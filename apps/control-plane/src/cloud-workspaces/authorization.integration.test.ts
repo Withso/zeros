@@ -176,6 +176,82 @@ d("cloud paid-work authorization", () => {
     expect(admitted.plan).toBe("pro");
   });
 
+  it("rejects an organization entitlement before its activation time", async () => {
+    const scope = await collaborativeScope();
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO organization_entitlements (
+           org_id, plan, status, cloud_workspaces_allowed, seat_limit, source,
+           valid_from
+         ) VALUES (
+           $1, 'business', 'active', true, 1, 'operator',
+           now() + interval '1 hour'
+         )`,
+        [scope.orgId],
+      );
+      await tx.query(
+        `INSERT INTO organization_seat_assignments (org_id, user_id, state)
+         VALUES ($1, $2, 'active')`,
+        [scope.orgId, owner.id],
+      );
+    });
+
+    await expect(
+      withSystemTx(pool, (tx) =>
+        authorizeCloudWorkspaceOperation(tx, {
+          organizationId: scope.orgId,
+          teamId: scope.teamId,
+          actorUserId: owner.id,
+          billingOwnerUserId: owner.id,
+          workosEnabled: false,
+          requireWorkspaceOwner: false,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      code: "cloud_organization_entitlement_required",
+    });
+  });
+
+  it("does not count a future-dated Pro collaborator entitlement", async () => {
+    const scope = await collaborativeScope();
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO organization_entitlements (
+           org_id, plan, status, cloud_workspaces_allowed, source
+         ) VALUES ($1, 'pro', 'active', true, 'operator')`,
+        [scope.orgId],
+      );
+      await tx.query(
+        `INSERT INTO account_entitlements (
+           user_id, plan, status, cloud_workspaces_allowed, source
+         ) VALUES ($1, 'pro', 'active', true, 'operator')`,
+        [owner.id],
+      );
+      await tx.query(
+        `INSERT INTO account_entitlements (
+           user_id, plan, status, cloud_workspaces_allowed, source, valid_from
+         ) VALUES (
+           $1, 'pro', 'active', true, 'operator',
+           now() + interval '1 hour'
+         )`,
+        [member.id],
+      );
+    });
+
+    await expect(
+      withSystemTx(pool, (tx) =>
+        authorizeCloudWorkspaceOperation(tx, {
+          organizationId: scope.orgId,
+          teamId: scope.teamId,
+          actorUserId: owner.id,
+          billingOwnerUserId: owner.id,
+          workosEnabled: false,
+          requireWorkspaceOwner: false,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "cloud_pro_collaborator_not_entitled" });
+  });
+
   it("requires an active Business seat and enforces the purchased seat ceiling", async () => {
     const scope = await collaborativeScope();
     await withSystemTx(pool, async (tx) => {

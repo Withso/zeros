@@ -348,6 +348,21 @@ export type CloudReplicaRuntimeDependencies = {
   platform?: "macos" | "windows" | "linux";
 };
 
+type ActiveCloudReplicaRuntime = {
+  session: CloudReplicaHostSession;
+  api: CloudWorkspaceDesktopApi;
+  broker: CloudReplicaSyncBroker;
+};
+
+type CloudReplicaCreateInput = {
+  organizationId: string;
+  workspaceId: string;
+  rootPath: string;
+  pathLabel?: string | null;
+  ignorePolicy?: CloudReplicaIgnorePolicy;
+  idempotencyKey: string;
+};
+
 /** Desktop engine owner for receive-only cloud replicas. WorkOS bearer tokens
  * are short-lived in memory, Ed25519 private keys remain in Electron
  * safeStorage, and all durable local state is device-private SQLite. */
@@ -366,6 +381,8 @@ export class CloudReplicaRuntime {
   private sessionEpoch = 0;
   private api: CloudWorkspaceDesktopApi | null = null;
   private broker: CloudReplicaSyncBroker | null = null;
+  private brokerDrain: Promise<void> | null = null;
+  private operationTail: Promise<void> = Promise.resolve();
   private timer: NodeJS.Timeout | null = null;
   private tick: Promise<void> | null = null;
   private enrollment: Promise<void> | null = null;
@@ -402,16 +419,86 @@ export class CloudReplicaRuntime {
     this.pendingProofs.clear();
   }
 
+  private drainBroker(broker: CloudReplicaSyncBroker | null): Promise<void> {
+    const prior = this.brokerDrain;
+    const current = broker?.cancelAndDrain();
+    if (!prior && !current) return Promise.resolve();
+    const work = Promise.all([prior, current]).then(() => undefined);
+    this.brokerDrain = work;
+    void work.then(
+      () => {
+        if (this.brokerDrain === work) this.brokerDrain = null;
+      },
+      () => {
+        if (this.brokerDrain === work) this.brokerDrain = null;
+      },
+    );
+    return work;
+  }
+
+  private runOperation<T>(epoch: number, operation: () => Promise<T>): Promise<T> {
+    const work = this.operationTail.then(() => {
+      if (this.disposed || this.sessionEpoch !== epoch) {
+        throw new CloudReplicaRuntimeError(
+          "signed_out",
+          "Cloud account session changed before the operation started",
+        );
+      }
+      return operation();
+    });
+    this.operationTail = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    return work;
+  }
+
+  private assertRuntimeCurrent(
+    runtime: Omit<ActiveCloudReplicaRuntime, "broker">,
+    epoch: number,
+    broker: CloudReplicaSyncBroker | null,
+  ): void {
+    if (
+      this.disposed ||
+      this.sessionEpoch !== epoch ||
+      this.session !== runtime.session ||
+      this.api !== runtime.api ||
+      this.broker !== broker
+    ) {
+      throw new CloudReplicaRuntimeError(
+        "signed_out",
+        "Cloud account session changed during the operation",
+      );
+    }
+  }
+
+  private async quiesceRuntime(
+    runtime: ActiveCloudReplicaRuntime,
+    epoch: number,
+  ): Promise<CloudReplicaSyncBroker> {
+    this.assertRuntimeCurrent(runtime, epoch, runtime.broker);
+    this.clearTimer();
+    const tick = this.tick;
+    this.broker = null;
+    await Promise.all([
+      this.drainBroker(runtime.broker),
+      tick?.catch(() => undefined),
+    ]);
+    this.assertRuntimeCurrent(runtime, epoch, null);
+    return new CloudReplicaSyncBroker(runtime.api, this.state, this.now);
+  }
+
   /** Called only with a message already validated by the private stdin parser. */
   async updateSession(next: CloudReplicaHostSession | null): Promise<void> {
     if (this.disposed) return;
     const priorBroker = this.broker;
     const priorTick = this.tick;
     const priorEnrollment = this.enrollment;
+    const priorOperations = this.operationTail;
     this.sessionEpoch += 1;
     const epoch = this.sessionEpoch;
     this.clearTimer();
-    priorBroker?.cancel();
+    const priorDrain = this.drainBroker(priorBroker);
     this.api = null;
     this.broker = null;
     this.retry.clear();
@@ -424,6 +511,8 @@ export class CloudReplicaRuntime {
     await Promise.all([
       priorTick?.catch(() => undefined),
       priorEnrollment?.catch(() => undefined),
+      priorDrain,
+      priorOperations.catch(() => undefined),
     ]);
     if (this.disposed || this.sessionEpoch !== epoch) return;
     this.session = next && next.expiresAtMs > this.now() ? next : null;
@@ -622,11 +711,7 @@ export class CloudReplicaRuntime {
     return true;
   }
 
-  private currentRuntime(): {
-    session: CloudReplicaHostSession;
-    api: CloudWorkspaceDesktopApi;
-    broker: CloudReplicaSyncBroker;
-  } {
+  private currentRuntime(): ActiveCloudReplicaRuntime {
     if (
       !this.session ||
       !this.api ||
@@ -667,14 +752,15 @@ export class CloudReplicaRuntime {
     return this.state.openDivergences(replicaId);
   }
 
-  async create(input: {
-    organizationId: string;
-    workspaceId: string;
-    rootPath: string;
-    pathLabel?: string | null;
-    ignorePolicy?: CloudReplicaIgnorePolicy;
-    idempotencyKey: string;
-  }): Promise<CloudReplicaLocalState> {
+  create(input: CloudReplicaCreateInput): Promise<CloudReplicaLocalState> {
+    const epoch = this.sessionEpoch;
+    return this.runOperation(epoch, () => this.createExclusive(input, epoch));
+  }
+
+  private async createExclusive(
+    input: CloudReplicaCreateInput,
+    epoch: number,
+  ): Promise<CloudReplicaLocalState> {
     const runtime = this.currentRuntime();
     assertIdempotency(input.idempotencyKey);
     if (
@@ -706,6 +792,7 @@ export class CloudReplicaRuntime {
     const root = await validateCloudReplicaDestination(input.rootPath, {
       allowPopulated: existingBinding !== undefined,
     });
+    this.assertRuntimeCurrent(runtime, epoch, runtime.broker);
     const policy = parseCloudReplicaIgnorePolicy(
       input.ignorePolicy ?? DEFAULT_CLOUD_REPLICA_IGNORE_POLICY,
     );
@@ -733,6 +820,7 @@ export class CloudReplicaRuntime {
     }
     let local: CloudReplicaLocalState;
     try {
+      this.assertRuntimeCurrent(runtime, epoch, runtime.broker);
       const existing = this.state.replica(result.replica.id);
       local =
         existing ??
@@ -776,6 +864,7 @@ export class CloudReplicaRuntime {
       }
       throw error;
     }
+    this.assertRuntimeCurrent(runtime, epoch, runtime.broker);
     runtime.broker.seedGrant(local.replicaId, result.grant);
     return runtime.broker.sync(local.replicaId);
   }
@@ -801,11 +890,30 @@ export class CloudReplicaRuntime {
     );
   }
 
-  private async changeState(
+  private changeState(
     replicaId: string,
     operation: "pause" | "resume" | "remove",
     idempotencyKey: string,
     replaceDiverged: boolean,
+  ): Promise<CloudReplicaLocalState> {
+    const epoch = this.sessionEpoch;
+    return this.runOperation(epoch, () =>
+      this.changeStateExclusive(
+        replicaId,
+        operation,
+        idempotencyKey,
+        replaceDiverged,
+        epoch,
+      ),
+    );
+  }
+
+  private async changeStateExclusive(
+    replicaId: string,
+    operation: "pause" | "resume" | "remove",
+    idempotencyKey: string,
+    replaceDiverged: boolean,
+    epoch: number,
   ): Promise<CloudReplicaLocalState> {
     const runtime = this.currentRuntime();
     assertIdempotency(idempotencyKey);
@@ -825,74 +933,135 @@ export class CloudReplicaRuntime {
         "Cloud replica belongs to another account or device",
       );
     }
-    const response = await runtime.api.changeReplicaState({
-      organizationId: local.organizationId,
-      workspaceId: local.workspaceId,
-      replicaId,
-      operation,
-      ...(operation === "resume" ? { replaceDiverged } : {}),
-      idempotencyKey,
-    });
-    assertRemoteIdentity(runtime.session, local, response.replica, local);
-    if (operation === "resume" && replaceDiverged) {
+    const replacementBroker = await this.quiesceRuntime(runtime, epoch);
+    try {
+      const response = await runtime.api.changeReplicaState({
+        organizationId: local.organizationId,
+        workspaceId: local.workspaceId,
+        replicaId,
+        operation,
+        ...(operation === "resume" ? { replaceDiverged } : {}),
+        idempotencyKey,
+      });
+      this.assertRuntimeCurrent(runtime, epoch, null);
+      assertRemoteIdentity(runtime.session, local, response.replica, local);
+      const expectedDesiredState =
+        operation === "pause"
+          ? "paused"
+          : operation === "remove"
+            ? "removed"
+            : "active";
       if (
-        response.replica.observedState !== "bootstrapping" ||
-        !response.replica.checkpointId ||
-        response.replica.manifestRevision === null
+        response.replica.desiredState !== expectedDesiredState ||
+        (operation === "resume") !== (response.grant !== null)
       ) {
         throw new CloudReplicaRuntimeError(
           "identity_mismatch",
-          "Cloud replacement did not return an exact durable snapshot",
+          "Cloud replica lifecycle response is inconsistent",
         );
       }
-      try {
-        await this.preserveOpenDivergences(local);
-      } catch (error) {
-        await runtime.api
-          .changeReplicaState({
-            organizationId: local.organizationId,
-            workspaceId: local.workspaceId,
+      const currentLocal = this.state.assertRemoteAuthority({
+        replicaId,
+        desiredState: response.replica.desiredState,
+        workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
+        grantEpoch: response.replica.grantEpoch,
+      });
+      const needsReplacement =
+        operation === "resume" &&
+        replaceDiverged &&
+        (!response.replayed ||
+          response.replica.observedState === "bootstrapping");
+      if (needsReplacement) {
+        if (
+          response.replica.observedState !== "bootstrapping" ||
+          !response.replica.checkpointId ||
+          response.replica.manifestRevision === null
+        ) {
+          throw new CloudReplicaRuntimeError(
+            "identity_mismatch",
+            "Cloud replacement did not return an exact durable snapshot",
+          );
+        }
+        try {
+          await this.preserveOpenDivergences(currentLocal);
+        } catch (error) {
+          await runtime.api
+            .changeReplicaState({
+              organizationId: local.organizationId,
+              workspaceId: local.workspaceId,
+              replicaId,
+              operation: "pause",
+              idempotencyKey: `${idempotencyKey}.preserve-failed`.slice(0, 128),
+            })
+            .catch(() => undefined);
+          throw new CloudReplicaRuntimeError(
+            "divergence_preserve_failed",
+            "Local changes could not be preserved before cloud replacement",
+            { cause: error },
+          );
+        }
+        this.assertRuntimeCurrent(runtime, epoch, null);
+      }
+      const locallyDiverged =
+        response.replica.desiredState === "active" &&
+        this.state.hasOpenDivergences(replicaId);
+      let updated = this.state.updateRemoteState({
+        replicaId,
+        desiredState: response.replica.desiredState,
+        observedState: locallyDiverged
+          ? "diverged"
+          : (response.replica
+              .observedState as CloudReplicaLocalState["observedState"]),
+        workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
+        grantEpoch: response.replica.grantEpoch,
+        checkpointId: response.replica.checkpointId,
+        manifestRevision: response.replica.manifestRevision,
+        lastErrorCode: locallyDiverged
+          ? "local_content_changed"
+          : response.replica.lastErrorCode,
+      });
+      if (operation === "resume" && response.grant) {
+        replacementBroker.seedGrant(replicaId, response.grant);
+        if (needsReplacement) {
+          updated = this.state.resetForSnapshot({
             replicaId,
-            operation: "pause",
-            idempotencyKey: `${idempotencyKey}.preserve-failed`.slice(0, 128),
-          })
-          .catch(() => undefined);
-        throw new CloudReplicaRuntimeError(
-          "divergence_preserve_failed",
-          "Local changes could not be preserved before cloud replacement",
-          { cause: error },
-        );
+            checkpointId: response.replica.checkpointId!,
+            manifestRevision: response.replica.manifestRevision!,
+            workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
+            grantEpoch: response.replica.grantEpoch,
+          });
+        }
+        this.assertRuntimeCurrent(runtime, epoch, null);
+        this.broker = replacementBroker;
+        updated = await replacementBroker.sync(replicaId);
+        this.assertRuntimeCurrent(runtime, epoch, replacementBroker);
+      }
+      return updated;
+    } finally {
+      if (
+        !this.disposed &&
+        this.sessionEpoch === epoch &&
+        this.session === runtime.session &&
+        this.api === runtime.api &&
+        (this.broker === null || this.broker === replacementBroker)
+      ) {
+        this.broker = replacementBroker;
+        this.schedule(0);
       }
     }
-    let updated = this.state.updateRemoteState({
-      replicaId,
-      desiredState: response.replica.desiredState,
-      observedState: response.replica
-        .observedState as CloudReplicaLocalState["observedState"],
-      workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
-      grantEpoch: response.replica.grantEpoch,
-      checkpointId: response.replica.checkpointId,
-      manifestRevision: response.replica.manifestRevision,
-      lastErrorCode: response.replica.lastErrorCode,
-    });
-    runtime.broker.revokeLocalGrant(replicaId);
-    if (operation === "resume" && response.grant) {
-      runtime.broker.seedGrant(replicaId, response.grant);
-      if (replaceDiverged) {
-        updated = this.state.resetForSnapshot({
-          replicaId,
-          checkpointId: response.replica.checkpointId!,
-          manifestRevision: response.replica.manifestRevision!,
-          workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
-          grantEpoch: response.replica.grantEpoch,
-        });
-      }
-      updated = await runtime.broker.sync(replicaId);
-    }
-    return updated;
   }
 
-  async relocate(
+  relocate(
+    replicaId: string,
+    nextRootPath: string,
+  ): Promise<CloudReplicaLocalState> {
+    const epoch = this.sessionEpoch;
+    return this.runOperation(epoch, () =>
+      this.relocateExclusive(replicaId, nextRootPath),
+    );
+  }
+
+  private async relocateExclusive(
     replicaId: string,
     nextRootPath: string,
   ): Promise<CloudReplicaLocalState> {
@@ -951,14 +1120,27 @@ export class CloudReplicaRuntime {
     });
   }
 
-  async syncNow(replicaId: string): Promise<CloudReplicaLocalState> {
-    const runtime = this.currentRuntime();
+  syncNow(replicaId: string): Promise<CloudReplicaLocalState> {
     const epoch = this.sessionEpoch;
+    return this.runOperation(epoch, () => this.syncNowExclusive(replicaId, epoch));
+  }
+
+  private async syncNowExclusive(
+    replicaId: string,
+    epoch: number,
+  ): Promise<CloudReplicaLocalState> {
+    const runtime = this.currentRuntime();
     const local = this.state.replica(replicaId);
     if (!local) {
       throw new CloudReplicaRuntimeError(
         "replica_not_found",
         "Cloud replica was not found",
+      );
+    }
+    if (local.desiredState !== "active") {
+      throw new CloudReplicaRuntimeError(
+        "replica_not_found",
+        "Cloud replica is not active",
       );
     }
     await this.scanLocalProjection(local);
@@ -1141,18 +1323,24 @@ export class CloudReplicaRuntime {
 
   async dispose(): Promise<void> {
     if (this.disposed) return;
+    const operations = this.operationTail;
     this.disposed = true;
     this.session = null;
     this.sessionEpoch += 1;
     this.clearTimer();
-    this.broker?.cancel();
+    const broker = this.broker;
+    const drain = this.drainBroker(broker);
     this.api = null;
     this.broker = null;
     this.retry.clear();
     this.scanCursor.clear();
     this.replicaScheduleCursor = null;
     this.rejectPendingProofs("cloud replica runtime stopped");
-    await this.tick?.catch(() => undefined);
-    await this.enrollment?.catch(() => undefined);
+    await Promise.all([
+      this.tick?.catch(() => undefined),
+      this.enrollment?.catch(() => undefined),
+      drain,
+      operations.catch(() => undefined),
+    ]);
   }
 }

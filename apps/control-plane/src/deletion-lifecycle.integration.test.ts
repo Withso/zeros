@@ -1,10 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 
 import { Hono } from "hono";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ensureUser, type AuthedUser } from "./auth.js";
+import {
+  ensureUser,
+  resolveAuthenticatedUser,
+  type AuthedUser,
+} from "./auth.js";
 import { HttpError } from "./authz.js";
 import {
   createDeletionLifecycleRoutes,
@@ -12,6 +16,11 @@ import {
 } from "./deletion-lifecycle.js";
 import { runMigrations } from "./migrate.js";
 import { createOpsRoutes } from "./ops.js";
+import {
+  MAX_ACCOUNT_WORKOS_ERASURE_SUBJECTS,
+  workOSProviderSubjectHash,
+  workOSProviderSubjectLockKey,
+} from "./workos-provider-locks.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -193,8 +202,8 @@ d("account, organization, and operator deletion lifecycle", () => {
       `UPDATE workos_command_outbox
        SET state = 'succeeded', completed_at = now(), updated_at = now(),
            lease_owner = NULL, lease_expires_at = NULL
-       WHERE id = $1`,
-      [commandId],
+       WHERE id = $1 OR payload->>'deletionRequestId' = $2::text`,
+      [commandId, requestId],
     );
     await pool.query(
       `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
@@ -354,6 +363,96 @@ d("account, organization, and operator deletion lifecycle", () => {
     const scheduled = await scheduleAccount(customer);
     expect(scheduled.response.status).toBe(202);
     const requestId = scheduled.body.deletion.id;
+    const candidateSubject = `user_account_purge_candidate_${randomUUID().replaceAll("-", "")}`;
+    const candidateCredentialHash = randomBytes(32);
+    await pool.query(
+      `INSERT INTO workos_browser_sessions (
+         credential_hash, kind, sealed_session, provider_session_id,
+         provider_sub, email, display_name, access_token_expires_at,
+         expires_at, revision
+       ) VALUES ($1, 'session', 'sealed-candidate', $2, $3, $4, $5,
+                 now() + interval '1 hour', now() + interval '7 days', 1)`,
+      [
+        candidateCredentialHash,
+        `session_account_purge_candidate_${randomUUID().replaceAll("-", "")}`,
+        candidateSubject,
+        originalEmail,
+        "Account Purge Candidate",
+      ],
+    );
+    const detachedSessionId = `session_detached_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO auth_sessions (
+         provider_session_id, provider_sub, user_id, client_kind, status,
+         revoked_at, revocation_reason
+       ) VALUES ($1, $2, NULL, 'unknown', 'revoked', now(),
+                 'workos_session_revoked')`,
+      [detachedSessionId, customer.identity.subject],
+    );
+    const invitationEventId = `event_invitation_${randomUUID().replaceAll("-", "")}`;
+    const controlInvitationEventId = `event_invitation_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO workos_event_inbox (
+         event_id, event_type, event_created_at, source, object_id,
+         workos_organization_id, data, state, attempt_count, processed_at
+       ) VALUES
+         ($1, 'invitation.revoked', now(), 'webhook', $2, $3,
+          jsonb_build_object('id', $2::text, 'email', $4::text),
+          'ignored', 1, now()),
+         ($5, 'invitation.revoked', now(), 'webhook', $6, $3,
+          jsonb_build_object('id', $6::text, 'email', $7::text),
+          'ignored', 1, now())`,
+      [
+        invitationEventId,
+        `invitation_${randomUUID().replaceAll("-", "")}`,
+        `org_${randomUUID().replaceAll("-", "")}`,
+        originalEmail,
+        controlInvitationEventId,
+        `invitation_${randomUUID().replaceAll("-", "")}`,
+        `retained-${randomUUID()}@example.test`,
+      ],
+    );
+    const unlinkedIdentityEventId = `event_identity_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO identity_provider_events (
+         event_id, event_type, event_created_at, provider_sub, email,
+         email_verified, status, processed_at
+       ) VALUES ($1, 'user.updated', now(), $2, $3, true,
+                 'unlinked', now())`,
+      [
+        unlinkedIdentityEventId,
+        `user_unlinked_${randomUUID().replaceAll("-", "")}`,
+        originalEmail,
+      ],
+    );
+    const historicalCommand = await pool.query<{ id: string }>(
+      `INSERT INTO workos_command_outbox (
+         operation, idempotency_key, aggregate_key, ordering_key,
+         aggregate_revision, provider_object_id, payload, state, completed_at
+       ) VALUES (
+         'session.revoke', $1, $2, $2, 1, $3,
+         jsonb_build_object(
+           'sessionId', 'session_historical',
+           'workosUserId', $3::text,
+           'email', $4::text
+         ),
+         'succeeded', now()
+       )
+       RETURNING id`,
+      [
+        `privacy-account-${randomUUID()}`,
+        `privacy-account:${customer.id}`,
+        customer.identity.subject,
+        originalEmail,
+      ],
+    );
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [customer.id],
+    );
     await makeDue(requestId);
 
     const processor = new DeletionLifecycleProcessor(pool, {
@@ -368,15 +467,45 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({ rows: [{ state: "provider_deleting" }] });
     await expect(
       pool.query(
-        `SELECT operation, provider_object_id, state
-         FROM workos_command_outbox
-         WHERE id = (SELECT purge_command_id FROM deletion_requests WHERE id = $1)`,
+        `SELECT metadata->'workosSubjectHashes'->>0 AS subject_hash
+         FROM deletion_request_events
+         WHERE deletion_request_id = $1
+           AND action = 'purge.provider_erasure_fenced'
+         ORDER BY subject_hash`,
         [requestId],
       ),
     ).resolves.toMatchObject({
       rows: [
-        expect.objectContaining({ operation: "user.delete", state: "queued" }),
-      ],
+        workOSProviderSubjectHash({ kind: "user", id: candidateSubject }),
+        workOSProviderSubjectHash({
+          kind: "user",
+          id: customer.identity.subject,
+        }),
+      ]
+        .sort()
+        .map((subject_hash) => ({ subject_hash })),
+    });
+    await expect(
+      pool.query(
+        `SELECT operation, provider_object_id, state,
+                payload->>'workosUserId' AS workos_user_id,
+                payload->>'deletionRequestId' AS deletion_request_id
+         FROM workos_command_outbox
+         WHERE operation = 'user.delete' AND user_id = $1
+           AND payload->>'deletionRequestId' = $2::text
+         ORDER BY workos_user_id`,
+        [customer.id, requestId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [customer.identity.subject, candidateSubject]
+        .sort()
+        .map((workos_user_id) => ({
+          operation: "user.delete",
+          state: "queued",
+          workos_user_id,
+          provider_object_id: workos_user_id,
+          deletion_request_id: requestId,
+        })),
     });
 
     await succeedPurgeCommand(requestId);
@@ -407,6 +536,48 @@ d("account, organization, and operator deletion lifecycle", () => {
       ]),
     ).resolves.toMatchObject({ rows: [] });
     await expect(
+      pool.query(`SELECT 1 FROM workos_command_outbox WHERE id = $1`, [
+        historicalCommand.rows[0]!.id,
+      ]),
+    ).resolves.toMatchObject({ rows: [] });
+    await expect(
+      pool.query(`SELECT 1 FROM auth_sessions WHERE provider_session_id = $1`, [
+        detachedSessionId,
+      ]),
+    ).resolves.toMatchObject({ rows: [] });
+    await expect(
+      pool.query(
+        `SELECT 1 FROM workos_browser_sessions WHERE credential_hash = $1`,
+        [candidateCredentialHash],
+      ),
+    ).resolves.toMatchObject({ rows: [] });
+    await expect(
+      pool.query(
+        `SELECT event_id FROM workos_event_inbox
+         WHERE event_id = ANY($1::text[]) ORDER BY event_id`,
+        [[invitationEventId, controlInvitationEventId]],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ event_id: controlInvitationEventId }],
+    });
+    await expect(
+      pool.query(`SELECT 1 FROM identity_provider_events WHERE event_id = $1`, [
+        unlinkedIdentityEventId,
+      ]),
+    ).resolves.toMatchObject({ rows: [] });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_command_outbox command
+         WHERE position($1::text in command.aggregate_key) > 0
+            OR position($1::text in command.ordering_key) > 0
+            OR command.provider_object_id = $2
+            OR command.payload::text LIKE '%' || $2 || '%'
+            OR command.payload::text LIKE '%' || $3 || '%'`,
+        [customer.id, customer.identity.subject, originalEmail],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(
       pool.query(
         `SELECT destination_email::text, user_id
          FROM security_notification_outbox
@@ -416,6 +587,254 @@ d("account, organization, and operator deletion lifecycle", () => {
       ),
     ).resolves.toMatchObject({
       rows: [{ destination_email: originalEmail, user_id: null }],
+    });
+
+    const replaySessionId = customer.authentication.sessionId;
+    if (!replaySessionId) throw new Error("WorkOS signup session is missing");
+    const now = Math.floor(Date.now() / 1_000);
+    await expect(
+      resolveAuthenticatedUser(pool, {
+        provider: "workos",
+        providerSubject: customer.identity.subject,
+        email: originalEmail,
+        displayName: "AccountPurge",
+        session: {
+          id: replaySessionId,
+          clientKind: "web",
+          authTime: now,
+          tokenExpiresAt: now + 3_600,
+        },
+      }),
+    ).rejects.toMatchObject({ status: 401, code: "account_deleted" });
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::integer FROM user_identities
+            WHERE provider = 'workos' AND provider_sub = $1) AS identities,
+           (SELECT count(*)::integer FROM auth_sessions
+            WHERE provider = 'workos' AND provider_session_id = $2) AS sessions,
+           (SELECT count(*)::integer FROM organizations o
+            JOIN users u ON u.id = o.created_by
+            WHERE u.email = $3 AND o.is_personal) AS personal_organizations`,
+        [customer.identity.subject, replaySessionId, originalEmail],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ identities: 0, sessions: 0, personal_organizations: 0 }],
+    });
+  });
+
+  it("waits for an in-flight WorkOS user mutation and drains queued account commands before deletion", async () => {
+    const customer = await signup("AccountProviderRace");
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    const requestId = scheduled.body.deletion.id;
+    const session = await pool.query<{ provider_session_id: string }>(
+      `INSERT INTO auth_sessions (
+         provider_session_id, provider_sub, user_id, client_kind, status,
+         revoked_at, revocation_reason
+       ) VALUES ($1, $2, $3, 'web', 'revoked', now(),
+                 'account_deletion_scheduled')
+       RETURNING provider_session_id`,
+      [
+        `session_scope_${randomUUID().replaceAll("-", "")}`,
+        customer.identity.subject,
+        customer.id,
+      ],
+    );
+    const sessionOnlyCommand = await pool.query<{ id: string }>(
+      `INSERT INTO workos_command_outbox (
+         operation, idempotency_key, aggregate_key, ordering_key,
+         aggregate_revision, payload
+       ) VALUES (
+         'session.revoke', $1, $2, $2, 1,
+         jsonb_build_object('sessionId', $3::text)
+       ) RETURNING id`,
+      [
+        `account-session-only-${randomUUID()}`,
+        `unlinked-session:${randomUUID()}`,
+        session.rows[0]!.provider_session_id,
+      ],
+    );
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [customer.id],
+    );
+    await makeDue(requestId);
+
+    const providerConnection = await pool.connect();
+    await providerConnection.query(
+      `SELECT pg_advisory_lock(
+         hashtextextended('workos-provider-user:' || $1::text, 0)
+       )`,
+      [customer.id],
+    );
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "account-provider-race-purge-worker",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    let settled = false;
+    const processing = processor.tick(1).finally(() => {
+      settled = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(settled).toBe(false);
+    } finally {
+      await providerConnection.query(
+        `SELECT pg_advisory_unlock(
+           hashtextextended('workos-provider-user:' || $1::text, 0)
+         )`,
+        [customer.id],
+      );
+      providerConnection.release();
+    }
+    await expect(processing).resolves.toBe(1);
+    await expect(
+      pool.query(
+        `SELECT state, purge_command_id, lease_owner
+         FROM deletion_requests WHERE id = $1`,
+        [requestId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ state: "purging", purge_command_id: null, lease_owner: null }],
+    });
+    await expect(
+      pool.query(
+        `SELECT operation, state FROM workos_command_outbox WHERE id = $1`,
+        [sessionOnlyCommand.rows[0]!.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ operation: "session.revoke", state: "queued" }],
+    });
+  });
+
+  it("serializes account purge with an authenticated WorkOS subject", async () => {
+    const customer = await signup("AccountAuthenticationRace");
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    const requestId = scheduled.body.deletion.id;
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [customer.id],
+    );
+    await makeDue(requestId);
+
+    const subjectLockKey = workOSProviderSubjectLockKey({
+      kind: "user",
+      id: customer.identity.subject,
+    });
+    const authenticationConnection = await pool.connect();
+    await authenticationConnection.query(
+      `SELECT pg_advisory_lock(hashtextextended($1::text, 0))`,
+      [subjectLockKey],
+    );
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "account-authentication-race-purge-worker",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    let settled = false;
+    const processing = processor.tick(1).finally(() => {
+      settled = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(settled).toBe(false);
+    } finally {
+      await authenticationConnection.query(
+        `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
+        [subjectLockKey],
+      );
+      authenticationConnection.release();
+    }
+
+    await expect(processing).resolves.toBe(1);
+    await expect(
+      pool.query(
+        `SELECT request.state, event.metadata
+         FROM deletion_requests request
+         JOIN deletion_request_events event
+           ON event.deletion_request_id = request.id
+          AND event.action = 'purge.provider_erasure_fenced'
+         WHERE request.id = $1`,
+        [requestId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "provider_deleting",
+          metadata: {
+            provider: "workos",
+            workosSubjectHashes: [
+              workOSProviderSubjectHash({
+                kind: "user",
+                id: customer.identity.subject,
+              }),
+            ],
+          },
+        },
+      ],
+    });
+  });
+
+  it("defers provider-lock contention without spending a purge attempt", async () => {
+    const customer = await signup("AccountPurgeLockContention");
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    const requestId = scheduled.body.deletion.id;
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [customer.id],
+    );
+    await makeDue(requestId);
+
+    const subjectLockKey = workOSProviderSubjectLockKey({
+      kind: "user",
+      id: customer.identity.subject,
+    });
+    const blocker = await pool.connect();
+    await blocker.query(
+      `SELECT pg_advisory_lock(hashtextextended($1::text, 0))`,
+      [subjectLockKey],
+    );
+    const processing = new DeletionLifecycleProcessor(pool, {
+      workerId: "account-purge-lock-contender",
+      providerLockTimeoutMs: 25,
+      logger: { warn: () => undefined, error: () => undefined },
+    }).tick(1);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    await blocker.query(
+      `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
+      [subjectLockKey],
+    );
+    blocker.release();
+    await expect(processing).resolves.toBe(1);
+
+    await expect(
+      pool.query(
+        `SELECT state, attempt_count, lease_owner, lease_expires_at,
+                last_error_code
+         FROM deletion_requests WHERE id = $1`,
+        [requestId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "purging",
+          attempt_count: 0,
+          lease_owner: null,
+          lease_expires_at: null,
+          last_error_code: "workos_provider_lock_timeout",
+        },
+      ],
     });
   });
 
@@ -593,17 +1012,591 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
+  it("fails closed before WorkOS erasure when Personal has an orphan cloud repository", async () => {
+    const customer = await signup("PersonalRepositoryInvariant");
+    const personal = await pool.query<{ id: string }>(
+      `SELECT id FROM organizations
+       WHERE created_by = $1 AND is_personal`,
+      [customer.id],
+    );
+    await createRepository(personal.rows[0]!.id, customer.id);
+
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    await makeDue(scheduled.body.deletion.id);
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-personal-repository-invariant",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(
+        `SELECT state, last_error_code
+         FROM deletion_requests WHERE id = $1`,
+        [scheduled.body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "failed",
+          last_error_code: "personal_cloud_workspace_invariant_violation",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_command_outbox
+         WHERE operation = 'user.delete' AND user_id = $1`,
+        [customer.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("fails closed before WorkOS erasure when Personal has orphaned physical blob metadata", async () => {
+    const customer = await signup("PersonalBlobInvariant");
+    const personal = await pool.query<{ id: string }>(
+      `SELECT id FROM organizations
+       WHERE created_by = $1 AND is_personal`,
+      [customer.id],
+    );
+    const blobId = randomUUID();
+    await pool.query(
+      `INSERT INTO workspace_blobs (
+         id, org_id, plaintext_sha256, ciphertext_sha256, plaintext_bytes,
+         ciphertext_bytes, object_key, encryption_key_version, nonce, auth_tag,
+         state, available_at
+       ) VALUES ($1, $2, $3, $4, 128, 128, $5, 1, $6, $7,
+                 'available', now())`,
+      [
+        blobId,
+        personal.rows[0]!.id,
+        randomBytes(32),
+        randomBytes(32),
+        `workspace/v2/${personal.rows[0]!.id}/${blobId}/k1`,
+        randomBytes(12),
+        randomBytes(16),
+      ],
+    );
+
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    await makeDue(scheduled.body.deletion.id);
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-personal-blob-invariant",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(
+        `SELECT state, last_error_code
+         FROM deletion_requests WHERE id = $1`,
+        [scheduled.body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "failed",
+          last_error_code: "personal_cloud_workspace_invariant_violation",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_command_outbox
+         WHERE operation = 'user.delete' AND user_id = $1`,
+        [customer.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("fails closed instead of truncating an oversized WorkOS subject capture", async () => {
+    const customer = await signup("ProviderSubjectOverflow");
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    const prefix = randomUUID().replaceAll("-", "");
+    await pool.query(
+      `INSERT INTO workos_browser_sessions (
+         credential_hash, kind, sealed_session, provider_session_id,
+         provider_sub, email, display_name, access_token_expires_at,
+         expires_at, revision
+       )
+       SELECT digest($1 || ':' || candidate::text, 'sha256'),
+              'session', 'sealed-overflow',
+              'session_overflow_' || $1 || '_' || candidate::text,
+              'user_overflow_' || $1 || '_' || candidate::text,
+              $2::citext, 'Overflow Candidate', now() + interval '1 hour',
+              now() + interval '7 days', 1
+       FROM generate_series(1, $3::integer) candidate`,
+      [prefix, customer.email, MAX_ACCOUNT_WORKOS_ERASURE_SUBJECTS],
+    );
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [customer.id],
+    );
+    await makeDue(scheduled.body.deletion.id);
+
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-provider-subject-overflow",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(
+        `SELECT state, last_error_code
+         FROM deletion_requests WHERE id = $1`,
+        [scheduled.body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "failed",
+          last_error_code: "workos_user_erasure_subject_limit_exceeded",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT count(*)::int AS count FROM workos_command_outbox
+         WHERE operation = 'user.delete' AND user_id = $1`,
+        [customer.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("fails closed when a captured WorkOS subject has no request-bound delete command", async () => {
+    const customer = await signup("MissingProviderDeleteCommand");
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [customer.id],
+    );
+    await makeDue(scheduled.body.deletion.id);
+
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-missing-provider-delete-command",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    await pool.query(
+      `UPDATE deletion_requests
+       SET purge_command_id = NULL, next_attempt_at = now()
+       WHERE id = $1`,
+      [scheduled.body.deletion.id],
+    );
+    await pool.query(
+      `DELETE FROM workos_command_outbox
+       WHERE operation = 'user.delete' AND user_id = $1
+         AND payload->>'deletionRequestId' = $2::text`,
+      [customer.id, scheduled.body.deletion.id],
+    );
+
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(
+        `SELECT request.state, request.last_error_code,
+                account.auth_status,
+                EXISTS (
+                  SELECT 1 FROM user_identities identity
+                  WHERE identity.user_id = account.id
+                    AND identity.provider = 'workos'
+                ) AS identity_retained
+         FROM deletion_requests request
+         JOIN users account ON account.id = request.target_user_id
+         WHERE request.id = $1`,
+        [scheduled.body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "failed",
+          last_error_code: "provider_delete_command_missing",
+          auth_status: "deletion_pending",
+          identity_retained: true,
+        },
+      ],
+    });
+  });
+
+  it("does not schedule Organization purge before deleted workspace data is erased", async () => {
+    const owner = await signup("OrgDataErasure");
+    const organizationId = await createOrganization(owner, "Erase Company");
+    const repositoryId = await createRepository(organizationId, owner.id);
+    const team = await pool.query<{ id: string }>(
+      `SELECT id FROM teams WHERE org_id = $1 AND is_default`,
+      [organizationId],
+    );
+    const workspaceId = randomUUID();
+    const providerConnectionId = await createProviderConnection(
+      organizationId,
+      owner.id,
+    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `INSERT INTO cloud_workspaces (
+           id, org_id, team_id, created_by, repository_id,
+           owner_user_id, assignee_user_id, display_name,
+           repository_forge, repository_owner, repository_name,
+           repository_revision, status, desired_state, deleted_at
+         ) VALUES ($1, $2, $3, $4, $5, $4, $4, 'Awaiting Erasure',
+                   'github.com', 'withso', 'zeros', 'main',
+                   'deleted', 'deleted', now())`,
+        [workspaceId, organizationId, team.rows[0]!.id, owner.id, repositoryId],
+      );
+      await client.query(
+        `INSERT INTO workspace_billing_epochs (
+           workspace_id, billing_epoch, org_id, billing_owner_user_id,
+           entitlement_scope, entitlement_plan, entitlement_revision,
+           created_by
+         ) VALUES ($1, 1, $2, $3, 'organization', 'business', 1, $3)`,
+        [workspaceId, organizationId, owner.id],
+      );
+      await client.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib,
+           source_commit, provider_connection_id,
+           provider_connection_version, created_by
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480, $3, $4, 1, $5)`,
+        [
+          workspaceId,
+          organizationId,
+          "a".repeat(40),
+          providerConnectionId,
+          owner.id,
+        ],
+      );
+      await client.query("COMMIT");
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+
+    asActor(owner);
+    const blocked = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Erase Company" },
+    });
+    expect(blocked.status).toBe(409);
+    await expect(blocked.json()).resolves.toMatchObject({
+      error: { code: "organization_has_cloud_workspaces" },
+    });
+
+    await pool.query(
+      `UPDATE cloud_workspaces SET data_deleted_at = now() WHERE id = $1`,
+      [workspaceId],
+    );
+    const scheduled = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Erase Company" },
+    });
+    expect(scheduled.status).toBe(202);
+  });
+
+  it("waits for an in-flight WorkOS organization mutation and drains it before provider deletion", async () => {
+    const owner = await signup("ProviderRaceOwner");
+    const organizationId = await createOrganization(
+      owner,
+      "Provider Race Company",
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::uuid::text, 'active')`,
+      [organizationId, workosOrganizationId],
+    );
+    await pool.query(
+      `INSERT INTO workos_command_outbox (
+         operation, idempotency_key, aggregate_key, ordering_key,
+         aggregate_revision, organization_id, payload, state,
+         attempt_count, lease_owner, lease_expires_at
+       ) VALUES (
+         'organization.update', $1, $2, $2, 2, $3::uuid,
+         jsonb_build_object('externalId', $3::text, 'name', 'Provider Race'),
+         'processing', 1, 'in-flight-provider-worker',
+         now() + interval '60 seconds'
+       )`,
+      [
+        `provider-race-${randomUUID()}`,
+        `organization:${organizationId}`,
+        organizationId,
+      ],
+    );
+
+    asActor(owner);
+    const scheduled = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Provider Race Company" },
+    });
+    expect(scheduled.status).toBe(202);
+    const body = (await scheduled.json()) as DeletionResponse;
+    await makeDue(body.deletion.id);
+
+    const providerConnection = await pool.connect();
+    await providerConnection.query(
+      `SELECT pg_advisory_lock(
+         hashtextextended('workos-provider-org:' || $1::text, 0)
+       )`,
+      [organizationId],
+    );
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "provider-race-purge-worker",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    let settled = false;
+    const processing = processor.tick(1).finally(() => {
+      settled = true;
+    });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(settled).toBe(false);
+    } finally {
+      await providerConnection.query(
+        `SELECT pg_advisory_unlock(
+           hashtextextended('workos-provider-org:' || $1::text, 0)
+         )`,
+        [organizationId],
+      );
+      providerConnection.release();
+    }
+    await expect(processing).resolves.toBe(1);
+    await expect(
+      pool.query(
+        `SELECT state, purge_command_id, lease_owner
+         FROM deletion_requests WHERE id = $1`,
+        [body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ state: "purging", purge_command_id: null, lease_owner: null }],
+    });
+  });
+
   it("waits for WorkOS organization deletion before erasing tenant data", async () => {
     const owner = await signup("OrgPurge");
     const member = await signup("OrgMember");
     const organizationId = await createOrganization(owner, "Purge Company");
     await addOrganizationMember(organizationId, member, "member");
+    const repositoryId = await createRepository(organizationId, owner.id);
+    const providerConnectionId = await createProviderConnection(
+      organizationId,
+      owner.id,
+    );
+    const workspaceId = randomUUID();
+    const team = await pool.query<{ id: string }>(
+      `SELECT id FROM teams WHERE org_id = $1 AND is_default`,
+      [organizationId],
+    );
+    const cloudClient = await pool.connect();
+    try {
+      await cloudClient.query("BEGIN");
+      await cloudClient.query(
+        `INSERT INTO cloud_workspaces (
+         id, org_id, team_id, created_by, repository_id,
+         owner_user_id, assignee_user_id, display_name,
+         repository_forge, repository_owner, repository_name,
+         repository_revision, status, desired_state, deleted_at, data_deleted_at
+       ) VALUES ($1, $2, $3, $4, $5, $4, $4, 'Purged Workspace',
+                 'github.com', 'withso', 'zeros', 'main',
+                 'deleted', 'deleted', now(), now())`,
+        [workspaceId, organizationId, team.rows[0]!.id, owner.id, repositoryId],
+      );
+      await cloudClient.query(
+        `INSERT INTO workspace_billing_epochs (
+         workspace_id, billing_epoch, org_id, billing_owner_user_id,
+         entitlement_scope, entitlement_plan, entitlement_revision, created_by
+       ) VALUES ($1, 1, $2, $3, 'organization', 'business', 1, $3)`,
+        [workspaceId, organizationId, owner.id],
+      );
+      await cloudClient.query(
+        `INSERT INTO cloud_workspace_generations (
+         workspace_id, generation, org_id, provider, image_ref,
+         architecture, cpu_millicores, memory_mib, storage_mib,
+         source_commit, provider_connection_id, provider_connection_version,
+         created_by
+       ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                 2000, 4096, 20480, $3, $4, 1, $5)`,
+        [
+          workspaceId,
+          organizationId,
+          "a".repeat(40),
+          providerConnectionId,
+          owner.id,
+        ],
+      );
+      await cloudClient.query(
+        `INSERT INTO cloud_workspace_usage_events (
+         org_id, workspace_id, generation, authority_epoch,
+         actor_user_id, billing_owner_user_id, billing_epoch, provider,
+         meter, quantity, source_idempotency_key, occurred_at, metadata,
+         provider_connection_id, provider_connection_version, request_sha256
+       ) VALUES ($1, $2, 1, 1, $3, $3, 1, 'daytona',
+                 'cpu_millisecond', 1, $4, now(), '{"tenant":"Purge Company"}',
+                 $5, 1, $6)`,
+        [
+          organizationId,
+          workspaceId,
+          owner.id,
+          `purge-usage-${randomUUID()}`,
+          providerConnectionId,
+          randomBytes(32),
+        ],
+      );
+      await cloudClient.query("COMMIT");
+    } finally {
+      await cloudClient.query("ROLLBACK").catch(() => undefined);
+      cloudClient.release();
+    }
+    await pool.query(
+      `INSERT INTO cloud_workspace_object_storage_limits (
+         org_id, max_organization_bytes, max_workspace_bytes, updated_by
+       ) VALUES ($1, 1048576, 524288, $2)`,
+      [organizationId, owner.id],
+    );
+    await pool.query(
+      `INSERT INTO cloud_workspace_quota_changes (
+         org_id, actor_user_id, next_max_workspaces,
+         next_max_running_workspaces, next_max_cpu_millicores,
+         next_max_memory_mib, next_max_storage_mib, deployment_channel,
+         target_fingerprint, database_principal, reason
+       ) VALUES ($1, $2, 2, 1, 1000, 2048, 10240, 'alpha',
+                 '0123456789abcdef', 'migration-owner',
+                 'Organization privacy-purge integration fixture')`,
+      [organizationId, owner.id],
+    );
+    await pool.query(
+      `INSERT INTO cloud_workspace_object_storage_limit_changes (
+         org_id, actor_user_id, next_organization_bytes,
+         next_workspace_bytes, deployment_channel, target_fingerprint,
+         database_principal, reason
+       ) VALUES ($1, $2, 1048576, 524288, 'alpha',
+                 '0123456789abcdef', 'migration-owner',
+                 'Organization privacy-purge integration fixture')`,
+      [organizationId, owner.id],
+    );
+    await pool.query(
+      `INSERT INTO cloud_workspace_object_rotation_retry_changes (
+         org_id, blob_id, actor_user_id, target_key_version,
+         source_key_version, prior_attempt_count, prior_error_code,
+         prior_target_sha256, next_target_sha256, fence_revision,
+         fence_fenced_at, job_snapshot_fingerprint, deployment_channel,
+         target_fingerprint, database_principal, reason
+       ) VALUES ($1, $2, $3, 2, 1, 1, 'rotation_write_failed',
+                 $4, $5, 1, now(), $6, 'alpha',
+                 '0123456789abcdef', 'migration-owner',
+                 'Organization privacy-purge rotation retry fixture')`,
+      [
+        organizationId,
+        randomUUID(),
+        owner.id,
+        randomBytes(32),
+        randomBytes(32),
+        randomBytes(16).toString("hex"),
+      ],
+    );
+    const historicalCommand = await pool.query<{ id: string }>(
+      `INSERT INTO workos_command_outbox (
+         operation, idempotency_key, aggregate_key, ordering_key,
+         aggregate_revision, organization_id, provider_object_id, payload,
+         state, completed_at
+       ) VALUES ('organization.update', $1, $2, $2, 1, $3,
+                 'org_historical', '{"name":"Purge Company"}',
+                 'succeeded', now())
+       RETURNING id`,
+      [
+        `privacy-purge-${randomUUID()}`,
+        `privacy-purge:${organizationId}`,
+        organizationId,
+      ],
+    );
+    const fencedBlobId = randomUUID();
+    await pool.query(
+      `INSERT INTO workspace_blob_object_deletions (
+         object_key, org_id, blob_id, reserved_bytes, fenced_at
+       ) VALUES ($1, $2, $3, 0, now())`,
+      [
+        `workspace/v2/${organizationId}/${fencedBlobId}/k1`,
+        organizationId,
+        fencedBlobId,
+      ],
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
     await pool.query(
       `INSERT INTO workos_organization_links (
          organization_id, workos_organization_id, external_id, state
        ) VALUES ($1::uuid, $2, $1::uuid::text, 'active')`,
-      [organizationId, `org_${randomUUID().replaceAll("-", "")}`],
+      [organizationId, workosOrganizationId],
     );
+    await pool.query(
+      `INSERT INTO workos_membership_projections (
+         workos_membership_id, workos_organization_id, workos_user_id,
+         organization_id, user_id, status, role, last_provider_event_at
+       ) VALUES ($1, $2, $3, $4, $5, 'active', 'owner', now())`,
+      [
+        `membership_${randomUUID().replaceAll("-", "")}`,
+        workosOrganizationId,
+        `user_${randomUUID().replaceAll("-", "")}`,
+        organizationId,
+        owner.id,
+      ],
+    );
+    const staleMembershipId = `membership_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO workos_membership_projections (
+         workos_membership_id, workos_organization_id, workos_user_id,
+         organization_id, user_id, status, role, last_provider_event_at
+       ) VALUES ($1, $2, $3, $4, $5, 'active', 'owner', now())`,
+      [
+        staleMembershipId,
+        `org_${randomUUID().replaceAll("-", "")}`,
+        `user_${randomUUID().replaceAll("-", "")}`,
+        organizationId,
+        owner.id,
+      ],
+    );
+    const controlOrganizationId = await createOrganization(
+      owner,
+      "Purge Isolation Company",
+    );
+    await pool.query(
+      `INSERT INTO cloud_workspace_quota_changes (
+         org_id, actor_user_id, next_max_workspaces,
+         next_max_running_workspaces, next_max_cpu_millicores,
+         next_max_memory_mib, next_max_storage_mib, deployment_channel,
+         target_fingerprint, database_principal, reason
+       ) VALUES ($1, $2, 3, 2, 1500, 3072, 20480, 'alpha',
+                 'fedcba9876543210', 'migration-owner',
+                 'Cross-tenant purge isolation integration fixture')`,
+      [controlOrganizationId, owner.id],
+    );
+    const activeSystemClient = await pool.connect();
+    try {
+      await activeSystemClient.query("BEGIN");
+      await activeSystemClient.query("SET LOCAL ROLE zeros_app");
+      await activeSystemClient.query(
+        "SELECT set_config('app.system', 'on', true)",
+      );
+      await expect(
+        activeSystemClient.query(
+          `DELETE FROM cloud_workspace_usage_events WHERE org_id = $1`,
+          [organizationId],
+        ),
+      ).rejects.toThrow(/usage events are append-only/i);
+    } finally {
+      await activeSystemClient.query("ROLLBACK").catch(() => undefined);
+      activeSystemClient.release();
+    }
 
     asActor(owner);
     const scheduled = await request(`/v1/organizations/${organizationId}`, {
@@ -618,15 +1611,69 @@ d("account, organization, and operator deletion lifecycle", () => {
       logger: { warn: () => undefined, error: () => undefined },
     });
     expect(await processor.tick(1)).toBe(1);
+    const purgeCommand = await pool.query<{
+      id: string;
+      operation: string;
+      state: string;
+    }>(
+      `SELECT command.id, command.operation, command.state
+       FROM workos_command_outbox command
+       WHERE command.id = (
+         SELECT purge_command_id FROM deletion_requests WHERE id = $1
+       )`,
+      [body.deletion.id],
+    );
+    expect(purgeCommand).toMatchObject({
+      rows: [{ operation: "organization.delete", state: "queued" }],
+    });
     await expect(
       pool.query(
-        `SELECT operation, state
-         FROM workos_command_outbox
-         WHERE id = (SELECT purge_command_id FROM deletion_requests WHERE id = $1)`,
+        `SELECT metadata FROM deletion_request_events
+         WHERE deletion_request_id = $1
+           AND action = 'purge.provider_erasure_fenced'`,
         [body.deletion.id],
       ),
     ).resolves.toMatchObject({
-      rows: [{ operation: "organization.delete", state: "queued" }],
+      rows: [
+        {
+          metadata: {
+            provider: "workos",
+            workosSubjectHashes: [
+              workOSProviderSubjectHash({
+                kind: "organization",
+                id: workosOrganizationId,
+              }),
+            ],
+          },
+        },
+      ],
+    });
+    await expect(
+      pool.query(`DELETE FROM cloud_workspace_usage_events WHERE org_id = $1`, [
+        organizationId,
+      ]),
+    ).rejects.toThrow(/usage events are append-only/i);
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workspace_blob_object_deletions WHERE org_id = $1`,
+        [organizationId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+    for (let poll = 0; poll < 25; poll += 1) {
+      await pool.query(
+        `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+        [body.deletion.id],
+      );
+      expect(await processor.tick(1)).toBe(1);
+    }
+    await expect(
+      pool.query(
+        `SELECT state, attempt_count FROM deletion_requests WHERE id = $1`,
+        [body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ state: "provider_deleting", attempt_count: 1 }],
     });
     await succeedPurgeCommand(body.deletion.id);
     expect(await processor.tick(1)).toBe(1);
@@ -636,12 +1683,314 @@ d("account, organization, and operator deletion lifecycle", () => {
     await expect(
       pool.query(
         `SELECT count(*)::integer AS count
+         FROM workspace_blob_object_deletions WHERE org_id = $1`,
+        [organizationId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM cloud_workspace_quota_changes WHERE org_id = $1`,
+        [controlOrganizationId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_membership_projections
+         WHERE workos_membership_id = $1`,
+        [staleMembershipId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_membership_projections
+         WHERE workos_organization_id = $1`,
+        [workosOrganizationId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::integer FROM cloud_workspace_quota_changes
+            WHERE org_id = $1) AS quota_changes,
+           (SELECT count(*)::integer
+            FROM cloud_workspace_object_storage_limit_changes
+            WHERE org_id = $1) AS storage_changes,
+           (SELECT count(*)::integer FROM cloud_workspace_usage_events
+            WHERE org_id = $1) AS usage_events,
+           (SELECT count(*)::integer
+            FROM cloud_workspace_object_rotation_retry_changes
+            WHERE org_id = $1) AS rotation_retry_changes,
+           (SELECT count(*)::integer FROM workos_command_outbox
+            WHERE organization_id = $1) AS workos_commands`,
+        [organizationId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          quota_changes: 0,
+          storage_changes: 0,
+          usage_events: 0,
+          rotation_retry_changes: 0,
+          workos_commands: 0,
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT 1 FROM workos_command_outbox
+         WHERE id = ANY($1::uuid[])`,
+        [[historicalCommand.rows[0]!.id, purgeCommand.rows[0]!.id]],
+      ),
+    ).resolves.toMatchObject({ rows: [] });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_command_outbox command
+         WHERE position($1::text in command.aggregate_key) > 0
+            OR position($1::text in command.ordering_key) > 0
+            OR command.provider_object_id IN ($2, 'org_historical')
+            OR command.payload::text LIKE '%' || $1::text || '%'
+            OR command.payload::text LIKE '%Purge Company%'`,
+        [organizationId, workosOrganizationId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
          FROM security_notification_outbox
          WHERE template = 'organization_deletion_completed'
            AND destination_email IN ($1, $2)`,
         [owner.email, member.email],
       ),
     ).resolves.toMatchObject({ rows: [{ count: 2 }] });
+  });
+
+  it("resumes a scheduled purge when WorkOS already reported the Organization deleted", async () => {
+    const owner = await signup("ProviderDeletedOrg");
+    const organizationId = await createOrganization(
+      owner,
+      "Provider Deleted Company",
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::uuid::text, 'active')`,
+      [organizationId, workosOrganizationId],
+    );
+
+    asActor(owner);
+    const scheduled = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Provider Deleted Company" },
+    });
+    expect(scheduled.status).toBe(202);
+    const body = (await scheduled.json()) as DeletionResponse;
+    await pool.query(
+      `UPDATE organizations
+       SET lifecycle_status = 'provider_deleted', deleted_at = now()
+       WHERE id = $1`,
+      [organizationId],
+    );
+    await pool.query(
+      `UPDATE workos_organization_links SET state = 'deleted' WHERE organization_id = $1`,
+      [organizationId],
+    );
+    await makeDue(body.deletion.id);
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-provider-deleted-organization",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(
+        `SELECT request.state, organization.lifecycle_status,
+                command.operation, command.state AS command_state
+         FROM deletion_requests request
+         JOIN organizations organization
+           ON organization.id = request.target_organization_id
+         JOIN workos_command_outbox command
+           ON command.id = request.purge_command_id
+         WHERE request.id = $1`,
+        [body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "provider_deleting",
+          lifecycle_status: "purging",
+          operation: "organization.delete",
+          command_state: "queued",
+        },
+      ],
+    });
+    await succeedPurgeCommand(body.deletion.id);
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(`SELECT 1 FROM organizations WHERE id = $1`, [organizationId]),
+    ).resolves.toMatchObject({ rows: [] });
+  });
+
+  it("fences a reclaimed same-worker deletion lease with a monotonic revision", async () => {
+    const owner = await signup("DeletionLeaseFence");
+    const organizationId = await createOrganization(
+      owner,
+      "Lease Fence Company",
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::uuid::text, 'active')`,
+      [organizationId, workosOrganizationId],
+    );
+    asActor(owner);
+    const scheduled = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Lease Fence Company" },
+    });
+    const body = (await scheduled.json()) as DeletionResponse;
+    await makeDue(body.deletion.id);
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "shared-deletion-worker",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    await pool.query(
+      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+      [body.deletion.id],
+    );
+
+    type InternalClaim = { lease_revision: string | number };
+    const controls = processor as unknown as {
+      claim(): Promise<InternalClaim | null>;
+      release(request: InternalClaim, delayMs: number): Promise<void>;
+    };
+    const first = await controls.claim();
+    expect(first).not.toBeNull();
+    await pool.query(
+      `UPDATE deletion_requests
+       SET lease_expires_at = now() - interval '1 second', next_attempt_at = now()
+       WHERE id = $1`,
+      [body.deletion.id],
+    );
+    const second = await controls.claim();
+    expect(second).not.toBeNull();
+    expect(Number(second!.lease_revision)).toBeGreaterThan(
+      Number(first!.lease_revision),
+    );
+
+    await controls.release(first!, 0);
+    await expect(
+      pool.query<{
+        lease_owner: string | null;
+        lease_revision: string | number;
+      }>(
+        `SELECT lease_owner, lease_revision
+         FROM deletion_requests WHERE id = $1`,
+        [body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          lease_owner: "shared-deletion-worker",
+          lease_revision: String(second!.lease_revision),
+        },
+      ],
+    });
+    await controls.release(second!, 0);
+    await expect(
+      pool.query(`SELECT lease_owner FROM deletion_requests WHERE id = $1`, [
+        body.deletion.id,
+      ]),
+    ).resolves.toMatchObject({ rows: [{ lease_owner: null }] });
+  });
+
+  it("does not purge an Organization until detached object keys are durably fenced", async () => {
+    const owner = await signup("OrgFencePurge");
+    const organizationId = await createOrganization(owner, "Fence Company");
+    const blobId = randomUUID();
+    await pool.query(
+      `INSERT INTO workspace_blob_object_deletions (
+         object_key, org_id, blob_id, reserved_bytes
+       ) VALUES ($1, $2, $3, 128)`,
+      [`workspace/v2/${organizationId}/${blobId}/k1`, organizationId, blobId],
+    );
+
+    asActor(owner);
+    const scheduled = await request(`/v1/organizations/${organizationId}`, {
+      method: "DELETE",
+      body: { confirmation: "Fence Company" },
+    });
+    expect(scheduled.status).toBe(202);
+    const body = (await scheduled.json()) as DeletionResponse;
+    await makeDue(body.deletion.id);
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-organization-fence-purge",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+
+    for (let poll = 0; poll < 25; poll += 1) {
+      await pool.query(
+        `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+        [body.deletion.id],
+      );
+      expect(await processor.tick(1)).toBe(1);
+    }
+    await expect(
+      pool.query(
+        `SELECT state, attempt_count, last_error_code
+         FROM deletion_requests WHERE id = $1`,
+        [body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "purging",
+          attempt_count: 1,
+          last_error_code: null,
+        },
+      ],
+    });
+    await expect(
+      pool.query(`SELECT id FROM organizations WHERE id = $1`, [
+        organizationId,
+      ]),
+    ).resolves.toMatchObject({ rows: [{ id: organizationId }] });
+
+    await pool.query(
+      `UPDATE workspace_blob_object_deletions
+       SET reserved_bytes = 0, fenced_at = now(), last_error_code = NULL
+       WHERE org_id = $1`,
+      [organizationId],
+    );
+    await pool.query(
+      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+      [body.deletion.id],
+    );
+    expect(await processor.tick(1)).toBe(1);
+    await pool.query(
+      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+      [body.deletion.id],
+    );
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(`SELECT 1 FROM organizations WHERE id = $1`, [organizationId]),
+    ).resolves.toMatchObject({ rows: [] });
+    await expect(
+      pool.query(
+        `SELECT disposition
+         FROM workos_provider_erasure_reconciliations
+         WHERE deletion_request_id = $1`,
+        [body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ disposition: "no_workos_subject" }],
+    });
   });
 
   it("requires exact-case owner grants and two people for Business recovery and forced purge", async () => {

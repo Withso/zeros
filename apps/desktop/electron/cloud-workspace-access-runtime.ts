@@ -2,6 +2,7 @@ import { app, clipboard } from "electron";
 import path from "node:path";
 
 import { CloudWorkspaceAccessBroker } from "./cloud-workspace-access-broker";
+import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
 import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
 import { CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
 import { ensureCloudAccessDeviceForMain } from "./cloud-replica-host-runtime";
@@ -98,6 +99,9 @@ function allowedPreviewHostSuffixes(): string[] | undefined {
 }
 
 export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
+  if (!cloudWorkspaceDesktopCapabilityEnabled()) {
+    throw new Error("Cloud workspaces are not enabled in this desktop build");
+  }
   if (broker) return broker;
   const hosts = allowedSshHosts();
   const knownHostEntries = pinnedSshKnownHostEntries();
@@ -119,8 +123,7 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
         : {}),
     }),
     getAccessToken: getValidAccessTokenForMain,
-    getDeviceId: async () =>
-      (await ensureCloudAccessDeviceForMain()).deviceId,
+    getDeviceId: async () => (await ensureCloudAccessDeviceForMain()).deviceId,
     writeClipboard: (value) => clipboard.writeText(value),
     launchTerminal: (input) => ssh.launchTerminal(input),
     launchIde: (input) => ssh.launchIde(input),

@@ -2772,6 +2772,8 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.workspaceId, input.organizationId, workspace.currentGeneration],
         )
       ).rows[0] ?? null;
+      // This allocation must remain identical to route and operator quota
+      // admission, including candidate reservations and pending provider disk.
       const quota = (
         await tx.query<{
           max_workspaces: number;
@@ -2785,35 +2787,72 @@ export class DatabaseCloudWorkspaceManagementService {
           memory_mib: string | number;
           storage_mib: string | number;
         }>(
-          `SELECT quota.max_workspaces, quota.max_running_workspaces,
+          `WITH workspace_usage AS (
+             SELECT count(*)::integer AS workspace_count,
+                    count(*) FILTER (
+                      WHERE desired_state = 'running'
+                    )::integer AS running_count
+             FROM cloud_workspaces
+             WHERE org_id = $1 AND status <> 'deleted'
+           ), generation_allocation AS (
+             SELECT generation.cpu_millicores, generation.memory_mib,
+                    generation.storage_mib, workspace.desired_state,
+                    (
+                      workspace.status <> 'deleted'
+                      AND generation.generation = workspace.current_generation
+                    ) AS current_reserved,
+                    (
+                      workspace.status <> 'deleted'
+                      AND generation.generation <> workspace.current_generation
+                      AND generation.retired_at IS NULL
+                      AND transition.id IS NOT NULL
+                    ) AS candidate_reserved,
+                    (
+                      binding.provider_resource_id IS NOT NULL
+                      AND binding.deletion_verified_at IS NULL
+                    ) AS provider_storage_allocated
+             FROM cloud_workspaces workspace
+             JOIN cloud_workspace_generations generation
+               ON generation.workspace_id = workspace.id
+              AND generation.org_id = workspace.org_id
+             LEFT JOIN cloud_workspace_provider_bindings binding
+               ON binding.workspace_id = generation.workspace_id
+              AND binding.generation = generation.generation
+              AND binding.org_id = generation.org_id
+             LEFT JOIN cloud_workspace_generation_transitions transition
+               ON transition.workspace_id = generation.workspace_id
+              AND transition.org_id = generation.org_id
+              AND transition.candidate_generation = generation.generation
+              AND transition.state IN (
+                'draining', 'provisioning', 'setting_up', 'rolling_back'
+              )
+             WHERE workspace.org_id = $1
+           ), generation_usage AS (
+             SELECT coalesce(sum(cpu_millicores) FILTER (
+                      WHERE (current_reserved AND desired_state = 'running')
+                         OR candidate_reserved
+                    ), 0) AS cpu_millicores,
+                    coalesce(sum(memory_mib) FILTER (
+                      WHERE (current_reserved AND desired_state = 'running')
+                         OR candidate_reserved
+                    ), 0) AS memory_mib,
+                    coalesce(sum(storage_mib) FILTER (
+                      WHERE current_reserved OR candidate_reserved
+                         OR provider_storage_allocated
+                    ), 0) AS storage_mib
+             FROM generation_allocation
+           )
+           SELECT quota.max_workspaces, quota.max_running_workspaces,
                   quota.max_cpu_millicores, quota.max_memory_mib,
-                  quota.max_storage_mib,
-                  count(workspace.id) FILTER (
-                    WHERE workspace.status <> 'deleted'
-                  )::integer AS workspace_count,
-                  count(workspace.id) FILTER (
-                    WHERE workspace.status IN (
-                      'requested', 'provisioning', 'setting_up', 'ready',
-                      'busy', 'waking', 'stopping'
-                    )
-                  )::integer AS running_count,
-                  coalesce(sum(generation.cpu_millicores) FILTER (
-                    WHERE workspace.status <> 'deleted'
-                  ), 0) AS cpu_millicores,
-                  coalesce(sum(generation.memory_mib) FILTER (
-                    WHERE workspace.status <> 'deleted'
-                  ), 0) AS memory_mib,
-                  coalesce(sum(generation.storage_mib) FILTER (
-                    WHERE workspace.status <> 'deleted'
-                  ), 0) AS storage_mib
+                  quota.max_storage_mib, workspace_usage.workspace_count,
+                  workspace_usage.running_count,
+                  generation_usage.cpu_millicores,
+                  generation_usage.memory_mib,
+                  generation_usage.storage_mib
            FROM cloud_workspace_quotas quota
-           LEFT JOIN cloud_workspaces workspace ON workspace.org_id = quota.org_id
-           LEFT JOIN cloud_workspace_generations generation
-             ON generation.workspace_id = workspace.id
-            AND generation.generation = workspace.current_generation
-            AND generation.org_id = workspace.org_id
-           WHERE quota.org_id = $1
-           GROUP BY quota.org_id`,
+           CROSS JOIN workspace_usage
+           CROSS JOIN generation_usage
+           WHERE quota.org_id = $1`,
           [input.organizationId],
         )
       ).rows[0] ?? null;

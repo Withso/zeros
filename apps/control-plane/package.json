@@ -11,8 +11,11 @@
   },
   "scripts": {
     "auth:probe": "tsx src/auth-contract-probe.ts",
+    "cloud-entitlement:manage": "tsx src/manage-cloud-workspace-entitlement.ts",
     "cloud-quota:manage": "tsx src/manage-cloud-workspace-quota.ts",
     "cloud-object-storage:manage": "tsx src/manage-cloud-workspace-object-storage.ts",
+    "cloud-object-rotation:retry": "tsx src/manage-cloud-workspace-object-rotation.ts",
+    "workos-erasure:manage": "tsx src/manage-workos-provider-erasure.ts",
     "staff:manage": "tsx src/manage-staff.ts",
     "reset:database": "tsx src/reset-database.ts",
     "dev": "tsx watch src/index.ts",

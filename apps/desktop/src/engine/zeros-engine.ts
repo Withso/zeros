@@ -176,6 +176,7 @@ import {
 } from "./agents/gateway/vault-persist";
 import { CloudReplicaRuntime } from "./cloud-replica-runtime";
 import { CloudWorkspaceForkRuntime } from "./cloud-workspace-fork-runtime";
+import { createCloudWorkspaceDesktopPipelines } from "./cloud-workspace-capability";
 import {
   parseCloudReplicaHostSessionMessage,
   parseCloudReplicaProofResponse,
@@ -1141,18 +1142,21 @@ export class ZerosEngine {
     // Initialize components
     this.cache = new EngineCache(this.root);
     this.workspace = new WorkspaceService(this.root);
-    this.cloudReplicaRuntime = cloudWorker
-      ? null
-      : new CloudReplicaRuntime(openZerosDb(), {
+    const cloudWorkspacePipelines = createCloudWorkspaceDesktopPipelines({
+      cloudWorker: Boolean(cloudWorker),
+      createReplica: () =>
+        new CloudReplicaRuntime(openZerosDb(), {
           emitHostControl: (line) => this.publishPrivateHostControl(line),
           logger: console,
-        });
-    this.cloudWorkspaceForkRuntime = this.cloudReplicaRuntime
-      ? new CloudWorkspaceForkRuntime(openZerosDb(), {
-          context: () => this.cloudReplicaRuntime!.cloudWorkspaceContext(),
+        }),
+      createFork: (replica) =>
+        new CloudWorkspaceForkRuntime(openZerosDb(), {
+          context: () => replica.cloudWorkspaceContext(),
           logger: console,
-        })
-      : null;
+        }),
+    });
+    this.cloudReplicaRuntime = cloudWorkspacePipelines.replica;
+    this.cloudWorkspaceForkRuntime = cloudWorkspacePipelines.fork;
     this.workspace.setRepoTaskBoundaryFactory(repoTaskBoundaryFactory);
     // Let the mcp.gateway.* ops reach the (lazily-created) gateway instance.
     this.workspace.setGatewayAccessor(() => this.mcpGateway);
@@ -1672,11 +1676,13 @@ export class ZerosEngine {
     this.cloudRuntimeRegistration = this.cloudRuntimeConfig
       ? new CloudRuntimeRegistration(this.cloudRuntimeConfig, {
           onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
-          onDurableRecordSync: (authority) => {
+          onDurableRecordSync: (authority, context) => {
             if (!this.cloudRecordRuntime) {
               throw new Error("cloud durable record runtime is unavailable");
             }
-            return this.cloudRecordRuntime.synchronize(authority);
+            return this.cloudRecordRuntime.synchronize(authority, {
+              settleImportedRunningTurns: context.initial,
+            });
           },
           onCheckpointRequested: (directive, authority) =>
             this.handleCloudCheckpointRequest(directive, authority),

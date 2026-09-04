@@ -36,6 +36,7 @@ const COUNT_TABLES = [
   "github_audit_log",
   "cloud_workspace_quotas",
   "cloud_workspace_quota_changes",
+  "cloud_workspace_entitlement_changes",
   "cloud_workspaces",
   "cloud_workspace_generations",
   "cloud_workspace_provider_bindings",

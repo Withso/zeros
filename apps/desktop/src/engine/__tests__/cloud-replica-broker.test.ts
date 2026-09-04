@@ -1,10 +1,10 @@
 import { createHash, generateKeyPairSync, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { CloudReplicaMutation } from "../cloud-replica-apply";
 import {
@@ -323,15 +323,20 @@ describe("cloud replica receive-only broker", () => {
   it.each([
     ["a missing audience", undefined],
     ["an unknown audience", "zeros-unrecognized-checkpoint-v1"],
-  ])("rejects %s instead of treating it as a legacy descriptor", (_, audience) => {
-    const document = checkpointManifest();
-    if (audience === undefined) delete document.audience;
-    else document.audience = audience;
+  ])(
+    "rejects %s instead of treating it as a legacy descriptor",
+    (_, audience) => {
+      const document = checkpointManifest();
+      if (audience === undefined) delete document.audience;
+      else document.audience = audience;
 
-    expect(() =>
-      parseBootstrapManifest(bootstrapManifestInput(document)),
-    ).toThrowError(expect.objectContaining({ code: "remote_protocol_error" }));
-  });
+      expect(() =>
+        parseBootstrapManifest(bootstrapManifestInput(document)),
+      ).toThrowError(
+        expect.objectContaining({ code: "remote_protocol_error" }),
+      );
+    },
+  );
 
   it.each([
     ["gitBaseCommit", {}],
@@ -342,20 +347,17 @@ describe("cloud replica receive-only broker", () => {
     ["entryType", []],
     ["mode", {}],
     ["mode", []],
-  ])(
-    "fails closed for an object or array %s value",
-    (field, value) => {
-      const document = checkpointManifest(
-        field === "gitBaseCommit" || field === "gitHeadRef"
-          ? { [field]: value }
-          : { entries: [checkpointManifestEntry({ [field]: value })] },
-      );
+  ])("fails closed for an object or array %s value", (field, value) => {
+    const document = checkpointManifest(
+      field === "gitBaseCommit" || field === "gitHeadRef"
+        ? { [field]: value }
+        : { entries: [checkpointManifestEntry({ [field]: value })] },
+    );
 
-      expect(() =>
-        parseBootstrapManifest(bootstrapManifestInput(document)),
-      ).toThrowError(expect.objectContaining({ code: "remote_protocol_error" }));
-    },
-  );
+    expect(() =>
+      parseBootstrapManifest(bootstrapManifestInput(document)),
+    ).toThrowError(expect.objectContaining({ code: "remote_protocol_error" }));
+  });
 
   it("bootstraps an exact checkpoint then consumes ordered event pages", async () => {
     const fixture = await localFixture();
@@ -424,6 +426,215 @@ describe("cloud replica receive-only broker", () => {
     expect(
       await readFile(path.join(fixture.rootPath, "value.txt"), "utf8"),
     ).toBe("already applied\n");
+  });
+
+  it("keeps a local divergence visible while adopting a response-lost cursor", async () => {
+    const fixture = await localFixture(0);
+    fixture.state.projection(fixture.replicaId).divergence({
+      path: "edited.ts",
+      expectedSha256: "a".repeat(64),
+      observedSha256: "b".repeat(64),
+      cloudSha256: "c".repeat(64),
+    });
+    const projectionHash = fixture.state
+      .projection(fixture.replicaId)
+      .manifestSha256();
+    const api = new FakeReplicaApi({
+      ...remoteFor(fixture),
+      observedState: "in_sync",
+      manifestRevision: 0,
+      eventCursor: 1,
+      clientManifestSha256: projectionHash,
+    });
+
+    await expect(
+      new CloudReplicaSyncBroker(api, fixture.state).sync(fixture.replicaId),
+    ).resolves.toMatchObject({
+      eventCursor: 1,
+      observedState: "diverged",
+      lastErrorCode: "local_content_changed",
+    });
+  });
+
+  it("rejects a stale renewal before adopting its cursor or caching its grant", async () => {
+    const fixture = await localFixture(0);
+    fixture.state.updateRemoteState({
+      replicaId: fixture.replicaId,
+      desiredState: "active",
+      observedState: "in_sync",
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+      checkpointId: fixture.checkpointId,
+      manifestRevision: 0,
+    });
+    const api = new FakeReplicaApi({
+      ...remoteFor(fixture),
+      observedState: "in_sync",
+      manifestRevision: 0,
+      eventCursor: 1,
+      clientManifestSha256: fixture.state
+        .projection(fixture.replicaId)
+        .manifestSha256(),
+    });
+    let renewCalls = 0;
+    const originalRenew = api.renewGrant.bind(api);
+    api.renewGrant = async () => {
+      renewCalls += 1;
+      return originalRenew();
+    };
+    const broker = new CloudReplicaSyncBroker(api, fixture.state);
+
+    await expect(broker.sync(fixture.replicaId)).rejects.toMatchObject({
+      code: "cursor_conflict",
+    });
+    expect(fixture.state.replica(fixture.replicaId)).toMatchObject({
+      eventCursor: 0,
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+      clientManifestSha256: null,
+    });
+
+    api.remote = {
+      ...remoteFor(fixture),
+      observedState: "in_sync",
+      manifestRevision: 0,
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+    };
+    await expect(broker.sync(fixture.replicaId)).resolves.toMatchObject({
+      eventCursor: 0,
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+    });
+    expect(renewCalls).toBe(2);
+  });
+
+  it("rejects a stale receipt before advancing local receipt state", async () => {
+    const fixture = await localFixture();
+    fixture.state.updateRemoteState({
+      replicaId: fixture.replicaId,
+      desiredState: "active",
+      observedState: "bootstrapping",
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+      checkpointId: fixture.checkpointId,
+      manifestRevision: 1,
+    });
+    const api = new FakeReplicaApi(remoteFor(fixture));
+    api.bootstrapPage = {
+      checkpointId: fixture.checkpointId,
+      manifestRevision: 1,
+      manifestBlobId: randomUUID(),
+      integritySha256: "0".repeat(64),
+      fileCount: 0,
+      totalBytes: 0,
+      entries: [],
+      nextAfterPath: null,
+    };
+    const broker = new CloudReplicaSyncBroker(api, fixture.state);
+    broker.seedGrant(fixture.replicaId, {
+      token: `zwr_${"r".repeat(43)}`,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    });
+
+    await expect(broker.sync(fixture.replicaId)).rejects.toMatchObject({
+      code: "cursor_conflict",
+    });
+    expect(api.receiptCalls).toBe(1);
+    expect(fixture.state.replica(fixture.replicaId)).toMatchObject({
+      eventCursor: 0,
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+      clientManifestSha256: null,
+    });
+  });
+
+  it("rejects a stale snapshot before resetting state or seeding its grant", async () => {
+    const fixture = await localFixture();
+    const existingBytes = Buffer.from("retained projection\n", "utf8");
+    const existingSha256 = createHash("sha256")
+      .update(existingBytes)
+      .digest("hex");
+    await mkdir(fixture.rootPath, { recursive: true });
+    await writeFile(path.join(fixture.rootPath, "retained.txt"), existingBytes);
+    fixture.state.projection(fixture.replicaId).commitEntry({
+      path: "retained.txt",
+      portablePathKey: "retained.txt",
+      revision: 1,
+      entryType: "file",
+      mode: 33188,
+      contentSha256: existingSha256,
+      sizeBytes: existingBytes.length,
+    });
+    fixture.state.advanceReceipt({
+      replicaId: fixture.replicaId,
+      fromRevision: 0,
+      toRevision: 1,
+      manifestSha256: fixture.state
+        .projection(fixture.replicaId)
+        .manifestSha256(),
+      observedState: "in_sync",
+    });
+    fixture.state.updateRemoteState({
+      replicaId: fixture.replicaId,
+      desiredState: "active",
+      observedState: "in_sync",
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+      checkpointId: fixture.checkpointId,
+      manifestRevision: 1,
+    });
+    const api = new FakeReplicaApi({
+      ...remoteFor(fixture),
+      observedState: "in_sync",
+      eventCursor: 1,
+    });
+    api.eventPages.push({
+      currentRevision: 3,
+      minimumRetainedRevision: 2,
+      snapshotRequired: true,
+      fromRevision: 1,
+      toRevision: 1,
+      events: [],
+      hasMore: false,
+    });
+    const staleCheckpointId = randomUUID();
+    api.refreshSnapshot = async () => ({
+      replica: {
+        ...remoteFor(fixture),
+        checkpointId: staleCheckpointId,
+        manifestRevision: 3,
+        observedState: "bootstrapping",
+      },
+      grant: {
+        token: `zwr_${"n".repeat(43)}`,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+      },
+    });
+    const broker = new CloudReplicaSyncBroker(api, fixture.state);
+    broker.seedGrant(fixture.replicaId, {
+      token: `zwr_${"c".repeat(43)}`,
+      expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+    });
+    const seedGrant = vi.spyOn(broker, "seedGrant");
+
+    await expect(broker.sync(fixture.replicaId)).rejects.toMatchObject({
+      code: "cursor_conflict",
+    });
+    expect(seedGrant).not.toHaveBeenCalled();
+    expect(fixture.state.replica(fixture.replicaId)).toMatchObject({
+      checkpointId: fixture.checkpointId,
+      manifestRevision: 1,
+      eventCursor: 1,
+      workspaceAuthorityEpoch: 2,
+      grantEpoch: 2,
+    });
+    expect(fixture.state.projectionEntries(fixture.replicaId)).toEqual([
+      expect.objectContaining({ path: "retained.txt", revision: 1 }),
+    ]);
+    await expect(
+      readFile(path.join(fixture.rootPath, "retained.txt"), "utf8"),
+    ).resolves.toBe("retained projection\n");
   });
 
   it("advances across a durable content revision with no file mutations", async () => {
@@ -647,10 +858,17 @@ describe("cloud replica receive-only broker", () => {
     const broker = new CloudReplicaSyncBroker(api, fixture.state);
     const work = broker.sync(fixture.replicaId);
     await started;
-    broker.cancel();
+    let drained = false;
+    const drain = broker.cancelAndDrain().then(() => {
+      drained = true;
+    });
+    await Promise.resolve();
+    expect(drained).toBe(false);
     release();
 
     await expect(work).rejects.toMatchObject({ code: "cancelled" });
+    await drain;
+    expect(drained).toBe(true);
     expect(api.receiptCalls).toBe(0);
     expect(fixture.state.projectionEntries(fixture.replicaId)).toEqual([]);
   });

@@ -34,6 +34,9 @@ let workosApp: Hono;
  *  token cleared every auth check. */
 const REACHED_DB = "REACHED_DB_SENTINEL";
 const poolStub = {
+  query: () => {
+    throw new Error(REACHED_DB);
+  },
   connect: () => {
     throw new Error(REACHED_DB);
   },

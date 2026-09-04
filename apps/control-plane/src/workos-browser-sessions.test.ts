@@ -72,17 +72,17 @@ class MemoryRepository implements WorkOSBrowserSessionRepository {
   async promoteFlow(
     credentialHash: Buffer,
     record: WorkOSSessionRecord,
-  ): Promise<boolean> {
+  ): Promise<"promoted" | "missing"> {
     if (
       !this.flow?.claimed ||
       !this.flow.credentialHash.equals(credentialHash)
     ) {
-      return false;
+      return "missing";
     }
     this.flow = null;
     this.session = clone(record);
     this.writes += 1;
-    return true;
+    return "promoted";
   }
 
   async deleteFlow(credentialHash: Buffer): Promise<void> {

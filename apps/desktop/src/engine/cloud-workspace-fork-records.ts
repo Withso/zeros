@@ -443,7 +443,8 @@ function parseForkProjection(input: {
       !targetChatId ||
       natural(row.ord) === null ||
       natural(row.started_at) === null ||
-      !["running", "completed", "failed", "cancelled"].includes(String(row.status)) ||
+      typeof row.status !== "string" ||
+      !["running", "completed", "failed", "cancelled"].includes(row.status) ||
       (row.ended_at !== null && natural(row.ended_at) === null)
     ) {
       throw new Error("Fork turn document is invalid");
@@ -474,7 +475,7 @@ function parseForkProjection(input: {
         : typeof row.stop_reason === "string"
           ? row.stop_reason
           : null,
-      status: wasRunning ? "cancelled" : String(row.status),
+      status: wasRunning ? "cancelled" : row.status,
       pre_snapshot: null,
       post_snapshot: null,
       files: typeof row.files === "string" ? row.files : null,

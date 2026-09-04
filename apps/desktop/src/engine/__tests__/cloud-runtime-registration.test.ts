@@ -5,6 +5,8 @@ import {
   CLOUD_RUNTIME_ENV,
   CloudRuntimeRegistration,
   consumeCloudRuntimeEnvironment,
+  type CloudDurableRecordSyncContext,
+  type CloudRuntimeAuthority,
 } from "../cloud-runtime-registration";
 
 const NOW = Date.parse("2026-08-23T12:00:00.000Z");
@@ -17,7 +19,12 @@ const clientAdmissionEndpoint =
 const ACCOUNT_USER_ID = "55555555-5555-4555-8555-555555555555";
 
 function completedDurableRecordSync() {
-  return vi.fn(async () => undefined);
+  return vi.fn(
+    async (
+      _authority: CloudRuntimeAuthority,
+      _context: CloudDurableRecordSyncContext,
+    ) => undefined,
+  );
 }
 
 function encodedRuntime(overrides: Record<string, unknown> = {}): string {
@@ -459,6 +466,44 @@ describe("cloud runtime registration", () => {
     }
   });
 
+  it("marks only the registration sync as initial", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      Date.now,
+    )!;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(
+        Response.json({
+          version: 1,
+          audience: "zeros-cloud-workspace-engine-heartbeat-v1",
+          accepted: true,
+          engineInstanceId: runtime.engine.instanceId,
+          leaseExpiresAtMs: NOW + 120_000,
+        }),
+      );
+    const onDurableRecordSync = completedDurableRecordSync();
+    const registration = new CloudRuntimeRegistration(runtime, {
+      fetch: fetch as typeof globalThis.fetch,
+      now: Date.now,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync,
+    });
+
+    await registration.start();
+    expect(onDurableRecordSync.mock.calls[0]?.[1]).toEqual({ initial: true });
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.waitFor(() =>
+      expect(onDurableRecordSync).toHaveBeenCalledTimes(2),
+    );
+    expect(onDurableRecordSync.mock.calls[1]?.[1]).toEqual({ initial: false });
+    await registration.stop();
+  });
+
   it("withholds readiness until the durable record projection has converged", async () => {
     const runtime = consumeCloudRuntimeEnvironment(
       { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
@@ -483,14 +528,17 @@ describe("cloud runtime registration", () => {
       expect(onDurableRecordSync).toHaveBeenCalledTimes(1),
     );
     expect(registration.readiness()).toBeNull();
-    expect(onDurableRecordSync).toHaveBeenCalledWith({
-      heartbeatEndpoint,
-      heartbeatToken: `zwh_${"H".repeat(43)}`,
-      workspaceId: runtime.execution.workspaceId,
-      organizationId: runtime.execution.organizationId,
-      generation: runtime.execution.generation,
-      engineInstanceId: runtime.engine.instanceId,
-    });
+    expect(onDurableRecordSync).toHaveBeenCalledWith(
+      {
+        heartbeatEndpoint,
+        heartbeatToken: `zwh_${"H".repeat(43)}`,
+        workspaceId: runtime.execution.workspaceId,
+        organizationId: runtime.execution.organizationId,
+        generation: runtime.execution.generation,
+        engineInstanceId: runtime.engine.instanceId,
+      },
+      { initial: true },
+    );
 
     complete();
     await starting;

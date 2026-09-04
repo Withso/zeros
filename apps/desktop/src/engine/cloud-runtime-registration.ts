@@ -73,13 +73,20 @@ export type CloudRuntimeClientAdmission = {
   authorityEpoch: number;
 };
 
+export type CloudDurableRecordSyncContext = {
+  initial: boolean;
+};
+
 type FetchLike = typeof fetch;
 
 export type CloudRuntimeRegistrationDependencies = {
   fetch?: FetchLike;
   now?: () => number;
   onAuthorityLost: () => void;
-  onDurableRecordSync: (authority: CloudRuntimeAuthority) => Promise<void>;
+  onDurableRecordSync: (
+    authority: CloudRuntimeAuthority,
+    context: CloudDurableRecordSyncContext,
+  ) => Promise<void>;
   readRepositoryCredentialRefresh?: () => {
     version: 1;
     audience: "zeros-cloud-github-refresh-v1";
@@ -409,7 +416,7 @@ export class CloudRuntimeRegistration {
     this.document = document;
     this.scheduleHeartbeat(document.heartbeat.intervalMs);
     try {
-      await this.synchronizeDurableRecord(document);
+      await this.synchronizeDurableRecord(document, { initial: true });
     } catch (error) {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
@@ -604,7 +611,9 @@ export class CloudRuntimeRegistration {
       );
       document.leaseExpiresAtMs = Number(raw.leaseExpiresAtMs);
       this.scheduleHeartbeat(document.heartbeat.intervalMs);
-      void this.synchronizeDurableRecord(document).catch(() => undefined);
+      void this.synchronizeDurableRecord(document, { initial: false }).catch(
+        () => undefined,
+      );
       if (checkpointRequest) {
         this.dispatchCheckpointRequest(checkpointRequest, document);
       }
@@ -814,10 +823,11 @@ export class CloudRuntimeRegistration {
 
   private synchronizeDurableRecord(
     document: RegistrationDocument,
+    context: CloudDurableRecordSyncContext,
   ): Promise<void> {
     if (this.durableRecordSyncInFlight) return this.durableRecordSyncInFlight;
     const task = Promise.resolve()
-      .then(() => this.onDurableRecordSync(this.authority(document)))
+      .then(() => this.onDurableRecordSync(this.authority(document), context))
       .then(() => {
         if (
           this.document === document &&

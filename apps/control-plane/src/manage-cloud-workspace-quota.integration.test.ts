@@ -361,6 +361,225 @@ d("owner-managed cloud-workspace quotas", () => {
     ).rejects.toThrow(/below.*current workspace usage/i);
   });
 
+  it("rejects a quota decrease while a replacement candidate reserves headroom", async () => {
+    const used = await seedReadyCloudWorkspace(pool);
+    await pool.query(
+      `UPDATE users SET staff_role = 'platform_owner' WHERE id = $1`,
+      [used.userId],
+    );
+    const organization = await pool.query<{ slug: string }>(
+      `SELECT slug::text FROM organizations WHERE id = $1`,
+      [used.organizationId],
+    );
+    const drainIntentId = randomUUID();
+    const transitionId = randomUUID();
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO cloud_workspace_quotas (
+           org_id, max_workspaces, max_running_workspaces,
+           max_cpu_millicores, max_memory_mib, max_storage_mib, updated_by
+         ) VALUES ($1, 5, 5, 10000, 20480, 61440, $2)`,
+        [used.organizationId, used.userId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib,
+           source_commit, created_by, provider_connection_id
+         ) SELECT workspace_id, 2, org_id, provider, image_ref,
+                  architecture, cpu_millicores, memory_mib, storage_mib,
+                  source_commit, created_by, provider_connection_id
+           FROM cloud_workspace_generations
+           WHERE workspace_id = $1 AND generation = 1`,
+        [used.workspaceId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_provider_bindings (
+           workspace_id, generation, org_id, provider, observed_state
+         ) VALUES ($1, 2, $2, 'daytona', 'absent')`,
+        [used.workspaceId, used.organizationId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_lifecycle_intents (
+           id, workspace_id, generation, org_id, requested_by, operation,
+           idempotency_key, request_sha256, affects_workspace
+         ) VALUES ($1, $2, 1, $3, $4, 'stop', $5, $6, false)`,
+        [
+          drainIntentId,
+          used.workspaceId,
+          used.organizationId,
+          used.userId,
+          `quota-headroom-${randomUUID()}`,
+          Buffer.alloc(32, 1),
+        ],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_generation_transitions (
+           id, workspace_id, org_id, requested_by, operation,
+           source_generation, template_generation, candidate_generation,
+           state, drain_intent_id
+         ) VALUES ($1, $2, $3, $4, 'upgrade', 1, 1, 2, 'draining', $5)`,
+        [
+          transitionId,
+          used.workspaceId,
+          used.organizationId,
+          used.userId,
+          drainIntentId,
+        ],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_lifecycle_intents
+         SET generation_transition_id = $2 WHERE id = $1`,
+        [drainIntentId, transitionId],
+      );
+    });
+
+    const input = {
+      databaseUrl: url!,
+      channel: "alpha",
+      railwayEnvironmentName: "alpha",
+      execute: false,
+      productionConfirmed: undefined,
+      approval: undefined,
+      organizationId: used.organizationId,
+      expectedOrganizationSlug: organization.rows[0]!.slug,
+      actorUserId: used.userId,
+      maxWorkspaces: "1",
+      maxRunningWorkspaces: "1",
+      maxCpuMillicores: "2000",
+      maxMemoryMiB: "4096",
+      maxStorageMiB: "20480",
+      reason: "Retain replacement capacity until the candidate is retired.",
+    } as const;
+    await expect(
+      manageCloudWorkspaceQuota(
+        pool,
+        validateCloudWorkspaceQuotaRequest(input),
+      ),
+    ).rejects.toThrow(/below.*current workspace usage/i);
+
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `UPDATE cloud_workspace_generations SET retired_at = now()
+         WHERE workspace_id = $1 AND generation = 2`,
+        [used.workspaceId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_generation_transitions
+         SET state = 'cancelled', completed_at = now(), updated_at = now()
+         WHERE id = $1`,
+        [transitionId],
+      );
+    });
+    await expect(
+      manageCloudWorkspaceQuota(
+        pool,
+        validateCloudWorkspaceQuotaRequest(input),
+      ),
+    ).resolves.toMatchObject({ state: "planned" });
+  });
+
+  it("rejects a quota decrease while retired provider storage awaits verified deletion", async () => {
+    const used = await seedReadyCloudWorkspace(pool);
+    await pool.query(
+      `UPDATE users SET staff_role = 'platform_owner' WHERE id = $1`,
+      [used.userId],
+    );
+    const organization = await pool.query<{ slug: string }>(
+      `SELECT slug::text FROM organizations WHERE id = $1`,
+      [used.organizationId],
+    );
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO cloud_workspace_quotas (
+           org_id, max_workspaces, max_running_workspaces,
+           max_cpu_millicores, max_memory_mib, max_storage_mib, updated_by
+         ) VALUES ($1, 5, 5, 10000, 20480, 61440, $2)`,
+        [used.organizationId, used.userId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib,
+           source_commit, created_by, provider_connection_id
+         ) SELECT workspace_id, 2, org_id, provider, image_ref,
+                  architecture, cpu_millicores, memory_mib, storage_mib,
+                  source_commit, created_by, provider_connection_id
+           FROM cloud_workspace_generations
+           WHERE workspace_id = $1 AND generation = 1`,
+        [used.workspaceId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_provider_bindings (
+           workspace_id, generation, org_id, provider,
+           provider_resource_id, observed_state, last_observed_at
+         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+        [
+          used.workspaceId,
+          used.organizationId,
+          `sandbox-${used.workspaceId}-2`,
+        ],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_generations SET retired_at = now()
+         WHERE workspace_id = $1 AND generation = 1`,
+        [used.workspaceId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_provider_bindings
+         SET observed_state = 'stopped', updated_at = now()
+         WHERE workspace_id = $1 AND generation = 1`,
+        [used.workspaceId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspaces
+         SET current_generation = 2, status = 'ready', updated_at = now()
+         WHERE id = $1`,
+        [used.workspaceId],
+      );
+    });
+
+    const input = {
+      databaseUrl: url!,
+      channel: "alpha",
+      railwayEnvironmentName: "alpha",
+      execute: false,
+      productionConfirmed: undefined,
+      approval: undefined,
+      organizationId: used.organizationId,
+      expectedOrganizationSlug: organization.rows[0]!.slug,
+      actorUserId: used.userId,
+      maxWorkspaces: "1",
+      maxRunningWorkspaces: "1",
+      maxCpuMillicores: "2000",
+      maxMemoryMiB: "4096",
+      maxStorageMiB: "20480",
+      reason: "Retain retired provider disk until deletion is verified.",
+    } as const;
+    await expect(
+      manageCloudWorkspaceQuota(
+        pool,
+        validateCloudWorkspaceQuotaRequest(input),
+      ),
+    ).rejects.toThrow(/below.*current workspace usage/i);
+
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE cloud_workspace_provider_bindings
+         SET observed_state = 'deleted', deletion_verified_at = now(),
+             last_observed_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND generation = 1`,
+        [used.workspaceId],
+      ),
+    );
+    await expect(
+      manageCloudWorkspaceQuota(
+        pool,
+        validateCloudWorkspaceQuotaRequest(input),
+      ),
+    ).resolves.toMatchObject({ state: "planned" });
+  });
+
   it("can raise a historically valid quota that predates current resource minima", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const actor = await ensureUser(pool, {

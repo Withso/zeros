@@ -163,6 +163,7 @@ async function assertSystemAuthority(tx: Tx): Promise<void> {
 function activeEntitlementSql(alias: string): string {
   return `${alias}.status IN ('active', 'trialing')
           AND ${alias}.cloud_workspaces_allowed
+          AND ${alias}.valid_from <= now()
           AND (${alias}.valid_until IS NULL OR ${alias}.valid_until > now())`;
 }
 

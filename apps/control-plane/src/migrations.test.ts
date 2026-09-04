@@ -351,6 +351,15 @@ d("migration ladder", () => {
     const boundaryIndex = LADDER.indexOf(boundary);
     expect(boundaryIndex).toBeGreaterThan(0);
     await applyThrough(boundaryIndex);
+    await expect(
+      pool.query<{ relation: string | null }>(
+        `SELECT to_regclass(
+           'public.workos_provider_erasure_fences'
+         )::text AS relation`,
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ relation: null }],
+    });
 
     const result = await runServiceBootMigrations(pool, {
       cloudWorkspacesEnabled: false,
@@ -442,6 +451,55 @@ d("migration ladder", () => {
     expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
   });
 
+  it("pauses safely at 0060 from a populated 0059 ledger and requires its exact approval", async () => {
+    const boundary = "0060_cloud_workspace_pending_blob_deletions.sql";
+    const boundaryIndex = LADDER.indexOf(boundary);
+    expect(boundaryIndex).toBeGreaterThan(0);
+    await applyThrough(boundaryIndex);
+    await pool.query(
+      `INSERT INTO cloud_workspace_provider_orphans (
+         provider, provider_resource_id
+       ) VALUES ('daytona', 'sandbox-retained-at-0059')`,
+    );
+
+    const result = await runServiceBootMigrations(pool, {
+      cloudWorkspacesEnabled: false,
+      env: {
+        NODE_ENV: "production",
+        CONTROL_PLANE_MIGRATION_APPROVALS: boundary,
+      },
+    });
+    expect(result).toEqual({
+      ran: [],
+      status: {
+        state: "controlled_migration_pending",
+        migration: boundary,
+        dependentRuntime: "cloud_workspaces",
+      },
+    });
+    expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
+
+    await expect(
+      runMigrations(pool, { env: { NODE_ENV: "production" } }),
+    ).rejects.toThrow(
+      /0060_cloud_workspace_pending_blob_deletions\.sql.*not approved/i,
+    );
+    expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
+
+    await expect(
+      runMigrations(pool, {
+        env: {
+          NODE_ENV: "production",
+          CONTROL_PLANE_MIGRATION_APPROVALS: [
+            boundary,
+            "0061_workos_provider_erasure_fences.sql",
+          ].join(","),
+        },
+      }),
+    ).resolves.toEqual(LADDER.slice(boundaryIndex));
+    expect(await ledger()).toEqual(LADDER);
+  });
+
   it("upgrades databases that recorded the a80ac25 0013-0018 filenames", async () => {
     const authStart = LADDER.indexOf("0013_auth_lifecycle.sql");
     expect(authStart).toBe(12);
@@ -500,6 +558,15 @@ d("migration ladder", () => {
     );
     const recorded = await ledger();
     for (const file of LADDER) expect(recorded).toContain(file);
+    await expect(
+      pool.query<{ relation: string | null }>(
+        `SELECT to_regclass(
+           'public.workos_provider_erasure_fences'
+         )::text AS relation`,
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ relation: "workos_provider_erasure_fences" }],
+    });
   });
 
   it("upgrades databases that recorded the pre-merge cloud migration filenames", async () => {
@@ -564,6 +631,10 @@ d("migration ladder", () => {
       "0056_cloud_workspace_secret_verifiers.sql",
       "0057_cloud_workspace_storage_worker_indexes.sql",
       "0058_cloud_workspace_storage_invariants.sql",
+      "0059_cloud_workspace_entitlement_activation.sql",
+      "0060_cloud_workspace_pending_blob_deletions.sql",
+      "0061_workos_provider_erasure_fences.sql",
+      "0062_cloud_workspace_entitlement_operations.sql",
     ]);
     await expect(
       pool.query(
@@ -586,6 +657,281 @@ d("migration ladder", () => {
     await applyThrough(LADDER.length - 1);
     const ran = await runMigrations(pool);
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
+  });
+
+  it("adds owner-only append-only Organization entitlement activation evidence", async () => {
+    await runMigrations(pool);
+    await expect(
+      pool.query<{ relation: string | null }>(
+        `SELECT to_regclass(
+           'public.cloud_workspace_entitlement_changes'
+         )::text AS relation`,
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ relation: "cloud_workspace_entitlement_changes" }],
+    });
+    await expect(
+      pool.query(
+        `SELECT has_table_privilege(
+           'zeros_app', 'public.cloud_workspace_entitlement_changes', 'INSERT'
+         ) AS can_insert`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ can_insert: false }] });
+  });
+
+  it("backfills provider erasure fences but keeps incomplete historical purges unresolved", async () => {
+    const fenceMigration = "0061_workos_provider_erasure_fences.sql";
+    const fenceMigrationIndex = LADDER.indexOf(fenceMigration);
+    expect(fenceMigrationIndex).toBeGreaterThan(0);
+    await applyThrough(fenceMigrationIndex);
+
+    const evidencedRequest = "71717171-7171-4171-8171-717171717171";
+    const unresolvedRequest = "72727272-7272-4272-8272-727272727272";
+    await pool.query(
+      `INSERT INTO deletion_requests (
+         id, public_code, target_kind, target_id, state, requested_at,
+         purge_after, purge_started_at, purged_at
+       ) VALUES
+         ($1, 'ZD-HSTF-ENCD', 'account', $1, 'purged',
+          '2025-01-01T00:00:00Z', '2025-01-31T00:00:00Z',
+          '2025-01-31T00:00:00Z', '2025-01-31T00:01:00Z'),
+         ($2, 'ZD-HSTN-OFNC', 'organization', $2, 'purged',
+          '2025-02-01T00:00:00Z', '2025-03-03T00:00:00Z',
+          '2025-03-03T00:00:00Z', '2025-03-03T00:01:00Z')`,
+      [evidencedRequest, unresolvedRequest],
+    );
+    await pool.query(
+      `INSERT INTO deletion_request_events (
+         deletion_request_id, action, metadata
+       ) VALUES ($1, 'purge.provider_erasure_fenced', $2::jsonb)`,
+      [
+        evidencedRequest,
+        JSON.stringify({
+          provider: "workos",
+          workosSubjectHashes: ["a".repeat(64)],
+        }),
+      ],
+    );
+
+    await expect(runMigrations(pool)).resolves.toEqual([
+      fenceMigration,
+      "0062_cloud_workspace_entitlement_operations.sql",
+    ]);
+    await expect(
+      pool.query(
+        `SELECT fence.provider, fence.subject_kind, fence.hash_version,
+                fence.subject_hash, reconciliation.disposition
+         FROM workos_provider_erasure_fences fence
+         JOIN workos_provider_erasure_reconciliations reconciliation
+           ON reconciliation.deletion_request_id = fence.deletion_request_id`,
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          provider: "workos",
+          subject_kind: "user",
+          hash_version: 1,
+          subject_hash: "a".repeat(64),
+          disposition: "fenced",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS unresolved
+         FROM deletion_requests request
+         WHERE request.state = 'purged'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM workos_provider_erasure_reconciliations reconciliation
+             WHERE reconciliation.deletion_request_id = request.id
+           )`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ unresolved: 1 }] });
+    await expect(
+      pool.query(
+        `UPDATE workos_provider_erasure_fences
+         SET subject_hash = $1`,
+        ["b".repeat(64)],
+      ),
+    ).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("moves pre-fence failed rotations into conservative target cleanup", async () => {
+    const fenceMigration = "0060_cloud_workspace_pending_blob_deletions.sql";
+    const fenceMigrationIndex = LADDER.indexOf(fenceMigration);
+    expect(fenceMigrationIndex).toBeGreaterThan(0);
+    await applyThrough(fenceMigrationIndex);
+
+    const userId = "61616161-6161-4161-8161-616161616161";
+    const organizationId = "62626262-6262-4262-8262-626262626262";
+    const sourceBlobId = "63636363-6363-4363-8363-636363636363";
+    const publishedBlobId = "64646464-6464-4464-8464-646464646464";
+    const succeededBlobId = "65656565-6565-4565-8565-656565656565";
+    const deletedBlobId = "66666666-6666-4666-8666-666666666666";
+    const restoredBlobId = "67676767-6767-4767-8767-676767676767";
+    const sourceKey = `workspace/v2/${organizationId}/${sourceBlobId}/k1`;
+    const sourceTargetKey = `workspace/v2/${organizationId}/${sourceBlobId}/k2`;
+    const publishedSourceKey = `workspace/v2/${organizationId}/${publishedBlobId}/k1`;
+    const publishedTargetKey = `workspace/v2/${organizationId}/${publishedBlobId}/k2`;
+    const succeededSourceKey = `workspace/v2/${organizationId}/${succeededBlobId}/k1`;
+    const succeededTargetKey = `workspace/v2/${organizationId}/${succeededBlobId}/k2`;
+    const deletedKey = `workspace/v2/${organizationId}/${deletedBlobId}/k1`;
+    await pool.query(
+      `INSERT INTO users (id, email)
+       VALUES ($1, 'rotation-upgrade@example.test')`,
+      [userId],
+    );
+    await pool.query(
+      `INSERT INTO organizations (
+         id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+       ) VALUES ($1, 'rotation-upgrade', 'Rotation Upgrade', $2, false, true)`,
+      [organizationId, userId],
+    );
+    await pool.query(
+      `INSERT INTO workspace_blobs (
+         id, org_id, plaintext_sha256, ciphertext_sha256, plaintext_bytes,
+         ciphertext_bytes, object_key, encryption_key_version, nonce, auth_tag,
+         state, available_at, deleted_at
+       ) VALUES
+       ($1, $3, decode(repeat('11', 32), 'hex'),
+        decode(repeat('12', 32), 'hex'), 5, 5, $4, 1,
+        decode(repeat('13', 12), 'hex'), decode(repeat('14', 16), 'hex'),
+        'available', now(), NULL),
+       ($2, $3, decode(repeat('21', 32), 'hex'),
+        decode(repeat('22', 32), 'hex'), 7, 7, $5, 2,
+        decode(repeat('23', 12), 'hex'), decode(repeat('24', 16), 'hex'),
+        'available', now(), NULL),
+       ($6, $3, decode(repeat('31', 32), 'hex'),
+        decode(repeat('32', 32), 'hex'), 9, 9, $7, 2,
+        decode(repeat('33', 12), 'hex'), decode(repeat('34', 16), 'hex'),
+        'available', now(), NULL),
+       ($8, $3, decode(repeat('41', 32), 'hex'),
+        decode(repeat('42', 32), 'hex'), 11, 11, $9, 1,
+        decode(repeat('43', 12), 'hex'), decode(repeat('44', 16), 'hex'),
+        'deleted', now(), now())`,
+      [
+        sourceBlobId,
+        publishedBlobId,
+        organizationId,
+        sourceKey,
+        publishedTargetKey,
+        succeededBlobId,
+        succeededTargetKey,
+        deletedBlobId,
+        deletedKey,
+      ],
+    );
+    await pool.query(
+      `INSERT INTO workspace_blob_rotation_jobs (
+         blob_id, org_id, target_key_version, source_object_key,
+         target_object_key, state, completed_at, reserved_bytes
+       ) VALUES
+       ($1, $3, 2, $4, $5, 'failed', now(), 0),
+       ($2, $3, 2, $6, $7, 'failed', now(), 3),
+       ($8, $3, 2, $9, $10, 'succeeded', now(), 0)`,
+      [
+        sourceBlobId,
+        publishedBlobId,
+        organizationId,
+        sourceKey,
+        sourceTargetKey,
+        publishedSourceKey,
+        publishedTargetKey,
+        succeededBlobId,
+        succeededSourceKey,
+        succeededTargetKey,
+      ],
+    );
+
+    await expect(runMigrations(pool)).resolves.toEqual([
+      fenceMigration,
+      "0061_workos_provider_erasure_fences.sql",
+      "0062_cloud_workspace_entitlement_operations.sql",
+    ]);
+    await expect(
+      pool.query(
+        `SELECT blob_id, state, reserved_bytes, completed_at
+         FROM workspace_blob_rotation_jobs
+         WHERE blob_id IN ($1, $2)
+         ORDER BY blob_id`,
+        [sourceBlobId, publishedBlobId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          blob_id: sourceBlobId,
+          state: "target_cleanup_pending",
+          reserved_bytes: "5",
+          completed_at: null,
+        },
+        {
+          blob_id: publishedBlobId,
+          state: "target_cleanup_pending",
+          reserved_bytes: "7",
+          completed_at: null,
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT state, reserved_bytes FROM workspace_blob_rotation_jobs
+         WHERE blob_id = $1`,
+        [succeededBlobId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ state: "succeeded", reserved_bytes: "0" }],
+    });
+    await expect(
+      pool.query(
+        `SELECT blob_id, object_key, reserved_bytes, fenced_at
+         FROM workspace_blob_object_deletions
+         ORDER BY blob_id, object_key`,
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          blob_id: succeededBlobId,
+          object_key: succeededSourceKey,
+          reserved_bytes: "9",
+          fenced_at: null,
+        },
+        {
+          blob_id: deletedBlobId,
+          object_key: deletedKey,
+          reserved_bytes: "11",
+          fenced_at: null,
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `INSERT INTO workspace_blobs (
+           id, org_id, plaintext_sha256, plaintext_bytes, object_key,
+           encryption_key_version, nonce
+         ) VALUES ($1, $2, decode(repeat('41', 32), 'hex'), 11, $3, 2,
+                   decode(repeat('45', 12), 'hex'))`,
+        [
+          restoredBlobId,
+          organizationId,
+          `workspace/v2/${organizationId}/${restoredBlobId}/k2`,
+        ],
+      ),
+    ).resolves.toMatchObject({ rowCount: 1 });
+    await expect(
+      pool.query(
+        `INSERT INTO workspace_blobs (
+           id, org_id, plaintext_sha256, plaintext_bytes, object_key,
+           encryption_key_version, nonce
+         ) VALUES ($1, $2, decode(repeat('41', 32), 'hex'), 11, $3, 2,
+                   decode(repeat('46', 12), 'hex'))`,
+        [
+          "68686868-6868-4868-8868-686868686868",
+          organizationId,
+          `workspace/v2/${organizationId}/68686868-6868-4868-8868-686868686868/k2`,
+        ],
+      ),
+    ).rejects.toMatchObject({ code: "23505" });
   });
 
   it("removes legacy raw secret digests without invalidating encrypted rows", async () => {

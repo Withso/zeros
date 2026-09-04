@@ -376,6 +376,10 @@ export async function manageCloudWorkspaceObjectStorage(
              SELECT sum(job.reserved_bytes)
              FROM workspace_blob_rotation_jobs job
              WHERE job.org_id = $1
+           ), 0) + coalesce((
+             SELECT sum(deletion.reserved_bytes)
+             FROM workspace_blob_object_deletions deletion
+             WHERE deletion.org_id = $1
            ), 0) AS organization_bytes,
            coalesce((
              SELECT max(workspace_bytes) FROM (

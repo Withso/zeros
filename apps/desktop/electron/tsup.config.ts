@@ -36,6 +36,12 @@ export default defineConfig({
   // process.env.ZEROS_CHANNEL so the spawned engine inherits the same value.
   define: {
     __ZEROS_CHANNEL_BAKED__: JSON.stringify(process.env.ZEROS_CHANNEL || ""),
+    // Independent desktop release capability. The exact boolean is compiled
+    // into main.cjs; main then pins the engine child's inherited environment.
+    // A packaged app cannot be enabled later with a launch-time env override.
+    __ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__: JSON.stringify(
+      process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true",
+    ),
     // Main-process GitHub App OAuth cannot read Vite's renderer-only
     // import.meta.env at runtime. Bake the same public control-plane origin into
     // main.cjs; an explicit ZEROS_CONTROL_PLANE_URL still overrides it in dev.

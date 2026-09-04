@@ -158,6 +158,10 @@ jobs:
     # names + title) so it never recomputes and risks a mismatch.
     outputs:
       version: ${{ steps.version.outputs.version }}
+    env:
+      # Protected release capability, baked into both Electron main and the
+      # packaged engine. Unset environments remain explicitly fail-closed.
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
 
     steps:
       - name: Require signing credentials

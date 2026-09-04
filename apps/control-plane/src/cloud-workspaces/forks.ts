@@ -2662,15 +2662,33 @@ export class CloudWorkspaceForkWorker {
       fileCount: row.file_count,
       totalBytes: Number(row.total_bytes),
     };
+    let manifest: Awaited<
+      ReturnType<DatabaseCloudWorkspaceBlobService["putCoordinator"]>
+    > | null = null;
+    let published = false;
     try {
-      const manifest = await this.blobs.putCoordinator({
+      const uploadedManifest = await this.blobs.putCoordinator({
         workspaceId: row.source_cloud_workspace_id,
         organizationId: row.org_id,
         bytes: Buffer.from(canonicalJson(descriptor), "utf8"),
       });
-      await withSystemTx(this.pool, async (tx) => {
+      manifest = uploadedManifest;
+      published = await withSystemTx(this.pool, async (tx) => {
+        // Uploading happens outside a database transaction. Serialize the
+        // publish point with expiry and lease takeover so an old worker cannot
+        // make an already-stale fork available.
+        const authority = await tx.query<{ id: string }>(
+          `SELECT id FROM workspace_fork_intents
+           WHERE id = $1 AND org_id = $2 AND operation = 'cloud_to_local'
+             AND state = 'exporting' AND lease_owner = $3
+             AND lease_expires_at > now() AND deadline_at > now()
+           FOR UPDATE`,
+          [row.id, row.org_id, this.workerId],
+        );
+        if (!authority.rows[0]) return false;
+
         const exportId = randomUUID();
-        await tx.query(
+        const inserted = await tx.query<{ id: string }>(
           `INSERT INTO workspace_exports (
              id, org_id, workspace_id, requested_by, checkpoint_id,
              record_revision, content_revision, include_chats,
@@ -2680,7 +2698,8 @@ export class CloudWorkspaceForkWorker {
              $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
              'available', $11, now(), now() + interval '7 days', now(), $12
            )
-           ON CONFLICT (fork_intent_id) DO NOTHING`,
+           ON CONFLICT (fork_intent_id) DO NOTHING
+           RETURNING id`,
           [
             exportId,
             row.org_id,
@@ -2692,38 +2711,41 @@ export class CloudWorkspaceForkWorker {
             row.include_chats,
             `fork.${row.id}.export`,
             digest(descriptor),
-            manifest.id,
+            uploadedManifest.id,
             row.id,
           ],
         );
-        const stored = await tx.query<{ id: string }>(
-          `SELECT id FROM workspace_exports WHERE fork_intent_id = $1`,
-          [row.id],
-        );
+        if ((inserted.rowCount ?? 0) !== 1) {
+          throw new Error("workspace fork export publication conflicted");
+        }
         await addReferences(tx, {
           organizationId: row.org_id,
           workspaceId: row.source_cloud_workspace_id,
           kind: "export",
-          referenceId: stored.rows[0]!.id,
-          blobIds: [manifest.id],
+          referenceId: exportId,
+          blobIds: [uploadedManifest.id],
         });
-        await tx.query(
+        const completed = await tx.query(
           `UPDATE workspace_fork_intents
            SET state = 'succeeded', source_checkpoint_id = $3,
                export_id = $4, result_blob_id = $5,
                lease_owner = NULL, lease_expires_at = NULL,
                completed_at = now(), updated_at = now(), error_code = NULL
            WHERE id = $1 AND org_id = $2 AND state = 'exporting'
-             AND lease_owner = $6`,
+             AND lease_owner = $6 AND lease_expires_at > now()
+             AND deadline_at > now()`,
           [
             row.id,
             row.org_id,
             row.checkpoint_id,
-            stored.rows[0]!.id,
-            manifest.id,
+            exportId,
+            uploadedManifest.id,
             this.workerId,
           ],
         );
+        if ((completed.rowCount ?? 0) !== 1) {
+          throw new Error("workspace fork export authority changed");
+        }
         await audit(
           tx,
           row.org_id,
@@ -2734,9 +2756,10 @@ export class CloudWorkspaceForkWorker {
             sourceCloudWorkspaceId: row.source_cloud_workspace_id,
             targetLocalWorkspaceId: row.target_local_workspace_id,
             checkpointId: row.checkpoint_id,
-            exportId: stored.rows[0]!.id,
+            exportId,
           },
         );
+        return true;
       });
     } catch {
       await withSystemTx(this.pool, (tx) =>
@@ -2750,6 +2773,16 @@ export class CloudWorkspaceForkWorker {
           [row.id, this.workerId],
         ),
       );
+    } finally {
+      if (manifest && !published) {
+        // A refused or rolled-back publication has no durable reference. Drop
+        // both its object bytes and storage reservation immediately instead of
+        // retaining them until ordinary orphan collection.
+        await this.blobs.deleteUnreferencedSystem({
+          blobId: manifest.id,
+          organizationId: row.org_id,
+        });
+      }
     }
     return true;
   }

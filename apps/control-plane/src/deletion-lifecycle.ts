@@ -9,8 +9,21 @@ import { audit } from "./audit.js";
 import { withSystemTx, type Tx } from "./db.js";
 import {
   enqueueWorkOSCommand,
+  enqueueWorkOSUserDeletionCommand,
   workOSInvitationOrderingKey,
 } from "./workos-command-outbox.js";
+import {
+  accountWorkOSProviderSubjects,
+  assertAccountWorkOSProviderErasureSubjectLimit,
+  withWorkOSProviderLocks,
+  WorkOSProviderLockAbortedError,
+  WorkOSProviderLockTimeoutError,
+  workOSOrganizationProviderLockKey,
+  workOSProviderSubjectHash,
+  workOSProviderSubjectLockKey,
+  workOSUserProviderLockKey,
+  type WorkOSProviderSubject,
+} from "./workos-provider-locks.js";
 
 export const DELETION_GRACE_DAYS = 30;
 export const SENSITIVE_ACTION_MAX_AGE_SECONDS = 5 * 60;
@@ -142,6 +155,81 @@ async function event(
   );
 }
 
+async function fenceErasedWorkOSSubjects(
+  tx: Tx,
+  requestId: string,
+  subjects: readonly WorkOSProviderSubject[],
+): Promise<void> {
+  const hashes = Array.from(
+    new Map(
+      subjects.map((subject) => [
+        `${subject.kind}\0${workOSProviderSubjectHash(subject)}`,
+        { kind: subject.kind, hash: workOSProviderSubjectHash(subject) },
+      ]),
+    ).values(),
+  ).sort((left, right) =>
+    `${left.kind}\0${left.hash}`.localeCompare(`${right.kind}\0${right.hash}`),
+  );
+  for (const subject of hashes) {
+    await tx.query(
+      `INSERT INTO deletion_request_events (
+         deletion_request_id, actor_user_id, action, metadata
+       )
+       SELECT $1, NULL, 'purge.provider_erasure_fenced', $4::jsonb
+       WHERE NOT EXISTS (
+         SELECT 1 FROM workos_provider_erasure_fences fence
+         WHERE fence.deletion_request_id = $1 AND fence.provider = 'workos'
+           AND fence.subject_kind = $2 AND fence.hash_version = 1
+           AND fence.subject_hash = $3
+       )`,
+      [
+        requestId,
+        subject.kind,
+        subject.hash,
+        JSON.stringify({
+          provider: "workos",
+          workosSubjectHashes: [subject.hash],
+        }),
+      ],
+    );
+  }
+}
+
+async function reconcileWorkOSProviderErasure(
+  tx: Tx,
+  requestId: string,
+): Promise<void> {
+  const evidence = await tx.query<{ fence_count: number }>(
+    `SELECT count(*)::int AS fence_count
+     FROM workos_provider_erasure_fences
+     WHERE deletion_request_id = $1 AND provider = 'workos'`,
+    [requestId],
+  );
+  const disposition =
+    (evidence.rows[0]?.fence_count ?? 0) > 0 ? "fenced" : "no_workos_subject";
+  await tx.query(
+    `INSERT INTO workos_provider_erasure_reconciliations (
+       deletion_request_id, disposition, evidence_source, evidence_reference
+     ) VALUES ($1, $2, 'lifecycle_worker', $3)
+     ON CONFLICT (deletion_request_id) DO NOTHING`,
+    [
+      requestId,
+      disposition,
+      disposition === "fenced"
+        ? "deletion-lifecycle:provider-subject-fenced"
+        : "deletion-lifecycle:no-workos-subject",
+    ],
+  );
+  const reconciled = await tx.query<{ disposition: string }>(
+    `SELECT disposition FROM workos_provider_erasure_reconciliations
+     WHERE deletion_request_id = $1`,
+    [requestId],
+  );
+  if (reconciled.rows[0]?.disposition !== disposition) {
+    throw new Error("workos_provider_erasure_reconciliation_mismatch");
+  }
+}
+
 async function notify(
   tx: Tx,
   input: {
@@ -183,16 +271,81 @@ async function assertPersonalHasNoCloudWorkspace(
   tx: Tx,
   accountId: string,
 ): Promise<void> {
-  const impossible = await tx.query(
-    `SELECT 1
-     FROM cloud_workspaces workspace
-     JOIN organizations organization ON organization.id = workspace.org_id
-     WHERE organization.created_by = $1 AND organization.is_personal
-     LIMIT 1`,
+  const personalOrganizations = await tx.query<{ id: string }>(
+    `SELECT id FROM organizations
+     WHERE created_by = $1 AND is_personal
+     FOR UPDATE`,
     [accountId],
   );
-  if (impossible.rows[0]) {
+  if (personalOrganizations.rows.length === 0) return;
+  const impossible = await tx.query<{ impossible: boolean }>(
+    `SELECT public.personal_organization_has_cloud_configuration($1)
+              AS impossible`,
+    [accountId],
+  );
+  if (impossible.rows[0]?.impossible) {
     throw new Error("personal_cloud_workspace_invariant_violation");
+  }
+}
+
+async function assertOrganizationCloudPurgeReady(
+  tx: Tx,
+  organizationId: string,
+  consumeFencedDeletions: boolean,
+): Promise<void> {
+  const retainedWorkspace = await tx.query(
+    `SELECT 1 FROM cloud_workspaces
+     WHERE org_id = $1
+       AND (status <> 'deleted' OR data_deleted_at IS NULL)
+     LIMIT 1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (retainedWorkspace.rows[0]) {
+    throw new Error("organization_cloud_deletion_not_verified");
+  }
+  const retainedBlob = await tx.query(
+    `SELECT 1 FROM workspace_blobs
+     WHERE org_id = $1 AND state <> 'deleted'
+     LIMIT 1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (retainedBlob.rows[0]) {
+    throw new Error("organization_blob_deletion_not_verified");
+  }
+  const activeRotation = await tx.query(
+    `SELECT 1 FROM workspace_blob_rotation_jobs
+     WHERE org_id = $1
+       AND NOT (state IN ('succeeded', 'failed') AND reserved_bytes = 0)
+     LIMIT 1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (activeRotation.rows[0]) {
+    throw new Error("organization_blob_rotation_not_terminal");
+  }
+  const retainedReservation = await tx.query(
+    `SELECT 1 FROM workspace_blob_storage_reservations
+     WHERE org_id = $1 LIMIT 1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (retainedReservation.rows[0]) {
+    throw new Error("organization_blob_reservation_not_released");
+  }
+  const retainedDeletion = await tx.query(
+    `SELECT 1 FROM workspace_blob_object_deletions
+     WHERE org_id = $1
+       AND (fenced_at IS NULL OR reserved_bytes <> 0)
+     LIMIT 1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (retainedDeletion.rows[0]) {
+    throw new Error("organization_blob_deletion_not_fenced");
+  }
+  if (consumeFencedDeletions) {
+    await tx.query(
+      `DELETE FROM workspace_blob_object_deletions
+       WHERE org_id = $1 AND fenced_at IS NOT NULL AND reserved_bytes = 0`,
+      [organizationId],
+    );
   }
 }
 
@@ -284,7 +437,8 @@ async function scheduleOrganizationInTransaction(
   // infrastructure or make the 30-day restore promise false.
   const retainedWorkspace = await tx.query(
     `SELECT 1 FROM cloud_workspaces
-     WHERE org_id = $1 AND status <> 'deleted'
+     WHERE org_id = $1
+       AND (status <> 'deleted' OR data_deleted_at IS NULL)
      LIMIT 1`,
     [organization.id],
   );
@@ -624,8 +778,10 @@ async function scheduleAccount(
     );
     await tx.query(
       `DELETE FROM workos_browser_sessions
-       WHERE account_user_id = $1 OR provider_sub = $2`,
-      [actor.id, actor.identity.subject],
+       WHERE account_user_id = $1 OR provider_sub = $2
+          OR (account_user_id IS NULL
+              AND lower(email::text) = lower($3::text))`,
+      [actor.id, actor.identity.subject, actor.email],
     );
     await tx.query(
       `UPDATE cloud_workspace_endpoint_grants
@@ -1148,6 +1304,8 @@ type ClaimedDeletion = DeletionRequestRow & {
   target_organization_id: string | null;
   purge_command_id: string | null;
   attempt_count: number;
+  attempt_incremented: boolean;
+  lease_revision: string | number;
 };
 
 export function deletionLifecycleErrorCode(error: unknown): string {
@@ -1160,6 +1318,14 @@ function lifecycleRetryMs(attempt: number): number {
   return Math.min(60 * 60_000, 5_000 * 2 ** Math.min(attempt, 10));
 }
 
+const ORGANIZATION_PURGE_READINESS_ERRORS = new Set([
+  "organization_cloud_deletion_not_verified",
+  "organization_blob_deletion_not_verified",
+  "organization_blob_rotation_not_terminal",
+  "organization_blob_reservation_not_released",
+  "organization_blob_deletion_not_fenced",
+]);
+
 /** Durable final-erasure worker. It never runs before `purge_after`; provider
  * deletion is an idempotent WorkOS outbox command and local erasure happens
  * only after that command succeeds (or when the provider object is already
@@ -1167,16 +1333,22 @@ function lifecycleRetryMs(attempt: number): number {
 export class DeletionLifecycleProcessor {
   private readonly workerId: string;
   private readonly logger: Pick<Console, "warn" | "error">;
+  private readonly providerLockTimeoutMs: number;
 
   constructor(
     private readonly pool: pg.Pool,
     options: {
       workerId?: string;
       logger?: Pick<Console, "warn" | "error">;
+      providerLockTimeoutMs?: number;
     } = {},
   ) {
     this.workerId = options.workerId ?? `deletion:${randomUUID()}`;
     this.logger = options.logger ?? console;
+    this.providerLockTimeoutMs = Math.max(
+      1,
+      Math.trunc(options.providerLockTimeoutMs ?? 30_000),
+    );
   }
 
   private claim(): Promise<ClaimedDeletion | null> {
@@ -1193,11 +1365,17 @@ export class DeletionLifecycleProcessor {
         purge_after: Date;
         purge_command_id: string | null;
         attempt_count: number;
+        attempt_incremented: boolean;
+        lease_revision: string | number;
       }>(
         `WITH candidate AS (
-           SELECT id
+           SELECT id, state AS claimed_state
            FROM deletion_requests
-           WHERE attempt_count < 20
+           WHERE (
+               (state IN ('scheduled', 'failed') AND attempt_count < 20)
+               OR (state IN ('purging', 'provider_deleting')
+                   AND attempt_count <= 20)
+             )
              AND next_attempt_at <= now()
              AND (
                (state = 'scheduled' AND purge_after <= now())
@@ -1212,12 +1390,17 @@ export class DeletionLifecycleProcessor {
          )
          UPDATE deletion_requests request
          SET state = CASE
-               WHEN request.state IN ('scheduled', 'failed')
+             WHEN request.state IN ('scheduled', 'failed')
                  THEN 'purging'::deletion_request_state
                ELSE request.state
              END,
              purge_started_at = COALESCE(purge_started_at, now()),
-             attempt_count = attempt_count + 1,
+             attempt_count = CASE
+               WHEN request.state IN ('scheduled', 'failed')
+                 THEN attempt_count + 1
+               ELSE attempt_count
+             END,
+             lease_revision = lease_revision + 1,
              lease_owner = $1,
              lease_expires_at = now() + interval '60 seconds',
              last_error_code = NULL,
@@ -1228,7 +1411,10 @@ export class DeletionLifecycleProcessor {
                    request.target_id, request.target_user_id,
                    request.target_organization_id, request.state,
                    request.requested_at, request.purge_after,
-                   request.purge_command_id, request.attempt_count`,
+                   request.purge_command_id, request.attempt_count,
+                   candidate.claimed_state IN ('scheduled', 'failed')
+                     AS attempt_incremented,
+                   request.lease_revision`,
         [this.workerId],
       );
       return result.rows[0] ?? null;
@@ -1244,21 +1430,141 @@ export class DeletionLifecycleProcessor {
         `UPDATE deletion_requests
          SET next_attempt_at = now() + ($3::bigint * interval '1 millisecond'),
              lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND lease_owner = $2`,
-        [request.id, this.workerId, delayMs],
+         WHERE id = $1 AND lease_owner = $2
+           AND attempt_count = $4 AND state = $5 AND lease_revision = $6`,
+        [
+          request.id,
+          this.workerId,
+          delayMs,
+          request.attempt_count,
+          request.state,
+          request.lease_revision,
+        ],
       ),
     );
   }
 
+  private async releaseForProviderDrain(
+    tx: Tx,
+    request: ClaimedDeletion,
+  ): Promise<void> {
+    const released = await tx.query(
+      `UPDATE deletion_requests
+       SET next_attempt_at = now() + interval '2 seconds',
+           lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
+       WHERE id = $1 AND lease_owner = $2 AND state = 'purging'
+         AND attempt_count = $3 AND lease_revision = $4`,
+      [
+        request.id,
+        this.workerId,
+        request.attempt_count,
+        request.lease_revision,
+      ],
+    );
+    if ((released.rowCount ?? 0) !== 1) {
+      throw new Error("deletion_purge_lease_changed");
+    }
+  }
+
+  private async providerLockKeys(request: ClaimedDeletion): Promise<string[]> {
+    const keys: string[] = [];
+    if (request.target_kind === "account" && request.target_user_id) {
+      keys.push(workOSUserProviderLockKey(request.target_user_id));
+      const subjects = await accountWorkOSProviderSubjects(
+        this.pool,
+        request.target_user_id,
+      );
+      keys.push(
+        ...subjects.map((subject) =>
+          workOSProviderSubjectLockKey({
+            kind: "user",
+            id: subject,
+          }),
+        ),
+      );
+    }
+    if (
+      request.target_kind === "organization" &&
+      request.target_organization_id
+    ) {
+      keys.push(
+        workOSOrganizationProviderLockKey(request.target_organization_id),
+      );
+      const links = await this.pool.query<{
+        workos_organization_id: string | null;
+      }>(
+        `SELECT workos_organization_id FROM workos_organization_links
+         WHERE organization_id = $1`,
+        [request.target_organization_id],
+      );
+      keys.push(
+        ...links.rows.flatMap((link) =>
+          link.workos_organization_id
+            ? [
+                workOSProviderSubjectLockKey({
+                  kind: "organization",
+                  id: link.workos_organization_id,
+                }),
+              ]
+            : [],
+        ),
+      );
+    }
+    return Array.from(new Set(keys)).sort();
+  }
+
+  private async withStableProviderLocks(
+    request: ClaimedDeletion,
+    work: () => Promise<void>,
+  ): Promise<void> {
+    let lockKeys = await this.providerLockKeys(request);
+    for (;;) {
+      const missing = await withWorkOSProviderLocks(
+        this.pool,
+        lockKeys,
+        async () => {
+          // Resolution necessarily precedes session-lock acquisition. Repeat
+          // it after acquiring the complete known set; cooperating writers
+          // share the stable local target lock, so an expanded set is retried
+          // before any provider fence, command, or local erasure is committed.
+          const current = await this.providerLockKeys(request);
+          const missingKeys = current.filter((key) => !lockKeys.includes(key));
+          if (missingKeys.length > 0) return missingKeys;
+          await work();
+          return [];
+        },
+        { timeoutMs: this.providerLockTimeoutMs },
+      );
+      if (missing.length === 0) return;
+      lockKeys = Array.from(new Set([...lockKeys, ...missing])).sort();
+    }
+  }
+
   private async prepareProviderDeletion(
+    request: ClaimedDeletion,
+  ): Promise<void> {
+    await this.withStableProviderLocks(request, () =>
+      this.prepareProviderDeletionLocked(request),
+    );
+  }
+
+  private async prepareProviderDeletionLocked(
     request: ClaimedDeletion,
   ): Promise<void> {
     await withSystemTx(this.pool, async (tx) => {
       const owned = await tx.query(
         `SELECT 1 FROM deletion_requests
          WHERE id = $1 AND lease_owner = $2 AND state = 'purging'
+           AND attempt_count = $3
+           AND lease_revision = $4
+           AND lease_expires_at > clock_timestamp()
          FOR UPDATE`,
-        [request.id, this.workerId],
+        [
+          request.id,
+          this.workerId,
+          request.attempt_count,
+          request.lease_revision,
+        ],
       );
       if (!owned.rows[0]) return;
 
@@ -1267,24 +1573,73 @@ export class DeletionLifecycleProcessor {
         // Do not erase the provider identity while an impossible legacy row
         // would prevent the corresponding Zeros account from finalizing.
         await assertPersonalHasNoCloudWorkspace(tx, request.target_user_id);
-        const identity = await tx.query<{ provider_sub: string }>(
-          `SELECT provider_sub FROM user_identities
-           WHERE user_id = $1 AND provider = 'workos'
-             AND status IN ('active', 'provider_deleted')
-           ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, created_at DESC
+        const pendingProviderCommand = await tx.query(
+          `SELECT 1
+           FROM workos_command_outbox command
+           WHERE command.state IN ('queued', 'processing')
+             AND (
+               command.user_id = $1
+               OR position($1::text in command.aggregate_key) > 0
+               OR position($1::text in command.ordering_key) > 0
+               OR command.provider_object_id IN (
+                 SELECT identity.provider_sub
+                 FROM user_identities identity
+                 WHERE identity.user_id = $1
+               )
+               OR command.payload->>'workosUserId' IN (
+                 SELECT identity.provider_sub
+                 FROM user_identities identity
+                 WHERE identity.user_id = $1
+               )
+               OR command.payload->>'inviterWorkosUserId' IN (
+                 SELECT identity.provider_sub
+                 FROM user_identities identity
+                 WHERE identity.user_id = $1
+               )
+               OR command.payload->>'sessionId' IN (
+                 SELECT session.provider_session_id
+                 FROM auth_sessions session
+                 WHERE session.user_id = $1
+                    OR session.provider_sub IN (
+                      SELECT identity.provider_sub
+                      FROM user_identities identity
+                      WHERE identity.user_id = $1
+                    )
+               )
+               OR lower(command.payload->>'email') = (
+                 SELECT lower(account.email::text)
+                 FROM users account WHERE account.id = $1
+               )
+             )
            LIMIT 1`,
           [request.target_user_id],
         );
-        if (identity.rows[0]) {
-          commandId = await enqueueWorkOSCommand(tx, {
-            operation: "user.delete",
-            idempotencyKey: `account.delete.${request.id}`,
-            aggregateKey: `account-delete:${request.target_user_id}`,
-            orderingKey: `account:${request.target_user_id}`,
-            aggregateRevision: 1,
+        if (pendingProviderCommand.rows[0]) {
+          await this.releaseForProviderDrain(tx, request);
+          return;
+        }
+        const providerSubjects = await accountWorkOSProviderSubjects(
+          tx,
+          request.target_user_id,
+        );
+        await assertAccountWorkOSProviderErasureSubjectLimit(
+          tx,
+          request.id,
+          providerSubjects,
+        );
+        await fenceErasedWorkOSSubjects(
+          tx,
+          request.id,
+          providerSubjects.map((providerSubject) => ({
+            kind: "user",
+            id: providerSubject,
+          })),
+        );
+        for (const providerSubject of providerSubjects) {
+          commandId = await enqueueWorkOSUserDeletionCommand(tx, {
+            deletionRequestId: request.id,
             userId: request.target_user_id,
-            providerObjectId: identity.rows[0].provider_sub,
-            payload: { workosUserId: identity.rows[0].provider_sub },
+            workosUserId: providerSubject,
           });
         }
       }
@@ -1292,14 +1647,38 @@ export class DeletionLifecycleProcessor {
         request.target_kind === "organization" &&
         request.target_organization_id
       ) {
-        const retained = await tx.query(
-          `SELECT 1 FROM cloud_workspaces
-           WHERE org_id = $1 AND status <> 'deleted' LIMIT 1`,
+        const pendingProviderCommand = await tx.query(
+          `SELECT 1
+           FROM workos_command_outbox command
+           WHERE command.state IN ('queued', 'processing')
+             AND (
+               command.organization_id = $1
+               OR position($1::text in command.aggregate_key) > 0
+               OR position($1::text in command.ordering_key) > 0
+               OR command.payload->>'externalId' = $1::text
+             )
+           LIMIT 1`,
           [request.target_organization_id],
         );
-        if (retained.rows[0]) {
-          throw new Error("organization_cloud_deletion_not_verified");
+        if (pendingProviderCommand.rows[0]) {
+          await this.releaseForProviderDrain(tx, request);
+          return;
         }
+        const organization = await tx.query(
+          `SELECT 1 FROM organizations
+           WHERE id = $1 AND deletion_request_id = $2
+             AND lifecycle_status IN ('scheduled', 'purging', 'provider_deleted')
+           FOR UPDATE`,
+          [request.target_organization_id, request.id],
+        );
+        if (!organization.rows[0]) {
+          throw new Error("organization_purge_state_mismatch");
+        }
+        await assertOrganizationCloudPurgeReady(
+          tx,
+          request.target_organization_id,
+          false,
+        );
         const link = await tx.query<{
           workos_organization_id: string | null;
           state: string;
@@ -1312,7 +1691,16 @@ export class DeletionLifecycleProcessor {
         if (link.rows[0] && !link.rows[0].workos_organization_id) {
           throw new Error("workos_organization_not_ready");
         }
-        if (link.rows[0]?.workos_organization_id) {
+        const workosOrganizationId =
+          link.rows[0]?.workos_organization_id ?? null;
+        await fenceErasedWorkOSSubjects(
+          tx,
+          request.id,
+          workosOrganizationId
+            ? [{ kind: "organization", id: workosOrganizationId }]
+            : [],
+        );
+        if (workosOrganizationId) {
           const revision = await tx.query<{
             workos_sync_revision: string | number;
           }>(
@@ -1336,7 +1724,7 @@ export class DeletionLifecycleProcessor {
             orderingKey: `organization:${request.target_organization_id}`,
             aggregateRevision: Number(revision.rows[0]!.workos_sync_revision),
             organizationId: request.target_organization_id,
-            providerObjectId: link.rows[0].workos_organization_id,
+            providerObjectId: workosOrganizationId,
             payload: {},
           });
         } else {
@@ -1352,8 +1740,16 @@ export class DeletionLifecycleProcessor {
          SET state = 'provider_deleting', purge_command_id = $3,
              next_attempt_at = now() + interval '2 seconds',
              lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND lease_owner = $2`,
-        [request.id, this.workerId, commandId],
+         WHERE id = $1 AND lease_owner = $2
+           AND attempt_count = $4 AND state = 'purging'
+           AND lease_revision = $5`,
+        [
+          request.id,
+          this.workerId,
+          commandId,
+          request.attempt_count,
+          request.lease_revision,
+        ],
       );
       await event(tx, request.id, null, "purge.provider_requested", {
         providerCommand: commandId !== null,
@@ -1362,6 +1758,45 @@ export class DeletionLifecycleProcessor {
   }
 
   private async providerReady(request: ClaimedDeletion): Promise<boolean> {
+    if (request.target_kind === "account" && request.target_user_id) {
+      const capturedSubjects = await accountWorkOSProviderSubjects(
+        this.pool,
+        request.target_user_id,
+      );
+      const commands = await withSystemTx(this.pool, (tx) =>
+        tx.query<{
+          provider_subject: string | null;
+          state: string;
+          last_error_code: string | null;
+        }>(
+          `SELECT payload->>'workosUserId' AS provider_subject,
+                  state, last_error_code
+           FROM workos_command_outbox
+           WHERE operation = 'user.delete' AND user_id = $1
+             AND payload->>'deletionRequestId' = $2::text`,
+          [request.target_user_id, request.id],
+        ),
+      );
+      const commandedSubjects = new Set(
+        commands.rows.flatMap((command) =>
+          command.provider_subject ? [command.provider_subject] : [],
+        ),
+      );
+      if (capturedSubjects.some((subject) => !commandedSubjects.has(subject))) {
+        throw new Error("provider_delete_command_missing");
+      }
+      const failed = commands.rows.find(
+        (command) => command.state === "dead" || command.state === "failed",
+      );
+      if (failed) {
+        throw new Error(failed.last_error_code || "provider_delete_failed");
+      }
+      if (commands.rows.every((command) => command.state === "succeeded")) {
+        return true;
+      }
+      await this.release(request, 5_000);
+      return false;
+    }
     if (!request.purge_command_id) return true;
     const command = await withSystemTx(this.pool, (tx) =>
       tx.query<{ state: string; last_error_code: string | null }>(
@@ -1379,8 +1814,31 @@ export class DeletionLifecycleProcessor {
   }
 
   private async finalizeAccount(request: ClaimedDeletion): Promise<void> {
+    await this.withStableProviderLocks(request, () =>
+      this.finalizeAccountLocked(request),
+    );
+  }
+
+  private async finalizeAccountLocked(request: ClaimedDeletion): Promise<void> {
     if (!request.target_user_id) throw new Error("account_target_missing");
     await withSystemTx(this.pool, async (tx) => {
+      const ownedRequest = await tx.query(
+        `SELECT 1 FROM deletion_requests
+         WHERE id = $1 AND state = 'provider_deleting'
+           AND lease_owner = $2 AND attempt_count = $3
+           AND lease_revision = $4
+           AND lease_expires_at > clock_timestamp()
+         FOR UPDATE`,
+        [
+          request.id,
+          this.workerId,
+          request.attempt_count,
+          request.lease_revision,
+        ],
+      );
+      if (!ownedRequest.rows[0]) {
+        throw new Error("account_purge_lease_changed");
+      }
       // Defense in depth for a row introduced after provider deletion was
       // requested through privileged maintenance or restored legacy data.
       await assertPersonalHasNoCloudWorkspace(tx, request.target_user_id!);
@@ -1392,11 +1850,107 @@ export class DeletionLifecycleProcessor {
         [request.target_user_id, request.id],
       );
       if (!account.rows[0]) throw new Error("account_purge_state_mismatch");
-      const identities = await tx.query<{ provider_sub: string }>(
-        `SELECT provider_sub FROM user_identities WHERE user_id = $1`,
-        [request.target_user_id],
+      const subjects = await accountWorkOSProviderSubjects(
+        tx,
+        request.target_user_id!,
       );
-      const subjects = identities.rows.map((row) => row.provider_sub);
+      await assertAccountWorkOSProviderErasureSubjectLimit(
+        tx,
+        request.id,
+        subjects,
+      );
+      // Re-read the complete, exact subject set while the stable account and
+      // provider-subject locks are held. A candidate reviewed during the grace
+      // period is just as capable of replaying a late token as the superseded
+      // identity, so persist its one-way fence before erasing the only mapping.
+      await fenceErasedWorkOSSubjects(
+        tx,
+        request.id,
+        subjects.map((id) => ({ kind: "user", id })),
+      );
+      const providerDeletionCommands = await tx.query<{
+        provider_subject: string | null;
+        state: string;
+      }>(
+        `SELECT payload->>'workosUserId' AS provider_subject, state
+         FROM workos_command_outbox
+         WHERE operation = 'user.delete' AND user_id = $1
+           AND payload->>'deletionRequestId' = $2::text`,
+        [request.target_user_id, request.id],
+      );
+      const succeededSubjects = new Set(
+        providerDeletionCommands.rows.flatMap((command) =>
+          command.state === "succeeded" && command.provider_subject
+            ? [command.provider_subject]
+            : [],
+        ),
+      );
+      const succeededSubjectHashes = new Set(
+        Array.from(succeededSubjects, (subject) =>
+          workOSProviderSubjectHash({ kind: "user", id: subject }),
+        ),
+      );
+      const providerFences = await tx.query<{ subject_hash: string }>(
+        `SELECT subject_hash FROM workos_provider_erasure_fences
+         WHERE deletion_request_id = $1 AND provider = 'workos'
+           AND subject_kind = 'user' AND hash_version = 1`,
+        [request.id],
+      );
+      if (
+        subjects.some((subject) => !succeededSubjects.has(subject)) ||
+        providerFences.rows.some(
+          (fence) => !succeededSubjectHashes.has(fence.subject_hash),
+        ) ||
+        providerDeletionCommands.rows.some(
+          (command) => command.state !== "succeeded",
+        )
+      ) {
+        throw new Error("account_provider_erasure_incomplete");
+      }
+      await reconcileWorkOSProviderErasure(tx, request.id);
+      const providerCommandsInFlight = await tx.query(
+        `SELECT 1 FROM workos_command_outbox command
+         WHERE command.state IN ('queued', 'processing')
+           AND (
+             command.user_id = $1
+             OR position($1::text in command.aggregate_key) > 0
+             OR position($1::text in command.ordering_key) > 0
+             OR command.provider_object_id = ANY($2::text[])
+             OR command.payload->>'workosUserId' = ANY($2::text[])
+             OR command.payload->>'inviterWorkosUserId' = ANY($2::text[])
+             OR command.payload->>'sessionId' IN (
+               SELECT session.provider_session_id
+               FROM auth_sessions session
+               WHERE session.user_id = $1
+                  OR ($2::text[] <> '{}'::text[]
+                      AND session.provider_sub = ANY($2::text[]))
+             )
+             OR lower(command.payload->>'email') = lower($3::text)
+           )
+         LIMIT 1`,
+        [request.target_user_id, subjects, account.rows[0].email],
+      );
+      if (providerCommandsInFlight.rows[0]) {
+        throw new Error("account_provider_commands_in_flight");
+      }
+      await tx.query(
+        `DELETE FROM workos_command_outbox command
+         WHERE command.user_id = $1
+            OR position($1::text in command.aggregate_key) > 0
+            OR position($1::text in command.ordering_key) > 0
+            OR command.provider_object_id = ANY($2::text[])
+            OR command.payload->>'workosUserId' = ANY($2::text[])
+            OR command.payload->>'inviterWorkosUserId' = ANY($2::text[])
+            OR command.payload->>'sessionId' IN (
+              SELECT session.provider_session_id
+              FROM auth_sessions session
+              WHERE session.user_id = $1
+                 OR ($2::text[] <> '{}'::text[]
+                     AND session.provider_sub = ANY($2::text[]))
+            )
+            OR lower(command.payload->>'email') = lower($3::text)`,
+        [request.target_user_id, subjects, account.rows[0].email],
+      );
 
       await tx.query(
         `DELETE FROM github_oauth_states WHERE owner_user_id = $1`,
@@ -1423,14 +1977,19 @@ export class DeletionLifecycleProcessor {
         `DELETE FROM account_recovery_requests WHERE target_user_id = $1`,
         [request.target_user_id],
       );
-      await tx.query(`DELETE FROM auth_sessions WHERE user_id = $1`, [
-        request.target_user_id,
-      ]);
+      await tx.query(
+        `DELETE FROM auth_sessions
+         WHERE user_id = $1
+            OR ($2::text[] <> '{}'::text[] AND provider_sub = ANY($2::text[]))`,
+        [request.target_user_id, subjects],
+      );
       await tx.query(
         `DELETE FROM workos_browser_sessions
          WHERE account_user_id = $1
-            OR ($2::text[] <> '{}'::text[] AND provider_sub = ANY($2::text[]))`,
-        [request.target_user_id, subjects],
+            OR ($2::text[] <> '{}'::text[] AND provider_sub = ANY($2::text[]))
+            OR (account_user_id IS NULL
+                AND lower(email::text) = lower($3::text))`,
+        [request.target_user_id, subjects, account.rows[0].email],
       );
       await tx.query(
         `DELETE FROM workos_membership_projections
@@ -1440,15 +1999,17 @@ export class DeletionLifecycleProcessor {
       );
       await tx.query(
         `DELETE FROM workos_event_inbox
-         WHERE $1::text[] <> '{}'::text[]
-           AND workos_user_id = ANY($1::text[])`,
-        [subjects],
+         WHERE ($1::text[] <> '{}'::text[]
+                AND workos_user_id = ANY($1::text[]))
+            OR lower(data->>'email') = lower($2::text)`,
+        [subjects, account.rows[0].email],
       );
       await tx.query(
         `DELETE FROM identity_provider_events
-         WHERE $1::text[] <> '{}'::text[]
-           AND provider_sub = ANY($1::text[])`,
-        [subjects],
+         WHERE ($1::text[] <> '{}'::text[]
+                AND provider_sub = ANY($1::text[]))
+            OR email = $2::citext`,
+        [subjects, account.rows[0].email],
       );
       await tx.query(`DELETE FROM team_members WHERE user_id = $1`, [
         request.target_user_id,
@@ -1495,14 +2056,24 @@ export class DeletionLifecycleProcessor {
         template: "account_deletion_completed",
         request,
       });
-      await tx.query(
+      const completed = await tx.query(
         `UPDATE deletion_requests
          SET state = 'purged', purged_at = now(), updated_at = now(),
              lease_owner = NULL, lease_expires_at = NULL,
              last_error_code = NULL
-         WHERE id = $1 AND lease_owner = $2`,
-        [request.id, this.workerId],
+         WHERE id = $1 AND state = 'provider_deleting'
+           AND lease_owner = $2 AND attempt_count = $3
+           AND lease_revision = $4`,
+        [
+          request.id,
+          this.workerId,
+          request.attempt_count,
+          request.lease_revision,
+        ],
       );
+      if ((completed.rowCount ?? 0) !== 1) {
+        throw new Error("account_purge_lease_changed");
+      }
       await event(tx, request.id, null, "purge.completed", {
         target: "account",
       });
@@ -1510,10 +2081,36 @@ export class DeletionLifecycleProcessor {
   }
 
   private async finalizeOrganization(request: ClaimedDeletion): Promise<void> {
-    if (!request.target_organization_id) {
+    await this.withStableProviderLocks(request, () =>
+      this.finalizeOrganizationLocked(request),
+    );
+  }
+
+  private async finalizeOrganizationLocked(
+    request: ClaimedDeletion,
+  ): Promise<void> {
+    const organizationId = request.target_organization_id;
+    if (!organizationId) {
       throw new Error("organization_target_missing");
     }
     await withSystemTx(this.pool, async (tx) => {
+      const ownedRequest = await tx.query(
+        `SELECT 1 FROM deletion_requests
+         WHERE id = $1 AND state = 'provider_deleting'
+           AND lease_owner = $2 AND attempt_count = $3
+           AND lease_revision = $4
+           AND lease_expires_at > clock_timestamp()
+         FOR UPDATE`,
+        [
+          request.id,
+          this.workerId,
+          request.attempt_count,
+          request.lease_revision,
+        ],
+      );
+      if (!ownedRequest.rows[0]) {
+        throw new Error("organization_purge_lease_changed");
+      }
       const organization = await tx.query<{ id: string }>(
         `SELECT id FROM organizations
          WHERE id = $1 AND lifecycle_status = 'purging'
@@ -1524,6 +2121,28 @@ export class DeletionLifecycleProcessor {
       if (!organization.rows[0]) {
         throw new Error("organization_purge_state_mismatch");
       }
+      const providerLink = await tx.query<{
+        workos_organization_id: string | null;
+      }>(
+        `SELECT workos_organization_id
+         FROM workos_organization_links
+         WHERE organization_id = $1`,
+        [organizationId],
+      );
+      const workosOrganizationId =
+        providerLink.rows[0]?.workos_organization_id ?? null;
+      await fenceErasedWorkOSSubjects(
+        tx,
+        request.id,
+        workosOrganizationId
+          ? [{ kind: "organization", id: workosOrganizationId }]
+          : [],
+      );
+      // Provider deletion is irreversible. Before removing the tenant row,
+      // prove that every coordinator-owned byte has reached a terminal,
+      // fenced state. The Organization row lock also serializes this check
+      // against new FK-backed detached-object identities.
+      await assertOrganizationCloudPurgeReady(tx, organizationId, true);
       const members = await tx.query<{ user_id: string; email: string }>(
         `SELECT om.user_id, u.email
          FROM organization_members om
@@ -1532,14 +2151,59 @@ export class DeletionLifecycleProcessor {
         [request.target_organization_id],
       );
       await tx.query(
-        `DELETE FROM workos_event_inbox
-         WHERE workos_organization_id IN (
+        `DELETE FROM workos_membership_projections
+         WHERE organization_id = $1
+            OR workos_organization_id IN (
            SELECT workos_organization_id FROM workos_organization_links
            WHERE organization_id = $1
          )`,
         [request.target_organization_id],
       );
+      await tx.query(
+        `DELETE FROM workos_event_inbox
+         WHERE workos_organization_id IN (
+           SELECT workos_organization_id FROM workos_organization_links
+           WHERE organization_id = $1
+        )`,
+        [request.target_organization_id],
+      );
+      const providerCommandsInFlight = await tx.query(
+        `SELECT 1 FROM workos_command_outbox command
+         WHERE command.state IN ('queued', 'processing')
+           AND (
+             command.organization_id = $1
+             OR position($1::text in command.aggregate_key) > 0
+             OR position($1::text in command.ordering_key) > 0
+             OR command.payload->>'externalId' = $1::text
+             OR ($2::text IS NOT NULL AND command.provider_object_id = $2)
+           )
+         LIMIT 1`,
+        [organizationId, workosOrganizationId],
+      );
+      if (providerCommandsInFlight.rows[0]) {
+        throw new Error("organization_provider_commands_in_flight");
+      }
+      await reconcileWorkOSProviderErasure(tx, request.id);
+      await tx.query(
+        `DELETE FROM workos_command_outbox command
+         WHERE command.organization_id = $1
+            OR position($1::text in command.aggregate_key) > 0
+            OR position($1::text in command.ordering_key) > 0
+            OR command.payload->>'externalId' = $1::text
+            OR ($2::text IS NOT NULL AND command.provider_object_id = $2)`,
+        [organizationId, workosOrganizationId],
+      );
+      await tx.query(
+        `SELECT public.purge_cloud_workspace_operator_configuration($1)`,
+        [request.target_organization_id],
+      );
+      await tx.query(`DELETE FROM workspace_fork_intents WHERE org_id = $1`, [
+        request.target_organization_id,
+      ]);
       await tx.query(`DELETE FROM cloud_workspaces WHERE org_id = $1`, [
+        request.target_organization_id,
+      ]);
+      await tx.query(`DELETE FROM repositories WHERE org_id = $1`, [
         request.target_organization_id,
       ]);
       await tx.query(`DELETE FROM audit_log WHERE org_id = $1`, [
@@ -1556,14 +2220,24 @@ export class DeletionLifecycleProcessor {
           request,
         });
       }
-      await tx.query(
+      const completed = await tx.query(
         `UPDATE deletion_requests
          SET state = 'purged', purged_at = now(), updated_at = now(),
              lease_owner = NULL, lease_expires_at = NULL,
              last_error_code = NULL
-         WHERE id = $1 AND lease_owner = $2`,
-        [request.id, this.workerId],
+         WHERE id = $1 AND state = 'provider_deleting'
+           AND lease_owner = $2 AND attempt_count = $3
+           AND lease_revision = $4`,
+        [
+          request.id,
+          this.workerId,
+          request.attempt_count,
+          request.lease_revision,
+        ],
       );
+      if ((completed.rowCount ?? 0) !== 1) {
+        throw new Error("organization_purge_lease_changed");
+      }
       await event(tx, request.id, null, "purge.completed", {
         target: "organization",
       });
@@ -1578,17 +2252,55 @@ export class DeletionLifecycleProcessor {
          SET state = 'failed', last_error_code = $3,
              next_attempt_at = now() + ($4::bigint * interval '1 millisecond'),
              lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
-         WHERE id = $1 AND lease_owner = $2`,
+         WHERE id = $1 AND lease_owner = $2
+           AND attempt_count = $5 AND state = $6
+           AND lease_revision = $7`,
         [
           request.id,
           this.workerId,
           code,
           lifecycleRetryMs(request.attempt_count),
+          request.attempt_count,
+          request.state,
+          request.lease_revision,
         ],
       ),
     );
     this.logger.warn(
       `[deletion] request=${request.id} target=${request.target_kind} retry [${code}]`,
+    );
+  }
+
+  private async deferForProviderLock(
+    request: ClaimedDeletion,
+    error: WorkOSProviderLockTimeoutError | WorkOSProviderLockAbortedError,
+  ): Promise<void> {
+    await withSystemTx(this.pool, (tx) =>
+      tx.query(
+        `UPDATE deletion_requests
+         SET attempt_count = CASE WHEN $3::boolean
+               THEN GREATEST(attempt_count - 1, 0)
+               ELSE attempt_count
+             END,
+             next_attempt_at = now() + interval '1 second',
+             lease_owner = NULL, lease_expires_at = NULL,
+             last_error_code = $4, updated_at = now()
+         WHERE id = $1 AND lease_owner = $2
+           AND attempt_count = $5 AND state = $6
+           AND lease_revision = $7`,
+        [
+          request.id,
+          this.workerId,
+          request.attempt_incremented,
+          error.code,
+          request.attempt_count,
+          request.state,
+          request.lease_revision,
+        ],
+      ),
+    );
+    this.logger.warn(
+      `[deletion] request=${request.id} target=${request.target_kind} waiting [${error.code}]`,
     );
   }
 
@@ -1612,7 +2324,25 @@ export class DeletionLifecycleProcessor {
           await this.finalizeOrganization(request);
         }
       } catch (error) {
-        await this.fail(request, error);
+        if (
+          error instanceof WorkOSProviderLockTimeoutError ||
+          error instanceof WorkOSProviderLockAbortedError
+        ) {
+          await this.deferForProviderLock(request, error);
+          continue;
+        }
+        const code = deletionLifecycleErrorCode(error);
+        if (
+          request.target_kind === "organization" &&
+          ORGANIZATION_PURGE_READINESS_ERRORS.has(code)
+        ) {
+          await this.release(request, 60_000);
+          this.logger.warn(
+            `[deletion] request=${request.id} target=organization waiting [${code}]`,
+          );
+        } else {
+          await this.fail(request, error);
+        }
       }
     }
     return processed;

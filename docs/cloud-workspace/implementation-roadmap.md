@@ -55,7 +55,7 @@ External exit evidence:
 ## Phase 1 — Identity, authorization, settings, and paid authority
 
 Repository status: implemented by forward migrations 0026–0027, 0041–0047,
-and 0053–0058, plus their control-plane services and tests.
+and 0053–0062, plus their control-plane services and tests.
 
 - WorkOS is the identity and Organization-membership source. Zeros maps WorkOS
   identities to canonical database UUIDs and remains authoritative for Team,
@@ -131,9 +131,9 @@ The setup worker remains disabled until every item above is reviewed.
 
 ## Phase 3 — Durable record, checkpoints, recovery, and deletion
 
-Repository status: implemented by migrations 0028–0031, 0036–0038, 0055, and
-0057, plus the durable-record, content, object-store, maintenance, recovery, and
-fork services.
+Repository status: implemented by migrations 0028–0031, 0036–0038, 0055,
+0057, and 0060, plus the durable-record, content, object-store, maintenance,
+recovery, and fork services.
 
 - Chats, messages, turns, agent sessions, runs, terminals, Design transactions,
   and metadata use ordered idempotent batches, current projections, tombstones,
@@ -149,10 +149,10 @@ fork services.
   rejects symlink traversal, non-regular objects, hard-link substitution,
   oversize reads, and root replacement.
 - Organization physical bytes, per-workspace logical bytes, pending uploads,
-  and copy-on-write rotation headroom are transactionally admitted before
-  publication. Tenant deduplication and retry reuse do not double-charge the
-  durable ledger; missing limits fail closed independently of sandbox disk
-  quota and provider volume size.
+  detached-upload deletion tombstones, and copy-on-write rotation headroom are
+  transactionally admitted before publication. Tenant deduplication and retry
+  reuse do not double-charge the durable ledger; missing limits fail closed
+  independently of sandbox disk quota and provider volume size.
 - Retention, legal hold metadata, export, key rotation, quarantine,
   reference-count reconciliation, garbage collection, deletion propagation,
   and health/backlog reporting are implemented.
@@ -219,8 +219,9 @@ release approval open.
   provider connection, quota, usage, checkpoint, export, replica, access,
   retention, and deletion APIs share the same authorization spine.
 - Phase 5 runtime is owner-only even when an Organization has other members.
-  Team members may see policy-authorized metadata, but cannot connect, prompt,
-  sync, mint access, or spend the owner's cloud/agent budget.
+  Other Team members cannot list or read the owner's workspace record and
+  cannot connect, prompt, sync, mint access, or spend the owner's cloud/agent
+  budget. Organization-level policy metadata is separate from workspace data.
 - Current entitlement or provider authority loss freezes new paid work and
   retires runtime access. Existing durable data remains owner-exportable after
   paid compute cancellation.

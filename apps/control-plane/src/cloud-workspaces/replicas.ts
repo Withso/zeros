@@ -1013,19 +1013,39 @@ export class DatabaseCloudWorkspaceReplicaService {
         const stored = replay.rows[0].response_json as {
           replica?: ReturnType<typeof replicaDocument>;
         } | null;
+        if (stored === null) {
+          throw new WorkspaceReplicaError(
+            "cursor_conflict",
+            "Replica command authority is no longer current",
+          );
+        }
         if (
-          stored !== null &&
-          (typeof stored !== "object" ||
-            !stored.replica ||
-            stored.replica.id !== replica.id ||
-            stored.replica.workspaceId !== replica.workspace_id ||
-            stored.replica.organizationId !== replica.org_id ||
-            stored.replica.deviceId !== replica.device_id)
+          typeof stored !== "object" ||
+          !stored.replica ||
+          stored.replica.id !== replica.id ||
+          stored.replica.workspaceId !== replica.workspace_id ||
+          stored.replica.organizationId !== replica.org_id ||
+          stored.replica.deviceId !== replica.device_id
         ) {
           throw new Error("Replica command response is invalid");
         }
+        const current = replicaDocument(replica);
+        if (
+          stored.replica.workspaceAuthorityEpoch !==
+            current.workspaceAuthorityEpoch ||
+          stored.replica.grantEpoch !== current.grantEpoch ||
+          stored.replica.desiredState !== current.desiredState
+        ) {
+          throw new WorkspaceReplicaError(
+            "cursor_conflict",
+            "Replica command was superseded by a later lifecycle change",
+          );
+        }
         return {
-          replica: stored?.replica ?? replicaDocument(replica),
+          // The idempotency record proves the command was already accepted,
+          // but a later lifecycle command may have advanced this locked row.
+          // Never return the historical document as current authority.
+          replica: current,
           grant:
             input.operation === "resume" &&
             replica.desired_state === "active" &&
@@ -1849,7 +1869,7 @@ export class DatabaseCloudWorkspaceReplicaService {
             "Replica receipt idempotency key was reused",
           );
         }
-        await this.lockReplicaForDevice(tx, {
+        const { replica } = await this.lockReplicaForDevice(tx, {
           ...input,
           action: "replica.receipt",
           payload,
@@ -1857,7 +1877,21 @@ export class DatabaseCloudWorkspaceReplicaService {
         const prior = replay.rows[0].response_json as {
           replica: ReturnType<typeof replicaDocument>;
         };
-        return { replica: prior.replica, replayed: true as const };
+        if (
+          !prior ||
+          typeof prior !== "object" ||
+          !prior.replica ||
+          prior.replica.id !== replica.id ||
+          prior.replica.workspaceId !== replica.workspace_id ||
+          prior.replica.organizationId !== replica.org_id ||
+          prior.replica.deviceId !== replica.device_id
+        ) {
+          throw new Error("Replica receipt response is invalid");
+        }
+        return {
+          replica: replicaDocument(replica),
+          replayed: true as const,
+        };
       }
       const replica = await this.authorizeGrant(tx, {
         ...input,

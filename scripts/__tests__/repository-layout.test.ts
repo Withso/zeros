@@ -78,13 +78,13 @@ describe("repository layout contracts", () => {
     expect(preflight).not.toMatch(/run: .*pnpm check:zsr$/m);
   });
 
-  it("retries only transient control-plane audit transport failures", () => {
+  it("routes the control-plane audit through the findings-first retry wrapper", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
-    expect(preflight).toContain('CONTROL_PLANE_AUDIT_ATTEMPTS: "3"');
-    expect(preflight).toContain("ERR_SOCKET_TIMEOUT");
-    expect(preflight).toContain("pnpm audit:prod");
-    expect(preflight).toContain('exit "$status"');
+    expect(preflight).toMatch(
+      /- name: Audit control-plane production dependencies\n(?:.|\n)*?working-directory: apps\/control-plane\n\s+run: node \.\.\/\.\.\/scripts\/check-audit\.mjs/,
+    );
+    expect(preflight).not.toContain("CONTROL_PLANE_AUDIT_ATTEMPTS");
   });
 
   it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
@@ -781,6 +781,27 @@ describe("repository layout contracts", () => {
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
+  });
+
+  it("bakes the default-off desktop cloud capability into every release process", () => {
+    const releaseCapability =
+      "ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}";
+    for (const workflow of [
+      ".github/workflows/release-alpha.yml",
+      ".github/workflows/release-beta.yml",
+      ".github/workflows/release.yml",
+    ]) {
+      expect(read(workflow)).toContain(releaseCapability);
+    }
+
+    const bakedIdentifier = "__ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__";
+    expect(read("tsup.config.ts")).toContain(bakedIdentifier);
+    expect(read("apps/desktop/electron/tsup.config.ts")).toContain(
+      bakedIdentifier,
+    );
+    const packagedEngineBuild = read("scripts/build-sidecar.mjs");
+    expect(packagedEngineBuild).toContain(bakedIdentifier);
+    expect(packagedEngineBuild).toContain('"--define"');
   });
 
   it("verifies every shipped macOS updater archive before publication", () => {

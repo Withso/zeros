@@ -7,14 +7,14 @@
 | Remote engine transport and exact runtime registry        | Implemented, gated; signed macOS/live E2E open                                     | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
 | Provider image/lifecycle qualification                    | Harness and protected workflow implemented; live evidence open                     | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                |
 | WorkOS identity and membership projection                 | Implemented with Auth0 rollback compatibility                                      | control-plane auth migrations/services and web WorkOS session/event handlers                          |
-| Organization Pro/Business/Enterprise paid authority       | Implemented and database-tested                                                    | migration `0026`, `authorization.ts`, `paid-authority.ts`                                             |
-| Reviewed compute and durable-storage provisioning         | Implemented and database-tested                                                    | migrations `0054`–`0055`, owner management commands                                                   |
+| Organization Pro/Business/Enterprise paid authority       | Implemented and database-tested                                                    | migrations `0026`, `0046`, `0059`, `0062`, `authorization.ts`, `paid-authority.ts`                    |
+| Reviewed entitlement, compute, and storage provisioning   | Implemented and database-tested                                                    | migrations `0054`–`0055`, `0062`, owner management commands                                           |
 | Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`, `0056`                                                       |
 | Lifecycle, setup worker, admission, and engine lease      | Implemented behind disabled setup-worker gate; live qualification open             | migrations `0020`–`0025`, setup and engine services                                                   |
 | Generation replacement and provider reconciliation        | Implemented and database-tested; live rollback/delete evidence open                | `generation-transitions.ts`, `reconciler.ts`, `daytona-provider.ts`                                   |
 | SSH, authenticated preview, and localhost forward         | Control plane and native desktop boundary implemented; UI/macOS qualification open | `access.ts`, `runtime-access.ts`, Electron access/SSH services                                        |
 | Ordered durable record and content/checkpoints            | Implemented and database-tested                                                    | migrations `0028`–`0031`, durable/content/recovery services                                           |
-| Encrypted object storage, admission, rotation, deletion   | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migrations `0037`, `0055`, `0057`, `0058`                 |
+| Encrypted object storage, admission, rotation, deletion   | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migrations `0037`, `0055`, `0057`, `0058`, `0060`         |
 | Local→cloud and cloud→local immutable forks               | Implemented with fresh destination UUIDs                                           | `forks.ts`, desktop cloud-workspace-fork services, migrations `0032`, `0038`, `0048`, `0051`          |
 | Per-user/per-device receive-only replicas                 | Implemented owner-only for Phase 5                                                 | `replicas.ts`, desktop cloud-replica services, migrations `0033`–`0035`, `0049`–`0052`                |
 | Remote-authoritative Design routing                       | Implemented through the normal exact runtime bridge; product UI E2E open           | runtime connection registry and existing Design protocol/service                                      |
@@ -53,6 +53,20 @@ The production control plane additionally recognizes the explicitly gated
 is false, reconciliation may create the provider resource but deliberately
 leaves it at `setting_up`; internal setup/registration routes and the setup
 worker are not mounted or started.
+The desktop has a separate release/build capability,
+`ZEROS_CLOUD_WORKSPACES_ENABLED`. It defaults to disabled and only the exact
+literal `true` enables it. This is not a user-controlled preference and does
+not replace either control-plane gate. `build:sidecar`, `build:engine`, and
+`electron:compile` bake the decision into their artifacts; Electron main also
+pins the value inherited by its engine child. A packaged artifact built with
+the capability disabled therefore cannot be enabled by a launch-time or child-
+process environment override. While disabled, desktop cloud access, device
+enrollment and safeStorage key creation, replica session seeding/refresh, and
+the local replica/fork runtimes remain unconstructed. Direct cloud worker
+runtime registration remains governed by its qualified bootstrap contract. A
+release cannot bake this capability on until the release-environment validator
+accepts 1-8 exact lowercase preview DNS suffixes and canonical base64url
+OpenSSH pins covering every allowed gateway.
 The desktop main process accepts `ZEROS_CLOUD_SSH_HOSTS` as an exact comma-
 separated SSH gateway allowlist; the default is `ssh.app.daytona.io`. Cloud
 preview issuance additionally fails closed unless
@@ -278,7 +292,7 @@ RLS only through a narrowly privileged fixed-search-path function, so a normal
 user-context self-leave cannot retain a provider bearer.
 WorkOS identity, account lifecycle, and notification migrations own `0011`
 through `0019`; cloud workspace additions resume at `0020` and continue
-forward through `0058`. The migration runner explicitly recognizes the
+forward through `0062`. The migration runner explicitly recognizes the
 `a80ac25` `0013`–`0018` and `c2b7418` `0018`–`0050` histories as aliases for
 their canonical `0020`–`0052` equivalents. `0053` repairs the Personal
 local-only constraint for those databases.

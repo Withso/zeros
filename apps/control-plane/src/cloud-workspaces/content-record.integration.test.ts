@@ -36,6 +36,7 @@ const d = databaseUrl ? describe : describe.skip;
 
 class InspectableObjectStore implements CloudWorkspaceObjectStore {
   readonly objects = new Map<string, Uint8Array>();
+  readonly fencedKeys = new Set<string>();
   failNextPut = false;
 
   async putIfAbsent(
@@ -46,18 +47,32 @@ class InspectableObjectStore implements CloudWorkspaceObjectStore {
       this.failNextPut = false;
       throw new Error("injected object-store outage");
     }
+    if (this.fencedKeys.has(key)) {
+      throw new Error("workspace object key is permanently fenced");
+    }
     if (this.objects.has(key)) return "already_exists";
     this.objects.set(key, Uint8Array.from(bytes));
     return "created";
   }
 
   async get(key: string): Promise<Uint8Array | null> {
+    if (this.fencedKeys.has(key)) return null;
     const value = this.objects.get(key);
     return value ? Uint8Array.from(value) : null;
   }
 
   async delete(key: string): Promise<void> {
+    if (this.fencedKeys.has(key)) return;
     this.objects.delete(key);
+  }
+
+  async deleteAndFence(key: string): Promise<void> {
+    this.objects.delete(key);
+    this.fencedKeys.add(key);
+  }
+
+  async sweepAbandonedUploads(): Promise<number> {
+    return 0;
   }
 }
 
@@ -245,7 +260,9 @@ d("cloud workspace content durability", () => {
   it("resumes an interrupted upload, deduplicates exact bytes, and supports empty objects", async () => {
     const bytes = Buffer.from("durable working tree\n", "utf8");
     objectStore.failNextPut = true;
-    await expect(blobs.put({ ...engineAuthority(), bytes })).rejects.toMatchObject({
+    await expect(
+      blobs.put({ ...engineAuthority(), bytes }),
+    ).rejects.toMatchObject({
       code: "object_store_unavailable",
     });
 
@@ -265,7 +282,9 @@ d("cloud workspace content durability", () => {
       }),
     ).resolves.toEqual(bytes);
 
-    await expect(blobs.put({ ...engineAuthority(), bytes })).resolves.toMatchObject({
+    await expect(
+      blobs.put({ ...engineAuthority(), bytes }),
+    ).resolves.toMatchObject({
       id: uploaded.id,
       reused: true,
     });
@@ -409,7 +428,10 @@ d("cloud workspace content durability", () => {
 
   it("fences later mutations when a requested final checkpoint becomes durable and permits its exact replay", async () => {
     const file = Buffer.from("final durable state\n", "utf8");
-    const manifest = Buffer.from('{"audience":"zeros-workspace-checkpoint-v1"}', "utf8");
+    const manifest = Buffer.from(
+      '{"audience":"zeros-workspace-checkpoint-v1"}',
+      "utf8",
+    );
     const fileBlob = await blobs.put({ ...engineAuthority(), bytes: file });
     const manifestBlob = await blobs.put({
       ...engineAuthority(),
@@ -708,7 +730,10 @@ d("cloud workspace content durability", () => {
       }),
     );
     expect(grant).toMatchObject({ checkpointId: checkpoint.checkpointId });
-    const recovery = new DatabaseCloudWorkspaceSetupRecoveryService(pool, blobs);
+    const recovery = new DatabaseCloudWorkspaceSetupRecoveryService(
+      pool,
+      blobs,
+    );
     await expect(
       recovery.manifestPage({
         token: grant!.token,

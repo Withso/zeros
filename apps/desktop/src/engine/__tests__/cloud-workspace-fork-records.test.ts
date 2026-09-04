@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,80 @@ async function tempRoot(name: string): Promise<string> {
   const root = await mkdtemp(path.join(os.tmpdir(), name));
   roots.push(root);
   return root;
+}
+
+function forkEventsWithTurnStatus(
+  status: unknown,
+): CloudWorkspaceForkRecordEvent[] {
+  const chatId = "source-chat";
+  const turnId = "turn-1";
+  const occurredAt = "2026-08-30T12:00:00.000Z";
+  return [
+    {
+      revision: 1,
+      entityKind: "chat",
+      entityId: chatId,
+      operation: "upsert",
+      schemaVersion: 1,
+      occurredAt,
+      document: {
+        version: 1,
+        chat: {
+          id: chatId,
+          folder: ".",
+          agentId: "codex",
+          agentName: "Codex",
+          model: "gpt-test",
+          effort: "medium",
+          permissionMode: "default",
+          lastModeId: null,
+          prePlanModeId: null,
+          fast: false,
+          additionalDirectories: [],
+          title: "Copied chat",
+          createdAt: 100,
+          updatedAt: 200,
+          sessionId: null,
+          providerBinding: null,
+          providerMetadata: null,
+          pinned: false,
+          archived: false,
+          sourceChatId: null,
+          kind: "code",
+        },
+      },
+    },
+    {
+      revision: 2,
+      entityKind: "turn",
+      entityId: `t:${createHash("sha256")
+        .update(`${chatId}\0${turnId}`, "utf8")
+        .digest("hex")}`,
+      operation: "upsert",
+      schemaVersion: 1,
+      occurredAt,
+      document: {
+        version: 1,
+        row: {
+          chat_id: chatId,
+          turn_id: turnId,
+          workspace_id: null,
+          folder: ".",
+          agent_id: "codex",
+          ord: 1,
+          summary: null,
+          started_at: 100,
+          ended_at: null,
+          stop_reason: null,
+          status,
+          pre_snapshot: null,
+          post_snapshot: null,
+          files: null,
+          usage: null,
+        },
+      },
+    },
+  ];
 }
 
 describe("portable workspace fork records", () => {
@@ -185,5 +260,52 @@ describe("portable workspace fork records", () => {
       }),
     ).toThrow("Fork message document is invalid");
     expect(getChat("provider-session")).toBeNull();
+  });
+
+  it.each([
+    ["an array", ["running"]],
+    ["a number", 1],
+  ])("rejects %s used as an imported turn status", async (_label, status) => {
+    const target = await tempRoot("zeros-fork-status-");
+    setZerosDbPathForTesting(":memory:");
+    openZerosDb();
+
+    expect(() =>
+      importCloudWorkspaceForkRecords({
+        targetRoot: target,
+        targetWorkspaceId: "ws_target",
+        targetWorkspaceCanonicalId: "33333333-3333-4333-8333-333333333333",
+        events: forkEventsWithTurnStatus(status),
+      }),
+    ).toThrow("Fork turn document is invalid");
+    expect(
+      getChat(
+        forkedChatId("33333333-3333-4333-8333-333333333333", "source-chat"),
+      ),
+    ).toBeNull();
+  });
+
+  it("cancels a scalar running turn imported from a fork record", async () => {
+    const target = await tempRoot("zeros-fork-running-");
+    setZerosDbPathForTesting(":memory:");
+    openZerosDb();
+    const targetWorkspaceCanonicalId = "33333333-3333-4333-8333-333333333333";
+
+    importCloudWorkspaceForkRecords({
+      targetRoot: target,
+      targetWorkspaceId: "ws_target",
+      targetWorkspaceCanonicalId,
+      events: forkEventsWithTurnStatus("running"),
+    });
+
+    expect(
+      getTurn(
+        forkedChatId(targetWorkspaceCanonicalId, "source-chat"),
+        "turn-1",
+      ),
+    ).toMatchObject({
+      status: "cancelled",
+      stopReason: "workspace_forked",
+    });
   });
 });

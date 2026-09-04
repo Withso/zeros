@@ -372,6 +372,15 @@ export class CloudReplicaSyncBroker {
     this.grants.clear();
   }
 
+  /** Close the broker generation and wait until every already-started sync has
+   * crossed its final cancellation boundary. Callers can then change remote
+   * authority knowing no response from this generation can still mutate the
+   * local filesystem or SQLite state afterward. */
+  async cancelAndDrain(): Promise<void> {
+    this.cancel();
+    await Promise.allSettled([...this.inFlight.values()]);
+  }
+
   private assertActive(): void {
     if (this.cancelled) {
       throw new CloudReplicaBrokerError(
@@ -450,13 +459,19 @@ export class CloudReplicaSyncBroker {
     const renewed = await this.api.renewGrant(this.coordinates(local));
     this.assertActive();
     assertRemoteIdentity(local, renewed.replica);
+    local = this.local(local.replicaId);
     if (renewed.replica.desiredState !== "active") {
       throw new CloudReplicaBrokerError(
         "replica_not_active",
         "Cloud replica is not active",
       );
     }
-    this.seedGrant(local.replicaId, renewed.grant);
+    this.state.assertRemoteAuthority({
+      replicaId: local.replicaId,
+      desiredState: renewed.replica.desiredState,
+      workspaceAuthorityEpoch: renewed.replica.workspaceAuthorityEpoch,
+      grantEpoch: renewed.replica.grantEpoch,
+    });
 
     const projectionHash = this.state
       .projection(local.replicaId)
@@ -482,7 +497,8 @@ export class CloudReplicaSyncBroker {
         "Cloud replica cursor moved backwards",
       );
     }
-    this.updateRemote(local, renewed.replica);
+    local = this.updateRemote(local, renewed.replica);
+    this.seedGrant(local.replicaId, renewed.grant);
     return renewed.grant.token;
   }
 
@@ -552,6 +568,12 @@ export class CloudReplicaSyncBroker {
       throw error;
     }
     assertRemoteIdentity(local, response.replica);
+    this.state.assertRemoteAuthority({
+      replicaId: local.replicaId,
+      desiredState: response.replica.desiredState,
+      workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
+      grantEpoch: response.replica.grantEpoch,
+    });
     if (input.outcome === "applied") {
       const advanced = this.state.advanceReceipt({
         replicaId: local.replicaId,

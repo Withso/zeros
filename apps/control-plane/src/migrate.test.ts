@@ -367,9 +367,15 @@ function poolWithAppliedMigrations(appliedNames: readonly string[]): {
 
 describe("automatic service-boot migration policy", () => {
   const controlledBoundary = "0025_cloud_workspace_engine_authority.sql";
+  const objectFenceBoundary = "0060_cloud_workspace_pending_blob_deletions.sql";
+  const providerErasureBoundary = "0061_workos_provider_erasure_fences.sql";
   const throughBeforeBoundary = LADDER.slice(
     0,
     LADDER.indexOf(controlledBoundary),
+  );
+  const throughBeforeObjectFence = LADDER.slice(
+    0,
+    LADDER.indexOf(objectFenceBoundary),
   );
   const productionWithoutApproval = { NODE_ENV: "production" };
 
@@ -480,6 +486,108 @@ describe("automatic service-boot migration policy", () => {
       }),
     ).rejects.toThrow(
       /0025_cloud_workspace_engine_authority\.sql.*not approved/i,
+    );
+  });
+
+  it("stops before 0060 from a 0059 ledger even when older cloud state exists", async () => {
+    const { pool, calls } = poolWithAppliedMigrations(throughBeforeObjectFence);
+
+    await expect(
+      runServiceBootMigrations(pool, {
+        cloudWorkspacesEnabled: false,
+        env: productionWithoutApproval,
+      }),
+    ).resolves.toEqual({
+      ran: [],
+      status: {
+        state: "controlled_migration_pending",
+        migration: objectFenceBoundary,
+        dependentRuntime: "cloud_workspaces",
+      },
+    });
+
+    expect(
+      calls.some(({ text }) =>
+        /SELECT\s+'cloud_workspace_quotas'\s+AS\s+relation/i.test(text),
+      ),
+    ).toBe(false);
+    const recordedNames = calls
+      .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
+      .map(({ values }) => values[0]);
+    expect(recordedNames).not.toContain(objectFenceBoundary);
+  });
+
+  it("ignores a leaked 0060 approval at service boot", async () => {
+    const { pool, calls } = poolWithAppliedMigrations(throughBeforeObjectFence);
+
+    await expect(
+      runServiceBootMigrations(pool, {
+        cloudWorkspacesEnabled: false,
+        env: {
+          NODE_ENV: "production",
+          CONTROL_PLANE_MIGRATION_APPROVALS: objectFenceBoundary,
+        },
+      }),
+    ).resolves.toMatchObject({
+      ran: [],
+      status: {
+        state: "controlled_migration_pending",
+        migration: objectFenceBoundary,
+      },
+    });
+
+    const recordedNames = calls
+      .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
+      .map(({ values }) => values[0]);
+    expect(recordedNames).not.toContain(objectFenceBoundary);
+  });
+
+  it("pauses the deletion lifecycle before 0061 while known WorkOS auth can continue", async () => {
+    const beforeProviderErasure = LADDER.slice(
+      0,
+      LADDER.indexOf(providerErasureBoundary),
+    );
+    const { pool, calls } = poolWithAppliedMigrations(beforeProviderErasure);
+
+    await expect(
+      runServiceBootMigrations(pool, {
+        cloudWorkspacesEnabled: false,
+        env: productionWithoutApproval,
+      }),
+    ).resolves.toEqual({
+      ran: [],
+      status: {
+        state: "controlled_migration_pending",
+        migration: providerErasureBoundary,
+        dependentRuntime: "cloud_workspaces",
+      },
+    });
+    const recordedNames = calls
+      .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
+      .map(({ values }) => values[0]);
+    expect(recordedNames).not.toContain(providerErasureBoundary);
+  });
+
+  it("fails closed at 0060 when cloud runtime is enabled", async () => {
+    const { pool } = poolWithAppliedMigrations(throughBeforeObjectFence);
+
+    await expect(
+      runServiceBootMigrations(pool, {
+        cloudWorkspacesEnabled: true,
+        env: productionWithoutApproval,
+      }),
+    ).rejects.toThrow(
+      /0060_cloud_workspace_pending_blob_deletions\.sql.*not approved/i,
+    );
+  });
+
+  it("requires the exact 0060 approval in strict mode from a 0059 ledger", async () => {
+    const { pool } = poolWithAppliedMigrations(throughBeforeObjectFence);
+
+    await expect(
+      runMigrations(pool, { env: productionWithoutApproval }),
+    ).rejects.toThrow(
+      /0060_cloud_workspace_pending_blob_deletions\.sql.*not approved/i,
     );
   });
 

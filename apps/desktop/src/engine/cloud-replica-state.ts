@@ -635,6 +635,7 @@ export class DatabaseCloudReplicaState {
     ) {
       throw new CloudReplicaStateError("invalid_state", "Replica epoch is invalid");
     }
+    this.assertRemoteAuthority(input);
     const now = Date.now();
     const result = this.db
       .prepare(
@@ -645,7 +646,10 @@ export class DatabaseCloudReplicaState {
            last_error_code = ?,
            removed_at = CASE WHEN ? = 'removed' THEN ? ELSE NULL END,
            updated_at = ?
-         WHERE replica_id = ?`,
+         WHERE replica_id = ?
+           AND workspace_authority_epoch <= ?
+           AND grant_epoch <= ?
+           AND (grant_epoch < ? OR desired_state = ?)`,
       )
       .run(
         input.desiredState,
@@ -659,11 +663,51 @@ export class DatabaseCloudReplicaState {
         now,
         now,
         input.replicaId,
+        input.workspaceAuthorityEpoch,
+        input.grantEpoch,
+        input.grantEpoch,
+        input.desiredState,
       );
     if (result.changes !== 1) {
+      if (this.replica(input.replicaId)) {
+        throw new CloudReplicaStateError(
+          "cursor_conflict",
+          "Replica authority epoch moved backwards",
+        );
+      }
       throw new CloudReplicaStateError("not_found", "Local replica was not found");
     }
     return this.replica(input.replicaId)!;
+  }
+
+  assertRemoteAuthority(input: {
+    replicaId: string;
+    desiredState: CloudReplicaLocalState["desiredState"];
+    workspaceAuthorityEpoch: number;
+    grantEpoch: number;
+  }): CloudReplicaLocalState {
+    if (
+      !positiveInteger(input.workspaceAuthorityEpoch) ||
+      !positiveInteger(input.grantEpoch)
+    ) {
+      throw new CloudReplicaStateError("invalid_state", "Replica epoch is invalid");
+    }
+    const current = this.replica(input.replicaId);
+    if (!current) {
+      throw new CloudReplicaStateError("not_found", "Local replica was not found");
+    }
+    if (
+      current.workspaceAuthorityEpoch > input.workspaceAuthorityEpoch ||
+      current.grantEpoch > input.grantEpoch ||
+      (current.grantEpoch === input.grantEpoch &&
+        current.desiredState !== input.desiredState)
+    ) {
+      throw new CloudReplicaStateError(
+        "cursor_conflict",
+        "Replica authority epoch moved backwards",
+      );
+    }
+    return current;
   }
 
   advanceReceipt(input: {
@@ -722,6 +766,10 @@ export class DatabaseCloudReplicaState {
     ) {
       throw new CloudReplicaStateError("invalid_state", "Snapshot state is invalid");
     }
+    this.assertRemoteAuthority({
+      ...input,
+      desiredState: "active",
+    });
     const result = this.db
       .prepare(
         `UPDATE cloud_replica_local_state SET
@@ -729,7 +777,9 @@ export class DatabaseCloudReplicaState {
            workspace_authority_epoch = ?, grant_epoch = ?,
            observed_state = 'bootstrapping', client_manifest_sha256 = NULL,
            last_error_code = NULL, updated_at = ?
-         WHERE replica_id = ? AND desired_state = 'active'`,
+         WHERE replica_id = ? AND desired_state = 'active'
+           AND workspace_authority_epoch <= ?
+           AND grant_epoch <= ?`,
       )
       .run(
         input.checkpointId,
@@ -738,8 +788,21 @@ export class DatabaseCloudReplicaState {
         input.grantEpoch,
         Date.now(),
         input.replicaId,
+        input.workspaceAuthorityEpoch,
+        input.grantEpoch,
       );
     if (result.changes !== 1) {
+      const current = this.replica(input.replicaId);
+      if (
+        current &&
+        (current.workspaceAuthorityEpoch > input.workspaceAuthorityEpoch ||
+          current.grantEpoch > input.grantEpoch)
+      ) {
+        throw new CloudReplicaStateError(
+          "cursor_conflict",
+          "Replica authority epoch moved backwards",
+        );
+      }
       throw new CloudReplicaStateError("not_found", "Active local replica was not found");
     }
     return this.replica(input.replicaId)!;

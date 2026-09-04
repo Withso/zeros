@@ -3,7 +3,7 @@
 This document defines the product and engineering contract for creating a
 Zeros workspace locally or in cloud, making integrity-checked copies between
 those placements, and keeping private device replicas. Migrations `0026`
-through `0058` and the desktop engine services implement the non-UI
+through `0062` and the desktop engine services implement the non-UI
 foundation. End-user wiring and protected live qualification remain separate
 release work.
 
@@ -440,7 +440,7 @@ own local engine/Design API and does not share the cloud workspace identity.
 ## Durable data model
 
 The main implemented relations are below. Exact SQL names in migrations
-`0026`–`0058` are compatibility contracts.
+`0026`–`0062` are compatibility contracts.
 
 | Relation                                                          | Purpose and important constraints                                                                                                                                            |
 | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -451,7 +451,7 @@ The main implemented relations are below. Exact SQL names in migrations
 | `provider_connections`                                            | User/Organization-owned encrypted Daytona or future provider binding; no raw credential in workspace rows                                                                    |
 | `secret_bindings`                                                 | Opaque secret-store references scoped by tenant, owner, purpose, placement, and rotation version                                                                             |
 | `cloud_workspaces`                                                | Cloud UUID, non-Personal Organization/team/repository, creator, owner, assignee, visibility, single-member flag, authority/billing epochs, lifecycle, and optimistic version |
-| `workspace_members`                                               | Explicit workspace role/following/presence eligibility; membership is always bounded by Organization/Team membership                                                         |
+| `cloud_workspace_members`                                         | Explicit workspace role/following/presence eligibility; membership is always bounded by Organization/Team membership                                                         |
 | `workspace_settings_versions`                                     | Redacted effective snapshot, source versions, environment profile, and policy version used by one workspace generation                                                       |
 | `workspace_executions`                                            | Append-only cloud execution projections; at most one current execution for an authority epoch                                                                                |
 | `cloud_workspace_generations`                                     | Pinned image/resources/source commit/settings snapshot for cloud execution; extends the existing generation contract                                                         |
@@ -466,6 +466,7 @@ The main implemented relations are below. Exact SQL names in migrations
 | `workspace_blobs`                                                 | Tenant-scoped content-addressed encrypted objects with reference accounting and deletion state                                                                               |
 | `cloud_workspace_object_storage_limits`                           | Owner-managed Organization physical-byte and per-workspace logical-byte admission limits, separate from provider disk quota                                                  |
 | `cloud_workspace_object_storage_limit_changes`                    | Immutable database-owner evidence for target-bound durable-storage limit changes                                                                                             |
+| `cloud_workspace_entitlement_changes`                             | Immutable database-owner evidence for target-bound Organization entitlement and active-seat changes                                                                          |
 | `workspace_blob_storage_reservations`                             | Deduplicated workspace/blob upload or referenced-byte ledger used for cumulative admission and crash recovery                                                                |
 | `workspace_fork_intents`                                          | Idempotent local→cloud/cloud→local copy identity, source/target UUIDs, selection flags, deadline, snapshot/checkpoint provenance, and outcome                                |
 | `workspace_fork_import_entries` / `workspace_fork_import_records` | Bounded immutable staging for file overlays and optional portable chat records; blob reservations use `workspace_blob_references`                                            |

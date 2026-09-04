@@ -9,6 +9,7 @@ import {
 } from "../cloud-replica-device-store";
 import {
   CloudAccessDeviceAuthority,
+  cloudReplicaSessionControlLine,
   handleCloudReplicaEngineControl,
 } from "../cloud-replica-host-runtime";
 
@@ -51,6 +52,7 @@ describe("main cloud access device authority", () => {
       trustState: "trusted",
     }));
     const authority = new CloudAccessDeviceAuthority({
+      capabilityEnabled: () => true,
       store,
       getSession: async () => ({
         provider: "workos" as const,
@@ -80,6 +82,7 @@ describe("main cloud access device authority", () => {
     const accountId = randomUUID();
     const store = memoryStore();
     const authority = new CloudAccessDeviceAuthority({
+      capabilityEnabled: () => true,
       store,
       getSession: async () => ({
         provider: "workos" as const,
@@ -127,6 +130,7 @@ describe("main cloud access device authority", () => {
       },
       (line) => lines.push(line),
       {
+        capabilityEnabled: () => true,
         store: () => store,
         getSession: async () => ({
           provider: "workos" as const,
@@ -147,5 +151,111 @@ describe("main cloud access device authority", () => {
       proof: null,
       errorCode: "identity_mismatch",
     });
+  });
+
+  it("does not create a safeStorage key or POST enrollment while disabled", async () => {
+    const accountId = randomUUID();
+    const store = memoryStore();
+    const ensure = vi.spyOn(store, "ensure");
+    const getSession = vi.fn(async () => ({
+      provider: "workos" as const,
+      accountId,
+      accessToken: unexpiredAccessToken(),
+      sub: "user_disabled",
+      email: "disabled@example.test",
+      name: null,
+      clientKind: "desktop" as const,
+    }));
+    const register = vi.fn();
+    const authority = new CloudAccessDeviceAuthority({
+      capabilityEnabled: () => false,
+      store,
+      getSession,
+      register,
+    });
+
+    await expect(authority.ensure()).rejects.toThrow(/not enabled/i);
+    expect(getSession).not.toHaveBeenCalled();
+    expect(ensure).not.toHaveBeenCalled();
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it("does not read auth or safeStorage when a disabled session seed is requested", async () => {
+    const getSession = vi.fn();
+    const getStore = vi.fn();
+
+    const line = await cloudReplicaSessionControlLine({
+      capabilityEnabled: () => false,
+      getSession,
+      store: getStore,
+    });
+
+    expect(JSON.parse(line)).toEqual({
+      type: "host.cloudReplicaSession",
+      session: null,
+    });
+    expect(getSession).not.toHaveBeenCalled();
+    expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it("retires delayed engine proof requests without reading auth or safeStorage while disabled", async () => {
+    const accountId = randomUUID();
+    const getSession = vi.fn();
+    const getStore = vi.fn();
+    const lines: string[] = [];
+
+    const handled = await handleCloudReplicaEngineControl(
+      {
+        type: "engine.cloudReplicaProofRequest",
+        requestId: `crp_${Buffer.alloc(16, 9).toString("base64url")}`,
+        accountUserId: accountId,
+        deviceId: randomUUID(),
+        keyVersion: 1,
+        action: "replica.events.read",
+        payload: { afterRevision: 0, limit: 100 },
+      },
+      (line) => lines.push(line),
+      {
+        capabilityEnabled: () => false,
+        getSession,
+        store: getStore,
+      },
+    );
+
+    expect(handled).toBe(true);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      type: "host.cloudReplicaProofResponse",
+      proof: null,
+      errorCode: "signed_out",
+    });
+    expect(getSession).not.toHaveBeenCalled();
+    expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it("ignores delayed device registration without mutating safeStorage while disabled", async () => {
+    const getSession = vi.fn();
+    const getStore = vi.fn();
+    const publicKey = Buffer.alloc(32, 4).toString("base64url");
+
+    const handled = await handleCloudReplicaEngineControl(
+      {
+        type: "engine.cloudReplicaDeviceRegistered",
+        accountUserId: randomUUID(),
+        deviceId: randomUUID(),
+        keyVersion: 1,
+        publicKey,
+        keyFingerprint: cloudDevicePublicKeyFingerprint(publicKey),
+      },
+      vi.fn(),
+      {
+        capabilityEnabled: () => false,
+        getSession,
+        store: getStore,
+      },
+    );
+
+    expect(handled).toBe(true);
+    expect(getSession).not.toHaveBeenCalled();
+    expect(getStore).not.toHaveBeenCalled();
   });
 });

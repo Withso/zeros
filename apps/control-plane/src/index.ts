@@ -55,11 +55,15 @@ const workosSync = workosProvider
       pool,
       provider: workosProvider,
       email: emailConfig,
+      deletionLifecycleEnabled:
+        migrationResult.status.state !== "controlled_migration_pending",
     })
   : null;
 if (workosSync) {
   console.log(
-    "[control-plane] WorkOS reconciliation and security outboxes enabled",
+    migrationResult.status.state === "controlled_migration_pending"
+      ? "[control-plane] WorkOS reconciliation and security outboxes enabled; deletion lifecycle paused at controlled migration boundary"
+      : "[control-plane] WorkOS reconciliation, security outboxes, and deletion lifecycle enabled",
   );
 }
 let stopCloudReconciler = async () => {};

@@ -358,12 +358,13 @@ type MigrationPolicy =
   | { mode: "explicit" }
   | { mode: "service_boot"; cloudWorkspacesEnabled: boolean };
 
-// Only this reviewed migration may be deferred at boot, and only while the
-// entire subsystem that depends on it is disabled. A future downtime marker
+// Only these reviewed migrations may be deferred at boot, and only while the
+// entire subsystem that depends on them is disabled. A future downtime marker
 // fails closed until it receives its own explicit dependency decision.
 type ControlledMigrationBootPolicy = {
   dependentRuntime: "cloud_workspaces";
   safePendingSuffix: readonly string[];
+  requiresEmptyPreBoundaryCloudState: boolean;
 };
 
 const CONTROLLED_MIGRATION_BOOT_POLICIES: Readonly<
@@ -371,9 +372,12 @@ const CONTROLLED_MIGRATION_BOOT_POLICIES: Readonly<
 > = {
   "0025_cloud_workspace_engine_authority.sql": {
     dependentRuntime: "cloud_workspaces",
-    // Every migration withheld by this pause is consumed only by the cloud
-    // subsystem gated in app.ts/index.ts. A newly appended migration is not
-    // assumed safe: this exact list must receive an explicit review update.
+    requiresEmptyPreBoundaryCloudState: true,
+    // Cloud consumers are gated in app.ts/index.ts. The WorkOS fence and
+    // owner-only entitlement-evidence migrations are also safe to withhold;
+    // unknown provider subjects fail closed while their evidence tables are
+    // absent and known active mappings continue. A newly appended migration
+    // is not assumed safe: this exact list must receive an explicit review.
     safePendingSuffix: [
       "0025_cloud_workspace_engine_authority.sql",
       "0026_cloud_workspace_identity_and_entitlements.sql",
@@ -409,6 +413,33 @@ const CONTROLLED_MIGRATION_BOOT_POLICIES: Readonly<
       "0056_cloud_workspace_secret_verifiers.sql",
       "0057_cloud_workspace_storage_worker_indexes.sql",
       "0058_cloud_workspace_storage_invariants.sql",
+      "0059_cloud_workspace_entitlement_activation.sql",
+      "0060_cloud_workspace_pending_blob_deletions.sql",
+      "0061_workos_provider_erasure_fences.sql",
+      "0062_cloud_workspace_entitlement_operations.sql",
+    ],
+  },
+  "0060_cloud_workspace_pending_blob_deletions.sql": {
+    dependentRuntime: "cloud_workspaces",
+    // Existing cloud state is the data this migration must conservatively
+    // backfill. Deferral is safe because no DDL runs and the cloud runtime is
+    // disabled; unlike 0025, an occupied pre-boundary schema is expected.
+    requiresEmptyPreBoundaryCloudState: false,
+    safePendingSuffix: [
+      "0060_cloud_workspace_pending_blob_deletions.sql",
+      "0061_workos_provider_erasure_fences.sql",
+      "0062_cloud_workspace_entitlement_operations.sql",
+    ],
+  },
+  "0061_workos_provider_erasure_fences.sql": {
+    dependentRuntime: "cloud_workspaces",
+    // This boundary must be crossed only after every old deletion worker is
+    // drained. While it is pending, the new binary pauses its deletion loop;
+    // known WorkOS mappings remain usable and unknown subjects fail closed.
+    requiresEmptyPreBoundaryCloudState: false,
+    safePendingSuffix: [
+      "0061_workos_provider_erasure_fences.sql",
+      "0062_cloud_workspace_entitlement_operations.sql",
     ],
   },
 };
@@ -772,14 +803,16 @@ async function executeMigrations(
                 `after missing controlled boundary ${migration.file}.`,
             );
           }
-          const existingCloudState = await findPreBoundaryCloudState(client);
-          if (existingCloudState) {
-            throw new Error(
-              `Cannot defer controlled migration ${migration.file}: existing ` +
-                `cloud state was found in ${existingCloudState}. Run the ` +
-                `strict operator migration during controlled downtime before ` +
-                `starting this release.`,
-            );
+          if (bootPolicy.requiresEmptyPreBoundaryCloudState) {
+            const existingCloudState = await findPreBoundaryCloudState(client);
+            if (existingCloudState) {
+              throw new Error(
+                `Cannot defer controlled migration ${migration.file}: existing ` +
+                  `cloud state was found in ${existingCloudState}. Run the ` +
+                  `strict operator migration during controlled downtime before ` +
+                  `starting this release.`,
+              );
+            }
           }
           return {
             ran,
@@ -830,8 +863,9 @@ export async function runMigrations(
 }
 
 /**
- * Automatic boot runner. It may report one reviewed pending cloud boundary
- * only while cloud runtime is actually disabled; every other case is strict.
+ * Automatic boot runner. It may report one of the reviewed pending cloud
+ * boundaries only while cloud runtime is actually disabled; every other case
+ * is strict.
  */
 export async function runServiceBootMigrations(
   pool: pg.Pool,

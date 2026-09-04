@@ -1,8 +1,31 @@
 import { describe, expect, it } from "vitest";
 
 import { PreviewFrameAuthorizations } from "../preview-frame-authorizations";
+import { isOwnedMainRendererFrame } from "../preview-frame-ipc-authority";
 
 describe("PreviewFrameAuthorizations", () => {
+  it("admits preview authorization IPC only from the owning main renderer frame", () => {
+    const ownerWebContents = {};
+    const ownerMainFrame = {};
+    const base = {
+      windowDestroyed: false,
+      senderWebContents: ownerWebContents,
+      ownerWebContents,
+      senderFrame: ownerMainFrame,
+      ownerMainFrame,
+    };
+
+    expect(isOwnedMainRendererFrame(base)).toBe(true);
+    expect(
+      isOwnedMainRendererFrame({ ...base, senderWebContents: {} }),
+    ).toBe(false);
+    expect(isOwnedMainRendererFrame({ ...base, senderFrame: {} })).toBe(false);
+    expect(isOwnedMainRendererFrame({ ...base, senderFrame: null })).toBe(false);
+    expect(
+      isOwnedMainRendererFrame({ ...base, windowDestroyed: true }),
+    ).toBe(false);
+  });
+
   it("allows only the exact volatile frame/origin pair until expiry", () => {
     const grants = new PreviewFrameAuthorizations();
     const now = 1_800_000_000_000;
@@ -92,6 +115,53 @@ describe("PreviewFrameAuthorizations", () => {
         now + 2,
       ),
     ).toBe(true);
+  });
+
+  it("authorizes before first iframe mount, then binds only the exact owned navigation", () => {
+    const grants = new PreviewFrameAuthorizations();
+    const now = 1_800_000_000_000;
+    const frameName = "zeros-browser-new-preview";
+    const origin = "https://41000-signed.preview.example";
+
+    // This is the real first-open IPC order: the renderer must authorize the
+    // volatile origin before dispatch creates the Browser tab and its iframe.
+    expect(
+      grants.authorize(
+        { frameName, origin, expiresAt: now + 60_000 },
+        now,
+        null,
+      ),
+    ).toBe(true);
+    // A pending grant cannot release a header to an unbound renderer request.
+    expect(grants.requestHeaders(`${origin}/app`, [101], now + 1)).toBeNull();
+    expect(
+      grants.bindPendingFrame(
+        "zeros-browser-other-preview",
+        `${origin}/app`,
+        101,
+        now + 1,
+      ),
+    ).toBe(false);
+    expect(
+      grants.bindPendingFrame(
+        frameName,
+        "https://other.preview.example/app",
+        101,
+        now + 1,
+      ),
+    ).toBe(false);
+
+    expect(
+      grants.bindPendingFrame(frameName, `${origin}/app`, 101, now + 1),
+    ).toBe(true);
+    expect(grants.requestHeaders(`${origin}/asset.js`, [101], now + 2)).toEqual(
+      { "X-Daytona-Skip-Preview-Warning": "true" },
+    );
+    // A later frame that reuses the logical name cannot steal the bound grant.
+    expect(
+      grants.bindPendingFrame(frameName, `${origin}/app`, 202, now + 2),
+    ).toBe(false);
+    expect(grants.requestHeaders(`${origin}/asset.js`, [202], now + 2)).toBeNull();
   });
 
   it("does not let stale cleanup revoke a newer capability for the same frame", () => {

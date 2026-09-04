@@ -434,31 +434,66 @@ export async function manageCloudWorkspaceQuota(
       [request.organizationId],
     );
     const previous = quotaFromRow(quotaResult.rows[0]);
+    // Match route admission: active candidates reserve their full shape, while
+    // every known provider resource retains disk until verified deletion.
     const usageResult = await client.query<UsageRow>(
-      `SELECT count(*) FILTER (
-                WHERE workspace.status <> 'deleted'
-              ) AS workspaces,
-              count(*) FILTER (
-                WHERE workspace.status <> 'deleted'
-                  AND workspace.desired_state = 'running'
-              ) AS running,
-              coalesce(sum(generation.cpu_millicores) FILTER (
-                WHERE workspace.status <> 'deleted'
-                  AND workspace.desired_state = 'running'
-              ), 0) AS cpu_millicores,
-              coalesce(sum(generation.memory_mib) FILTER (
-                WHERE workspace.status <> 'deleted'
-                  AND workspace.desired_state = 'running'
-              ), 0) AS memory_mib,
-              coalesce(sum(generation.storage_mib) FILTER (
-                WHERE workspace.status <> 'deleted'
-              ), 0) AS storage_mib
-       FROM cloud_workspaces workspace
-       LEFT JOIN cloud_workspace_generations generation
-         ON generation.workspace_id = workspace.id
-        AND generation.org_id = workspace.org_id
-        AND generation.generation = workspace.current_generation
-       WHERE workspace.org_id = $1`,
+      `WITH workspace_usage AS (
+         SELECT count(*) AS workspaces,
+                count(*) FILTER (WHERE desired_state = 'running') AS running
+         FROM cloud_workspaces
+         WHERE org_id = $1 AND status <> 'deleted'
+       ), generation_allocation AS (
+         SELECT generation.cpu_millicores, generation.memory_mib,
+                generation.storage_mib, workspace.desired_state,
+                (
+                  workspace.status <> 'deleted'
+                  AND generation.generation = workspace.current_generation
+                ) AS current_reserved,
+                (
+                  workspace.status <> 'deleted'
+                  AND generation.generation <> workspace.current_generation
+                  AND generation.retired_at IS NULL
+                  AND transition.id IS NOT NULL
+                ) AS candidate_reserved,
+                (
+                  binding.provider_resource_id IS NOT NULL
+                  AND binding.deletion_verified_at IS NULL
+                ) AS provider_storage_allocated
+         FROM cloud_workspaces workspace
+         JOIN cloud_workspace_generations generation
+           ON generation.workspace_id = workspace.id
+          AND generation.org_id = workspace.org_id
+         LEFT JOIN cloud_workspace_provider_bindings binding
+           ON binding.workspace_id = generation.workspace_id
+          AND binding.generation = generation.generation
+          AND binding.org_id = generation.org_id
+         LEFT JOIN cloud_workspace_generation_transitions transition
+           ON transition.workspace_id = generation.workspace_id
+          AND transition.org_id = generation.org_id
+          AND transition.candidate_generation = generation.generation
+          AND transition.state IN (
+            'draining', 'provisioning', 'setting_up', 'rolling_back'
+          )
+         WHERE workspace.org_id = $1
+       ), generation_usage AS (
+         SELECT coalesce(sum(cpu_millicores) FILTER (
+                  WHERE (current_reserved AND desired_state = 'running')
+                     OR candidate_reserved
+                ), 0) AS cpu_millicores,
+                coalesce(sum(memory_mib) FILTER (
+                  WHERE (current_reserved AND desired_state = 'running')
+                     OR candidate_reserved
+                ), 0) AS memory_mib,
+                coalesce(sum(storage_mib) FILTER (
+                  WHERE current_reserved OR candidate_reserved
+                     OR provider_storage_allocated
+                ), 0) AS storage_mib
+         FROM generation_allocation
+       )
+       SELECT workspace_usage.workspaces, workspace_usage.running,
+              generation_usage.cpu_millicores, generation_usage.memory_mib,
+              generation_usage.storage_mib
+       FROM workspace_usage CROSS JOIN generation_usage`,
       [request.organizationId],
     );
     assertQuotaCoversUsage(request.next, usageResult.rows[0]!);

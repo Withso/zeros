@@ -115,6 +115,42 @@ export class PreviewFrameAuthorizations {
     return true;
   }
 
+  /** Bind a pre-navigation, capability-free authorization to the exact
+   * top-level Browser iframe that starts using it. Ordinary Daytona preview
+   * authorization is requested before React mounts the iframe, so the frame
+   * tree id does not exist at IPC time. The trusted WebContents navigation
+   * observer supplies that id before request headers are released. */
+  bindPendingFrame(
+    frameName: string,
+    candidateUrl: string,
+    frameTreeNodeId: number,
+    now = Date.now(),
+  ): boolean {
+    if (
+      !frameName.startsWith("zeros-browser-") ||
+      frameName.length > 320 ||
+      !Number.isSafeInteger(frameTreeNodeId) ||
+      frameTreeNodeId < 1
+    ) {
+      return false;
+    }
+    this.purge(now);
+    const grant = this.grants.get(frameName);
+    if (!grant || grant.capability !== null) return false;
+    let origin: string;
+    try {
+      origin = new URL(candidateUrl).origin;
+    } catch {
+      return false;
+    }
+    if (origin !== grant.origin) return false;
+    if (grant.frameTreeNodeId !== null) {
+      return grant.frameTreeNodeId === frameTreeNodeId;
+    }
+    this.grants.set(frameName, { ...grant, frameTreeNodeId });
+    return true;
+  }
+
   allows(frameName: string, candidateUrl: string, now = Date.now()): boolean {
     this.purge(now);
     const grant = this.grants.get(frameName);

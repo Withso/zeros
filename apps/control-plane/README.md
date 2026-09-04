@@ -117,9 +117,14 @@ approved in `NODE_ENV=production` only for the explicit strict migrator, by
 putting its exact filename in `CONTROL_PLANE_MIGRATION_APPROVALS`. Production
 service boot never consumes that variable. Migration `0009` uses the guard
 because the prior and new server binaries require incompatible core schemas;
-an unapproved `0009` always fails startup. Follow the one-time procedure in
-[`docs/deployment-environments.md`](../../docs/deployment-environments.md);
-do not approve it during a rolling deploy.
+an unapproved `0009` always fails startup. Cloud-era migrations `0025`, `0060`,
+and `0061` also use it because old and new workers must not overlap their
+authority, object-lifecycle, or provider-erasure transitions. Follow the `0009`
+procedure in
+[`docs/deployment-environments.md`](../../docs/deployment-environments.md) and
+the cloud procedures in
+[`docs/cloud-workspace/infrastructure-and-operations.md`](../../docs/cloud-workspace/infrastructure-and-operations.md);
+never approve one during a rolling deploy.
 
 The strict operator command never skips an unapproved boundary. From a source
 checkout use the first command; inside the production image (where `tsx` and
@@ -130,18 +135,28 @@ pnpm --dir apps/control-plane migrate
 node dist/migrate.js
 ```
 
-Automatic service boot has exactly one filename-specific, fail-safe pause
-policy: `0025_cloud_workspace_engine_authority.sql`. It may stop before `0025`
-and serve the non-cloud control plane only when the resolved cloud runtime is
-disabled (`CLOUD_WORKSPACES_ENABLED=false` and
-`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`), every pre-`0025` cloud state
-table is empty, and no later migration is recorded. A leaked or standing
-`CONTROL_PLANE_MIGRATION_APPROVALS` value does not change that decision. Boot
-neither records `0025` nor applies any suffix; only a completed strict operator
-run can advance the ledger. The current `0025`–`0058` cloud-only suffix is
-classified explicitly; appending any migration makes this pause fail closed
-until its runtime dependency is reviewed. `/healthz` remains HTTP 200 for
-Railway but exposes the incomplete schema explicitly:
+Automatic service boot has exactly three filename-specific, fail-safe pause
+policies: `0025_cloud_workspace_engine_authority.sql`,
+`0060_cloud_workspace_pending_blob_deletions.sql`, and
+`0061_workos_provider_erasure_fences.sql`. It may stop before any
+boundary and serve the non-cloud control plane only when the resolved cloud
+runtime is disabled (`CLOUD_WORKSPACES_ENABLED=false` and
+`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`) and no later migration is
+recorded. Deferring `0025` additionally requires every pre-`0025` cloud state
+table to be empty. Deferring `0060` from a `0059` ledger permits existing cloud
+state because that is the data the controlled migration must conservatively
+backfill. Deferring `0061` permits existing state, keeps exact active WorkOS
+mappings usable, and makes unknown provider subjects fail closed until
+historical purge evidence is reconciled. At any pending cloud-era boundary,
+service boot keeps the WorkOS deletion lifecycle worker stopped; the WorkOS
+command, event-repair, and security-notification loops continue. No boundary
+DDL or cloud worker runs while it is pending. A leaked or standing
+`CONTROL_PLANE_MIGRATION_APPROVALS` value does not change any decision. Boot
+neither records the boundary nor applies its suffix; only a completed strict
+operator run can advance the ledger. All pending suffixes are classified
+explicitly, so appending any migration makes the pause fail closed until its
+runtime dependency is reviewed. `/healthz` remains HTTP 200 for Railway but
+exposes the incomplete schema explicitly:
 
 ```json
 {
@@ -160,10 +175,11 @@ While that state is present, every `/v1/devices`, Organization
 `error.code=controlled_migration_pending` before authentication or database
 access. Unrelated APIs remain available.
 
-If cloud runtime is enabled, any quota/workspace/resource/authority row already
-exists, the ledger has crossed the missing boundary, or a controlled migration
-(including `0009` or any future marker) has no explicit boot-pause policy,
-startup fails closed. Follow the exact `0025` procedure in
+If cloud runtime is enabled, the ledger has crossed a missing boundary, or a
+controlled migration (including `0009` or any future marker) has no explicit
+boot-pause policy, startup fails closed. Existing cloud state also prevents the
+special pre-`0025` pause, but is expected for the pre-`0060` and pre-`0061`
+pauses. Follow the exact `0025`, `0060`, and `0061` procedures in
 [`docs/cloud-workspace/infrastructure-and-operations.md`](../../docs/cloud-workspace/infrastructure-and-operations.md).
 
 The current tenant hierarchy is Account → Personal/Organization → Team →
@@ -212,14 +228,14 @@ does not print the database URL.
    complete a restore drill before continuing.
 3. Copy the non-secret approval value printed by the plan. Because the empty
    schema replays the full migration ladder through the strict operator runner,
-   include the exact two currently required controlled-downtime approvals as
+   include the exact four currently required controlled-downtime approvals as
    one comma-separated value, then execute:
 
    ```bash
    CONTROL_PLANE_RESET_CHANNEL=alpha \
    CONTROL_PLANE_RESET_BACKUP_CONFIRMED=true \
    CONTROL_PLANE_RESET_APPROVAL='reset:alpha:<target-fingerprint>' \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
    pnpm reset:database -- --execute
    ```
 
@@ -325,9 +341,30 @@ Verified profile updates remain subject-linked. An occupied email never
 transfers ownership. `user.deleted` disables the identity/account, revokes
 known sessions and endpoint grants, removes collaborative memberships, emits
 security revisions, and queues notification email while preserving Personal
-and product data. A same-email replacement subject enters a 24-hour recovery
-request. Only a freshly authenticated staff operator may approve it; approval
-is audited, notifies the owner, and does not restore collaborative access.
+and product data. While that retained account has not completed final purge, a
+same-email replacement subject enters a 24-hour recovery request. Only a
+freshly authenticated platform owner may approve it; approval is audited,
+notifies the owner, and does not restore collaborative access. After final
+Zeros purge there is no account to recover: a new provider subject is a fresh
+signup, while the exact erased subject remains permanently fenced.
+
+Migration `0061` stores only append-only, domain-separated subject hashes and a
+per-purge reconciliation disposition. After its drained rollout, inspect
+historical readiness as the database owner:
+
+```sh
+pnpm --dir apps/control-plane workos-erasure:manage --status
+# Production image (/app):
+node dist/manage-workos-provider-erasure.js --status
+```
+
+Unknown-subject login and event ingestion remain retryably unavailable until
+every historical purge has exact provider-audit evidence. Reconcile one request
+at a time with a read-only plan and unchanged `--execute` request; never save
+the one-shot `CONTROL_PLANE_WORKOS_ERASURE_*` variables on the service or put
+raw provider IDs in the evidence reference. The complete variables, privacy
+contract, and production confirmation are documented in
+[`docs/workos-authentication-migration.md`](../../docs/workos-authentication-migration.md#account-deletion-replacement-and-recovery).
 
 `GET /v1/auth/snapshot` and `GET /v1/auth/events` provide current revision state
 and a replayable authenticated SSE stream. They replace periodic WorkOS polls:
@@ -427,6 +464,61 @@ image, architecture, source commit, and resource allocation per generation.
 The provider reconciler uses leases, observes before mutating, recovers lost
 create responses, converges drift, and only deletes a managed true orphan after
 repeat observation plus a grace period.
+
+### Organization cloud-entitlement activation
+
+An Organization quota is resource capacity, not billing authority. Never infer
+an entitlement or paid seat from a quota row, and do not activate either with
+ad-hoc SQL. Before provisioning the first quota, use the database-owner command
+to record an explicit current Organization plan and exact active seat set. The
+Organization must be active, non-Personal, cloud-enabled, linked to one active
+WorkOS Organization, and every requested seat must identify an active member.
+The accountable actor must be an active `platform_owner`.
+
+Set `DATABASE_URL` and these one-shot inputs in a controlled operator shell:
+
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_CHANNEL`, matching
+  `RAILWAY_ENVIRONMENT_NAME` when present;
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_ORGANIZATION_ID` and
+  `CONTROL_PLANE_CLOUD_ENTITLEMENT_EXPECTED_ORGANIZATION_SLUG` for the same
+  exact Organization;
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_ACTOR_USER_ID` for the accountable platform
+  owner;
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_PLAN` (`pro`, `business`, or `enterprise`)
+  and `CONTROL_PLANE_CLOUD_ENTITLEMENT_STATUS` (`active` or `trialing`);
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_VALID_FROM` as an ISO-8601 timestamp and
+  `CONTROL_PLANE_CLOUD_ENTITLEMENT_VALID_UNTIL` as a later timestamp or the
+  explicit value `none`;
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_SEAT_LIMIT` and
+  `CONTROL_PLANE_CLOUD_ENTITLEMENT_ACTIVE_SEAT_USER_IDS`. Business/Enterprise
+  require a positive purchased limit and a comma-separated, duplicate-free list
+  of active member UUIDs within that limit. Pro requires both values to be
+  `none` and also fails closed unless every current collaborator already has
+  current Pro account authority; and
+- `CONTROL_PLANE_CLOUD_ENTITLEMENT_REASON`, a 16–512 character audit reason.
+
+Generate a read-only plan, copy its exact target-bound approval value into
+`CONTROL_PLANE_CLOUD_ENTITLEMENT_APPROVAL`, then execute:
+
+```sh
+# Source checkout
+pnpm --dir apps/control-plane cloud-entitlement:manage
+pnpm --dir apps/control-plane cloud-entitlement:manage --execute
+
+# Production image (/app)
+node dist/manage-cloud-workspace-entitlement.js
+node dist/manage-cloud-workspace-entitlement.js --execute
+```
+
+Production execution also requires
+`CONTROL_PLANE_CLOUD_ENTITLEMENT_PRODUCTION_CONFIRMED=true`. The command locks
+and revalidates the Organization, WorkOS link, actor, members, current billing
+source, entitlement, validity, and seats. It refuses to overwrite Stripe,
+contract, or migration authority and writes an immutable
+`cloud_workspace_entitlement_changes` row in the same transaction. After it
+reports `changed`, provision quota separately below. Entitlement activation
+does not create quota or object-storage limits and does not enable either cloud
+feature flag.
 
 ### Cloud-workspace quota provisioning
 
@@ -541,6 +633,57 @@ does not invent rows for existing Organizations: provision reviewed limits
 before re-enabling object-writing clients or the rotation worker. Size the
 provider volume above the aggregate application limits for filesystem metadata,
 temporary publication files, backups, and operational response headroom.
+
+### Terminal object-key rotation recovery
+
+Normal rotation scheduling is insert-only. A terminally failed job is never
+globally or automatically revived: its old target key remains permanently
+fenced, and an operator must queue one exact retry with a fresh target identity.
+Use the database-owner command only after confirming that every API and worker
+replica has the complete readable old-plus-new object keyring, the selected
+current version is the intended target, and the Organization has enough durable
+storage headroom for another copy-on-write attempt.
+
+Set the existing `DATABASE_URL`, `CLOUD_WORKSPACE_OBJECT_KEY_V1` and/or
+`CLOUD_WORKSPACE_OBJECT_KEYS_JSON`, and
+`CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION`, plus these one-shot values in a
+controlled shell (do not persist them on the web service):
+
+- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_CHANNEL`, matching
+  `RAILWAY_ENVIRONMENT_NAME` when present;
+- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_ORGANIZATION_ID` and
+  `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_EXPECTED_ORGANIZATION_SLUG`;
+- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_BLOB_ID` and
+  `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_TARGET_KEY_VERSION`;
+- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_ACTOR_USER_ID`, identifying an active
+  `platform_owner`; and
+- `CONTROL_PLANE_CLOUD_OBJECT_ROTATION_REASON`, containing a 16–512 character
+  incident or change reference.
+
+Generate a read-only plan, copy its exact approval value into
+`CONTROL_PLANE_CLOUD_OBJECT_ROTATION_APPROVAL`, then execute the unchanged
+request:
+
+```sh
+# Source checkout
+pnpm --dir apps/control-plane cloud-object-rotation:retry
+pnpm --dir apps/control-plane cloud-object-rotation:retry --execute
+
+# Production image (/app)
+node dist/manage-cloud-workspace-object-rotation.js
+node dist/manage-cloud-workspace-object-rotation.js --execute
+```
+
+Production execution additionally requires
+`CONTROL_PLANE_CLOUD_OBJECT_ROTATION_PRODUCTION_CONFIRMED=true`. The plan is
+bound to the deployment, Organization, actor, blob, target version, reason, and
+the exact locked job/fence snapshot. Execution only resets that one job to
+`queued`, assigns a new unpredictable target key and nonce, and appends
+owner-only evidence; it does not mean rotation has succeeded. Keep both key
+versions deployed and monitor rotation state, deletion-fence state, durable
+storage headroom, and health until the job is `succeeded` and its source key is
+fenced. Retire an old key only after no live blob, pending/failed job, or
+required backup can reference it.
 
 ### Secret keyring rotation
 

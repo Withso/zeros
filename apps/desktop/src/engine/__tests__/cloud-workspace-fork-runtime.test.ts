@@ -1,12 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import {
   mkdir,
   mkdtemp,
   readFile,
   realpath,
+  rename,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -374,6 +376,142 @@ describe("local and cloud workspace copy runtime", () => {
     ).toBe(true);
     await stableRuntime.dispose();
   });
+
+  it.each(["already symlinked", "swapped after inspection"] as const)(
+    "rejects a tracked file whose parent is %s before creating or finalizing a cloud fork",
+    async (parentAttack) => {
+      const sourceCreated = await createWorkspace({
+        repoRoot,
+        runRepoScripts: false,
+      });
+      const source = getWorkspace(sourceCreated.workspaceId);
+      const nested = path.join(source.path, "nested");
+      const leaf = path.join(nested, "entry.txt");
+      const relocated = path.join(workdir, `relocated-${parentAttack}`);
+      await mkdir(nested);
+      await writeFile(leaf, "captured through parent\n");
+      await writeFile(path.join(source.path, ".gitignore"), "/nested\n");
+      await execFileAsync("git", ["add", ".gitignore"], {
+        cwd: source.path,
+      });
+      await execFileAsync("git", ["add", "--force", "nested/entry.txt"], {
+        cwd: source.path,
+      });
+      await execFileAsync("git", ["commit", "-q", "-m", "nested entry"], {
+        cwd: source.path,
+      });
+
+      let swapped = false;
+      let leafInspections = 0;
+      let restoreLstat: (() => void) | null = null;
+      if (parentAttack === "already symlinked") {
+        await rename(nested, relocated);
+        await symlink(relocated, nested);
+      } else {
+        const originalLstat = fs.lstat.bind(fs);
+        const lstat = vi
+          .spyOn(fs, "lstat")
+          .mockImplementation(async (...args) => {
+            const result = await originalLstat(...args);
+            if (path.basename(String(args[0])) === "entry.txt") {
+              leafInspections += 1;
+              if (!swapped) {
+                swapped = true;
+                await rename(nested, relocated);
+                await symlink(relocated, nested);
+              } else if (leafInspections === 2) {
+                await fs.unlink(nested);
+                await rename(relocated, nested);
+              }
+            }
+            return result;
+          });
+        restoreLstat = () => lstat.mockRestore();
+      }
+
+      const lifecycleIntentId = randomUUID();
+      const forkIntentId = randomUUID();
+      const createCloudFromLocal = vi.fn(
+        async ({
+          targetWorkspaceId,
+        }: Parameters<CloudWorkspaceDesktopApi["createCloudFromLocal"]>[0]) => ({
+          workspaceId: targetWorkspaceId,
+          lifecycleIntentId,
+          forkIntentId,
+          replayed: false,
+        }),
+      );
+      const uploadForkBlob = vi.fn(
+        async ({
+          bytes,
+        }: Parameters<CloudWorkspaceDesktopApi["uploadForkBlob"]>[0]) => ({
+          id: randomUUID(),
+          plaintextSha256: createHash("sha256").update(bytes).digest("hex"),
+          plaintextBytes: bytes.byteLength,
+          reused: false,
+        }),
+      );
+      const stageForkEntries = vi.fn(
+        async ({
+          entries,
+        }: Parameters<CloudWorkspaceDesktopApi["stageForkEntries"]>[0]) => ({
+          accepted: entries.length,
+        }),
+      );
+      const stageForkRecords = vi.fn(
+        async ({
+          records,
+        }: Parameters<CloudWorkspaceDesktopApi["stageForkRecords"]>[0]) => ({
+          accepted: records.length,
+        }),
+      );
+      const finalizeForkImport = vi.fn(async () => ({
+        checkpointId: randomUUID(),
+        replayed: false,
+      }));
+      const accountUserId = randomUUID();
+      const runtime = new CloudWorkspaceForkRuntime(openZerosDb(), {
+        context: () => ({
+          accountUserId,
+          api: api({
+            createCloudFromLocal,
+            uploadForkBlob,
+            stageForkEntries,
+            stageForkRecords,
+            finalizeForkImport,
+          }),
+        }),
+        schedulerIntervalMs: 300_000,
+      });
+      try {
+        await expect(
+          runtime.copyLocalToCloud({
+            sourceWorkspaceAlias: source.id,
+            organizationId: randomUUID(),
+            repository: {
+              forge: "github.com",
+              owner: "acme",
+              name: "example",
+              revision: "main",
+              githubInstallationId: randomUUID(),
+            },
+            includeChats: false,
+          }),
+        ).rejects.toThrow(/ENOTDIR|ELOOP|parent/);
+        expect(createCloudFromLocal).not.toHaveBeenCalled();
+        expect(uploadForkBlob).not.toHaveBeenCalled();
+        expect(stageForkEntries).not.toHaveBeenCalled();
+        expect(stageForkRecords).not.toHaveBeenCalled();
+        expect(finalizeForkImport).not.toHaveBeenCalled();
+        if (parentAttack === "swapped after inspection") {
+          expect(swapped).toBe(true);
+        }
+      } finally {
+        restoreLstat?.();
+        await runtime.dispose();
+      }
+    },
+  );
 
   it("rejects a cloud transcript page that skips a durable revision", async () => {
     const organizationId = randomUUID();

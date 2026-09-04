@@ -191,21 +191,32 @@ function parseEntry(value: unknown): RecordEntry {
 
 export class CloudWorkspaceRecordRuntime {
   private readonly requestFetch: typeof fetch;
+  private readonly now: () => number;
   private active: Promise<void> | null = null;
 
   constructor(
     private readonly repositoryRoot: string,
-    dependencies: { fetch?: typeof fetch } = {},
+    dependencies: { fetch?: typeof fetch; now?: () => number } = {},
   ) {
     if (!path.isAbsolute(repositoryRoot)) {
       throw new Error("cloud record repository root is invalid");
     }
     this.requestFetch = dependencies.fetch ?? globalThis.fetch;
+    this.now = dependencies.now ?? Date.now;
   }
 
-  synchronize(authority: CloudDurabilityAuthority): Promise<void> {
+  /** Boot recovery runs before the remote projection exists locally. The
+   * settle flag is reserved for that first, pre-readiness import; ordinary and
+   * checkpoint syncs must preserve live running rows. */
+  synchronize(
+    authority: CloudDurabilityAuthority,
+    options: { settleImportedRunningTurns?: boolean } = {},
+  ): Promise<void> {
     if (this.active) return this.active;
-    const task = this.run(authority).finally(() => {
+    const settleImportedRunningAt = options.settleImportedRunningTurns
+      ? this.now()
+      : null;
+    const task = this.run(authority, settleImportedRunningAt).finally(() => {
       if (this.active === task) this.active = null;
     });
     this.active = task;
@@ -438,6 +449,7 @@ export class CloudWorkspaceRecordRuntime {
   private restoreRemote(
     remote: Map<string, RecordEntry>,
     mode: "replace" | "missing",
+    settleImportedRunningAt: number | null,
   ): void {
     const db = openZerosDb();
     const existing = this.localProjection();
@@ -543,9 +555,8 @@ export class CloudWorkspaceRecordRuntime {
         !availableChats.has(row.chat_id) ||
         natural(row.ord) === null ||
         natural(row.started_at) === null ||
-        !["running", "completed", "failed", "cancelled"].includes(
-          String(row.status),
-        ) ||
+        typeof row.status !== "string" ||
+        !["running", "completed", "failed", "cancelled"].includes(row.status) ||
         (row.ended_at !== null && natural(row.ended_at) === null)
       ) {
         throw new Error("cloud turn document is invalid");
@@ -563,6 +574,8 @@ export class CloudWorkspaceRecordRuntime {
       if (row.folder !== null && folder === null) {
         throw new Error("cloud turn document is invalid");
       }
+      const settleRunning =
+        settleImportedRunningAt !== null && row.status === "running";
       turns.push({
         chat_id: row.chat_id,
         turn_id: row.turn_id,
@@ -572,13 +585,31 @@ export class CloudWorkspaceRecordRuntime {
         ord: Number(row.ord),
         summary: typeof row.summary === "string" ? row.summary : null,
         started_at: Number(row.started_at),
-        ended_at: row.ended_at === null ? null : Number(row.ended_at),
-        stop_reason: typeof row.stop_reason === "string" ? row.stop_reason : null,
-        status: String(row.status) as TurnDbRow["status"],
+        // Match the existing boot janitor's serialized terminal shape. The
+        // remote row cannot retain execution authority in a fresh process.
+        ended_at: settleRunning
+          ? settleImportedRunningAt
+          : row.ended_at === null
+            ? null
+            : Number(row.ended_at),
+        stop_reason: settleRunning
+          ? null
+          : typeof row.stop_reason === "string"
+            ? row.stop_reason
+            : null,
+        status: settleRunning ? "failed" : row.status,
         pre_snapshot: null,
         post_snapshot: null,
-        files: typeof row.files === "string" ? row.files : null,
-        usage: typeof row.usage === "string" ? row.usage : null,
+        files: settleRunning
+          ? "[]"
+          : typeof row.files === "string"
+            ? row.files
+            : null,
+        usage: settleRunning
+          ? null
+          : typeof row.usage === "string"
+            ? row.usage
+            : null,
         rev: 0,
       });
     }
@@ -726,7 +757,10 @@ export class CloudWorkspaceRecordRuntime {
     return Number(raw.currentRevision);
   }
 
-  private async run(authority: CloudDurabilityAuthority): Promise<void> {
+  private async run(
+    authority: CloudDurabilityAuthority,
+    settleImportedRunningAt: number | null,
+  ): Promise<void> {
     if (
       !UUID_PATTERN.test(authority.workspaceId) ||
       !UUID_PATTERN.test(authority.organizationId) ||
@@ -743,7 +777,11 @@ export class CloudWorkspaceRecordRuntime {
           localBefore.size === 0 ||
           (state !== null &&
             this.manifest(localBefore) === state.manifestSha256);
-        this.restoreRemote(remote.entries, clean ? "replace" : "missing");
+        this.restoreRemote(
+          remote.entries,
+          clean ? "replace" : "missing",
+          settleImportedRunningAt,
+        );
       }
       const local = this.localProjection();
       const pending = this.mutations(local, remote.entries);

@@ -1,12 +1,14 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { constants as fsConstants, promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs, type Stats } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const CONTENT_HEAD_PATH = "/internal/v1/cloud-workspaces/engine/content/head";
-const CONTENT_APPEND_PATH = "/internal/v1/cloud-workspaces/engine/content/append";
+const CONTENT_APPEND_PATH =
+  "/internal/v1/cloud-workspaces/engine/content/append";
 const CHECKPOINT_PATH =
   "/internal/v1/cloud-workspaces/engine/checkpoints/commit";
 const BLOB_PATH = "/internal/v1/cloud-workspaces/engine/blobs";
@@ -18,6 +20,9 @@ const MAX_FILE_BYTES = 64 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const MAX_FILES = 100_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+// O_PATH is Linux-specific and intentionally used only behind a platform gate.
+// Node does not expose it, but Linux keeps this UAPI value stable across arches.
+const LINUX_O_PATH = 0o10000000;
 
 export type CloudCheckpointDirective = {
   id: string;
@@ -152,11 +157,61 @@ function secretLike(relativePath: string): boolean {
 function splitNull(source: Buffer): string[] {
   if (source.length === 0) return [];
   if (source.at(-1) !== 0) throw new Error("git path output is invalid");
-  return source
-    .subarray(0, -1)
-    .toString("utf8")
-    .split("\0")
-    .map(normalizedPath);
+  const values: string[] = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let start = 0;
+  for (let end = 0; end < source.length; end += 1) {
+    if (source[end] !== 0) continue;
+    let value: string;
+    try {
+      value = decoder.decode(source.subarray(start, end));
+    } catch {
+      throw new Error("git path output is not valid UTF-8");
+    }
+    values.push(normalizedPath(value));
+    start = end + 1;
+  }
+  return values;
+}
+
+function validateSymlinkTarget(relativePath: string, bytes: Buffer): void {
+  let value: string;
+  try {
+    value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("cloud checkpoint symlink target is not valid UTF-8");
+  }
+  if (
+    bytes.length < 1 ||
+    bytes.length > 4_096 ||
+    value.length < 1 ||
+    value.length > 4_096 ||
+    value !== value.normalize("NFC") ||
+    value.includes("\\") ||
+    path.posix.isAbsolute(value) ||
+    // eslint-disable-next-line no-control-regex -- link targets reject C0 and DEL
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error("cloud checkpoint symlink target is unsafe");
+  }
+  const resolved = path.posix.normalize(
+    path.posix.join(path.posix.dirname(relativePath), value),
+  );
+  if (
+    resolved === "." ||
+    resolved === ".." ||
+    resolved.startsWith("../") ||
+    path.posix.isAbsolute(resolved)
+  ) {
+    throw new Error("cloud checkpoint symlink target escaped the repository");
+  }
+  normalizedPath(resolved);
+  if (
+    resolved.toLocaleLowerCase("en-US") === ".zeros" ||
+    secretLike(resolved)
+  ) {
+    throw new Error("cloud checkpoint symlink target is excluded");
+  }
 }
 
 async function gitBuffer(root: string, args: string[]): Promise<Buffer> {
@@ -181,62 +236,200 @@ async function gitText(root: string, args: string[]): Promise<string> {
   return (await gitBuffer(root, args)).toString("utf8").trim();
 }
 
-async function readEntry(root: string, relativePath: string): Promise<ScannedEntry> {
-  const absolute = path.join(root, ...relativePath.split("/"));
-  const relative = path.relative(root, absolute);
-  if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("cloud checkpoint path escaped the repository");
+type NamedDirectoryBinding = {
+  absolutePath: string;
+  stat: Stats;
+};
+
+type LinuxDirectoryBinding = NamedDirectoryBinding & {
+  handle: FileHandle;
+};
+
+type CaptureRoot = {
+  root: string;
+  binding: NamedDirectoryBinding;
+  linux: LinuxDirectoryBinding | null;
+};
+
+function sameIdentity(left: Stats, right: Stats): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function sameStableEntry(left: Stats, right: Stats): boolean {
+  return (
+    sameIdentity(left, right) &&
+    left.mode === right.mode &&
+    left.nlink === right.nlink &&
+    left.size === right.size &&
+    left.mtimeMs === right.mtimeMs &&
+    left.ctimeMs === right.ctimeMs
+  );
+}
+
+function noFollowFlag(): number {
+  if (!Number.isInteger(fsConstants.O_NOFOLLOW)) {
+    throw new Error("no-follow cloud checkpoint capture is unavailable");
   }
-  const before = await fs.lstat(absolute);
-  let bytes: Buffer;
-  let entryType: "file" | "symlink";
-  let mode: 33188 | 33261 | 40960;
-  if (before.isSymbolicLink()) {
-    entryType = "symlink";
-    mode = 40960;
-    bytes = Buffer.from(await fs.readlink(absolute), "utf8");
-    if (bytes.length > 4_096) {
-      bytes.fill(0);
-      throw new Error("cloud checkpoint symlink is too large");
-    }
-  } else if (before.isFile()) {
-    if (before.size > MAX_FILE_BYTES || before.nlink !== 1) {
-      throw new Error("cloud checkpoint file is unsupported or too large");
-    }
-    entryType = "file";
-    mode = (before.mode & 0o111) === 0 ? 33188 : 33261;
-    const handle = await fs.open(
-      absolute,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
-    );
-    try {
-      const opened = await handle.stat();
-      if (
-        !opened.isFile() ||
-        opened.dev !== before.dev ||
-        opened.ino !== before.ino ||
-        opened.size !== before.size ||
-        opened.nlink !== 1
-      ) {
-        throw new Error("cloud checkpoint file changed during scan");
-      }
-      bytes = await handle.readFile();
-    } finally {
-      await handle.close();
-    }
-  } else {
-    throw new Error("cloud checkpoint path type is unsupported");
+  return fsConstants.O_NOFOLLOW;
+}
+
+function linuxDirectoryFlags(): number {
+  if (!Number.isInteger(fsConstants.O_DIRECTORY)) {
+    throw new Error("secure Linux cloud checkpoint capture is unavailable");
   }
-  const after = await fs.lstat(absolute);
+  return fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | noFollowFlag();
+}
+
+function linuxDescriptorChild(handle: FileHandle, component: string): string {
   if (
-    after.dev !== before.dev ||
-    after.ino !== before.ino ||
-    after.size !== before.size ||
-    after.mtimeMs !== before.mtimeMs
+    component.length < 1 ||
+    component === "." ||
+    component === ".." ||
+    component.includes("/")
   ) {
-    bytes.fill(0);
-    throw new Error("cloud checkpoint file changed during scan");
+    throw new Error("cloud checkpoint descriptor component is invalid");
   }
+  // `/proc/self/fd/<fd>` is the one intentionally followed magic link: the
+  // kernel creates it from a directory descriptor this process already owns.
+  // The worker-controlled component is a single final component and every
+  // directory/file open applies O_NOFOLLOW, so it cannot redirect traversal.
+  return `/proc/self/fd/${handle.fd}/${component}`;
+}
+
+async function openLinuxDirectory(
+  parent: FileHandle,
+  component: string,
+  absolutePath: string,
+): Promise<LinuxDirectoryBinding> {
+  const handle = await fs.open(
+    linuxDescriptorChild(parent, component),
+    linuxDirectoryFlags(),
+  );
+  try {
+    const stat = await handle.stat();
+    if (!stat.isDirectory()) {
+      throw new Error("cloud checkpoint parent is not a directory");
+    }
+    return { absolutePath, handle, stat };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function openLinuxCaptureRoot(
+  root: string,
+): Promise<LinuxDirectoryBinding> {
+  const filesystemRoot = path.parse(root).root;
+  let handle = await fs.open(filesystemRoot, linuxDirectoryFlags());
+  let currentPath = filesystemRoot;
+  try {
+    for (const component of path
+      .relative(filesystemRoot, root)
+      .split(path.sep)
+      .filter(Boolean)) {
+      const nextPath = path.join(currentPath, component);
+      const next = await openLinuxDirectory(handle, component, nextPath);
+      await handle.close();
+      handle = next.handle;
+      currentPath = nextPath;
+    }
+    const stat = await handle.stat();
+    const [named, anchored] = await Promise.all([
+      fs.lstat(root),
+      fs.stat(`/proc/self/fd/${handle.fd}`),
+    ]);
+    if (
+      !named.isDirectory() ||
+      named.isSymbolicLink() ||
+      !sameIdentity(stat, named) ||
+      !sameIdentity(stat, anchored)
+    ) {
+      throw new Error("cloud checkpoint repository root is unsafe");
+    }
+    return { absolutePath: root, handle, stat };
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function openCaptureRoot(
+  root: string,
+  requireDescriptorSafety: boolean,
+): Promise<CaptureRoot> {
+  const resolved = await fs.realpath(root);
+  if (
+    resolved !== root ||
+    !path.isAbsolute(root) ||
+    root === path.parse(root).root
+  ) {
+    throw new Error("cloud checkpoint repository root is invalid");
+  }
+  if (process.platform === "linux") {
+    const linux = await openLinuxCaptureRoot(root);
+    return { root, binding: linux, linux };
+  }
+  if (requireDescriptorSafety) {
+    throw new Error(
+      "privileged cloud checkpoint capture requires Linux descriptor safety",
+    );
+  }
+  const stat = await fs.lstat(root);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error("cloud checkpoint repository root is unsafe");
+  }
+  return {
+    root,
+    binding: { absolutePath: root, stat },
+    linux: null,
+  };
+}
+
+async function withCaptureRoot<T>(
+  root: string,
+  requireDescriptorSafety: boolean,
+  operation: (captureRoot: CaptureRoot, commandRoot: string) => Promise<T>,
+): Promise<T> {
+  const captureRoot = await openCaptureRoot(root, requireDescriptorSafety);
+  const commandRoot = captureRoot.linux
+    ? `/proc/${process.pid}/fd/${captureRoot.linux.handle.fd}`
+    : captureRoot.root;
+  try {
+    return await operation(captureRoot, commandRoot);
+  } finally {
+    await captureRoot.linux?.handle.close().catch(() => undefined);
+  }
+}
+
+async function verifyDirectoryBindings(
+  bindings: readonly NamedDirectoryBinding[],
+): Promise<void> {
+  for (const binding of bindings) {
+    let current: Stats;
+    try {
+      current = await fs.lstat(binding.absolutePath);
+    } catch (error) {
+      throw new Error("cloud checkpoint parent changed during scan", {
+        cause: error,
+      });
+    }
+    if (
+      !current.isDirectory() ||
+      current.isSymbolicLink() ||
+      !sameIdentity(current, binding.stat)
+    ) {
+      throw new Error("cloud checkpoint parent changed during scan");
+    }
+  }
+}
+
+function scannedEntry(
+  relativePath: string,
+  entryType: "file" | "symlink",
+  mode: 33188 | 33261 | 40960,
+  bytes: Buffer,
+): ScannedEntry {
   return {
     path: relativePath,
     entryType,
@@ -247,115 +440,277 @@ async function readEntry(root: string, relativePath: string): Promise<ScannedEnt
   };
 }
 
+async function readBoundLeaf(
+  leafPath: string,
+  relativePath: string,
+  descriptorBound: boolean,
+  verifyParents: () => Promise<void>,
+): Promise<ScannedEntry> {
+  const before = await fs.lstat(leafPath);
+  let bytes: Buffer | null = null;
+  try {
+    if (before.isSymbolicLink()) {
+      let linkHandle: FileHandle | null = null;
+      try {
+        if (descriptorBound) {
+          linkHandle = await fs.open(leafPath, LINUX_O_PATH | noFollowFlag());
+          const opened = await linkHandle.stat();
+          if (!opened.isSymbolicLink() || !sameStableEntry(opened, before)) {
+            throw new Error("cloud checkpoint symlink changed during scan");
+          }
+        }
+        bytes = await fs.readlink(leafPath, { encoding: "buffer" });
+        validateSymlinkTarget(relativePath, bytes);
+        await verifyParents();
+        let after: Stats;
+        try {
+          after = await fs.lstat(leafPath);
+        } catch (error) {
+          throw new Error("cloud checkpoint symlink changed during scan", {
+            cause: error,
+          });
+        }
+        const expected = linkHandle ? await linkHandle.stat() : before;
+        if (!after.isSymbolicLink() || !sameStableEntry(after, expected)) {
+          throw new Error("cloud checkpoint symlink changed during scan");
+        }
+        return scannedEntry(relativePath, "symlink", 40960, bytes);
+      } finally {
+        await linkHandle?.close().catch(() => undefined);
+      }
+    }
+    if (!before.isFile()) {
+      throw new Error("cloud checkpoint path type is unsupported");
+    }
+    if (before.size > MAX_FILE_BYTES || before.nlink !== 1) {
+      throw new Error("cloud checkpoint file is unsupported or too large");
+    }
+    const handle = await fs.open(
+      leafPath,
+      fsConstants.O_RDONLY | noFollowFlag(),
+    );
+    try {
+      const opened = await handle.stat();
+      if (
+        !opened.isFile() ||
+        opened.nlink !== 1 ||
+        !sameStableEntry(opened, before)
+      ) {
+        throw new Error("cloud checkpoint file changed during scan");
+      }
+      bytes = await handle.readFile();
+      await verifyParents();
+      const after = await handle.stat();
+      if (
+        !after.isFile() ||
+        after.nlink !== 1 ||
+        after.size > MAX_FILE_BYTES ||
+        bytes.length !== after.size ||
+        !sameStableEntry(after, opened)
+      ) {
+        throw new Error("cloud checkpoint file changed during scan");
+      }
+      const mode = (opened.mode & 0o111) === 0 ? 33188 : 33261;
+      return scannedEntry(relativePath, "file", mode, bytes);
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    bytes?.fill(0);
+    throw error;
+  }
+}
+
+async function readLinuxEntry(
+  captureRoot: CaptureRoot,
+  rootBinding: LinuxDirectoryBinding,
+  relativePath: string,
+): Promise<ScannedEntry> {
+  const components = relativePath.split("/");
+  const openedParents: LinuxDirectoryBinding[] = [];
+  let parent = rootBinding;
+  try {
+    for (const component of components.slice(0, -1)) {
+      const absolutePath = path.join(parent.absolutePath, component);
+      const opened = await openLinuxDirectory(
+        parent.handle,
+        component,
+        absolutePath,
+      );
+      openedParents.push(opened);
+      parent = opened;
+    }
+    const leaf = components.at(-1)!;
+    return await readBoundLeaf(
+      linuxDescriptorChild(parent.handle, leaf),
+      relativePath,
+      true,
+      () => verifyDirectoryBindings([captureRoot.binding, ...openedParents]),
+    );
+  } finally {
+    for (const binding of openedParents.reverse()) {
+      await binding.handle.close().catch(() => undefined);
+    }
+  }
+}
+
+async function readPortableEntry(
+  captureRoot: CaptureRoot,
+  relativePath: string,
+): Promise<ScannedEntry> {
+  const components = relativePath.split("/");
+  const bindings: NamedDirectoryBinding[] = [captureRoot.binding];
+  let current = captureRoot.root;
+  for (const component of components.slice(0, -1)) {
+    current = path.join(current, component);
+    const stat = await fs.lstat(current);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error("cloud checkpoint parent is unsafe");
+    }
+    bindings.push({ absolutePath: current, stat });
+  }
+  return readBoundLeaf(
+    path.join(captureRoot.root, ...components),
+    relativePath,
+    false,
+    () => verifyDirectoryBindings(bindings),
+  );
+}
+
+async function readEntry(
+  captureRoot: CaptureRoot,
+  relativePath: string,
+): Promise<ScannedEntry> {
+  const linux = captureRoot.linux;
+  return linux
+    ? readLinuxEntry(captureRoot, linux, relativePath)
+    : readPortableEntry(captureRoot, relativePath);
+}
+
 async function scanCloudWorkspaceChangesOnce(
   root: string,
   baseCommit: string | null,
   includeRepositorySettings: boolean,
+  requireDescriptorSafety: boolean,
 ): Promise<CloudWorkspaceChangeScan> {
-  const resolved = await fs.realpath(root);
-  if (resolved !== root || !path.isAbsolute(root)) {
-    throw new Error("cloud checkpoint repository root is invalid");
-  }
-  const revision = baseCommit ?? "HEAD";
-  const [commit, tracked, changed, untracked] = await Promise.all([
-    gitText(root, ["rev-parse", "--verify", `${revision}^{commit}`]),
-    gitBuffer(root, ["ls-files", "-z", "--cached", "--"]),
-    gitBuffer(root, [
-      "diff",
-      "--name-only",
-      "-z",
-      "--no-ext-diff",
-      "--no-renames",
-      revision,
-      "--",
-    ]),
-    gitBuffer(root, ["ls-files", "-z", "--others", "--exclude-standard", "--"]),
-  ]);
-  if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
-    throw new Error("cloud checkpoint Git base is invalid");
-  }
-  let headRef: string | null = null;
-  try {
-    const candidate = await gitText(root, ["symbolic-ref", "-q", "HEAD"]);
-    headRef = candidate.length > 0 && candidate.length <= 512 ? candidate : null;
-  } catch {
-    headRef = null;
-  }
-  // The durable projection is the complete safe working tree, not merely the
-  // dirty overlay. This keeps a receive-only folder useful without copying
-  // `.git` and makes a revert-to-HEAD distinguishable from a tracked deletion.
-  // `changed` remains in the union because an index-staged deletion no longer
-  // appears in `ls-files --cached` but must still become a tombstone.
-  const paths = [
-    ...new Set([
-      ...splitNull(tracked),
-      ...splitNull(changed),
-      ...splitNull(untracked),
-    ]),
-  ]
-    .filter(
-      (entry) =>
-        !secretLike(entry) &&
-        (includeRepositorySettings ||
-          entry.toLocaleLowerCase("en-US") !== ".zeros/settings.toml"),
-    )
-    .sort((left, right) =>
-      Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
-    );
-  if (paths.length > MAX_FILES) {
-    throw new Error("cloud checkpoint contains too many files");
-  }
-  const collisionKeys = new Set<string>();
-  const entries = new Map<string, ScannedEntry>();
-  const deletions = new Set<string>();
-  let totalBytes = 0;
-  try {
-    for (const relativePath of paths) {
-      const collision = relativePath
-        .normalize("NFKC")
-        .toLocaleLowerCase("en-US");
-      if (collisionKeys.has(collision)) {
-        throw new Error("cloud checkpoint contains a path collision");
+  return withCaptureRoot(
+    root,
+    requireDescriptorSafety,
+    async (captureRoot, commandRoot) => {
+      const revision = baseCommit ?? "HEAD";
+      const [commit, tracked, changed, untracked] = await Promise.all([
+        gitText(commandRoot, ["rev-parse", "--verify", `${revision}^{commit}`]),
+        gitBuffer(commandRoot, ["ls-files", "-z", "--cached", "--"]),
+        gitBuffer(commandRoot, [
+          "diff",
+          "--name-only",
+          "-z",
+          "--no-ext-diff",
+          "--no-renames",
+          revision,
+          "--",
+        ]),
+        gitBuffer(commandRoot, [
+          "ls-files",
+          "-z",
+          "--others",
+          "--exclude-standard",
+          "--",
+        ]),
+      ]);
+      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
+        throw new Error("cloud checkpoint Git base is invalid");
       }
-      collisionKeys.add(collision);
+      let headRef: string | null = null;
       try {
-        const entry = await readEntry(root, relativePath);
-        totalBytes += entry.sizeBytes;
-        if (totalBytes > MAX_TOTAL_BYTES) {
-          entry.bytes.fill(0);
-          throw new Error("cloud checkpoint is too large");
-        }
-        entries.set(relativePath, entry);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-        deletions.add(relativePath);
+        const candidate = await gitText(commandRoot, [
+          "symbolic-ref",
+          "-q",
+          "HEAD",
+        ]);
+        headRef =
+          candidate.length > 0 && candidate.length <= 512 ? candidate : null;
+      } catch {
+        headRef = null;
       }
-    }
-    const fingerprint = createHash("sha256")
-      .update(commit)
-      .update("\0")
-      .update(headRef ?? "")
-      .update("\0")
-      .update(
-        JSON.stringify(
-          [...entries.values()].map(({ bytes: _bytes, ...entry }) => entry),
-        ),
-      )
-      .update("\0")
-      .update(JSON.stringify([...deletions]))
-      .digest("hex");
-    return {
-      gitBaseCommit: commit,
-      gitHeadRef: headRef,
-      entries,
-      deletions,
-      fingerprint,
-      totalBytes,
-    };
-  } catch (error) {
-    for (const entry of entries.values()) entry.bytes.fill(0);
-    throw error;
-  }
+      // The durable projection is the complete safe working tree, not merely the
+      // dirty overlay. This keeps a receive-only folder useful without copying
+      // `.git` and makes a revert-to-HEAD distinguishable from a tracked deletion.
+      // `changed` remains in the union because an index-staged deletion no longer
+      // appears in `ls-files --cached` but must still become a tombstone.
+      const paths = [
+        ...new Set([
+          ...splitNull(tracked),
+          ...splitNull(changed),
+          ...splitNull(untracked),
+        ]),
+      ]
+        .filter(
+          (entry) =>
+            !secretLike(entry) &&
+            (includeRepositorySettings ||
+              entry.toLocaleLowerCase("en-US") !== ".zeros/settings.toml"),
+        )
+        .sort((left, right) =>
+          Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8")),
+        );
+      if (paths.length > MAX_FILES) {
+        throw new Error("cloud checkpoint contains too many files");
+      }
+      const collisionKeys = new Set<string>();
+      const entries = new Map<string, ScannedEntry>();
+      const deletions = new Set<string>();
+      let totalBytes = 0;
+      try {
+        for (const relativePath of paths) {
+          const collision = relativePath
+            .normalize("NFKC")
+            .toLocaleLowerCase("en-US");
+          if (collisionKeys.has(collision)) {
+            throw new Error("cloud checkpoint contains a path collision");
+          }
+          collisionKeys.add(collision);
+          try {
+            const entry = await readEntry(captureRoot, relativePath);
+            totalBytes += entry.sizeBytes;
+            if (totalBytes > MAX_TOTAL_BYTES) {
+              entry.bytes.fill(0);
+              throw new Error("cloud checkpoint is too large");
+            }
+            entries.set(relativePath, entry);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            deletions.add(relativePath);
+          }
+        }
+        await verifyDirectoryBindings([captureRoot.binding]);
+        const fingerprint = createHash("sha256")
+          .update(commit)
+          .update("\0")
+          .update(headRef ?? "")
+          .update("\0")
+          .update(
+            JSON.stringify(
+              [...entries.values()].map(({ bytes: _bytes, ...entry }) => entry),
+            ),
+          )
+          .update("\0")
+          .update(JSON.stringify([...deletions]))
+          .digest("hex");
+        return {
+          gitBaseCommit: commit,
+          gitHeadRef: headRef,
+          entries,
+          deletions,
+          fingerprint,
+          totalBytes,
+        };
+      } catch (error) {
+        for (const entry of entries.values()) entry.bytes.fill(0);
+        throw error;
+      }
+    },
+  );
 }
 
 /** Capture the working-tree overlay relative to an exact Git base. Production
@@ -368,6 +723,8 @@ export async function scanCloudWorkspaceChanges(
     baseCommit?: string;
     verifyStable?: boolean;
     includeRepositorySettings?: boolean;
+    /** Privileged cloud-engine capture has no pathname-only fallback. */
+    requireDescriptorSafety?: boolean;
   } = {},
 ): Promise<CloudWorkspaceChangeScan> {
   const baseCommit = options.baseCommit ?? null;
@@ -382,6 +739,7 @@ export async function scanCloudWorkspaceChanges(
     root,
     baseCommit,
     includeRepositorySettings,
+    options.requireDescriptorSafety === true,
   );
   if (!options.verifyStable) return first;
   let confirmation: CloudWorkspaceChangeScan | null = null;
@@ -390,6 +748,7 @@ export async function scanCloudWorkspaceChanges(
       root,
       baseCommit,
       includeRepositorySettings,
+      options.requireDescriptorSafety === true,
     );
     if (confirmation.fingerprint !== first.fingerprint) {
       throw new Error("cloud checkpoint changed while it was being captured");
@@ -414,13 +773,17 @@ async function boundedJson(response: Response): Promise<unknown> {
     throw new Error("cloud durability response is invalid");
   }
   const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && (declared < 0 || declared > MAX_JSON_BYTES)) {
+  if (
+    Number.isFinite(declared) &&
+    (declared < 0 || declared > MAX_JSON_BYTES)
+  ) {
     await response.body?.cancel().catch(() => undefined);
     throw new Error("cloud durability response is too large");
   }
   const bytes = Buffer.from(await response.arrayBuffer());
   try {
-    if (bytes.length > MAX_JSON_BYTES) throw new Error("cloud durability response is too large");
+    if (bytes.length > MAX_JSON_BYTES)
+      throw new Error("cloud durability response is too large");
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } finally {
     bytes.fill(0);
@@ -450,7 +813,10 @@ export class CloudWorkspaceDurabilityRuntime {
     return task;
   }
 
-  private endpoint(authority: CloudDurabilityAuthority, pathname: string): string {
+  private endpoint(
+    authority: CloudDurabilityAuthority,
+    pathname: string,
+  ): string {
     const origin = new URL(authority.heartbeatEndpoint).origin;
     return `${origin}${pathname}`;
   }
@@ -529,7 +895,9 @@ export class CloudWorkspaceDurabilityRuntime {
       }
       if (revision === null) revision = Number(raw.currentRevision);
       else if (revision !== raw.currentRevision) {
-        throw new Error("cloud durability projection changed during pagination");
+        throw new Error(
+          "cloud durability projection changed during pagination",
+        );
       }
       for (const candidate of raw.entries) {
         if (
@@ -550,7 +918,8 @@ export class CloudWorkspaceDurabilityRuntime {
           throw new Error("cloud durability projection is invalid");
         }
         const entryPath = normalizedPath(candidate.path);
-        if (entries.has(entryPath)) throw new Error("cloud durability projection is invalid");
+        if (entries.has(entryPath))
+          throw new Error("cloud durability projection is invalid");
         const blobId = candidate.blobId;
         const contentSha256 = candidate.contentSha256;
         if (candidate.operation === "delete") {
@@ -673,17 +1042,30 @@ export class CloudWorkspaceDurabilityRuntime {
     ) {
       throw new Error("cloud checkpoint directive is invalid");
     }
+    // This runtime is constructed only for the privileged cloud engine. Local
+    // desktop forks call the scanner directly and may use the portable path
+    // verifier; an authority-bearing checkpoint may never fall back to it.
+    if (process.platform !== "linux") {
+      throw new Error(
+        "privileged cloud checkpoint capture requires Linux descriptor safety",
+      );
+    }
     let projection = await this.loadProjection(authority);
     let finalScan: CloudWorkspaceChangeScan | null = null;
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const scan = await scanCloudWorkspaceChanges(this.repositoryRoot);
+        const scan = await scanCloudWorkspaceChanges(this.repositoryRoot, {
+          requireDescriptorSafety: true,
+        });
         const mutations: Array<Record<string, unknown>> = [];
         const deletedPaths = new Set<string>();
         for (const [entryPath, prior] of projection.entries) {
           if (prior.operation === "delete" && !scan.entries.has(entryPath)) {
             deletedPaths.add(entryPath);
-          } else if (prior.operation === "upsert" && !scan.entries.has(entryPath)) {
+          } else if (
+            prior.operation === "upsert" &&
+            !scan.entries.has(entryPath)
+          ) {
             mutations.push({ operation: "delete", path: entryPath });
             deletedPaths.add(entryPath);
           } else if (secretLike(entryPath)) {
@@ -713,14 +1095,21 @@ export class CloudWorkspaceDurabilityRuntime {
           const uploaded = await this.upload(authority, entry);
           mutations.push(uploaded);
         }
-        const confirmation = await scanCloudWorkspaceChanges(this.repositoryRoot);
+        const confirmation = await scanCloudWorkspaceChanges(
+          this.repositoryRoot,
+          { requireDescriptorSafety: true },
+        );
         for (const entry of scan.entries.values()) entry.bytes.fill(0);
         if (confirmation.fingerprint !== scan.fingerprint) {
-          for (const entry of confirmation.entries.values()) entry.bytes.fill(0);
+          for (const entry of confirmation.entries.values())
+            entry.bytes.fill(0);
           continue;
         }
         if (mutations.length === 0 && projection.currentRevision === 0) {
-          mutations.push({ operation: "delete", path: ".zeros-empty-baseline" });
+          mutations.push({
+            operation: "delete",
+            path: ".zeros-empty-baseline",
+          });
         }
         for (let offset = 0; offset < mutations.length; offset += 10_000) {
           const chunk = mutations.slice(offset, offset + 10_000);
@@ -751,9 +1140,12 @@ export class CloudWorkspaceDurabilityRuntime {
           }
           projection.currentRevision = Number(raw.revision);
         }
-        const settled = await scanCloudWorkspaceChanges(this.repositoryRoot);
+        const settled = await scanCloudWorkspaceChanges(this.repositoryRoot, {
+          requireDescriptorSafety: true,
+        });
         if (settled.fingerprint !== confirmation.fingerprint) {
-          for (const entry of confirmation.entries.values()) entry.bytes.fill(0);
+          for (const entry of confirmation.entries.values())
+            entry.bytes.fill(0);
           for (const entry of settled.entries.values()) entry.bytes.fill(0);
           projection = await this.loadProjection(authority);
           continue;
@@ -762,14 +1154,17 @@ export class CloudWorkspaceDurabilityRuntime {
         finalScan = settled;
         break;
       }
-      if (!finalScan) throw new Error("cloud checkpoint could not quiesce the working tree");
+      if (!finalScan)
+        throw new Error("cloud checkpoint could not quiesce the working tree");
       const manifestBytes = Buffer.from(
         JSON.stringify({
           version: 1,
           audience: "zeros-cloud-workspace-checkpoint-manifest-v1",
           gitBaseCommit: finalScan.gitBaseCommit,
           gitHeadRef: finalScan.gitHeadRef,
-          entries: [...finalScan.entries.values()].map(({ bytes: _bytes, ...entry }) => entry),
+          entries: [...finalScan.entries.values()].map(
+            ({ bytes: _bytes, ...entry }) => entry,
+          ),
           deletions: [...finalScan.deletions],
         }),
         "utf8",

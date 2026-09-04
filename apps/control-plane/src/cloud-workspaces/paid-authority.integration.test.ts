@@ -96,6 +96,83 @@ d("cloud workspace paid-authority reconciliation", () => {
     expect(epochs.rows[0]!.ended_at).not.toBeNull();
   });
 
+  it("denies runtime authority before an organization entitlement activates", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE organization_entitlements
+         SET valid_from = now() + interval '1 hour', updated_at = now()
+         WHERE org_id = $1`,
+        [fixture.organizationId],
+      ),
+    );
+
+    const authority = await pool.query<{ paid: boolean; runtime: boolean }>(
+      `SELECT cloud_workspace_paid_authority_live($1, $2, false) AS paid,
+              cloud_workspace_runtime_authority_live($1, 1, $2, false)
+                AS runtime`,
+      [fixture.workspaceId, fixture.userId],
+    );
+    expect(authority.rows[0]).toEqual({ paid: false, runtime: false });
+  });
+
+  it("denies Pro runtime authority for a future-dated collaborator entitlement", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE organization_entitlements
+         SET plan = 'pro', seat_limit = NULL, revision = revision + 1,
+             updated_at = now()
+         WHERE org_id = $1`,
+        [fixture.organizationId],
+      ),
+    );
+    const reconciler = new DatabaseCloudWorkspacePaidAuthorityReconciler(pool, {
+      workosEnabled: false,
+      recheckIntervalMs: 300_000,
+    });
+    await expect(reconciler.runOnce()).resolves.toMatchObject({
+      workspaceId: fixture.workspaceId,
+      action: "billing_rebound",
+    });
+
+    const collaborator = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_${randomUUID().replaceAll("-", "")}`,
+      email: `future-collaborator-${randomUUID()}@example.test`,
+      displayName: "Future Pro Collaborator",
+    });
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'member')`,
+        [fixture.organizationId, collaborator.id],
+      );
+      await tx.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'member')`,
+        [fixture.teamId, fixture.organizationId, collaborator.id],
+      );
+      await tx.query(
+        `INSERT INTO account_entitlements (
+           user_id, plan, status, cloud_workspaces_allowed, source, valid_from
+         ) VALUES (
+           $1, 'pro', 'active', true, 'operator',
+           now() + interval '1 hour'
+         )`,
+        [collaborator.id],
+      );
+    });
+
+    const authority = await pool.query<{ paid: boolean; runtime: boolean }>(
+      `SELECT cloud_workspace_paid_authority_live($1, $2, false) AS paid,
+              cloud_workspace_runtime_authority_live($1, 1, $2, false)
+                AS runtime`,
+      [fixture.workspaceId, fixture.userId],
+    );
+    expect(authority.rows[0]).toEqual({ paid: false, runtime: false });
+  });
+
   it("fails closed and queues cleanup for every generation when the owner seat is released", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);
     await withSystemTx(pool, async (tx) => {

@@ -54,4 +54,71 @@ d("cloud workspace operational health", () => {
     expect(JSON.stringify(degraded)).not.toContain(fixture.workspaceId);
     expect(JSON.stringify(degraded)).not.toContain(fixture.organizationId);
   });
+
+  it("reports repeatedly failing detached-object deletion even between retries", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const objectKey =
+      `workspace/v2/${fixture.organizationId}/detached-health-object/k1`;
+    await pool.query(
+      `INSERT INTO workspace_blob_object_deletions (
+         object_key, org_id, blob_id, reserved_bytes, attempt_count,
+         next_attempt_at, last_error_code
+       ) VALUES ($1, $2, $3, 128, 3, now() + interval '5 minutes',
+                 'object_store_delete_failed')`,
+      [objectKey, fixture.organizationId, fixture.workspaceId],
+    );
+    const service = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: false,
+      durabilityEnabled: true,
+      outboxDeliveryEnabled: false,
+    });
+
+    const degraded = await service.read();
+    expect(degraded).toMatchObject({
+      operationalState: "degraded",
+      reasons: ["object_deletion_stalled"],
+    });
+    expect(JSON.stringify(degraded)).not.toContain(objectKey);
+    expect(JSON.stringify(degraded)).not.toContain(fixture.organizationId);
+  });
+
+  it("reports a repeatedly failing published-source cleanup", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const blobId = "71717171-7171-4171-8171-717171717171";
+    const sourceKey =
+      `workspace/v2/${fixture.organizationId}/${blobId}/k1`;
+    const targetKey =
+      `workspace/v2/${fixture.organizationId}/${blobId}/k2`;
+    await pool.query(
+      `INSERT INTO workspace_blobs (
+         id, org_id, plaintext_sha256, ciphertext_sha256, plaintext_bytes,
+         ciphertext_bytes, object_key, encryption_key_version, nonce, auth_tag,
+         state, available_at
+       ) VALUES (
+         $1, $2, decode(repeat('31', 32), 'hex'),
+         decode(repeat('32', 32), 'hex'), 16, 16, $3, 2,
+         decode(repeat('33', 12), 'hex'), decode(repeat('34', 16), 'hex'),
+         'available', now()
+       )`,
+      [blobId, fixture.organizationId, targetKey],
+    );
+    await pool.query(
+      `INSERT INTO workspace_blob_rotation_jobs (
+         blob_id, org_id, target_key_version, source_object_key,
+         target_object_key, state, attempt_count, error_code, reserved_bytes
+       ) VALUES ($1, $2, 2, $3, $4, 'cleanup_pending', 3,
+                 'object_store_delete_failed', 16)`,
+      [blobId, fixture.organizationId, sourceKey, targetKey],
+    );
+    const service = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: false,
+      durabilityEnabled: true,
+      outboxDeliveryEnabled: false,
+    });
+
+    await expect(service.read()).resolves.toMatchObject({
+      operationalState: "degraded",
+      reasons: ["object_rotation_failed"],
+    });
+  });
 });

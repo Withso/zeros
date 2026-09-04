@@ -112,6 +112,31 @@ An optional queue/cache may accelerate workers but cannot be the sole durable
 record. Use a transactional outbox so database commits and asynchronous work do
 not diverge.
 
+For the filesystem adapter, attach one Railway volume to one control-plane
+service instance and mount it at a parent such as `/data`. Configure
+`CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY` as a dedicated child such as
+`/data/zeros-workspace-objects`, never as the mount root. The child must already
+be, or be creatable as, mode `0700`, owned by the exact runtime UID; the adapter
+rejects a different owner or any group/world permission before object access.
+Railway [mounts volumes as
+root](https://docs.railway.com/volumes#permissions), and the current
+control-plane image runs as root. If that image changes to a non-root user,
+update volume ownership deliberately and validate the runtime UID before
+enabling cloud storage.
+
+Railway [volumes do not support replicas and prevent two deployments from
+being active on the same mounted
+service](https://docs.railway.com/volumes/reference#caveats). Keep the
+filesystem-backed control plane at one replica and do not introduce a sidecar,
+shell, maintenance process, or second service that writes the live directory.
+Move to a shared object-store adapter before horizontal scaling. The
+`.uploads-v2` tree is adapter-owned, bounded staging state; operators must not
+edit or clean it manually. Permanent per-key fence directories retain opaque
+Organization/blob UUID path components after database tombstone privacy purge
+so a delayed writer cannot resurrect an erased immutable key. They contain
+neither plaintext object bytes nor account identifiers and must remain in
+backups and restores.
+
 Organization compute quotas are operator-approved admission records, not
 Organization-admin settings. Provision or change them only through
 `pnpm --dir apps/control-plane cloud-quota:manage` from a source checkout, or
@@ -132,9 +157,10 @@ Inside the production image use the supported
 `node dist/manage-cloud-workspace-object-storage.js` entrypoint. Append
 `--execute` only after copying the exact target-bound approval from the
 read-only plan.
-The Organization byte limit covers physical tenant blobs plus copy-on-write
-rotation reservations; the workspace byte limit covers logical unique blob
-reservations and cannot exceed the Organization byte limit. The command
+The Organization byte limit covers physical tenant blobs, detached-upload
+deletion tombstones, and copy-on-write rotation reservations; the workspace
+byte limit covers logical unique blob reservations and cannot exceed the
+Organization byte limit. The command
 rejects an incoherent pair or a limit below either current measure and writes
 append-only evidence. It does not change provider sandbox
 `storage_mib`, resize the Railway volume, or enable either cloud feature gate.
@@ -144,6 +170,23 @@ above the aggregate application limits with reviewed allowance for filesystem
 metadata, atomic-publication temporaries, backups, and incident response.
 Alert before that headroom is consumed; application rejection is not a
 substitute for provider capacity monitoring.
+
+Terminal object-key rotation failures are owner-managed recovery events, not
+automatic scheduler input. The ordinary scheduler never rewrites a failed job.
+From a database-owner shell, use
+`pnpm --dir apps/control-plane cloud-object-rotation:retry` (or
+`node dist/manage-cloud-workspace-object-rotation.js` in the production image)
+to generate a read-only plan for one exact Organization/blob/target version;
+then rerun the unchanged request with its target-bound approval and `--execute`.
+The command requires an active `platform_owner`, the complete source-and-target
+keyring, a terminal released job, and a durable zero-byte fence for the prior
+target. It appends immutable evidence and queues a fresh unpredictable target;
+workers still have to claim, reserve capacity, copy, verify, publish, and clean
+up before the rotation is successful. Deploy the corrected full keyring to
+every replica first, preserve copy-on-write headroom, monitor health and the
+rotation/deletion backlogs, and retain the old key until live rows and required
+backups prove it is no longer needed. The detailed one-shot variables and
+production confirmation are documented in the control-plane README.
 
 Secret bindings and one-use setup material share a versioned coordinator
 keyring, but their persisted rows retain the exact encryption-key version used.
@@ -180,13 +223,31 @@ those ciphertexts or backups remain readable. Migration `0057` adds only the
 blob-deletion foreign-key and previously uncovered `SKIP LOCKED` claim indexes
 identified by the catalog/query audit; it changes no serialized state.
 Migration `0058` forward-applies the object-storage ceiling relationship for
-databases that recorded an earlier feature-branch draft of `0055`.
+databases that recorded an earlier feature-branch draft of `0055`. Migration
+`0059` makes entitlement activation time a lower bound in both admission and
+live runtime authority. Migration `0060` durably retains the exact object key
+and physical-byte charge when an expired pending upload is detached. Successful
+physical deletion reduces the row to a permanent zero-byte database fence so a
+late writer can never republish that immutable key; tenant privacy purge removes
+the database identity only after readiness is proven. Migration `0061` adds the
+append-only exact-subject WorkOS erasure fence and historical-purge
+reconciliation ledger. Until every old purge has evidence, unknown WorkOS
+subjects fail closed while exact active mappings remain usable.
 
-`0025_cloud_workspace_engine_authority.sql` is deliberately marked
-`zeros:requires-controlled-downtime`. It takes an `EXCLUSIVE` lock on
-`cloud_workspaces` before altering the engine table so a live workspace-first
-transaction cannot form a schema-lock/row-lock cycle. Reads may continue, but
-workspace row lockers are drained and blocked until that migration commits.
+`0025_cloud_workspace_engine_authority.sql`,
+`0060_cloud_workspace_pending_blob_deletions.sql`, and
+`0061_workos_provider_erasure_fences.sql` are deliberately marked
+`zeros:requires-controlled-downtime`. Migration `0025` takes an `EXCLUSIVE` lock
+on `cloud_workspaces` before altering the engine table so a live workspace-first
+transaction cannot form a schema-lock/row-lock cycle. Migration `0060` changes
+the live blob uniqueness and deletion protocol, backfills every reconstructable
+terminal object key, and moves old failed rotations into owned target cleanup.
+The pre-`0060` uploader cannot target its partial uniqueness rule and the old
+garbage collectors do not create durable deletion fences, so no old API or
+worker may overlap `0060` or the binaries deployed after it. A pre-`0061`
+deletion worker can erase a WorkOS mapping without an exact durable subject
+fence, so every old deletion worker must be stopped and drained before `0061`
+is applied. Do not restart one after the boundary.
 
 For every environment that has not yet applied `0025`:
 
@@ -219,24 +280,93 @@ For every environment that has not yet applied `0025`:
 
    ```bash
    NODE_ENV=production \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0025_cloud_workspace_engine_authority.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
    node dist/migrate.js
    ```
 
    (`pnpm --dir apps/control-plane migrate` is the source-checkout equivalent.)
-   The command serializes against every boot runner. Without the exact approval
-   it fails; it never skips `0025` to apply a suffix. Service boot cannot use
-   this approval to execute the migration.
+   The command serializes against every boot runner. All three exact approvals
+   are required because this path crosses all three cloud-era controlled
+   boundaries. It never
+   skips an unapproved migration to apply a suffix, and service boot cannot use
+   either approval to execute a migration.
 
 7. Verify that canonical `schema_migrations` now runs contiguously through the
    release tip with non-null checksums, then inspect the authority-retirement
    triggers and queued provider deletion for any already-deleted owner scope.
+   Run `node dist/manage-workos-provider-erasure.js --status`; reconcile every
+   unresolved historical purge from provider-side audit evidence before
+   accepting new WorkOS subjects.
 8. Remove the one-time approval everywhere and restart/redeploy the same commit.
    Require `/healthz` to omit the pending migration state and pass normal API
    smoke tests.
 9. Enable cloud runtime, if planned, only in a separate deployment after its
    live qualification. Monitor lock waits, lifecycle/setup queues,
    access-revocation backlog, and provider drift.
+
+For every environment whose canonical ledger is already through `0059` but not
+`0060`:
+
+1. Set both cloud feature defaults to `false`. Stop and prove stopped every old
+   API, reconciler, setup, object-maintenance, retention, deletion, fork,
+   checkpoint, replica, access-revocation, and operations process that can read
+   or mutate cloud state or the object store. Take and verify a PostgreSQL
+   backup, preserve the object-store snapshot, and record the deployed commit,
+   complete ledger, keyring versions, and runtime flags.
+2. Inventory `pending_upload`, `deleting`, and `deleted` blob rows, every
+   non-terminal or failed rotation, storage reservations, and physical object
+   keys before approval. Migration `0060` reconstructs fences from retained
+   deleted blobs and successful rotation source keys and conservatively queues
+   failed rotation targets. It cannot reconstruct an abandoned-upload identity
+   that a pre-`0060` garbage collector already removed from PostgreSQL. If such
+   a worker ever ran, reconcile object-store keys against retained blob and
+   rotation identities and quarantine any unexplained key before proceeding.
+3. Deploy the reviewed `0060`/`0061`-aware image to the web service without a
+   migration approval. With cloud runtime disabled, service boot must remain at
+   `0059`, `/healthz` must report `controlled_migration_pending` with the exact
+   `0060` filename, every cloud route must return the non-cacheable
+   pending-migration `503`, and unrelated API smoke tests must pass. Existing
+   cloud rows are expected and do not prevent this pause. Confirm no `0060`
+   ledger row exists.
+4. From a drained database-owner shell in that exact image, run only the strict
+   one-shot migrator with the approval scoped to that process:
+
+   ```bash
+   NODE_ENV=production \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
+   node dist/migrate.js
+   ```
+
+   Without both exact filenames it fails. A standing approval on the web
+   service is ignored and must never be used as a substitute for the drained
+   window.
+
+5. Verify that the canonical ledger is contiguous through the release tip with
+   non-null checksums (including `0061`). Inspect the new deletion-fence backlog,
+   confirm old failed rotations
+   are in `target_cleanup_pending` with conservative reservations, and confirm
+   retained deleted blobs and successful old rotation sources have an unfenced
+   tombstone ready for the new worker. Run the WorkOS provider-erasure status
+   command and reconcile every unresolved historical purge from provider-side
+   evidence. Remove the one-time approval everywhere.
+6. Restart only `0061`-aware binaries. Keep cloud runtime disabled until normal
+   qualification is complete, then enable it in a separate deployment and
+   monitor the object-deletion/rotation backlog and physical-byte headroom. Do
+   not roll an environment whose ledger contains `0060` or `0061` back to a
+   binary from before the recorded boundary; restore the coordinated backup or
+   roll forward instead.
+
+For an environment already through `0060` but not `0061`, use the same drained
+deployment discipline without repeating the object migration: stop and prove
+stopped every old deletion worker, verify a database backup, deploy the reviewed
+image without approval, and require `/healthz` to report exact pending migration
+`0061_workos_provider_erasure_fences.sql`. Run the strict migrator with only
+that exact one-process approval. Verify the checksummed ledger, run
+`node dist/manage-workos-provider-erasure.js --status`, reconcile every
+unresolved request from provider-side evidence, remove the approval, and only
+then restart the same `0061`-aware image. Known active WorkOS mappings remain
+usable while `0061` is pending; unknown subjects return a retryable unavailable
+response and no raw callback or event payload is persisted.
 
 If the migration cannot obtain its boundary in the approved window, stop it and
 investigate the remaining workspace transaction. Do not bypass the marker or

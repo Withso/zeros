@@ -5,6 +5,7 @@ import {
   cloudDevicePublicKeyFingerprint,
 } from "../src/engine/cloud-device-enrollment";
 import { HttpCloudReplicaEnrollmentClient } from "../src/engine/cloud-replica-client";
+import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
 import { CloudReplicaDeviceSigner } from "../src/engine/cloud-replica-device";
 import {
   cloudReplicaHostControlLine,
@@ -75,6 +76,7 @@ type RegisteredCloudDevice = {
 };
 
 type CloudAccessDeviceAuthorityDependencies = {
+  capabilityEnabled: () => boolean;
   store: CloudReplicaDeviceSecretStore;
   getSession: () => Promise<MainAuthSession | null>;
   register: (input: {
@@ -88,12 +90,14 @@ type CloudAccessDeviceAuthorityDependencies = {
 };
 
 export type CloudReplicaEngineControlDependencies = {
+  capabilityEnabled: () => boolean;
   store: () => CloudReplicaDeviceSecretStore;
   getSession: () => Promise<MainAuthSession | null>;
 };
 
 const defaultEngineControlDependencies: CloudReplicaEngineControlDependencies =
   {
+    capabilityEnabled: cloudWorkspaceDesktopCapabilityEnabled,
     store,
     getSession: getValidSessionForMain,
   };
@@ -127,6 +131,9 @@ export class CloudAccessDeviceAuthority {
   ) {}
 
   async ensure(): Promise<{ accountUserId: string; deviceId: string }> {
+    if (!this.dependencies.capabilityEnabled()) {
+      throw new Error("Cloud workspaces are not enabled in this desktop build");
+    }
     const session = workosAccountSession(await this.dependencies.getSession());
     if (!session) {
       throw new Error("A current WorkOS desktop session is required");
@@ -209,7 +216,13 @@ export function ensureCloudAccessDeviceForMain(): Promise<{
   accountUserId: string;
   deviceId: string;
 }> {
+  if (!cloudWorkspaceDesktopCapabilityEnabled()) {
+    return Promise.reject(
+      new Error("Cloud workspaces are not enabled in this desktop build"),
+    );
+  }
   accessDeviceAuthority ??= new CloudAccessDeviceAuthority({
+    capabilityEnabled: cloudWorkspaceDesktopCapabilityEnabled,
     store: store(),
     getSession: getValidSessionForMain,
     register: async (input) => {
@@ -227,8 +240,16 @@ export function ensureCloudAccessDeviceForMain(): Promise<{
 /** Build the private stdin seed. Auth0 compatibility sessions deliberately
  * produce a clear message: replica authority is tied to canonical WorkOS
  * account UUIDs, never a provider subject or email. */
-export async function cloudReplicaSessionControlLine(): Promise<string> {
-  const session = workosAccountSession(await getValidSessionForMain());
+export async function cloudReplicaSessionControlLine(
+  dependencies: CloudReplicaEngineControlDependencies = defaultEngineControlDependencies,
+): Promise<string> {
+  if (!dependencies.capabilityEnabled()) {
+    return cloudReplicaHostControlLine({
+      type: "host.cloudReplicaSession",
+      session: null,
+    });
+  }
+  const session = workosAccountSession(await dependencies.getSession());
   if (!session) {
     return cloudReplicaHostControlLine({
       type: "host.cloudReplicaSession",
@@ -242,7 +263,7 @@ export async function cloudReplicaSessionControlLine(): Promise<string> {
       session: null,
     });
   }
-  const envelope = store().ensure(session.accountId);
+  const envelope = dependencies.store().ensure(session.accountId);
   const value: CloudReplicaHostSession = {
     version: 1,
     accountUserId: session.accountId,
@@ -282,6 +303,13 @@ export async function handleCloudReplicaEngineControl(
   dependencies: CloudReplicaEngineControlDependencies = defaultEngineControlDependencies,
 ): Promise<boolean> {
   const proofRequest = parseCloudReplicaProofRequest(value);
+  if (!dependencies.capabilityEnabled()) {
+    if (proofRequest) {
+      writeToEngine(proofFailure(proofRequest.requestId, "signed_out"));
+      return true;
+    }
+    return parseCloudReplicaDeviceRegistered(value) !== null;
+  }
   if (proofRequest) {
     if (!SIGNABLE_ACTIONS.has(proofRequest.action)) {
       writeToEngine(proofFailure(proofRequest.requestId, "signing_failed"));
@@ -356,7 +384,7 @@ export async function handleCloudReplicaEngineControl(
     dependencies.store().bindRegistration(registration);
     // Re-seed immediately with the now-bound safeStorage identity. The engine
     // remains unable to request signatures until it receives this message.
-    void cloudReplicaSessionControlLine()
+    void cloudReplicaSessionControlLine(dependencies)
       .then(writeToEngine)
       .catch(() => {
         writeToEngine(

@@ -168,7 +168,7 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
     vi.unstubAllEnvs();
   });
 
-  it("uses strict mode and requires both 0009 and 0025 approvals", async () => {
+  it("uses strict mode and requires all four controlled approvals", async () => {
     await pool.query(
       "DROP SCHEMA public CASCADE; CREATE SCHEMA public; CREATE TABLE reset_preflight_sentinel (id integer);",
     );
@@ -176,7 +176,7 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
 
     vi.stubEnv(
       "CONTROL_PLANE_MIGRATION_APPROVALS",
-      "0025_cloud_workspace_engine_authority.sql",
+      "0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
     );
     await expect(resetPublicSchema(pool)).rejects.toThrow(
       /0009_organization_team_hierarchy\.sql.*not approved/i,
@@ -191,7 +191,7 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
 
     vi.stubEnv(
       "CONTROL_PLANE_MIGRATION_APPROVALS",
-      "0009_organization_team_hierarchy.sql",
+      "0009_organization_team_hierarchy.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
     );
     await expect(resetPublicSchema(pool)).rejects.toThrow(
       /0025_cloud_workspace_engine_authority\.sql.*not approved/i,
@@ -206,7 +206,37 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
 
     vi.stubEnv(
       "CONTROL_PLANE_MIGRATION_APPROVALS",
-      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0061_workos_provider_erasure_fences.sql",
+    );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(
+      /0060_cloud_workspace_pending_blob_deletions\.sql.*not approved/i,
+    );
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.reset_preflight_sentinel')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBe("reset_preflight_sentinel");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql",
+    );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(
+      /0061_workos_provider_erasure_fences\.sql.*not approved/i,
+    );
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.reset_preflight_sentinel')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBe("reset_preflight_sentinel");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
     );
     await expect(resetPublicSchema(pool)).resolves.toEqual(LADDER);
   });

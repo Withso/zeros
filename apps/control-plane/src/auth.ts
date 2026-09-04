@@ -35,6 +35,14 @@ import {
 } from "./auth-token-contract.js";
 import { materializeProjectedMemberships } from "./workos-sync-events.js";
 import { isDeletionRecoveryRequest } from "./deletion-lifecycle.js";
+import { enqueueWorkOSUserDeletionCommand } from "./workos-command-outbox.js";
+import {
+  assertAccountWorkOSProviderErasureSubjectLimit,
+  workOSProviderErasureFenceStatus,
+  workOSProviderSubjectHash,
+  workOSProviderSubjectLockKey,
+  workOSUserProviderLockKey,
+} from "./workos-provider-locks.js";
 
 export type IdentityProvider = "auth0" | "workos";
 
@@ -437,6 +445,285 @@ function activePrincipal(
   };
 }
 
+async function requireUnfencedWorkOSIdentity(
+  tx: Tx,
+  input: AuthenticatedIdentityInput,
+): Promise<void> {
+  if (input.provider !== "workos") return;
+  const status = await workOSProviderErasureFenceStatus(tx, [
+    { kind: "user", id: input.providerSubject },
+  ]);
+  if (status === "not_ready") {
+    throw new HttpError(
+      503,
+      "authentication_temporarily_unavailable",
+      "Authentication is temporarily unavailable. Try again.",
+    );
+  }
+  if (status === "fenced") {
+    throw new HttpError(
+      401,
+      "account_deleted",
+      "This account is no longer active.",
+    );
+  }
+}
+
+const WORKOS_AUTH_LOCK_TIMEOUT_MS = 10_000;
+
+type WorkOSAuthenticationTarget = {
+  user_id: string;
+  exact_identity: boolean;
+  subject_binding: boolean;
+  email_match: boolean;
+};
+
+async function workOSAuthenticationTargets(
+  database: pg.Pool | Tx,
+  input: AuthenticatedIdentityInput,
+): Promise<WorkOSAuthenticationTarget[]> {
+  const sessionId = input.session?.id ?? null;
+  const targets = await database.query<WorkOSAuthenticationTarget>(
+    `SELECT associated.user_id,
+            bool_or(associated.source = 'exact_identity') AS exact_identity,
+            bool_or(associated.source IN (
+              'recovery', 'auth_session', 'browser_session'
+            )) AS subject_binding,
+            bool_or(associated.source = 'email') AS email_match
+     FROM (
+       SELECT identity.user_id, 'exact_identity'::text AS source
+       FROM user_identities identity
+       WHERE identity.provider = 'workos' AND identity.provider_sub = $1
+       UNION ALL
+       SELECT account.id AS user_id, 'email'::text AS source
+       FROM users account WHERE account.email = $2::citext
+       UNION ALL
+       SELECT recovery.target_user_id AS user_id, 'recovery'::text AS source
+       FROM account_recovery_requests recovery
+       WHERE recovery.candidate_provider_sub = $1
+         AND recovery.state = 'pending'
+       UNION ALL
+       SELECT session.user_id, 'auth_session'::text AS source
+       FROM auth_sessions session
+       WHERE session.provider = 'workos' AND session.user_id IS NOT NULL
+         AND (session.provider_sub = $1
+              OR ($3::text IS NOT NULL
+                  AND session.provider_session_id = $3))
+       UNION ALL
+       SELECT browser.account_user_id AS user_id,
+              'browser_session'::text AS source
+       FROM workos_browser_sessions browser
+       WHERE browser.kind = 'session'
+         AND browser.account_user_id IS NOT NULL
+         AND (browser.provider_sub = $1
+              OR ($3::text IS NOT NULL
+                  AND browser.provider_session_id = $3))
+     ) associated
+     GROUP BY associated.user_id
+     ORDER BY associated.user_id`,
+    [input.providerSubject, input.email, sessionId],
+  );
+  return targets.rows;
+}
+
+function resolveCurrentWorkOSAuthenticationTarget(
+  targets: readonly WorkOSAuthenticationTarget[],
+):
+  | { kind: "exact" }
+  | { kind: "candidate"; userId: string }
+  | { kind: "ambiguous" }
+  | { kind: "unassociated" } {
+  const exact = targets.filter((target) => target.exact_identity);
+  if (exact.length === 1) return { kind: "exact" };
+  if (exact.length > 1) return { kind: "ambiguous" };
+
+  const subjectTargets = targets.filter((target) => target.subject_binding);
+  const uniqueTargets = new Set(targets.map((target) => target.user_id));
+  if (subjectTargets.length > 1 || uniqueTargets.size > 1) {
+    return { kind: "ambiguous" };
+  }
+  const userId = targets[0]?.user_id;
+  return userId ? { kind: "candidate", userId } : { kind: "unassociated" };
+}
+
+async function fenceAndQueueLatePurgingWorkOSCandidate(
+  tx: Tx,
+  input: AuthenticatedIdentityInput,
+  targetUserId: string,
+): Promise<boolean> {
+  const deletion = await tx.query<{
+    deletion_request_id: string;
+    target_user_id: string;
+  }>(
+    `SELECT request.id AS deletion_request_id,
+            account.id AS target_user_id
+     FROM users account
+     JOIN deletion_requests request
+       ON request.id = account.deletion_request_id
+      AND request.target_kind = 'account'
+      AND request.target_id = account.id
+      AND request.target_user_id = account.id
+      AND request.state IN ('purging', 'provider_deleting', 'failed')
+     WHERE account.id = $1
+       AND account.auth_status = 'deletion_pending'
+       AND account.deletion_request_id = request.id`,
+    [targetUserId],
+  );
+  const target = deletion.rows[0];
+  if (!target) return false;
+  try {
+    await assertAccountWorkOSProviderErasureSubjectLimit(
+      tx,
+      target.deletion_request_id,
+      [input.providerSubject],
+    );
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      error.message === "workos_user_erasure_subject_limit_exceeded"
+    ) {
+      throw new HttpError(
+        503,
+        "workos_user_erasure_subject_limit_exceeded",
+        "Authentication is temporarily unavailable. Try again.",
+      );
+    }
+    throw error;
+  }
+  const subjectHash = workOSProviderSubjectHash({
+    kind: "user",
+    id: input.providerSubject,
+  });
+  const existingFence = await tx.query(
+    `SELECT 1 FROM workos_provider_erasure_fences
+     WHERE deletion_request_id = $1 AND provider = 'workos'
+       AND subject_kind = 'user' AND hash_version = 1
+       AND subject_hash = $2`,
+    [target.deletion_request_id, subjectHash],
+  );
+  if (!existingFence.rows[0]) {
+    await tx.query(
+      `INSERT INTO deletion_request_events (
+         deletion_request_id, actor_user_id, action, metadata
+       ) VALUES ($1, NULL, 'purge.provider_erasure_fenced', $2::jsonb)`,
+      [
+        target.deletion_request_id,
+        JSON.stringify({
+          provider: "workos",
+          workosSubjectHashes: [subjectHash],
+        }),
+      ],
+    );
+  }
+  await enqueueWorkOSUserDeletionCommand(tx, {
+    deletionRequestId: target.deletion_request_id,
+    userId: target.target_user_id,
+    workosUserId: input.providerSubject,
+  });
+  return true;
+}
+
+async function withWorkOSAuthenticationTx<T>(
+  pool: pg.Pool,
+  input: AuthenticatedIdentityInput,
+  work: (tx: Tx) => Promise<T>,
+): Promise<T> {
+  if (input.provider !== "workos") return withSystemTx(pool, work);
+  const subjectKey = workOSProviderSubjectLockKey({
+    kind: "user",
+    id: input.providerSubject,
+  });
+  const knownTargets = new Map(
+    (await workOSAuthenticationTargets(pool, input)).map((target) => [
+      target.user_id,
+      target,
+    ]),
+  );
+  const deadline = Date.now() + WORKOS_AUTH_LOCK_TIMEOUT_MS;
+  let retryDelayMs = 5;
+  for (;;) {
+    const keys = Array.from(
+      new Set([
+        subjectKey,
+        ...Array.from(knownTargets.keys(), workOSUserProviderLockKey),
+      ]),
+    ).sort();
+    const result = await withSystemTx<
+      | { kind: "acquired"; value: T }
+      | { kind: "account_deleted" }
+      | { kind: "ambiguous" }
+      | { kind: "contended" }
+      | { kind: "expanded"; targets: WorkOSAuthenticationTarget[] }
+    >(pool, async (tx) => {
+      for (const key of keys) {
+        const lock = await tx.query<{ acquired: boolean }>(
+          `SELECT pg_try_advisory_xact_lock(
+             hashtextextended($1::text, 0)
+           ) AS acquired`,
+          [key],
+        );
+        if (!lock.rows[0]?.acquired) return { kind: "contended" };
+      }
+      const currentTargets = await workOSAuthenticationTargets(tx, input);
+      if (
+        currentTargets.some(
+          (target) => !keys.includes(workOSUserProviderLockKey(target.user_id)),
+        )
+      ) {
+        return { kind: "expanded", targets: currentTargets };
+      }
+      const resolution =
+        resolveCurrentWorkOSAuthenticationTarget(currentTargets);
+      if (resolution.kind === "ambiguous") return { kind: "ambiguous" };
+      if (
+        resolution.kind === "candidate" &&
+        (await fenceAndQueueLatePurgingWorkOSCandidate(
+          tx,
+          input,
+          resolution.userId,
+        ))
+      ) {
+        return { kind: "account_deleted" };
+      }
+      return { kind: "acquired", value: await work(tx) };
+    });
+    if (result.kind === "acquired") return result.value;
+    if (result.kind === "account_deleted") {
+      throw new HttpError(
+        401,
+        "account_deleted",
+        "This account is no longer active.",
+      );
+    }
+    if (result.kind === "ambiguous") {
+      throw new HttpError(
+        503,
+        "authentication_temporarily_unavailable",
+        "Authentication is temporarily unavailable. Try again.",
+      );
+    }
+    if (result.kind === "expanded") {
+      for (const target of result.targets) {
+        knownTargets.set(target.user_id, target);
+      }
+      continue;
+    }
+
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new HttpError(
+        503,
+        "authentication_temporarily_unavailable",
+        "Authentication is temporarily unavailable. Try again.",
+      );
+    }
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(retryDelayMs, remainingMs)),
+    );
+    retryDelayMs = Math.min(retryDelayMs * 2, 100);
+  }
+}
+
 async function registerAuthenticatedSession(
   tx: Tx,
   user: AuthedUser,
@@ -534,7 +821,7 @@ export async function resolveAuthenticatedUser(
   input: AuthenticatedIdentityInput,
   options: { allowDeletionPending?: boolean } = {},
 ): Promise<AuthedUser> {
-  const existing = await withSystemTx(pool, async (tx) => {
+  const existing = await withWorkOSAuthenticationTx(pool, input, async (tx) => {
     const result = await tx.query<PrincipalRow>(
       `SELECT u.id, u.email, u.display_name, u.avatar_url, u.staff_role,
               u.auth_status, u.auth_revision, u.deleted_at,
@@ -545,6 +832,9 @@ export async function resolveAuthenticatedUser(
       [input.provider, input.providerSubject],
     );
     if (!result.rows[0]) return null;
+    if (options.allowDeletionPending === true) {
+      await requireUnfencedWorkOSIdentity(tx, input);
+    }
     const user = activePrincipal(result.rows[0], input, {
       allowDeletionPending: options.allowDeletionPending === true,
     });
@@ -553,10 +843,11 @@ export async function resolveAuthenticatedUser(
   });
   if (existing) return existing;
 
-  const created = await ensureUser(pool, input);
-  await withSystemTx(pool, (tx) =>
-    registerAuthenticatedSession(tx, created, input),
-  );
+  const created = await ensureUserWithoutProviderLock(pool, input);
+  await withWorkOSAuthenticationTx(pool, input, async (tx) => {
+    await requireUnfencedWorkOSIdentity(tx, input);
+    await registerAuthenticatedSession(tx, created, input);
+  });
   return created;
 }
 
@@ -571,10 +862,17 @@ export async function ensureUser(
   pool: pg.Pool,
   input: AuthenticatedIdentityInput,
 ): Promise<AuthedUser> {
-  const result = await withSystemTx<
+  return ensureUserWithoutProviderLock(pool, input);
+}
+
+async function ensureUserWithoutProviderLock(
+  pool: pg.Pool,
+  input: AuthenticatedIdentityInput,
+): Promise<AuthedUser> {
+  const result = await withWorkOSAuthenticationTx<
     | { kind: "active"; user: AuthedUser }
     | { kind: "recovery_required"; publicCode: string | null }
-  >(pool, async (tx) => {
+  >(pool, input, async (tx) => {
     let linked = await tx.query<{
       user_id: string;
       status: IdentityLifecycleStatus;
@@ -584,6 +882,7 @@ export async function ensureUser(
       [input.provider, input.providerSubject],
     );
     if (!linked.rows[0]) {
+      await requireUnfencedWorkOSIdentity(tx, input);
       // Serialize only the first-request path for one provider identity, then
       // re-read after acquiring the lock. Unique constraints reject duplicates,
       // but without this lock the losing transaction surfaces an opaque 500

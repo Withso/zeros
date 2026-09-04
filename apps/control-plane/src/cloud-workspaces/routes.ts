@@ -571,7 +571,7 @@ async function loadWorkspace(
   orgId: string,
   workspaceId: string,
   userId: string,
-  options: { lock?: boolean } = {},
+  options: { lock?: boolean; ownerOnly?: boolean } = {},
 ): Promise<WorkspaceRow> {
   await requireOrganizationMembership(tx, orgId, userId);
   const result = await tx.query<WorkspaceRow>(
@@ -581,6 +581,11 @@ async function loadWorkspace(
       AND actor_team.org_id = cw.org_id
       AND actor_team.user_id = $3
      WHERE cw.org_id = $1 AND cw.id = $2
+     ${
+       options.ownerOnly
+         ? "AND cw.owner_user_id = $3 AND cw.single_member_mode"
+         : ""
+     }
      ${options.lock ? "FOR UPDATE OF cw" : ""}`,
     [orgId, workspaceId, userId],
   );
@@ -853,20 +858,66 @@ type UsageRow = {
 };
 
 async function loadUsage(tx: Tx, orgId: string): Promise<UsageRow> {
+  // A candidate reserves its full shape before provider allocation. Any known
+  // provider resource retains disk allocation until deletion is verified.
   const result = await tx.query<UsageRow>(
-    `SELECT count(*) AS workspaces,
-            count(*) FILTER (WHERE cw.desired_state = 'running') AS running,
-            coalesce(sum(g.cpu_millicores) FILTER (
-              WHERE cw.desired_state = 'running'
-            ), 0) AS cpu_millicores,
-            coalesce(sum(g.memory_mib) FILTER (
-              WHERE cw.desired_state = 'running'
-            ), 0) AS memory_mib,
-            coalesce(sum(g.storage_mib), 0) AS storage_mib
-     FROM cloud_workspaces cw
-     JOIN cloud_workspace_generations g
-       ON g.workspace_id = cw.id AND g.generation = cw.current_generation
-     WHERE cw.org_id = $1 AND cw.status <> 'deleted'`,
+    `WITH workspace_usage AS (
+       SELECT count(*) AS workspaces,
+              count(*) FILTER (WHERE desired_state = 'running') AS running
+       FROM cloud_workspaces
+       WHERE org_id = $1 AND status <> 'deleted'
+     ), generation_allocation AS (
+       SELECT generation.cpu_millicores, generation.memory_mib,
+              generation.storage_mib, workspace.desired_state,
+              (
+                workspace.status <> 'deleted'
+                AND generation.generation = workspace.current_generation
+              ) AS current_reserved,
+              (
+                workspace.status <> 'deleted'
+                AND generation.generation <> workspace.current_generation
+                AND generation.retired_at IS NULL
+                AND transition.id IS NOT NULL
+              ) AS candidate_reserved,
+              (
+                binding.provider_resource_id IS NOT NULL
+                AND binding.deletion_verified_at IS NULL
+              ) AS provider_storage_allocated
+       FROM cloud_workspaces workspace
+       JOIN cloud_workspace_generations generation
+         ON generation.workspace_id = workspace.id
+        AND generation.org_id = workspace.org_id
+       LEFT JOIN cloud_workspace_provider_bindings binding
+         ON binding.workspace_id = generation.workspace_id
+        AND binding.generation = generation.generation
+        AND binding.org_id = generation.org_id
+       LEFT JOIN cloud_workspace_generation_transitions transition
+         ON transition.workspace_id = generation.workspace_id
+        AND transition.org_id = generation.org_id
+        AND transition.candidate_generation = generation.generation
+        AND transition.state IN (
+          'draining', 'provisioning', 'setting_up', 'rolling_back'
+        )
+       WHERE workspace.org_id = $1
+     ), generation_usage AS (
+       SELECT coalesce(sum(cpu_millicores) FILTER (
+                WHERE (current_reserved AND desired_state = 'running')
+                   OR candidate_reserved
+              ), 0) AS cpu_millicores,
+              coalesce(sum(memory_mib) FILTER (
+                WHERE (current_reserved AND desired_state = 'running')
+                   OR candidate_reserved
+              ), 0) AS memory_mib,
+              coalesce(sum(storage_mib) FILTER (
+                WHERE current_reserved OR candidate_reserved
+                   OR provider_storage_allocated
+              ), 0) AS storage_mib
+       FROM generation_allocation
+     )
+     SELECT workspace_usage.workspaces, workspace_usage.running,
+            generation_usage.cpu_millicores, generation_usage.memory_mib,
+            generation_usage.storage_mib
+     FROM workspace_usage CROSS JOIN generation_usage`,
     [orgId],
   );
   return result.rows[0]!;
@@ -1171,6 +1222,8 @@ export function createCloudWorkspaceRoutes(
             AND actor_team.org_id = cw.org_id
             AND actor_team.user_id = $2
            WHERE cw.org_id = $1
+             AND cw.owner_user_id = $2
+             AND cw.single_member_mode
              ${includeDeleted ? "" : "AND cw.status <> 'deleted'"}
              ${cursorSql}
            ORDER BY cw.created_at DESC, cw.id DESC
@@ -1192,7 +1245,7 @@ export function createCloudWorkspaceRoutes(
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
     const row = await withUserTx(pool, user.id, (tx) =>
-      loadWorkspace(tx, orgId, workspaceId, user.id),
+      loadWorkspace(tx, orgId, workspaceId, user.id, { ownerOnly: true }),
     );
     return c.json({ workspace: workspaceDocument(row) });
   });
@@ -2328,7 +2381,7 @@ export function createCloudWorkspaceRoutes(
     const digest = requestDigest(normalized);
 
     const result = await withSystemTx(pool, async (tx) => {
-      await requireOrganizationRole(tx, orgId, user.id, "admin");
+      await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
       const workspace = await loadWorkspace(tx, orgId, workspaceId, user.id, {
         lock: true,
@@ -2757,7 +2810,7 @@ export function createCloudWorkspaceRoutes(
     });
 
     const result = await withSystemTx(pool, async (tx) => {
-      await requireOrganizationRole(tx, orgId, user.id, "admin");
+      await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
       let workspace = await loadWorkspace(tx, orgId, workspaceId, user.id, {
         lock: true,

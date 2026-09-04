@@ -448,9 +448,19 @@ d("cloud workspace receive-only replicas", () => {
         idempotencyKey: pauseIdempotencyKey,
         proof: proof(deviceA, "replica.pause", pausePayload),
       }),
+    ).rejects.toMatchObject({ code: "cursor_conflict" });
+    await expect(
+      replicas.recordReceipt({
+        organizationId: fixture.organizationId,
+        workspaceId: fixture.workspaceId,
+        replicaId: createdA.replica.id,
+        accountUserId: fixture.userId,
+        grantToken: grantA.token,
+        ...bootstrapReceipt,
+        proof: proof(deviceA, "replica.receipt", bootstrapReceipt),
+      }),
     ).resolves.toMatchObject({
-      replica: { desiredState: "paused", observedState: "paused" },
-      grant: null,
+      replica: { desiredState: "active", observedState: "syncing" },
       replayed: true,
     });
     expect(
@@ -613,6 +623,41 @@ d("cloud workspace receive-only replicas", () => {
       replaceDiverged: true,
       idempotencyKey: replacementIdempotencyKey,
     };
+    const replacement = await replicas.changeReplicaState({
+      organizationId: fixture.organizationId,
+      workspaceId: fixture.workspaceId,
+      replicaId: created.replica.id,
+      accountUserId: fixture.userId,
+      operation: "resume",
+      replaceDiverged: true,
+      idempotencyKey: replacementIdempotencyKey,
+      proof: proof(device, "replica.resume", replacementPayload),
+    });
+    expect(replacement).toMatchObject({
+      replica: {
+        observedState: "bootstrapping",
+        eventCursor: 0,
+        manifestRevision: 1,
+      },
+      grant: { token: expect.stringMatching(/^zwr_/) },
+    });
+    const replacementReceipt = {
+      fromRevision: 0,
+      toRevision: 1,
+      manifestSha256: "e".repeat(64),
+      outcome: "applied" as const,
+      errorCode: null,
+      idempotencyKey: `receipt-${randomUUID()}`,
+    };
+    await replicas.recordReceipt({
+      organizationId: fixture.organizationId,
+      workspaceId: fixture.workspaceId,
+      replicaId: created.replica.id,
+      accountUserId: fixture.userId,
+      grantToken: replacement.grant!.token,
+      ...replacementReceipt,
+      proof: proof(device, "replica.receipt", replacementReceipt),
+    });
     await expect(
       replicas.changeReplicaState({
         organizationId: fixture.organizationId,
@@ -625,13 +670,53 @@ d("cloud workspace receive-only replicas", () => {
         proof: proof(device, "replica.resume", replacementPayload),
       }),
     ).resolves.toMatchObject({
-      replica: {
-        observedState: "bootstrapping",
-        eventCursor: 0,
-        manifestRevision: 1,
-      },
+      replica: { desiredState: "active", observedState: "in_sync" },
       grant: { token: expect.stringMatching(/^zwr_/) },
+      replayed: true,
     });
+
+    const afterReplacementPauseKey = `command-${randomUUID()}`;
+    const afterReplacementPause = {
+      operation: "pause" as const,
+      replaceDiverged: false,
+      idempotencyKey: afterReplacementPauseKey,
+    };
+    await replicas.changeReplicaState({
+      organizationId: fixture.organizationId,
+      workspaceId: fixture.workspaceId,
+      replicaId: created.replica.id,
+      accountUserId: fixture.userId,
+      operation: "pause",
+      idempotencyKey: afterReplacementPauseKey,
+      proof: proof(device, "replica.pause", afterReplacementPause),
+    });
+    const afterReplacementResumeKey = `command-${randomUUID()}`;
+    const afterReplacementResume = {
+      operation: "resume" as const,
+      replaceDiverged: false,
+      idempotencyKey: afterReplacementResumeKey,
+    };
+    await replicas.changeReplicaState({
+      organizationId: fixture.organizationId,
+      workspaceId: fixture.workspaceId,
+      replicaId: created.replica.id,
+      accountUserId: fixture.userId,
+      operation: "resume",
+      idempotencyKey: afterReplacementResumeKey,
+      proof: proof(device, "replica.resume", afterReplacementResume),
+    });
+    await expect(
+      replicas.changeReplicaState({
+        organizationId: fixture.organizationId,
+        workspaceId: fixture.workspaceId,
+        replicaId: created.replica.id,
+        accountUserId: fixture.userId,
+        operation: "resume",
+        replaceDiverged: true,
+        idempotencyKey: replacementIdempotencyKey,
+        proof: proof(device, "replica.resume", replacementPayload),
+      }),
+    ).rejects.toMatchObject({ code: "cursor_conflict" });
 
     const nextKey = newKeyPair();
     const rotationIdempotencyKey = `rotate-${randomUUID()}`;

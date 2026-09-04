@@ -178,6 +178,75 @@ describe("device-private cloud replica SQLite state", () => {
     );
   });
 
+  it("rejects remote state whose authority or grant epoch moved backwards", async () => {
+    const db = database();
+    const state = new DatabaseCloudReplicaState(db);
+    const accountUserId = randomUUID();
+    const deviceId = randomUUID();
+    state.recordRegistration({
+      accountUserId,
+      deviceId,
+      keyVersion: 1,
+      publicKey: publicKey(),
+    });
+    const replicaId = randomUUID();
+    state.createReplica({
+      replicaId,
+      workspaceId: randomUUID(),
+      organizationId: randomUUID(),
+      accountUserId,
+      deviceId,
+      rootPath: await tempRoot(),
+      checkpointId: randomUUID(),
+      manifestRevision: 1,
+      workspaceAuthorityEpoch: 4,
+      grantEpoch: 7,
+      ignorePolicy: { version: 1 },
+    });
+
+    expect(() =>
+      state.updateRemoteState({
+        replicaId,
+        desiredState: "paused",
+        observedState: "paused",
+        workspaceAuthorityEpoch: 3,
+        grantEpoch: 8,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "cursor_conflict" }));
+    expect(() =>
+      state.updateRemoteState({
+        replicaId,
+        desiredState: "paused",
+        observedState: "paused",
+        workspaceAuthorityEpoch: 4,
+        grantEpoch: 6,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "cursor_conflict" }));
+    expect(() =>
+      state.updateRemoteState({
+        replicaId,
+        desiredState: "removed",
+        observedState: "removed",
+        workspaceAuthorityEpoch: 4,
+        grantEpoch: 7,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "cursor_conflict" }));
+    expect(() =>
+      state.resetForSnapshot({
+        replicaId,
+        checkpointId: randomUUID(),
+        manifestRevision: 2,
+        workspaceAuthorityEpoch: 3,
+        grantEpoch: 8,
+      }),
+    ).toThrowError(expect.objectContaining({ code: "cursor_conflict" }));
+    expect(state.replica(replicaId)).toMatchObject({
+      desiredState: "active",
+      workspaceAuthorityEpoch: 4,
+      grantEpoch: 7,
+    });
+  });
+
   it("keeps each replica path unique and records divergence transactionally", async () => {
     const db = database();
     const state = new DatabaseCloudReplicaState(db);

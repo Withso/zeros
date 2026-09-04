@@ -79,6 +79,8 @@ import {
   cloudReplicaSessionControlLine,
   handleCloudReplicaEngineControl,
 } from "./cloud-replica-host-runtime";
+import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
+import { seedCloudReplicaSessionToEngineIfEnabled } from "./cloud-replica-session-lifecycle";
 
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
@@ -1730,7 +1732,9 @@ async function doSpawnEngine(
   // Seed only the short-lived WorkOS bearer and public device identity. The
   // Ed25519 private key remains in Electron safeStorage; signing requests make
   // the reverse trip over fd 3 and return over this same stdin pipe.
-  void pushCloudReplicaSessionToEngine();
+  seedCloudReplicaSessionToEngineIfEnabled({
+    push: pushCloudReplicaSessionToEngine,
+  });
 
   // Seed the engine's OAuth token vault from the durable store (safeStorage) so
   // the MCP gateway restores its sign-ins without re-auth. Pushed on stdin
@@ -1902,6 +1906,7 @@ export async function pushGithubCredentialToEngine(): Promise<void> {
 /** Refresh/clear the engine's in-memory cloud-replica session over the private
  * parent pipe. Never place this bearer in argv, env, renderer IPC, or logs. */
 export async function pushCloudReplicaSessionToEngine(): Promise<void> {
+  if (!cloudWorkspaceDesktopCapabilityEnabled()) return;
   const child = state.child;
   if (!child || child.killed || !child.stdin || !child.stdin.writable) return;
   let line: string;

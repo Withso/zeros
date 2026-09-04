@@ -43,6 +43,50 @@ type DeviceSigner = {
   keyVersion: number;
 };
 
+class PausedUploadObjectStore extends MemoryCloudWorkspaceObjectStore {
+  private nextUpload:
+    | {
+        started: (objectKey: string) => void;
+        released: Promise<void>;
+      }
+    | undefined;
+
+  pauseNextUpload(): {
+    started: Promise<string>;
+    resume: () => void;
+  } {
+    if (this.nextUpload) throw new Error("an upload is already paused");
+    let started!: (objectKey: string) => void;
+    let resume!: () => void;
+    const gate = {
+      started: new Promise<string>((resolve) => {
+        started = resolve;
+      }),
+      resume: () => resume(),
+    };
+    this.nextUpload = {
+      started,
+      released: new Promise<void>((resolve) => {
+        resume = resolve;
+      }),
+    };
+    return gate;
+  }
+
+  override async putIfAbsent(
+    key: string,
+    bytes: Uint8Array,
+  ): Promise<"created" | "already_exists"> {
+    const paused = this.nextUpload;
+    if (paused) {
+      this.nextUpload = undefined;
+      paused.started(key);
+      await paused.released;
+    }
+    return super.putIfAbsent(key, bytes);
+  }
+}
+
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -126,6 +170,7 @@ d("cloud workspace immutable forks", () => {
   let content: DatabaseCloudWorkspaceContentService;
   let records: DatabaseCloudWorkspaceDurableRecordService;
   let replicas: DatabaseCloudWorkspaceReplicaService;
+  let objectStore: PausedUploadObjectStore;
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 6 });
@@ -139,9 +184,10 @@ d("cloud workspace immutable forks", () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
     fixture = await seedReadyCloudWorkspace(pool);
+    objectStore = new PausedUploadObjectStore();
     blobs = new DatabaseCloudWorkspaceBlobService({
       pool,
-      objectStore: new MemoryCloudWorkspaceObjectStore(),
+      objectStore,
       encryptionKeyV1: randomBytes(32).toString("base64url"),
       workosEnabled: false,
     });
@@ -1141,6 +1187,151 @@ d("cloud workspace immutable forks", () => {
         proof: proof(device, "fork.export.grant", grantPayload),
       }),
     ).rejects.toMatchObject({ code: "export_unavailable" });
+  });
+
+  it("does not publish an export whose fork expires during its manifest upload", async () => {
+    const file = Buffer.from("export deadline race\n", "utf8");
+    const fileBlob = await blobs.put({ ...engine(), bytes: file });
+    const appended = await content.append({
+      ...engine(),
+      expectedRevision: 0,
+      idempotencyKey: `content-${randomUUID()}`,
+      gitBaseCommit: "e".repeat(40),
+      gitHeadRef: "refs/heads/main",
+      mutations: [
+        {
+          operation: "upsert",
+          path: "deadline.txt",
+          entryType: "file",
+          mode: 33188,
+          blobId: fileBlob.id,
+          contentSha256: fileBlob.plaintextSha256,
+          sizeBytes: file.length,
+        },
+      ],
+    });
+    const checkpointManifestBytes = Buffer.from(
+      '{"kind":"fork-deadline-race"}',
+      "utf8",
+    );
+    const checkpointManifest = await blobs.put({
+      ...engine(),
+      bytes: checkpointManifestBytes,
+    });
+    const requested = await forks.requestCloudToLocal({
+      organizationId: fixture.organizationId,
+      workspaceId: fixture.workspaceId,
+      targetLocalWorkspaceId: randomUUID(),
+      accountUserId: fixture.userId,
+      idempotencyKey: `deadline-${randomUUID()}`,
+      includeChats: false,
+    });
+    expect(
+      await withSystemTx(pool, (tx) =>
+        deliverWorkspaceCheckpointRequest(tx, {
+          workspaceId: fixture.workspaceId,
+          organizationId: fixture.organizationId,
+          generation: 1,
+        }),
+      ),
+    ).toMatchObject({ id: requested.checkpointRequestId });
+    await content.commitCheckpoint({
+      ...engine(),
+      requestId: requested.checkpointRequestId,
+      idempotencyKey: `checkpoint-${randomUUID()}`,
+      contentRevision: appended.revision,
+      reason: "before_fork",
+      manifestBlobId: checkpointManifest.id,
+      artifactBlobId: null,
+      inclusionPolicy: { ignored: "excluded", secrets: "excluded" },
+      fileCount: 1,
+      totalBytes: file.length,
+      integritySha256: createHash("sha256")
+        .update(checkpointManifestBytes)
+        .digest("hex"),
+    });
+
+    const upload = objectStore.pauseNextUpload();
+    const exporter = new CloudWorkspaceForkWorker(pool, blobs, {
+      workerId: "stale-fork-exporter",
+    });
+    const exporting = exporter.runOnce();
+    const exportObjectKey = await upload.started;
+    await pool.query(
+      `UPDATE workspace_fork_intents
+       SET created_at = now() - interval '2 seconds',
+           deadline_at = now() - interval '1 second'
+       WHERE id = $1`,
+      [requested.forkIntentId],
+    );
+    const expirer = new CloudWorkspaceForkWorker(pool, blobs, {
+      workerId: "concurrent-fork-expirer",
+    });
+    const expired = await expirer.runOnce().finally(upload.resume);
+    const exported = await exporting;
+
+    expect(expired).toBe(true);
+    expect(exported).toBe(true);
+    expect(
+      (
+        await pool.query(
+          `SELECT state, error_code FROM workspace_fork_intents WHERE id = $1`,
+          [requested.forkIntentId],
+        )
+      ).rows[0],
+    ).toEqual({ state: "failed", error_code: "fork_deadline_exceeded" });
+    expect(
+      Number(
+        (
+          await pool.query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM workspace_exports
+             WHERE fork_intent_id = $1`,
+            [requested.forkIntentId],
+          )
+        ).rows[0]!.count,
+      ),
+    ).toBe(0);
+    expect(
+      Number(
+        (
+          await pool.query<{ count: string }>(
+            `SELECT count(*)::text AS count FROM audit_log
+             WHERE org_id = $1
+               AND action = 'cloud_workspace.local_copy_ready'
+               AND subject ->> 'forkIntentId' = $2`,
+            [fixture.organizationId, requested.forkIntentId],
+          )
+        ).rows[0]!.count,
+      ),
+    ).toBe(0);
+    expect(
+      (
+        await pool.query<{
+          state: string;
+          reference_count: string;
+          references: string;
+          reservations: string;
+        }>(
+          `SELECT blob.state, blob.reference_count::text,
+                  count(reference.blob_id)::text AS references,
+                  count(reservation.blob_id)::text AS reservations
+           FROM workspace_blobs blob
+           LEFT JOIN workspace_blob_references reference
+             ON reference.blob_id = blob.id AND reference.org_id = blob.org_id
+           LEFT JOIN workspace_blob_storage_reservations reservation
+             ON reservation.blob_id = blob.id AND reservation.org_id = blob.org_id
+           WHERE blob.object_key = $1
+           GROUP BY blob.id`,
+          [exportObjectKey],
+        )
+      ).rows[0],
+    ).toEqual({
+      state: "deleted",
+      reference_count: "0",
+      references: "0",
+      reservations: "0",
+    });
+    await expect(objectStore.get(exportObjectKey)).resolves.toBeNull();
   });
 
   it("rejects a cloud-to-local copy that reuses the source cloud identity", async () => {

@@ -20,6 +20,7 @@ type HealthSignals = {
   deletion_jobs_failed: boolean;
   deletion_provider_stalled: boolean;
   object_rotation_failed: boolean;
+  object_deletion_stalled: boolean;
   provider_orphans_stalled: boolean;
   durability_stalled: boolean;
 };
@@ -77,8 +78,24 @@ export class DatabaseCloudWorkspaceHealthService {
                  AND created_at <= now() - interval '24 hours'
              ) AS deletion_provider_stalled,
              CASE WHEN $2::boolean THEN EXISTS (
-               SELECT 1 FROM workspace_blob_rotation_jobs WHERE state = 'failed'
+               SELECT 1 FROM workspace_blob_rotation_jobs
+               WHERE state = 'failed'
+                  OR (
+                    state IN ('cleanup_pending', 'target_cleanup_pending')
+                    AND (
+                      created_at <= now() - interval '15 minutes'
+                      OR (error_code IS NOT NULL AND attempt_count >= 3)
+                    )
+                  )
              ) ELSE false END AS object_rotation_failed,
+             CASE WHEN $2::boolean THEN EXISTS (
+               SELECT 1 FROM workspace_blob_object_deletions
+               WHERE fenced_at IS NULL
+                 AND (
+                   created_at <= now() - interval '15 minutes'
+                   OR (last_error_code IS NOT NULL AND attempt_count >= 3)
+                 )
+             ) ELSE false END AS object_deletion_stalled,
              EXISTS (
                SELECT 1 FROM cloud_workspace_provider_orphans
                WHERE deletion_verified_at IS NULL

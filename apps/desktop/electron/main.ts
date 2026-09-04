@@ -131,6 +131,8 @@ import {
   pushGithubCredentialToEngine,
   pushCloudReplicaSessionToEngine,
 } from "./sidecar";
+import { startCloudReplicaSessionRefresh } from "./cloud-replica-session-lifecycle";
+import { seedCloudWorkspaceDesktopCapabilityEnvironment } from "../src/engine/cloud-workspace-capability";
 import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
 import { setupContextMenu } from "./context-menu";
@@ -286,6 +288,12 @@ if (runningDev) process.env.ZEROS_DEV = "1";
         : "stable";
   }
 }
+
+// Cloud workspaces are a release/build capability, not a user preference. A
+// packaged compile replaces the shared resolver's baked constant, then this
+// pins the inherited engine environment so an arbitrary launch environment
+// cannot enable a release that shipped with the capability off.
+seedCloudWorkspaceDesktopCapabilityEnvironment();
 
 // (3) One identity for EVERY channel. app.getName() is pinned to the CHANNEL name
 // only — NEVER the per-worktree slug — so macOS safeStorage derives ONE keychain
@@ -1528,16 +1536,16 @@ app.whenReady().then(async () => {
   // Token refresh is intentionally not a semantic sign-in event. Periodically
   // renew the engine's in-memory bearer so background replica convergence does
   // not stall after the original WorkOS access token expires.
-  const cloudReplicaSessionRefresh = setInterval(() => {
-    void pushCloudReplicaSessionToEngine().catch((error: unknown) => {
+  const disposeCloudReplicaSessionRefresh = startCloudReplicaSessionRefresh({
+    refresh: pushCloudReplicaSessionToEngine,
+    onError: (error: unknown) => {
       console.warn(
         `[cloud-replica] periodic session refresh failed (${error instanceof Error ? error.name : "unknown"})`,
       );
-    });
-  }, 45_000);
-  cloudReplicaSessionRefresh.unref?.();
+    },
+  });
   app.on("will-quit", () => {
-    clearInterval(cloudReplicaSessionRefresh);
+    disposeCloudReplicaSessionRefresh();
     disposeGithubSessionSync();
     app.off("browser-window-focus", onAuthWindowFocus);
     powerMonitor.off("resume", onAuthResume);

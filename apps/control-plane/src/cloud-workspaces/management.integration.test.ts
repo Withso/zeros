@@ -196,6 +196,86 @@ d("cloud workspace Phase 5 management", () => {
     });
   });
 
+  it("reports retired provider storage until its deletion is verified", async () => {
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `UPDATE cloud_workspace_provider_bindings
+         SET observed_state = 'stopped', updated_at = now()
+         WHERE workspace_id = $1 AND generation = 1`,
+        [workspaceId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib,
+           source_commit, created_by, provider_connection_id
+         ) SELECT workspace_id, 2, org_id, provider, image_ref,
+                  architecture, cpu_millicores, memory_mib, storage_mib,
+                  source_commit, created_by, provider_connection_id
+           FROM cloud_workspace_generations
+           WHERE workspace_id = $1 AND generation = 1`,
+        [workspaceId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_provider_bindings (
+           workspace_id, generation, org_id, provider,
+           provider_resource_id, observed_state, last_observed_at
+         ) VALUES ($1, 2, $2, 'daytona', $3, 'running', now())`,
+        [workspaceId, orgId, `sandbox-${workspaceId}-2`],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_generations SET retired_at = now()
+         WHERE workspace_id = $1 AND generation = 1`,
+        [workspaceId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspaces
+         SET current_generation = 2, status = 'ready', updated_at = now()
+         WHERE id = $1`,
+        [workspaceId],
+      );
+    });
+
+    const beforeDeletion = (await management.workspaceOverview({
+      organizationId: orgId,
+      workspaceId,
+      actorUserId: actor.id,
+    })) as {
+      quota: {
+        allocation: {
+          workspaces: number;
+          runningWorkspaces: number;
+          cpuMillicores: number;
+          memoryMiB: number;
+          storageMiB: number;
+        };
+      };
+    };
+    expect(beforeDeletion.quota.allocation).toEqual({
+      workspaces: 1,
+      runningWorkspaces: 1,
+      cpuMillicores: 2000,
+      memoryMiB: 4096,
+      storageMiB: 40960,
+    });
+
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE cloud_workspace_provider_bindings
+         SET observed_state = 'deleted', deletion_verified_at = now(),
+             last_observed_at = now(), updated_at = now()
+         WHERE workspace_id = $1 AND generation = 1`,
+        [workspaceId],
+      ),
+    );
+    const afterDeletion = (await management.workspaceOverview({
+      organizationId: orgId,
+      workspaceId,
+      actorUserId: actor.id,
+    })) as typeof beforeDeletion;
+    expect(afterDeletion.quota.allocation.storageMiB).toBe(20480);
+  });
+
   it("versions repository settings with optimistic concurrency and idempotent replay", async () => {
     const first = await management.putRepositorySettings({
       organizationId: orgId,
