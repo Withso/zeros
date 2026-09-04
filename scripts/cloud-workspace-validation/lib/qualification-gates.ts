@@ -178,6 +178,20 @@ export function validateEphemeralSnapshotName(name: string): void {
   }
 }
 
+export function validateDeletableQualificationSnapshotName(
+  name: string,
+): void {
+  if (
+    !/^zeros-zsr-(?:ci|candidate)-[1-9][0-9]{0,19}-[1-9][0-9]{0,9}$/.test(
+      name,
+    )
+  ) {
+    throw new Error(
+      "automated snapshot deletion requires a run-scoped zeros-zsr-ci or zeros-zsr-candidate name",
+    );
+  }
+}
+
 export function parseValidationAutoDeleteMinutes(
   raw: string | undefined,
 ): number {

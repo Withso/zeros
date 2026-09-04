@@ -9,7 +9,7 @@ import {
   SNAPSHOT_NAME,
   snapshotAttestationExists,
 } from "./config";
-import { validateEphemeralSnapshotName } from "./lib/qualification-gates";
+import { validateDeletableQualificationSnapshotName } from "./lib/qualification-gates";
 import {
   runBoundedProviderOperation,
   verifySnapshotNameAbsent,
@@ -21,7 +21,7 @@ async function main(): Promise<void> {
       "ephemeral snapshot deletion requires ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE=1",
     );
   }
-  validateEphemeralSnapshotName(SNAPSHOT_NAME);
+  validateDeletableQualificationSnapshotName(SNAPSHOT_NAME);
   const daytona = makeDaytona();
   const candidates = [];
   for (let page = 1; page <= 1_000; page++) {

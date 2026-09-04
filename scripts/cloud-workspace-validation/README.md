@@ -4,7 +4,8 @@ This directory is an operator-run validation harness for the Zeros engine in a
 remote Daytona sandbox. It proves that a sandbox image can boot the engine,
 serve an account- and capability-gated bridge, run Claude/Codex/Cursor through
 the same full ZSR boundary, complete `file.tree` and PTY round trips, reconnect
-after stop/start, and pass lifecycle, socket, outbound-reachability, and SSH gates.
+after stop/start, and pass lifecycle, socket, outbound-reachability, private-
+preview, SSH-forward, and production-provider-adapter rollback gates.
 
 This is not a deployable application or a product roadmap. Nothing in the
 packaged desktop app imports these scripts, and repository builds exclude them.
@@ -73,7 +74,7 @@ identity, cleanup, and fail-closed verdict regressions.
 ```bash
 export DAYTONA_API_KEY=dtn_... # required
 export DAYTONA_TARGET=eu       # optional: us | eu; default eu
-export ZEROS_CLOUD_OWNER_SUB='auth0|owner-id'
+export ZEROS_CLOUD_OWNER_SUB='user_workos-owner-id'
 export ZEROS_ACCOUNT_ACCESS_TOKEN='eyJ...' # client-only JWT; sub must equal owner
 export ZEROS_ACCOUNT_JWT_JWKS_URL='https://tenant/.well-known/jwks.json'
 # Or configure ZEROS_ACCOUNT_JWT_ISSUER / ZEROS_ACCOUNT_JWT_PUBLIC_KEY.
@@ -82,6 +83,39 @@ export ZEROS_CLOUD_REQUIRED_AGENTS='claude,codex,cursor' # paid live differentia
 
 `@daytona/sdk` is an exact root dev dependency. Run commands from the repository
 root with `pnpm tsx scripts/cloud-workspace-validation/<name>.ts`.
+The harness and control-plane provider/toolbox clients are all pinned at
+`0.190.1`. Treat a Daytona SDK/client upgrade as a qualification reset: update
+the adapters together, rerun contract tests, and complete this live matrix
+before using the new version in a release.
+
+## Protected release-candidate procedure
+
+The GitHub workflow is the canonical production-shaped path. An operator must:
+
+1. Merge the exact candidate commit to `main`; the workflow rejects every other
+   ref.
+2. Configure required reviewers on the `zsr-cloud-qualification` Environment.
+3. Add Environment secrets for `DAYTONA_API_KEY`, the three dedicated low-quota
+   agent keys, the qualification GitHub App ID/private key/installation, one
+   exact private repository and commit, allowed Daytona toolbox origins, and
+   the Cloudflare tunnel token. Set
+   `ZSR_CLOUD_QUALIFICATION_TUNNEL_ORIGIN` as an Environment variable.
+4. Dispatch a `rehearsal` run first. Confirm its artifact contains the sanitized
+   attestation and digest, and confirm both sandbox and snapshot inventories are
+   empty after cleanup.
+5. Complete the root-coordinator exception decision and the signed macOS
+   Terminal, Cursor, VS Code, pinned-host-key, preview, tunnel, expiry, and
+   revocation run. The Linux workflow does not supply that evidence.
+6. Dispatch `release-candidate` for the same commit, region, and reviewed
+   configuration. Verify the GitHub attestation and uploaded digest before
+   copying its immutable snapshot ID/source commit into deployment config.
+7. Keep `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false` until every prior step is
+   recorded and approved. Enable it first in a low-quota canary deployment,
+   verify setup/heartbeat/deletion telemetry, then roll forward explicitly.
+
+Never promote a snapshot merely because it exists. A failed/cancelled candidate
+is deleted by the workflow, and an unattested retained image is not eligible for
+`DAYTONA_SNAPSHOT_ID`.
 
 ## Validation sequence
 
@@ -93,10 +127,12 @@ root with `pnpm tsx scripts/cloud-workspace-validation/<name>.ts`.
 | 4     | `pnpm tsx scripts/cloud-workspace-validation/test-client.ts`                 | Handshake, file tree, PTY, and stop/start reconnect           |
 | 5     | `pnpm tsx scripts/cloud-workspace-validation/agent-smoke.ts`                 | Live providers enter the full Design-enforced boundary        |
 | 6     | `pnpm tsx scripts/cloud-workspace-validation/egress.ts`                      | Required outbound provider/package endpoints are reachable    |
-| 7     | `pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts`                   | Stop/start and archive/restore latency                        |
-| 8     | `ZEROS_SOAK_HOURS=4 pnpm tsx scripts/cloud-workspace-validation/soak-wss.ts` | Long-lived socket stability and reconnect behavior            |
-| 9     | `pnpm tsx scripts/cloud-workspace-validation/ssh-forward.ts`                 | SSH local-forward fallback                                    |
-| 10    | `pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts --delete`          | Provider resource and local credential cleanup                |
+| 7     | `pnpm tsx scripts/cloud-workspace-validation/preview-access.ts`              | Production adapter's private header-token preview round trip  |
+| 8     | `pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts`                   | Stop/start and archive/restore latency                        |
+| 9     | `pnpm tsx scripts/cloud-workspace-validation/provider-lifecycle.ts`          | Adapter stop/wake and drain/reject/delete/source-wake matrix  |
+| 10    | `ZEROS_SOAK_HOURS=4 pnpm tsx scripts/cloud-workspace-validation/soak-wss.ts` | Long-lived socket stability and reconnect behavior            |
+| 11    | `pnpm tsx scripts/cloud-workspace-validation/ssh-forward.ts`                 | Production adapter SSH grant and localhost-forward fallback   |
+| 12    | `pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts --delete`          | Provider resource and local credential cleanup                |
 
 Set `ZEROS_CLOUD_VALIDATION_SKIP_RECONNECT=1` only for a deliberately shortened
 local iteration. The legacy `ZEROS_SPIKE_SKIP_RECONNECT` name remains accepted
@@ -123,6 +159,14 @@ snapshots left by killed runners after 24 hours. Configure required reviewers
 on the `zsr-cloud-qualification` GitHub Environment before storing its Daytona
 and dedicated low-quota model keys.
 
+`provider-lifecycle.ts` creates two short-lived, immutable-label generations
+through the same `DaytonaWorkspaceProvider` used by the control plane. It proves
+source stop/wake, source drain before candidate create, inventory-verified
+candidate deletion, and source wake after candidate rejection. Its own
+`finally` block deletes both resources; a one-hour auto-stop and the configured
+auto-delete interval are only a killed-run backstop, not successful cleanup
+evidence.
+
 Keep `preview-coordinator.ts` running for the lifetime of an active validation
 workspace. The Daytona API key, account JWT, GitHub App mint authority, and any
 refresh credential remain in this external process. The worker receives only
@@ -139,25 +183,31 @@ is persisted by renderer state.
 
 The harness automates bridge/account binding, PTY, reconnect, live provider
 authentication, GitHub working-credential rotation, outbound reachability,
-lifecycle, soak, and SSH checks. Long-term billing
-behavior, production file mirroring, and vendor redistribution approval remain
-outside this provider qualification.
+lifecycle, production-adapter preview/rollback, soak, and SSH-forward checks.
+Long-term billing behavior, production file mirroring, and vendor
+redistribution approval remain outside this provider qualification.
 
 ## Files
 
-| Path                         | Responsibility                                               |
-| ---------------------------- | ------------------------------------------------------------ |
-| `config.ts`                  | Provider client, resources, private state, and URL helpers   |
-| `image.ts`                   | Canonical Daytona image specification                        |
-| `Dockerfile`                 | Portable equivalent for local Docker/provider validation     |
-| `sandbox/start-engine.sh`    | In-sandbox engine launcher                                   |
-| `sandbox/egress-probe.sh`    | In-sandbox outbound endpoint probe                           |
-| `lib/bridge-client.ts`       | Minimal bridge handshake, request, and PTY client            |
-| `lib/provider-cleanup.ts`    | Bounded operations and inventory-proven resource deletion    |
-| `lib/validation-identity.ts` | Ephemeral asymmetric qualification identity                  |
-| `preview-coordinator.ts`     | External signed-ingress renewal and crash recovery           |
-| `github-coordinator.ts`      | Owner-bound GitHub App working-credential minting            |
-| Remaining `.ts` files        | Ordered operator commands from the validation sequence above |
+| Path                                  | Responsibility                                                    |
+| ------------------------------------- | ----------------------------------------------------------------- |
+| `config.ts`                           | Provider client, resources, private state, and URL helpers        |
+| `image.ts`                            | Canonical Daytona image specification                             |
+| `Dockerfile`                          | Portable equivalent for local Docker/provider validation          |
+| `sandbox/start-engine.sh`             | Fixed in-sandbox engine launcher                                  |
+| `sandbox/setup-cloud-workspace.mjs`   | Strict clone/settings/setup/readiness coordinator                 |
+| `sandbox/cloud-worker-supervisor.mjs` | Root-only one-use engine process supervisor                       |
+| `sandbox/cloud-git-askpass.mjs`       | Host-scoped Git credential carrier; keeps tokens out of argv/URLs |
+| `sandbox/egress-probe.sh`             | In-sandbox outbound endpoint probe                                |
+| `lib/bridge-client.ts`                | Minimal bridge handshake, request, and PTY client                 |
+| `lib/provider-cleanup.ts`             | Bounded operations and inventory-proven resource deletion         |
+| `lib/validation-identity.ts`          | Ephemeral asymmetric qualification identity                       |
+| `preview-coordinator.ts`              | External signed-ingress renewal and crash recovery                |
+| `github-coordinator.ts`               | Owner-bound GitHub App working-credential minting                 |
+| `control-plane-provider.ts`           | Pinned production adapter configuration for live gates            |
+| `preview-access.ts`                   | Standard private preview header-token round trip                  |
+| `provider-lifecycle.ts`               | Managed stop/wake and generation rollback primitive matrix        |
+| Remaining `.ts` files                 | Ordered operator commands from the validation sequence above      |
 
 ## Configuration
 

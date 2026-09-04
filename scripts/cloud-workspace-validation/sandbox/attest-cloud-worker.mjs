@@ -296,11 +296,7 @@ try {
 const helperTrust = Object.fromEntries(
   Object.entries(marker.toolchain ?? {}).map(([name, file]) => [
     name,
-    typeof file === "string" &&
-      rootControlled(
-        file,
-        name !== "supervisor",
-      ),
+    typeof file === "string" && rootControlled(file, name !== "supervisor"),
   ]),
 );
 const deploymentTrust = {
@@ -323,6 +319,18 @@ const deploymentTrust = {
   ),
   githubRefreshRequestHelper: rootControlled(
     "/usr/local/lib/zeros/cloud-github-refresh-request.mjs",
+    true,
+  ),
+  gitAskpass: rootControlled(
+    "/usr/local/lib/zeros/cloud-git-askpass.mjs",
+    true,
+  ),
+  workerSupervisor: rootControlled(
+    "/usr/local/lib/zeros/cloud-worker-supervisor.mjs",
+    true,
+  ),
+  setupHelper: rootControlled(
+    "/usr/local/lib/zeros/setup-cloud-workspace.mjs",
     true,
   ),
   attester: rootControlled(

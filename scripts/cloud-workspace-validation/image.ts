@@ -165,16 +165,31 @@ export function buildEngineImage(): Image {
         path.join(here, "sandbox", "cloud-github-refresh-request.mjs"),
         "/usr/local/lib/zeros/cloud-github-refresh-request.mjs",
       )
+      .addLocalFile(
+        path.join(here, "sandbox", "cloud-git-askpass.mjs"),
+        "/usr/local/lib/zeros/cloud-git-askpass.mjs",
+      )
+      .addLocalFile(
+        path.join(here, "sandbox", "cloud-worker-supervisor.mjs"),
+        "/usr/local/lib/zeros/cloud-worker-supervisor.mjs",
+      )
+      .addLocalFile(
+        path.join(here, "sandbox", "setup-cloud-workspace.mjs"),
+        "/usr/local/lib/zeros/setup-cloud-workspace.mjs",
+      )
       .runCommands(
-        "chown root:root /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs /etc/zeros/cloud-worker.json",
+        "chown root:root /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs /usr/local/lib/zeros/cloud-git-askpass.mjs /usr/local/lib/zeros/cloud-worker-supervisor.mjs /usr/local/lib/zeros/setup-cloud-workspace.mjs /etc/zeros/cloud-worker.json",
         "chmod 0755 /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh",
-        "chmod 0555 /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs",
+        "chmod 0555 /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs /usr/local/lib/zeros/cloud-git-askpass.mjs /usr/local/lib/zeros/cloud-worker-supervisor.mjs /usr/local/lib/zeros/setup-cloud-workspace.mjs",
         "chmod 0644 /etc/zeros/cloud-worker.json",
         `/usr/local/bin/node /usr/local/lib/zeros/write-image-build-metadata.mjs /etc/zeros/image-build.json ${baseImage} ${repositoryUrl} ${repositoryRef} ${engineDirectory} ${imageContract}`,
       )
       .workdir(SANDBOX_REPO_DIR)
-      // Keep the container alive; provision.ts starts the engine as a managed
-      // session process so an engine crash does not stop the container.
-      .entrypoint(["sleep", "infinity"])
+      // Root-owned PID 1 keeps the sandbox alive and is the only component
+      // allowed to turn a one-use setup session into a persistent engine.
+      .entrypoint([
+        "/usr/local/bin/node",
+        "/usr/local/lib/zeros/cloud-worker-supervisor.mjs",
+      ])
   );
 }

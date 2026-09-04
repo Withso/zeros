@@ -89,6 +89,9 @@ COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admi
 COPY sandbox/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs
 COPY sandbox/install-cloud-github-credential.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs
 COPY sandbox/cloud-github-refresh-request.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs
+COPY sandbox/cloud-git-askpass.mjs /usr/local/lib/zeros/cloud-git-askpass.mjs
+COPY sandbox/cloud-worker-supervisor.mjs /usr/local/lib/zeros/cloud-worker-supervisor.mjs
+COPY sandbox/setup-cloud-workspace.mjs /usr/local/lib/zeros/setup-cloud-workspace.mjs
 RUN chown root:root /usr/local/bin/start-engine.sh \
       /usr/local/bin/egress-probe.sh \
       /usr/local/lib/zeros/write-image-build-metadata.mjs \
@@ -97,6 +100,9 @@ RUN chown root:root /usr/local/bin/start-engine.sh \
       /usr/local/lib/zeros/install-cloud-preview-links.mjs \
       /usr/local/lib/zeros/install-cloud-github-credential.mjs \
       /usr/local/lib/zeros/cloud-github-refresh-request.mjs \
+      /usr/local/lib/zeros/cloud-git-askpass.mjs \
+      /usr/local/lib/zeros/cloud-worker-supervisor.mjs \
+      /usr/local/lib/zeros/setup-cloud-workspace.mjs \
       /etc/zeros/cloud-worker.json \
  && chmod 0755 /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh \
  && chmod 0555 /usr/local/lib/zeros/write-image-build-metadata.mjs \
@@ -105,6 +111,9 @@ RUN chown root:root /usr/local/bin/start-engine.sh \
       /usr/local/lib/zeros/install-cloud-preview-links.mjs \
       /usr/local/lib/zeros/install-cloud-github-credential.mjs \
       /usr/local/lib/zeros/cloud-github-refresh-request.mjs \
+      /usr/local/lib/zeros/cloud-git-askpass.mjs \
+      /usr/local/lib/zeros/cloud-worker-supervisor.mjs \
+      /usr/local/lib/zeros/setup-cloud-workspace.mjs \
  && chmod 0644 /etc/zeros/cloud-worker.json \
  && /usr/local/bin/node /usr/local/lib/zeros/write-image-build-metadata.mjs \
       /etc/zeros/image-build.json "$ZEROS_NODE_BASE_IMAGE" "$ZEROS_REPO_URL" \
@@ -112,5 +121,5 @@ RUN chown root:root /usr/local/bin/start-engine.sh \
 
 WORKDIR /workspace/zeros
 
-# Keep the container alive; the engine is started as a managed process post-create.
-ENTRYPOINT ["sleep", "infinity"]
+# Keep the sandbox alive and launch engines only through a one-use root session.
+ENTRYPOINT ["/usr/local/bin/node", "/usr/local/lib/zeros/cloud-worker-supervisor.mjs"]

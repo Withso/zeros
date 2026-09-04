@@ -1,5 +1,5 @@
 import type { GithubBackendConfig } from "../config.js";
-import { createGithubAppJwt } from "../github.js";
+import { createGithubAppJwt } from "../github-app-jwt.js";
 import type { CloudWorkspaceRepositoryCredentialBroker } from "./setup-materials.js";
 
 const GITHUB_API_VERSION = "2026-03-10";
