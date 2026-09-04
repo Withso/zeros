@@ -721,6 +721,10 @@ export async function prepareZsrPolicy(
           // later repository edit from de-registering an admitted Design root.
         ]
       : [
+          // Host-parity Seatbelt starts from native host access. A Design
+          // actor instead has a read-only host root, with provider state and
+          // scratch reopened from allowWrite as explicit nested islands.
+          hostFilesystemRoot,
           workspaceRoot,
           ...additional,
           ...protectedCodeDirectories,

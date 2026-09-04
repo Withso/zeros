@@ -449,6 +449,7 @@ describe("ZSR host-parity policy builder", () => {
     );
     expect(designPolicy.document.filesystem.denyWrite).toEqual(
       expect.arrayContaining([
+        path.parse(workspace).root,
         workspace,
         design,
         siblingWorkspace,
