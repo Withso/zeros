@@ -52,7 +52,12 @@ CREATE TABLE cloud_workspace_quota_changes (
       AND previous_max_memory_mib IS NULL
       AND previous_max_storage_mib IS NULL
     ) OR (
-      previous_max_workspaces > 0
+      previous_max_workspaces IS NOT NULL
+      AND previous_max_running_workspaces IS NOT NULL
+      AND previous_max_cpu_millicores IS NOT NULL
+      AND previous_max_memory_mib IS NOT NULL
+      AND previous_max_storage_mib IS NOT NULL
+      AND previous_max_workspaces > 0
       AND previous_max_running_workspaces > 0
       AND previous_max_running_workspaces <= previous_max_workspaces
       -- Migration 0010 historically accepted any positive resource limits.

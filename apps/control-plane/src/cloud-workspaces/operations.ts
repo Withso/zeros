@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
+import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 
 export interface CloudWorkspaceDeletionObjectService {
   deleteUnreferencedSystem(input: {
@@ -70,9 +71,7 @@ export class CloudWorkspaceOperationsWorker {
     this.maxAttempts = options.maxAttempts ?? 10;
     this.deletionBatchSize = options.deletionBatchSize ?? 50;
     if (
-      this.workerId.length < 1 ||
-      this.workerId.length > 255 ||
-      /[\u0000-\u001f\u007f]/u.test(this.workerId) ||
+      !isValidCloudWorkspaceWorkerId(this.workerId) ||
       !Number.isSafeInteger(this.intervalMs) ||
       this.intervalMs < 1_000 ||
       this.intervalMs > 300_000 ||
@@ -134,6 +133,7 @@ export class CloudWorkspaceOperationsWorker {
     while (expiredExports < 100 && (await this.expireExportOnce())) {
       expiredExports += 1;
     }
+    await this.discoverDeletionJobs();
     let deletionSteps = 0;
     while (
       deletionSteps < this.deletionBatchSize &&
@@ -557,7 +557,6 @@ export class CloudWorkspaceOperationsWorker {
   }
 
   async processDeletionOnce(): Promise<boolean> {
-    await this.discoverDeletionJobs();
     const job = await this.claimDeletionJob();
     if (!job) return false;
     try {

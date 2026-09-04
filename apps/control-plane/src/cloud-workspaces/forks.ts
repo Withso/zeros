@@ -1488,11 +1488,11 @@ export class DatabaseCloudWorkspaceForkService {
         const batchCount = Math.ceil(recordCount / 100);
         await tx.query(
           `INSERT INTO workspace_record_batches (
-             workspace_id, org_id, engine_instance_id, authority_epoch,
+             workspace_id, org_id, generation, engine_instance_id, authority_epoch,
              idempotency_key, request_sha256, first_revision, last_revision,
              event_count, source_kind, fork_intent_id
            )
-           SELECT $1, $2, NULL, 1,
+           SELECT $1, $2, 1, NULL, 1,
                   'fork.' || $3::text || '.record.' || batch::text,
                   digest($3::text || ':record:' || batch::text, 'sha256'),
                   ((batch - 1) * 100) + 1,

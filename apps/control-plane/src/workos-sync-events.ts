@@ -898,19 +898,15 @@ export async function ingestWorkOSManagementEvent(
         ],
       );
       if (!inserted.rows[0]) return { status: "duplicate" as const };
-      try {
-        const state = await applyNormalizedEvent(tx, event);
-        return finishInbox(
-          tx,
-          event.id,
-          state,
-          state === "quarantined" ? "unsupported_role" : null,
-        );
-      } catch (error) {
-        // The transaction intentionally rolls back so Events API reconciliation
-        // can retry without advancing its cursor. Never persist raw errors.
-        throw error;
-      }
+      // A thrown error rolls the transaction back so Events API reconciliation
+      // can retry without advancing its cursor. Never persist raw errors.
+      const state = await applyNormalizedEvent(tx, event);
+      return finishInbox(
+        tx,
+        event.id,
+        state,
+        state === "quarantined" ? "unsupported_role" : null,
+      );
     }),
   );
 }

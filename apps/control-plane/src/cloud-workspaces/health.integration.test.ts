@@ -55,6 +55,46 @@ d("cloud workspace operational health", () => {
     expect(JSON.stringify(degraded)).not.toContain(fixture.organizationId);
   });
 
+  it("ignores setup-owned lease signals while setup execution is paused", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    await pool.query(
+      `UPDATE cloud_workspace_engine_instances
+       SET last_heartbeat_at = now() - interval '2 minutes',
+           lease_expires_at = now() - interval '1 minute'
+       WHERE id = $1`,
+      [fixture.engineInstanceId],
+    );
+    await pool.query(
+       `INSERT INTO cloud_workspace_setup_runs (
+         workspace_id, generation, org_id, attempt, state, execution_fence,
+         lease_owner, lease_expires_at, last_heartbeat_at, started_at
+       ) VALUES ($1, 1, $2, 2, 'running', 1, 'paused-worker',
+                 now() - interval '1 minute', now() - interval '2 minutes',
+                 now() - interval '2 minutes')`,
+      [fixture.workspaceId, fixture.organizationId],
+    );
+
+    const paused = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: false,
+      durabilityEnabled: false,
+      outboxDeliveryEnabled: false,
+    });
+    await expect(paused.read()).resolves.toMatchObject({
+      operationalState: "healthy",
+      reasons: [],
+    });
+
+    const enabled = new DatabaseCloudWorkspaceHealthService(pool, {
+      setupExecutionEnabled: true,
+      durabilityEnabled: false,
+      outboxDeliveryEnabled: false,
+    });
+    await expect(enabled.read()).resolves.toMatchObject({
+      operationalState: "degraded",
+      reasons: ["setup_lease_expired", "engine_lease_expired"],
+    });
+  });
+
   it("reports repeatedly failing detached-object deletion even between retries", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);
     const objectKey =

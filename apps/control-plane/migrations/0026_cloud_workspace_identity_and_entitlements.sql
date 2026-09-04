@@ -209,8 +209,8 @@ SET repository_id = repository.id,
 FROM repositories repository
 WHERE repository.org_id = cw.org_id
   AND repository.forge = lower(cw.repository_forge)
-  AND repository.owner_name = cw.repository_owner
-  AND repository.repository_name = cw.repository_name
+  AND lower(repository.owner_name) = lower(cw.repository_owner)
+  AND lower(repository.repository_name) = lower(cw.repository_name)
   AND repository.github_installation_id IS NOT DISTINCT FROM cw.github_installation_id
   AND repository.identity_state = 'legacy_unverified';
 

@@ -165,6 +165,7 @@ function maskQuotedSql(sql: string): string {
     | "line-comment"
     | "block-comment"
     | "single-quote"
+    | "escape-string"
     | "double-quote"
     | "dollar-quote" = "normal";
   let blockDepth = 0;
@@ -218,16 +219,24 @@ function maskQuotedSql(sql: string): string {
       continue;
     }
 
-    if (state === "single-quote" || state === "double-quote") {
-      const delimiter = state === "single-quote" ? "'" : '"';
+    if (
+      state === "single-quote" ||
+      state === "escape-string" ||
+      state === "double-quote"
+    ) {
+      const quote = state === "double-quote" ? '"' : "'";
       blank(index, 1);
-      if (character === delimiter && sql[index + 1] === delimiter) {
+      if (character === quote && sql[index + 1] === quote) {
         blank(index + 1, 1);
         index += 1;
-      } else if (character === "\\" && index + 1 < sql.length) {
+      } else if (
+        state === "escape-string" &&
+        character === "\\" &&
+        index + 1 < sql.length
+      ) {
         blank(index + 1, 1);
         index += 1;
-      } else if (character === delimiter) {
+      } else if (character === quote) {
         state = "normal";
       }
       continue;
@@ -248,7 +257,16 @@ function maskQuotedSql(sql: string): string {
     }
     if (character === "'" || character === '"') {
       blank(index, 1);
-      state = character === "'" ? "single-quote" : "double-quote";
+      const escapePrefix =
+        character === "'" &&
+        /[eE]/u.test(sql[index - 1] ?? "") &&
+        !/[A-Za-z0-9_$]/u.test(sql[index - 2] ?? "");
+      state =
+        character === '"'
+          ? "double-quote"
+          : escapePrefix
+            ? "escape-string"
+            : "single-quote";
       continue;
     }
     if (character === "$") {
@@ -544,7 +562,7 @@ async function withMigrationClient<T>(
       cleanupError ??= error;
     }
   }
-  client.release(cleanupError ? true : undefined);
+  client.release(cleanupError || !completed ? true : undefined);
 
   if (!completed) throw operationError;
   if (cleanupError) {

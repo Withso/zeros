@@ -50,6 +50,24 @@ describe("workspace content path contract", () => {
       ]),
     ).toThrow("file and directory");
   });
+
+  it("rejects file/directory aliases separated by a sorted sibling", () => {
+    const descriptor = {
+      operation: "upsert" as const,
+      entryType: "file" as const,
+      mode: 33188 as const,
+      blobId: "11111111-1111-4111-8111-111111111111",
+      contentSha256: "a".repeat(64),
+      sizeBytes: 1,
+    };
+    expect(() =>
+      validateWorkspaceFileMutations([
+        { ...descriptor, path: "src" },
+        { ...descriptor, path: "src.bak" },
+        { ...descriptor, path: "src/a.ts" },
+      ]),
+    ).toThrow("file and directory");
+  });
 });
 
 describe("workspace content size contract", () => {

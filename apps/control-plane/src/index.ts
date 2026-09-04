@@ -309,6 +309,7 @@ if (config.cloudWorkspaces) {
   let setupWorker: InstanceType<typeof CloudWorkspaceSetupWorker> | null = null;
   if (cloud.setupExecution && blobService) {
     const setup = cloud.setupExecution;
+    const blobs = blobService;
     const endpoint = (path: string) => `${setup.controlPlaneOrigin}${path}`;
     cloudWorkspaceEngineClientAdmissionService =
       new DatabaseCloudWorkspaceEngineClientAdmissionService({
@@ -355,7 +356,7 @@ if (config.cloudWorkspaces) {
     });
     const recoveryService = new DatabaseCloudWorkspaceSetupRecoveryService(
       pool,
-      blobService,
+      blobs,
     );
     cloudWorkspaceInternalSetupService = {
       redeem: (input) => materials.redeem(input),
@@ -368,8 +369,8 @@ if (config.cloudWorkspaces) {
       appendContent: (input) => contentService.append(input),
       readContentHead: (input) => contentService.headForEngine(input),
       commitCheckpoint: (input) => contentService.commitCheckpoint(input),
-      putBlob: (input) => blobService.put(input),
-      getBlob: (input) => blobService.getForEngine(input),
+      putBlob: (input) => blobs.put(input),
+      getBlob: (input) => blobs.getForEngine(input),
       ingestUsage: (input) => usageService.ingestEngine(input),
       readRecoveryManifest: (input) => recoveryService.manifestPage(input),
       getRecoveryBlob: (input) => recoveryService.blob(input),

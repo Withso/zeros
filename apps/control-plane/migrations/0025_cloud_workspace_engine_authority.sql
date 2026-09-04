@@ -297,11 +297,11 @@ BEGIN
          'delete'::cloud_workspace_operation,
          'system:' || retirement_reason || ':' || workspace.id::text ||
            ':g' || generation.generation::text,
-         digest(
+         pg_catalog.sha256(pg_catalog.convert_to(
            retirement_reason || ':' || workspace.id::text || ':' ||
              generation.generation::text,
-           'sha256'
-         ),
+           'UTF8'
+         )),
          generation.generation = workspace.current_generation
   FROM cloud_workspaces workspace
   JOIN cloud_workspace_generations generation

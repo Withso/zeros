@@ -320,6 +320,38 @@ d("cloud workspace reconciliation", () => {
     return { workspaceId, intentId, providerConnectionId };
   };
 
+  it.each(["stop", "archive"] as const)(
+    "does not dispatch %s for a provider resource already observed as deleted",
+    async (operation) => {
+      const resourceId = `deleted-${operation}`;
+      const seeded = await seedWorkspace({
+        desiredState: operation === "stop" ? "stopped" : "archived",
+        status: operation === "stop" ? "stopping" : "archiving",
+        operation,
+        providerResourceId: resourceId,
+        observedState: "deleted",
+      });
+      const provider = new FakeProvider();
+      provider.resources.set(
+        resourceId,
+        provider.make(
+          { workspaceId: seeded.workspaceId, generation: 1 },
+          "deleted",
+          resourceId,
+        ),
+      );
+      const reconciler = new CloudWorkspaceReconciler({
+        pool,
+        provider,
+        intervalMs: 1_000,
+      });
+
+      await expect(reconciler.runOnce()).resolves.toBe(true);
+      expect(provider.stopCount).toBe(0);
+      expect(provider.archiveCount).toBe(0);
+    },
+  );
+
   const seedGenerationTransition = async () => {
     const seeded = await seedWorkspace({
       status: "ready",

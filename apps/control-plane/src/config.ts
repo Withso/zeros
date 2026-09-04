@@ -17,6 +17,14 @@ import { z } from "zod";
 
 import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 
+function containsAsciiControl(value: string): boolean {
+  for (const character of value) {
+    const code = character.codePointAt(0)!;
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
 const EnvSchema = z.object({
   /** Postgres connection string (Railway: the service's DATABASE_URL). */
   DATABASE_URL: z.string().min(1),
@@ -1201,7 +1209,7 @@ function loadCloudWorkspaceConfig(
     if (
       !path.isAbsolute(rawObjectStoreDirectory) ||
       objectStoreDirectory === path.parse(objectStoreDirectory).root ||
-      /[\u0000-\u001f\u007f]/u.test(rawObjectStoreDirectory)
+      containsAsciiControl(rawObjectStoreDirectory)
     ) {
       throw new Error(
         "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path",

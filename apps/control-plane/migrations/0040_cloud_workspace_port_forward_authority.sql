@@ -60,7 +60,7 @@ BEGIN
     WHERE session.device_id = NEW.id
       AND session.access_grant_id = access.id
       AND access.kind = 'tunnel'
-      AND access.state = 'active';
+      AND access.state IN ('issuing', 'active');
   END IF;
   RETURN NEW;
 END;

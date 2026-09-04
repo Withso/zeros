@@ -56,6 +56,109 @@ const LADDER = readdirSync(MIGRATIONS_DIR)
   .filter((f) => /^\d{4}_.+\.sql$/.test(f))
   .sort();
 
+function migrationSource(file: string): string {
+  return readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+}
+
+describe("cloud migration regression contracts", () => {
+  it("case-folds both sides of the legacy repository identity backfill", () => {
+    const sql = migrationSource(
+      "0026_cloud_workspace_identity_and_entitlements.sql",
+    );
+    expect(sql).toContain(
+      "lower(repository.owner_name) = lower(cw.repository_owner)",
+    );
+    expect(sql).toContain(
+      "lower(repository.repository_name) = lower(cw.repository_name)",
+    );
+  });
+
+  it("suspends the append-only trigger only around the usage backfill", () => {
+    const sql = migrationSource(
+      "0029_cloud_workspace_production_operations.sql",
+    );
+    const disabled = sql.indexOf(
+      "DISABLE TRIGGER cloud_workspace_usage_append_only",
+    );
+    const backfill = sql.indexOf("UPDATE cloud_workspace_usage_events usage");
+    const enabled = sql.indexOf(
+      "ENABLE TRIGGER cloud_workspace_usage_append_only",
+    );
+    expect(disabled).toBeGreaterThan(-1);
+    expect(backfill).toBeGreaterThan(disabled);
+    expect(enabled).toBeGreaterThan(backfill);
+  });
+
+  it("keeps recovery grants bound to a mutable setup run without foreign-keying its fence", () => {
+    const sql = migrationSource(
+      "0030_cloud_workspace_recovery_and_replica_authority.sql",
+    );
+    const foreignKey = sql.match(
+      /FOREIGN KEY \(\s*setup_run_id[\s\S]*?\)\s+REFERENCES cloud_workspace_setup_runs\([\s\S]*?\) ON DELETE CASCADE/,
+    )?.[0];
+    expect(foreignKey).toBeDefined();
+    expect(foreignKey).not.toContain("setup_execution_fence");
+    expect(foreignKey).not.toContain("execution_fence");
+  });
+
+  it("revokes issuing and active tunnel grants when their device is revoked", () => {
+    expect(
+      migrationSource("0040_cloud_workspace_port_forward_authority.sql"),
+    ).toContain("access.state IN ('issuing', 'active')");
+  });
+
+  it.each([
+    [
+      "0054_cloud_workspace_quota_operations.sql",
+      [
+        "previous_max_workspaces IS NOT NULL",
+        "previous_max_running_workspaces IS NOT NULL",
+        "previous_max_cpu_millicores IS NOT NULL",
+        "previous_max_memory_mib IS NOT NULL",
+        "previous_max_storage_mib IS NOT NULL",
+      ],
+    ],
+    [
+      "0055_cloud_workspace_object_storage_admission.sql",
+      [
+        "previous_organization_bytes IS NOT NULL",
+        "previous_workspace_bytes IS NOT NULL",
+      ],
+    ],
+  ] as const)("requires complete previous snapshots in %s", (file, fields) => {
+    const sql = migrationSource(file);
+    for (const field of fields) expect(sql).toContain(field);
+  });
+
+  it("binds durable record batches to the engine tenant and generation", () => {
+    const sql = migrationSource("0028_cloud_workspace_durable_record.sql");
+    expect(sql).toContain(
+      "FOREIGN KEY (engine_instance_id, workspace_id, generation, org_id)",
+    );
+    expect(sql).toContain(
+      "REFERENCES cloud_workspace_engine_instances(\n      id, workspace_id, generation, org_id\n    )",
+    );
+  });
+
+  it("binds each port-forward device to the session user", () => {
+    const sql = migrationSource(
+      "0027_cloud_workspace_settings_providers_and_replicas.sql",
+    );
+    expect(sql).toContain("FOREIGN KEY (device_id, user_id)");
+    expect(sql).toContain("REFERENCES devices(id, user_id) ON DELETE CASCADE");
+  });
+
+  it("lets one workspace cascade delete both sides of a lifecycle relationship", () => {
+    const sql = migrationSource(
+      "0023_cloud_workspace_generation_transitions.sql",
+    );
+    expect(sql.match(/ON DELETE NO ACTION/g)).toHaveLength(3);
+    expect(sql).not.toMatch(
+      /(?:drain_intent_id|provision_intent_id|generation_transition_id)[\s\S]{0,220}ON DELETE RESTRICT/,
+    );
+  });
+});
+
 d("migration ladder", () => {
   let pool: pg.Pool;
 
@@ -93,6 +196,103 @@ d("migration ladder", () => {
     }
   };
 
+  const applyAndRecord = async (file: string) => {
+    await pool.query("BEGIN");
+    try {
+      await pool.query(migrationSource(file));
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+        file,
+      ]);
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    }
+  };
+
+  const seedLegacyCloudTenant = async (input: {
+    userId: string;
+    organizationId: string;
+    teamId: string;
+    workspaces: Array<{
+      id: string;
+      repositoryOwner: string;
+      repositoryName: string;
+      generations?: number;
+    }>;
+  }) => {
+    await pool.query("BEGIN");
+    try {
+      await pool.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [
+        input.userId,
+        `${input.userId}@example.test`,
+      ]);
+      await pool.query(
+        `INSERT INTO organizations (
+           id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+         ) VALUES ($1, $2, 'Migration Regression', $3, false, true)`,
+        [
+          input.organizationId,
+          `migration-${input.organizationId}`,
+          input.userId,
+        ],
+      );
+      await pool.query(
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'owner')`,
+        [input.organizationId, input.userId],
+      );
+      await pool.query(
+        `INSERT INTO teams (
+           id, org_id, slug, name, is_default, created_by
+         ) VALUES ($1, $2, 'default', 'Default', true, $3)`,
+        [input.teamId, input.organizationId, input.userId],
+      );
+      await pool.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'maintainer')`,
+        [input.teamId, input.organizationId, input.userId],
+      );
+      for (const workspace of input.workspaces) {
+        await pool.query(
+          `INSERT INTO cloud_workspaces (
+             id, org_id, team_id, created_by, display_name,
+             repository_forge, repository_owner, repository_name,
+             repository_revision, status, desired_state
+           ) VALUES ($1, $2, $3, $4, 'Migration Regression', 'github.com',
+                     $5, $6, 'main', 'requested', 'running')`,
+          [
+            workspace.id,
+            input.organizationId,
+            input.teamId,
+            input.userId,
+            workspace.repositoryOwner,
+            workspace.repositoryName,
+          ],
+        );
+        await pool.query(
+          `INSERT INTO cloud_workspace_generations (
+             workspace_id, generation, org_id, provider, image_ref,
+             architecture, cpu_millicores, memory_mib, storage_mib, created_by
+           )
+           SELECT $1, generation, $2, 'daytona', 'snapshot:test',
+                  'linux/amd64', 2000, 4096, 20480, $3
+           FROM generate_series(1, $4::integer) AS generation`,
+          [
+            workspace.id,
+            input.organizationId,
+            input.userId,
+            workspace.generations ?? 1,
+          ],
+        );
+      }
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    }
+  };
+
   const ledger = async () =>
     (
       await pool.query<{ name: string }>(
@@ -106,6 +306,206 @@ d("migration ladder", () => {
     const ran = await runMigrations(pool);
     expect(ran).toEqual(LADDER);
     expect(await ledger()).toEqual(LADDER);
+  });
+
+  it("upgrades case-aliased repository identities without leaving an unmatched workspace", async () => {
+    const identityIndex = LADDER.indexOf(
+      "0026_cloud_workspace_identity_and_entitlements.sql",
+    );
+    await applyThrough(identityIndex);
+    await seedLegacyCloudTenant({
+      userId: "11111111-1111-4111-8111-111111111101",
+      organizationId: "22222222-2222-4222-8222-222222222201",
+      teamId: "33333333-3333-4333-8333-333333333301",
+      workspaces: [
+        {
+          id: "44444444-4444-4444-8444-444444444401",
+          repositoryOwner: "Withso",
+          repositoryName: "Zeros",
+        },
+        {
+          id: "55555555-5555-4555-8555-555555555501",
+          repositoryOwner: "wItHsO",
+          repositoryName: "zErOs",
+        },
+      ],
+    });
+
+    await applyAndRecord(LADDER[identityIndex]!);
+
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS workspace_count,
+                count(DISTINCT repository_id)::integer AS repository_count,
+                count(*) FILTER (WHERE repository_id IS NULL)::integer AS unmatched
+         FROM cloud_workspaces`,
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ workspace_count: 2, repository_count: 1, unmatched: 0 }],
+    });
+  });
+
+  it("backfills populated append-only usage rows and restores their trigger", async () => {
+    const identityIndex = LADDER.indexOf(
+      "0026_cloud_workspace_identity_and_entitlements.sql",
+    );
+    const productionIndex = LADDER.indexOf(
+      "0029_cloud_workspace_production_operations.sql",
+    );
+    await applyThrough(identityIndex);
+    const userId = "11111111-1111-4111-8111-111111111102";
+    const organizationId = "22222222-2222-4222-8222-222222222202";
+    const workspaceId = "44444444-4444-4444-8444-444444444402";
+    await seedLegacyCloudTenant({
+      userId,
+      organizationId,
+      teamId: "33333333-3333-4333-8333-333333333302",
+      workspaces: [
+        {
+          id: workspaceId,
+          repositoryOwner: "withso",
+          repositoryName: "zeros",
+        },
+      ],
+    });
+    for (const file of LADDER.slice(identityIndex, productionIndex)) {
+      await applyAndRecord(file);
+    }
+    const usageId = "66666666-6666-4666-8666-666666666602";
+    await pool.query(
+      `INSERT INTO cloud_workspace_usage_events (
+         id, org_id, workspace_id, generation, authority_epoch,
+         actor_user_id, billing_owner_user_id, billing_epoch, provider,
+         meter, quantity, source_idempotency_key, occurred_at
+       ) VALUES ($1, $2, $3, 1, 1, $4, $4, 1, 'daytona',
+                 'cpu_millisecond', 42, 'usage-before-0029', now())`,
+      [usageId, organizationId, workspaceId, userId],
+    );
+
+    await applyAndRecord(LADDER[productionIndex]!);
+
+    await expect(
+      pool.query(
+        `SELECT provider_connection_id IS NOT NULL AS connection_bound,
+                provider_connection_version,
+                octet_length(request_sha256) AS hash_bytes
+         FROM cloud_workspace_usage_events WHERE id = $1`,
+        [usageId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          connection_bound: true,
+          provider_connection_version: "1",
+          hash_bytes: 32,
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `UPDATE cloud_workspace_usage_events SET quantity = 43 WHERE id = $1`,
+        [usageId],
+      ),
+    ).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("cascades a workspace whose transition and lifecycle intent reference each other", async () => {
+    const transitionIndex = LADDER.indexOf(
+      "0023_cloud_workspace_generation_transitions.sql",
+    );
+    await applyThrough(transitionIndex + 1);
+    const organizationId = "22222222-2222-4222-8222-222222222203";
+    const workspaceId = "44444444-4444-4444-8444-444444444403";
+    await seedLegacyCloudTenant({
+      userId: "11111111-1111-4111-8111-111111111103",
+      organizationId,
+      teamId: "33333333-3333-4333-8333-333333333303",
+      workspaces: [
+        {
+          id: workspaceId,
+          repositoryOwner: "withso",
+          repositoryName: "zeros",
+          generations: 2,
+        },
+      ],
+    });
+    const intentId = "66666666-6666-4666-8666-666666666603";
+    const transitionId = "77777777-7777-4777-8777-777777777703";
+    await pool.query(
+      `INSERT INTO cloud_workspace_lifecycle_intents (
+         id, workspace_id, generation, org_id, operation,
+         idempotency_key, request_sha256
+       ) VALUES ($1, $2, 1, $3, 'stop', 'mutual-fk-intent',
+                 decode(repeat('11', 32), 'hex'))`,
+      [intentId, workspaceId, organizationId],
+    );
+    await pool.query(
+      `INSERT INTO cloud_workspace_generation_transitions (
+         id, workspace_id, org_id, operation, source_generation,
+         template_generation, candidate_generation, state, drain_intent_id
+       ) VALUES ($1, $2, $3, 'upgrade', 1, 1, 2, 'draining', $4)`,
+      [transitionId, workspaceId, organizationId, intentId],
+    );
+    await pool.query(
+      `UPDATE cloud_workspace_lifecycle_intents
+       SET generation_transition_id = $1 WHERE id = $2`,
+      [transitionId, intentId],
+    );
+
+    await expect(
+      pool.query(`DELETE FROM cloud_workspaces WHERE id = $1`, [workspaceId]),
+    ).resolves.toMatchObject({ rowCount: 1 });
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::integer FROM cloud_workspace_lifecycle_intents) AS intents,
+           (SELECT count(*)::integer FROM cloud_workspace_generation_transitions) AS transitions`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ intents: 0, transitions: 0 }] });
+  });
+
+  it("retires workspaces after pgcrypto is relocated outside the pinned search path", async () => {
+    const authorityIndex = LADDER.indexOf(
+      "0025_cloud_workspace_engine_authority.sql",
+    );
+    await applyThrough(authorityIndex + 1);
+    const organizationId = "22222222-2222-4222-8222-222222222204";
+    const workspaceId = "44444444-4444-4444-8444-444444444404";
+    await seedLegacyCloudTenant({
+      userId: "11111111-1111-4111-8111-111111111104",
+      organizationId,
+      teamId: "33333333-3333-4333-8333-333333333304",
+      workspaces: [
+        {
+          id: workspaceId,
+          repositoryOwner: "withso",
+          repositoryName: "zeros",
+        },
+      ],
+    });
+    await pool.query(
+      "CREATE SCHEMA crypto; ALTER EXTENSION pgcrypto SET SCHEMA crypto",
+    );
+    try {
+      await expect(
+        pool.query(
+          `UPDATE organizations SET deleted_at = now() WHERE id = $1`,
+          [organizationId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await expect(
+        pool.query(
+          `SELECT octet_length(request_sha256) AS hash_bytes
+           FROM cloud_workspace_lifecycle_intents
+           WHERE workspace_id = $1 AND operation = 'delete'`,
+          [workspaceId],
+        ),
+      ).resolves.toMatchObject({ rows: [{ hash_bytes: 32 }] });
+    } finally {
+      await pool.query(
+        "ALTER EXTENSION pgcrypto SET SCHEMA public; DROP SCHEMA crypto",
+      );
+    }
   });
 
   it("enforces the same 64 MiB file ceiling at every durable storage layer", async () => {

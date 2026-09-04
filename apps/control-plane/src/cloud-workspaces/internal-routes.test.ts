@@ -8,6 +8,8 @@ import {
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
   CLOUD_WORKSPACE_RECORD_APPEND_PATH,
+  CLOUD_WORKSPACE_RECORD_HEAD_PATH,
+  CLOUD_WORKSPACE_CONTENT_HEAD_PATH,
   CLOUD_WORKSPACE_SETUP_ADMISSION_PATH,
   createCloudWorkspaceInternalRoutes,
   type CloudWorkspaceInternalSetupService,
@@ -199,6 +201,24 @@ describe("cloud workspace internal setup routes", () => {
     expect(service.redeem).not.toHaveBeenCalled();
     expect(service.registerEngine).not.toHaveBeenCalled();
     expect(service.heartbeat).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    CLOUD_WORKSPACE_RECORD_HEAD_PATH,
+    CLOUD_WORKSPACE_CONTENT_HEAD_PATH,
+  ])("authenticates %s before validating its query", async (path) => {
+    const readRecordHead = vi.fn();
+    const readContentHead = vi.fn();
+    const { app } = harness({ readRecordHead, readContentHead });
+
+    const response = await app.request(`${path}?workspaceId=not-a-uuid`);
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({
+      error: { code: "invalid_capability" },
+    });
+    expect(readRecordHead).not.toHaveBeenCalled();
+    expect(readContentHead).not.toHaveBeenCalled();
   });
 
   it("uses bounded strict JSON and does not reflect validation input", async () => {

@@ -16,7 +16,10 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-import { protocolSourceSignature } from "./protocol-source-signature.mjs";
+import {
+  exportedIntegerConstant,
+  protocolSourceSignature,
+} from "./protocol-source-signature.mjs";
 
 const SCHEMA_FILES = [
   "packages/protocol/src/messages.ts",
@@ -78,7 +81,7 @@ function protocolVersion(ref) {
         encoding: "utf8",
       })
     : readFileSync(VERSION_FILE, "utf8");
-  return (src.match(/PROTOCOL_VERSION\s*=\s*(\d+)/) || [])[1] ?? null;
+  return exportedIntegerConstant(src, "PROTOCOL_VERSION");
 }
 
 function minimumProtocolVersion(ref) {
@@ -87,15 +90,12 @@ function minimumProtocolVersion(ref) {
         encoding: "utf8",
       })
     : readFileSync(VERSION_FILE, "utf8");
-  return (src.match(/MIN_SUPPORTED_PROTOCOL\s*=\s*(\d+)/) || [])[1] ?? null;
+  return exportedIntegerConstant(src, "MIN_SUPPORTED_PROTOCOL");
 }
 
 function deployedCloudSetupVersion(name) {
   const source = readFileSync(CLOUD_SETUP_PROTOCOL_FILE, "utf8");
-  return (
-    (source.match(new RegExp(`export const ${name}\\s*=\\s*(\\d+)`)) ||
-      [])[1] ?? null
-  );
+  return exportedIntegerConstant(source, name);
 }
 
 // apps/control-plane is installed as an independent deployment boundary, so it

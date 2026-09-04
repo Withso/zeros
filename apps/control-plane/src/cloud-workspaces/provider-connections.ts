@@ -365,7 +365,7 @@ export async function loadGenerationCloudProviderConnection(
   const result = await tx.query<StoredProviderConnection>(
     `SELECT connection.id, connection.org_id, connection.provider,
             connection.credential_source, version.endpoint,
-            connection.region, connection.current_version
+            connection.region, version.version AS current_version
      FROM cloud_workspace_generations generation
      JOIN provider_connections connection
        ON connection.id = generation.provider_connection_id
@@ -373,7 +373,7 @@ export async function loadGenerationCloudProviderConnection(
      JOIN provider_connection_versions version
        ON version.connection_id = connection.id
       AND version.org_id = connection.org_id
-      AND version.version = connection.current_version
+      AND version.version = generation.provider_connection_version
      WHERE generation.workspace_id = $1
        AND generation.org_id = $2
        AND generation.generation = $3

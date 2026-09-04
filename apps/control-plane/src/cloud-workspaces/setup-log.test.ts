@@ -16,15 +16,16 @@ describe("cloud workspace setup log boundary", () => {
   it("bounds multibyte output without repeated whole-string scans", () => {
     const maximum = 256 * 1024;
     const input = `${"a".repeat(maximum - 20)}${"é".repeat(30)}`;
-    const byteLength = vi.spyOn(Buffer, "byteLength");
+    const from = vi.spyOn(Buffer, "from");
 
     const result = boundedCloudWorkspaceSetupLog(input);
 
+    expect(from).toHaveBeenCalledTimes(1);
+    from.mockRestore();
     expect(Buffer.byteLength(result.value, "utf8")).toBeLessThanOrEqual(
       maximum,
     );
     expect(result.value.endsWith("é")).toBe(true);
     expect(result.truncated).toBe(true);
-    expect(byteLength.mock.calls.length).toBeLessThanOrEqual(4);
   });
 });

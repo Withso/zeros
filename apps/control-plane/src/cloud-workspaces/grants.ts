@@ -106,13 +106,16 @@ function setupBinding(
   return input.setup;
 }
 
-function databaseFence(value: string | number | null): number | null {
+function databaseFence(
+  value: string | number | null,
+  label = "setup grant fence",
+): number | null {
   if (value === null) return null;
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed) || parsed < 1) {
     throw new CloudWorkspaceGrantError(
       "grant_record_invalid",
-      "Stored setup grant fence is invalid",
+      `Stored ${label} is invalid`,
     );
   }
   return parsed;
@@ -241,8 +244,6 @@ export async function issueCloudWorkspaceGrant(
        ON tm.team_id = cw.team_id
       AND tm.org_id = cw.org_id
       AND tm.user_id = $4
-     JOIN users account
-       ON account.id = $4 AND account.deleted_at IS NULL
      WHERE cw.id = $1 AND cw.org_id = $3
        AND cw.current_generation = $2
        AND cw.deleted_at IS NULL
@@ -476,8 +477,6 @@ export async function consumeCloudWorkspaceGrant(
          ON tm.team_id = cw.team_id
         AND tm.org_id = cw.org_id
         AND tm.user_id = eg.account_user_id
-       JOIN users account
-         ON account.id = eg.account_user_id AND account.deleted_at IS NULL
        WHERE eg.token_hash = $1
          AND eg.workspace_id = $2 AND eg.generation = $3
          AND eg.org_id = $4 AND eg.account_user_id = $5
@@ -570,7 +569,7 @@ export async function consumeCloudWorkspaceGrant(
     id: row.id,
     workspaceId: input.workspaceId,
     generation: input.generation,
-    authorityEpoch: databaseFence(row.authority_epoch)!,
+    authorityEpoch: databaseFence(row.authority_epoch, "authority epoch")!,
     organizationId: input.organizationId,
     accountUserId: input.accountUserId,
     purpose: input.purpose,

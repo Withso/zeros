@@ -101,7 +101,7 @@ describe("cloud workspace settings resolution", () => {
   });
 
   it.each([
-    ["prototype key", { values: { __proto__: { polluted: true } } }],
+    ["prototype key", JSON.parse('{"values":{"__proto__":{"polluted":true}}}')],
     ["non-finite number", { values: { timeout: Number.NaN } }],
     ["inline secret", { values: {}, secrets: { DATABASE_URL: "plaintext" } }],
     [

@@ -132,7 +132,7 @@ export function createApp(
   // header, not an interactive account JWT. Let the access service recognize
   // only its exact host before ordinary API middleware runs; every non-preview
   // request falls through unchanged.
-  if (dependencies.cloudWorkspaceAccessService) {
+  if (!pendingMigration && dependencies.cloudWorkspaceAccessService) {
     const previewPreAuthLimit = rateLimit(
       "cloud-preview-preauth",
       600,

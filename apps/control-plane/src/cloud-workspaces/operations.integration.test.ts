@@ -178,13 +178,13 @@ d("cloud workspace production operations", () => {
     );
     await pool.query(
       `INSERT INTO workspace_record_batches (
-         id, workspace_id, org_id, engine_instance_id, authority_epoch,
+         id, workspace_id, org_id, generation, engine_instance_id, authority_epoch,
          idempotency_key, request_sha256, first_revision, last_revision,
          event_count, created_at
        ) VALUES
-         ($3, $1, $2, $5, 1, 'operations-record-old', $6, 1, 1, 1,
+         ($3, $1, $2, 1, $5, 1, 'operations-record-old', $6, 1, 1, 1,
           now() - interval '2 days'),
-         ($4, $1, $2, $5, 1, 'operations-record-current', $6, 2, 2, 1,
+         ($4, $1, $2, 1, $5, 1, 'operations-record-current', $6, 2, 2, 1,
           now())`,
       [
         fixture.workspaceId,
@@ -287,7 +287,7 @@ d("cloud workspace production operations", () => {
       deletionBatchSize: 10,
     });
 
-    await expect(worker.processDeletionOnce()).resolves.toBe(false);
+    await expect(worker.runOnce()).resolves.toMatchObject({ deletionSteps: 0 });
     expect(
       (
         await pool.query(
@@ -307,9 +307,7 @@ d("cloud workspace production operations", () => {
        WHERE workspace_id = $1`,
       [fixture.workspaceId],
     );
-    for (let step = 0; step < 6; step += 1) {
-      await worker.processDeletionOnce();
-    }
+    await worker.runOnce();
     expect(
       (
         await pool.query(

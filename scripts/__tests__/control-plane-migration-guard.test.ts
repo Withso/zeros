@@ -114,4 +114,32 @@ $body$;
 
     expect(result.status).toBe(0);
   });
+
+  it.each([
+    "SELECT '\\'; COMMIT;\n",
+    'CREATE TABLE "quoted\\" (id integer); COMMIT;\n',
+  ])("does not let a backslash hide transaction control in %s", (sql) => {
+    const cwd = createCurrentLayoutRepository(sql);
+    const result = spawnSync(process.execPath, [GUARD], {
+      cwd,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "0001_init.sql contains top-level transaction control COMMIT",
+    );
+  });
+
+  it("allows transaction words escaped inside an E-prefixed string", () => {
+    const cwd = createCurrentLayoutRepository(
+      String.raw`SELECT E'escaped\' COMMIT'; SELECT 1;`,
+    );
+    const result = spawnSync(process.execPath, [GUARD], {
+      cwd,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
+  });
 });

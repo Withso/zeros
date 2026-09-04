@@ -229,23 +229,27 @@ d("Postgres WorkOS browser sessions", () => {
       .finally(() => {
         settled = true;
       });
-    await new Promise((resolve) => setTimeout(resolve, 75));
-    expect(settled).toBe(false);
-    await expect(
-      pool.query(
-        `SELECT kind, sealed_session
-         FROM workos_browser_sessions
-         WHERE credential_hash = $1`,
-        [createHash("sha256").update(started.credential).digest()],
-      ),
-    ).resolves.toMatchObject({
-      rows: [{ kind: "flow", sealed_session: null }],
-    });
-    await blocker.query(
-      `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
-      [accountLock],
-    );
-    blocker.release();
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(settled).toBe(false);
+      await expect(
+        pool.query(
+          `SELECT kind, sealed_session
+           FROM workos_browser_sessions
+           WHERE credential_hash = $1`,
+          [createHash("sha256").update(started.credential).digest()],
+        ),
+      ).resolves.toMatchObject({
+        rows: [{ kind: "flow", sealed_session: null }],
+      });
+    } finally {
+      await blocker.query(
+        `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
+        [accountLock],
+      );
+      blocker.release();
+      await Promise.allSettled([completion]);
+    }
 
     await expect(completion).resolves.toEqual({
       ok: true,

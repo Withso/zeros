@@ -52,7 +52,9 @@ CREATE TABLE cloud_workspace_object_storage_limit_changes (
   CHECK (
     (previous_organization_bytes IS NULL AND previous_workspace_bytes IS NULL)
     OR (
-      previous_organization_bytes BETWEEN 1 AND 9007199254740991
+      previous_organization_bytes IS NOT NULL
+      AND previous_workspace_bytes IS NOT NULL
+      AND previous_organization_bytes BETWEEN 1 AND 9007199254740991
       AND previous_workspace_bytes BETWEEN 1 AND 9007199254740991
       AND previous_workspace_bytes <= previous_organization_bytes
     )

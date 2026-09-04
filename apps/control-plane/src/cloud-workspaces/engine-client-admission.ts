@@ -2,7 +2,10 @@ import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
 import { authorizeCloudWorkspaceOperation } from "./authorization.js";
-import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
+import {
+  assertCurrentCloudEngineAuthority,
+  CloudWorkspaceEngineAuthorityError,
+} from "./engine-authority.js";
 import {
   CloudWorkspaceGrantError,
   consumeCloudWorkspaceEngineConnectGrant,
@@ -195,7 +198,10 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineClientAdmissionError)
         throw error;
-      if (error instanceof CloudWorkspaceGrantError) {
+      if (
+        error instanceof CloudWorkspaceGrantError ||
+        error instanceof CloudWorkspaceEngineAuthorityError
+      ) {
         throw new CloudWorkspaceEngineClientAdmissionError(
           "engine_client_admission_ineligible",
           "Cloud engine connection capability could not be issued",
@@ -292,10 +298,16 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineClientAdmissionError)
         throw error;
-      throw new CloudWorkspaceEngineClientAdmissionError(
-        "engine_client_admission_rejected",
-        "Engine client admission was rejected",
-      );
+      if (
+        error instanceof CloudWorkspaceGrantError ||
+        error instanceof CloudWorkspaceEngineAuthorityError
+      ) {
+        throw new CloudWorkspaceEngineClientAdmissionError(
+          "engine_client_admission_rejected",
+          "Engine client admission was rejected",
+        );
+      }
+      throw error;
     }
   }
 }

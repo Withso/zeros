@@ -49,14 +49,14 @@ export class DatabaseCloudWorkspaceHealthService {
                  AND next_attempt_at <= now() - interval '15 minutes'
                  AND updated_at <= now() - interval '15 minutes'
              ) AS lifecycle_stalled,
-             EXISTS (
+             CASE WHEN $3::boolean THEN EXISTS (
                SELECT 1 FROM cloud_workspace_setup_runs
                WHERE state = 'running' AND lease_expires_at <= now()
-             ) AS setup_lease_expired,
-             EXISTS (
+             ) ELSE false END AS setup_lease_expired,
+             CASE WHEN $3::boolean THEN EXISTS (
                SELECT 1 FROM cloud_workspace_engine_instances
                WHERE state = 'ready' AND lease_expires_at <= now()
-             ) AS engine_lease_expired,
+             ) ELSE false END AS engine_lease_expired,
              EXISTS (
                SELECT 1 FROM cloud_workspace_client_access_grants
                WHERE state = 'failed'
@@ -117,7 +117,11 @@ export class DatabaseCloudWorkspaceHealthService {
                    OR (record.current_revision > 0 AND record.last_durable_at IS NULL)
                  )
              ) ELSE false END AS durability_stalled`,
-          [this.posture.outboxDeliveryEnabled, this.posture.durabilityEnabled],
+          [
+            this.posture.outboxDeliveryEnabled,
+            this.posture.durabilityEnabled,
+            this.posture.setupExecutionEnabled,
+          ],
         )
       ).rows[0]!,
     );

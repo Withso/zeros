@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
+  loadGenerationCloudProviderConnection,
   openCloudProviderCredential,
   sealCloudProviderCredential,
 } from "./provider-connections.js";
@@ -61,5 +62,40 @@ describe("cloud provider credential envelope", () => {
         key,
       ),
     ).toThrow("invalid");
+  });
+});
+
+describe("generation provider connection lookup", () => {
+  it("loads the immutable generation version instead of the rotated current version", async () => {
+    const query = vi.fn(async () => ({
+      rows: [
+        {
+          id: "11111111-1111-4111-8111-111111111111",
+          org_id: "22222222-2222-4222-8222-222222222222",
+          provider: "daytona",
+          credential_source: "hosted",
+          endpoint: "hosted://daytona-v1",
+          region: null,
+          current_version: 1,
+        },
+      ],
+    }));
+
+    await expect(
+      loadGenerationCloudProviderConnection({ query } as never, {
+        workspaceId: "33333333-3333-4333-8333-333333333333",
+        organizationId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+      }),
+    ).resolves.toMatchObject({
+      credentialVersion: 1,
+      endpoint: "hosted://daytona-v1",
+    });
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "version.version = generation.provider_connection_version",
+    );
+    expect(query.mock.calls[0]?.[0]).toContain(
+      "version.version AS current_version",
+    );
   });
 });

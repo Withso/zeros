@@ -258,17 +258,21 @@ export function validateWorkspaceFileMutations(
     }
     return { ...entry, path: normalized };
   });
-  const livePortablePaths = validated
-    .filter((entry) => entry.operation === "upsert")
-    .map((entry) => entry.path.normalize("NFKC").toLocaleLowerCase("en-US"))
-    .sort();
-  for (let index = 1; index < livePortablePaths.length; index += 1) {
-    const previous = livePortablePaths[index - 1]!;
-    if (livePortablePaths[index]!.startsWith(`${previous}/`)) {
-      throw new WorkspaceContentError(
-        "invalid_input",
-        "Workspace paths collide as a file and directory",
-      );
+  const livePortablePaths = new Set(
+    validated
+      .filter((entry) => entry.operation === "upsert")
+      .map((entry) => entry.path.normalize("NFKC").toLocaleLowerCase("en-US")),
+  );
+  for (const portablePath of livePortablePaths) {
+    let separator = portablePath.indexOf("/");
+    while (separator >= 0) {
+      if (livePortablePaths.has(portablePath.slice(0, separator))) {
+        throw new WorkspaceContentError(
+          "invalid_input",
+          "Workspace paths collide as a file and directory",
+        );
+      }
+      separator = portablePath.indexOf("/", separator + 1);
     }
   }
   return validated;

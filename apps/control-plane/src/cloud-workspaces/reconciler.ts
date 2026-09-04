@@ -11,6 +11,7 @@ import {
   type CloudWorkspaceProvider,
 } from "./provider.js";
 import type { CloudWorkspaceProviderResolver } from "./provider-resolver.js";
+import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 import {
   advanceCloudWorkspaceGenerationTransitionAfterDrain,
   failCloudWorkspaceGenerationRollback,
@@ -286,11 +287,7 @@ export class CloudWorkspaceReconciler {
     ) {
       throw new Error("Cloud workspace reconciler timing is invalid");
     }
-    if (
-      this.workerId.length < 1 ||
-      this.workerId.length > 255 ||
-      /[\u0000-\u001f\u007f]/u.test(this.workerId)
-    ) {
+    if (!isValidCloudWorkspaceWorkerId(this.workerId)) {
       throw new Error("Cloud workspace reconciler worker identity is invalid");
     }
     this.logger = options.logger ?? console;
@@ -548,7 +545,9 @@ export class CloudWorkspaceReconciler {
       // satisfies stop/archive, dispatch once so a stale SSH bearer cannot be
       // declared revoked in PostgreSQL without provider proof.
       const forceProviderAccessDrain =
-        current !== null && ["stop", "archive"].includes(intent.operation);
+        current !== null &&
+        current.state !== "deleted" &&
+        ["stop", "archive"].includes(intent.operation);
       if (
         (!operationSatisfied(intent.operation, current) ||
           forceProviderAccessDrain) &&

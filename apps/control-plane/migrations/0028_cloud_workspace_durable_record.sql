@@ -19,6 +19,10 @@ CREATE TYPE workspace_checkpoint_state AS ENUM (
   'pending', 'uploading', 'durable', 'invalid', 'deleting', 'deleted'
 );
 
+ALTER TABLE cloud_workspace_engine_instances
+  ADD CONSTRAINT cloud_workspace_engine_content_scope_unique
+  UNIQUE (id, workspace_id, generation, org_id);
+
 CREATE TABLE workspace_record_heads (
   workspace_id               uuid NOT NULL,
   org_id                     uuid NOT NULL,
@@ -39,6 +43,7 @@ CREATE TABLE workspace_record_batches (
   id                         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   workspace_id               uuid NOT NULL,
   org_id                     uuid NOT NULL,
+  generation                 integer NOT NULL CHECK (generation > 0),
   engine_instance_id         uuid NOT NULL,
   authority_epoch            bigint NOT NULL CHECK (authority_epoch > 0),
   idempotency_key            text NOT NULL CHECK (
@@ -56,8 +61,10 @@ CREATE TABLE workspace_record_batches (
   UNIQUE (workspace_id, last_revision),
   FOREIGN KEY (workspace_id, org_id)
     REFERENCES workspace_record_heads(workspace_id, org_id) ON DELETE CASCADE,
-  FOREIGN KEY (engine_instance_id)
-    REFERENCES cloud_workspace_engine_instances(id) ON DELETE RESTRICT
+  FOREIGN KEY (engine_instance_id, workspace_id, generation, org_id)
+    REFERENCES cloud_workspace_engine_instances(
+      id, workspace_id, generation, org_id
+    ) ON DELETE RESTRICT
 );
 
 CREATE TABLE workspace_record_events (
@@ -141,10 +148,6 @@ CREATE TABLE workspace_content_heads (
   FOREIGN KEY (workspace_id, org_id)
     REFERENCES cloud_workspaces(id, org_id) ON DELETE CASCADE
 );
-
-ALTER TABLE cloud_workspace_engine_instances
-  ADD CONSTRAINT cloud_workspace_engine_content_scope_unique
-  UNIQUE (id, workspace_id, generation, org_id);
 
 CREATE TABLE workspace_content_revisions (
   workspace_id               uuid NOT NULL,

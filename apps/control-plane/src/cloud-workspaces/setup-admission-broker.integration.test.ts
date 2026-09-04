@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
@@ -353,5 +353,27 @@ d("cloud workspace setup admission broker", () => {
     );
     expect(row.rows[0]).toMatchObject({ revoked: true });
     expect(row.rows[0]!.visible).not.toContain(admission.token);
+  });
+
+  it("keeps the abort result when best-effort grant retirement also fails", async () => {
+    const broker = new DatabaseCloudWorkspaceSetupAdmissionBroker({
+      pool,
+      endpoint: "https://control.example.test/setup",
+    });
+    vi.spyOn(broker, "revoke").mockRejectedValueOnce(
+      new Error("database unavailable during retirement"),
+    );
+    let reads = 0;
+    const signal = {
+      get aborted() {
+        reads += 1;
+        return reads > 1;
+      },
+    } as AbortSignal;
+
+    await expect(broker.issue(setup, signal)).rejects.toMatchObject({
+      code: "setup_execution_aborted",
+      retryable: true,
+    });
   });
 });

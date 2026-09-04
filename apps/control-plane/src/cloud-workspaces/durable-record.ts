@@ -276,14 +276,15 @@ export class DatabaseCloudWorkspaceDurableRecordService {
         const lastRevision = currentRevision + mutations.length;
         const batch = await tx.query<{ id: string }>(
           `INSERT INTO workspace_record_batches (
-             workspace_id, org_id, engine_instance_id, authority_epoch,
+             workspace_id, org_id, generation, engine_instance_id, authority_epoch,
              idempotency_key, request_sha256, first_revision, last_revision,
              event_count
-           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id`,
           [
             input.workspaceId,
             input.organizationId,
+            input.generation,
             input.engineInstanceId,
             authority.authorityEpoch,
             input.idempotencyKey,

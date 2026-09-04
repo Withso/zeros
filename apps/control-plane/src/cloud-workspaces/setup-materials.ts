@@ -766,14 +766,13 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       ...options.accountAuth.issuers,
     ]) {
       const url = new URL(rawUrl);
-      if (
-        url.protocol !== "https:" ||
-        url.username ||
-        url.password ||
-        url.search ||
-        url.hash
-      ) {
+      if (url.protocol !== "https:") {
         throw new Error("cloud workspace account authority must use HTTPS");
+      }
+      if (url.username || url.password || url.search || url.hash) {
+        throw new Error(
+          "cloud workspace account authority must not include credentials, a query, or a fragment",
+        );
       }
     }
     const setupSecretEncryptionKeys: Record<number, string> = {

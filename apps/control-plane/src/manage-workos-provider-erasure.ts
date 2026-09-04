@@ -461,7 +461,7 @@ async function manageWorkOSProviderErasureEvidenceUnlocked(
       );
     }
 
-    for (const [index, subject] of request.subjects.entries()) {
+    for (const subject of request.subjects) {
       await client.query(
         `INSERT INTO workos_provider_erasure_fences (
            provider, subject_kind, hash_version, subject_hash,
@@ -469,7 +469,11 @@ async function manageWorkOSProviderErasureEvidenceUnlocked(
          ) VALUES ('workos', $1, 1, $2, $3, 'operator_reconciliation')
          ON CONFLICT (provider, subject_kind, hash_version, subject_hash)
          DO NOTHING`,
-        [subject.kind, request.subjectHashes[index], request.deletionRequestId],
+        [
+          subject.kind,
+          workOSProviderSubjectHash(subject),
+          request.deletionRequestId,
+        ],
       );
     }
     await client.query(

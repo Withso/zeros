@@ -163,7 +163,7 @@ export async function seedReadyCloudWorkspace(
   const teamId = randomUUID();
   const repositoryId = randomUUID();
   const workspaceId = randomUUID();
-  const providerConnectionId = randomUUID();
+  let providerConnectionId = "";
   const settingsVersionId = randomUUID();
   const setupRunId = randomUUID();
   const registrationGrantId = randomUUID();
@@ -260,19 +260,12 @@ export async function seedReadyCloudWorkspace(
          FROM organization_entitlements WHERE org_id = $2`,
       [workspaceId, organizationId, userId],
     );
-    await tx.query(
-      `INSERT INTO provider_connections (
-         id, org_id, owner_kind, provider, display_name,
-         credential_source, current_version, state
-       ) VALUES ($1, $2, 'organization', 'daytona', 'Hosted Daytona',
-                 'hosted', 1, 'active')`,
-      [providerConnectionId, organizationId],
-    );
-    await tx.query(
-      `INSERT INTO provider_connection_versions (
-         connection_id, org_id, version, credential_source, endpoint, created_by
-       ) VALUES ($1, $2, 1, 'hosted', 'hosted://daytona', $3)`,
-      [providerConnectionId, organizationId, userId],
+    providerConnectionId = await seedHostedCloudWorkspaceProviderConnection(
+      tx,
+      {
+        organizationId,
+        createdBy: userId,
+      },
     );
     await tx.query(
       `INSERT INTO cloud_workspace_generations (

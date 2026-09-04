@@ -53,6 +53,8 @@ ALTER TABLE cloud_workspace_usage_events
   ADD COLUMN provider_connection_version bigint,
   ADD COLUMN request_sha256 bytea;
 
+ALTER TABLE cloud_workspace_usage_events
+  DISABLE TRIGGER cloud_workspace_usage_append_only;
 UPDATE cloud_workspace_usage_events usage
 SET provider_connection_id = generation.provider_connection_id,
     provider_connection_version = generation.provider_connection_version,
@@ -70,6 +72,8 @@ FROM cloud_workspace_generations generation
 WHERE generation.workspace_id = usage.workspace_id
   AND generation.generation = usage.generation
   AND generation.org_id = usage.org_id;
+ALTER TABLE cloud_workspace_usage_events
+  ENABLE TRIGGER cloud_workspace_usage_append_only;
 
 ALTER TABLE cloud_workspace_usage_events
   ALTER COLUMN provider_connection_id SET NOT NULL,

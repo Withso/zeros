@@ -362,33 +362,33 @@ d("schema + signup transaction", () => {
     );
 
     const first = ensureUser(authPool, firstInput);
-    let observedBlockedTransaction = false;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const activity = await pool.query(
-        `SELECT 1 FROM pg_stat_activity
-         WHERE application_name = $1 AND wait_event_type = 'Lock'
-         LIMIT 1`,
-        [applicationName],
-      );
-      if (activity.rows[0]) {
-        observedBlockedTransaction = true;
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
-    expect(observedBlockedTransaction).toBe(true);
-
-    const second = ensureUser(authPool, secondInput);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const completedWhileFirstWasBlocked = await Promise.race([
-      second.then(() => true),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), 300);
-      }),
-    ]);
-    if (timer) clearTimeout(timer);
-
+    let second: ReturnType<typeof ensureUser> | null = null;
     try {
+      let observedBlockedTransaction = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const activity = await pool.query(
+          `SELECT 1 FROM pg_stat_activity
+           WHERE application_name = $1 AND wait_event_type = 'Lock'
+           LIMIT 1`,
+          [applicationName],
+        );
+        if (activity.rows[0]) {
+          observedBlockedTransaction = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(observedBlockedTransaction).toBe(true);
+
+      second = ensureUser(authPool, secondInput);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const completedWhileFirstWasBlocked = await Promise.race([
+        second.then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), 300);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
       expect(completedWhileFirstWasBlocked).toBe(true);
     } finally {
       await blocker.query(
@@ -396,7 +396,7 @@ d("schema + signup transaction", () => {
         [`email:${firstInput.email.toLowerCase()}`],
       );
       blocker.release();
-      await Promise.all([first, second]);
+      await Promise.allSettled(second ? [first, second] : [first]);
       await authPool.end();
     }
   });

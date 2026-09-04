@@ -22,3 +22,14 @@ export function protocolSourceSignature(source) {
   );
   return printer.printFile(sourceFile);
 }
+
+/** Read a decimal integer from one real exported const declaration. */
+export function exportedIntegerConstant(source, name) {
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/u.test(name)) return null;
+  const normalized = protocolSourceSignature(source);
+  return (
+    normalized.match(
+      new RegExp(`^export const ${name}\\s*=\\s*(\\d+)\\b`, "mu"),
+    )?.[1] ?? null
+  );
+}

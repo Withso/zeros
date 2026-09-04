@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -12,6 +12,7 @@ import type {
   WorkOSManagementEvent,
   WorkOSManagementProvider,
 } from "./workos-provider.js";
+import { workOSProviderSubjectHash } from "./workos-provider-locks.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -27,15 +28,6 @@ function managementEvent(
     createdAt,
     data,
   };
-}
-
-function providerSubjectHash(
-  kind: "user" | "organization",
-  providerId: string,
-): string {
-  return createHash("sha256")
-    .update(`workos:${kind}:${providerId}`, "utf8")
-    .digest("hex");
 }
 
 d("WorkOS normalized event synchronization", () => {
@@ -662,12 +654,17 @@ d("WorkOS normalized event synchronization", () => {
         organizationRequest.rows[0]!.id,
         JSON.stringify({
           provider: "workos",
-          workosSubjectHashes: [providerSubjectHash("user", subject)],
+          workosSubjectHashes: [
+            workOSProviderSubjectHash({ kind: "user", id: subject }),
+          ],
         }),
         JSON.stringify({
           provider: "workos",
           workosSubjectHashes: [
-            providerSubjectHash("organization", workosOrganizationId),
+            workOSProviderSubjectHash({
+              kind: "organization",
+              id: workosOrganizationId,
+            }),
           ],
         }),
       ],
@@ -870,7 +867,9 @@ d("WorkOS normalized event synchronization", () => {
           request.rows[0]!.id,
           JSON.stringify({
             provider: "workos",
-            workosSubjectHashes: [providerSubjectHash("user", subject)],
+            workosSubjectHashes: [
+              workOSProviderSubjectHash({ kind: "user", id: subject }),
+            ],
           }),
         ],
       );

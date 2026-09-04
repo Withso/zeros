@@ -333,6 +333,36 @@ d("cloud workspace client access", () => {
     ).rejects.toMatchObject({ code: "cloud_access_response_not_replayable" });
   });
 
+  it("maps a malformed provider access identifier to a bounded provider response", async () => {
+    const { provider } = fakeAccessProvider();
+    vi.mocked(provider.createSshAccess).mockResolvedValueOnce({
+      providerAccessId: "invalid provider id",
+      credential: "ssh-token-abcdefghijklmnopqrstuvwxyz",
+      host: "ssh.app.daytona.io",
+      command: "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.app.daytona.io",
+      expiresAt: new Date(Date.now() + 15 * 60_000),
+    });
+    const service = new DatabaseCloudWorkspaceAccessService({
+      pool,
+      provider,
+      previewBaseDomain: "cloud-preview.example.test",
+    });
+
+    await expect(
+      service.issue({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        kind: "ssh",
+        expiresInMinutes: 15,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      status: 502,
+      code: "cloud_access_provider_rejected",
+    });
+  });
+
   it("refuses new access after the WorkOS-backed account is suspended", async () => {
     await withSystemTx(pool, (tx) =>
       tx.query(
@@ -416,11 +446,11 @@ d("cloud workspace client access", () => {
       return id;
     });
     const { provider } = fakeAccessProvider();
-    let releaseIdempotencyReads!: () => void;
-    const bothIdempotencyReads = new Promise<void>((resolve) => {
-      releaseIdempotencyReads = resolve;
+    let releaseAuthorizationReads!: () => void;
+    const bothAuthorizationReads = new Promise<void>((resolve) => {
+      releaseAuthorizationReads = resolve;
     });
-    let idempotencyReads = 0;
+    let authorizationReads = 0;
     const racingPool = {
       connect: async () => {
         const client = await pool.connect();
@@ -428,19 +458,15 @@ d("cloud workspace client access", () => {
           get(target, property) {
             if (property === "query") {
               return async (...args: unknown[]) => {
-                const result = await (
+                const sql = typeof args[0] === "string" ? args[0] : "";
+                if (sql.includes("SELECT o.is_personal")) {
+                  authorizationReads += 1;
+                  if (authorizationReads === 2) releaseAuthorizationReads();
+                  await bothAuthorizationReads;
+                }
+                return (
                   target.query as (...queryArgs: unknown[]) => Promise<unknown>
                 ).apply(target, args);
-                const sql = typeof args[0] === "string" ? args[0] : "";
-                if (
-                  sql.includes("SELECT workspace_id, request_sha256") &&
-                  !sql.includes("idempotency-conflict")
-                ) {
-                  idempotencyReads += 1;
-                  if (idempotencyReads === 2) releaseIdempotencyReads();
-                  await bothIdempotencyReads;
-                }
-                return result;
               };
             }
             const value = Reflect.get(target, property, target);

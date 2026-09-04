@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import pg from "pg";
 
 import { runMigrations } from "../migrate.js";
@@ -16,6 +16,34 @@ import {
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
+
+describe("cloud workspace engine client admission failures", () => {
+  it("preserves unexpected infrastructure failures as retryable transport errors", async () => {
+    const unavailable = new Error("database temporarily unavailable");
+    const pool = {
+      connect: vi.fn(async () => {
+        throw unavailable;
+      }),
+    } as unknown as pg.Pool;
+    const service = new DatabaseCloudWorkspaceEngineClientAdmissionService({
+      pool,
+      endpoint: `https://api.example.test${CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH}`,
+      enginePort: 39_393,
+      workosEnabled: false,
+    });
+
+    await expect(
+      service.consume({
+        token: `zws_${"A".repeat(43)}`,
+        heartbeatToken: `zwh_${"B".repeat(43)}`,
+        organizationId: "11111111-1111-4111-8111-111111111111",
+        workspaceId: "22222222-2222-4222-8222-222222222222",
+        generation: 1,
+        engineInstanceId: "33333333-3333-4333-8333-333333333333",
+      }),
+    ).rejects.toBe(unavailable);
+  });
+});
 
 d("cloud workspace engine client admission", () => {
   let pool: pg.Pool;

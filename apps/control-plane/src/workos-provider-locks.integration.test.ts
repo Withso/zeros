@@ -36,7 +36,7 @@ d("WorkOS provider locks", () => {
   let pool: pg.Pool;
 
   beforeAll(() => {
-    pool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
+    pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
   });
 
   afterAll(async () => pool.end());

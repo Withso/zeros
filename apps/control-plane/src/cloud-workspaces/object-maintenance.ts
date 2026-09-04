@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
+
 export interface CloudWorkspaceObjectMaintenance {
   scheduleKeyRotation(): Promise<number>;
   rotateKeyOnce(input: {
@@ -58,9 +60,7 @@ export class CloudWorkspaceObjectMaintenanceWorker {
     this.garbageBatchSize = options.garbageBatchSize ?? 100;
     this.garbageGraceMs = options.garbageGraceMs ?? 24 * 60 * 60_000;
     if (
-      this.workerId.length < 1 ||
-      this.workerId.length > 255 ||
-      /[\u0000-\u001f\u007f]/u.test(this.workerId) ||
+      !isValidCloudWorkspaceWorkerId(this.workerId) ||
       !Number.isSafeInteger(this.intervalMs) ||
       this.intervalMs < 100 ||
       this.intervalMs > 300_000 ||

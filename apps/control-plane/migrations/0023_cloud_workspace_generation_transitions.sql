@@ -51,6 +51,7 @@ ALTER TABLE cloud_workspace_lifecycle_intents
 CREATE FUNCTION bind_cloud_workspace_intent_generation()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = pg_catalog, public
 AS $$
 BEGIN
   IF NEW.generation IS NULL THEN
@@ -87,10 +88,10 @@ CREATE TABLE cloud_workspace_generation_transitions (
   state                  cloud_workspace_generation_transition_state NOT NULL,
   drain_intent_id        uuid UNIQUE
                          REFERENCES cloud_workspace_lifecycle_intents(id)
-                         ON DELETE RESTRICT,
+                         ON DELETE NO ACTION,
   provision_intent_id    uuid UNIQUE
                          REFERENCES cloud_workspace_lifecycle_intents(id)
-                         ON DELETE RESTRICT,
+                         ON DELETE NO ACTION,
   error_code             text CHECK (
                            error_code IS NULL OR char_length(error_code) <= 128
                          ),
@@ -147,7 +148,7 @@ ALTER TABLE cloud_workspace_lifecycle_intents
   ADD CONSTRAINT cloud_workspace_lifecycle_intents_transition_fkey
     FOREIGN KEY (generation_transition_id, workspace_id, org_id)
     REFERENCES cloud_workspace_generation_transitions(id, workspace_id, org_id)
-    ON DELETE RESTRICT;
+    ON DELETE NO ACTION;
 
 ALTER TABLE cloud_workspace_generation_transitions ENABLE ROW LEVEL SECURITY;
 

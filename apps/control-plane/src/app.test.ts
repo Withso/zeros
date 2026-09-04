@@ -381,6 +381,34 @@ describe("app assembly — cloud workspace internal capabilities", () => {
 });
 
 describe("app assembly — isolated cloud preview proxy", () => {
+  it("does not enter the preview database path while a controlled migration is pending", async () => {
+    const handlePreviewRequest = vi.fn(async () => new Response("proxied"));
+    const app = createApp(config(null), pool, emailConfig as never, {
+      migrationStatus: {
+        state: "controlled_migration_pending",
+        migration: "0025_cloud_workspace_engine_authority.sql",
+        dependentRuntime: "cloud_workspaces",
+      },
+      cloudWorkspaceAccessService: {
+        issue: async () => {
+          throw new Error("not used");
+        },
+        revoke: async () => {
+          throw new Error("not used");
+        },
+        recognizesPreviewRequest: () => true,
+        handlePreviewRequest,
+      },
+    });
+
+    const response = await app.request(
+      "https://0123456789abcdef0123456789abcdef.cloud-preview.example.test/app",
+    );
+
+    expect(response.status).not.toBe(200);
+    expect(handlePreviewRequest).not.toHaveBeenCalled();
+  });
+
   it("serves a capability-authorized preview before interactive auth", async () => {
     const access = {
       issue: async () => {

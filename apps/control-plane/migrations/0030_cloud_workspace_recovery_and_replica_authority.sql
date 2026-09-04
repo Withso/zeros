@@ -93,11 +93,10 @@ CREATE TABLE workspace_setup_recovery_grants (
   use_count                  integer NOT NULL DEFAULT 0 CHECK (use_count >= 0),
   created_at                 timestamptz NOT NULL DEFAULT now(),
   UNIQUE (id, workspace_id, generation, org_id),
-  FOREIGN KEY (
-    setup_run_id, workspace_id, generation, org_id, setup_execution_fence
-  ) REFERENCES cloud_workspace_setup_runs(
-    id, workspace_id, generation, org_id, execution_fence
-  ) ON DELETE CASCADE,
+  FOREIGN KEY (setup_run_id, workspace_id, generation, org_id)
+    REFERENCES cloud_workspace_setup_runs(
+      id, workspace_id, generation, org_id
+    ) ON DELETE CASCADE,
   FOREIGN KEY (checkpoint_id, workspace_id, org_id)
     REFERENCES workspace_checkpoints(id, workspace_id, org_id)
     ON DELETE CASCADE,

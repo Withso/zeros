@@ -86,7 +86,7 @@ export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspac
             executionFence: execution.executionFence,
           },
           "rejected",
-        );
+        ).catch(() => undefined);
         throw new CloudWorkspaceSetupError(
           "setup_execution_aborted",
           "Cloud workspace setup execution was aborted",

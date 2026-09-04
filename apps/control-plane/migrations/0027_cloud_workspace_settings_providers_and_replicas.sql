@@ -733,7 +733,7 @@ CREATE TABLE port_forward_sessions (
   generation                 integer NOT NULL,
   org_id                     uuid NOT NULL,
   user_id                    uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  device_id                  uuid NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+  device_id                  uuid NOT NULL,
   access_grant_id            uuid NOT NULL,
   remote_port                integer NOT NULL CHECK (remote_port BETWEEN 1024 AND 65535),
   requested_local_port       integer CHECK (
@@ -757,6 +757,8 @@ CREATE TABLE port_forward_sessions (
   FOREIGN KEY (workspace_id, generation, org_id)
     REFERENCES cloud_workspace_generations(workspace_id, generation, org_id)
     ON DELETE CASCADE,
+  FOREIGN KEY (device_id, user_id)
+    REFERENCES devices(id, user_id) ON DELETE CASCADE,
   FOREIGN KEY (access_grant_id, workspace_id, generation, org_id)
     REFERENCES cloud_workspace_client_access_grants(
       id, workspace_id, generation, org_id

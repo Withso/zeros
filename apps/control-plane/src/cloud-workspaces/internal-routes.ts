@@ -658,8 +658,9 @@ export function createCloudWorkspaceInternalRoutes(
         c.req.header("authorization"),
         HEARTBEAT_TOKEN_PATTERN,
       );
+      if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
       const scope = RecordHeadScope.safeParse(c.req.query());
-      if (!token || !scope.success) {
+      if (!scope.success) {
         return c.json({ error: { code: "invalid_request" } }, 422);
       }
       try {
@@ -716,10 +717,11 @@ export function createCloudWorkspaceInternalRoutes(
         c.req.header("authorization"),
         HEARTBEAT_TOKEN_PATTERN,
       );
+      if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
       const { after, ...rawScope } = c.req.query();
       const scope = ContentHeadScope.safeParse(rawScope);
       const afterPath = recoveryCursor(after);
-      if (!token || !scope.success || afterPath === undefined) {
+      if (!scope.success || afterPath === undefined) {
         return c.json({ error: { code: "invalid_request" } }, 422);
       }
       try {

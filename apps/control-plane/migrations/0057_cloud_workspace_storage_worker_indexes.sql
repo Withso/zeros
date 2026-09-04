@@ -52,3 +52,9 @@ CREATE INDEX workspace_blobs_pending_gc_claim_idx
   ON workspace_blobs (created_at, id)
   INCLUDE (org_id, object_key)
   WHERE state = 'pending_upload' AND reference_count = 0;
+
+-- `/healthz` bounds its durability probe by the workspace update age without
+-- constraining desired_state, so the reconciler index cannot serve this scan.
+CREATE INDEX cloud_workspaces_durability_health_idx
+  ON cloud_workspaces (updated_at, id)
+  WHERE status IN ('ready', 'busy');

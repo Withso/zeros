@@ -216,6 +216,27 @@ $function$;
       assertNoTopLevelTransactionControl("0001_example.sql", sql),
     ).not.toThrow();
   });
+
+  it.each([
+    "SELECT '\\'; COMMIT;",
+    'CREATE TABLE "quoted\\" (id integer); COMMIT;',
+  ])(
+    "does not let a backslash hide top-level transaction control in %s",
+    (sql) => {
+      expect(() =>
+        assertNoTopLevelTransactionControl("0001_example.sql", sql),
+      ).toThrow(/0001_example\.sql.*top-level transaction control COMMIT/i);
+    },
+  );
+
+  it("keeps backslash escapes scoped to PostgreSQL escape strings", () => {
+    expect(() =>
+      assertNoTopLevelTransactionControl(
+        "0001_example.sql",
+        String.raw`SELECT E'escaped\' COMMIT'; SELECT 1;`,
+      ),
+    ).not.toThrow();
+  });
 });
 
 describe("historical migration filename compatibility", () => {

@@ -106,13 +106,21 @@ function maskQuotedSql(sql) {
       }
       continue;
     }
-    if (state === "single-quote" || state === "double-quote") {
-      const delimiter = state === "single-quote" ? "'" : '"';
+    if (
+      state === "single-quote" ||
+      state === "escape-string" ||
+      state === "double-quote"
+    ) {
+      const delimiter = state === "double-quote" ? '"' : "'";
       blank(index, 1);
       if (character === delimiter && sql[index + 1] === delimiter) {
         blank(index + 1, 1);
         index += 1;
-      } else if (character === "\\" && index + 1 < sql.length) {
+      } else if (
+        state === "escape-string" &&
+        character === "\\" &&
+        index + 1 < sql.length
+      ) {
         blank(index + 1, 1);
         index += 1;
       } else if (character === delimiter) {
@@ -131,7 +139,16 @@ function maskQuotedSql(sql) {
       state = "block-comment";
     } else if (character === "'" || character === '"') {
       blank(index, 1);
-      state = character === "'" ? "single-quote" : "double-quote";
+      const escapePrefix =
+        character === "'" &&
+        /[eE]/u.test(sql[index - 1] ?? "") &&
+        !/[A-Za-z0-9_$]/u.test(sql[index - 2] ?? "");
+      state =
+        character === '"'
+          ? "double-quote"
+          : escapePrefix
+            ? "escape-string"
+            : "single-quote";
     } else if (character === "$") {
       const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index));
       if (tag) {

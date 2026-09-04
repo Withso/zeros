@@ -3,6 +3,7 @@ import { createHmac, randomUUID } from "node:crypto";
 import type pg from "pg";
 
 import { withSystemTx } from "../db.js";
+import { isValidCloudWorkspaceWorkerId } from "./worker-identity.js";
 
 export type CloudWorkspaceOutboxEvent = {
   id: string;
@@ -168,11 +169,7 @@ export class CloudWorkspaceOutboxWorker {
       throw new Error("cloud workspace outbox worker configuration is invalid");
     }
     this.workerId = options.workerId ?? `cloud-outbox:${randomUUID()}`;
-    if (
-      this.workerId.length < 1 ||
-      this.workerId.length > 255 ||
-      /[\u0000-\u001f\u007f]/u.test(this.workerId)
-    ) {
+    if (!isValidCloudWorkspaceWorkerId(this.workerId)) {
       throw new Error("cloud workspace outbox worker identity is invalid");
     }
   }

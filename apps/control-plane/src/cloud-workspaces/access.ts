@@ -171,6 +171,14 @@ function iso(value: Date | string): string {
   return (value instanceof Date ? value : new Date(value)).toISOString();
 }
 
+function hasAsciiWhitespaceOrControl(value: string): boolean {
+  for (const character of value) {
+    const code = character.charCodeAt(0);
+    if (code <= 0x20 || code === 0x7f) return true;
+  }
+  return false;
+}
+
 function providerHttpError(error: unknown, operation: string): HttpError {
   if (error instanceof CloudProviderError) {
     return new HttpError(
@@ -391,7 +399,7 @@ function normalizedCredential(value: string): string {
     typeof value !== "string" ||
     value.length < 16 ||
     value.length > 4_096 ||
-    /[\u0000-\u0020\u007f]/.test(value)
+    hasAsciiWhitespaceOrControl(value)
   ) {
     throw new HttpError(404, "not_found", "Cloud access grant not found");
   }
@@ -402,7 +410,7 @@ function safeProviderAccessId(value: string): string {
   if (
     value.length < 1 ||
     value.length > 512 ||
-    /[\u0000-\u0020\u007f]/.test(value)
+    hasAsciiWhitespaceOrControl(value)
   ) {
     throw new CloudProviderError(
       "provider_access_response_invalid",
@@ -712,6 +720,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     let credential: string;
     let expiresAt: Date;
     let ssh: CloudProviderSshAccess | null = null;
+    let providerAccessId: string | null = null;
     try {
       const provider = await this.providerFor({
         workspaceId: input.workspaceId,
@@ -737,6 +746,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           prepared.provider_resource_id,
           expiresInMinutes,
         );
+        providerAccessId = safeProviderAccessId(ssh.providerAccessId);
         credential = ssh.credential;
         expiresAt = ssh.expiresAt;
       }
@@ -817,7 +827,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           [
             grantId,
             hashToken(credential),
-            ssh ? safeProviderAccessId(ssh.providerAccessId) : null,
+            providerAccessId,
             expiresAt,
           ],
         );
