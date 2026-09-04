@@ -41,6 +41,7 @@ import {
 } from "./workspace-file-data-cache";
 import {
   invalidateAllEngineReadCaches,
+  invalidateDesignDirectoryTargetReadCache,
   invalidateExternalGitRefCaches,
   invalidateWorkingDirectoriesReadCache,
 } from "../state/read-caches";
@@ -338,6 +339,15 @@ function handleWorkspaceDbChanged(msg: unknown): void {
 
   const gitRefsChanged =
     (msg as { gitRefsChanged?: unknown }).gitRefsChanged === true;
+  const designRecognitionChanged =
+    (msg as { designRecognitionChanged?: unknown }).designRecognitionChanged ===
+    true;
+  // Git-ref invalidation already covers Design targets because a checkout can
+  // add/remove a committed marker. A marker-only watcher event takes the
+  // narrower path and leaves branch catalogs untouched.
+  if (designRecognitionChanged && !gitRefsChanged) {
+    invalidateDesignDirectoryTargetReadCache();
+  }
   if (Array.isArray(workspaceIds) && workspaceIds.length > 0) {
     if (gitRefsChanged) {
       invalidateExternalGitRefCaches(
@@ -535,8 +545,16 @@ export function subscribeGitRefreshForTests(
 /** Test-only exact opaque-id publication, mirroring scoped DB_CHANGED. */
 export function triggerGitRefreshForWorkspaceIdsForTests(
   workspaceIds: readonly string[],
+  change?: {
+    gitRefsChanged?: boolean;
+    designRecognitionChanged?: boolean;
+  },
 ): void {
-  handleWorkspaceDbChanged({ kinds: ["workspaces"], workspaceIds });
+  handleWorkspaceDbChanged({
+    kinds: ["workspaces"],
+    workspaceIds,
+    ...change,
+  });
 }
 
 function refreshAfterBridgeConnection(initial: boolean): void {

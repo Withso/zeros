@@ -1,19 +1,20 @@
 // ──────────────────────────────────────────────────────────
-// Design mode — one workspace, two CONCURRENT modes
+// Design mode — one workspace, two concurrent views
 // ──────────────────────────────────────────────────────────
 //
 // A workspace is never "a design workspace" by species: every worktree is
 // created through the same code pipeline (same base ref, files-to-copy
 // seeding, setup, context graph), and the MODE is simply which surface the
-// user is working in. Both halves stay alive at once — agents and terminals
-// keep editing code territory while the design canvas is open — so the mode
-// switch enforces nothing and blocks on nothing; it ensures the design
-// document exists, flips the row, and returns.
+// user is working in. The Design surface still writes only through its scoped
+// API. Switching the visible surface never changes Git checkout shape, stages
+// files, commits, or retires Code processes. Design files remain ordinary
+// uncommitted work until the user performs an explicit Git action.
 //
 // Isolation is TERRITORIAL and ACTOR-SCOPED:
 //
-//   • a Zeros-launched code agent receives an immutable provider sandbox whose
-//     write map carves out every recognized Design subtree;
+//   • code actors run natively and receive an explicit behavioral contract
+//     that treats the live Design root as read-only context;
+//   • Design agents run in ZSR and mutate only through the Design API;
 //   • the codebase is writable only by code actors — the design surface
 //     can't reach outside the design dir by construction
 //     (assertSafeDesignWriteTarget); external tools retain normal access to the
@@ -28,8 +29,8 @@
 // The row flip and the filesystem work cannot be atomic, so each transition
 // writes a durable marker (workspace_meta) before touching anything and
 // clears it after the last step; boot completes whatever it finds. The
-// remaining filesystem legs are small (ensure/commit the doc and legacy
-// cleanup), and every one is idempotent.
+// remaining filesystem legs (initialize the document and legacy cleanup) are
+// idempotent.
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
@@ -37,7 +38,6 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  discoverDesignDirectories,
   previewDesignDirectoryForEnter,
   resolveDesignDirectoryForEnter,
 } from "../design/directory";
@@ -48,21 +48,27 @@ import {
 } from "../design/directory-registry";
 import { initializeDesignDocument } from "../design/document";
 import { unlockLegacyDesignWorkspaceLock } from "../design/workspace-lock";
+import {
+  rememberRecognizedDesignDirectories,
+  stickyRecognizedDesignDirectories,
+} from "../design/recognition-store";
 import { opSettingsWrite } from "../settings/ops";
 import { GitError } from "./errors";
 import { runGit } from "./git-exec";
+import { withWorkspaceGitMutation } from "./mutation-lock";
 import {
   getWorkingDirectories,
   setWorkingDirectories,
 } from "./sparse-checkout";
 import {
+  designWorktreesRoot,
   getWorkspaceById,
   getWorkspaceMeta,
   listWorkspaces,
   setWorkspaceMeta,
   updateWorkspace,
 } from "./state";
-import type { Workspace, WorkspaceMode } from "./types";
+import type { Workspace } from "./types";
 
 /** Durable transition marker. Written before a transition's first mutation,
  *  cleared after its last; boot completes whatever it finds. The value names
@@ -93,200 +99,129 @@ function clearMarker(workspaceId: string): void {
   setWorkspaceMeta(workspaceId, DESIGN_MODE_TRANSITION_META_KEY, "");
 }
 
-/** Ensure the design document exists and is committed, WITHOUT sweeping
- *  unrelated work into the commit.
- *
- *  Entering design mode on a live workspace must never turn the user's
- *  in-flight code-mode changes into a surprise "Initialize Zeros Design"
- *  commit, so the staging is narrowed by what was actually found:
- *
- *    • design folder has NO tracked files (first enter, or a design folder
- *      pasted in from another repo): force-add the whole folder — untracked
- *      and gitignore-swallowed files alike — and commit it by pathspec.
- *    • folder tracked, but seed files were MISSING (partial doc): force-add
- *      exactly the created paths and commit those.
- *    • folder tracked and complete: no commit at all. The user's own design
- *      edits stay uncommitted until they Save designs.
- *
- *  Commits are pathspec-limited (`git commit -- <paths>`), so whatever else
- *  is staged in the index stays staged and uncommitted. */
-export async function ensureDesignDocumentCommitted(
+/** Ensure the Design foundation exists without touching Git history or index.
+ * The returned paths are repository-relative files created by this call.
+ * Existing authored files are never overwritten. */
+export async function ensureDesignDocumentInitialized(
   workspacePath: string,
   designDir: string = designDirectoryNameFor(workspacePath),
-): Promise<{ committed: boolean }> {
-  const { created } = await initializeDesignDocument(workspacePath);
-  const tracked = await runGit(workspacePath, [
-    "ls-files",
-    "-z",
-    "--",
-    literalGitPathspec(designDir),
-  ]);
-  const commitPaths: string[] = [];
-  if (!tracked.stdout.split("\0").some(Boolean)) {
-    await runGit(workspacePath, [
-      "add",
-      "-f",
-      "-A",
-      "--",
-      literalGitPathspec(designDir),
-    ]);
-    commitPaths.push(designDir);
-  } else if (created.length > 0) {
-    await runGit(workspacePath, [
-      "add",
-      "-f",
-      "--",
-      ...created.map(literalGitPathspec),
-    ]);
-    commitPaths.push(...created);
-  } else {
-    return { committed: false };
-  }
-  // The add above can be a no-op tree-wise (a checkout hook already committed
-  // the seeds); commit only when it actually staged a delta, mirroring the
-  // original create-time sequence.
-  const staged = await runGit(workspacePath, [
-    "diff",
-    "--cached",
-    "--name-only",
-    "--",
-    ...commitPaths.map(literalGitPathspec),
-  ]);
-  if (!staged.stdout.trim()) return { committed: false };
-  await runGit(workspacePath, [
-    "-c",
-    "user.name=Zeros",
-    "-c",
-    "user.email=zeros@localhost",
-    "commit",
-    "--no-verify",
-    "-m",
-    "Initialize Zeros Design",
-    "--",
-    ...commitPaths.map(literalGitPathspec),
-  ]);
-  return { committed: true };
+): Promise<{ created: string[] }> {
+  primeDesignDirectoryName(workspacePath, designDir);
+  return initializeDesignDocument(workspacePath);
 }
 
-/** Dissolve the sparse cone pre-mode builds wrote for design workspaces.
- *
- *  Under the mode model a design checkout is FULL — the codebase is present
- *  and read-only, not absent — so a surviving cone is legacy state. It is
- *  normalized on EXIT (materialize everything, then the unlock sweep covers
- *  whatever appeared) rather than at boot, so a legacy design workspace is
- *  never churned while the user isn't touching it. Best-effort: a non-cone /
- *  unsupported sparse state is left alone for the Working-directories picker
- *  to surface, and a failure here must not block leaving design mode. */
-async function normalizeLegacyCone(workspacePath: string): Promise<void> {
-  try {
-    const state = await getWorkingDirectories(workspacePath);
-    if (!state.sparse || !state.supported) return;
-    const result = await setWorkingDirectories(workspacePath, state.all);
-    if (result.leftBehind.length > 0) {
-      console.warn(
-        `[design-mode] ${result.leftBehind.length} path(s) had local ` +
-          `modifications while dissolving the legacy design cone at ` +
-          `${workspacePath}; they were left on disk.`,
-      );
-    }
-  } catch (error) {
-    console.warn(
-      `[design-mode] couldn't dissolve the legacy design cone at ` +
-        `${workspacePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-    );
-  }
-}
-
-/** Enter design mode on a live code-mode workspace.
- *
- *  An existing or admission-reserved Design subtree is already carved out of
- *  every code-agent sandbox, so switching the visible surface does not disturb
- *  those agents. `withFirstTerritoryCreation` asks the engine to prove that
- *  identity; only a legacy/stale boundary admitted before reservation is
- *  retired before initialization creates/publishes the document.
- *  Order: preview identity → optional authority transition → publish identity
- *  → marker → ensure/commit doc → flip row → clear marker. */
-export async function enterDesignMode(
+/** Enter Design view without changing Git or process authority. A caller may
+ * validate/build the first surface receipt before the row is published; if
+ * that preparation fails, the workspace remains in Code view. */
+export async function enterDesignMode<T = void>(
   workspace: Workspace,
-  opts: {
-    withFirstTerritoryCreation?: (
-      designDirectory: string,
-      mutation: () => Promise<void>,
-    ) => Promise<void>;
-  } = {},
-): Promise<void> {
+  beforePublish?: () => Promise<T>,
+): Promise<T | undefined> {
   // Decide WHICH folder is the design folder before anything durable happens:
   // the `[design] directory` pointer, with recognition/adoption of committed
-  // design folders (the copy-paste-between-repos case). A refusal here — the
-  // pointer dangles and several candidates exist — aborts cleanly with no
-  // marker written. This is deliberately a PREVIEW: on first use, publishing
-  // the identity before the authority transition would let a concurrent
-  // Design observer target the new subtree while old code processes were
-  // still alive. Publication and creation therefore happen inside the same
-  // process-start block below.
-  const designDir = await previewDesignDirectoryForEnter(workspace);
-  const createOrEnter = async (): Promise<void> => {
-    primeDesignDirectoryName(workspace.path, designDir);
-    writeMarker(workspace.id, "enter");
-    try {
-      await ensureDesignDocumentCommitted(workspace.path, designDir);
-      updateWorkspace(workspace.id, { viewMode: "design" });
-    } catch (error) {
-      updateWorkspace(workspace.id, { viewMode: "code" });
-      clearMarker(workspace.id);
-      throw error;
-    }
+  // design folders (the copy-paste-between-repos case). A refusal here aborts
+  // cleanly with no marker, Git, or view-state mutation.
+  const sticky = await stickyRecognizedDesignDirectories(workspace.path);
+  const designDir = await previewDesignDirectoryForEnter(workspace, {
+    additionalRecognized: sticky,
+  });
+  primeDesignDirectoryName(workspace.path, designDir);
+  writeMarker(workspace.id, "enter");
+  try {
+    await ensureDesignDocumentInitialized(workspace.path, designDir);
+    // A freshly initialized Design draft is intentionally uncommitted. Remember
+    // the resolved identity outside Git so leaving and re-entering Design does
+    // not mistake that engine-created draft for an unrelated user directory.
+    await rememberRecognizedDesignDirectories(workspace.path, [designDir]);
+    const prepared = await beforePublish?.();
+    updateWorkspace(workspace.id, { viewMode: "design" });
     clearMarker(workspace.id);
-  };
-  const designDirectory = path.join(workspace.path, ...designDir.split("/"));
-  // An untracked default folder may have been pre-seeded by a checkout hook—or
-  // created while a no-Design code session was alive. Existence alone does not
-  // make it an established authority boundary. Retire the old sandbox before
-  // the first committed marker is created, even when the directory already
-  // exists, so pre-seeding cannot open a creation-time policy race.
-  const recognized = await discoverDesignDirectories(workspace.path);
-  if (!recognized.includes(designDir) && opts.withFirstTerritoryCreation) {
-    await opts.withFirstTerritoryCreation(designDirectory, createOrEnter);
-    return;
+    return prepared;
+  } catch (error) {
+    updateWorkspace(workspace.id, { viewMode: "code" });
+    clearMarker(workspace.id);
+    throw error;
   }
-  await createOrEnter();
 }
 
-/** Exit design mode: marker → flip row → dissolve legacy cone → sweep off
- *  legacy whole-tree ACLs (pre-concurrency builds locked the entire codebase
- *  while in design mode) → clear marker. When the sweep reports failures the marker is KEPT so boot
- *  retries; the row stays "code" (visible, actionable) and the error names
- *  the stragglers rather than silently leaving read-only source. */
-export async function exitDesignMode(workspace: Workspace): Promise<void> {
-  writeMarker(workspace.id, "exit");
-  updateWorkspace(workspace.id, { viewMode: "code" });
-  await normalizeLegacyCone(workspace.path);
-  try {
-    await unlockLegacyDesignWorkspaceLock(workspace.path);
-  } catch (error) {
+function isInsideDirectory(candidate: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative.length > 0 &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/** Pre-mode Design workspaces were created under the dedicated legacy root
+ * with an engine-owned cone containing exactly their Design top-level folder.
+ * Dissolve only that fingerprint. A user-managed sparse selection in a normal
+ * workspace—or any legacy checkout whose cone has since been customized—is
+ * preserved byte-for-byte. */
+async function normalizeLegacyDesignCone(workspace: Workspace): Promise<void> {
+  if (!isInsideDirectory(workspace.path, designWorktreesRoot())) return;
+  const state = await getWorkingDirectories(workspace.path);
+  if (!state.sparse || !state.supported) return;
+  const designTopLevel = designDirectoryNameFor(workspace.path).split("/")[0]!;
+  if (state.included.length !== 1 || state.included[0] !== designTopLevel) {
+    return;
+  }
+  const normalized = await setWorkingDirectories(workspace.path, state.all);
+  if (normalized.leftBehind.length > 0) {
     throw new GitError({
       code: "GIT_COMMAND_FAILED",
-      message: "Some files are still read-only after leaving design mode.",
-      cause: error,
+      message:
+        "The legacy Design-only checkout could not be fully materialized.",
       remediation:
-        "Close processes using this workspace and switch modes again (or restart Zeros) to finish unlocking.",
-      context: { workspaceId: workspace.id },
+        "Review the locally modified paths, then switch to Code mode again.",
+      context: {
+        workspaceId: workspace.id,
+        paths: normalized.leftBehind.slice(0, 20),
+      },
     });
   }
-  clearMarker(workspace.id);
+}
+
+/** Exit Design view without hiding, staging, committing, or moving Design
+ * files. Legacy migration failures are reported directly; there is no
+ * alternate execution backend or containment fallback. */
+export async function exitDesignMode(workspace: Workspace): Promise<void> {
+  writeMarker(workspace.id, "exit");
+  try {
+    await normalizeLegacyDesignCone(workspace);
+    await unlockLegacyDesignWorkspaceLock(workspace.path);
+    updateWorkspace(workspace.id, { viewMode: "code" });
+    clearMarker(workspace.id);
+  } catch (cause) {
+    throw cause instanceof GitError
+      ? cause
+      : new GitError({
+          code: "GIT_COMMAND_FAILED",
+          message: "The legacy Design workspace cleanup did not complete.",
+          cause,
+          remediation:
+            "Close processes using the checkout and switch to Code mode again; no alternate backend will be used.",
+          context: { workspaceId: workspace.id },
+        });
+  }
 }
 
 /** Prime the active Design identity for a workspace that already carries one.
- * Historical name retained for compatibility; provider admission installs the
- * actual actor-scoped write boundary. */
+ * Historical name retained for compatibility; Code admission uses the identity
+ * for instructions and lifecycle checks, while Design agents use it in ZSR. */
 export async function fenceWorkspaceDesignDirectoryIfPresent(workspace: {
   path: string;
   repoRoot: string;
 }): Promise<void> {
+  // Sticky recognition covers the engine-created first-use draft
+  // ("<repo> - Design"), which has no committed marker until the user commits
+  // it and no pointer of its own: without it a restart would re-prime the
+  // unconfigured default and orphan the live draft.
+  const sticky = await stickyRecognizedDesignDirectories(workspace.path);
   await resolveDesignDirectoryForEnter(workspace, {
     strict: false,
+    additionalRecognized: sticky,
   });
 }
 
@@ -297,9 +232,10 @@ export async function reconcileDesignDirAfterExternalGit(workspace: {
   path: string;
   repoRoot?: string;
 }): Promise<void> {
+  const sticky = await stickyRecognizedDesignDirectories(workspace.path);
   await resolveDesignDirectoryForEnter(
     { path: workspace.path, repoRoot: workspace.repoRoot ?? workspace.path },
-    { strict: false },
+    { strict: false, additionalRecognized: sticky },
   );
 }
 
@@ -319,6 +255,16 @@ export async function reconcileDesignDirAfterExternalGit(workspace: {
  *  in the main checkout — an automatic commit would sweep them silently into
  *  the rename. */
 export async function renameDesignDirectory(opts: {
+  repoRoot: string;
+  from: string;
+  to: string;
+}): Promise<{ committedPointer: boolean }> {
+  return withWorkspaceGitMutation(opts.repoRoot, () =>
+    renameDesignDirectoryAdmitted(opts),
+  );
+}
+
+async function renameDesignDirectoryAdmitted(opts: {
   repoRoot: string;
   from: string;
   to: string;
@@ -418,16 +364,8 @@ export async function renameDesignDirectory(opts: {
   return { committedPointer };
 }
 
-/** Complete transitions a crash interrupted. Directions are re-derived from
- *  marker + row state:
- *
- *    enter + design row → the flip landed: finish compatibility cleanup.
- *    enter + code row   → nothing durable happened: clear the marker.
- *    exit  + code row   → the flip landed, the legacy sweep may not have:
- *                         dissolve cone and sweep.
- *    exit  + design row → the flip never landed: clear the marker (the row
- *                         is still consistently in design mode).
- */
+/** Complete a crash-interrupted view flip. View transitions never alter the
+ * checkout, index, Git history, or execution backend. */
 export async function reconcileDesignModeTransition(
   workspaceId: string,
 ): Promise<void> {
@@ -437,11 +375,6 @@ export async function reconcileDesignModeTransition(
   if (!workspace || !existsSync(workspace.path)) {
     clearMarker(workspaceId);
     return;
-  }
-  const mode: WorkspaceMode = workspace.kind === "design" ? "design" : "code";
-  if (marker === "exit" && mode === "code") {
-    await normalizeLegacyCone(workspace.path);
-    await unlockLegacyDesignWorkspaceLock(workspace.path);
   }
   clearMarker(workspaceId);
 }

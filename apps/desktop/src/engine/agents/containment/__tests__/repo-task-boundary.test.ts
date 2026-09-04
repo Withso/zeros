@@ -75,6 +75,47 @@ afterEach(async () => {
 });
 
 describe("repository task boundary factory", () => {
+  it("keeps local Code tasks native without Design resolution or path canonicalization", async () => {
+    const physical = await designRepo();
+    const aliasParent = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-repo-native-alias-"),
+    );
+    temporaryDirectories.push(aliasParent);
+    const alias = path.join(aliasParent, "workspace");
+    await symlink(physical, alias, "dir");
+    const requests: BoundaryRequest[] = [];
+    const localBoundary = {
+      ...testExecutionBoundary({
+        onPrepare: (candidate) => requests.push(candidate),
+      }),
+      backend: "none" as const,
+    };
+    const factory = createRepoTaskBoundaryFactory(localBoundary);
+    const onAuthorityResolved = vi.fn();
+
+    const prepared = await factory({
+      executionId: "repo-task-native",
+      cwd: alias,
+      workspaceRoot: alias,
+      repoRoot: alias,
+      onAuthorityResolved,
+    });
+    await prepared.stopAndProve();
+
+    expect(onAuthorityResolved).toHaveBeenCalledWith({
+      registeredDesignAuthorityIdentity: null,
+      territoryContributions: [],
+    });
+    expect(requests.at(-1)).toEqual({
+      executionId: "repo-task-native",
+      actor: "repo-code-task",
+      providerId: "generic",
+      cwd: alias,
+      workspaceRoot: alias,
+      backendHint: "none",
+    });
+  });
+
   it("canonicalizes symlinked task roots before deriving authority identity", async () => {
     const physical = await designRepo();
     const aliasParent = await mkdtemp(
@@ -101,6 +142,14 @@ describe("repository task boundary factory", () => {
     expect(requests.at(-1)).toMatchObject({
       cwd: await realpath(physical),
       workspaceRoot: await realpath(physical),
+      codeTerritoryOwners: [
+        {
+          workspaceRoot: await realpath(physical),
+          protectedDesignDirectories: [
+            path.join(await realpath(physical), "Zeros Design"),
+          ],
+        },
+      ],
     });
   });
 
@@ -132,7 +181,6 @@ describe("repository task boundary factory", () => {
 
     const request = requests.at(-1);
     expect(request).toBeDefined();
-    expect(request?.containerWorker).toBeUndefined();
     expect(request?.containerWorkflowExpected).toBeUndefined();
   });
 
@@ -186,7 +234,7 @@ describe("repository task boundary factory", () => {
     }
   });
 
-  it("pre-protects managed siblings for Setup and Run boundaries", async () => {
+  it("does not invent or materialize Design authority for a code-only task", async () => {
     const previousWorkspacesDir = process.env.ZEROS_WORKSPACES_DIR;
     const container = await realpath(
       await mkdtemp(path.join(os.tmpdir(), "zeros-repo-managed-boundary-")),
@@ -241,12 +289,12 @@ describe("repository task boundary factory", () => {
       const request = requests.at(-1);
 
       expect(request?.protectedWorkspaceDirectories).toContain(managed);
-      expect(request?.territory?.protectedDesignDirectories).toContain(
+      expect(request?.territory?.protectedDesignDirectories).not.toContain(
         path.join(workspace, "Zeros Design"),
       );
-      expect(await realpath(path.join(workspace, "Zeros Design"))).toBe(
-        path.join(workspace, "Zeros Design"),
-      );
+      await expect(
+        realpath(path.join(workspace, "Zeros Design")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
       expect(request?.territory?.protectedDesignDirectories).toContain(
         path.join(registeredMain, "Zeros Design"),
       );

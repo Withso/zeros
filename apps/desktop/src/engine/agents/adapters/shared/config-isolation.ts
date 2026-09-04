@@ -67,6 +67,7 @@ export const ENGINE_AUTHORITY_ENV_VARS = [
 function isEngineAuthorityEnvName(name: string): boolean {
   return (
     (ENGINE_AUTHORITY_ENV_VARS as readonly string[]).includes(name) ||
+    name.startsWith("ZEROS_HOST_SUPERVISOR_") ||
     name.startsWith("ZEROS_ZSR_") ||
     /^CONDUCTOR_.*(?:TOKEN|SECRET|AUTH|CREDENTIAL|COOKIE|PRIVATE_KEY)$/.test(
       name,

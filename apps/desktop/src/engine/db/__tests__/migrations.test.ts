@@ -276,8 +276,8 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
          VALUES ('draft-chat', '/repo', 'codex', 'Draft chat', 'legacy-thread')`,
       ).run();
 
-      // Internal checkpoint builds used these migration numbers for
-      // autonomous-foundation drafts. A later build could legitimately add
+      // Internal checkpoint builds used these migration numbers for early
+      // Design-agent foundation drafts. A later build could legitimately add
       // the final v31/v32 workspace columns while v28-v30 remained recorded,
       // leaving the database at head without provider_binding/provider_metadata.
       db.exec(`

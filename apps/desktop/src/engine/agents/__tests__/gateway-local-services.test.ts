@@ -4,33 +4,9 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import {
-  deriveContainerWorker,
-  expectsContainerWorkflow,
-} from "../gateway";
+import { expectsContainerWorkflow } from "../gateway";
 
-describe("agent container-worker discovery", () => {
-  it("selects a physical Podman binary instead of an ambient daemon", async () => {
-    if (process.platform !== "linux") return;
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-podman-discovery-"));
-    const podman = path.join(root, "podman");
-    try {
-      await writeFile(podman, "#!/bin/sh\nexit 0\n", { mode: 0o700 });
-      expect(
-        deriveContainerWorker({
-          PATH: root,
-          DOCKER_HOST: "unix:///var/run/docker.sock",
-        }),
-      ).toEqual({
-        runtime: "podman",
-        backend: "embedded-linux",
-        executable: podman,
-      });
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
+describe("agent container-workflow detection", () => {
   it("detects normal container workflows independently from safe worker availability", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "zeros-docker-discovery-"));
     const docker = path.join(root, "docker");

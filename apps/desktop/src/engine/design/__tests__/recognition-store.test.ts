@@ -44,9 +44,7 @@ describe("sticky Design recognition", () => {
     // than replace it: two chats in one workspace can legitimately resolve
     // different active Design folders, and forgetting one would drop its
     // protection on the next session.
-    await rememberRecognizedDesignDirectories(workspace, [
-      "docs/Brand Design",
-    ]);
+    await rememberRecognizedDesignDirectories(workspace, ["docs/Brand Design"]);
     expect(await stickyRecognizedDesignDirectories(workspace)).toEqual([
       "docs/Brand Design",
       "Product Design",
@@ -115,9 +113,9 @@ describe("sticky Design recognition", () => {
     await writeFile(designRecognitionStorePath(), "{not json");
     // A corrupt file must not fail admission: recognition still has the
     // repository's own evidence, and the memory rebuilds from it.
-    await expect(
-      stickyRecognizedDesignDirectories(workspace),
-    ).resolves.toEqual([]);
+    await expect(stickyRecognizedDesignDirectories(workspace)).resolves.toEqual(
+      [],
+    );
     await rememberRecognizedDesignDirectories(workspace, ["Product Design"]);
     expect(await stickyRecognizedDesignDirectories(workspace)).toEqual([
       "Product Design",

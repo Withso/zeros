@@ -211,15 +211,6 @@ export function testExecutionBoundary(
             level: restrictions.length === 0 ? "full" : "restricted",
             restrictions,
           },
-          ...(request.containerWorker
-            ? {
-                services: {
-                  state: "ready" as const,
-                  activeCount: 1,
-                  kinds: ["podman" as const],
-                },
-              }
-            : {}),
           git: { state: "not-applicable" },
           checkedAt: Date.now(),
         },

@@ -98,6 +98,59 @@ describe("detach mode", () => {
     expect(rootSrc).toBe("workspace content\n");
   });
 
+  it("mirrors tracked Code without committing the branch, touching the index, or projecting the live Design draft", async () => {
+    const { getWorkspace } = await import("..");
+    const ws = getWorkspace(workspaceId);
+    const designDir = path.join(ws.path, "Zeros Design");
+    await mkdir(designDir, { recursive: true });
+    await Promise.all([
+      writeFile(path.join(designDir, ".zeros-canvas.json"), "{}\n"),
+      writeFile(path.join(designDir, "frame.html"), "committed design\n"),
+    ]);
+    await execFileAsync("git", ["add", "--", "Zeros Design"], {
+      cwd: ws.path,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "Design base"], {
+      cwd: ws.path,
+    });
+    await Promise.all([
+      writeFile(path.join(ws.path, "src.txt"), "live code\n"),
+      writeFile(path.join(designDir, "frame.html"), "live design\n"),
+    ]);
+    await execFileAsync(
+      "git",
+      ["add", "--", "Zeros Design/frame.html"],
+      { cwd: ws.path },
+    );
+    const headBefore = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: ws.path })
+    ).stdout.trim();
+    const stagedBefore = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: ws.path,
+      })
+    ).stdout;
+
+    await detachStart({ workspaceId });
+
+    const headAfter = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: ws.path })
+    ).stdout.trim();
+    const stagedAfter = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: ws.path,
+      })
+    ).stdout;
+    expect(headAfter).toBe(headBefore);
+    expect(stagedAfter).toBe(stagedBefore);
+    await expect(readFile(path.join(repoRoot, "src.txt"), "utf8")).resolves.toBe(
+      "live code\n",
+    );
+    await expect(
+      readFile(path.join(repoRoot, "Zeros Design", "frame.html"), "utf8"),
+    ).resolves.toBe("committed design\n");
+  });
+
   it("edit in workspace while detached → root updates", async () => {
     const { getWorkspace } = await import("..");
     const ws = getWorkspace(workspaceId);

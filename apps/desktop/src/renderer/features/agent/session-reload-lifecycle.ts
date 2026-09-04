@@ -452,7 +452,7 @@ export function sendNeedsSessionRecovery(status: SessionStatus): boolean {
  * has to be built. So: kick the build in the background, accept the message
  * into the queued card immediately, and let the existing readiness drain
  * dispatch it. That makes EVERY send accepted in <100 ms regardless of what
- * admission costs — the pre-ZSR feeling, without weakening admission. */
+ * admission costs, without weakening the execution boundary. */
 export function sendSessionRecoveryMode(
   status: SessionStatus,
 ): "none" | "park" | "await" {
@@ -465,8 +465,8 @@ export function sendSessionRecoveryMode(
  * card rather than fall into the turn body.
  *
  * The turn body used to pay for these inline: "!sessionId → await
- * ensureSession" and the settings-drift force-respawn each awaited a FULL ZSR
- * admission after runSend had already cleared the composer and before any
+ * ensureSession" and the settings-drift force-respawn each awaited a full
+ * provider-session admission after runSend had already cleared the composer and before any
  * bubble was appended. The user's first send into a new chat was invisible for
  * the whole admission, while a SECOND send — queueing behind the first's local
  * send lock — rendered a queued card immediately. Deciding it here, before the
@@ -566,9 +566,9 @@ export function unreadableTranscriptSendAction(input: {
  * PENDING_AUTO_SEND_RECOVERY_MAX_AGE_MS (state/persist-composer-drafts), which
  * decides whether a park survives a restart at all.
  *
- * Sized against what a legitimate pre-ready wait actually costs — a worktree
- * checkout, a ZSR admission, a cold provider host, an engine respawn — with
- * room to spare. Anything past it is not slow, it is stuck. */
+ * Sized against what a legitimate pre-ready wait can cost — a worktree
+ * checkout, execution admission, a cold provider host, or an engine respawn —
+ * with room to spare. Anything past it is not slow, it is stuck. */
 export const QUEUED_FIRST_TURN_MAX_WAIT_MS = 10 * 60_000;
 
 /** What to do with a first turn parked BEFORE its chat could run it (the

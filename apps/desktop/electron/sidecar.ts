@@ -345,6 +345,32 @@ function resolveZsrSupervisorPath(): string | null {
   return existsSync(dev) ? dev : null;
 }
 
+/** Resolve the unrestricted native lifecycle supervisor. It applies no ZSR
+ * policy; it only keeps provider descendants in a crash-recoverable process
+ * group. Like the ZSR supervisor, it needs Electron's Node mode because the
+ * packaged engine is a Bun-compiled executable rather than a script runtime. */
+function resolveHostProcessSupervisorPath(): string | null {
+  if (IS_PACKAGED) {
+    const packaged = path.join(
+      process.resourcesPath,
+      "host-process-supervisor.mjs",
+    );
+    return existsSync(packaged) ? packaged : null;
+  }
+  const development = path.resolve(
+    __dirname,
+    "..",
+    "apps",
+    "desktop",
+    "src",
+    "engine",
+    "agents",
+    "containment",
+    "host-process-supervisor.mjs",
+  );
+  return existsSync(development) ? development : null;
+}
+
 /** Resolve SRT's required ripgrep helper without relying on the launcher's
  * PATH. Packaged builds execute the staged Resources copy; development first
  * accepts that same build output, then resolves the pinned optional package. */
@@ -369,62 +395,6 @@ function resolveZsrRipgrepPath(): string | null {
   } catch {
     return null;
   }
-}
-
-function resolveZsrContainerWorkerPath(): string | null {
-  if (IS_PACKAGED) {
-    const packaged = path.join(
-      process.resourcesPath,
-      "zsr-container-worker.mjs",
-    );
-    return existsSync(packaged) ? packaged : null;
-  }
-  const dev = path.resolve(
-    __dirname,
-    "..",
-    "apps",
-    "desktop",
-    "src",
-    "engine",
-    "agents",
-    "containment",
-    "zsr-container-worker.mjs",
-  );
-  return existsSync(dev) ? dev : null;
-}
-
-function resolveZsrOrbStackContainerHostPath(): string | null {
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-orbstack-container-host.mjs")
-    : path.resolve(
-        __dirname,
-        "..",
-        "apps",
-        "desktop",
-        "src",
-        "engine",
-        "agents",
-        "containment",
-        "zsr-orbstack-container-host.mjs",
-      );
-  return existsSync(candidate) ? candidate : null;
-}
-
-function resolveZsrOrbStackCloudInitPath(): string | null {
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-orbstack-cloud-init.yaml")
-    : path.resolve(
-        __dirname,
-        "..",
-        "apps",
-        "desktop",
-        "src",
-        "engine",
-        "agents",
-        "containment",
-        "zsr-orbstack-cloud-init.yaml",
-      );
-  return existsSync(candidate) ? candidate : null;
 }
 
 function resolveZsrMacosProcessDomainHelperPath(): string | null {
@@ -1422,24 +1392,16 @@ async function doSpawnEngine(
   // to `node` on PATH; see pty-host-client.ts.)
   extraEnv.ZEROS_PTY_HOST_RUNTIME = process.execPath;
   extraEnv.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
+  extraEnv.ZEROS_HOST_SUPERVISOR_RUNTIME = process.execPath;
+  const hostProcessSupervisor = resolveHostProcessSupervisorPath();
+  if (hostProcessSupervisor) {
+    extraEnv.ZEROS_HOST_SUPERVISOR_SCRIPT = hostProcessSupervisor;
+  }
   extraEnv.ZEROS_ZSR_SUPERVISOR_RUNTIME = process.execPath;
   const zsrSupervisor = resolveZsrSupervisorPath();
   if (zsrSupervisor) extraEnv.ZEROS_ZSR_SUPERVISOR_SCRIPT = zsrSupervisor;
   const zsrRipgrep = resolveZsrRipgrepPath();
   if (zsrRipgrep) extraEnv.ZEROS_ZSR_RIPGREP_PATH = zsrRipgrep;
-  const zsrContainerWorker = resolveZsrContainerWorkerPath();
-  if (zsrContainerWorker) {
-    extraEnv.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT = zsrContainerWorker;
-  }
-  const zsrOrbStackContainerHost = resolveZsrOrbStackContainerHostPath();
-  if (zsrOrbStackContainerHost) {
-    extraEnv.ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT =
-      zsrOrbStackContainerHost;
-  }
-  const zsrOrbStackCloudInit = resolveZsrOrbStackCloudInitPath();
-  if (zsrOrbStackCloudInit) {
-    extraEnv.ZEROS_ZSR_ORBSTACK_CLOUD_INIT = zsrOrbStackCloudInit;
-  }
   const zsrMacosProcessDomain = resolveZsrMacosProcessDomainHelperPath();
   if (zsrMacosProcessDomain) {
     extraEnv.ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER = zsrMacosProcessDomain;

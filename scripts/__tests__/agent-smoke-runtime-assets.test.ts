@@ -14,15 +14,15 @@ import { describe, expect, it } from "vitest";
 import {
   agentSmokeProviderCwd,
   agentSmokeProviderRuntimeEnvironment,
+  agentSmokeRuntimeEnvironment,
   agentSmokeSkipReason,
-  agentSmokeZsrEnvironment,
   canonicalAgentSmokeWorkspace,
-  installAgentSmokeZsrEnvironment,
-} from "../agent-smoke-zsr-assets.mjs";
+  installAgentSmokeRuntimeEnvironment,
+} from "../agent-smoke-runtime-assets.mjs";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../..");
 
-describe("live agent smoke ZSR assets", () => {
+describe("live agent smoke runtime assets", () => {
   it("hands the bundled Claude and Codex runtimes to the compiled smoke gateway", () => {
     const resolved = agentSmokeProviderRuntimeEnvironment(
       {},
@@ -47,98 +47,83 @@ describe("live agent smoke ZSR assets", () => {
     });
   });
 
-  it("binds every gateway boundary asset to the repository build output", () => {
-    expect(agentSmokeZsrEnvironment("/repo", "/runtime/node", {})).toEqual({
+  it("binds only native Code runtime assets to the repository source", () => {
+    expect(agentSmokeRuntimeEnvironment("/repo", "/runtime/node", {})).toEqual({
       ZEROS_PTY_HOST_RUNTIME: "/runtime/node",
       ZEROS_CURSOR_HOST_SCRIPT:
         "/repo/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
-      ZEROS_ZSR_SUPERVISOR_RUNTIME: "/runtime/node",
-      ZEROS_ZSR_SUPERVISOR_SCRIPT: "/repo/binaries/zsr-supervisor.mjs",
-      ZEROS_ZSR_CONTAINER_WORKER_SCRIPT:
-        "/repo/binaries/zsr-container-worker.mjs",
-      ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT:
-        "/repo/binaries/zsr-orbstack-container-host.mjs",
-      ZEROS_ZSR_ORBSTACK_CLOUD_INIT:
-        "/repo/binaries/zsr-orbstack-cloud-init.yaml",
-      ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER:
-        "/repo/binaries/zsr-macos-process-domain",
-      ZEROS_ZSR_RIPGREP_PATH: "/repo/binaries/zsr-rg",
+      ZEROS_HOST_SUPERVISOR_RUNTIME: "/runtime/node",
+      ZEROS_HOST_SUPERVISOR_SCRIPT:
+        "/repo/apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
     });
   });
 
-  it("preserves an explicitly supplied packaged asset", () => {
+  it("preserves an explicitly supplied host supervisor", () => {
     expect(
-      agentSmokeZsrEnvironment("/repo", "/runtime/node", {
-        ZEROS_ZSR_SUPERVISOR_SCRIPT: "/packaged/supervisor.mjs",
-      }).ZEROS_ZSR_SUPERVISOR_SCRIPT,
-    ).toBe("/packaged/supervisor.mjs");
+      agentSmokeRuntimeEnvironment("/repo", "/runtime/node", {
+        ZEROS_HOST_SUPERVISOR_SCRIPT: "/packaged/host-supervisor.mjs",
+      }).ZEROS_HOST_SUPERVISOR_SCRIPT,
+    ).toBe("/packaged/host-supervisor.mjs");
   });
 
-  it("pairs an Electron host with the same Electron supervisor runtime", () => {
+  it("pairs an Electron host with the same native supervisor runtime", () => {
     const electron = "/Applications/Zeros Dev.app/Contents/MacOS/Zeros Dev";
     expect(
-      agentSmokeZsrEnvironment("/repo", "/runtime/node", {
+      agentSmokeRuntimeEnvironment("/repo", "/runtime/node", {
         ZEROS_PTY_HOST_RUNTIME: electron,
         ZEROS_PTY_HOST_RUNTIME_ELECTRON: "1",
-      }).ZEROS_ZSR_SUPERVISOR_RUNTIME,
+      }).ZEROS_HOST_SUPERVISOR_RUNTIME,
     ).toBe(electron);
   });
 
-  it("builds the generated and native assets before the live smoke", async () => {
+  it("does not build Design-agent ZSR assets before a native Code smoke", async () => {
     const packageJson = JSON.parse(
       await readFile(path.join(REPO_ROOT, "package.json"), "utf8"),
     ) as { scripts?: Record<string, string> };
     expect(packageJson.scripts?.["agents:smoke"]).toBe(
-      "pnpm build:zsr-supervisor && node scripts/agent-smoke.mjs",
+      "node scripts/agent-smoke.mjs",
+    );
+    expect(packageJson.scripts?.["cursor:smoke:stored-admission"]).toBe(
+      "electron scripts/cursor-stored-admission-smoke.cjs",
     );
   });
 
-  it("does not require Darwin-only helpers after a Linux asset build", async () => {
+  it("does not require any ZSR build output for native Code", async () => {
     const fixture = await mkdtemp(path.join(tmpdir(), "agent-smoke-linux-"));
     const runtime = path.join(fixture, "node");
     const cursorHost = path.join(
       fixture,
       "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
     );
-    const commonAssets = [
-      "zsr-supervisor.mjs",
-      "zsr-container-worker.mjs",
-      "zsr-orbstack-container-host.mjs",
-      "zsr-orbstack-cloud-init.yaml",
-      "zsr-rg",
-    ];
+    const hostSupervisor = path.join(
+      fixture,
+      "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
+    );
     try {
       await mkdir(path.dirname(cursorHost), { recursive: true });
-      await mkdir(path.join(fixture, "binaries"), { recursive: true });
+      await mkdir(path.dirname(hostSupervisor), { recursive: true });
       await Promise.all([
         writeFile(runtime, ""),
         writeFile(cursorHost, ""),
-        ...commonAssets.map((leaf) =>
-          writeFile(path.join(fixture, "binaries", leaf), ""),
-        ),
+        writeFile(hostSupervisor, ""),
       ]);
 
       expect(() =>
-        installAgentSmokeZsrEnvironment(
-          fixture,
-          runtime,
-          {},
-          "linux",
-        ),
+        installAgentSmokeRuntimeEnvironment(fixture, runtime, {}, "linux"),
       ).not.toThrow();
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }
   });
 
-  it("does not misreport an unavailable contained probe as signed out", () => {
+  it("does not misreport an unavailable provider probe as signed out", () => {
     expect(
       agentSmokeSkipReason({
         installed: true,
         authenticated: false,
-        authenticationUnavailableReason: "ZSR could not run the probe.",
+        authenticationUnavailableReason: "provider probe timed out",
       }),
-    ).toBe("authentication check unavailable: ZSR could not run the probe.");
+    ).toBe("authentication check unavailable: provider probe timed out");
   });
 
   it("keeps every provider cwd inside the canonical smoke workspace", () => {

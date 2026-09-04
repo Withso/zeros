@@ -21,28 +21,15 @@ contributors after the change that introduced them has shipped.
   conversation, execution, and provider-binding ownership and lifecycle.
 - [Zeros browser service](browser-service.md) defines the shared browser tool,
   identity, isolation, policy, artifact, and provider-adapter boundaries.
-- [Design Foundation 1.0](design-foundation-1.0.md) defines the canonical
-  source, identity, transaction, renderer, headless, agent, and performance
-  contracts beneath the Design workspace.
-- [Autonomous Code and Design Foundation](autonomous-code-design-foundation.md)
-  defines the protected target architecture and phased path from today's local
-  GitHub product to isolated design agents, visual artifacts, cloud execution,
-  and additional Git forges.
+- [Design workspace](design-workspace.md) is the consolidated contract for the
+  current editor, Foundation schemas, shared-worktree Git behavior, native Code
+  execution, and the production-disabled Design-agent/ZSR foundation.
 - [Color names](color-names.md) records the stable workspace-name palette used
   by the local engine.
 - [Agent capability roadmap](agent-capabilities-parity-and-ui-consolidated-2026-07-01.md)
   is the actively maintained parity and product-work checklist for supported
   agent integrations. It remains tracked until every item is resolved or moved
   to another owned roadmap.
-- [Zeros sandbox runtime and Git broker plan](zeros-sandbox-runtime-plan.md)
-  is the active roadmap for Zeros-owned whole-process-tree agent containment,
-  the agent Git broker, provider onboarding, and cloud qualification. It stays
-  tracked until every phase is delivered, cancelled, or folded into the
-  foundation and design-mode contracts.
-- [Zeros sandbox runtime qualification ledger](zeros-sandbox-runtime-qualification.md)
-  records the exact local gates that ran, the supported parity and isolation
-  evidence they produced, and the release architectures and production-cloud
-  work that remain explicitly unqualified.
 - [Cloud workspaces](cloud-workspace/README.md) contains the current product,
   architecture, data, security, operations, enterprise, and delivery contracts
   for the pre-production remote-workspace program.

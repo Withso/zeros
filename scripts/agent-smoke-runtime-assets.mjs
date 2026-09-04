@@ -2,20 +2,6 @@ import { existsSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 
-const ZSR_ASSETS = {
-  ZEROS_ZSR_SUPERVISOR_SCRIPT: "zsr-supervisor.mjs",
-  ZEROS_ZSR_CONTAINER_WORKER_SCRIPT: "zsr-container-worker.mjs",
-  ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT:
-    "zsr-orbstack-container-host.mjs",
-  ZEROS_ZSR_ORBSTACK_CLOUD_INIT: "zsr-orbstack-cloud-init.yaml",
-  ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER: "zsr-macos-process-domain",
-  ZEROS_ZSR_RIPGREP_PATH: "zsr-rg",
-};
-
-const DARWIN_ONLY_ASSETS = new Set([
-  "ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER",
-]);
-
 const moduleRequire = createRequire(import.meta.url);
 
 function defaultModuleResolver(specifier, anchor) {
@@ -26,7 +12,7 @@ function defaultModuleResolver(specifier, anchor) {
 
 /** The smoke gateway is bundled to ESM before it is imported. Dynamic
  * `require.resolve` calls inside that bundle cannot reproduce the real
- * engine's package-relative runtime discovery and used to fall through to
+ * engine's package-relative runtime discovery and could fall through to
  * unrelated global Claude/Codex installs. Resolve the pinned artifacts while
  * this unbundled launcher still has normal Node module semantics, then hand
  * their physical paths to the gateway exactly as Electron main does. */
@@ -81,23 +67,17 @@ export function agentSmokeProviderRuntimeEnvironment(
   return resolved;
 }
 
-/** Resolve the same generated ZSR assets that the Electron sidecar exports.
- * The live smoke deliberately serves a temporary repository, so relying on
- * AgentGateway's projectRoot-relative development fallback points at files
- * that cannot exist and silently turns every contained auth probe into an
- * "unauthenticated" skip. Explicit caller/package overrides still win. */
-export function agentSmokeZsrEnvironment(
+/** Resolve the native process owner and provider host used by the live Code
+ * smoke. Its gateway serves a temporary repository, so projectRoot-relative
+ * development discovery would point at files that do not exist. Design-agent
+ * ZSR assets are deliberately absent: this command opens Code sessions only. */
+export function agentSmokeRuntimeEnvironment(
   repoRoot,
   runtime = process.execPath,
   ambient = process.env,
 ) {
   const hostRuntime = ambient.ZEROS_PTY_HOST_RUNTIME?.trim() || runtime;
-  const supervisorRuntime =
-    ambient.ZEROS_ZSR_SUPERVISOR_RUNTIME?.trim() ||
-    (ambient.ZEROS_PTY_HOST_RUNTIME_ELECTRON === "1"
-      ? hostRuntime
-      : runtime);
-  const resolved = {
+  return {
     ZEROS_PTY_HOST_RUNTIME: hostRuntime,
     ZEROS_CURSOR_HOST_SCRIPT:
       ambient.ZEROS_CURSOR_HOST_SCRIPT?.trim() ||
@@ -105,39 +85,35 @@ export function agentSmokeZsrEnvironment(
         repoRoot,
         "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
       ),
-    ZEROS_ZSR_SUPERVISOR_RUNTIME: supervisorRuntime,
+    ZEROS_HOST_SUPERVISOR_RUNTIME:
+      ambient.ZEROS_HOST_SUPERVISOR_RUNTIME?.trim() || hostRuntime,
+    ZEROS_HOST_SUPERVISOR_SCRIPT:
+      ambient.ZEROS_HOST_SUPERVISOR_SCRIPT?.trim() ||
+      path.join(
+        repoRoot,
+        "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs",
+      ),
   };
-  for (const [name, leaf] of Object.entries(ZSR_ASSETS)) {
-    resolved[name] =
-      ambient[name]?.trim() || path.join(repoRoot, "binaries", leaf);
-  }
-  return resolved;
 }
 
-export function installAgentSmokeZsrEnvironment(
+export function installAgentSmokeRuntimeEnvironment(
   repoRoot,
   runtime = process.execPath,
   ambient = process.env,
   platform = process.platform,
 ) {
   const resolved = {
-    ...agentSmokeZsrEnvironment(repoRoot, runtime, ambient),
-    ...agentSmokeProviderRuntimeEnvironment(
-      ambient,
-      platform,
-      process.arch,
-    ),
+    ...agentSmokeRuntimeEnvironment(repoRoot, runtime, ambient),
+    ...agentSmokeProviderRuntimeEnvironment(ambient, platform, process.arch),
   };
   const unavailable = Object.entries(resolved).filter(
-    ([name, file]) =>
-      (platform === "darwin" || !DARWIN_ONLY_ASSETS.has(name)) &&
-      (!path.isAbsolute(file) || !existsSync(file)),
+    ([, file]) => !path.isAbsolute(file) || !existsSync(file),
   );
   if (unavailable.length > 0) {
     throw new Error(
-      `live smoke ZSR asset is unavailable: ${unavailable
+      `live Code smoke runtime is unavailable: ${unavailable
         .map(([name]) => name)
-        .join(", ")}; run pnpm build:zsr-supervisor first`,
+        .join(", ")}`,
     );
   }
   Object.assign(ambient, resolved);

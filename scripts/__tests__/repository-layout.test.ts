@@ -123,9 +123,17 @@ describe("repository layout contracts", () => {
       .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(token));
     expect(files.length).toBeGreaterThan(0);
     expect(files.filter((file) => !existsSync(file))).toEqual([]);
+    for (const lightweightContract of [
+      "apps/desktop/src/engine/design/__tests__/design-agent-capability.test.ts",
+      "apps/desktop/src/engine/design/__tests__/design-agent-admission.test.ts",
+      "apps/desktop/src/engine/design/__tests__/design-agent-mcp.test.ts",
+      "apps/desktop/src/engine/git/__tests__/mutation-lock.test.ts",
+    ]) {
+      expect(files).toContain(lightweightContract);
+    }
   });
 
-  it("gates every ZSR boundary suite plus interactive init/resume contracts", () => {
+  it("gates every execution-boundary suite plus interactive init/resume contracts", () => {
     const rootPackage = JSON.parse(read("package.json")) as {
       scripts: Record<string, string>;
     };
@@ -169,7 +177,9 @@ describe("repository layout contracts", () => {
       ...automaticallyRequired,
       ...interactiveContracts,
     ]) {
-      expect(runner, `${testFile} must be ZSR-gated`).toContain(testFile);
+      expect(runner, `${testFile} must be execution-boundary-gated`).toContain(
+        testFile,
+      );
     }
   });
 
@@ -491,6 +501,21 @@ describe("repository layout contracts", () => {
     expect(read("scripts/generate-third-party-licenses.mjs")).toContain(
       'packageName: "@openai/codex-darwin-arm64"',
     );
+  });
+
+  it("packages and exports the native host process supervisor", () => {
+    const packaging = read("electron-builder.yml");
+    const sidecar = read("apps/desktop/electron/sidecar.ts");
+    const packagingCheck = read("scripts/check-packaging-paths.mjs");
+    const source =
+      "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
+
+    expect(existsSync(source)).toBe(true);
+    expect(packaging).toContain(`from: ${source}`);
+    expect(sidecar).toContain("ZEROS_HOST_SUPERVISOR_RUNTIME");
+    expect(sidecar).toContain("ZEROS_HOST_SUPERVISOR_SCRIPT");
+    expect(packagingCheck).toContain(source);
+    expect(packagingCheck).toContain("ZEROS_HOST_SUPERVISOR_SCRIPT");
   });
 
   it("does not let an enclosing Zeros parent watchdog kill the engine smoke", () => {

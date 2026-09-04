@@ -526,8 +526,8 @@ jobs:
 
       - name: Build and smoke-test the Intel packaged engine
         # This proves the historical x86_64 sidecar path still bundles and can
-        # sustain health plus create/archive/restore. Private OrbStack worker
-        # qualification remains a separate virtualization-capable host gate.
+        # sustain health plus create/archive/restore with the packaged native
+        # lifecycle supervisor and optional Seatbelt assets.
         run: |
           pnpm build:sidecar
           pnpm smoke:engine

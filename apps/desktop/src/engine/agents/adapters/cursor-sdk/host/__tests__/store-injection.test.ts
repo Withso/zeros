@@ -177,7 +177,7 @@ describe("cursor host — workspace scan cache TTL", () => {
 });
 
 describe("cursor host — local agent store injection", () => {
-  it("keeps Cursor ripgrep scans away from the protected canonical .git entry", async () => {
+  it("passes Cursor ripgrep arguments through without process-wide rewriting", async () => {
     const temporary = await mkdtemp(
       path.join(os.tmpdir(), "zeros-cursor-ripgrep-boundary-"),
     );
@@ -194,17 +194,16 @@ describe("cursor host — local agent store injection", () => {
       const args = JSON.parse(
         res.agentId.slice("ripgrep:".length),
       ) as string[];
-      const searchPathSeparator = args.indexOf("--");
-      expect(searchPathSeparator).toBeGreaterThan(0);
-      expect(args.slice(0, searchPathSeparator)).toEqual(
-        expect.arrayContaining([
-          "--iglob",
-          "!.git",
-          "--iglob",
-          "!**/.git",
-        ]),
-      );
-      expect(args.slice(searchPathSeparator)).toEqual(["--", "src"]);
+      expect(args).toEqual([
+        "--files",
+        "--hidden",
+        "--iglob",
+        "**/.gitignore",
+        "--iglob",
+        "!**/.git/**",
+        "--",
+        "src",
+      ]);
     } finally {
       host?.dispose();
       host = null;

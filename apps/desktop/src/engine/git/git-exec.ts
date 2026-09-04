@@ -282,6 +282,7 @@ const SAFE_CALLER_GIT_ENV = new Set([
   "GIT_COMMITTER_EMAIL",
   "GIT_COMMITTER_NAME",
   "GIT_INDEX_FILE",
+  "GIT_NO_REPLACE_OBJECTS",
   "GIT_SSL_CAINFO",
   "GIT_SSL_CAPATH",
 ]);
@@ -593,6 +594,7 @@ const ENGINE_GIT_BUILTINS = new Set([
   "check-ignore",
   "check-ref-format",
   "checkout",
+  "checkout-index",
   "cherry-pick",
   "clean",
   "clone",

@@ -220,6 +220,19 @@ export function isKnownRepoRoot(repoRoot: string): boolean {
   );
 }
 
+/** The user-visible project name of an open (non-hidden) repo, or null when
+ *  the root isn't registered. Read-only — never seeds a row — so callers that
+ *  only need a display name (first-use Design folder naming) cannot create
+ *  project state as a side effect. */
+export function projectNameForRoot(repoRoot: string): string | null {
+  if (!repoRoot) return null;
+  const row = openZerosDb()
+    .prepare("SELECT name FROM repos WHERE root_path = ? AND hidden = 0")
+    .get(canonicalRepoRoot(repoRoot)) as { name: string | null } | undefined;
+  const name = row?.name?.trim();
+  return name ? name : null;
+}
+
 /** Rename a repo by root. */
 export function renameRepoByRoot(repoRoot: string, name: string): void {
   if (!repoRoot) return;

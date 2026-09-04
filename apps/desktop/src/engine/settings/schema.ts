@@ -1014,6 +1014,20 @@ export function sanitizeLayer(
       if (models) doc.models = models;
       continue;
     }
+    if (key === "design") {
+      let candidate = value;
+      if (isPlainObject(value) && hasOwn(value, "isolation")) {
+        warnings.push(
+          "design.isolation: unsupported retired setting — ignored",
+        );
+        candidate = Object.fromEntries(
+          Object.entries(value).filter(([nested]) => nested !== "isolation"),
+        );
+      }
+      const table = sanitizeTable(designSchema.shape, candidate, key, warnings);
+      if (table && Object.keys(table).length > 0) doc[key] = table;
+      continue;
+    }
     const shape = hasOwn(TABLE_SHAPES, key) ? TABLE_SHAPES[key] : undefined;
     if (shape) {
       // Browser policy is a privileged product boundary. Unlike ordinary

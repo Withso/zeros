@@ -35,7 +35,7 @@ export {
   enterDesignMode,
   exitDesignMode,
   reconcileDesignModeTransition,
-  ensureDesignDocumentCommitted,
+  ensureDesignDocumentInitialized,
   renameDesignDirectory,
 } from "./design-mode";
 
@@ -121,6 +121,7 @@ export type {
 
 export {
   abortOperation,
+  assertGitCheckpointReady,
   changeTargetBranch,
   cherryPick,
   commit,

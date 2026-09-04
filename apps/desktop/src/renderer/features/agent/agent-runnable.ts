@@ -47,7 +47,7 @@ export function isRunnableAgent(a: BridgeRegistryAgent): boolean {
   if (a.authenticated === true) return true;
   // An unavailable auth probe is infrastructure uncertainty, not a negative
   // credential verdict. Keep an installed provider sendable so the real
-  // admission failure (for example a temporarily unavailable ZSR boundary)
+  // admission failure (for example an unavailable execution prerequisite)
   // reaches the composer instead of replacing it with the false and
   // unactionable "Sign in required" flow. This must precede Cursor's
   // API-key-only branch: its key probe can be unavailable for the same reason.

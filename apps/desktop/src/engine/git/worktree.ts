@@ -58,10 +58,11 @@ import {
   WORKSPACE_OWNERSHIP_META_KEY,
 } from "./state";
 import {
-  ensureDesignDocumentCommitted,
+  ensureDesignDocumentInitialized,
   fenceWorkspaceDesignDirectoryIfPresent,
 } from "./design-mode";
 import { resolveDesignDirectoryForEnter } from "../design/directory";
+import { rememberRecognizedDesignDirectories } from "../design/recognition-store";
 import {
   unfenceDesignDirectory,
   unlockLegacyDesignWorkspaceLock,
@@ -1641,7 +1642,8 @@ async function createWorkspaceInner(
       // Design-at-birth: the identical checkout opens on the design surface.
       // Resolve WHICH folder is the design folder (the `[design] directory`
       // pointer + committed-marker recognition, non-strict so create always
-      // succeeds), ensure + commit the portable design document, then publish
+      // succeeds), initialize the portable design document as uncommitted
+      // work, then publish
       // its semantic identity for Zeros' actor-scoped authority. Nothing is
       // made read-only on the shared checkout: terminals, dev servers, and
       // other applications continue to see an ordinary worktree.
@@ -1649,7 +1651,12 @@ async function createWorkspaceInner(
         { path: workspacePath, repoRoot: input.repoRoot },
         { strict: false },
       );
-      await ensureDesignDocumentCommitted(workspacePath, designDir);
+      await ensureDesignDocumentInitialized(workspacePath, designDir);
+      // The first-use "<repo> - Design" folder is intentionally uncommitted,
+      // so Git cannot rediscover it during archive/restore or engine restart.
+      // Persist the same sticky identity mode-entry uses until the user commits
+      // the marker (at which point repository evidence becomes authoritative).
+      await rememberRecognizedDesignDirectories(workspacePath, [designDir]);
     } else {
       // Code-mode creates resolve the same identity when the base branch
       // already carries a design folder. Provider admission—not a shared ACL—

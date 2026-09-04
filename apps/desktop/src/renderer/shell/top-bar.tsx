@@ -137,7 +137,6 @@ import {
 import {
   usePendingCreatesAll,
   type PendingWorkspaceCreate,
-  pendingWorkspaceMode,
   usePendingWorkspaceMode,
   useWorkspaceArchiving,
   useWorkspaceProvisioning,
@@ -755,7 +754,7 @@ function WorkspaceTab({
 }: WorkspaceTabProps) {
   const requestedMode = usePendingWorkspaceMode(workspace.id);
   const modeSwitching = requestedMode !== null;
-  const designWorkspace = (requestedMode ?? workspace.kind) === "design";
+  const designWorkspace = workspace.kind === "design";
   const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
   const working = useAnyChatAgentWorking(agentChatIds);
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
@@ -2182,7 +2181,7 @@ export function TopBar() {
       // Design rows are ordinary destinations, so warm the surface for them
       // too — but never their coding chat.
       prefetchWorkspaceSurface(workspace);
-      if ((pendingWorkspaceMode(workspace.id) ?? workspace.kind) === "design") {
+      if (workspace.kind === "design") {
         return;
       }
       const chatId = selectChatToRestoreForFolder(

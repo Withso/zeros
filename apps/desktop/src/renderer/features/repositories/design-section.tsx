@@ -45,6 +45,9 @@ interface DirectoryListing {
   directories: string[];
   pointer: string;
   active: string;
+  /** What Design entry would use in the main checkout — adopts a single
+   *  committed folder, or names the first-use folder ("<repo> - Design"). */
+  target?: { directory: string; exists: boolean } | null;
 }
 
 /** Read `design.directory` out of the resolved tree with its provenance. */
@@ -106,7 +109,14 @@ export function DesignSection({
     refreshListing();
   }, [surfaceActive, refreshListing]);
 
-  const activeName = pointer.value ?? listing?.pointer ?? "Zeros Design";
+  // With no explicit pointer, the engine's entry preview is the honest answer:
+  // the single committed folder it would adopt, or the first-use name it
+  // would create — not the unconfigured pointer default.
+  const activeName =
+    pointer.value ??
+    listing?.target?.directory ??
+    listing?.pointer ??
+    "Zeros Design";
 
   const [saving, setSaving] = useState(false);
   const choose = async (name: string) => {

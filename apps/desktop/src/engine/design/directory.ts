@@ -20,7 +20,17 @@
 //
 //   pointer exists + is recognized    → use it.
 //   pointer exists but unrecognized   → refuse; policy cannot target source.
-//   pointer missing, 0 discovered     → first design use: create the pointer.
+//   pointer missing, 0 discovered     → first design use. An EXPLICIT pointer
+//                                       is created under its own name; the
+//                                       implicit default is named after the
+//                                       repository ("<repo> - Design", see
+//                                       firstUseDesignDirectoryName) so a
+//                                       user's first design folder reads as
+//                                       theirs, not as a product artifact.
+//                                       "Zeros Design" remains the unconfigured
+//                                       POINTER value for compatibility: a
+//                                       checkout that already carries that
+//                                       folder keeps using it.
 //   pointer missing, exactly 1 found  → adopt it (the copy-paste/migration
 //                                       case) — never silently create a
 //                                       SECOND design folder next to it.
@@ -37,6 +47,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
+import { projectNameForRoot } from "../db/projects";
 import { GitError } from "../git/errors";
 import { runGit } from "../git/git-exec";
 import { opSettingsResolve } from "../settings/ops";
@@ -46,6 +57,59 @@ import {
   primeDesignDirectoryName,
   sanitizeDesignDirectoryName,
 } from "./directory-registry";
+
+/** Suffix appended to the repository's name for a first-use Design folder. */
+export const FIRST_USE_DESIGN_DIRECTORY_SUFFIX = " - Design";
+
+/** Keep "<name> - Design" comfortably inside every filesystem's 255-byte leaf
+ *  limit even for multi-byte names; long repository names are truncated, not
+ *  refused. */
+const MAX_FIRST_USE_REPO_NAME_CHARS = 60;
+
+/** The folder name Design mode creates on a repository's FIRST design use when
+ *  no `[design] directory` pointer is configured: the repository's display
+ *  name plus " - Design" ("Odocs - Design"). Total function: separators and
+ *  control bytes in the name become spaces, a leading dot is dropped so the
+ *  folder is never hidden, and anything the registry would refuse falls back
+ *  to the historical default. */
+export function firstUseDesignDirectoryName(repoName: string): string {
+  const cleaned = repoName
+    .replace(/[\\/\0\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^\.+/, "")
+    .trim();
+  const bounded = Array.from(cleaned)
+    .slice(0, MAX_FIRST_USE_REPO_NAME_CHARS)
+    .join("")
+    .trim();
+  if (!bounded) return DEFAULT_DESIGN_DIRECTORY_NAME;
+  return (
+    sanitizeDesignDirectoryName(
+      `${bounded}${FIRST_USE_DESIGN_DIRECTORY_SUFFIX}`,
+    ) ?? DEFAULT_DESIGN_DIRECTORY_NAME
+  );
+}
+
+/** The name a repository shows in the UI: its registered project name (the
+ *  user may have renamed it) or the checkout folder's basename. The registry
+ *  read is best-effort — an unopened DB, an unregistered root, or a test
+ *  fixture without one all answer with the basename. */
+export function repoDisplayNameForRoot(repoRoot: string): string {
+  let registered: string | null = null;
+  try {
+    registered = projectNameForRoot(repoRoot);
+  } catch {
+    registered = null;
+  }
+  return registered ?? path.basename(path.resolve(repoRoot));
+}
+
+/** First-use Design folder for a repository root — see
+ *  firstUseDesignDirectoryName. */
+export function firstUseDesignDirectoryNameForRepo(repoRoot: string): string {
+  return firstUseDesignDirectoryName(repoDisplayNameForRoot(repoRoot));
+}
 
 /** Validate a human-selected pointer against the checkout it will control.
  * Existing workspaces may only switch to a real, committed Design document;
@@ -522,13 +586,11 @@ export async function previewDesignDirectoryForEnter(
   },
   opts: {
     strict?: boolean;
-    /** Folders Zeros already knows are Design documents even though the
-     * repository no longer says so — engine-side sticky recognition, from
-     * design/recognition-store.ts. Code-agent admission passes it so the ACTIVE
-     * name and the protected set are chosen from the same universe: without it a
-     * Git de-registration would leave the fence protecting a folder that this
-     * resolver has decided is missing, and the session would refuse to start
-     * with a confusing "Design folder is missing from this checkout". */
+    /** Folders Zeros already knows are Design documents even when they are
+     * intentionally absent from an engine-owned sparse checkout. Callers must
+     * supply only validated sticky/shape identities. Code-agent admission and
+     * mode entry pass the durable shape so the active name and protected set
+     * are chosen from one authority universe. */
     additionalRecognized?: readonly string[];
   } = {},
 ): Promise<string> {
@@ -542,12 +604,25 @@ export async function previewDesignDirectoryForEnter(
   const pointerExists = existsSync(
     path.join(workspace.path, ...pointer.split("/")),
   );
+  const additionalRecognized = [
+    ...new Set(
+      (opts.additionalRecognized ?? []).flatMap((candidate) => {
+        const safe = sanitizeDesignDirectoryName(candidate);
+        return safe ? [safe] : [];
+      }),
+    ),
+  ];
+  const intentionallyAbsent = additionalRecognized.filter(
+    (candidate) =>
+      !existsSync(path.join(workspace.path, ...candidate.split("/"))),
+  );
+  const pointerCoveredByAbsentAuthority = intentionallyAbsent.some(
+    (candidate) => pointer === candidate || pointer.startsWith(`${candidate}/`),
+  );
   const discovered = [
     ...new Set([
       ...(await discoverDesignDirectories(workspace.path)),
-      ...(opts.additionalRecognized ?? []).filter((name) =>
-        existsSync(path.join(workspace.path, ...name.split("/"))),
-      ),
+      ...additionalRecognized,
     ]),
   ].sort((left, right) => left.localeCompare(right));
   if (pointerExists) {
@@ -577,7 +652,12 @@ export async function previewDesignDirectoryForEnter(
       });
     }
   } else {
-    if (discovered.length === 1) {
+    if (pointerCoveredByAbsentAuthority) {
+      // Sparse checkout deliberately removed this configured, recognized
+      // document. Preserve the explicit pointer even when several protected
+      // documents exist; suspension will materialize all of them next.
+      name = pointer;
+    } else if (discovered.length === 1) {
       name = discovered[0]!;
     } else if (discovered.length > 1) {
       if (!strict) {
@@ -594,8 +674,50 @@ export async function previewDesignDirectoryForEnter(
             "Choose the active design folder in this repo's settings (Design tab), then switch to design mode again.",
         });
       }
+    } else if (!pointerState.configured) {
+      // 0 discovered and nothing configured → this repository's first design
+      // use. Name the new document after the repository rather than after the
+      // product; initialization creates it fresh under that name. The
+      // historical "Zeros Design" pointer still wins above whenever that folder
+      // already exists in the checkout, so pre-naming checkouts are unchanged.
+      const firstUseName = firstUseDesignDirectoryNameForRepo(
+        workspace.repoRoot,
+      );
+      const firstUseTarget = path.join(
+        workspace.path,
+        ...firstUseName.split("/"),
+      );
+      if (existsSync(firstUseTarget)) {
+        try {
+          // A Code-agent sandbox may already have reserved this exact name as
+          // an empty vnode. That is safe to initialize. Any other unrecognized
+          // content is user territory: never add a Design marker beside it and
+          // silently change its authority just because the names collide.
+          await assertSafeProspectiveDesignDirectory(
+            workspace.path,
+            firstUseName,
+          );
+          if (
+            !(await isEmptyProspectiveDesignDirectory(
+              workspace.path,
+              firstUseName,
+            ))
+          ) {
+            throw new Error("the target is not empty");
+          }
+        } catch (cause) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `The first-use Design folder "${firstUseName}" already exists and is not an empty reservation or recognized Design document.`,
+            remediation:
+              "Move or rename that folder, or select a recognized Design folder in this repository's Design settings.",
+            cause,
+          });
+        }
+      }
+      name = firstUseName;
     }
-    // 0 discovered → first design use in this repo: keep the pointer and let
+    // 0 discovered with an EXPLICIT pointer → keep the pointer and let
     // initialization create it fresh.
   }
   return name;
@@ -610,7 +732,7 @@ export async function resolveDesignDirectoryForEnter(
     path: string;
     repoRoot: string;
   },
-  opts: { strict?: boolean } = {},
+  opts: { strict?: boolean; additionalRecognized?: readonly string[] } = {},
 ): Promise<string> {
   const name = await previewDesignDirectoryForEnter(workspace, opts);
   primeDesignDirectoryName(workspace.path, name);

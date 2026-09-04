@@ -1462,6 +1462,59 @@ describe("workspace git/gh credential shims", () => {
     expect(result.stdout).not.toContain("github-only-secret");
   });
 
+  it("falls back to the real Git helper chain after the engine broker is gone", async () => {
+    setGitCredentialSourceForTesting({
+      supports({ protocol, host }) {
+        return protocol === "https" && host === "github.com";
+      },
+      async getCredential() {
+        return { username: "x-access-token", password: "broker-secret" };
+      },
+    });
+    const fallbackHelper = path.join(dir, "fallback-helper");
+    await writeFile(
+      fallbackHelper,
+      "#!/bin/sh\nprintf 'username=ambient\\npassword=surviving-helper\\n'\n",
+    );
+    await chmod(fallbackHelper, 0o700);
+    await writeFile(
+      path.join(dir, ".gitconfig"),
+      `[credential]\n\thelper = ${fallbackHelper}\n`,
+    );
+    const prepared = await prepareGitCredentialShellEnvironment(
+      "workspace:test",
+      process.env.PATH ?? "",
+    );
+    const env = {
+      ...process.env,
+      ...prepared!.env,
+      ZEROS_GIT_AUTH_SOCKET: path.join(dir, "dead-broker.sock"),
+      ZEROS_GIT_AUTH_BROKER_PID: "2147483647",
+      HOME: dir,
+      XDG_CONFIG_HOME: dir,
+      GIT_CONFIG_NOSYSTEM: "1",
+      GIT_ASKPASS: "/usr/bin/false",
+      GIT_TERMINAL_PROMPT: "0",
+    };
+    const gitShim = path.join(
+      prepared!.env.PATH.split(path.delimiter)[0]!,
+      "git",
+    );
+
+    const result = await runFile(
+      gitShim,
+      ["credential", "fill"],
+      {
+        env,
+        input: "protocol=https\nhost=github.com\n\n",
+      },
+    );
+
+    expect(result.stdout).toContain("username=ambient");
+    expect(result.stdout).toContain("password=surviving-helper");
+    expect(result.stdout).not.toContain("broker-secret");
+  });
+
   it("fails closed for an owned GitHub host while its credential is absent", async () => {
     setGitCredentialSourceForTesting({
       supports({ protocol, host }) {

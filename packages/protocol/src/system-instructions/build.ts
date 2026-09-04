@@ -12,6 +12,9 @@
 import {
   ADDITIONAL_DIRS_NOTICE,
   CODE_AGENT_DESIGN_TERRITORY_NOTICE,
+  DESIGN_AGENT_AUTHORITY_NOTICE,
+  DESIGN_AGENT_CONTEXT_NOTICE,
+  DESIGN_AGENT_WORKSPACE_PREAMBLE,
   SYSTEM_INSTRUCTION_CLOSE,
   SYSTEM_INSTRUCTION_OPEN,
   WORKSPACE_PREAMBLE,
@@ -31,6 +34,30 @@ export interface FirstTurnInstructionInput {
   /** Absolute active Design directory. When present, inject the permanent
    * code-actor territory rule independently of the UI's current view mode. */
   designDirectory?: string | null;
+  /** Every recognized Design root for a native Code actor. The active root
+   * above remains the singular Design-agent document identity. */
+  designDirectories?: readonly string[];
+  /** Defaults to code for serialized/backward compatibility. */
+  agentRole?: "code" | "design";
+}
+
+export function buildDesignAgentNotice(
+  designDirectory?: string | null,
+): string {
+  const directory = designDirectory?.trim() || "the active Design draft";
+  return DESIGN_AGENT_AUTHORITY_NOTICE.split("{DESIGN_DIR}").join(directory);
+}
+
+function buildDesignAgentWorkspacePreamble(workspaceDir: string): string {
+  return DESIGN_AGENT_WORKSPACE_PREAMBLE.split("{WORKSPACE_DIR}").join(
+    workspaceDir,
+  );
+}
+
+function buildDesignAgentContextNotice(dirs?: readonly string[]): string {
+  const clean = (dirs ?? []).map((entry) => entry.trim()).filter(Boolean);
+  if (clean.length === 0) return "";
+  return DESIGN_AGENT_CONTEXT_NOTICE.split("{DIRS}").join(clean.join(", "));
 }
 
 /** Fill {WORKSPACE_DIR} + {TARGET_BRANCH} in the base preamble. */
@@ -57,12 +84,22 @@ export function buildAdditionalDirsNotice(dirs?: readonly string[]): string {
 /** Code-actor Design-territory notice, or "" when this workspace has no
  * active Design document. */
 export function buildCodeAgentDesignTerritoryNotice(
-  designDirectory?: string | null,
+  designDirectories?: string | readonly string[] | null,
 ): string {
-  const directory = designDirectory?.trim();
-  if (!directory) return "";
-  return CODE_AGENT_DESIGN_TERRITORY_NOTICE.split("{DESIGN_DIR}").join(
-    directory,
+  const directories = [
+    ...new Set(
+      (Array.isArray(designDirectories)
+        ? designDirectories
+        : [designDirectories]
+      )
+        .filter((entry): entry is string => typeof entry === "string")
+        .map((entry) => entry.trim())
+        .filter(Boolean),
+    ),
+  ];
+  if (directories.length === 0) return "";
+  return CODE_AGENT_DESIGN_TERRITORY_NOTICE.split("{DESIGN_DIRS}").join(
+    directories.join(", "),
   );
 }
 
@@ -78,16 +115,29 @@ export function wrapSystemInstruction(body: string): string {
  *  /add-dir notice + (optional) custom instructions. For agents with a native
  *  instruction channel (Codex `thread/start.developerInstructions`) — a proper
  *  channel needs no <system_instruction> disguise. */
-export function buildFirstTurnInstructionBody(input: FirstTurnInstructionInput): string {
-  const parts = [buildWorkspacePreamble(input)];
-  const dirs = buildAdditionalDirsNotice(input.additionalDirectories);
+export function buildFirstTurnInstructionBody(
+  input: FirstTurnInstructionInput,
+): string {
+  const designAgent = input.agentRole === "design";
+  const parts = [
+    designAgent
+      ? buildDesignAgentWorkspacePreamble(input.workspaceDir)
+      : buildWorkspacePreamble(input),
+  ];
+  const dirs = designAgent
+    ? buildDesignAgentContextNotice(input.additionalDirectories)
+    : buildAdditionalDirsNotice(input.additionalDirectories);
   if (dirs) parts.push(dirs);
   // Repository/user prose is untrusted with respect to runtime authority. Put
   // it before the engine-owned boundary so it can never be the last word on
   // whether the coding actor may mutate Design territory.
   const custom = input.customInstructions?.trim();
   if (custom) parts.push(custom);
-  const territory = buildCodeAgentDesignTerritoryNotice(input.designDirectory);
+  const territory = designAgent
+    ? buildDesignAgentNotice(input.designDirectory)
+    : buildCodeAgentDesignTerritoryNotice(
+        input.designDirectories ?? input.designDirectory,
+      );
   if (territory) parts.push(territory);
   return parts.join("\n\n").trim();
 }
@@ -95,20 +145,27 @@ export function buildFirstTurnInstructionBody(input: FirstTurnInstructionInput):
 /** Assemble the ONE first-turn block: the body above, wrapped for in-band
  *  injection. This is what the send path prepends to the first user message's
  *  agent text (mechanism A — agents without a native instruction channel). */
-export function buildFirstTurnSystemInstruction(input: FirstTurnInstructionInput): string {
+export function buildFirstTurnSystemInstruction(
+  input: FirstTurnInstructionInput,
+): string {
   return wrapSystemInstruction(buildFirstTurnInstructionBody(input));
 }
 
 /** Standalone <system_instruction> carrying ONLY the /add-dir awareness — for
  *  injecting on a mid-chat turn where the user just added directories (the
  *  first-turn preamble already shipped). Returns "" when there are no dirs. */
-export function buildAdditionalDirsSystemInstruction(dirs?: readonly string[]): string {
+export function buildAdditionalDirsSystemInstruction(
+  dirs?: readonly string[],
+): string {
   return wrapSystemInstruction(buildAdditionalDirsNotice(dirs));
 }
 
 /** Prepend an assembled <system_instruction> block to the agent-facing user
  *  text. No-op (returns the text unchanged) when the block is empty. The block
  *  goes ONLY into the agent payload — never the displayed bubble. */
-export function prependSystemInstruction(block: string, userText: string): string {
+export function prependSystemInstruction(
+  block: string,
+  userText: string,
+): string {
   return block ? `${block}\n\n${userText}` : userText;
 }

@@ -44,6 +44,7 @@ import { useResizeHint } from "../../use-resize-hint";
 import { FileViewer } from "./file-viewer";
 import { resolveFilesTabLayout } from "./files-tab-layout";
 import { WorkspaceFileTree } from "./workspace-file-tree";
+import { DesignFilesPane, useHasDesignSection } from "./design-files-pane";
 import {
   canPickWorkingDirectories,
   WorkingDirectoriesPanel,
@@ -97,6 +98,11 @@ export const FilesTab = React.memo(function FilesTab({
   // saves invalidate the cached listing, then bump — so the sidebar picks up
   // created/deleted files without a manual refresh.
   const gitRefresh = useGitRefreshKey(cwd, workspaceId, active);
+  // Whether the tree sidebar stacks a "Design files" section under the code
+  // tree (design-files-pane.tsx). Decided here, from the same cached listing
+  // the trees read, so a repo without a design document mounts exactly one
+  // tree and reserves nothing.
+  const hasDesignSection = useHasDesignSection(cwd, gitRefresh, active);
 
   const filePath = tab.filePath ?? "";
   // Blank tabs start with a full-width tree. A filled tab restores its own
@@ -293,18 +299,48 @@ export const FilesTab = React.memo(function FilesTab({
       }
     >
       {sidebarMode === "tree" ? (
-        <div className="min-h-0 flex-1">
-          <WorkspaceFileTree
-            active={active}
-            cwd={cwd}
-            reloadKey={gitRefresh}
-            initialSelectedPath={tab.filePath}
-            selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
-            scrollMemoryKey={JSON.stringify(["files-tree", cwd ?? "", tab.id])}
-            onOpenFile={handleOpenFile}
-            onOpenInNewTab={handleOpenInNewTab}
-          />
-        </div>
+        // The code tree fills the column; the design section, when the
+        // workspace has one, stacks under it at its content height (capped).
+        // Both trees receive the same selection mirror: whichever holds the
+        // open file highlights it, the other clears any stale highlight.
+        <>
+          <div className="min-h-0 flex-1">
+            <WorkspaceFileTree
+              active={active}
+              cwd={cwd}
+              reloadKey={gitRefresh}
+              // Always on: inert (the SAME listing reference) on a workspace
+              // with no design document, so the split never has to be switched
+              // on after the tree mounted and the filter was captured.
+              designFilter="exclude-design"
+              initialSelectedPath={tab.filePath}
+              selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
+              scrollMemoryKey={JSON.stringify([
+                "files-tree",
+                cwd ?? "",
+                tab.id,
+              ])}
+              onOpenFile={handleOpenFile}
+              onOpenInNewTab={handleOpenInNewTab}
+            />
+          </div>
+          {hasDesignSection && cwd && (
+            <DesignFilesPane
+              active={active}
+              cwd={cwd}
+              reloadKey={gitRefresh}
+              initialSelectedPath={tab.filePath}
+              selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
+              scrollMemoryKey={JSON.stringify([
+                "files-design-tree",
+                cwd,
+                tab.id,
+              ])}
+              onOpenFile={handleOpenFile}
+              onOpenInNewTab={handleOpenInNewTab}
+            />
+          )}
+        </>
       ) : sidebarMode === "search" ? (
         <FilesSearchSidebar
           active={active}

@@ -1711,6 +1711,8 @@ export function AgentSessionsProvider({
             {
               type: "AGENT_NEW_SESSION",
               agentId,
+              agentRole: options?.agentRole,
+              designDocumentId: options?.designDocumentId,
               chatId, // Bind the session to its chat for engine persistence.
               cwd: resolvedCwd ?? undefined,
               workspaceId: spawnWorkspaceId ?? undefined,
@@ -2044,7 +2046,7 @@ export function AgentSessionsProvider({
       // agent switch racing the keystroke-armed spawn) or the live session's
       // env drifted from the composer pills (model/effort changed while it was
       // warming) and must be force-respawned. The old path fell into the turn
-      // body and awaited the FULL ZSR admission there — after runSend had
+      // body and awaited the full provider-session admission there — after runSend had
       // already cleared the composer and before any bubble was appended — so
       // the user's first send into a new chat was invisible for the whole
       // admission (tens of seconds under a burst), while a SECOND send

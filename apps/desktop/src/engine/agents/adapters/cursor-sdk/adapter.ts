@@ -19,6 +19,7 @@ import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
 
 import { AgentFailureError } from "../../types";
+import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
 import type {
   AgentAdapter,
@@ -422,9 +423,12 @@ export interface CursorModelListItem {
  *  value yields [], never throws into session creation. Mirrors the Claude
  *  adapter's parseAdditionalDirs; kept local because the two adapters do not
  *  import each other. Relative entries are dropped: `local.dirs` must be
- *  absolute for the SDK to resolve project settings, and ZSR authority is
- *  granted over absolute canonical roots. */
-function parseCursorAdditionalDirs(raw: string | undefined): string[] {
+ *  absolute for the SDK to resolve project settings, and the selected native
+ *  or kernel boundary admits only engine-validated canonical roots. */
+export function parseCursorAdditionalDirs(
+  raw: string | undefined,
+  pathApi: Pick<typeof import("node:path"), "isAbsolute"> = { isAbsolute },
+): string[] {
   const value = raw?.trim();
   if (!value) return [];
   try {
@@ -435,7 +439,7 @@ function parseCursorAdditionalDirs(raw: string | undefined): string[] {
     for (const entry of parsed) {
       if (typeof entry !== "string") continue;
       const dir = entry.trim();
-      if (!dir || !dir.startsWith("/") || seen.has(dir)) continue;
+      if (!dir || !pathApi.isAbsolute(dir) || seen.has(dir)) continue;
       seen.add(dir);
       out.push(dir);
     }
@@ -856,7 +860,7 @@ interface Session {
   modeId: CursorSdkModeId;
   agent: SdkAgent;
   /** Per-session SDK transport. Production always points at a dedicated
-   * Cursor host below this session's prepared ZSR boundary. */
+   * Cursor host below this session's prepared execution boundary. */
   sdk: CursorSdkModule;
   disposeRuntime?: () => Promise<void>;
   /** The HOME this session's Cursor host actually runs with, and where the SDK
@@ -1183,7 +1187,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     autoReview: boolean = autoReviewFor(CURSOR_DEFAULT_MODE),
   ): void {
     if (!sdk.platform?.prewarm) return;
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     void sdk.platform
       .prewarm({
         apiKey,
@@ -1412,7 +1416,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       modelState,
     );
     const sdk = runtime.sdk;
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     try {
       agent = await sdk.Agent.create({
@@ -1518,7 +1522,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
     // first created with, so a server the user ADDED after the chat opened never
     // appeared until they started a brand-new chat.
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     // True when resume failed and we seeded a FRESH agent below — the gateway
     // re-injects the first-turn <system_instruction> (the fresh agent has no
@@ -2102,7 +2106,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (want === session.appliedAutoReview) return;
     try {
       const sdk = session.sdk;
-      const sessionMcp = this.mcpServers(session.mcpServers);
+      const sessionMcp = this.mcpServers(session.mcpServers, session.env);
       session.agent = await sdk.Agent.resume(session.agent.agentId, {
         apiKey: session.apiKey,
         model: this.modelSelection(session.modelId, session.modelState),
@@ -2315,7 +2319,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // scoping) while `dirs` widens which folders project rules, skills, and
     // request-context metadata are loaded from. Before 1.0.28 there was no way
     // to express it, so an added directory was silently invisible to Cursor even
-    // though ZSR had already granted the session write authority over it.
+    // though the selected boundary had already granted the session authority.
     const additionalDirs = parseCursorAdditionalDirs(
       env?.ZEROS_ADDITIONAL_DIRS,
     ).filter((dir) => dir !== cwd);
@@ -2344,8 +2348,12 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  RCE-gated); undefined → the global ctx.mcpServers. */
   private mcpServers(
     override?: McpServerRegistration[],
+    env: Readonly<Record<string, string | undefined>> = {},
   ): Record<string, CursorMcpConfig> | null {
-    const list = override ?? this.ctx.mcpServers;
+    const list = materializeMcpServerRegistrations(
+      override ?? this.ctx.mcpServers,
+      env,
+    );
     if (list.length === 0) return null;
     return Object.fromEntries(
       list.map((s) => [

@@ -163,8 +163,8 @@ export interface ZsrPrivatePaths {
   /** Host-created service façades; readable/connectable but never writable by
    * the untrusted process. */
   readonly networkServices: string;
-  /** Durable per-session OCI image/container store. It is the sole
-   * engine-state subtree intentionally projected to an embedded worker. */
+  /** Durable OCI state for the qualified cloud worker's generation-private
+   * rootless Podman service. Desktop/native boundaries never allocate it. */
   readonly containerState?: string;
 }
 
@@ -174,8 +174,9 @@ export interface PreparedZsrPolicy {
 }
 
 export interface PrepareZsrPolicyOptions {
-  /** Canonical control metadata that must remain writable inside a broader
-   * design-actor worktree deny (for example .git and linked-worktree state). */
+  /** Compatibility input for qualified code-worker Git integration. A Design
+   * agent never receives writable Git metadata; supplied islands are added to
+   * its deny set instead of reopening authority. */
   readonly localHostParityWriteIslands?: readonly string[];
   /** Generation-private Unix façades. Raw host service sockets are never
    * admitted here. */
@@ -183,6 +184,9 @@ export interface PrepareZsrPolicyOptions {
   /** Record the dedicated identity used by the trusted cloud-worker
    * supervisor. The VM remains the tenant boundary. */
   readonly cloudWorker?: CloudWorkerRuntimeConfiguration;
+  /** Preserve the qualified cloud image's Docker/Podman contract without
+   * reviving any desktop VM or host-daemon bridge. Requires `cloudWorker`. */
+  readonly cloudContainerWorker?: true;
 }
 
 export function zsrNetworkRoot(generation: TerritoryGeneration): string {
@@ -330,15 +334,25 @@ export function isDeniedZerosControlPort(port: number): boolean {
   return deniedZerosControlPorts([]).includes(port);
 }
 
-/** Build the single normal-authority-minus-territory policy. The filesystem
- * root is readable and writable; recognized Design/code territory, the small
- * engine-authority set, and generation control descriptors are subtracted.
- * HOME, credentials, Git, network, and ports otherwise keep deployment parity. */
+/** Build the actor-scoped ZSR policy. Cloud Code workers that reach this
+ * boundary keep host-parity authority minus protected territory; local Code
+ * never calls this policy. Design agents receive read-only host context,
+ * API-only durable mutation, and generation-private write islands. Engine
+ * authority and generation control descriptors are always subtracted from
+ * untrusted Design reads. */
 export async function prepareZsrPolicy(
   request: BoundaryRequest,
   generation: TerritoryGeneration,
   options: PrepareZsrPolicyOptions = {},
 ): Promise<PreparedZsrPolicy> {
+  if (
+    options.cloudContainerWorker &&
+    (!options.cloudWorker || request.actor === "design-agent")
+  ) {
+    throw new Error(
+      "private container state is reserved for code actors on a cloud worker",
+    );
+  }
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(request.executionId)) {
     throw new Error("invalid execution id");
   }
@@ -398,7 +412,7 @@ export async function prepareZsrPolicy(
     network,
     networkRuntime: path.join(network, "runtime"),
     networkServices: path.join(network, "services"),
-    ...(request.containerWorker?.backend === "embedded-linux"
+    ...(options.cloudContainerWorker
       ? {
           containerState: path.join(
             sessionDir(request.executionId),
@@ -431,7 +445,7 @@ export async function prepareZsrPolicy(
       parentMetadata.isSymbolicLink() ||
       (await realpath(containerStateParent)) !== containerStateParent
     ) {
-      throw new Error("container-worker state parent is not physical");
+      throw new Error("cloud container-worker state parent is not physical");
     }
     try {
       await mkdir(paths.containerState, { mode: 0o700 });
@@ -444,7 +458,7 @@ export async function prepareZsrPolicy(
       metadata.isSymbolicLink() ||
       (await realpath(paths.containerState)) !== paths.containerState
     ) {
-      throw new Error("container-worker state is not a physical directory");
+      throw new Error("cloud container-worker state is not physical");
     }
     await chmod(paths.containerState, 0o700);
   }
@@ -471,6 +485,28 @@ export async function prepareZsrPolicy(
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  const additionalReadOnlyInputs = request.additionalReadOnlyRoots ?? [];
+  if (additionalReadOnlyInputs.length > 64) {
+    throw new Error("at most 64 additional read-only roots are allowed");
+  }
+  if (
+    additionalReadOnlyInputs.some(
+      (entry) => !path.isAbsolute(entry) || entry.includes("\0"),
+    )
+  ) {
+    throw new Error("additional read-only roots must be absolute");
+  }
+  const additionalReadOnly = uniqueSorted(
+    await Promise.all(additionalReadOnlyInputs.map(canonicalExistingOrLexical)),
+  );
+  for (const root of additionalReadOnly) {
+    const metadata = await lstat(root);
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+      throw new Error(
+        "additional read-only roots must be physical directories",
+      );
     }
   }
   const protectedWorkspaceInputs = request.protectedWorkspaceDirectories ?? [];
@@ -592,11 +628,12 @@ export async function prepareZsrPolicy(
       engineAuthorityWriteDenies[engineAuthorityWriteDenies.length - 1]!,
     ),
   ]);
-  // A design actor is the inverse of a code actor: it reads the whole machine
-  // but owns no code-tree write authority. Design roots and the explicitly
-  // discovered Git-metadata islands are reopened below that repository deny.
-  // Requested read/write roots are honoured as read-only rather than rejected:
-  // the downgrade can only remove authority.
+  // A Design agent is an API-only mutation actor. It may read the host context
+  // needed by the provider, but its only filesystem write surfaces are its
+  // generation-private provider cache and scratch/artifact directory. Code,
+  // Design, Git metadata, and requested add-dirs remain read-only; durable
+  // engine state is neither readable nor writable. Requested read/write roots
+  // are therefore downgraded to reads.
   const codeWriteAuthority = request.actor !== "design-agent";
 
   let protectedDesignDirectories: string[] = [];
@@ -617,13 +654,17 @@ export async function prepareZsrPolicy(
   const localHostParityWriteIslands = await Promise.all(
     (options.localHostParityWriteIslands ?? []).map(canonicalExistingOrLexical),
   );
-  const allowWrite = uniqueSorted([
-    hostFilesystemRoot,
-    ...(codeWriteAuthority
-      ? [workspaceRoot, ...additional, ...protectedWorkspaceWriteDirectories]
-      : [...protectedDesignDirectories, ...localHostParityWriteIslands]),
-    ...(paths.containerState ? [paths.containerState] : []),
-  ]);
+  const allowWrite = uniqueSorted(
+    codeWriteAuthority
+      ? [
+          hostFilesystemRoot,
+          workspaceRoot,
+          ...additional,
+          ...protectedWorkspaceWriteDirectories,
+          ...(paths.containerState ? [paths.containerState] : []),
+        ]
+      : [paths.providerState, paths.scratch],
+  );
   const containerSocket = paths.containerState
     ? path.join(paths.containerState, "podman.sock")
     : null;
@@ -644,11 +685,16 @@ export async function prepareZsrPolicy(
     }
   }
   // The additional roots were validated above even though the host root makes
-  // their read grant implicit. Keep exact container state entries because the
-  // supervisor validates that embedded-worker descriptors name an admitted
-  // root rather than merely an arbitrary descendant of `/`.
+  // their read grant implicit. Keep the exact worker state entry so the
+  // supervisor can prove a descriptor did not name arbitrary host storage.
+  const protectEngineReads =
+    options.cloudWorker !== undefined || request.actor === "design-agent";
   const allowRead = uniqueSorted([
     hostFilesystemRoot,
+    ...additionalReadOnly,
+    ...(request.actor === "design-agent"
+      ? [workspaceRoot, ...additional, paths.providerState, paths.scratch]
+      : []),
     ...(paths.containerState ? [paths.containerState] : []),
   ]);
   const denyWrite = uniqueSorted([
@@ -656,6 +702,7 @@ export async function prepareZsrPolicy(
     // respective allowWrite islands below it reopen only current code roots or
     // discovered Design roots, never a sibling that appears after admission.
     ...protectedWorkspaceDirectories,
+    ...additionalReadOnly,
     ...(codeWriteAuthority
       ? [
           ...protectedDesignDirectories,
@@ -664,22 +711,28 @@ export async function prepareZsrPolicy(
           // tree-level Git can update it. Sticky engine recognition prevents a
           // later repository edit from de-registering an admitted Design root.
         ]
-      : [workspaceRoot, ...additional, ...protectedCodeDirectories]),
+      : [
+          workspaceRoot,
+          ...additional,
+          ...protectedCodeDirectories,
+          ...protectedDesignDirectories,
+          ...localHostParityWriteIslands,
+        ]),
     // Both actors are denied the small authority set that defines the next
     // admission: the database and sidecars, recovery seeds, and sticky Design
     // recognition. Otherwise either actor could weaken future territory.
     ...engineAuthorityWriteDenies,
-    // The desktop shares the user's uid and keeps ordinary reads. The cloud
-    // worker is a separate uid within its tenant VM, so root-owned engine state
-    // is absent from both its read and write views.
-    ...(options.cloudWorker ? engineRoots : []),
+    // A Design actor must not reach durable engine authority through the
+    // desktop's shared uid. Cloud workers keep the same deny for root-owned
+    // tenant state.
+    ...(protectEngineReads ? engineRoots : []),
     paths.policy,
     paths.commands,
     paths.tools,
     paths.networkRuntime,
   ]);
   const denyRead = uniqueSorted([
-    ...(options.cloudWorker ? engineRoots : []),
+    ...(protectEngineReads ? engineRoots : []),
     paths.commands,
     paths.networkRuntime,
   ]);

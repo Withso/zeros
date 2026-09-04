@@ -748,8 +748,8 @@ export function FileViewer({
             <div className="flex h-full min-h-0 flex-col">
               {designReadOnly && (
                 <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
-                  Design files are edited in Design Mode and committed with
-                  “Save designs”.
+                  Design files are edited in Design view, then staged and
+                  committed with the dedicated Design actions.
                 </div>
               )}
               <div className="min-h-0 flex-1">

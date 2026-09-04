@@ -12,6 +12,9 @@
 export {
   ADDITIONAL_DIRS_NOTICE,
   CODE_AGENT_DESIGN_TERRITORY_NOTICE,
+  DESIGN_AGENT_AUTHORITY_NOTICE,
+  DESIGN_AGENT_CONTEXT_NOTICE,
+  DESIGN_AGENT_WORKSPACE_PREAMBLE,
   SYSTEM_INSTRUCTION_CLOSE,
   SYSTEM_INSTRUCTION_OPEN,
   WORKSPACE_PREAMBLE,
@@ -21,6 +24,7 @@ export {
   buildAdditionalDirsNotice,
   buildAdditionalDirsSystemInstruction,
   buildCodeAgentDesignTerritoryNotice,
+  buildDesignAgentNotice,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   buildWorkspacePreamble,

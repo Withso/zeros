@@ -234,12 +234,10 @@ export async function requestWorkspaceList(
   const result = (await workspaceOp(bridge, "workspace.list")) as
     | { workspaces?: Workspace[] }
     | undefined;
-  // This helper exists for the coding-agent cwd → workspace-id resolver. A
-  // Design workspace must never become an additional-directory or agent cwd,
-  // because the public Design surface does not grant code-agent authority.
-  return (result?.workspaces ?? []).filter(
-    (workspace) => workspace.kind !== "design",
-  );
+  // `kind` is the visible surface, not a different checkout species. Code
+  // agents remain attached to the same native workspace while Design is
+  // visible, so cwd/add-directory resolution must retain both modes.
+  return result?.workspaces ?? [];
 }
 
 /** Like requestWorkspaceList but forwards the desktop's `{status, repoSlug}`
