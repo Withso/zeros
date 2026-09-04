@@ -20,7 +20,15 @@
 //   TEST_DATABASE_URL=postgres://postgres:t@localhost:5433/postgres pnpm test
 // ──────────────────────────────────────────────────────────
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -246,6 +254,77 @@ d("migration ladder", () => {
     expect(await ledger()).toEqual(LADDER);
   });
 
+  it("upgrades databases that recorded the pre-merge cloud migration filenames", async () => {
+    const firstMainCollision = LADDER.indexOf("0018_deletion_lifecycle.sql");
+    expect(firstMainCollision).toBeGreaterThan(0);
+    await applyThrough(firstMainCollision);
+
+    const ownerId = "abababab-abab-4bab-8bab-abababababab";
+    const personalOrgId = "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd";
+    await pool.query(
+      `INSERT INTO users (id, email, display_name)
+       VALUES ($1, 'legacy-cloud-owner@example.test', 'Legacy Owner')`,
+      [ownerId],
+    );
+    await pool.query(
+      `INSERT INTO organizations (
+         id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+       ) VALUES ($1, 'legacy-personal', 'Legacy Personal', $2, true, false)`,
+      [personalOrgId, ownerId],
+    );
+
+    const renamedCloudMigrations = LADDER.filter((file) => {
+      const sequence = Number(file.slice(0, 4));
+      return sequence >= 20 && sequence <= 52;
+    });
+    expect(renamedCloudMigrations).toHaveLength(33);
+    for (const currentFile of renamedCloudMigrations) {
+      const currentSequence = Number(currentFile.slice(0, 4));
+      const legacyFile = `${String(currentSequence - 2).padStart(4, "0")}${currentFile.slice(4)}`;
+      const sql = readFileSync(path.join(MIGRATIONS_DIR, currentFile), "utf8");
+      await pool.query("BEGIN");
+      try {
+        await pool.query(sql);
+        await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+          legacyFile,
+        ]);
+        await pool.query("COMMIT");
+      } catch (error) {
+        await pool.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    // The pre-merge 0024 migration removed this constraint and enabled the
+    // coarse capability on Personal. Recreate those durable effects even
+    // though the current 0026 file deliberately no longer does either.
+    await pool.query(
+      "ALTER TABLE organizations DROP CONSTRAINT personal_organizations_are_local_only",
+    );
+    await pool.query(
+      `UPDATE organizations SET cloud_workspaces_allowed = true
+       WHERE id = $1`,
+      [personalOrgId],
+    );
+
+    await expect(runMigrations(pool)).resolves.toEqual([
+      "0018_deletion_lifecycle.sql",
+      "0019_resend_product_notifications.sql",
+      "0053_cloud_workspace_personal_organization_invariant.sql",
+    ]);
+    await expect(
+      pool.query(
+        `SELECT cloud_workspaces_allowed
+         FROM organizations WHERE id = $1`,
+        [personalOrgId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ cloud_workspaces_allowed: false }],
+    });
+    const recorded = await ledger();
+    for (const file of LADDER) expect(recorded).toContain(file);
+  });
+
   it("applies the NEWEST migration to a database at the previous revision", async () => {
     // The actual production upgrade path, and the one a fresh-install test
     // cannot see: DDL that is fine against an empty schema can still fail
@@ -268,10 +347,10 @@ d("migration ladder", () => {
       const ran = await runMigrations(pool);
       expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
     }
-  // This is O(n²) real DDL: every possible deployed prefix is upgraded through
-  // the full suffix. Forty-plus migrations exceed Vitest's generic 30-second
-  // unit-test ceiling on shared CI even while PostgreSQL is making progress.
-  // Keep the larger budget scoped to this exhaustive compatibility matrix.
+    // This is O(n²) real DDL: every possible deployed prefix is upgraded through
+    // the full suffix. Forty-plus migrations exceed Vitest's generic 30-second
+    // unit-test ceiling on shared CI even while PostgreSQL is making progress.
+    // Keep the larger budget scoped to this exhaustive compatibility matrix.
   }, 180_000);
 
   it("backfills immutable setup inputs and safely requeues pre-lease running work", async () => {
@@ -565,7 +644,7 @@ d("migration ladder", () => {
              WHERE datname = current_database()
                AND pid <> pg_backend_pid()
                AND wait_event_type = 'Lock'
-               AND query LIKE '%0023 — Engine membership retirement%'`,
+               AND query LIKE '%0025 — Engine membership retirement%'`,
           );
           expect(waiting.rows[0]!.count).toBeGreaterThan(0);
         },
@@ -955,15 +1034,15 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
     }
   });
 
-  it("backfills one permanent, cloud-eligible Personal organization per user", async () => {
+  it("backfills one permanent, local-only Personal organization per user", async () => {
     const personal = await pool.query(
       `SELECT created_by, name, cloud_workspaces_allowed
        FROM organizations WHERE is_personal ORDER BY created_by`,
     );
     expect(personal.rows).toEqual([
-      { created_by: OWNER, name: "Ada", cloud_workspaces_allowed: true },
-      { created_by: MEMBER, name: "Personal", cloud_workspaces_allowed: true },
-      { created_by: STRANGER, name: "Lin", cloud_workspaces_allowed: true },
+      { created_by: OWNER, name: "Ada", cloud_workspaces_allowed: false },
+      { created_by: MEMBER, name: "Personal", cloud_workspaces_allowed: false },
+      { created_by: STRANGER, name: "Lin", cloud_workspaces_allowed: false },
     ]);
     const shells = await pool.query<{ n: number }>(`
       SELECT count(*)::int AS n
@@ -1062,5 +1141,120 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
     const strangerRows = await visible(STRANGER);
     expect(strangerRows.some((row) => row.id === ORG)).toBe(false);
     expect(strangerRows.filter((row) => row.is_personal)).toHaveLength(1);
+  });
+});
+
+d("0019 retires legacy provider backlog without losing audit rows", () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: url, max: 3 });
+    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+    await pool.query(`
+      CREATE TABLE schema_migrations (
+        name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    for (const file of LADDER.filter((name) => name < "0019")) {
+      await pool.query("BEGIN");
+      await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+        file,
+      ]);
+      await pool.query("COMMIT");
+    }
+    await pool.query(`
+      INSERT INTO security_notification_outbox (
+        destination_email, template, state, lease_owner, lease_expires_at,
+        last_error_code, sent_at
+      ) VALUES
+        ('queued@example.com', 'sessions_revoked', 'queued', NULL, NULL,
+         'zeptomail_429', NULL),
+        ('sending@example.com', 'sessions_revoked', 'sending', 'old-worker',
+         now() + interval '1 minute', NULL, NULL),
+        ('sent@example.com', 'sessions_revoked', 'sent', NULL, NULL,
+         NULL, now()),
+        ('dead@example.com', 'sessions_revoked', 'dead', NULL, NULL,
+         'zeptomail_400', NULL)
+    `);
+    const file = LADDER.find((name) => name.startsWith("0019_"))!;
+    await pool.query("BEGIN");
+    await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+    await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+      file,
+    ]);
+    await pool.query("COMMIT");
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it("preserves prior rows under an explicit legacy provider", async () => {
+    const rows = await pool.query<{
+      destination_email: string;
+      state: string;
+      delivery_provider: string;
+      last_error_code: string | null;
+      lease_owner: string | null;
+    }>(`
+      SELECT destination_email, state, delivery_provider, last_error_code,
+             lease_owner
+      FROM security_notification_outbox
+      ORDER BY destination_email
+    `);
+    expect(rows.rows).toEqual([
+      {
+        destination_email: "dead@example.com",
+        state: "dead",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: "zeptomail_400",
+        lease_owner: null,
+      },
+      {
+        destination_email: "queued@example.com",
+        state: "dead",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: "provider_retired_zeptomail",
+        lease_owner: null,
+      },
+      {
+        destination_email: "sending@example.com",
+        state: "dead",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: "provider_retired_zeptomail",
+        lease_owner: null,
+      },
+      {
+        destination_email: "sent@example.com",
+        state: "sent",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: null,
+        lease_owner: null,
+      },
+    ]);
+  });
+
+  it("defaults only newly-created notifications to Resend", async () => {
+    const inserted = await pool.query<{
+      delivery_provider: string;
+      state: string;
+    }>(`
+      INSERT INTO security_notification_outbox (
+        destination_email, template
+      ) VALUES ('new@example.com', 'sessions_revoked')
+      RETURNING delivery_provider, state
+    `);
+    expect(inserted.rows[0]).toEqual({
+      delivery_provider: "resend",
+      state: "queued",
+    });
+    await expect(
+      pool.query(
+        `UPDATE security_notification_outbox
+         SET delivery_provider = 'legacy_zeptomail'
+         WHERE destination_email = 'new@example.com'`,
+      ),
+    ).rejects.toThrow(/delivery provider is immutable/i);
   });
 });

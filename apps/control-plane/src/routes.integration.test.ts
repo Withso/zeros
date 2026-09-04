@@ -7,6 +7,7 @@ import { HttpError } from "./authz.js";
 import { withSystemTx } from "./db.js";
 import { runMigrations } from "./migrate.js";
 import { createRoutes } from "./routes.js";
+import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import type { WorkOSInvitationRecord } from "./workos-provider.js";
 import {
   seedCanonicalCloudWorkspaceAuthority,
@@ -26,10 +27,16 @@ d("organization routes", () => {
   const signup = (name: string) => {
     const sub = randomUUID();
     return ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: sub,
       email: `${name.toLowerCase()}-${sub}@example.com`,
       displayName: name,
+      session: {
+        id: `session_${sub}`,
+        clientKind: "web",
+        authTime: Math.floor(Date.now() / 1_000),
+        tokenExpiresAt: Math.floor(Date.now() / 1_000) + 3_600,
+      },
     });
   };
 
@@ -47,7 +54,7 @@ d("organization routes", () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
-    owner = await signup("Ada");
+    owner = { ...(await signup("Ada")), staffRole: "platform_owner" };
     member = await signup("Grace");
     actor = owner;
 
@@ -56,6 +63,7 @@ d("organization routes", () => {
       c.set("user", actor);
       await next();
     });
+    app.route("/", createDeletionLifecycleRoutes(pool));
     app.route(
       "/",
       createRoutes(pool, undefined, null, {
@@ -82,6 +90,7 @@ d("organization routes", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       user: Record<string, unknown>;
+      capabilities: { createOrganization: boolean };
       organizations: Array<{
         name: string;
         isPersonal: boolean;
@@ -94,6 +103,7 @@ d("organization routes", () => {
     expect(body.user).not.toHaveProperty("providerSub");
     expect(body.user).not.toHaveProperty("identity");
     expect(body.teams).toEqual(body.organizations);
+    expect(body.capabilities).toEqual({ createOrganization: true });
     expect(body.organizations[0]).toMatchObject({
       name: "Ada",
       isPersonal: true,
@@ -102,6 +112,28 @@ d("organization routes", () => {
     expect(body.organizations[0]!.defaultTeamId).toMatch(
       /^[0-9a-f-]{36}$/,
     );
+  });
+
+  it("fails closed for ordinary users on both organization-create routes", async () => {
+    actor = member;
+    try {
+      const me = await request("/v1/me");
+      await expect(me.json()).resolves.toMatchObject({
+        capabilities: { createOrganization: false },
+      });
+      for (const path of ["/v1/organizations", "/v1/teams"]) {
+        const response = await request(path, {
+          method: "POST",
+          body: { name: "Must not exist" },
+        });
+        expect(response.status, path).toBe(404);
+        await expect(response.json()).resolves.toMatchObject({
+          error: { code: "not_found" },
+        });
+      }
+    } finally {
+      actor = owner;
+    }
   });
 
   it("creates an organization and its one default team atomically", async () => {
@@ -293,12 +325,15 @@ d("organization routes", () => {
 
   it("accepts only an exact locally-correlated WorkOS native invitation", async () => {
     const suffix = randomUUID().replaceAll("-", "");
-    const nativeOwner = await ensureUser(pool, {
-      provider: "workos",
-      providerSubject: `user_native_owner_${suffix}`,
-      email: `native-owner-${suffix}@example.com`,
-      displayName: "Native Owner",
-    });
+    const nativeOwner = {
+      ...(await ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_native_owner_${suffix}`,
+        email: `native-owner-${suffix}@example.com`,
+        displayName: "Native Owner",
+      })),
+      staffRole: "developer" as const,
+    };
     const nativeMember = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_native_member_${suffix}`,
@@ -585,12 +620,15 @@ d("organization routes", () => {
 
   it("serializes provider invitation cleanup before membership creation and removal", async () => {
     const suffix = randomUUID().replaceAll("-", "");
-    const workosOwner = await ensureUser(pool, {
-      provider: "workos",
-      providerSubject: `user_owner_${suffix}`,
-      email: `workos-owner-${suffix}@example.com`,
-      displayName: "WorkOS Owner",
-    });
+    const workosOwner = {
+      ...(await ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_owner_${suffix}`,
+        email: `workos-owner-${suffix}@example.com`,
+        displayName: "WorkOS Owner",
+      })),
+      staffRole: "developer" as const,
+    };
     const workosMember = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_member_${suffix}`,
@@ -1054,7 +1092,7 @@ d("organization routes", () => {
 
     const deleted = await request(
       `/v1/organizations/${body.organization.id}`,
-      { method: "DELETE" },
+      { method: "DELETE", body: { confirmation: "Cloud Retention" } },
     );
     expect(deleted.status).toBe(409);
     await expect(deleted.json()).resolves.toMatchObject({
@@ -1067,7 +1105,7 @@ d("organization routes", () => {
     expect(organization.rows[0]?.deleted_at).toBeNull();
   });
 
-  it("soft-deletes a collaborative organization atomically without exposing it through RLS", async () => {
+  it("schedules and restores a collaborative organization without deleting it in WorkOS", async () => {
     const created = await request("/v1/organizations", {
       method: "POST",
       body: { name: "Temporary" },
@@ -1075,8 +1113,13 @@ d("organization routes", () => {
     const body = (await created.json()) as { organization: { id: string } };
     const deleted = await request(`/v1/organizations/${body.organization.id}`, {
       method: "DELETE",
+      body: { confirmation: "Temporary" },
     });
-    expect(deleted.status).toBe(200);
+    expect(deleted.status).toBe(202);
+    const scheduled = (await deleted.json()) as {
+      deletion: { id: string; state: string; purgeAfter: string };
+    };
+    expect(scheduled.deletion.state).toBe("scheduled");
 
     const me = (await (await request("/v1/me")).json()) as {
       organizations: Array<{ id: string }>;
@@ -1086,9 +1129,33 @@ d("organization routes", () => {
     );
     const audit = await pool.query(
       `SELECT 1 FROM audit_log
-       WHERE org_id = $1 AND action = 'organization.deleted'`,
+       WHERE org_id = $1 AND action = 'organization.deletion_scheduled'`,
       [body.organization.id],
     );
     expect(audit.rowCount).toBe(1);
+
+    const providerDelete = await pool.query(
+      `SELECT 1 FROM workos_command_outbox
+       WHERE organization_id = $1 AND operation = 'organization.delete'`,
+      [body.organization.id],
+    );
+    expect(providerDelete.rowCount).toBe(0);
+
+    const restored = await request(
+      `/v1/organizations/${body.organization.id}/restore`,
+      {
+        method: "POST",
+        body: { requestId: scheduled.deletion.id },
+      },
+    );
+    expect(restored.status).toBe(200);
+    const meAfterRestore = (await (await request("/v1/me")).json()) as {
+      organizations: Array<{ id: string }>;
+    };
+    expect(
+      meAfterRestore.organizations.some(
+        (item) => item.id === body.organization.id,
+      ),
+    ).toBe(true);
   });
 });

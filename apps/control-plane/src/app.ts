@@ -34,7 +34,10 @@ import {
   WorkOSBrowserSessions,
   createWorkOSBrowserSessionRoutes,
 } from "./workos-browser-sessions.js";
-import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
+import {
+  createWorkOSDesktopRevocationRoutes,
+  enqueueSessionsRevokedNotification,
+} from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
@@ -47,6 +50,8 @@ import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks
 import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
 import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
 import { createAccountRecoveryRoutes } from "./account-recovery.js";
+import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
+import { createOpsRoutes } from "./ops.js";
 import {
   PostgresSecurityEventBroker,
   createSecurityEventRoutes,
@@ -162,6 +167,25 @@ export function createApp(
       "/",
       createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
     );
+    if (
+      config.workos.opsOrigin &&
+      config.deploymentChannel !== "beta"
+    ) {
+      const opsSessions = new WorkOSBrowserSessions(
+        new PostgresWorkOSBrowserSessionRepository(pool),
+        workosProvider,
+        config.workos.opsOrigin,
+      );
+      // The external callback remains /auth/callback on the isolated Ops host;
+      // its Pages facade forwards only to this separate upstream namespace.
+      app.route(
+        "/ops",
+        createWorkOSBrowserSessionRoutes(
+          opsSessions,
+          config.workos.opsOrigin,
+        ),
+      );
+    }
     app.route(
       "/",
       createWorkOSDesktopAuthorizationRoutes(
@@ -169,7 +193,22 @@ export function createApp(
         config.workos.appOrigin,
       ),
     );
-    app.route("/", createWorkOSDesktopRevocationRoutes(workosProvider));
+    app.route(
+      "/",
+      createWorkOSDesktopRevocationRoutes(workosProvider, {
+        onAllSessionsRevoked: async ({ providerSubject }) => {
+          const queued = await enqueueSessionsRevokedNotification(
+            pool,
+            providerSubject,
+          );
+          if (!queued) {
+            console.warn(
+              "[auth] sessions-revoked notification has no linked recipient",
+            );
+          }
+        },
+      }),
+    );
     app.route(
       "/",
       createWorkOSManagementEventRoutes(
@@ -366,6 +405,21 @@ export function createApp(
 
   app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createAccountRecoveryRoutes(pool));
+  app.route("/", createDeletionLifecycleRoutes(pool));
+  if (
+    config.workos?.opsOrigin &&
+    config.deploymentChannel !== "beta"
+  ) {
+    app.route(
+      "/",
+      createOpsRoutes(
+        pool,
+        config.deploymentChannel === "development"
+          ? "development"
+          : config.deploymentChannel,
+      ),
+    );
+  }
   app.route(
     "/",
     createSecurityEventRoutes(

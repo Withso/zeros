@@ -128,6 +128,7 @@ import {
   cancelledSince,
   clearPrebindGoalSnapshotsForChat,
   detachAdmissionFlight,
+  executionActorForRecovery,
   loadedSessionStatus,
   markPrebindGoalSnapshot,
   markPrebindDirty,
@@ -1615,6 +1616,7 @@ export function AgentSessionsProvider({
           agentName: options?.agentName ?? existing?.agentName ?? agentId,
           cwd: options?.cwd ?? existing?.cwd ?? undefined,
           env: options?.env,
+          ...executionActorForRecovery(existing, options),
         });
         if (adopted) return;
         existing = getStore().sessions[chatId];
@@ -1630,6 +1632,7 @@ export function AgentSessionsProvider({
       // OWN folder / active scope from the store, so a spawn from ANY
       // recovery path lands in the right folder instead of throwing.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
+      const executionActor = executionActorForRecovery(existing, options);
 
       let bindWasSuperseded = false;
       const work = (async () => {
@@ -1637,6 +1640,8 @@ export function AgentSessionsProvider({
           ...BLANK,
           agentId,
           agentName: options?.agentName ?? agentId,
+          agentRole: executionActor.agentRole ?? "code",
+          designDocumentId: executionActor.designDocumentId ?? null,
           cwd: resolvedCwd,
           status: "warming",
           transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
@@ -1711,6 +1716,7 @@ export function AgentSessionsProvider({
             {
               type: "AGENT_NEW_SESSION",
               agentId,
+              ...executionActor,
               chatId, // Bind the session to its chat for engine persistence.
               cwd: resolvedCwd ?? undefined,
               workspaceId: spawnWorkspaceId ?? undefined,
@@ -2044,7 +2050,7 @@ export function AgentSessionsProvider({
       // agent switch racing the keystroke-armed spawn) or the live session's
       // env drifted from the composer pills (model/effort changed while it was
       // warming) and must be force-respawned. The old path fell into the turn
-      // body and awaited the FULL ZSR admission there — after runSend had
+      // body and awaited the full provider-session admission there — after runSend had
       // already cleared the composer and before any bubble was appended — so
       // the user's first send into a new chat was invisible for the whole
       // admission (tens of seconds under a burst), while a SECOND send
@@ -2150,6 +2156,7 @@ export function AgentSessionsProvider({
             .current(chatId, slot.agentId, {
               cwd: slot.cwd ?? undefined,
               env: expectedEnv,
+              ...executionActorForRecovery(slot),
               ...(park === "drift-respawn" ? { force: true } : {}),
             })
             .catch(() => {});
@@ -2234,6 +2241,7 @@ export function AgentSessionsProvider({
             await ensureSessionRef.current(chatId, current.agentId, {
               cwd: current.cwd ?? undefined,
               env: chatComposerEnv(chatId, current.initialize),
+              ...executionActorForRecovery(current),
             });
           } catch {
             /* ensureSession patches the slot with the failure */
@@ -2268,6 +2276,7 @@ export function AgentSessionsProvider({
               await ensureSessionRef.current(chatId, current.agentId, {
                 cwd: current.cwd ?? undefined,
                 env: expected,
+                ...executionActorForRecovery(current),
                 force: true,
               });
             } catch {
@@ -2743,6 +2752,7 @@ export function AgentSessionsProvider({
               replaceProviderConversation: true,
               cwd: current.cwd ?? undefined,
               env: chatComposerEnv(chatId, current.initialize),
+              ...executionActorForRecovery(current),
             });
           } catch {
             /* surfaces via store below */
@@ -4567,10 +4577,13 @@ export function AgentSessionsProvider({
       // rebuild minutes later threw "chat has no project folder bound."
       // resolveSpawnCwd also recovers the chat's own folder from the store.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
+      const executionActor = executionActorForRecovery(existing, options);
       getStore().setSession(chatId, {
         ...BLANK,
         agentId,
         agentName: options?.agentName ?? agentId,
+        agentRole: executionActor.agentRole ?? "code",
+        designDocumentId: executionActor.designDocumentId ?? null,
         executionId: null,
         sessionId: null,
         providerBinding: providerBinding ?? null,

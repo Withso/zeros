@@ -15,9 +15,10 @@ name: Preflight
 #   build   — the app must actually BUILD: renderer, engine bundle, Electron main,
 #             and the bun-compiled engine sidecar binary that ships in the DMG.
 #   source-sync — required aggregate for the macOS source-sync workload plus
-#             ZSR qualification on macOS Intel and Linux arm64. Keeping the
-#             established check name makes the existing ruleset enforce all
-#             three jobs instead of silently overlooking new job names.
+#             live ZSR runtime qualification on macOS Intel and Linux arm64.
+#             Source-level boundary contracts run once in `test`; these jobs
+#             prove the target kernels. Keeping the established check name makes
+#             the existing ruleset enforce all three jobs.
 #   secret-scan — gitleaks over every commit the PR adds, not just its net diff,
 #             so a credential added and then removed within the PR is still caught.
 #   control-plane — typecheck + vitest for apps/control-plane (its own pnpm
@@ -415,8 +416,9 @@ jobs:
       - name: ZSR kernel, parity, and detached-lifecycle qualification
         # Compiles the package-owned Darwin helper, exercises real Seatbelt/SRT
         # policy, then proves setsid + double-fork teardown and next-engine
-        # recovery after an intentionally abrupt engine exit.
-        run: pnpm check:zsr
+        # recovery after an intentionally abrupt engine exit. Source contracts
+        # already ran in `test`; this target-architecture job owns runtime proof.
+        run: pnpm check:zsr:runtime
 
       - name: Packaged engine health + workspace lifecycle
         # Source-mode tests do not reproduce Bun --compile runtime failures.
@@ -522,12 +524,14 @@ jobs:
           pnpm agents:smoke:offline
 
       - name: Qualify Intel Seatbelt, parity, and detached lifecycle
-        run: pnpm check:zsr
+        # Keep this job architecture-specific: source contracts already ran in
+        # `test`, while only this runner can prove the x64 Seatbelt helpers.
+        run: pnpm check:zsr:runtime
 
       - name: Build and smoke-test the Intel packaged engine
         # This proves the historical x86_64 sidecar path still bundles and can
-        # sustain health plus create/archive/restore. Private OrbStack worker
-        # qualification remains a separate virtualization-capable host gate.
+        # sustain health plus create/archive/restore with the packaged native
+        # lifecycle supervisor and optional Seatbelt assets.
         run: |
           pnpm build:sidecar
           pnpm smoke:engine
@@ -565,8 +569,9 @@ jobs:
       - name: Qualify arm64 bubblewrap, parity, and detached lifecycle
         # This proves the generic Linux backend on real arm64. The production
         # cloud image separately supplies rootless Podman, delegated memory/PID
-        # cgroups, and its signed cloud-worker admission artifact.
-        run: bash scripts/ci/with-userns.sh pnpm check:zsr
+        # cgroups, and its signed cloud-worker admission artifact. Source
+        # contracts already ran once in `test` on the provisioned Linux host.
+        run: bash scripts/ci/with-userns.sh pnpm check:zsr:runtime
 
   # The repository ruleset already requires `source-sync (macOS)`. GitHub does
   # not automatically make newly-added sibling jobs required, so retain that
@@ -644,9 +649,32 @@ jobs:
         run: pnpm typecheck
       - name: Audit control-plane production dependencies
         # This service deploys from its independent lockfile, so the root audit
-        # cannot prove the graph Railway actually installs.
+        # cannot prove the graph Railway actually installs. npm's audit endpoint
+        # occasionally times out after pnpm's internal retries; retry only those
+        # transport failures, while a real advisory still fails immediately.
         working-directory: apps/control-plane
-        run: pnpm audit:prod
+        env:
+          CONTROL_PLANE_AUDIT_ATTEMPTS: "3"
+        run: |
+          set -euo pipefail
+          audit_log="$RUNNER_TEMP/control-plane-audit.log"
+          for ((attempt = 1; attempt <= CONTROL_PLANE_AUDIT_ATTEMPTS; attempt++)); do
+            set +e
+            pnpm audit:prod 2>&1 | tee "$audit_log"
+            status=${PIPESTATUS[0]}
+            set -e
+            if [ "$status" -eq 0 ]; then
+              exit 0
+            fi
+            if ! grep -Eiq 'ERR_SOCKET_TIMEOUT|ECONNRESET|ETIMEDOUT|EAI_AGAIN|HTTP (408|429|5[0-9]{2})' "$audit_log"; then
+              exit "$status"
+            fi
+            if [ "$attempt" -eq "$CONTROL_PLANE_AUDIT_ATTEMPTS" ]; then
+              exit "$status"
+            fi
+            echo "::warning::npm audit transport failed (attempt $attempt/$CONTROL_PLANE_AUDIT_ATTEMPTS); retrying"
+            sleep "$((attempt * 10))"
+          done
       - name: Control-plane tests (migrations + auth/invite contracts)
         working-directory: apps/control-plane
         env:

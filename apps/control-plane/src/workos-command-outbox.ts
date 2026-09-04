@@ -20,7 +20,9 @@ export type WorkOSCommandOperation =
   | "membership.delete"
   | "invitation.create"
   | "invitation.revoke"
-  | "session.revoke";
+  | "session.revoke"
+  | "sessions.revoke_all"
+  | "user.delete";
 
 export type EnqueueWorkOSCommandInput = {
   operation: WorkOSCommandOperation;
@@ -38,14 +40,15 @@ export type EnqueueWorkOSCommandInput = {
 export async function enqueueWorkOSCommand(
   tx: Tx,
   input: EnqueueWorkOSCommandInput,
-): Promise<void> {
-  await tx.query(
+): Promise<string> {
+  const inserted = await tx.query<{ id: string }>(
     `INSERT INTO workos_command_outbox (
        operation, idempotency_key, aggregate_key, ordering_key,
        aggregate_revision,
        organization_id, user_id, provider_object_id, payload
      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
-     ON CONFLICT (idempotency_key) DO NOTHING`,
+     ON CONFLICT (idempotency_key) DO NOTHING
+     RETURNING id`,
     [
       input.operation,
       input.idempotencyKey,
@@ -58,6 +61,15 @@ export async function enqueueWorkOSCommand(
       JSON.stringify(input.payload),
     ],
   );
+  if (inserted.rows[0]) return inserted.rows[0].id;
+  const existing = await tx.query<{ id: string }>(
+    `SELECT id FROM workos_command_outbox WHERE idempotency_key = $1`,
+    [input.idempotencyKey],
+  );
+  if (!existing.rows[0]) {
+    throw new Error("WorkOS command idempotency lookup failed");
+  }
+  return existing.rows[0].id;
 }
 
 /** Keep normalized email addresses out of operational keys while serializing
@@ -104,6 +116,31 @@ const InvitationPayload = z.object({
   inviterWorkosUserId: Identifier.optional(),
 });
 const SessionPayload = z.object({ sessionId: Identifier });
+const SessionsPayload = z.object({
+  workosUserId: Identifier,
+  createdBefore: z.string().datetime({ offset: true }),
+});
+const UserDeletePayload = z.object({ workosUserId: Identifier });
+
+export function sessionsEligibleForRevocation(
+  sessions: ReadonlyArray<{
+    id: string;
+    status: string;
+    createdAt: string;
+  }>,
+  createdBefore: string,
+): string[] {
+  const cutoff = Date.parse(createdBefore);
+  if (!Number.isFinite(cutoff)) return [];
+  return sessions.flatMap((session) => {
+    const createdAt = Date.parse(session.createdAt);
+    return session.status === "active" &&
+      Number.isFinite(createdAt) &&
+      createdAt <= cutoff
+      ? [session.id]
+      : [];
+  });
+}
 
 type WorkOSCommandLogger = Pick<Console, "info" | "warn" | "error">;
 
@@ -174,7 +211,10 @@ export class WorkOSCommandProcessor {
              )
            )
              AND (
-               c.operation IN ('organization.create', 'session.revoke')
+               c.operation IN (
+                 'organization.create', 'session.revoke',
+                 'sessions.revoke_all', 'user.delete'
+               )
                OR c.organization_id IS NULL
                OR EXISTS (
                  SELECT 1 FROM workos_organization_links ready
@@ -521,13 +561,62 @@ export class WorkOSCommandProcessor {
       }
       return { kind: "void" };
     }
-    const payload = SessionPayload.parse(command.payload);
-    try {
-      await this.provider.revokeSession(payload.sessionId);
-    } catch (error) {
-      if (safeError(error).status !== 404) throw error;
+    if (command.operation === "session.revoke") {
+      const payload = SessionPayload.parse(command.payload);
+      try {
+        await this.provider.revokeSession(payload.sessionId);
+      } catch (error) {
+        if (safeError(error).status !== 404) throw error;
+      }
+      return { kind: "void" };
     }
-    return { kind: "void" };
+    if (command.operation === "sessions.revoke_all") {
+      const payload = SessionsPayload.parse(command.payload);
+      let after: string | undefined;
+      for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
+        let page: Awaited<
+          ReturnType<WorkOSManagementProvider["listSessions"]>
+        >;
+        try {
+          page = await this.provider.listSessions(payload.workosUserId, {
+            limit: 100,
+            ...(after ? { after } : {}),
+          });
+        } catch (error) {
+          // Provider-user deletion can win before this ordered command is
+          // observed (for example, a WorkOS administrator deletes the user
+          // directly). An absent user has no remaining provider sessions, so
+          // that state already satisfies revoke-all and must not poison the
+          // outbox with a permanent dead letter.
+          if (safeError(error).status === 404) return { kind: "void" };
+          throw error;
+        }
+        for (const sessionId of sessionsEligibleForRevocation(
+          page.data,
+          payload.createdBefore,
+        )) {
+          try {
+            await this.provider.revokeSession(sessionId);
+          } catch (error) {
+            if (safeError(error).status !== 404) throw error;
+          }
+        }
+        const next = page.listMetadata.after ?? undefined;
+        if (!next) return { kind: "void" };
+        after = next;
+      }
+      throw new Error("WorkOS session pagination exceeded safety bound");
+    }
+    if (command.operation === "user.delete") {
+      const payload = UserDeletePayload.parse(command.payload);
+      try {
+        await this.provider.deleteUser(payload.workosUserId);
+      } catch (error) {
+        if (safeError(error).status !== 404) throw error;
+      }
+      return { kind: "void" };
+    }
+    throw new Error("Unsupported WorkOS command operation");
   }
 
   private async complete(

@@ -65,9 +65,13 @@ export async function createWorkspaceForProject(args: {
   project: Project;
   dispatch: Dispatch;
   kind?: "code" | "design";
+  /** Fork the new worktree off this ref instead of the repo's default branch
+   *  (the Create page's "Create from…" base). */
+  baseBranch?: string;
 }): Promise<boolean> {
   const { project, dispatch } = args;
   const kind = args.kind === "design" ? "design" : "code";
+  const baseBranch = args.baseBranch?.trim() || undefined;
   // Capture semantic ownership at intent time. The user can switch
   // organizations while prepare crosses the bridge; that must not silently
   // move the already-requested workspace to the newly selected owner.
@@ -166,8 +170,10 @@ export async function createWorkspaceForProject(args: {
       repoSlug: project.repoSlug,
       ...owner,
       ...(kind === "design" ? { kind } : {}),
+      ...(baseBranch ? { baseBranch } : {}),
       ...(chat?.agentId ? { agentId: chat.agentId } : {}),
       preparedId: prepared.workspaceId,
+
       preparedBranch: prepared.branch,
       ...(chat ? { optimisticChatId: chat.id } : {}),
     });

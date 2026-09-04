@@ -50,8 +50,9 @@ export interface SpawnStdioAgentOptions {
   /** Complete child environment. Callers that need ambient variables must
    * construct and scrub that environment before this process boundary. */
   env?: Record<string, string>;
-  /** Prepared ZSR capability for this execution. When present the real child
-   * is the supervisor and every provider descendant shares its boundary. */
+  /** Prepared execution capability. When present the real child is the
+   * selected lifecycle/sandbox supervisor and every provider descendant shares
+   * its boundary. */
   executionBoundary?: PreparedBoundary;
   /** Tag used for diagnostics (no behavioural effect). */
   logTag?: string;

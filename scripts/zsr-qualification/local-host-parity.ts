@@ -24,6 +24,9 @@ import {
   ZsrExecutionBoundary,
 } from "../../apps/desktop/src/engine/agents/containment/zsr-boundary";
 import { loadCloudWorkerConfiguration } from "../../apps/desktop/src/engine/agents/containment/cloud-worker-config";
+import { HostExecutionBoundary } from "../../apps/desktop/src/engine/agents/containment/host-boundary";
+import { RoutingExecutionBoundary } from "../../apps/desktop/src/engine/agents/containment/routing-boundary";
+import { QUALIFICATION_WRITE_PROBE_SOURCE } from "./write-probe-source";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -122,7 +125,13 @@ async function reserveAmbientContainerSocket(): Promise<{
     process.platform === "darwin" ? "/private/tmp" : os.tmpdir(),
     `zeros-zq-container-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
   );
-  const server = createServer((socket) => socket.end("ambient-container\n"));
+  const server = createServer((socket) => {
+    // The native-host probe exits as soon as connect succeeds. Its intentional
+    // early close may surface as ECONNRESET on the accepting socket; that is
+    // evidence of visibility, not a qualification-process failure.
+    socket.on("error", () => undefined);
+    socket.end("ambient-container\n");
+  });
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(socketPath, resolve);
@@ -314,7 +323,7 @@ async function run(): Promise<void> {
       ]);
     }
 
-    const boundary = new ZsrExecutionBoundary({
+    const sandboxBoundary = new ZsrExecutionBoundary({
       projectRoot,
       supervisorScript: path.join(projectRoot, "binaries/zsr-supervisor.mjs"),
       macosProcessDomainHelper: path.join(
@@ -327,6 +336,14 @@ async function run(): Promise<void> {
             cloudWorkerToolchain: cloudConfiguration.toolchain,
           }
         : {}),
+    });
+    const boundary = new RoutingExecutionBoundary({
+      host: new HostExecutionBoundary({
+        projectRoot,
+        supervisorRuntime: process.execPath,
+      }),
+      sandbox: sandboxBoundary,
+      forceSandbox: Boolean(cloudConfiguration),
     });
     // A real, readable PEM so the child's Node runtime accepts the sentinel
     // silently. The point of the variable is not the trust it adds: it is that a
@@ -363,8 +380,20 @@ async function run(): Promise<void> {
       providerStateEnv: { HOME: hostHome },
       cwd: workspace,
       workspaceRoot: workspace,
-      territory: territory(workspace, designs),
+      ...(cloudConfiguration
+        ? {
+            territory: territory(workspace, designs),
+            containerWorkflowExpected: true,
+          }
+        : {}),
     });
+    const cloudContainerBoundary =
+      !cloudConfiguration ||
+      (codeBoundary.status.backend === "cloud-worker" &&
+        codeBoundary.status.parity.level === "full" &&
+        codeBoundary.status.parity.restrictions.length === 0 &&
+        codeBoundary.status.services?.state === "ready" &&
+        codeBoundary.status.services.kinds.includes("podman"));
     const codeAdmissionMs = Math.round(
       performance.now() - codeAdmissionStarted,
     );
@@ -382,7 +411,7 @@ async function run(): Promise<void> {
 const fs = require("node:fs");
 const net = require("node:net");
 const { spawnSync } = require("node:child_process");
-const [hostLog, codeFile, primary, secondary, aliasFile, servicePort, expectedCa, settingsFile, markerFile, divergedDesignFile, restoreFromCommit, authorityFilesJson, authorityAliasRoot, ambientContainerSocket, macosAuthorityHelper] = process.argv.slice(1);
+const [hostLog, codeFile, primary, secondary, aliasFile, servicePort, expectedCa, settingsFile, markerFile, divergedDesignFile, restoreFromCommit, authorityFilesJson, authorityAliasRoot, ambientContainerSocket, macosAuthorityHelper, cloudContainerExpected] = process.argv.slice(1);
 function denied(write) { try { write(); return false; } catch { return true; } }
 const caExpected = JSON.parse(expectedCa);
 const caDrift = Object.entries(caExpected).flatMap(([name, value]) => {
@@ -459,13 +488,37 @@ const ambientContainerProbe = spawnSync(
   { encoding: "utf8", timeout: 3_000 },
 );
 const ambientContainerSocketDenied = ambientContainerProbe.status === 0;
-const ambientContainerSelectorsScrubbed = [
-  "DOCKER_HOST",
-  "DOCKER_CONTEXT",
-  "CONTAINER_HOST",
-  "CONTAINER_CONNECTION",
-  "PODMAN_HOST",
-].every((name) => process.env[name] === undefined);
+const ambientContainerSocketVisible = ambientContainerProbe.status === 91;
+const expectsPrivateContainer = cloudContainerExpected === "true";
+const privateContainerEndpoint = process.env.DOCKER_HOST;
+const ambientContainerSelectorsScrubbed = expectsPrivateContainer
+  ? privateContainerEndpoint === process.env.CONTAINER_HOST &&
+    privateContainerEndpoint?.startsWith("unix://") === true &&
+    privateContainerEndpoint.endsWith("/container-worker/podman.sock") &&
+    ["DOCKER_CONTEXT", "CONTAINER_CONNECTION", "PODMAN_HOST"].every(
+      (name) => process.env[name] === undefined,
+    )
+  : [
+      "DOCKER_HOST",
+      "DOCKER_CONTEXT",
+      "CONTAINER_HOST",
+      "CONTAINER_CONNECTION",
+      "PODMAN_HOST",
+    ].every((name) => process.env[name] === undefined);
+const ambientContainerSelectorsPreserved =
+  process.env.DOCKER_HOST === "unix://" + ambientContainerSocket &&
+  process.env.DOCKER_CONTEXT === "ambient-qualification" &&
+  process.env.CONTAINER_HOST === "unix://" + ambientContainerSocket &&
+  process.env.CONTAINER_CONNECTION === "ambient-qualification" &&
+  process.env.PODMAN_HOST === "unix://" + ambientContainerSocket;
+const privateContainerProbe = expectsPrivateContainer
+  ? spawnSync("podman", ["info", "--format=json"], {
+      encoding: "utf8",
+      timeout: 15_000,
+    })
+  : { status: 0 };
+const privateContainerReady =
+  !expectsPrivateContainer || privateContainerProbe.status === 0;
 const connection = net.connect({ host: "127.0.0.1", port: Number(servicePort) });
 let service = "";
 connection.setEncoding("utf8");
@@ -502,7 +555,10 @@ connection.once("end", () => {
           keychainAvailable: keychain.status === 0,
           appleEventsDenied,
           ambientContainerSocketDenied,
+          ambientContainerSocketVisible,
           ambientContainerSelectorsScrubbed,
+          ambientContainerSelectorsPreserved,
+          privateContainerReady,
           directService: service === "host-service\n",
           directPort: selfReply === "agent-port\n",
           proxyUnchanged: process.env.HTTP_PROXY === ${JSON.stringify(process.env.HTTP_PROXY)},
@@ -532,6 +588,7 @@ connection.once("error", (error) => { throw error; });
         engineAuthorityAliasRoot,
         ambientContainer.path,
         path.join(projectRoot, "binaries", "zsr-macos-process-domain"),
+        String(Boolean(cloudConfiguration)),
       ],
       cwd: workspace,
       env: {
@@ -554,8 +611,19 @@ connection.once("error", (error) => { throw error; });
       string,
       unknown
     >;
+    const codeBackend = codeBoundary.status.backend;
     await codeBoundary.stopAndProve();
     codeBoundary = null;
+
+    // Native Code is intentionally unrestricted and the fixture proves that
+    // honestly by attempting writes to the temporary engine authority files.
+    // Restore their sentinel bytes before admitting Design so the ZSR read deny
+    // cannot pass merely because Code changed the expected value.
+    await Promise.all(
+      engineAuthorityFiles.map((file) => writeFile(file, "engine-owned\n")),
+    );
+    await rm(engineAuthorityAliasRoot, { recursive: true, force: true });
+    await mkdir(engineAuthorityAliasRoot, { recursive: true });
 
     const designAdmissionStarted = performance.now();
     designBoundary = await boundary.prepare({
@@ -577,38 +645,63 @@ connection.once("error", (error) => { throw error; });
         String.raw`
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
+${QUALIFICATION_WRITE_PROBE_SOURCE}
 const [codeFile, primary, secondary, outside, authorityFilesJson, authorityAliasRoot] = process.argv.slice(1);
 const authorityFiles = JSON.parse(authorityFilesJson);
-const engineAuthorityRead = authorityFiles.every((file) => {
-  try { return fs.readFileSync(file, "utf8") === "engine-owned\n"; }
-  catch { return false; }
-});
+function denied(operation) { try { operation(); return false; } catch { return true; } }
+const engineAuthorityReadDenied = authorityFiles.map((file) =>
+  denied(() => fs.readFileSync(file, "utf8")),
+);
 const engineAuthorityWriteDenied = authorityFiles.map((file) => {
-  try { fs.writeFileSync(file, "forbidden\n"); return false; } catch { return true; }
+  return denied(() => fs.writeFileSync(file, "forbidden\n"));
 });
 const engineAuthorityHardlinkDenied = authorityFiles.map((file, index) => {
-  try { fs.linkSync(file, require("node:path").join(authorityAliasRoot, "design-" + index)); return false; } catch { return true; }
+  return denied(() => fs.linkSync(file, require("node:path").join(authorityAliasRoot, "design-" + index)));
 });
-let codeDenied = false;
-try { fs.writeFileSync(codeFile, "forbidden-design-code\n"); } catch { codeDenied = true; }
-fs.writeFileSync(primary, '{"mode":"design-writable"}\n');
-fs.writeFileSync(secondary, '{"mode":"design-writable"}\n');
-fs.writeFileSync(outside, "outside-write\n");
-let gitDirectoryWrite = false;
-try {
+const codeReadable = fs.readFileSync(codeFile, "utf8") === "host-parity-code\n";
+const designReadable = [primary, secondary].every((file) => fs.readFileSync(file, "utf8").length > 0);
+const codeDenied = denied(() => fs.writeFileSync(codeFile, "forbidden-design-code\n"));
+const primaryDenied = denied(() => fs.writeFileSync(primary, '{"mode":"forbidden-design-write"}\n'));
+const secondaryDenied = denied(() => fs.writeFileSync(secondary, '{"mode":"forbidden-design-write"}\n'));
+const outsideDenied = denied(() => fs.writeFileSync(outside, "outside-write\n"));
+const gitDirectoryWriteDenied = denied(() => {
   fs.writeFileSync(".git/qualification-write", "ok\n");
   fs.unlinkSync(".git/qualification-write");
-  gitDirectoryWrite = true;
-} catch {}
+});
+const pathApi = require("node:path");
+const scratchWrite = qualificationWriteProbe(
+  fs,
+  pathApi,
+  process.env.TMPDIR,
+  "design-scratch.txt",
+);
+const providerRoots = [
+  process.env.XDG_CACHE_HOME,
+  process.env.XDG_CONFIG_HOME,
+  process.env.XDG_DATA_HOME,
+  process.env.XDG_STATE_HOME,
+];
+const providerStateWrites = providerRoots.map((root, index) => {
+  return qualificationWriteProbe(
+    fs,
+    pathApi,
+    root,
+    "qualification-" + index + ".txt",
+  );
+});
 const git = spawnSync("git", ["add", "--", "Zeros Design/canvas.json", "examples/Product Design/tokens.json"], { encoding: "utf8" });
 process.stdout.write(JSON.stringify({
+  codeReadable,
+  designReadable,
   codeDenied,
-  primaryWrite: fs.readFileSync(primary, "utf8").includes("design-writable"),
-  secondaryWrite: fs.readFileSync(secondary, "utf8").includes("design-writable"),
-  outsideWrite: fs.readFileSync(outside, "utf8") === "outside-write\n",
-  gitDirectoryWrite,
-  canonicalGitWrite: git.status === 0,
-  engineAuthorityRead,
+  primaryDenied,
+  secondaryDenied,
+  outsideDenied,
+  gitDirectoryWriteDenied,
+  canonicalGitWriteDenied: git.status !== 0,
+  scratchWrite,
+  providerStateWrites,
+  engineAuthorityReadDenied,
   engineAuthorityWriteDenied,
   engineAuthorityHardlinkDenied,
   gitError: git.stderr,
@@ -640,6 +733,12 @@ process.stdout.write(JSON.stringify({
       string,
       unknown
     >;
+    const designEngineAuthorityPreserved = (
+      await Promise.all(
+        engineAuthorityFiles.map((file) => readFile(file, "utf8")),
+      )
+    ).every((contents) => contents === "engine-owned\n");
+    const designBackend = designBoundary.status.backend;
     await designBoundary.stopAndProve();
     designBoundary = null;
 
@@ -647,6 +746,9 @@ process.stdout.write(JSON.stringify({
       `${JSON.stringify({
         code: codeReport,
         design: designReport,
+        codeBackend,
+        designBackend,
+        designEngineAuthorityPreserved,
         hostHomePreserved: codeReport.home === hostHome,
         providerHomePreserved: hostHome === codeReport.home,
         ghTokenPreserved:
@@ -664,6 +766,7 @@ process.stdout.write(JSON.stringify({
         codeAdmissionMs,
         designAdmissionMs,
         cloudWorkerUid: cloudConfiguration?.uid ?? null,
+        cloudContainerBoundary,
       })}\n`,
     );
   } finally {

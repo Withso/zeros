@@ -7,6 +7,14 @@ export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
 const MAX_RAILWAY_SESSION_BYTES = 256 * 1024;
 
+function upstreamBrowserPath(env, pathname) {
+  const prefix = String(env.WORKOS_BROWSER_ROUTE_PREFIX || "").trim();
+  if (prefix !== "" && prefix !== "/ops") {
+    throw new Error("WORKOS_BROWSER_ROUTE_PREFIX must be empty or /ops");
+  }
+  return `${prefix}${pathname}`;
+}
+
 function cookies(request) {
   const parsed = new Map();
   for (const segment of (request.headers.get("cookie") || "").split(";")) {
@@ -113,7 +121,7 @@ async function proxyBrowserGet(request, env, pathname, options = {}) {
   try {
     const upstream = await fetchWorkOSRailway(
       env,
-      `${pathname}${url.search}`,
+      `${upstreamBrowserPath(env, pathname)}${url.search}`,
       { method: "GET", headers },
       options.fetch || fetch,
     );
@@ -160,6 +168,9 @@ export function beginWorkOSBrowserAuth(request, env, options = {}) {
   const sanitized = new URL("/auth/start", source.origin);
   const returnTo = source.searchParams.get("return");
   if (returnTo !== null) sanitized.searchParams.set("return", returnTo);
+  if (source.searchParams.get("max_age") === "300") {
+    sanitized.searchParams.set("max_age", "300");
+  }
   return proxyBrowserGet(
     new Request(sanitized, { headers: request.headers }),
     env,
@@ -181,7 +192,7 @@ export async function readWorkOSBrowserSession(env, request, options = {}) {
   if (!OPAQUE_ID.test(sessionId)) return null;
   const response = await fetchWorkOSRailway(
     env,
-    "/auth/browser/session",
+    upstreamBrowserPath(env, "/auth/browser/session"),
     {
       method: "GET",
       headers: {
@@ -236,7 +247,7 @@ export async function refreshWorkOSBrowserSession(
   try {
     response = await fetchWorkOSRailway(
       env,
-      "/auth/browser/refresh",
+      upstreamBrowserPath(env, "/auth/browser/refresh"),
       { method: "POST", headers },
       options.fetch || fetch,
     );

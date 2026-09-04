@@ -667,7 +667,7 @@ d("cloud workspace API contracts", () => {
     expect(count.rows[0]).toEqual({ workspaces: 1, intents: 1 });
   });
 
-  it("fails closed on an unentitled Personal account, missing quota, foreign repository grants, and exhausted quota", async () => {
+  it("fails closed on Personal ownership, missing quota, foreign repository grants, and exhausted quota", async () => {
     const personal = await pool.query<{ id: string }>(
       `SELECT id FROM organizations
        WHERE created_by = $1 AND is_personal AND deleted_at IS NULL`,
@@ -679,7 +679,7 @@ d("cloud workspace API contracts", () => {
     );
     expect(personalResponse.status).toBe(403);
     await expect(personalResponse.json()).resolves.toMatchObject({
-      error: { code: "cloud_account_entitlement_required" },
+      error: { code: "cloud_workspaces_not_allowed" },
     });
 
     await pool.query(`DELETE FROM cloud_workspace_quotas WHERE org_id = $1`, [
@@ -1474,7 +1474,7 @@ d("cloud workspace API contracts", () => {
       [created.body.workspace.id, orgId],
     );
     await pool.query(
-       `INSERT INTO cloud_workspace_endpoint_grants (
+      `INSERT INTO cloud_workspace_endpoint_grants (
          workspace_id, generation, org_id, account_user_id, purpose,
          audience, token_hash, account_revision, authorization_revision,
          expires_at

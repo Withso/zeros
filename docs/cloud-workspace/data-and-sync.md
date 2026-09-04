@@ -2,8 +2,8 @@
 
 This document defines the product and engineering contract for creating a
 Zeros workspace locally or in cloud, making integrity-checked copies between
-those placements, and keeping private device replicas. Migrations `0024`
-through `0050` and the desktop engine services implement the non-UI
+those placements, and keeping private device replicas. Migrations `0026`
+through `0053` and the desktop engine services implement the non-UI
 foundation. End-user wiring and protected live qualification remain separate
 release work.
 
@@ -12,37 +12,37 @@ release work.
 Do not encode ownership, immutable workspace placement, and replication in one
 `location` field. They answer different questions:
 
-| Dimension               | Values                                            | Meaning                                                                                   |
-| ----------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Tenant ownership        | Personal or Organization/Team                     | Who owns policy, repository access, retention, and the workspace record                   |
-| Workspace placement     | This Mac or Cloud                                 | Where this workspace's single authoritative engine is created; it does not change in place |
-| Device replica          | Off, Syncing, In sync, Paused, Diverged, or Error | Whether one member's device has a private local mirror of a cloud-authoritative workspace |
+| Dimension           | Values                                            | Meaning                                                                                    |
+| ------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Tenant ownership    | Personal or Organization/Team                     | Who owns policy, repository access, retention, and the workspace record                    |
+| Workspace placement | This Mac or Cloud                                 | Where this workspace's single authoritative engine is created; it does not change in place |
+| Device replica      | Off, Syncing, In sync, Paused, Diverged, or Error | Whether one member's device has a private local mirror of a cloud-authoritative workspace  |
 
 Local placement does **not** imply Personal ownership. An Organization workspace
 may be created on one member's Mac and inherit Organization repository policy
 while its files, chats, paths, processes, and terminals remain private to that
-device. Likewise, a Personal workspace may run in cloud without becoming
-collaborative.
+device. Cloud placement does require Organization ownership; Personal
+workspaces are permanently device-local.
 
-This separation produces four valid creation combinations:
+This separation produces three valid creation combinations:
 
 | Tenant       | Runs on this Mac                                         | Runs in cloud                                        |
 | ------------ | -------------------------------------------------------- | ---------------------------------------------------- |
-| Personal     | Private local workspace                                  | Private single-member cloud workspace                |
+| Personal     | Private local workspace                                  | Not supported                                        |
 | Organization | Organization-governed but device-private local workspace | Shared cloud workspace when collaboration is enabled |
 
 ## Sources of truth
 
-| Data                                                                                                                | Live authority                      | Durable authority                                                                  |
-| ------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------- |
-| Repository content                                                                                                  | Authoritative engine/working tree   | Configured Git remote plus explicit encrypted checkpoints for uncommitted recovery |
-| Never-cloud local workspace identity and runtime metadata                                                           | Local engine                        | Device SQLite                                                                      |
-| Cloud workspace identity, tenant/team, creator, billing owner, assignee, generation/authority epoch                | Control plane                       | Control-plane database                                                             |
-| Local replica path and device-only overrides                                                                        | Desktop replica broker/local engine | Device SQLite/OS credential store; never the cloud record                          |
-| Replica desired state, health, and cursors                                                                          | Desktop broker + cloud engine       | Tenant-scoped control-plane record                                                 |
-| Chat, turns, agent sessions, run state, and recoverable workspace metadata                                          | Running engine while active         | Durable cloud record                                                               |
-| Presence and transient UI state                                                                                     | Active client/engine session        | Not durable unless explicitly promoted to a product preference                     |
-| Secrets                                                                                                             | Narrow runtime credential boundary  | Approved server secret store or user OS credential store; never the transcript     |
+| Data                                                                                                | Live authority                      | Durable authority                                                                  |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------- |
+| Repository content                                                                                  | Authoritative engine/working tree   | Configured Git remote plus explicit encrypted checkpoints for uncommitted recovery |
+| Never-cloud local workspace identity and runtime metadata                                           | Local engine                        | Device SQLite                                                                      |
+| Cloud workspace identity, tenant/team, creator, billing owner, assignee, generation/authority epoch | Control plane                       | Control-plane database                                                             |
+| Local replica path and device-only overrides                                                        | Desktop replica broker/local engine | Device SQLite/OS credential store; never the cloud record                          |
+| Replica desired state, health, and cursors                                                          | Desktop broker + cloud engine       | Tenant-scoped control-plane record                                                 |
+| Chat, turns, agent sessions, run state, and recoverable workspace metadata                          | Running engine while active         | Durable cloud record                                                               |
+| Presence and transient UI state                                                                     | Active client/engine session        | Not durable unless explicitly promoted to a product preference                     |
+| Secrets                                                                                             | Narrow runtime credential boundary  | Approved server secret store or user OS credential store; never the transcript     |
 
 The execution environment is disposable. It may cache durable data, but it must
 not be the only location from which a user can recover workspace identity,
@@ -270,7 +270,7 @@ last-writer-wins is prohibited.
 
 ### Create a cloud workspace from local
 
-1. **Preflight:** choose the destination Personal/Organization tenant, resolve a
+1. **Preflight:** choose the destination Organization tenant, resolve a
    verified repository identity, authorize cloud creation, and validate
    provider connection, paid entitlement, quota, settings, paths, exclusions,
    symlink/case portability, and bounded snapshot size.
@@ -398,45 +398,47 @@ own local engine/Design API and does not share the cloud workspace identity.
 ## Durable data model
 
 The main implemented relations are below. Exact SQL names in migrations
-`0024`–`0050` are compatibility contracts.
+`0026`–`0053` are compatibility contracts.
 
-| Relation                                                | Purpose and important constraints                                                                                                                                                                                                                                            |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `repositories`                                          | Stable tenant + forge repository identity; unique on tenant/forge/provider-repository ID; rename-safe                                                                                                                                                                        |
-| `repository_device_paths`                               | Device-local stable repository ID to canonical path mapping; SQLite only                                                                                                                                                                                                     |
-| `repository_settings_versions`                          | Immutable schema-versioned Shared/Local/Cloud non-secret documents with creator and provenance                                                                                                                                                                               |
-| `environment_profiles` / `environment_profile_versions` | Named Personal or Organization placement profiles and immutable build inputs                                                                                                                                                                                                 |
-| `provider_connections`                                  | User/Organization-owned encrypted Daytona or future provider binding; no raw credential in workspace rows                                                                                                                                                                    |
-| `secret_bindings`                                       | Opaque secret-store references scoped by tenant, owner, purpose, placement, and rotation version                                                                                                                                                                             |
-| `cloud_workspaces`                                      | Cloud UUID, tenant/team/repository, creator, owner, assignee, visibility, single-member flag, authority/billing epochs, lifecycle, and optimistic version                                                                                                                |
-| `workspace_members`                                     | Explicit workspace role/following/presence eligibility; membership is always bounded by Organization/Team membership                                                                                                                                                         |
-| `workspace_settings_versions`                           | Redacted effective snapshot, source versions, environment profile, and policy version used by one workspace generation                                                                                                                                                       |
-| `workspace_executions`                                  | Append-only cloud execution projections; at most one current execution for an authority epoch                                                                                                                                                                                  |
-| `cloud_workspace_generations`                           | Pinned image/resources/source commit/settings snapshot for cloud execution; extends the existing generation contract                                                                                                                                                         |
-| `cloud_workspace_provider_bindings`                     | Opaque provider resource observed state keyed by provider connection and generation                                                                                                                                                                                          |
-| `devices`                                               | Per-user public-key identity, trust/revocation state, platform, and last-seen metadata                                                                                                                                                                                       |
-| `workspace_replicas`                                    | Workspace + user + device binding, mode, desired/observed state, authority epoch, checkpoint and event cursors; one live binding per tuple                                                                                                                                   |
-| `workspace_replica_events`                              | Bounded state/error history for diagnosis; no absolute local path or source bytes                                                                                                                                                                                            |
-| `workspace_content_revisions`                           | Monotonic engine sequence and parent/checkpoint identity                                                                                                                                                                                                                     |
-| `workspace_file_entries`                                | Current manifest projection: normalized relative path, type, mode, content hash, size, revision, tombstone                                                                                                                                                                   |
-| `workspace_file_events`                                 | Idempotent ordered changes used for catch-up; payload refers to encrypted object blobs                                                                                                                                                                                       |
-| `workspace_checkpoints`                                 | Git base/ref plus encrypted manifest/artifact reference, reason, author, integrity state, and retention                                                                                                                                                                      |
-| `workspace_blobs`                                       | Tenant-scoped content-addressed encrypted objects with reference accounting and deletion state                                                                                                                                                                               |
-| `workspace_fork_intents`                                | Idempotent local→cloud/cloud→local copy identity, source/target UUIDs, selection flags, deadline, snapshot/checkpoint provenance, and outcome                                                                                                                                |
-| `workspace_fork_import_entries` / `workspace_fork_import_records` | Bounded immutable staging for file overlays and optional portable chat records; blob reservations use `workspace_blob_references`                                                                                                                           |
-| `workspace_ports`                                       | Engine-observed sandbox listeners and health, never an unauthenticated public endpoint                                                                                                                                                                                       |
-| `port_forward_sessions`                                 | Actor/device/remote/local mapping, bind address, grant, expiry, and observed status                                                                                                                                                                                          |
-| `cloud_workspace_ownership_transfers`                   | Deferred Phase 6A offer/accept/cancel state; old/new owner and optimistic workspace version                                                                                                                                                                                   |
-| `usage_events`                                          | Immutable provider/agent usage with actor, billing-owner snapshot, billing epoch, source idempotency key, quantity, and timestamps                                                                                                                                           |
-| `outbox_events`                                         | Transactional publication of lifecycle, sync, audit, usage, and notification events                                                                                                                                                                                          |
+| Relation                                                          | Purpose and important constraints                                                                                                                                            |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `repositories`                                                    | Stable tenant + forge repository identity; unique on tenant/forge/provider-repository ID; rename-safe                                                                        |
+| `repository_device_paths`                                         | Device-local stable repository ID to canonical path mapping; SQLite only                                                                                                     |
+| `repository_settings_versions`                                    | Immutable schema-versioned Shared/Local/Cloud non-secret documents with creator and provenance                                                                               |
+| `environment_profiles` / `environment_profile_versions`           | Named Personal or Organization placement profiles and immutable build inputs                                                                                                 |
+| `provider_connections`                                            | User/Organization-owned encrypted Daytona or future provider binding; no raw credential in workspace rows                                                                    |
+| `secret_bindings`                                                 | Opaque secret-store references scoped by tenant, owner, purpose, placement, and rotation version                                                                             |
+| `cloud_workspaces`                                                | Cloud UUID, non-Personal Organization/team/repository, creator, owner, assignee, visibility, single-member flag, authority/billing epochs, lifecycle, and optimistic version |
+| `workspace_members`                                               | Explicit workspace role/following/presence eligibility; membership is always bounded by Organization/Team membership                                                         |
+| `workspace_settings_versions`                                     | Redacted effective snapshot, source versions, environment profile, and policy version used by one workspace generation                                                       |
+| `workspace_executions`                                            | Append-only cloud execution projections; at most one current execution for an authority epoch                                                                                |
+| `cloud_workspace_generations`                                     | Pinned image/resources/source commit/settings snapshot for cloud execution; extends the existing generation contract                                                         |
+| `cloud_workspace_provider_bindings`                               | Opaque provider resource observed state keyed by provider connection and generation                                                                                          |
+| `devices`                                                         | Per-user public-key identity, trust/revocation state, platform, and last-seen metadata                                                                                       |
+| `workspace_replicas`                                              | Workspace + user + device binding, mode, desired/observed state, authority epoch, checkpoint and event cursors; one live binding per tuple                                   |
+| `workspace_replica_events`                                        | Bounded state/error history for diagnosis; no absolute local path or source bytes                                                                                            |
+| `workspace_content_revisions`                                     | Monotonic engine sequence and parent/checkpoint identity                                                                                                                     |
+| `workspace_file_entries`                                          | Current manifest projection: normalized relative path, type, mode, content hash, size, revision, tombstone                                                                   |
+| `workspace_file_events`                                           | Idempotent ordered changes used for catch-up; payload refers to encrypted object blobs                                                                                       |
+| `workspace_checkpoints`                                           | Git base/ref plus encrypted manifest/artifact reference, reason, author, integrity state, and retention                                                                      |
+| `workspace_blobs`                                                 | Tenant-scoped content-addressed encrypted objects with reference accounting and deletion state                                                                               |
+| `workspace_fork_intents`                                          | Idempotent local→cloud/cloud→local copy identity, source/target UUIDs, selection flags, deadline, snapshot/checkpoint provenance, and outcome                                |
+| `workspace_fork_import_entries` / `workspace_fork_import_records` | Bounded immutable staging for file overlays and optional portable chat records; blob reservations use `workspace_blob_references`                                            |
+| `workspace_ports`                                                 | Engine-observed sandbox listeners and health, never an unauthenticated public endpoint                                                                                       |
+| `port_forward_sessions`                                           | Actor/device/remote/local mapping, bind address, grant, expiry, and observed status                                                                                          |
+| `cloud_workspace_ownership_transfers`                             | Deferred Phase 6A offer/accept/cancel state; old/new owner and optimistic workspace version                                                                                  |
+| `usage_events`                                                    | Immutable provider/agent usage with actor, billing-owner snapshot, billing epoch, source idempotency key, quantity, and timestamps                                           |
+| `outbox_events`                                                   | Transactional publication of lifecycle, sync, audit, usage, and notification events                                                                                          |
 
 Normalize authorization, ownership, lifecycle, billing, grants, provider
 bindings, and cursors. JSONB is appropriate for bounded versioned settings,
 provider observations, and redacted event metadata; it is not a substitute for
 foreign keys or queryable security state.
 
-Every tenant relation carries `org_id` (including Personal's tenant shell) and
-uses composite foreign keys where that prevents cross-tenant references.
+Every tenant relation carries `org_id` (including Personal's tenant shell for
+relations that support local Personal ownership), while cloud workspace rows
+require a non-Personal Organization. Tenant relations use composite foreign
+keys where that prevents cross-tenant references.
 Application authorization and forced row-level security both apply. Background
 workers set an explicit system/tenant context. Mutations use optimistic version
 checks or row leases, idempotency keys, and a transactional outbox. Large file,
@@ -514,7 +516,8 @@ flow, and it never uploads local source changes.
 Before Phase 5 can be called seamless for a single member, automated and
 end-to-end tests cover:
 
-- Personal/Organization × local/cloud creation and exact settings provenance;
+- Personal local and Organization local/cloud creation with exact settings
+  provenance, including rejection of Personal cloud creation;
 - local-to-cloud fork with clean, staged, unstaged, untracked, ignored,
   secret-like, large, symlink, executable, Unicode, and case-collision trees;
 - snapshot mismatch, deadline expiry, over-quota object publication, process

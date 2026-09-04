@@ -2036,7 +2036,7 @@ fast-sha256@1.3.0
   Source: https://github.com/dchest/fast-sha256-js
   License documents: 88d9b4eb6057
 
-fast-uri@3.1.5
+fast-uri@3.1.6
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
@@ -13711,8 +13711,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT df7464922225
 SHA-256: df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
-Applies to: fast-uri@3.1.5
-Source labels: fast-uri@3.1.5 — LICENSE
+Applies to: fast-uri@3.1.6
+Source labels: fast-uri@3.1.6 — LICENSE
 ================================================================================
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae

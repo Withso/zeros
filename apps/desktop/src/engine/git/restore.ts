@@ -6,6 +6,7 @@
 import { resolveRepoForGitOp } from "./worktree";
 import { assertSafeGitRef, runGit } from "./git-exec";
 import { GitError } from "./errors";
+import { prepareDesignSafeIntegration } from "./design-draft-guard";
 
 function requirePaths(paths: unknown, context: string): string[] {
   if (!Array.isArray(paths) || paths.length === 0) {
@@ -67,7 +68,19 @@ export async function reset(opts: ResetOptions): Promise<void> {
     });
   }
   const ref = assertSafeGitRef(opts.ref ?? "HEAD", "reset.ref");
-  await runGit(ws.path, ["reset", `--${opts.mode}`, ref]);
+  const target =
+    opts.mode === "hard"
+      ? await prepareDesignSafeIntegration({
+          workspaceId: opts.workspaceId,
+          path: ws.path,
+          repoRoot: ws.repoRoot,
+          target: ref,
+          operation: "Hard reset",
+          comparison: "tree-transition",
+          rejectAnyDirtyDesign: true,
+        })
+      : ref;
+  await runGit(ws.path, ["reset", `--${opts.mode}`, target]);
 }
 
 // ── discard (restore working tree) ───────────────────────

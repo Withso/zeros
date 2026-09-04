@@ -2,25 +2,25 @@
 
 ## Current implementation status
 
-| Capability | Repository status | Current anchor |
-| --- | --- | --- |
-| Remote engine transport and exact runtime registry | Implemented, gated; signed macOS/live E2E open | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
-| Provider image/lifecycle qualification | Harness and protected workflow implemented; live evidence open | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml` |
-| WorkOS identity and membership projection | Implemented with Auth0 rollback compatibility | control-plane auth migrations/services and web WorkOS session/event handlers |
-| Personal/Pro/Business/Enterprise paid authority | Implemented and database-tested | migration `0024`, `authorization.ts`, `paid-authority.ts` |
-| Repository/settings/environment/secret/provider model | Implemented and database-tested | migrations `0024`–`0025`, `0039`–`0045` |
-| Lifecycle, setup worker, admission, and engine lease | Implemented behind disabled setup-worker gate; live qualification open | migrations `0018`–`0023`, setup and engine services |
-| Generation replacement and provider reconciliation | Implemented and database-tested; live rollback/delete evidence open | `generation-transitions.ts`, `reconciler.ts`, `daytona-provider.ts` |
-| SSH, authenticated preview, and localhost forward | Control plane and native desktop boundary implemented; UI/macOS qualification open | `access.ts`, `runtime-access.ts`, Electron access/SSH services |
-| Ordered durable record and content/checkpoints | Implemented and database-tested | migrations `0026`–`0029`, durable/content/recovery services |
-| Encrypted object storage, retention, export, deletion | Implemented; production restore/DR drills open | `object-store.ts`, `object-maintenance.ts`, migration `0035` |
-| Local→cloud and cloud→local immutable forks | Implemented with fresh destination UUIDs | `forks.ts`, desktop cloud-workspace-fork services, migrations `0030`, `0036`, `0046`, `0049` |
-| Per-user/per-device receive-only replicas | Implemented owner-only for Phase 5 | `replicas.ts`, desktop cloud-replica services, migrations `0031`–`0033`, `0047`–`0050` |
-| Remote-authoritative Design routing | Implemented through the normal exact runtime bridge; product UI E2E open | runtime connection registry and existing Design protocol/service |
-| Management, usage, outbox, health, and self-host seams | Implemented as APIs/services; dashboards/drills/template publication open | `management*.ts`, `usage.ts`, `outbox.ts`, `health.ts` |
-| Cloud creation/catalog/details/onboarding UI | Deliberately deferred | final UI phase |
-| Organization multiplayer and ownership-transfer execution | Deferred to Phase 6A | persisted roles/transfer model only |
-| Native mobile clients | Deferred | no `apps/ios` or `apps/android` boundary |
+| Capability                                                | Repository status                                                                  | Current anchor                                                                                        |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Remote engine transport and exact runtime registry        | Implemented, gated; signed macOS/live E2E open                                     | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
+| Provider image/lifecycle qualification                    | Harness and protected workflow implemented; live evidence open                     | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                |
+| WorkOS identity and membership projection                 | Implemented with Auth0 rollback compatibility                                      | control-plane auth migrations/services and web WorkOS session/event handlers                          |
+| Organization Pro/Business/Enterprise paid authority       | Implemented and database-tested                                                    | migration `0026`, `authorization.ts`, `paid-authority.ts`                                             |
+| Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`                                                               |
+| Lifecycle, setup worker, admission, and engine lease      | Implemented behind disabled setup-worker gate; live qualification open             | migrations `0020`–`0025`, setup and engine services                                                   |
+| Generation replacement and provider reconciliation        | Implemented and database-tested; live rollback/delete evidence open                | `generation-transitions.ts`, `reconciler.ts`, `daytona-provider.ts`                                   |
+| SSH, authenticated preview, and localhost forward         | Control plane and native desktop boundary implemented; UI/macOS qualification open | `access.ts`, `runtime-access.ts`, Electron access/SSH services                                        |
+| Ordered durable record and content/checkpoints            | Implemented and database-tested                                                    | migrations `0028`–`0031`, durable/content/recovery services                                           |
+| Encrypted object storage, retention, export, deletion     | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migration `0037`                                          |
+| Local→cloud and cloud→local immutable forks               | Implemented with fresh destination UUIDs                                           | `forks.ts`, desktop cloud-workspace-fork services, migrations `0032`, `0038`, `0048`, `0051`          |
+| Per-user/per-device receive-only replicas                 | Implemented owner-only for Phase 5                                                 | `replicas.ts`, desktop cloud-replica services, migrations `0033`–`0035`, `0049`–`0052`                |
+| Remote-authoritative Design routing                       | Implemented through the normal exact runtime bridge; product UI E2E open           | runtime connection registry and existing Design protocol/service                                      |
+| Management, usage, outbox, health, and self-host seams    | Implemented as APIs/services; dashboards/drills/template publication open          | `management*.ts`, `usage.ts`, `outbox.ts`, `health.ts`                                                |
+| Cloud creation/catalog/details/onboarding UI              | Deliberately deferred                                                              | final UI phase                                                                                        |
+| Organization multiplayer and ownership-transfer execution | Deferred to Phase 6A                                                               | persisted roles/transfer model only                                                                   |
+| Native mobile clients                                     | Deferred                                                                           | no `apps/ios` or `apps/android` boundary                                                              |
 
 ## Existing environment contract
 
@@ -63,8 +63,9 @@ credentials.
 The configured image, architecture, source commit, CPU, memory, and storage are
 recorded per generation and passed through the provider boundary. Public API
 documents use the stable Zeros workspace id and never expose provider resource
-ids. Creation also requires the appropriate Personal account entitlement or
-Organization entitlement/seat policy and an available workspace quota.
+ids. Creation also requires the appropriate Organization entitlement/seat
+policy and an available workspace quota. Personal workspaces remain
+device-local.
 
 Provider observations are accepted only when their immutable workspace and
 generation labels match the requested identity. Lifecycle results and failures
@@ -89,7 +90,7 @@ the same generation-scoped retirement. A later wake therefore allocates a fresh
 setup-verification attempt instead of being blocked by an attempt from the old
 runtime.
 
-Migration `0018_cloud_workspace_setup_worker.sql` adds immutable per-generation
+Migration `0020_cloud_workspace_setup_worker.sql` adds immutable per-generation
 repository/settings inputs plus bounded claims, heartbeat/expiry, retry timing,
 cancellation, and an incrementing execution fence. The orchestration in
 `setup-worker.ts` locks workspace before setup rows, commits the claim before
@@ -99,7 +100,7 @@ therefore finish, but its late result cannot mutate durable state. Logs cross a
 required sanitizer and a 256 KiB database ceiling; exception messages are not
 persisted.
 
-Migration `0019_cloud_workspace_setup_authority.sql` binds each new setup grant
+Migration `0021_cloud_workspace_setup_authority.sql` binds each new setup grant
 to one setup-run ID and live execution fence. It retires pre-fence setup grants
 during upgrade, and a database trigger rejects a new unbound or stale-fence
 grant even from system code. Consumption rechecks the token digest, account,
@@ -142,7 +143,7 @@ run/fence, and requires retirement before executor success can be returned.
 Helper error codes are allowlisted, provider details are collapsed, output is
 bounded, and an echoed admission makes the run fail closed.
 
-Migration `0020_cloud_workspace_setup_materials.sql` adds encrypted per-
+Migration `0022_cloud_workspace_setup_materials.sql` adds encrypted per-
 generation setup secrets and durable engine instances whose bridge and
 heartbeat capabilities are stored only as SHA-256 verifiers. The capability-
 authenticated internal routes are mounted only with the setup gate. Redemption
@@ -178,7 +179,7 @@ replacement ten minutes before expiry (or after a credential rejection), and
 the heartbeat returns only an owner-bound replacement document. PostgreSQL and
 audit rows never contain the raw GitHub token.
 
-Migration `0021_cloud_workspace_generation_transitions.sql` binds lifecycle
+Migration `0023_cloud_workspace_generation_transitions.sql` binds lifecycle
 intents to an immutable generation and records a drain-first transition. The
 source is stopped and its client/runtime authority retired before candidate
 creation; only structured candidate readiness can promote it. A permanent
@@ -186,7 +187,7 @@ drain failure restores the source without creating the candidate, while a
 rejected candidate is deleted before a source wake is queued. Provider results
 remain fenced by transition, generation, desired state, lease owner, and intent.
 
-Migration `0022_cloud_workspace_client_access.sql` stores only capability
+Migration `0024_cloud_workspace_client_access.sql` stores only capability
 verifiers and operational provider IDs for SSH, localhost tunnels, and isolated
 preview origins. Access issuance rechecks Organization/Team/current-generation
 authority on both sides of the provider call. Unknown SSH issue outcomes enter
@@ -201,7 +202,7 @@ calls. Valid streaming responses retain a bounded slot through completion or
 cancellation (4 per grant, 32 per process). External provider-edge limits are
 still required for production.
 
-Migration `0023_cloud_workspace_engine_authority.sql` closes authority that is
+Migration `0025_cloud_workspace_engine_authority.sql` closes authority that is
 not represented by an ordinary lifecycle request. Organization/Team membership
 loss retires issuing and active client grants, endpoint grants, and live engine
 instances even when the removal runs under user-context RLS. WorkOS account
@@ -274,16 +275,21 @@ similarly cancels setup/replacement work, revokes runtime/client grants, and
 queues every provider generation for deletion. Membership triggers cross FORCE
 RLS only through a narrowly privileged fixed-search-path function, so a normal
 user-context self-leave cannot retain a provider bearer.
-WorkOS identity lifecycle and browser-session migrations own `0011` through
-`0017`; cloud workspace additions continue forward through `0050`.
+WorkOS identity, account lifecycle, and notification migrations own `0011`
+through `0019`; cloud workspace additions resume at `0020` and continue
+forward through `0053`. The migration runner recognizes the pre-merge cloud
+filenames `0018`–`0050` as aliases for their renumbered `0020`–`0052`
+equivalents, and `0053` repairs the Personal local-only constraint for those
+databases.
 Never rename a migration after deployment and never edit
 `0010_cloud_workspace_control_plane.sql` in place.
 
-The cloud API models Personal and Organization-owned cloud rows. Desktop local
-workspaces remain in SQLite; fork jobs allocate fresh UUID destinations and
-preserve released local identifiers as compatibility data. The placement-aware
-resolver preserves `.zeros/settings.toml` as optional shared input and always
-excludes `.zeros/settings.local.toml` and secret material from copies.
+The cloud API models Organization-owned cloud rows and rejects Personal
+ownership. Desktop local workspaces remain in SQLite; fork jobs allocate fresh
+UUID destinations and preserve released local identifiers as compatibility
+data. The placement-aware resolver preserves `.zeros/settings.toml` as optional
+shared input and always excludes `.zeros/settings.local.toml` and secret
+material from copies.
 
 ## Protocol contract
 

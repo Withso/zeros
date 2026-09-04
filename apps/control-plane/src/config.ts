@@ -35,6 +35,8 @@ const EnvSchema = z.object({
   AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
   /** Canonical browser application origin used for callbacks and cookies. */
   APP_ORIGIN: z.string().trim().min(1).optional(),
+  /** Optional isolated staff console origin. Deliberately absent in Beta. */
+  OPS_ORIGIN: z.string().trim().min(1).optional(),
   /** Exact browser landing page used in organization invitations. */
   INVITE_LINK_BASE: z.string().trim().min(1).optional(),
   /** Railway-only WorkOS browser-session credentials. */
@@ -220,6 +222,7 @@ export type AuthBackendConfig =
 
 export type WorkOSBackendConfig = {
   appOrigin: string;
+  opsOrigin: string | null;
   apiKey: string;
   cookiePassword: string;
   webhookSecret: string;
@@ -234,6 +237,7 @@ export type Config = {
   inviteLinkBase: string;
   port: number;
   isProduction: boolean;
+  deploymentChannel: "development" | "alpha" | "beta" | "production";
   /** Null when no GitHub App is registered for this environment. */
   github: GithubBackendConfig | null;
   /** Null when neither feedback destination is configured. */
@@ -485,12 +489,16 @@ function requiredAuthValue(value: string | undefined, name: string): string {
   return normalized;
 }
 
-function validatedAppOrigin(value: string, nodeEnv: string): string {
+function validatedAppOrigin(
+  value: string,
+  nodeEnv: string,
+  name = "APP_ORIGIN",
+): string {
   let url: URL;
   try {
     url = new URL(value);
   } catch {
-    throw new Error("Invalid environment: APP_ORIGIN must be an exact origin");
+    throw new Error(`Invalid environment: ${name} must be an exact origin`);
   }
   const devLoopback =
     nodeEnv !== "production" &&
@@ -507,7 +515,7 @@ function validatedAppOrigin(value: string, nodeEnv: string): string {
     url.hash
   ) {
     throw new Error(
-      "Invalid environment: APP_ORIGIN must be an HTTPS origin (or dev loopback HTTP) with no path, credentials, query, or fragment",
+      `Invalid environment: ${name} must be an HTTPS origin (or dev loopback HTTP) with no path, credentials, query, or fragment`,
     );
   }
   return url.origin;
@@ -563,6 +571,9 @@ function loadWorkOSBackendConfig(
   }
   return {
     appOrigin,
+    opsOrigin: env.OPS_ORIGIN
+      ? validatedAppOrigin(env.OPS_ORIGIN, env.NODE_ENV, "OPS_ORIGIN")
+      : null,
     apiKey: requiredAuthValue(env.WORKOS_API_KEY, "WORKOS_API_KEY"),
     cookiePassword: requiredAuthValue(
       env.WORKOS_COOKIE_PASSWORD,
@@ -589,6 +600,16 @@ function validateWorkOSOriginSeparation(
   if (audienceOrigin === backend.appOrigin) {
     throw new Error(
       "Invalid environment: APP_ORIGIN and the WorkOS API audience must use separate origins",
+    );
+  }
+  if (backend.opsOrigin === backend.appOrigin) {
+    throw new Error(
+      "Invalid environment: OPS_ORIGIN and APP_ORIGIN must be separate origins",
+    );
+  }
+  if (audienceOrigin !== null && audienceOrigin === backend.opsOrigin) {
+    throw new Error(
+      "Invalid environment: OPS_ORIGIN and the WorkOS API audience must use separate origins",
     );
   }
 }
@@ -1218,16 +1239,19 @@ const HOSTED_ENVIRONMENTS = {
   alpha: {
     audience: "https://api-alpha.zeros.build",
     appOrigin: "https://app-alpha.zeros.build",
+    opsOrigin: "https://ops-alpha.zeros.build",
     branch: "main",
   },
   beta: {
     audience: "https://api-beta.zeros.build",
     appOrigin: "https://app-beta.zeros.build",
+    opsOrigin: null,
     branch: "release/",
   },
   production: {
     audience: "https://api.zeros.build",
     appOrigin: "https://app.zeros.build",
+    opsOrigin: "https://ops.zeros.build",
     branch: "release/",
   },
 } as const;
@@ -1237,6 +1261,7 @@ function validateRailwayEnvironment(
   audience: string,
   appOrigin: string | null,
   inviteLinkBase: string,
+  opsOrigin: string | null,
   selfHosted: boolean,
 ): void {
   // Railway injects these values. Local processes and non-Railway hosts have no
@@ -1262,6 +1287,13 @@ function validateRailwayEnvironment(
   if (appOrigin !== null && appOrigin !== expected.appOrigin) {
     throw new Error(
       `Invalid environment: APP_ORIGIN must be ${expected.appOrigin} in Railway ${name}`,
+    );
+  }
+  if (appOrigin !== null && opsOrigin !== expected.opsOrigin) {
+    throw new Error(
+      expected.opsOrigin
+        ? `Invalid environment: OPS_ORIGIN must be ${expected.opsOrigin} in Railway ${name}`
+        : "Invalid environment: OPS_ORIGIN is not supported in Railway beta",
     );
   }
   const expectedInviteLinkBase = `${expected.appOrigin}/invite`;
@@ -1313,6 +1345,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     e.AUTH_AUDIENCE,
     appOrigin,
     inviteLinkBase,
+    workos?.opsOrigin ?? null,
     e.ZEROS_SELF_HOSTED === "true",
   );
 
@@ -1345,6 +1378,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     inviteLinkBase,
     port: e.PORT,
     isProduction: e.NODE_ENV === "production",
+    deploymentChannel: (() => {
+      const channel = (env.RAILWAY_ENVIRONMENT_NAME ?? "development")
+        .trim()
+        .toLowerCase();
+      return channel === "alpha" ||
+        channel === "beta" ||
+        channel === "production"
+        ? channel
+        : "development";
+    })(),
     github,
     feedback: loadFeedbackConfig(env),
     cloudWorkspaces: loadCloudWorkspaceConfig(env, github),

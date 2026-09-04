@@ -107,9 +107,7 @@ async function localHostParityMain(cloudWorker = false) {
     },
     platform: process.platform,
     arch: process.arch,
-    backend: cloudWorker
-      ? "cloud-host-parity+srt"
-      : "local-host-parity+srt",
+    backend: cloudWorker ? "cloud-worker+zsr" : "native-code+zsr-design",
     secure: false,
     checks: [
       result(
@@ -153,14 +151,27 @@ async function localHostParityMain(cloudWorker = false) {
   if (observed) {
     const code = observed.code ?? {};
     const design = observed.design ?? {};
+    const all = (value, length, expected) =>
+      Array.isArray(value) &&
+      value.length === length &&
+      value.every((entry) => entry === expected);
     const checks = [
+      [
+        "actor-boundary-routing",
+        cloudWorker
+          ? observed.codeBackend === "cloud-worker" &&
+            observed.designBackend === "cloud-worker"
+          : observed.codeBackend === "none" &&
+            observed.designBackend === "zeros-srt",
+      ],
       ["host-machine-read", code.hostRead === true],
       ["code-workspace-write", code.codeWrite === true],
       [
-        "multiple-design-write-denial",
-        Array.isArray(code.designDenied) &&
-          code.designDenied.length === 3 &&
-          code.designDenied.every(Boolean),
+        cloudWorker
+          ? "cloud-code-design-write-denial"
+          : "native-code-has-no-filesystem-fence",
+        all(code.designDenied, 3, cloudWorker) &&
+          code.markerDenied === cloudWorker,
       ],
       [
         "native-git-all-subcommands",
@@ -183,12 +194,25 @@ async function localHostParityMain(cloudWorker = false) {
       ["gh-cli", code.ghAvailable === true],
       ["keychain", code.keychainAvailable === true],
       ...(process.platform === "darwin"
-        ? [["macos-apple-events-denial", code.appleEventsDenied === true]]
+        ? cloudWorker
+          ? [["macos-apple-events-denial", code.appleEventsDenied === true]]
+          : []
         : []),
       [
-        "ambient-container-authority-denial",
-        code.ambientContainerSocketDenied === true &&
-          code.ambientContainerSelectorsScrubbed === true,
+        cloudWorker
+          ? "ambient-container-authority-denial"
+          : "native-container-environment",
+        cloudWorker
+          ? code.ambientContainerSocketDenied === true &&
+            code.ambientContainerSelectorsScrubbed === true
+          : code.ambientContainerSocketVisible === true &&
+            code.ambientContainerSelectorsPreserved === true,
+      ],
+      [
+        "cloud-private-container-workflow",
+        !cloudWorker ||
+          (observed.cloudContainerBoundary === true &&
+            code.privateContainerReady === true),
       ],
       ["direct-local-service", code.directService === true],
       ["direct-agent-port", code.directPort === true],
@@ -207,15 +231,17 @@ async function localHostParityMain(cloudWorker = false) {
       // `git pull` that had to rewrite it. De-registration is covered by
       // engine-side sticky recognition, which is deliberately NOT a filesystem
       // rule — both halves are asserted so neither can drift silently.
-      ["design-marker-write-denial", code.markerDenied === true],
+      ["design-marker-boundary-posture", code.markerDenied === cloudWorker],
       ["repo-settings-host-parity-write", code.repoSettingsWritable === true],
       [
-        "engine-authority-read",
+        "code-engine-authority-posture",
         cloudWorker
           ? code.engineAuthorityRead === false &&
-            design.engineAuthorityRead === false
+            all(code.engineAuthorityWriteDenied, 6, true) &&
+            all(code.engineAuthorityHardlinkDenied, 6, true)
           : code.engineAuthorityRead === true &&
-            design.engineAuthorityRead === true,
+            all(code.engineAuthorityWriteDenied, 6, false) &&
+            all(code.engineAuthorityHardlinkDenied, 6, false),
       ],
       [
         "cloud-worker-identity",
@@ -224,35 +250,45 @@ async function localHostParityMain(cloudWorker = false) {
             design.workerIdentity === observed.cloudWorkerUid),
       ],
       [
-        "engine-authority-write-denial",
-        Array.isArray(code.engineAuthorityWriteDenied) &&
-          code.engineAuthorityWriteDenied.length === 6 &&
-          code.engineAuthorityWriteDenied.every(Boolean) &&
-          Array.isArray(design.engineAuthorityWriteDenied) &&
-          design.engineAuthorityWriteDenied.length === 6 &&
-          design.engineAuthorityWriteDenied.every(Boolean),
+        "design-engine-authority-read-denial",
+        all(design.engineAuthorityReadDenied, 6, true),
       ],
       [
-        "engine-authority-hardlink-denial",
-        Array.isArray(code.engineAuthorityHardlinkDenied) &&
-          code.engineAuthorityHardlinkDenied.length === 6 &&
-          code.engineAuthorityHardlinkDenied.every(Boolean) &&
-          Array.isArray(design.engineAuthorityHardlinkDenied) &&
-          design.engineAuthorityHardlinkDenied.length === 6 &&
-          design.engineAuthorityHardlinkDenied.every(Boolean),
+        "design-engine-authority-durable-write-denial",
+        observed.designEngineAuthorityPreserved === true,
+      ],
+      [
+        "design-engine-authority-hardlink-denial",
+        all(design.engineAuthorityHardlinkDenied, 6, true),
       ],
       // The one case a matching Design tree hides: git itself writing a protected
       // path. Refused on that path, with the bytes intact.
       [
         "design-git-restore-denial",
-        code.designRestoreRefused === true &&
-          code.designRestoreBytes === '{"mode":"code-protected-v2"}\n',
+        cloudWorker
+          ? code.designRestoreRefused === true &&
+            code.designRestoreBytes === '{"mode":"code-protected-v2"}\n'
+          : code.designRestoreRefused === false &&
+            code.designRestoreBytes === '{"mode":"code-protected"}\n',
       ],
+      ["design-code-read", design.codeReadable === true],
+      ["design-context-read", design.designReadable === true],
       ["design-code-write-denial", design.codeDenied === true],
-      ["design-primary-write", design.primaryWrite === true],
-      ["design-secondary-write", design.secondaryWrite === true],
-      ["design-outside-cache-write", design.outsideWrite === true],
-      ["design-canonical-git-write", design.canonicalGitWrite === true],
+      [
+        "design-directory-write-denial",
+        design.primaryDenied === true && design.secondaryDenied === true,
+      ],
+      ["design-outside-write-denial", design.outsideDenied === true],
+      [
+        "design-git-metadata-write-denial",
+        design.gitDirectoryWriteDenied === true,
+      ],
+      [
+        "design-canonical-git-write-denial",
+        design.canonicalGitWriteDenied === true,
+      ],
+      ["design-scratch-write", design.scratchWrite === true],
+      ["design-provider-state-write", all(design.providerStateWrites, 4, true)],
       ["design-preserves-code", observed.codeFileUnchangedByDesign === true],
       [
         "local-admission-fast-path",
@@ -341,7 +377,6 @@ async function localHostParityMain(cloudWorker = false) {
   process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
   if (args.has("--require-secure") && !report.secure) process.exitCode = 1;
 }
-
 
 await localHostParityMain(args.has("--cloud-worker")).catch((error) => {
   process.stderr.write(safeError(error) + "\n");

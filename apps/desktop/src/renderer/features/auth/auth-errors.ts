@@ -57,7 +57,7 @@ export function workOSSignInFailureMessage(
       typeof recoveryCode === "string" && RECOVERY_CODE_RE.test(recoveryCode)
         ? ` Recovery code: ${recoveryCode}.`
         : "";
-    return `For your security, this sign-in must be reviewed before it can be linked to your existing Zeros account. Contact hello@zeros.build.${locator}`;
+    return `Your sign-in succeeded, but the previous login identity for your Zeros account was deleted. Your account data is preserved. Signing up again won't restore access. Contact hello@zeros.build for a reviewed recovery.${locator}`;
   }
   const messages: Record<string, string> = {
     expired:

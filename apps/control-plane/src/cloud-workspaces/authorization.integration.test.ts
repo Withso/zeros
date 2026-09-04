@@ -82,7 +82,7 @@ d("cloud paid-work authorization", () => {
     });
   }
 
-  it("requires an active Pro account entitlement for Personal cloud", async () => {
+  it("keeps Personal cloud disabled even with an active Pro entitlement", async () => {
     const scope = await personalScope();
     await expect(
       withSystemTx(pool, (tx) =>
@@ -95,7 +95,7 @@ d("cloud paid-work authorization", () => {
           requireWorkspaceOwner: false,
         }),
       ),
-    ).rejects.toMatchObject({ code: "cloud_account_entitlement_required" });
+    ).rejects.toMatchObject({ code: "cloud_workspaces_not_allowed" });
 
     await withSystemTx(pool, (tx) =>
       tx.query(
@@ -105,22 +105,18 @@ d("cloud paid-work authorization", () => {
         [owner.id],
       ),
     );
-    const admitted = await withSystemTx(pool, (tx) =>
-      authorizeCloudWorkspaceOperation(tx, {
-        organizationId: scope.org_id,
-        teamId: scope.team_id,
-        actorUserId: owner.id,
-        billingOwnerUserId: owner.id,
-        workosEnabled: true,
-        requireWorkspaceOwner: false,
-      }),
-    );
-    expect(admitted).toMatchObject({
-      isPersonal: true,
-      plan: "pro",
-      entitlementScope: "account",
-      billingOwnerUserId: owner.id,
-    });
+    await expect(
+      withSystemTx(pool, (tx) =>
+        authorizeCloudWorkspaceOperation(tx, {
+          organizationId: scope.org_id,
+          teamId: scope.team_id,
+          actorUserId: owner.id,
+          billingOwnerUserId: owner.id,
+          workosEnabled: true,
+          requireWorkspaceOwner: false,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "cloud_workspaces_not_allowed" });
   });
 
   it("requires every active collaborator to hold Pro independently", async () => {

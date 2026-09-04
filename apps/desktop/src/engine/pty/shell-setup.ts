@@ -310,6 +310,8 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
   delete env.ZEROS_PTY_HOST_SCRIPT;
   delete env.ZEROS_PTY_NODE_PTY;
+  delete env.ZEROS_HOST_SUPERVISOR_RUNTIME;
+  delete env.ZEROS_HOST_SUPERVISOR_SCRIPT;
   delete env.ELECTRON_RUN_AS_NODE;
   // Drop the CHANNEL identity, one level coarser than the instance vars below.
   // Nothing in scripts/dev-instance.mjs exports this one: apps/desktop/electron/main.ts seeds

@@ -40,13 +40,10 @@ vi.mock("../../shared/ui/primitives/elements", () => ({
 vi.mock("../../features/agent/agent-history-client", () => ({
   dbDeleteChat: vi.fn(async () => {}),
 }));
-vi.mock(
-  "../../features/agent/composer-editor/context-graph-staging",
-  () => ({
-    discardQueuedContextGraphWrites: (cwd: string) =>
-      discardQueuedContextGraphWrites(cwd),
-  }),
-);
+vi.mock("../../features/agent/composer-editor/context-graph-staging", () => ({
+  discardQueuedContextGraphWrites: (cwd: string) =>
+    discardQueuedContextGraphWrites(cwd),
+}));
 vi.mock("../../platform/observability/analytics/agent-events", () => ({
   trackWorkspaceOpened: vi.fn(),
 }));
@@ -298,6 +295,31 @@ describe("createWorkspaceForProject", () => {
     );
     expect(workspaceCreate).toHaveBeenCalledWith(
       expect.objectContaining({ kind: "design" }),
+    );
+  });
+
+  it("passes the dispatcher's selected base through a Design create", async () => {
+    workspacePrepareCreate.mockResolvedValue({
+      workspaceId: "ws_design",
+      path: "/worktrees/design",
+      repoSlug: "zeros",
+      branch: "zeros/design",
+    });
+    workspaceCreate.mockResolvedValue({ status: "in-progress" });
+    reloadWorkspacesFor.mockResolvedValue(true);
+    peekWorkspacesFor.mockReturnValue([
+      workspace({ id: "ws_design", kind: "design" }),
+    ]);
+
+    await createWorkspaceForProject({
+      project,
+      dispatch: vi.fn(),
+      kind: "design",
+      baseBranch: "feature/design-system",
+    });
+
+    expect(workspaceCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ baseBranch: "feature/design-system" }),
     );
   });
 });

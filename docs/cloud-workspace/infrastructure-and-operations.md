@@ -118,20 +118,27 @@ deploy button by itself is not a supported self-hosted product.
 
 ## Controlled migration rollout
 
-`0023_cloud_workspace_engine_authority.sql` is deliberately marked
+Cloud migration filenames `0018`–`0050` existed on the feature branch before
+main released its own `0018` and `0019`. The merged runner records those legacy
+names as aliases for `0020`–`0052` instead of replaying their DDL. Migration
+`0053` then restores the permanent Personal local-only constraint. If it finds
+a legacy Personal-owned cloud workspace, it stops without deleting or
+reassigning data; move that workspace to an Organization before retrying.
+
+`0025_cloud_workspace_engine_authority.sql` is deliberately marked
 `zeros:requires-controlled-downtime`. It takes an `EXCLUSIVE` lock on
 `cloud_workspaces` before altering the engine table so a live workspace-first
 transaction cannot form a schema-lock/row-lock cycle. Reads may continue, but
 workspace row lockers are drained and blocked until that migration commits.
 
-For every environment that has not yet applied `0018`:
+For every environment that has not yet applied `0025`:
 
 1. stop API, reconciler, setup, and access-revocation processes that can mutate
    cloud workspace tables; do not use a rolling old/new process overlap;
 2. take and verify a PostgreSQL backup and record the currently deployed commit
    and migration ledger;
 3. set
-   `CONTROL_PLANE_MIGRATION_APPROVALS=0023_cloud_workspace_engine_authority.sql`
+   `CONTROL_PLANE_MIGRATION_APPROVALS=0025_cloud_workspace_engine_authority.sql`
    only on the one migration runner and apply the same reviewed commit that will
    be deployed;
 4. verify `schema_migrations`, the authority-retirement triggers, queued provider

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   createWorkOSDesktopRevocationRoutes,
@@ -79,6 +79,82 @@ describe("Railway WorkOS desktop revocation", () => {
       { subject: "user_example" },
       { subject: "user_example", after: "next" },
     ]);
+  });
+
+  it("queues a security notification only after all-device revocation succeeds", async () => {
+    const notify = vi.fn(async () => {});
+    const app = createWorkOSDesktopRevocationRoutes(provider(), {
+      onAllSessionsRevoked: notify,
+    });
+
+    const response = await app.request("/auth/desktop-revoke", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer signed-access-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ scope: "all" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(notify).toHaveBeenCalledOnce();
+    expect(notify).toHaveBeenCalledWith({
+      providerSubject: "user_example",
+      revoked: 0,
+    });
+  });
+
+  it("does not queue a notification when provider revocation fails", async () => {
+    const notify = vi.fn(async () => {});
+    const app = createWorkOSDesktopRevocationRoutes(
+      provider({
+        async listSessions() {
+          throw new Error("provider unavailable");
+        },
+      }),
+      { onAllSessionsRevoked: notify },
+    );
+
+    const response = await app.request("/auth/desktop-revoke", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer signed-access-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ scope: "all" }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(notify).not.toHaveBeenCalled();
+  });
+
+  it("keeps a successful logout successful when notification enqueue fails", async () => {
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const app = createWorkOSDesktopRevocationRoutes(provider(), {
+        async onAllSessionsRevoked() {
+          throw new Error("recipient@example.com must never reach the log");
+        },
+      });
+
+      const response = await app.request("/auth/desktop-revoke", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer signed-access-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ scope: "all" }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ revoked: 0 });
+      expect(errorLog).toHaveBeenCalledOnce();
+      expect(errorLog).toHaveBeenCalledWith(
+        "[auth] sessions-revoked notification enqueue failed",
+      );
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("validates the bounded scope before verifying the bearer", async () => {

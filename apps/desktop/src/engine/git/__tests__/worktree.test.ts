@@ -46,6 +46,7 @@ import {
   stagePaths,
   status,
   worktreesRoot,
+  designWorktreesRoot,
   migrateWorktreesToNewRoot,
 } from "..";
 import { upsertRepoByRoot } from "../../db/projects";
@@ -61,12 +62,14 @@ import {
   finishWorkspaceLifecycle,
   getWorkspaceLifecycle,
   getWorkspaceMeta,
+  insertWorkspace,
   setWorkspaceMeta,
   updateWorkspace,
   updateWorkspaceLifecycleDetails,
   updateWorkspaceLifecyclePhase,
 } from "../state";
 import { DESIGN_MODE_TRANSITION_META_KEY } from "../design-mode";
+import { withWorkspaceGitMutation } from "../mutation-lock";
 import {
   pruneOrphanArchiveSnapshots,
   pruneOrphanWorkspaceBranchOwnershipRefs,
@@ -153,6 +156,7 @@ describe("worktree lifecycle (integration)", () => {
   });
 
   it("creates a design-at-birth workspace as a full territorial checkout with the code pipeline", async () => {
+    upsertRepoByRoot({ repoRoot, repoSlug: "repo", name: "Odocs" });
     await mkdir(path.join(repoRoot, "src"), { recursive: true });
     await writeFile(path.join(repoRoot, "src", "code.ts"), "export {};\n");
     await execFileAsync("git", ["add", "src/code.ts"], { cwd: repoRoot });
@@ -178,19 +182,21 @@ describe("worktree lifecycle (integration)", () => {
       optimisticChatId: "legacy-design-chat",
     });
     const workspace = getWorkspace(created.workspaceId);
+    const designDirectory = "Odocs - Design";
 
     expect(workspace.kind).toBe("design");
     expect(workspace.agentId).toBeNull();
+    expect(designDirectoryNameFor(workspace.path)).toBe(designDirectory);
     // One root for every workspace — design is a mode, not a placement.
     expect(workspace.path.startsWith(worktreesRoot() + path.sep)).toBe(true);
     // Setup resolves for design creates too (installs write gitignored paths).
     expect(created.setupCommand).toContain("setup.sh");
     expect(
-      existsSync(path.join(workspace.path, "Zeros Design", "tokens.css")),
+      existsSync(path.join(workspace.path, designDirectory, "tokens.css")),
     ).toBe(true);
     expect(
       existsSync(
-        path.join(workspace.path, "Zeros Design", ".zeros-canvas.json"),
+        path.join(workspace.path, designDirectory, ".zeros-canvas.json"),
       ),
     ).toBe(true);
     // FULL checkout: the codebase is present and writable to code actors,
@@ -205,22 +211,20 @@ describe("worktree lifecycle (integration)", () => {
     // No sparse cone — the mode model never hides the checkout.
     const sparse = await getWorkingDirectories(workspace.path);
     expect(sparse.sparse).toBe(false);
-    expect(sparse.included).toEqual(
-      expect.arrayContaining(["Zeros Design", "src"]),
-    );
+    expect(sparse.included).toContain("src");
     const log = await execFileAsync("git", ["log", "-1", "--format=%s"], {
       cwd: workspace.path,
     });
-    expect(log.stdout.trim()).toBe("Initialize Zeros Design");
+    expect(log.stdout.trim()).toBe("ignore env");
     const dirty = await execFileAsync("git", ["status", "--porcelain"], {
       cwd: workspace.path,
     });
-    expect(dirty.stdout).toBe("");
+    expect(dirty.stdout).toContain(`${designDirectory}/`);
 
     // The shared checkout remains writable to external same-user tools. Zeros
     // code agents are isolated by their actor-scoped provider sandbox.
     await writeFile(
-      path.join(workspace.path, "Zeros Design", "scratch.html"),
+      path.join(workspace.path, designDirectory, "scratch.html"),
       "<!doctype html><html><body>Writable</body></html>\n",
     );
     // Concurrent duality: the CODEBASE is never locked — agents/terminals
@@ -229,7 +233,7 @@ describe("worktree lifecycle (integration)", () => {
     await writeFile(path.join(workspace.path, "src", "code.ts"), "writable\n");
     await writeFile(path.join(workspace.path, ".env"), "API_URL=changed\n");
     await writeFile(
-      path.join(workspace.path, "Zeros Design", "tokens.css"),
+      path.join(workspace.path, designDirectory, "tokens.css"),
       "external tool may write\n",
     );
     await deleteWorkspace({
@@ -239,8 +243,42 @@ describe("worktree lifecycle (integration)", () => {
     expect(existsSync(workspace.path)).toBe(false);
   });
 
-  it("force-adds an ignored design bootstrap without sparsifying the checkout", async () => {
-    await writeFile(path.join(repoRoot, ".gitignore"), "Zeros Design/\n");
+  it("refuses to convert an occupied first-use target into Design territory", async () => {
+    const designDirectory = "repo - Design";
+    const occupied = path.join(repoRoot, designDirectory);
+    await mkdir(occupied, { recursive: true });
+    await writeFile(path.join(occupied, "notes.txt"), "unrelated content\n");
+    await execFileAsync("git", ["add", designDirectory], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "occupied name"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
+    let createdWorkspaceId: string | null = null;
+
+    try {
+      await expect(
+        createWorkspace({ repoRoot, kind: "design" }).then((created) => {
+          createdWorkspaceId = created.workspaceId;
+          return created;
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(await readFile(path.join(occupied, "notes.txt"), "utf8")).toBe(
+        "unrelated content\n",
+      );
+      expect(existsSync(path.join(occupied, ".zeros-canvas.json"))).toBe(false);
+    } finally {
+      if (createdWorkspaceId) {
+        await deleteWorkspace({
+          workspaceId: createdWorkspaceId,
+          includeBranch: true,
+        });
+      }
+    }
+  });
+
+  it("keeps an ignored design bootstrap uncommitted without sparsifying the checkout", async () => {
+    const designDirectory = "repo - Design";
+    await writeFile(path.join(repoRoot, ".gitignore"), `${designDirectory}/\n`);
     await execFileAsync("git", ["add", ".gitignore"], { cwd: repoRoot });
     await execFileAsync("git", ["commit", "-q", "-m", "ignore designs"], {
       cwd: repoRoot,
@@ -251,19 +289,22 @@ describe("worktree lifecycle (integration)", () => {
     const sparse = await getWorkingDirectories(created.path);
     const tracked = await execFileAsync(
       "git",
-      ["ls-files", "--", "Zeros Design"],
+      ["ls-files", "--", designDirectory],
       { cwd: created.path },
     );
 
     expect(sparse.sparse).toBe(false);
-    expect(tracked.stdout).toContain("Zeros Design/tokens.css");
+    expect(tracked.stdout).toBe("");
+    expect(
+      existsSync(path.join(created.path, designDirectory, "tokens.css")),
+    ).toBe(true);
     expect(
       (
         await execFileAsync("git", ["log", "-1", "--format=%s"], {
           cwd: created.path,
         })
       ).stdout.trim(),
-    ).toBe("Initialize Zeros Design");
+    ).toBe("ignore designs");
 
     await deleteWorkspace({
       workspaceId: created.workspaceId,
@@ -271,7 +312,8 @@ describe("worktree lifecycle (integration)", () => {
     });
   });
 
-  it("suppresses checkout hooks and commits the engine-owned design bootstrap", async () => {
+  it("suppresses checkout hooks and leaves the Design bootstrap uncommitted", async () => {
+    const designDirectory = "repo - Design";
     const hook = path.join(repoRoot, ".git", "hooks", "post-checkout");
     const sentinel = path.join(workdir, "post-checkout-ran");
     await writeFile(
@@ -286,26 +328,22 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const tracked = await execFileAsync(
       "git",
-      ["ls-files", "--", "Zeros Design"],
+      ["ls-files", "--", designDirectory],
       { cwd: created.path },
     );
 
     expect(existsSync(sentinel)).toBe(false);
-    expect(tracked.stdout.trim().split("\n")).toEqual(
-      expect.arrayContaining([
-        "Zeros Design/tokens.css",
-        "Zeros Design/.zeros-canvas.json",
-        "Zeros Design/assets/.gitkeep",
-        "Zeros Design/components/.gitkeep",
-      ]),
-    );
+    expect(tracked.stdout).toBe("");
+    expect(
+      existsSync(path.join(created.path, designDirectory, "tokens.css")),
+    ).toBe(true);
     expect(
       (
         await execFileAsync("git", ["log", "-1", "--format=%s"], {
           cwd: created.path,
         })
       ).stdout.trim(),
-    ).toBe("Initialize Zeros Design");
+    ).toBe("init");
 
     await deleteWorkspace({
       workspaceId: created.workspaceId,
@@ -363,8 +401,9 @@ printf ran > '${sentinel}'
     });
     await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
     const created = await createWorkspace({ repoRoot, kind: "design" });
+    const designDirectory = designDirectoryNameFor(created.path);
     await writeFile(
-      path.join(created.path, "Zeros Design", "restored.html"),
+      path.join(created.path, designDirectory, "restored.html"),
       "<!doctype html><html><body>Restore me</body></html>\n",
     );
 
@@ -381,13 +420,13 @@ printf ran > '${sentinel}'
     expect(existsSync(path.join(restored.path, "src", "code.ts"))).toBe(true);
     expect(
       await readFile(
-        path.join(restored.path, "Zeros Design", "restored.html"),
+        path.join(restored.path, designDirectory, "restored.html"),
         "utf8",
       ),
     ).toContain("Restore me");
     await writeFile(path.join(restored.path, "README.md"), "writable\n");
     await writeFile(
-      path.join(restored.path, "Zeros Design", "tokens.css"),
+      path.join(restored.path, designDirectory, "tokens.css"),
       "external tool may write again\n",
     );
     await deleteWorkspace({
@@ -421,7 +460,7 @@ printf ran > '${sentinel}'
     const tracked = await execFileAsync("git", ["ls-files", "--", "Brand"], {
       cwd: created.path,
     });
-    expect(tracked.stdout).toContain("Brand/.zeros-canvas.json");
+    expect(tracked.stdout).toBe("");
 
     await deleteWorkspace({
       workspaceId: created.workspaceId,
@@ -462,9 +501,10 @@ printf ran > '${sentinel}'
     });
   });
 
-  it("enterDesignMode flips a code workspace without sweeping staged work into the design commit", async () => {
+  it("enterDesignMode initializes Design as uncommitted work without changing HEAD or the index", async () => {
     const created = await createWorkspace({ repoRoot });
     const workspace = getWorkspace(created.workspaceId);
+    const designDirectory = "repo - Design";
     expect(workspace.kind).toBe("code");
 
     // In-flight code work: a staged file that must SURVIVE the mode switch
@@ -472,30 +512,45 @@ printf ran > '${sentinel}'
     // unrelated work.
     await writeFile(path.join(workspace.path, "wip.ts"), "export {};\n");
     await execFileAsync("git", ["add", "wip.ts"], { cwd: workspace.path });
+    const headBefore = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], {
+        cwd: workspace.path,
+      })
+    ).stdout.trim();
 
     await enterDesignMode(workspace);
 
     const flipped = getWorkspace(created.workspaceId);
     expect(flipped.kind).toBe("design");
+    expect(designDirectoryNameFor(workspace.path)).toBe(designDirectory);
     expect(
-      existsSync(path.join(workspace.path, "Zeros Design", "tokens.css")),
+      existsSync(path.join(workspace.path, designDirectory, "tokens.css")),
     ).toBe(true);
-    const log = await execFileAsync("git", ["log", "-1", "--format=%s"], {
-      cwd: workspace.path,
-    });
-    expect(log.stdout.trim()).toBe("Initialize Zeros Design");
+    expect(
+      (
+        await execFileAsync("git", ["rev-parse", "HEAD"], {
+          cwd: workspace.path,
+        })
+      ).stdout.trim(),
+    ).toBe(headBefore);
     const staged = await execFileAsync(
       "git",
       ["diff", "--cached", "--name-only"],
       { cwd: workspace.path },
     );
     expect(staged.stdout.trim()).toBe("wip.ts");
+    const designStatus = await execFileAsync(
+      "git",
+      ["status", "--short", "-z", "--", designDirectory],
+      { cwd: workspace.path },
+    );
+    expect(designStatus.stdout).toContain(`?? ${designDirectory}/`);
     // No cone under the mode model — the checkout stays full, and the
     // codebase stays WRITABLE (agents keep working while the user designs).
     expect((await getWorkingDirectories(workspace.path)).sparse).toBe(false);
     await writeFile(path.join(workspace.path, "README.md"), "writable\n");
     await writeFile(
-      path.join(workspace.path, "Zeros Design", "tokens.css"),
+      path.join(workspace.path, designDirectory, "tokens.css"),
       "external tool may write\n",
     );
 
@@ -505,29 +560,16 @@ printf ran > '${sentinel}'
     });
   });
 
-  it("retires old-authority agents before first Design creation", async () => {
+  it("publishes first Design identity without an authority transition", async () => {
     const created = await createWorkspace({ repoRoot });
     const workspace = getWorkspace(created.workspaceId);
-    const events: string[] = [];
-    // Simulate a stale synchronous consumer identity. Merely previewing first
-    // use must not publish the prospective Design territory before the engine
-    // has acquired its process-start block and drained old-authority agents.
+    const designDirectory = "repo - Design";
     primeDesignDirectoryName(workspace.path, "Old Design");
 
-    await enterDesignMode(workspace, {
-      withFirstTerritoryCreation: async (designDirectory, mutation) => {
-        events.push("transition-acquired");
-        expect(designDirectory).toBe(path.join(workspace.path, "Zeros Design"));
-        expect(existsSync(designDirectory)).toBe(false);
-        expect(designDirectoryNameFor(workspace.path)).toBe("Old Design");
-        await mutation();
-        expect(designDirectoryNameFor(workspace.path)).toBe("Zeros Design");
-        events.push("transition-released");
-      },
-    });
+    await enterDesignMode(workspace);
 
-    expect(events).toEqual(["transition-acquired", "transition-released"]);
-    expect(existsSync(path.join(workspace.path, "Zeros Design"))).toBe(true);
+    expect(existsSync(path.join(workspace.path, designDirectory))).toBe(true);
+    expect(designDirectoryNameFor(workspace.path)).toBe(designDirectory);
     expect(getWorkspace(created.workspaceId).kind).toBe("design");
 
     await deleteWorkspace({
@@ -536,30 +578,33 @@ printf ran > '${sentinel}'
     });
   });
 
-  it("retires old-authority agents before adopting an untracked default Design seed", async () => {
+  it("adopts an untracked default Design seed without staging it", async () => {
     const created = await createWorkspace({ repoRoot });
     const workspace = getWorkspace(created.workspaceId);
     const seeded = path.join(workspace.path, "Zeros Design");
     await mkdir(seeded, { recursive: true });
     await writeFile(path.join(seeded, ".zeros-canvas.json"), "{}\n");
-    const events: string[] = [];
+    const headBefore = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], {
+        cwd: workspace.path,
+      })
+    ).stdout.trim();
 
-    await enterDesignMode(workspace, {
-      withFirstTerritoryCreation: async (designDirectory, mutation) => {
-        events.push("transition-acquired");
-        expect(designDirectory).toBe(seeded);
-        expect(existsSync(designDirectory)).toBe(true);
-        await mutation();
-      },
-    });
+    await enterDesignMode(workspace);
 
-    expect(events).toEqual(["transition-acquired"]);
     const tracked = await execFileAsync(
       "git",
       ["ls-files", "--", "Zeros Design/.zeros-canvas.json"],
       { cwd: workspace.path },
     );
-    expect(tracked.stdout.trim()).toBe("Zeros Design/.zeros-canvas.json");
+    expect(tracked.stdout.trim()).toBe("");
+    expect(
+      (
+        await execFileAsync("git", ["rev-parse", "HEAD"], {
+          cwd: workspace.path,
+        })
+      ).stdout.trim(),
+    ).toBe(headBefore);
 
     await deleteWorkspace({
       workspaceId: created.workspaceId,
@@ -567,29 +612,39 @@ printf ran > '${sentinel}'
     });
   });
 
-  it("exitDesignMode returns a writable code checkout and dissolves a legacy cone", async () => {
+  it("exitDesignMode preserves a user-managed sparse checkout without creating an engine shape", async () => {
     await mkdir(path.join(repoRoot, "src"), { recursive: true });
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
     await writeFile(path.join(repoRoot, "src", "code.ts"), "export {};\n");
-    await execFileAsync("git", ["add", "src/code.ts"], { cwd: repoRoot });
-    await execFileAsync("git", ["commit", "-q", "-m", "add code"], {
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await execFileAsync("git", ["add", "src", "Zeros Design"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "code and design"], {
       cwd: repoRoot,
     });
     await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
 
-    const created = await createWorkspace({ repoRoot, kind: "design" });
-    // Simulate a pre-mode build's cone so exit has legacy state to dissolve.
-    await setWorkingDirectories(created.path, ["Zeros Design"], {
+    const created = await createWorkspace({ repoRoot });
+    await setWorkingDirectories(created.path, ["src"], {
       forceSparse: true,
     });
-    expect(existsSync(path.join(created.path, "src", "code.ts"))).toBe(false);
+    expect(existsSync(path.join(created.path, "Zeros Design"))).toBe(false);
+    updateWorkspace(created.workspaceId, { kind: "design" });
 
     await exitDesignMode(getWorkspace(created.workspaceId));
 
     const flipped = getWorkspace(created.workspaceId);
     expect(flipped.kind).toBe("code");
-    // Legacy cone dissolved: the codebase is materialized again.
     expect(existsSync(path.join(created.path, "src", "code.ts"))).toBe(true);
-    expect((await getWorkingDirectories(created.path)).sparse).toBe(false);
+    expect(existsSync(path.join(created.path, "Zeros Design"))).toBe(false);
+    expect(await getWorkingDirectories(created.path)).toMatchObject({
+      sparse: true,
+      included: ["src"],
+    });
     // Writable again on every platform (the unlock sweep ran).
     await writeFile(path.join(created.path, "README.md"), "writable\n");
 
@@ -597,6 +652,300 @@ printf ran > '${sentinel}'
       workspaceId: created.workspaceId,
       includeBranch: true,
     });
+  });
+
+  it("dissolves only the exact sparse cone owned by a legacy Design workspace", async () => {
+    await mkdir(path.join(repoRoot, "src"), { recursive: true });
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+    await writeFile(path.join(repoRoot, "src", "code.ts"), "export {};\n");
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await execFileAsync("git", ["add", "src", "Zeros Design"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "legacy content"], {
+      cwd: repoRoot,
+    });
+    const legacyPath = path.join(
+      designWorktreesRoot(),
+      "repo",
+      "legacy-design",
+    );
+    await mkdir(path.dirname(legacyPath), { recursive: true });
+    await execFileAsync(
+      "git",
+      ["worktree", "add", "-q", "-b", "legacy-design", legacyPath, "main"],
+      { cwd: repoRoot },
+    );
+    await setWorkingDirectories(legacyPath, ["Zeros Design"], {
+      forceSparse: true,
+    });
+    insertWorkspace({
+      id: "ws_legacy-design-cone",
+      kind: "design",
+      organizationId: null,
+      placement: "local",
+      repoSlug: "repo",
+      repoRoot,
+      branch: "legacy-design",
+      baseBranch: "main",
+      path: legacyPath,
+      status: "in-progress",
+      createdAt: Date.now(),
+      archivedAt: null,
+      stashRef: null,
+      archivedHead: null,
+      archiveSnapshot: null,
+      prNumber: null,
+      prState: null,
+      prUrl: null,
+      agentId: null,
+      lastActiveAt: null,
+      setupState: null,
+    });
+
+    try {
+      expect(existsSync(path.join(legacyPath, "src", "code.ts"))).toBe(false);
+      await exitDesignMode(getWorkspace("ws_legacy-design-cone"));
+      expect(await getWorkingDirectories(legacyPath)).toMatchObject({
+        sparse: false,
+        included: expect.arrayContaining(["src", "Zeros Design"]),
+      });
+      expect(existsSync(path.join(legacyPath, "src", "code.ts"))).toBe(true);
+    } finally {
+      deleteWorkspaceRow("ws_legacy-design-cone");
+      await execFileAsync(
+        "git",
+        ["worktree", "remove", "--force", legacyPath],
+        {
+          cwd: repoRoot,
+        },
+      ).catch(() => undefined);
+      await execFileAsync("git", ["branch", "-D", "legacy-design"], {
+        cwd: repoRoot,
+      }).catch(() => undefined);
+    }
+  });
+
+  it("ignores the legacy sparse setting when switching Code and Design views", async () => {
+    const previousSettingsDir = process.env.ZEROS_USER_SETTINGS_DIR;
+    const settingsDir = path.join(workdir, "user-settings-sparse-roundtrip");
+    process.env.ZEROS_USER_SETTINGS_DIR = settingsDir;
+    await mkdir(settingsDir, { recursive: true });
+    await writeFile(
+      path.join(settingsDir, "settings.toml"),
+      '[design.isolation]\nmode = "sparse"\n',
+    );
+    await mkdir(path.join(repoRoot, "src"), { recursive: true });
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+    await writeFile(path.join(repoRoot, "src", "code.ts"), "export {};\n");
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await execFileAsync("git", ["add", "src", "Zeros Design"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "code and design"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
+
+    const created = await createWorkspace({ repoRoot, kind: "design" });
+    try {
+      await exitDesignMode(getWorkspace(created.workspaceId));
+
+      expect(getWorkspace(created.workspaceId).kind).toBe("code");
+      expect(existsSync(path.join(created.path, "src", "code.ts"))).toBe(true);
+      expect(existsSync(path.join(created.path, "Zeros Design"))).toBe(true);
+
+      await writeFile(
+        path.join(created.path, "src", "code.ts"),
+        "export const changed = true;\n",
+      );
+      await stagePaths({
+        workspaceId: created.workspaceId,
+        paths: ["src/code.ts"],
+      });
+      await expect(
+        commit({
+          workspaceId: created.workspaceId,
+          message: "change code with Design live",
+          authority: "code",
+        }),
+      ).resolves.toMatchObject({ branch: created.branch });
+
+      await enterDesignMode(getWorkspace(created.workspaceId));
+      expect(getWorkspace(created.workspaceId).kind).toBe("design");
+      expect(
+        existsSync(
+          path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
+        ),
+      ).toBe(true);
+    } finally {
+      if (previousSettingsDir === undefined) {
+        delete process.env.ZEROS_USER_SETTINGS_DIR;
+      } else {
+        process.env.ZEROS_USER_SETTINGS_DIR = previousSettingsDir;
+      }
+      await deleteWorkspace({
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("keeps nested recognized Design roots materialized in Code view", async () => {
+    await mkdir(path.join(repoRoot, "Zeros Design", "Nested Design"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await writeFile(
+      path.join(
+        repoRoot,
+        "Zeros Design",
+        "Nested Design",
+        ".zeros-canvas.json",
+      ),
+      "{}\n",
+    );
+    await execFileAsync("git", ["add", "Zeros Design"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "nested designs"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
+
+    const created = await createWorkspace({ repoRoot, kind: "design" });
+    try {
+      await expect(
+        exitDesignMode(getWorkspace(created.workspaceId)),
+      ).resolves.toBeUndefined();
+      expect(existsSync(path.join(created.path, "Zeros Design"))).toBe(true);
+    } finally {
+      await deleteWorkspace({
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("enters the configured Design root with multiple Design documents", async () => {
+    await Promise.all([
+      mkdir(path.join(repoRoot, "src"), { recursive: true }),
+      mkdir(path.join(repoRoot, "Product Design"), { recursive: true }),
+      mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true }),
+      mkdir(path.join(repoRoot, ".zeros"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(path.join(repoRoot, "src", "code.ts"), "export {};\n"),
+      writeFile(
+        path.join(repoRoot, "Product Design", ".zeros-canvas.json"),
+        "{}\n",
+      ),
+      writeFile(
+        path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      ),
+      writeFile(
+        path.join(repoRoot, ".zeros", "settings.toml"),
+        '[design]\ndirectory = "Product Design"\n',
+      ),
+    ]);
+    await execFileAsync("git", ["add", "-A"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "two designs"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["push", "-q"], { cwd: repoRoot });
+
+    const created = await createWorkspace({ repoRoot });
+    try {
+      await enterDesignMode(getWorkspace(created.workspaceId));
+
+      expect(getWorkspace(created.workspaceId).kind).toBe("design");
+      expect(designDirectoryNameFor(created.path)).toBe("Product Design");
+      expect(
+        existsSync(
+          path.join(created.path, "Product Design", ".zeros-canvas.json"),
+        ),
+      ).toBe(true);
+      expect(
+        existsSync(
+          path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
+        ),
+      ).toBe(true);
+    } finally {
+      await deleteWorkspace({
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("keeps uncommitted Design work live through Code view without a commit", async () => {
+    const created = await createWorkspace({ repoRoot, kind: "design" });
+    const designDirectory = designDirectoryNameFor(created.path);
+    const canvas = path.join(
+      created.path,
+      designDirectory,
+      ".zeros-canvas.json",
+    );
+    const dirty = '{"dirty":true}\n';
+    const frame = path.join(created.path, designDirectory, "frame.html");
+    await writeFile(canvas, dirty);
+    await writeFile(frame, "<main>draft</main>\n");
+    const headBefore = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], {
+        cwd: created.path,
+      })
+    ).stdout.trim();
+
+    try {
+      await expect(
+        exitDesignMode(getWorkspace(created.workspaceId)),
+      ).resolves.toBeUndefined();
+      expect(getWorkspace(created.workspaceId).kind).toBe("code");
+      expect(existsSync(path.join(created.path, designDirectory))).toBe(true);
+      expect(
+        (
+          await execFileAsync(
+            "git",
+            ["status", "--short", "-z", "--", designDirectory],
+            { cwd: created.path },
+          )
+        ).stdout,
+      ).toContain(`${designDirectory}/`);
+      expect(await readFile(canvas, "utf8")).toBe(dirty);
+      expect(await readFile(frame, "utf8")).toBe("<main>draft</main>\n");
+      expect(
+        (
+          await execFileAsync("git", ["rev-parse", "HEAD"], {
+            cwd: created.path,
+          })
+        ).stdout.trim(),
+      ).toBe(headBefore);
+
+      await enterDesignMode(getWorkspace(created.workspaceId));
+      expect(getWorkspace(created.workspaceId).kind).toBe("design");
+      expect(await readFile(canvas, "utf8")).toBe(dirty);
+      expect(await readFile(frame, "utf8")).toBe("<main>draft</main>\n");
+      expect(
+        (
+          await execFileAsync("git", ["rev-parse", "HEAD"], {
+            cwd: created.path,
+          })
+        ).stdout.trim(),
+      ).toBe(headBefore);
+    } finally {
+      await deleteWorkspace({
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
   });
 
   it("renameDesignDirectory moves the folder and pointer in one commit, refusing live design workspaces", async () => {
@@ -656,6 +1005,53 @@ printf ran > '${sentinel}'
     expect(dirty.stdout).toBe("");
   });
 
+  it("serializes a Design-directory rename with repository Git mutations", async () => {
+    const designDir = path.join(repoRoot, "Zeros Design");
+    await mkdir(designDir, { recursive: true });
+    await writeFile(
+      path.join(designDir, ".zeros-canvas.json"),
+      '{"version":2,"frames":{}}\n',
+    );
+    await writeFile(path.join(designDir, "tokens.css"), "/* t */\n");
+    await execFileAsync("git", ["add", "Zeros Design"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "designs"], {
+      cwd: repoRoot,
+    });
+
+    let release!: () => void;
+    let entered!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocker = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const held = withWorkspaceGitMutation(repoRoot, async () => {
+      entered();
+      await blocker;
+    });
+    await admitted;
+
+    let settled = false;
+    const renaming = renameDesignDirectory({
+      repoRoot,
+      from: "Zeros Design",
+      to: "Brand",
+    }).finally(() => {
+      settled = true;
+    });
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(settled).toBe(false);
+      expect(existsSync(path.join(repoRoot, "Brand"))).toBe(false);
+    } finally {
+      release();
+      await held;
+      await renaming.catch(() => undefined);
+    }
+    await expect(renaming).resolves.toMatchObject({ committedPointer: true });
+  });
+
   it("renames a Design folder whose literal name contains Git pathspec bytes", async () => {
     const literalName = "Design[1]";
     const literalDir = path.join(repoRoot, literalName);
@@ -674,12 +1070,7 @@ printf ran > '${sentinel}'
     ]);
     await execFileAsync(
       "git",
-      [
-        "add",
-        "--",
-        `:(literal)${literalName}`,
-        ":(literal)Design1",
-      ],
+      ["add", "--", `:(literal)${literalName}`, ":(literal)Design1"],
       { cwd: repoRoot },
     );
     await execFileAsync("git", ["commit", "-q", "-m", "design fixtures"], {
@@ -727,12 +1118,7 @@ printf ran > '${sentinel}'
     ]);
     await execFileAsync(
       "git",
-      [
-        "add",
-        "--",
-        `:(literal)${literalName}`,
-        ":(literal)Design1",
-      ],
+      ["add", "--", `:(literal)${literalName}`, ":(literal)Design1"],
       { cwd: repoRoot },
     );
     await execFileAsync("git", ["commit", "-q", "-m", "literal design"], {
@@ -1876,6 +2262,40 @@ printf ran > '${sentinel}'
     expect(ws.status).toBe("in-progress");
     expect(ws.stashRef).toBeNull();
     expect(ws.archiveSnapshot).toBe(result.archiveSnapshot);
+  });
+
+  it("includes a live uncommitted Design draft in archive and restore", async () => {
+    const created = await createWorkspace({ repoRoot, kind: "design" });
+    const designDirectory = designDirectoryNameFor(created.path);
+    const canvas = path.join(
+      created.path,
+      designDirectory,
+      ".zeros-canvas.json",
+    );
+    const frame = path.join(created.path, designDirectory, "draft.html");
+    await writeFile(canvas, '{"uncommitted":true}\n');
+    await writeFile(frame, "<main>archive me</main>\n");
+    const headBefore = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: created.path })
+    ).stdout.trim();
+    updateWorkspace(created.workspaceId, { kind: "code" });
+    expect(existsSync(path.join(created.path, designDirectory))).toBe(true);
+
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const restored = await restoreWorkspace(created.workspaceId);
+
+    expect(await readFile(canvas, "utf8")).toBe('{"uncommitted":true}\n');
+    expect(await readFile(frame, "utf8")).toBe("<main>archive me</main>\n");
+    expect(
+      (
+        await execFileAsync("git", ["rev-parse", "HEAD"], {
+          cwd: restored.path,
+        })
+      ).stdout.trim(),
+    ).toBe(headBefore);
   });
 
   it("awaits exact watcher retirement before moving an archived checkout", async () => {

@@ -67,9 +67,8 @@ Core environment variables:
 | `WORKOS_API_KEY`         | WorkOS server API key; Railway-only                                                                                                              |
 | `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only                                                                                |
 | `WORKOS_WEBHOOK_SECRET`  | Exact WorkOS endpoint signing secret; Railway-only                                                                                               |
-| `ZEPTOMAIL_TOKEN`        | Optional Send Mail Token for Zeros security notifications and the Auth0 invitation rollback path                                                 |
-| `EMAIL_FROM`             | Optional ZeptoMail security/rollback sender, for example `Zeros <hello@zeros.build>`                                                             |
-| `ZEPTOMAIL_API_URL`      | Optional regional ZeptoMail API URL; defaults to the deployment's India endpoint                                                                 |
+| `RESEND_API_KEY`         | Optional Railway-only, sending-only Resend key for Zeros product/security notifications and the Auth0 invitation rollback path                   |
+| `EMAIL_FROM`             | Optional verified Resend sender, for example `Zeros <notifications@updates.zeros.build>`                                                         |
 | `ZEROS_SELF_HOSTED`      | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
 | `AUTH0_DOMAIN`           | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent                                                                      |
 | `PORT`                   | HTTP port, default `8080`                                                                                                                        |
@@ -287,6 +286,16 @@ succeeded. Inspect the bounded error code and current provider/local object,
 repair the root cause, then use a reviewed replay/requeue procedure. A public
 `/healthz` success proves HTTP/database availability only; it is not proof that
 provider synchronization or email delivery is current.
+
+Resend delivery is at-least-once from the durable outbox and uses the outbox
+UUID as Resend's 24-hour idempotency key. The accepted Resend message ID is
+stored on the row for provider-log correlation. Provider migrations never
+replay old rows implicitly: migration `0019` preserves unfinished ZeptoMail
+rows as `dead`/`legacy_zeptomail`; a reviewed replay creates a new
+Resend-owned row instead of changing the historical provider field. Keep open
+and click tracking disabled for security notifications, restrict every runtime
+key to sending from the exact verified domain, and use a separate key per
+deployment channel.
 
 ## Organization API
 

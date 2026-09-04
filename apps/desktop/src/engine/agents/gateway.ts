@@ -54,7 +54,9 @@ import {
   resolveDesignDirectoryPointerState,
 } from "../design/directory";
 import {
+  DEFAULT_DESIGN_DIRECTORY_NAME,
   DESIGN_CANVAS_FILE,
+  designDirectoryNameFor,
   primeDesignDirectoryName,
 } from "../design/directory-registry";
 import {
@@ -83,6 +85,8 @@ import {
 import { removeSessionDir, sessionsRoot } from "./session-paths";
 import {
   buildCodeAgentDesignTerritoryNotice,
+  buildDesignAgentNotice,
+  effectiveCodeAgentDesignDirectories,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   wrapSystemInstruction,
@@ -139,23 +143,18 @@ import {
   AdmissionCancelledError,
   type BoundaryTerritoryContributionSnapshot,
   type BoundaryRequest,
-  type ContainerWorkerRequest,
   type ExecutionBoundary,
   type PreparedBoundary,
 } from "./containment/types";
-import {
-  ZsrExecutionBoundary,
-  resumeSharedContainerWorkerIdling,
-  stopIdleSharedContainerWorkers,
-  suspendSharedContainerWorkerIdling,
-} from "./containment/zsr-boundary";
+import { HostExecutionBoundary } from "./containment/host-boundary";
+import { RoutingExecutionBoundary } from "./containment/routing-boundary";
+import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
 import { UtilityBoundaryPool } from "./containment/utility-boundary-pool";
 import {
   WarmSessionBoundaryPool,
   warmSessionBoundariesEnabled,
 } from "./containment/warm-session-boundary-pool";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
-import { findOrbStackCli } from "./containment/macos-orbstack-container-worker";
 import {
   localPreviewGatewayFactory,
   type BoundaryPreviewGateway,
@@ -164,11 +163,10 @@ import {
 } from "./containment/zsr-preview-gateway";
 
 /** Provider startup is a control-plane operation, not a model turn. Keep its
- * deadline below the renderer's 120s admission ceiling so the gateway still
+ * deadline below the renderer's admission ceiling so the gateway still
  * has time to revoke capabilities, stop the adapter, and prove the kernel
- * boundary retired. Boundary preparation is intentionally outside this clock:
- * a qualified cold private-container path may take longer but is itself
- * bounded by its backend. */
+ * boundary retired. Boundary preparation is intentionally outside this clock
+ * because kernel-boundary recovery has its own backend deadline. */
 const ADAPTER_START_TIMEOUT_MS = 90_000;
 
 async function awaitAdapterStartup<T>(options: {
@@ -227,7 +225,7 @@ async function awaitAdapterStartup<T>(options: {
             `${options.agentId} ${options.stage} startup timed out after ` +
             `${Math.round(ADAPTER_START_TIMEOUT_MS / 1_000)} seconds.`,
           advice:
-            "Retry once. If startup times out again, open the engine log and check the provider's contained-host diagnostics.",
+            "Retry once. If startup times out again, open the engine log and check the provider process diagnostics.",
         }),
       );
     }, ADAPTER_START_TIMEOUT_MS);
@@ -251,50 +249,10 @@ function boundaryRequiresProviderAuthentication(
   ].some((message) => error.message.includes(message));
 }
 
-/** Select a local OCI implementation, never an ambient daemon endpoint. On
- * Linux the worker is launched later inside the already-projected ZSR domain,
- * so the executable has no more filesystem/network authority than the agent. */
-export function deriveContainerWorker(
-  env: Readonly<Record<string, string>> | undefined,
-): ContainerWorkerRequest | undefined {
-  if (!env) return undefined;
-  if (process.platform === "darwin") {
-    const executable = findOrbStackCli(env);
-    return executable
-      ? { runtime: "podman", backend: "orbstack-machine", executable }
-      : undefined;
-  }
-  if (process.platform !== "linux") return undefined;
-  for (const directory of (env.PATH ?? "").split(path.delimiter)) {
-    if (!directory || !path.isAbsolute(directory)) continue;
-    const candidate = path.join(directory, "podman");
-    try {
-      // Resolve symlinks before handing the path to the strict supervisor. The
-      // target still runs as untrusted worker bytes inside ZSR.
-      const executable = realpathSync(candidate);
-      const metadata = lstatSync(executable);
-      if (
-        metadata.isFile() &&
-        !metadata.isSymbolicLink() &&
-        metadata.mode & 0o111
-      ) {
-        return {
-          runtime: "podman",
-          backend: "embedded-linux",
-          executable,
-        };
-      }
-    } catch {
-      // Keep searching the exact PATH.
-    }
-  }
-  return undefined;
-}
-
 /** Whether the normal child environment advertises a container workflow that
- * ZSR must preserve. Detection is intentionally capability-shaped: endpoint
- * variables and familiar CLIs count, but their ambient daemon authority is
- * never forwarded. */
+ * a kernel-isolated actor may not preserve. Detection is intentionally
+ * capability-shaped: endpoint variables and familiar CLIs count. Native Code
+ * sessions keep those capabilities untouched. */
 export function expectsContainerWorkflow(
   env: Readonly<Record<string, string>> | undefined,
 ): boolean {
@@ -354,9 +312,9 @@ function canonicalExecutable(candidate: string): string | null {
   }
 }
 
-/** Resolve a provider command before the ZSR supervisor is launched. The
- * supervisor accepts only absolute commands, and Linux's hidden-root policy
- * must know the executable's exact read projection at admission time. */
+/** Resolve a provider command before the selected lifecycle supervisor is
+ * launched. Both the native process owner and ZSR accept only absolute
+ * commands, so resolution happens before admission. */
 function resolveProviderExecutable(
   binary: string,
   env: Readonly<Record<string, string>> | undefined,
@@ -402,7 +360,7 @@ function normalizeProviderSpawn<
   };
 }
 
-export function agentTerritoryIdentity(
+export function agentTerritoryAuthorityIdentity(
   territory: AgentFilesystemTerritory | undefined,
 ): string | null {
   if (!territory) return null;
@@ -425,14 +383,56 @@ export function agentTerritoryIdentity(
   });
 }
 
+export function agentTerritoryIdentity(
+  territory: AgentFilesystemTerritory | undefined,
+): string | null {
+  return agentTerritoryAuthorityIdentity(territory);
+}
+
 const MAX_ADDITIONAL_TERRITORY_ROOTS = 32;
 
 interface ResolvedTerritorySet {
   territory: AgentFilesystemTerritory | undefined;
+  /** Primary and explicitly attached Code owners. Deny-only registered
+   * siblings stay out: registration is not a cross-workspace read grant. */
+  contextTerritories: readonly AgentFilesystemTerritory[];
   registeredDesignAuthorityIdentity: string | null;
   contributions: readonly BoundaryTerritoryContributionSnapshot[];
   additionalRoots: readonly string[];
   additionalGitWorkspaceRoots: readonly string[];
+  /** Non-fatal orientation defects observed only by unrestricted native Code.
+   * They are surfaced to the provider's diagnostics but never select another
+   * backend or fail admission. */
+  nativeContextDiagnostics?: readonly string[];
+}
+
+export function codeTerritoryOwners(
+  territories: readonly AgentFilesystemTerritory[],
+): NonNullable<BoundaryRequest["codeTerritoryOwners"]> {
+  const protectedByOwner = new Map<string, Set<string>>();
+  for (const territory of territories) {
+    const workspaceRoot = path.resolve(territory.workspaceRoot);
+    const protectedDirectories =
+      protectedByOwner.get(workspaceRoot) ?? new Set<string>();
+    for (const candidate of territory.protectedDesignDirectories) {
+      const absoluteCandidate = path.resolve(candidate);
+      if (!pathInsideOrEqual(absoluteCandidate, workspaceRoot)) continue;
+      protectedDirectories.add(absoluteCandidate);
+    }
+    if (protectedDirectories.size > 0) {
+      protectedByOwner.set(workspaceRoot, protectedDirectories);
+    }
+  }
+  return [...protectedByOwner]
+    .map(([workspaceRoot, protectedDirectories]) => ({
+      workspaceRoot,
+      protectedDesignDirectories: [...protectedDirectories].sort(
+        (left, right) => left.localeCompare(right),
+      ),
+    }))
+    .sort((left, right) =>
+      left.workspaceRoot.localeCompare(right.workspaceRoot),
+    );
 }
 
 export interface RegisteredCodeTerritoryOwner {
@@ -844,12 +844,11 @@ export function shouldRepollInitialize(init: InitializeResponse): boolean {
   );
 }
 
-/** Resolve the active Design subtree for a code actor at admission time.
- * Missing Design content means there is no territory to carve out yet. An
- * existing target is validated segment-by-segment without following symlinks,
- * then every recognized real subtree is added to the immutable provider
- * profile. The provider sandbox is the promised boundary; the shared checkout
- * receives no persistent ACL. */
+/** Resolve the active Design subtree for a Code actor at admission time.
+ * Missing Design content means there is no territory to describe yet. Existing
+ * targets are validated segment-by-segment without following symlinks, then
+ * every recognized real subtree is attached to the session's semantic
+ * territory. The shared checkout receives no ACL or sparse-checkout rewrite. */
 async function canonicalTerritoryWorkspaceRoot(opts: {
   cwd: string;
   workspaceRoot?: string;
@@ -899,11 +898,10 @@ async function gitWorkspaceOwner(cwd: string): Promise<string | null> {
   }
 }
 
-/** Provider profiles are keyed by physical absolute paths. Refuse a Design
- * session reached through a symlink or case alias instead of assuming every
- * provider canonicalizes allow and deny rules identically. Ordinary code-only
- * workspaces keep their historical behavior because this runs only after a
- * prospective Design subtree exists. */
+/** ZSR profiles are keyed by physical absolute paths. Refuse a contained
+ * Design session (and qualified cloud boundary) reached through a symlink or
+ * case alias instead of assuming every policy backend canonicalizes allow and
+ * deny rules identically. Native local Code never calls this validator. */
 async function assertCanonicalTerritoryPaths(
   workspaceRoot: string,
   cwd: string,
@@ -925,6 +923,7 @@ async function buildCodeAgentTerritory(opts: {
   cwd: string;
   workspaceRoot?: string;
   repoRoot?: string;
+  reserveManagedDefault?: boolean;
 }): Promise<AgentFilesystemTerritory | undefined> {
   const workspaceRoot = await canonicalTerritoryWorkspaceRoot(opts);
   const repoRoot = path.resolve(opts.repoRoot ?? workspaceRoot);
@@ -937,14 +936,13 @@ async function buildCodeAgentTerritory(opts: {
       "The configured Design directory is not a safe repo-relative path.",
     );
   }
-  // Engine memory of what previous admissions protected here. Both halves of the
-  // repository evidence — the marker in Git's index/HEAD and the `[design]
-  // directory` pointer — are agent-writable under host parity, so an agent that
-  // removes them would otherwise hand the NEXT session an unprotected Design
-  // folder. Sticky names are reported only while their directory still exists on
-  // disk (see design/recognition-store.ts), so remembering can protect real
-  // content but can never demand a folder the user legitimately deleted.
-  const sticky = await stickyRecognizedDesignDirectories(workspaceRoot);
+  // Engine memory of what previous admissions protected here. Both repository
+  // evidence sources — the marker in Git and the `[design] directory` pointer
+  // — can change through ordinary Git, so sticky recognition keeps an existing
+  // live Design root protected across that transition.
+  const sticky = [
+    ...new Set(await stickyRecognizedDesignDirectories(workspaceRoot)),
+  ].sort((left, right) => left.localeCompare(right));
   // Publication happens only after the complete territory has been validated.
   // Priming before the existence check could turn a failed admission into
   // shared mutable registry state. The sticky names go in so the ACTIVE Design
@@ -962,6 +960,18 @@ async function buildCodeAgentTerritory(opts: {
   ].sort((left, right) => left.localeCompare(right));
   const hasExistingOrRecognizedDesign =
     existsSync(designDirectory) || recognized.length > 0;
+  const cwdOwner = await gitWorkspaceOwner(opts.cwd);
+  // Managed Git workspaces reserve their prospective default before a Code
+  // provider starts. That makes first-time Design initialization a pure UI
+  // view change: every already-running Code session was admitted with the same
+  // read-only subtraction. Neutral provider probe roots and unmanaged/aliased
+  // folders remain untouched.
+  const reserveManagedDefault =
+    !hasExistingOrRecognizedDesign &&
+    !pointer.configured &&
+    opts.reserveManagedDefault !== false &&
+    opts.repoRoot !== undefined &&
+    cwdOwner === workspaceRoot;
 
   // A caller-provided outer workspace cannot erase a more-specific Git
   // owner's Design policy. Git treats nested repositories/submodules as
@@ -970,7 +980,6 @@ async function buildCodeAgentTerritory(opts: {
   // authority; the chat must be rebound to the exact owner so settings, Git
   // metadata, and the protected subtree are resolved as one unit. Preserve
   // historical behavior for genuinely code-only nested folders.
-  const cwdOwner = await gitWorkspaceOwner(opts.cwd);
   if (cwdOwner && cwdOwner !== workspaceRoot) {
     const nestedPointer = await resolveDesignDirectoryPointerState({
       repoRoot: cwdOwner,
@@ -994,11 +1003,17 @@ async function buildCodeAgentTerritory(opts: {
       throw new Error(
         "The agent cwd belongs to a nested Git owner that differs from the " +
           "declared workspace; bind the chat to that exact repository before " +
-          "starting a Design-contained code agent.",
+          "starting a Code agent with Design context.",
       );
     }
   }
-  if (!hasExistingOrRecognizedDesign && !pointer.configured) return undefined;
+  if (
+    !hasExistingOrRecognizedDesign &&
+    !pointer.configured &&
+    !reserveManagedDefault
+  ) {
+    return undefined;
+  }
 
   await assertCanonicalTerritoryPaths(workspaceRoot, opts.cwd);
 
@@ -1020,7 +1035,10 @@ async function buildCodeAgentTerritory(opts: {
             "finish or revert the filesystem/Git transition before starting a code agent.",
         );
       }
-      if (pointer.configured && candidate === pointer.directory) {
+      if (
+        candidate === designName &&
+        (pointer.configured || reserveManagedDefault)
+      ) {
         await assertSafeProspectiveDesignDirectory(workspaceRoot, candidate);
         protectedDesignDirectories.push(candidatePath);
         continue;
@@ -1037,42 +1055,11 @@ async function buildCodeAgentTerritory(opts: {
     );
   }
 
-  // A Git index is one monolithic file: no OS sandbox can permit "stage code"
-  // while forbidding "stage Design" inside that same index.
-  //
-  // Host parity keeps canonical Git metadata writable so normal staging,
-  // commits, fetches, and pushes work. The consequences are explicit: a commit
-  // can carry synthetic Design content into history, and mixed native path
-  // operations may update code before the Design write is refused. Design bytes
-  // in the worktree remain protected by the actor fence.
-  const gitMetadata = new Set<string>();
-  const dotGit = path.join(workspaceRoot, ".git");
-  if (existsSync(dotGit)) gitMetadata.add(dotGit);
-  for (const arg of ["--absolute-git-dir", "--git-common-dir"] as const) {
-    try {
-      const { stdout } = await runGit(workspaceRoot, ["rev-parse", arg]);
-      const value = stdout.trim();
-      if (value) {
-        gitMetadata.add(
-          path.resolve(
-            path.isAbsolute(value) ? value : path.join(workspaceRoot, value),
-          ),
-        );
-      }
-    } catch {
-      // discoverDesignDirectories already established the repository identity;
-      // a failure here is not safely ignorable because it would reopen Git.
-      throw new Error(
-        "Couldn't resolve read-only Git metadata for this workspace.",
-      );
-    }
-  }
-  // What decides, for the NEXT session, whether these folders are Design at all:
-  // the `.zeros` settings directories that hold the `[design] directory` pointer,
-  // and the `.zeros-canvas.json` markers Git recognition reads. Host parity
-  // leaves them writable because they are committed repository content; denying
-  // `.zeros/settings.toml` broke any `git pull` that had to rewrite it) and closes
-  // de-registration in engine state instead, via design/recognition-store.ts.
+  // Recognition inputs stay explicit for lifecycle comparison, but they are
+  // ordinary repository content. Code actors retain normal Git and settings
+  // authority. The Design roots remain live and readable, while native staging,
+  // committing, pulling, hooks, and worktree commands behave exactly as they
+  // do outside Design view.
   const designRecognitionPaths = [
     path.dirname(repoSettingsPath(workspaceRoot)),
     ...(repoRoot !== workspaceRoot
@@ -1082,11 +1069,7 @@ async function buildCodeAgentTerritory(opts: {
       path.join(directory, DESIGN_CANVAS_FILE),
     ),
   ];
-  const deniedPaths = [
-    ...protectedDesignDirectories,
-    ...designRecognitionPaths,
-    ...gitMetadata,
-  ];
+  const deniedPaths = protectedDesignDirectories;
   return {
     agentRole: "code",
     workspaceRoot,
@@ -1111,6 +1094,7 @@ export async function previewCodeAgentTerritory(opts: {
   cwd: string;
   workspaceRoot?: string;
   repoRoot?: string;
+  reserveManagedDefault?: boolean;
 }): Promise<AgentFilesystemTerritory | undefined> {
   return buildCodeAgentTerritory(opts);
 }
@@ -1119,34 +1103,9 @@ export async function resolveCodeAgentTerritory(opts: {
   cwd: string;
   workspaceRoot?: string;
   repoRoot?: string;
-  /** Managed workspaces reserve the conventional default before a provider
-   * exists. This makes later first Design publication an identity-preserving
-   * operation without creating folders for arbitrary/plain-folder probes. */
-  reserveDefaultDesignDirectory?: boolean;
+  reserveManagedDefault?: boolean;
 }): Promise<AgentFilesystemTerritory | undefined> {
   let territory = await buildCodeAgentTerritory(opts);
-  if (!territory && opts.reserveDefaultDesignDirectory) {
-    const workspaceRoot = await canonicalTerritoryWorkspaceRoot(opts);
-    const pointer = await resolveDesignDirectoryPointerState({
-      repoRoot: path.resolve(opts.repoRoot ?? workspaceRoot),
-      workspacePath: workspaceRoot,
-    });
-    if (!pointer.valid) {
-      throw new Error(
-        "The configured Design directory is not a safe repo-relative path.",
-      );
-    }
-    // buildCodeAgentTerritory returns undefined only for an unconfigured,
-    // absent, unrecognized destination. Explicit destinations already take
-    // the ordinary prospective-reservation path below.
-    await reserveProspectiveDesignDirectory(workspaceRoot, pointer.directory);
-    territory = await buildCodeAgentTerritory(opts);
-    if (!territory) {
-      throw new Error(
-        "The default Design territory disappeared while its isolation lease was established.",
-      );
-    }
-  }
   if (!territory) return undefined;
   const absentProtectedDirectories =
     territory.protectedDesignDirectories.filter(
@@ -1190,6 +1149,129 @@ export async function resolveCodeAgentTerritory(opts: {
     ),
   );
   return territory;
+}
+
+interface NativeCodeContextResolution {
+  territory?: AgentFilesystemTerritory;
+  diagnostics: string[];
+}
+
+/** Resolve Design *orientation* for unrestricted local Code. This deliberately
+ * does not canonicalize paths, reserve directories, inspect hard links, or
+ * claim a filesystem boundary. Local Code only needs a
+ * precise behavioral instruction; security-grade resolution belongs to ZSR
+ * Design admission (and the qualified cloud boundary).
+ *
+ * Every failure is downgraded to a diagnostic so a damaged Design pointer can
+ * never select another execution backend or prevent ordinary native coding. */
+async function resolveNativeCodeContextTerritory(opts: {
+  cwd: string;
+  workspaceRoot?: string;
+  repoRoot?: string;
+}): Promise<NativeCodeContextResolution> {
+  const cwd = path.resolve(opts.cwd);
+  const workspaceRoot = path.resolve(
+    opts.workspaceRoot ?? (await gitWorkspaceOwner(cwd)) ?? cwd,
+  );
+  const repoRoot = path.resolve(opts.repoRoot ?? workspaceRoot);
+  const diagnostics: string[] = [];
+
+  let pointer:
+    | Awaited<ReturnType<typeof resolveDesignDirectoryPointerState>>
+    | undefined;
+  try {
+    pointer = await resolveDesignDirectoryPointerState({
+      repoRoot,
+      workspacePath: workspaceRoot,
+    });
+    if (!pointer.valid) {
+      diagnostics.push(
+        "The configured Design directory is invalid; fix [design].directory in Settings.",
+      );
+    }
+  } catch (error) {
+    diagnostics.push(
+      `The Design directory setting could not be read: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  let recognized: string[] = [];
+  try {
+    recognized = await discoverDesignDirectories(workspaceRoot);
+  } catch (error) {
+    diagnostics.push(
+      `Recognized Design directories could not be enumerated: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+
+  const registeredName = designDirectoryNameFor(workspaceRoot);
+  const protectedNames = new Set(recognized);
+  if (pointer?.valid && pointer.configured) {
+    protectedNames.add(pointer.directory);
+  }
+  // A primed registry value is the Design surface's already-resolved active
+  // identity. Keep it even when Git/settings are changing concurrently; this
+  // is an instruction snapshot, not an immutable authority lease.
+  if (
+    registeredName !== DEFAULT_DESIGN_DIRECTORY_NAME ||
+    existsSync(path.join(workspaceRoot, registeredName, DESIGN_CANVAS_FILE))
+  ) {
+    protectedNames.add(registeredName);
+  }
+  if (protectedNames.size === 0) {
+    return { diagnostics };
+  }
+
+  const sortedNames = [...protectedNames].sort((left, right) =>
+    left.localeCompare(right),
+  );
+  const activeName =
+    (pointer?.valid && pointer.configured
+      ? pointer.directory
+      : sortedNames.includes(registeredName)
+        ? registeredName
+        : sortedNames.length === 1
+          ? sortedNames[0]
+          : undefined) ?? sortedNames[0]!;
+  if (
+    !pointer?.configured &&
+    !sortedNames.includes(registeredName) &&
+    sortedNames.length > 1
+  ) {
+    diagnostics.push(
+      "Several Design directories are recognized but no active pointer is selected; all were marked read-only in the Code instruction.",
+    );
+  }
+
+  const protectedDesignDirectories = sortedNames.map((name) =>
+    path.join(workspaceRoot, ...name.split("/")),
+  );
+  return {
+    diagnostics,
+    territory: {
+      agentRole: "code",
+      workspaceRoot,
+      designDirectory: path.join(workspaceRoot, ...activeName.split("/")),
+      protectedDesignDirectories,
+      designRecognitionPaths: [
+        path.dirname(repoSettingsPath(workspaceRoot)),
+        ...(repoRoot !== workspaceRoot
+          ? [path.dirname(repoLocalSettingsPath(repoRoot))]
+          : []),
+        ...protectedDesignDirectories.map((directory) =>
+          path.join(directory, DESIGN_CANVAS_FILE),
+        ),
+      ],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: protectedDesignDirectories,
+      },
+    },
+  };
 }
 
 /** TTL on the listAgents result cache. Short enough that an
@@ -1250,6 +1332,111 @@ async function withTargetBranchEnv(
   return { ...env, ZEROS_TARGET_BRANCH: targetRef };
 }
 
+export interface NewAgentSessionOptions {
+  cwd?: string;
+  env?: Record<string, string>;
+  /** When supplied, resolved against ~/.zeros/state.db. Explicit cwd wins. */
+  workspaceId?: string;
+  /** Durable Zeros conversation identity owning optional product tools. */
+  conversationId?: string;
+  /** Optional provider CLI override from Settings. */
+  cliBinary?: string;
+  /** Publish the engine-owned route before adapter.newSession can emit. */
+  onExecutionCreated?: (executionId: string) => void;
+  /** Cancel queued admission when its owning conversation disappears. */
+  admissionSignal?: AbortSignal;
+}
+
+export interface DesignAgentSessionAdmission {
+  readonly actor: "design-agent";
+  readonly agentRunId: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly mcpServers: readonly Extract<
+    McpServerRegistration,
+    { transport: "http" }
+  >[];
+  readonly trustedLocalPorts: readonly number[];
+}
+
+type SessionExecutionProfile =
+  | { readonly actor: "agent-code" }
+  | {
+      readonly actor: "design-agent";
+      readonly mcpServers: readonly Extract<
+        McpServerRegistration,
+        { transport: "http" }
+      >[];
+      readonly trustedLocalPorts: readonly number[];
+    };
+
+function checkedDesignSessionProfile(
+  admission: DesignAgentSessionAdmission,
+): Extract<SessionExecutionProfile, { actor: "design-agent" }> {
+  if (
+    admission.actor !== "design-agent" ||
+    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(admission.agentRunId) ||
+    admission.mcpServers.length !== 1
+  ) {
+    throw new Error("The Design-agent admission is invalid.");
+  }
+  const ports = new Set<number>();
+  for (const server of admission.mcpServers) {
+    let parsed: URL;
+    try {
+      parsed = new URL(server.url);
+    } catch {
+      throw new Error("The Design-agent MCP endpoint is invalid.");
+    }
+    if (
+      parsed.protocol !== "http:" ||
+      (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") ||
+      parsed.pathname !== "/mcp" ||
+      parsed.username ||
+      parsed.password ||
+      parsed.search ||
+      parsed.hash ||
+      !parsed.port
+    ) {
+      throw new Error("The Design-agent MCP endpoint is not scoped loopback.");
+    }
+    const port = Number(parsed.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw new Error("The Design-agent MCP endpoint port is invalid.");
+    }
+    if (
+      Object.keys(server.headers ?? {}).some(
+        (name) => name.toLowerCase() === "authorization",
+      )
+    ) {
+      throw new Error(
+        "The Design-agent bearer must not be embedded in MCP config.",
+      );
+    }
+    const references = Object.values(server.headersFromEnv ?? {});
+    if (
+      references.length < 1 ||
+      references.some(
+        (name) => !/^Bearer [a-f0-9]{64}$/.test(admission.env[name] ?? ""),
+      )
+    ) {
+      throw new Error("The Design-agent MCP credential reference is invalid.");
+    }
+    ports.add(port);
+  }
+  const trusted = [...new Set(admission.trustedLocalPorts)].sort(
+    (left, right) => left - right,
+  );
+  const derived = [...ports].sort((left, right) => left - right);
+  if (JSON.stringify(trusted) !== JSON.stringify(derived)) {
+    throw new Error("The Design-agent loopback authority is inconsistent.");
+  }
+  return {
+    actor: "design-agent",
+    mcpServers: admission.mcpServers,
+    trustedLocalPorts: trusted,
+  };
+}
+
 export class AgentGateway {
   private readonly projectRoot: string;
   private readonly events: AgentGatewayEvents;
@@ -1267,6 +1454,11 @@ export class AgentGateway {
   private readonly mcpServersView: McpServerRegistration[] = [];
   private readonly adapters = new Map<string, AgentAdapter>();
   private readonly executionToAgent = new Map<string, string>();
+  /** Actor identity is fixed at admission and independent of workspace view. */
+  private readonly executionToActor = new Map<
+    string,
+    Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">
+  >();
   /** Track which workspace each session belongs
    *  to so adapter callbacks can look it up (e.g. for the background-
    *  rename hook in follow-up C). Sessions without a workspaceId
@@ -1298,6 +1490,16 @@ export class AgentGateway {
     string,
     readonly BoundaryTerritoryContributionSnapshot[]
   >();
+  /** Behavioral Design context carried by each live Code conversation. Unlike
+   * `executionToTerritoryContributions`, this is not filesystem authority:
+   * native Code remains an unrestricted host process. Keeping the owner
+   * slices lets a settings/Git recognition change replace only the affected
+   * workspace and re-assert the current read-only instruction without
+   * restarting the provider session. */
+  private readonly executionToContextTerritories = new Map<
+    string,
+    ReadonlyMap<string, AgentFilesystemTerritory>
+  >();
   /** Territory snapshots are published as soon as resolution completes, before
    * MCP lookup or kernel-boundary preparation can yield. External Design
    * reconciliation can therefore compare a racing admission with the exact
@@ -1305,6 +1507,10 @@ export class AgentGateway {
   private readonly provisionalTerritoryContributions = new Map<
     string,
     readonly BoundaryTerritoryContributionSnapshot[]
+  >();
+  private readonly provisionalExecutionActors = new Map<
+    string,
+    Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">
   >();
   /** Redacted status paired with the exact execution admission. */
   private readonly executionToBoundaryStatus = new Map<
@@ -1360,9 +1566,9 @@ export class AgentGateway {
   // session (loadSession) is pre-marked instructed so the block — already in the
   // resumed transcript — isn't sent twice. See system-instructions/ for the text.
   private readonly sessionsInstructed = new Set<string>();
-  /** A true resume predating the Design boundary already contains the general
-   * first-turn preamble but not necessarily the current immutable territory.
-   * Re-assert only the security notice on the first post-load turn. */
+  /** A true resume already contains the general first-turn preamble, but its
+   * Design territory may have changed while it was closed. Re-assert that
+   * current actor notice on the first post-load turn. */
   private readonly sessionsTerritoryNoticePending = new Set<string>();
   private readonly executionToInstructionCtx = new Map<
     string,
@@ -1371,6 +1577,8 @@ export class AgentGateway {
       targetBranch?: string;
       customInstructions?: string;
       designDirectory?: string;
+      designDirectories?: string[];
+      agentRole?: "code" | "design";
     }
   >();
   private readonly agentInitializes = new Map<string, InitializeResponse>();
@@ -1458,13 +1666,17 @@ export class AgentGateway {
     }
   }
 
-  /** True when at least one live session in this workspace was admitted under
-   * a different immutable filesystem map. Used only to avoid unnecessary
-   * retirements after broad Git/settings invalidations. */
+  /** True when at least one live session observed a different Design identity.
+   * Local callers retire only Design-agent capabilities; native Code uses the
+   * result to refresh recognition without treating it as kernel authority.
+   * Cloud callers retain their immutable filesystem handoff. */
   workspaceTerritoryChanged(
     workspaceId: string,
     workspaceRoot: string,
     territory: AgentFilesystemTerritory | undefined,
+    options: {
+      actor?: Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">;
+    } = {},
   ): boolean {
     const normalizedWorkspace = path.resolve(workspaceRoot);
     const next = agentTerritoryIdentity(territory);
@@ -1474,6 +1686,11 @@ export class AgentGateway {
       ...this.provisionalTerritoryContributions.keys(),
     ]);
     for (const sessionId of candidates) {
+      const actor =
+        this.executionToActor.get(sessionId) ??
+        this.provisionalExecutionActors.get(sessionId) ??
+        "agent-code";
+      if (options.actor && actor !== options.actor) continue;
       const contribution = (
         this.executionToTerritoryContributions.get(sessionId) ??
         this.provisionalTerritoryContributions.get(sessionId)
@@ -1486,7 +1703,11 @@ export class AgentGateway {
           ? territory
           : territoryForGrants(territory, contribution.grants);
         if (
-          contribution.identity !== agentTerritoryIdentity(nextContribution)
+          contribution.identity !==
+            agentTerritoryAuthorityIdentity(nextContribution) ||
+          (contribution.contextIdentity !== undefined &&
+            contribution.contextIdentity !==
+              agentTerritoryIdentity(nextContribution))
         ) {
           return true;
         }
@@ -1510,11 +1731,137 @@ export class AgentGateway {
     return false;
   }
 
+  /** Publish a newly resolved Design context to live native Code sessions.
+   * This changes only the next model-facing instruction; it never changes the
+   * process backend, filesystem permissions, provider configuration, or Git
+   * state. Sessions already carrying their first-turn instruction receive one
+   * in-band re-assertion on their next prompt. A session that has not received
+   * its first prompt simply consumes the updated snapshot there. */
+  refreshNativeCodeTerritoryContext(
+    workspaceId: string,
+    workspaceRoot: string,
+    territory: AgentFilesystemTerritory | undefined,
+  ): number {
+    if (this.executionBoundary.backend !== "none") return 0;
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    let refreshed = 0;
+
+    for (const sessionId of this.executionToAgent.keys()) {
+      if (
+        (this.executionToActor.get(sessionId) ?? "agent-code") !== "agent-code"
+      ) {
+        continue;
+      }
+      const cwd = this.executionToCwd.get(sessionId);
+      const instructionCtx = this.executionToInstructionCtx.get(sessionId);
+      if (!cwd || !instructionCtx) continue;
+      const currentContexts = new Map(
+        this.executionToContextTerritories.get(sessionId) ?? [],
+      );
+      const relevant =
+        this.executionToWorkspace.get(sessionId) === workspaceId ||
+        pathInsideOrEqual(cwd, normalizedWorkspace) ||
+        [...currentContexts.keys()].some((owner) =>
+          pathsOverlap(owner, normalizedWorkspace),
+        ) ||
+        instructionCtx.additionalDirectories.some((directory) =>
+          pathsOverlap(directory, normalizedWorkspace),
+        );
+      if (!relevant) continue;
+
+      for (const owner of [...currentContexts.keys()]) {
+        if (path.resolve(owner) === normalizedWorkspace) {
+          currentContexts.delete(owner);
+        }
+      }
+      if (territory) {
+        currentContexts.set(normalizedWorkspace, territory);
+      }
+
+      const ordered = [...currentContexts.values()].sort((left, right) => {
+        const leftOwnsCwd = pathInsideOrEqual(cwd, left.workspaceRoot);
+        const rightOwnsCwd = pathInsideOrEqual(cwd, right.workspaceRoot);
+        if (leftOwnsCwd !== rightOwnsCwd) return leftOwnsCwd ? -1 : 1;
+        return left.workspaceRoot.localeCompare(right.workspaceRoot);
+      });
+      const primary = ordered.find((candidate) =>
+        pathInsideOrEqual(cwd, candidate.workspaceRoot),
+      );
+      const merged = mergeCodeAgentTerritories(
+        primary?.workspaceRoot ?? cwd,
+        primary,
+        ordered.filter((candidate) => candidate !== primary),
+      );
+      const previousDirectories = [
+        ...(instructionCtx.designDirectories?.length
+          ? instructionCtx.designDirectories
+          : instructionCtx.designDirectory
+            ? [instructionCtx.designDirectory]
+            : []),
+      ]
+        .map((candidate) => path.resolve(candidate))
+        .sort();
+      const nextDirectories = [
+        ...new Set(
+          (merged?.protectedDesignDirectories ?? []).map((candidate) =>
+            path.resolve(candidate),
+          ),
+        ),
+      ].sort();
+      const previousActive = instructionCtx.designDirectory
+        ? path.resolve(instructionCtx.designDirectory)
+        : null;
+      const nextActive = merged?.designDirectory
+        ? path.resolve(merged.designDirectory)
+        : null;
+      if (
+        previousActive === nextActive &&
+        previousDirectories.length === nextDirectories.length &&
+        previousDirectories.every(
+          (candidate, index) => candidate === nextDirectories[index],
+        )
+      ) {
+        this.executionToContextTerritories.set(sessionId, currentContexts);
+        continue;
+      }
+
+      const {
+        designDirectory: _previousDesignDirectory,
+        designDirectories: _previousDesignDirectories,
+        ...baseInstructionCtx
+      } = instructionCtx;
+      this.executionToInstructionCtx.set(sessionId, {
+        ...baseInstructionCtx,
+        ...(nextActive ? { designDirectory: nextActive } : {}),
+        ...(nextDirectories.length > 0
+          ? { designDirectories: nextDirectories }
+          : {}),
+      });
+      this.executionToContextTerritories.set(sessionId, currentContexts);
+      this.executionToDesignDirectory.set(sessionId, nextActive);
+      this.executionToTerritoryIdentity.set(
+        sessionId,
+        merged ? agentTerritoryIdentity(merged) : null,
+      );
+      if (this.sessionsInstructed.has(sessionId)) {
+        this.sessionsTerritoryNoticePending.add(sessionId);
+      }
+      refreshed += 1;
+    }
+    return refreshed;
+  }
+
   /** Execution ids whose immutable authority depends on this workspace,
    * including sessions that attached it through `/add-dir`. The engine uses
    * this during a Design transition so the capability is revoked before the
    * pointer or recognized-root set changes. */
-  workspaceSessionIds(workspaceId: string, workspaceRoot: string): string[] {
+  workspaceSessionIds(
+    workspaceId: string,
+    workspaceRoot: string,
+    options: {
+      actor?: Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">;
+    } = {},
+  ): string[] {
     const normalizedWorkspace = path.resolve(workspaceRoot);
     const sessions: string[] = [];
     const candidates = new Set([
@@ -1523,6 +1870,11 @@ export class AgentGateway {
       ...this.provisionalTerritoryContributions.keys(),
     ]);
     for (const sessionId of candidates) {
+      const actor =
+        this.executionToActor.get(sessionId) ??
+        this.provisionalExecutionActors.get(sessionId) ??
+        "agent-code";
+      if (options.actor && actor !== options.actor) continue;
       if (this.executionToWorkspace.get(sessionId) === workspaceId) {
         sessions.push(sessionId);
         continue;
@@ -1556,18 +1908,41 @@ export class AgentGateway {
     executionId: string,
     contributions: readonly BoundaryTerritoryContributionSnapshot[],
     run: () => Promise<T>,
+    actor: Extract<
+      ExecutionBoundaryActor,
+      "agent-code" | "design-agent"
+    > = "agent-code",
   ): Promise<T> {
     this.provisionalTerritoryContributions.set(executionId, contributions);
+    this.provisionalExecutionActors.set(executionId, actor);
     try {
       return await run();
     } finally {
       this.provisionalTerritoryContributions.delete(executionId);
+      this.provisionalExecutionActors.delete(executionId);
     }
   }
 
-  /** Establish the code actor's immutable territory before an adapter starts.
-   * The instruction remains behavioral defense in depth; the provider-neutral
-   * ZSR boundary prepared below is the actual admission boundary. */
+  sessionActor(
+    executionId: string,
+  ): Extract<ExecutionBoundaryActor, "agent-code" | "design-agent"> | null {
+    return (
+      this.executionToActor.get(executionId) ??
+      this.provisionalExecutionActors.get(executionId) ??
+      null
+    );
+  }
+
+  private isNativeCodeActor(
+    actor: Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">,
+  ): boolean {
+    return actor === "agent-code" && this.executionBoundary.backend === "none";
+  }
+
+  /** Resolve the actor's Design context before an adapter starts. Local Code
+   * receives a non-blocking behavioral snapshot. Design and qualified cloud
+   * admissions retain the strict, fail-closed territory resolver used to
+   * compile their real filesystem boundary. */
   private async prepareCodeAgentTerritory(
     adapter: AgentAdapter,
     cwd: string,
@@ -1577,45 +1952,57 @@ export class AgentGateway {
     opts?: {
       cliBinary?: string;
       persistRecognition?: boolean;
-      reserveDefaultDesignDirectory?: boolean;
+      actor?: Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">;
     },
   ): Promise<AgentFilesystemTerritory | undefined> {
+    const actor = opts?.actor ?? "agent-code";
+    if (this.isNativeCodeActor(actor)) {
+      const context = await resolveNativeCodeContextTerritory({
+        cwd,
+        workspaceRoot,
+        repoRoot: mainRepoRoot,
+      });
+      if (context.territory) {
+        // Native Code has no filesystem boundary, but it still observed a real
+        // Design identity. Persist that semantic fact so later mode entry and
+        // session instructions remain stable while Git recognition is in
+        // flight. The store is best-effort and existence-filtered.
+        await rememberRecognizedDesignDirectories(
+          context.territory.workspaceRoot,
+          context.territory.protectedDesignDirectories.map((directory) =>
+            path
+              .relative(context.territory!.workspaceRoot, directory)
+              .split(path.sep)
+              .join("/"),
+          ),
+        );
+      }
+      for (const diagnostic of context.diagnostics) {
+        this.events.onAgentStderr(
+          adapter.agentId,
+          `[zeros-design-context] ${diagnostic} Native Code remains available.`,
+        );
+      }
+      return context.territory;
+    }
+
     let territory: AgentFilesystemTerritory | undefined;
     try {
       const resolveTerritory =
         opts?.persistRecognition === false
           ? previewCodeAgentTerritory
           : resolveCodeAgentTerritory;
-      let reserveDefaultDesignDirectory =
-        opts?.reserveDefaultDesignDirectory === true;
-      if (
-        opts?.persistRecognition !== false &&
-        !reserveDefaultDesignDirectory &&
-        workspaceRoot !== undefined
-      ) {
-        const canonicalWorkspace = await canonicalTerritoryWorkspaceRoot({
-          cwd,
-          workspaceRoot,
-        });
-        reserveDefaultDesignDirectory =
-          registeredCodeTerritorySnapshot().workspaces.some(
-            (managed) => managed.path === canonicalWorkspace,
-          );
-      }
       territory = await resolveTerritory({
         cwd,
         workspaceRoot,
         repoRoot: mainRepoRoot,
-        ...(opts?.persistRecognition !== false && reserveDefaultDesignDirectory
-          ? { reserveDefaultDesignDirectory: true }
-          : {}),
       });
     } catch (error) {
       throw new AgentFailureError({
         kind: "protocol-error",
         message:
-          `Code agent cannot start because the active Design territory ` +
-          `could not be resolved and protected: ${
+          `${actor === "design-agent" ? "Design" : "Cloud Code"} agent cannot start because the active Design territory ` +
+          `could not be resolved safely: ${
             error instanceof Error ? error.message : String(error)
           }`,
         stage,
@@ -1627,14 +2014,13 @@ export class AgentGateway {
     return territory;
   }
 
-  /** Extend the primary immutable territory across every registered local
+  /** Extend a contained actor's primary Design territory across every registered local
    * checkout and every user-authorized `/add-dir` owner before a provider
-   * process exists. Host parity means an agent can otherwise walk to any of
-   * those paths, so Design protection must be app-wide even though ordinary
-   * write grants remain unchanged. A second Zeros/Git workspace is not an
-   * implicit additional directory: only its Design roots are subtracted unless
-   * the user explicitly attached it. Resolving by the physical Git owner also
-   * covers a selected subdirectory of that workspace.
+   * process exists. This makes the behavioral contract app-wide while ordinary
+   * native host authority remains unchanged. A second Zeros/Git workspace is
+   * not an implicit additional directory: it contributes Design recognition
+   * only unless the user explicitly attached it. Resolving by the physical Git
+   * owner also covers a selected subdirectory of that workspace.
    *
    * Contributions remain separate for lifecycle comparison. This lets a
    * Design transition in an attached workspace retire the primary session
@@ -1645,8 +2031,137 @@ export class AgentGateway {
     workspaceRoot: string | undefined,
     env: Record<string, string> | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
-    options: { persistRecognition?: boolean } = {},
+    options: {
+      persistRecognition?: boolean;
+      actor?: Extract<ExecutionBoundaryActor, "agent-code" | "design-agent">;
+    } = {},
   ): Promise<ResolvedTerritorySet> {
+    const actor = options.actor ?? "agent-code";
+    if (this.isNativeCodeActor(actor)) {
+      let additionalRoots: string[];
+      try {
+        additionalRoots = await canonicalAdditionalTerritoryRoots(
+          this.parseInstructionCtx(env).additionalDirectories,
+        );
+      } catch (error) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          stage,
+          message: `Code agent cannot attach the requested directories: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          advice: "Remove the invalid additional directory and retry.",
+        });
+      }
+      const attachedTerritories: AgentFilesystemTerritory[] = [];
+      const nativeContextDiagnostics: string[] = [];
+      const primaryOwner = primary
+        ? path.resolve(primary.workspaceRoot)
+        : path.resolve(workspaceRoot ?? cwd);
+      const attachedOwners = new Map<
+        string,
+        { repoRoot: string; grants: Set<string> }
+      >();
+      let registeredWorkspaces: ReturnType<typeof listWorkspaces> = [];
+      try {
+        registeredWorkspaces = listWorkspaces({ archived: false });
+      } catch (error) {
+        nativeContextDiagnostics.push(
+          `Registered attached workspaces could not be enumerated: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      const addAttachedOwner = (
+        owner: string,
+        repoRoot: string,
+        grant: string,
+      ) => {
+        const normalizedOwner = path.resolve(owner);
+        const current = attachedOwners.get(normalizedOwner) ?? {
+          repoRoot: path.resolve(repoRoot),
+          grants: new Set<string>(),
+        };
+        current.grants.add(path.resolve(grant));
+        attachedOwners.set(normalizedOwner, current);
+      };
+      for (const grant of additionalRoots) {
+        const gitOwner = await gitWorkspaceOwner(grant);
+        if (gitOwner) {
+          const managed = registeredWorkspaces.find(
+            (candidate) => path.resolve(candidate.path) === gitOwner,
+          );
+          addAttachedOwner(gitOwner, managed?.repoRoot ?? gitOwner, grant);
+        } else {
+          addAttachedOwner(grant, grant, grant);
+        }
+        for (const managed of registeredWorkspaces) {
+          if (pathInsideOrEqual(managed.path, grant)) {
+            addAttachedOwner(managed.path, managed.repoRoot, grant);
+          }
+        }
+      }
+      for (const [owner, attachment] of [...attachedOwners].sort(
+        ([left], [right]) => left.localeCompare(right),
+      )) {
+        if (owner === primaryOwner) continue;
+        const resolved = await resolveNativeCodeContextTerritory({
+          cwd: owner,
+          workspaceRoot: owner,
+          repoRoot: attachment.repoRoot,
+        });
+        nativeContextDiagnostics.push(
+          ...resolved.diagnostics.map(
+            (diagnostic) => `${owner}: ${diagnostic}`,
+          ),
+        );
+        const contribution = territoryForGrants(resolved.territory, [
+          ...attachment.grants,
+        ]);
+        if (!contribution) continue;
+        attachedTerritories.push(contribution);
+        if (options.persistRecognition !== false) {
+          try {
+            await rememberRecognizedDesignDirectories(
+              resolved.territory!.workspaceRoot,
+              resolved.territory!.protectedDesignDirectories.map((directory) =>
+                path
+                  .relative(resolved.territory!.workspaceRoot, directory)
+                  .split(path.sep)
+                  .join("/"),
+              ),
+            );
+          } catch (error) {
+            nativeContextDiagnostics.push(
+              `${owner}: Design recognition could not be remembered: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+        }
+      }
+      const contextTerritories = [
+        ...(primary ? [primary] : []),
+        ...attachedTerritories,
+      ];
+      // No registered-owner union, immutable authority identity, or Design
+      // transition contribution belongs to unrestricted local Code. These
+      // territories compose behavioral instructions only.
+      return {
+        territory: mergeCodeAgentTerritories(
+          primaryOwner,
+          primary,
+          attachedTerritories,
+        ),
+        contextTerritories,
+        registeredDesignAuthorityIdentity: null,
+        contributions: [],
+        additionalRoots,
+        additionalGitWorkspaceRoots: [],
+        nativeContextDiagnostics,
+      };
+    }
+
     const canonicalWorkspace = path.resolve(
       primary?.workspaceRoot ??
         (await canonicalTerritoryWorkspaceRoot({ cwd, workspaceRoot })),
@@ -1683,9 +2198,6 @@ export class AgentGateway {
 
     const registered = registeredCodeTerritorySnapshot();
     const registeredWorkspaces = registered.workspaces;
-    const managedWorkspacePaths = new Set(
-      registeredWorkspaces.map((workspace) => workspace.path),
-    );
     const protectedWorkspaceDirectories =
       protectedManagedWorkspaceDirectories();
     const exactRegisteredOwners = registered.owners.filter(
@@ -1765,7 +2277,7 @@ export class AgentGateway {
       // Open project roots can also sit below a browsed parent. Managed roots
       // were omitted from the default exact deny union above, so re-add every
       // explicitly covered owner as a grant-scoped contribution before its
-      // exact writable island is reopened in the ZSR policy.
+      // exact writable island is reopened in the selected kernel policy.
       for (const registeredOwner of registered.owners) {
         if (
           isProtectedManagedWorkspacePath(
@@ -1782,6 +2294,9 @@ export class AgentGateway {
     }
 
     const additions: AgentFilesystemTerritory[] = [];
+    const contextTerritories: AgentFilesystemTerritory[] = primary
+      ? [primary]
+      : [];
     const additionalGitWorkspaceRoots: string[] = [];
     const resolveTerritory =
       options.persistRecognition === false
@@ -1798,17 +2313,13 @@ export class AgentGateway {
           cwd: owner,
           workspaceRoot: owner,
           repoRoot: ownerGrant.repoRoot,
-          ...(options.persistRecognition !== false &&
-          ownerGrant.attached &&
-          managedWorkspacePaths.has(owner)
-            ? { reserveDefaultDesignDirectory: true }
-            : {}),
         });
         const contribution = ownerGrant.full
           ? ownerTerritory
           : territoryForGrants(ownerTerritory, grants);
         if (contribution) {
           additions.push(contribution);
+          if (ownerGrant.attached) contextTerritories.push(contribution);
           if (exactRegisteredOwnerPaths.has(owner)) {
             registeredTerritories.push(contribution);
           }
@@ -1842,6 +2353,7 @@ export class AgentGateway {
         primary,
         additions,
       ),
+      contextTerritories,
       registeredDesignAuthorityIdentity: codeAgentWriteAuthorityIdentity(
         mergeCodeAgentTerritories(
           canonicalWorkspace,
@@ -1860,7 +2372,8 @@ export class AgentGateway {
             left.localeCompare(right),
           ),
           full: contribution.full,
-          identity: agentTerritoryIdentity(contribution.territory),
+          identity: agentTerritoryAuthorityIdentity(contribution.territory),
+          contextIdentity: agentTerritoryIdentity(contribution.territory),
         }))
         .sort((left, right) =>
           left.workspaceRoot.localeCompare(right.workspaceRoot),
@@ -1876,7 +2389,14 @@ export class AgentGateway {
     mainRepoRoot: string | undefined,
     env: Record<string, string> | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
+    actor: Extract<
+      ExecutionBoundaryActor,
+      "agent-code" | "design-agent"
+    > = "agent-code",
   ): Promise<void> {
+    // Native Code has no Design-derived filesystem authority to attest. A
+    // concurrent Design edit must not delay, fail, or restart Code startup.
+    if (this.isNativeCodeActor(actor)) return;
     // Re-read the primary owner too. Reusing the pre-admission object here
     // checked only secondary registered owners and missed a pointer/marker
     // change in the workspace whose process was about to start.
@@ -1886,7 +2406,7 @@ export class AgentGateway {
       workspaceRoot,
       mainRepoRoot,
       stage,
-      { persistRecognition: false },
+      { persistRecognition: false, actor },
     );
     const current = await this.resolveTerritorySet(
       primary,
@@ -1894,7 +2414,7 @@ export class AgentGateway {
       workspaceRoot,
       env,
       stage,
-      { persistRecognition: false },
+      { persistRecognition: false, actor },
     );
     this.assertTerritorySetsEqual(expected, current, stage);
   }
@@ -1931,6 +2451,18 @@ export class AgentGateway {
     }
   }
 
+  private reportNativeContextDiagnostics(
+    adapter: AgentAdapter,
+    territorySet: ResolvedTerritorySet,
+  ): void {
+    for (const diagnostic of territorySet.nativeContextDiagnostics ?? []) {
+      this.events.onAgentStderr(
+        adapter.agentId,
+        `[zeros-design-context] ${diagnostic} Native Code remains available.`,
+      );
+    }
+  }
+
   private async boundaryRequest(
     executionId: string,
     cwd: string,
@@ -1942,32 +2474,42 @@ export class AgentGateway {
     resolvedAdditionalRoots?: readonly string[],
     additionalGitWorkspaceRoots: readonly string[] = [],
     includeSessionCapabilities = true,
-    // Everything the gateway admits today is a code actor. A design actor
-    // reaches the same boundary with code authority subtracted instead of
-    // Design authority; the policy builder owns that difference, so the only
-    // thing the caller chooses is which side of the contract it is on.
+    // Actor identity selects the execution posture: native local Code carries
+    // no filesystem policy, while Design and qualified cloud requests compile
+    // the strict inverse-authority map below.
     actor: ExecutionBoundaryActor = "agent-code",
+    contextTerritories?: readonly AgentFilesystemTerritory[],
+    trustedLocalPorts: readonly number[] = [],
   ): Promise<BoundaryRequest> {
+    const nativeCode =
+      actor === "agent-code" && this.executionBoundary.backend === "none";
     const canonicalWorkspace =
       territory?.workspaceRoot ??
-      (await canonicalTerritoryWorkspaceRoot({ cwd, workspaceRoot }));
-    const additionalReadWriteRoots = resolvedAdditionalRoots
+      (nativeCode
+        ? path.resolve(workspaceRoot ?? cwd)
+        : await canonicalTerritoryWorkspaceRoot({ cwd, workspaceRoot }));
+    const requestedAdditionalRoots = resolvedAdditionalRoots
       ? [...resolvedAdditionalRoots]
       : await canonicalAdditionalTerritoryRoots(
           this.parseInstructionCtx(env).additionalDirectories,
         );
-    const registeredSnapshot = registeredCodeTerritorySnapshot();
-    const registeredCodeOwners = registeredSnapshot.owners.map(
-      (owner) => owner.path,
-    );
-    // Both halves of the inverse authority model pre-deny managed workspace
-    // collections. Code actors reopen their own checkout; Design actors reopen
-    // only discovered Design islands. This keeps a future sibling protected
-    // from every already-admitted actor before Git creates it.
-    const protectedWorkspaceDirectories =
-      protectedManagedWorkspaceDirectories();
+    const additionalReadWriteRoots =
+      actor === "design-agent" ? [] : requestedAdditionalRoots;
+    const additionalReadOnlyRoots =
+      actor === "design-agent" ? requestedAdditionalRoots : [];
+    const registeredSnapshot = nativeCode
+      ? null
+      : registeredCodeTerritorySnapshot();
+    const registeredCodeOwners =
+      registeredSnapshot?.owners.map((owner) => owner.path) ?? [];
+    // Contained actors pre-deny managed workspace collections. Native Code
+    // intentionally carries no such request fields: its host process sees the
+    // same filesystem as the user and normal coding tools.
+    const protectedWorkspaceDirectories = nativeCode
+      ? []
+      : protectedManagedWorkspaceDirectories();
     const protectedWorkspaceWriteDirectories =
-      actor !== "design-agent"
+      actor !== "design-agent" && registeredSnapshot
         ? registeredSnapshot.owners
             .map((owner) => owner.path)
             .filter((owner) =>
@@ -1986,7 +2528,7 @@ export class AgentGateway {
     let effectiveTerritory = territory;
     if (actor === "design-agent") {
       const registeredTerritories: AgentFilesystemTerritory[] = [];
-      for (const owner of registeredSnapshot.owners) {
+      for (const owner of registeredSnapshot!.owners) {
         if (
           effectiveTerritory &&
           path.resolve(effectiveTerritory.workspaceRoot) === owner.path
@@ -2025,7 +2567,7 @@ export class AgentGateway {
           ].sort((left, right) => left.localeCompare(right))
         : [];
     const gitIntegrationRoots =
-      actor !== "design-agent"
+      actor !== "design-agent" && !nativeCode
         ? [
             ...new Set([
               path.resolve(canonicalWorkspace),
@@ -2048,9 +2590,6 @@ export class AgentGateway {
         return value ? [[name, value] as const] : [];
       }),
     );
-    const containerWorker = includeSessionCapabilities
-      ? deriveContainerWorker(env)
-      : undefined;
     const containerWorkflowExpected = includeSessionCapabilities
       ? expectsContainerWorkflow(env)
       : false;
@@ -2061,9 +2600,19 @@ export class AgentGateway {
       ...(Object.keys(providerStateEnv).length > 0 ? { providerStateEnv } : {}),
       cwd: path.resolve(cwd),
       workspaceRoot: path.resolve(canonicalWorkspace),
-      ...(effectiveTerritory ? { territory: effectiveTerritory } : {}),
+      ...(!nativeCode && effectiveTerritory
+        ? { territory: effectiveTerritory }
+        : {}),
       ...(additionalReadWriteRoots.length > 0
         ? { additionalReadWriteRoots }
+        : {}),
+      ...(additionalReadOnlyRoots.length > 0
+        ? { additionalReadOnlyRoots }
+        : {}),
+      ...(!nativeCode && contextTerritories
+        ? {
+            codeTerritoryOwners: codeTerritoryOwners(contextTerritories),
+          }
         : {}),
       ...(protectedWorkspaceDirectories.length > 0
         ? { protectedWorkspaceDirectories }
@@ -2079,9 +2628,15 @@ export class AgentGateway {
         ? this.scopedLocalServicePorts(mcpServers)
         : [],
       trustedLocalPorts: includeSessionCapabilities
-        ? this.trustedLocalServicePorts()
+        ? [
+            ...new Set([
+              ...(actor === "agent-code"
+                ? this.trustedLocalServicePorts()
+                : []),
+              ...trustedLocalPorts,
+            ]),
+          ].sort((left, right) => left - right)
         : [],
-      ...(containerWorker ? { containerWorker } : {}),
       ...(containerWorkflowExpected ? { containerWorkflowExpected: true } : {}),
       ...(additionalGitWorkspaceRoots.length > 0
         ? { additionalGitWorkspaceRoots }
@@ -2120,6 +2675,12 @@ export class AgentGateway {
         contributions: readonly BoundaryTerritoryContributionSnapshot[];
         registeredDesignAuthorityIdentity: string | null;
       };
+      /** Primary and explicitly attached Git owners whose Design identity
+       * participates in this admission; registered deny-only owners remain
+       * separate because they are not user-authorized Code roots. */
+      contextTerritories?: readonly AgentFilesystemTerritory[];
+      /** Exact engine-owned loopback façades for this actor. */
+      trustedLocalPorts?: readonly number[];
     } = {},
   ): Promise<PreparedBoundary> {
     try {
@@ -2135,6 +2696,8 @@ export class AgentGateway {
         additionalGitWorkspaceRoots,
         options.includeSessionCapabilities !== false,
         options.actor,
+        options.contextTerritories,
+        options.trustedLocalPorts,
       );
       // Fork boundaries are one-shots torn down in the same call; adopting a
       // spare for them would only drain the pool a real session could use.
@@ -2219,10 +2782,10 @@ export class AgentGateway {
     }
   }
 
-  /** One translation of "Design protection could not be established" for every
-   * admission path. Authentication remains actionable and provider-specific;
-   * every other protection refusal is deliberately non-technical and uses the
-   * same prompt-stage footer as a failed asynchronous attestation. */
+  /** Translate execution-boundary admission without mislabelling an ordinary
+   * native lifecycle failure as Design containment. Authentication remains
+   * actionable and provider-specific; contained actors retain the dedicated
+   * fail-closed Design-protection result. */
   private boundaryAdmissionFailure(
     providerId: string,
     stage: "newSession" | "loadSession" | "forkSession",
@@ -2255,6 +2818,17 @@ export class AgentGateway {
         agentId: providerId,
         advice:
           "Sign in to Claude again, then retry this message. The stored OAuth session is no longer accepted by Claude.",
+      });
+    }
+    if (this.executionBoundary.backend === "none") {
+      return new AgentFailureError({
+        kind: "protocol-error",
+        message:
+          "The native agent process supervisor could not be started. No agent process was left running.",
+        stage: "prompt",
+        agentId: providerId,
+        advice:
+          "Restart Zeros and retry. If this continues, reinstall or repair the packaged agent runtime.",
       });
     }
     return new AgentFailureError({
@@ -2487,25 +3061,19 @@ export class AgentGateway {
   /** Prove every pooled utility boundary stopped. A global Design-owner
    * transaction passes `reopen:false` and owns the later reopen, keeping title,
    * probe, validation, and listing admissions closed through the mutation. */
-  /** True while this gateway holds the app-wide "no container idling" gate.
+  /** True while this gateway holds the app-wide warm-boundary admission gate.
    * Queued global transitions each call retire({reopen:false}) but reopen only
    * once at the tail, so the hold must be a toggle, not a counter. */
-  private globalContainerIdleHold = false;
+  private globalWarmBoundaryHold = false;
 
   async retirePooledUtilityBoundaries(
     options: { reopen?: boolean } = {},
   ): Promise<void> {
-    // A global Design-owner transaction is also the moment every idle shared
-    // container machine must die: an idle machine carries the mount
-    // protections of the map being replaced. Suspend idling first so session
-    // drains that follow inside the same gate stop their machines inline.
-    if (options.reopen === false && !this.globalContainerIdleHold) {
-      this.globalContainerIdleHold = true;
-      suspendSharedContainerWorkerIdling();
+    if (options.reopen === false && !this.globalWarmBoundaryHold) {
+      this.globalWarmBoundaryHold = true;
       this.warmSessionBoundariesInstance?.suspendGlobal();
     }
     try {
-      await stopIdleSharedContainerWorkers();
       await this.warmSessionBoundariesInstance?.disposeAll();
       if (this.utilityBoundariesInstance) {
         await this.utilityBoundariesInstance.disposeAll();
@@ -2521,9 +3089,8 @@ export class AgentGateway {
    * published the new registered-owner map. No-op when the pool was never
    * instantiated. */
   reopenPooledUtilityBoundaries(): void {
-    if (this.globalContainerIdleHold) {
-      this.globalContainerIdleHold = false;
-      resumeSharedContainerWorkerIdling();
+    if (this.globalWarmBoundaryHold) {
+      this.globalWarmBoundaryHold = false;
       this.warmSessionBoundariesInstance?.resumeGlobal();
     }
     this.utilityBoundariesInstance?.reopen();
@@ -2534,7 +3101,6 @@ export class AgentGateway {
    * admission that begins later in the same transition must observe the
    * synchronous suspension too. */
   suspendPooledUtilityWorkspaceTerritory(workspaceRoot: string): void {
-    suspendSharedContainerWorkerIdling(workspaceRoot);
     this.warmSessionBoundaries.suspendWorkspaceTerritory(workspaceRoot);
     this.utilityBoundaries.suspendWorkspaceTerritory(workspaceRoot);
   }
@@ -2542,7 +3108,6 @@ export class AgentGateway {
   async retirePooledUtilityWorkspaceTerritory(
     workspaceRoot: string,
   ): Promise<void> {
-    await stopIdleSharedContainerWorkers(workspaceRoot);
     await this.warmSessionBoundariesInstance?.disposeWorkspaceTerritory(
       workspaceRoot,
     );
@@ -2553,7 +3118,6 @@ export class AgentGateway {
   }
 
   resumePooledUtilityWorkspaceTerritory(workspaceRoot: string): void {
-    resumeSharedContainerWorkerIdling(workspaceRoot);
     this.warmSessionBoundariesInstance?.resumeWorkspaceTerritory(workspaceRoot);
     this.utilityBoundariesInstance?.resumeWorkspaceTerritory(workspaceRoot);
   }
@@ -2604,7 +3168,10 @@ export class AgentGateway {
       const nextContribution = contribution.full
         ? territory
         : territoryForGrants(territory, contribution.grants);
-      if (contribution.identity !== agentTerritoryIdentity(nextContribution)) {
+      if (
+        contribution.identity !==
+        agentTerritoryAuthorityIdentity(nextContribution)
+      ) {
         return true;
       }
     }
@@ -3148,8 +3715,9 @@ export class AgentGateway {
     this.events = opts.events;
     this.executionBoundary =
       opts.executionBoundary ??
-      new ZsrExecutionBoundary({
-        projectRoot: opts.projectRoot,
+      new RoutingExecutionBoundary({
+        host: new HostExecutionBoundary({ projectRoot: opts.projectRoot }),
+        sandbox: new ZsrExecutionBoundary({ projectRoot: opts.projectRoot }),
       });
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;
@@ -3565,11 +4133,18 @@ export class AgentGateway {
       if (!executable) {
         throw new Error("provider command probe executable is unavailable");
       }
-      const primaryTerritory = await resolveCodeAgentTerritory({
-        cwd: probeRoot,
-        workspaceRoot: probeRoot,
-        repoRoot: probeRoot,
-      });
+      // Desktop-native provider probes are ordinary host processes in a
+      // disposable neutral directory. They do not need Design recognition,
+      // reservations, or registered-owner authority. Qualified cloud retains
+      // the strict territory resolver used by its contained Code actor.
+      const primaryTerritory =
+        this.executionBoundary.backend === "none"
+          ? undefined
+          : await resolveCodeAgentTerritory({
+              cwd: probeRoot,
+              workspaceRoot: probeRoot,
+              repoRoot: probeRoot,
+            });
       const territorySet = await this.resolveTerritorySet(
         primaryTerritory,
         probeRoot,
@@ -3590,6 +4165,8 @@ export class AgentGateway {
         territorySet.additionalRoots,
         territorySet.additionalGitWorkspaceRoots,
         false,
+        undefined,
+        territorySet.contextTerritories,
       );
       return await this.withUtilityBoundary(
         providerId,
@@ -3821,11 +4398,11 @@ export class AgentGateway {
     return this.initializeAgent(agentId);
   }
 
-  /** Run provider-owned one-shot bytes under the same ZSR contract as a
-   * session, then prove the boundary retired before returning. These calls do
-   * not need MCP, local-service, or container capabilities, but they may load
-   * arbitrary provider SDK code and therefore must never use an engine-global
-   * host. */
+  /** Run provider-owned one-shot bytes under the same execution-boundary
+   * contract as a session, then prove the boundary retired before returning.
+   * These calls do not need MCP, local-service, or container capabilities, but
+   * they may load arbitrary provider SDK code and therefore must never use an
+   * engine-global host. */
   private async runProviderOneShot<T>(opts: {
     agentId: string;
     executionPrefix: string;
@@ -3884,6 +4461,8 @@ export class AgentGateway {
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
       false,
+      undefined,
+      territorySet.contextTerritories,
     );
     return this.withUtilityBoundary(
       adapter.agentId,
@@ -4014,6 +4593,8 @@ export class AgentGateway {
         territorySet.additionalRoots,
         territorySet.additionalGitWorkspaceRoots,
         false,
+        undefined,
+        territorySet.contextTerritories,
       );
       const text = await this.withUtilityBoundary(
         adapter.agentId,
@@ -4058,28 +4639,34 @@ export class AgentGateway {
 
   async newSession(
     agentId: string,
-    opts: {
-      cwd?: string;
-      env?: Record<string, string>;
-      /** When supplied, resolved against
-       *  ~/.zeros/state.db. If cwd is also supplied, cwd wins (the
-       *  renderer is the source of truth). If cwd is missing, the
-       *  workspace's path is used. */
-      workspaceId?: string;
-      /** Durable Zeros conversation identity owning optional product tools. */
-      conversationId?: string;
-      /** Optional CLI binary override from Settings → Providers →
-       *  Advanced. Threaded down to the adapter so the per-turn spawn
-       *  uses this in place of the registry's `cliBinary`. */
-      cliBinary?: string;
-      /** Publish the engine-owned route before adapter.newSession can emit. */
-      onExecutionCreated?: (executionId: string) => void;
-      /** Aborted when the owning conversation is closed or superseded, so an
-       * admission that is still queued is cancelled instead of burned. */
-      admissionSignal?: AbortSignal;
-    } = {},
+    opts: NewAgentSessionOptions = {},
+  ): Promise<NewSessionResponse> {
+    return this.startNewSession(agentId, opts, { actor: "agent-code" });
+  }
+
+  /** Start one persistent autonomous Design session. It uses the same provider
+   * lifecycle as Code, but its immutable actor profile selects ZSR and replaces
+   * the user MCP registry with the single scoped Design API endpoint. */
+  async newDesignSession(
+    agentId: string,
+    admission: DesignAgentSessionAdmission,
+    opts: NewAgentSessionOptions = {},
+  ): Promise<NewSessionResponse> {
+    const profile = checkedDesignSessionProfile(admission);
+    return this.startNewSession(
+      agentId,
+      { ...opts, env: { ...(opts.env ?? {}), ...admission.env } },
+      profile,
+    );
+  }
+
+  private async startNewSession(
+    agentId: string,
+    opts: NewAgentSessionOptions,
+    profile: SessionExecutionProfile,
   ): Promise<NewSessionResponse> {
     const sessionStartedAt = Date.now();
+    const actor = profile.actor;
     const adapter = await this.adapterFor(agentId);
     // The prior silent fallback
     // `opts.cwd ?? this.projectRoot` was a critical footgun. When a
@@ -4138,16 +4725,12 @@ export class AgentGateway {
       "newSession",
       {
         cliBinary: spawn.cliBinary,
-        ...(managedWorkspace?.placement === "local" &&
-        canonicalWorkspaceRoot !== undefined
-          ? { reserveDefaultDesignDirectory: true }
-          : {}),
+        actor,
       },
     );
-    // ZSR wraps the complete provider runtime before any provider wrapper,
-    // MCP server, hook, plugin or `/add-dir` child starts. Preserve the same
-    // provider environment as a normal workspace; the boundary policy, not a
-    // provider-specific feature clamp, subtracts Design authority.
+    // The actor router owns the complete provider lifecycle before any wrapper,
+    // MCP server, hook, plugin, or `/add-dir` child starts. Code selects native
+    // host execution with its normal environment; Design selects ZSR.
     const sessionEnv = spawn.env;
     const territorySet = await this.resolveTerritorySet(
       primaryTerritory,
@@ -4155,15 +4738,23 @@ export class AgentGateway {
       canonicalWorkspaceRoot,
       sessionEnv,
       "newSession",
+      { actor },
     );
+    this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
+    const providerEnv = this.sanitizeProviderEnv(sessionEnv);
     // Native-instruction adapters (Codex and Claude) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
-    const instructionCtx = this.parseInstructionCtx(
-      sessionEnv,
-      territory?.designDirectory,
-    );
+    const instructionCtx = {
+      ...this.parseInstructionCtx(
+        providerEnv,
+        territory?.designDirectory,
+        territory?.protectedDesignDirectories,
+      ),
+      agentRole:
+        actor === "design-agent" ? ("design" as const) : ("code" as const),
+    };
     const systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
@@ -4175,18 +4766,17 @@ export class AgentGateway {
         executionId,
         territorySet.contributions,
         async () => {
-          const mcpServers = await this.resolveSessionMcp(
-            agentId,
-            cwd,
-            mainRepoRoot,
-          );
+          const mcpServers =
+            actor === "design-agent"
+              ? [...profile.mcpServers]
+              : await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
           const preparedBoundary = await this.prepareExecutionBoundary(
             executionId,
             cwd,
             canonicalWorkspaceRoot,
             adapter,
             territory,
-            sessionEnv,
+            providerEnv,
             mcpServers,
             "newSession",
             territorySet.additionalRoots,
@@ -4195,18 +4785,26 @@ export class AgentGateway {
               ...(opts.admissionSignal
                 ? { admissionSignal: opts.admissionSignal }
                 : {}),
-              warmSession: {
-                contributions: territorySet.contributions,
-                registeredDesignAuthorityIdentity:
-                  territorySet.registeredDesignAuthorityIdentity,
-              },
+              ...(actor === "agent-code"
+                ? {
+                    warmSession: {
+                      contributions: territorySet.contributions,
+                      registeredDesignAuthorityIdentity:
+                        territorySet.registeredDesignAuthorityIdentity,
+                    },
+                  }
+                : {}),
+              actor,
+              ...(actor === "design-agent"
+                ? { trustedLocalPorts: profile.trustedLocalPorts }
+                : {}),
+              contextTerritories: territorySet.contextTerritories,
             },
           );
-          // The immutable kernel policy is already installed. Re-read the
-          // authority immediately, but do not hold provider startup on this
-          // second full filesystem scan. Any drift joins the live canary's
-          // exact-execution failure path and stops this boundary before the
-          // failure card is published.
+          // The actor boundary is already admitted. Re-read the authority
+          // immediately, but do not hold provider startup on this second full
+          // filesystem scan. Any drift joins the exact execution's attestation
+          // failure path and stops that run before the failure is published.
           const territoryRevalidation = Promise.resolve().then(() =>
             this.assertAdditionalTerritorySetStillCurrent(
               territorySet,
@@ -4216,6 +4814,7 @@ export class AgentGateway {
               mainRepoRoot,
               sessionEnv,
               "newSession",
+              actor,
             ),
           );
           const protectionAttestation = Promise.all([
@@ -4236,17 +4835,22 @@ export class AgentGateway {
           );
           return { mcpServers, preparedBoundary, protectionAttestation };
         },
+        actor,
       );
     const boundary = preparedBoundary.status;
-    const browserUse = await this.resolveBrowserUse(
-      agentId,
-      cwd,
-      opts.workspaceId,
-      opts.conversationId,
-      mainRepoRoot,
-    );
-    // Local MCP, hooks, plugins and subagents are now descendants of the same
-    // ZSR process root, so Design-bearing sessions retain the normal registry.
+    const browserUse =
+      actor === "design-agent"
+        ? null
+        : await this.resolveBrowserUse(
+            agentId,
+            cwd,
+            opts.workspaceId,
+            opts.conversationId,
+            mainRepoRoot,
+          );
+    // Local MCP, hooks, plugins, and subagents are descendants of the selected
+    // actor boundary. Native Code keeps the normal registry; Design receives
+    // only the scoped endpoint assembled above.
     try {
       opts.onExecutionCreated?.(executionId);
     } catch (error) {
@@ -4259,12 +4863,12 @@ export class AgentGateway {
       const startup = adapter.newSession({
         executionId,
         cwd,
-        env: sessionEnv,
+        env: providerEnv,
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(browserUse ? { browserUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
-        ...(territory ? { territory } : {}),
+        ...(territory && actor === "agent-code" ? { territory } : {}),
         executionBoundary: preparedBoundary,
       });
       this.trackAdapterStartup(executionId, startup);
@@ -4308,6 +4912,7 @@ export class AgentGateway {
     console.log(
       `[agents] ${agentId} newSession: executionId=${session.executionId} cwd=${cwd}` +
         (opts.workspaceId ? ` workspaceId=${opts.workspaceId}` : "") +
+        ` actor=${actor}` +
         (systemInstruction ? " sysInstr=native" : "") +
         ` ready=${Date.now() - sessionStartedAt}ms` +
         this.describeBoundaryAdmission(preparedBoundary) +
@@ -4316,12 +4921,22 @@ export class AgentGateway {
     // Optional benchmark mode only: pre-admit the next spare of this shape.
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(session.executionId, agentId);
+    this.executionToActor.set(session.executionId, actor);
     this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
     if (mainRepoRoot) {
       this.executionToMainRepoRoot.set(session.executionId, mainRepoRoot);
     }
     this.executionToInstructionCtx.set(session.executionId, instructionCtx);
+    this.executionToContextTerritories.set(
+      session.executionId,
+      new Map(
+        territorySet.contextTerritories.map((context) => [
+          path.resolve(context.workspaceRoot),
+          context,
+        ]),
+      ),
+    );
     this.executionToDesignDirectory.set(
       session.executionId,
       territory?.designDirectory ?? null,
@@ -4419,10 +5034,6 @@ export class AgentGateway {
       "loadSession",
       {
         cliBinary: spawn.cliBinary,
-        ...(managedWorkspace?.placement === "local" &&
-        canonicalWorkspaceRoot !== undefined
-          ? { reserveDefaultDesignDirectory: true }
-          : {}),
       },
     );
     const sessionEnv = spawn.env;
@@ -4433,10 +5044,13 @@ export class AgentGateway {
       sessionEnv,
       "loadSession",
     );
+    this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
+    const providerEnv = this.sanitizeProviderEnv(sessionEnv);
     const instructionCtx = this.parseInstructionCtx(
-      sessionEnv,
+      providerEnv,
       territory?.designDirectory,
+      territory?.protectedDesignDirectories,
     );
     const systemInstruction = this.nativeInstructionFor(
       adapter,
@@ -4459,7 +5073,7 @@ export class AgentGateway {
             canonicalWorkspaceRoot,
             adapter,
             territory,
-            sessionEnv,
+            providerEnv,
             mcpServers,
             "loadSession",
             territorySet.additionalRoots,
@@ -4473,6 +5087,7 @@ export class AgentGateway {
                 registeredDesignAuthorityIdentity:
                   territorySet.registeredDesignAuthorityIdentity,
               },
+              contextTerritories: territorySet.contextTerritories,
             },
           );
           const territoryRevalidation = Promise.resolve().then(() =>
@@ -4528,7 +5143,7 @@ export class AgentGateway {
         // Compatibility for adapters/tests that have not yet adopted bindings.
         sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
         cwd,
-        env: sessionEnv,
+        env: providerEnv,
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(browserUse ? { browserUse } : {}),
@@ -4587,12 +5202,22 @@ export class AgentGateway {
     // either path.
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(executionId, agentId);
+    this.executionToActor.set(executionId, "agent-code");
     this.settleAdapterStartup(executionId);
     this.executionToCwd.set(executionId, cwd);
     if (mainRepoRoot) {
       this.executionToMainRepoRoot.set(executionId, mainRepoRoot);
     }
     this.executionToInstructionCtx.set(executionId, instructionCtx);
+    this.executionToContextTerritories.set(
+      executionId,
+      new Map(
+        territorySet.contextTerritories.map((context) => [
+          path.resolve(context.workspaceRoot),
+          context,
+        ]),
+      ),
+    );
     this.executionToDesignDirectory.set(
       executionId,
       territory?.designDirectory ?? null,
@@ -4705,10 +5330,6 @@ export class AgentGateway {
       "forkSession",
       {
         cliBinary: spawn.cliBinary,
-        ...(managedWorkspace?.placement === "local" &&
-        canonicalWorkspaceRoot !== undefined
-          ? { reserveDefaultDesignDirectory: true }
-          : {}),
       },
     );
     const sessionEnv = spawn.env;
@@ -4719,10 +5340,13 @@ export class AgentGateway {
       sessionEnv,
       "forkSession",
     );
+    this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
+    const providerEnv = this.sanitizeProviderEnv(sessionEnv);
     const instructionCtx = this.parseInstructionCtx(
-      sessionEnv,
+      providerEnv,
       territory?.designDirectory,
+      territory?.protectedDesignDirectories,
     );
     const systemInstruction = this.nativeInstructionFor(
       adapter,
@@ -4745,7 +5369,7 @@ export class AgentGateway {
           canonicalWorkspaceRoot,
           adapter,
           territory,
-          sessionEnv,
+          providerEnv,
           mcpServers,
           "forkSession",
           territorySet.additionalRoots,
@@ -4759,6 +5383,7 @@ export class AgentGateway {
               registeredDesignAuthorityIdentity:
                 territorySet.registeredDesignAuthorityIdentity,
             },
+            contextTerritories: territorySet.contextTerritories,
           },
         );
         try {
@@ -4786,7 +5411,7 @@ export class AgentGateway {
             operation: forkProviderBinding({
               providerBinding,
               cwd,
-              env: sessionEnv,
+              env: providerEnv,
               cliBinary: spawn.cliBinary,
               mcpServers,
               ...(systemInstruction ? { systemInstruction } : {}),
@@ -4842,12 +5467,14 @@ export class AgentGateway {
       this.settleAdapterStartup(executionId);
       this.boundaryAttestations.delete(executionId);
       this.executionToAgent.delete(executionId);
+      this.executionToActor.delete(executionId);
       this.executionToWorkspace.delete(executionId);
       this.executionToCwd.delete(executionId);
       this.executionToInstructionCtx.delete(executionId);
       this.executionToDesignDirectory.delete(executionId);
       this.executionToTerritoryIdentity.delete(executionId);
       this.executionToTerritoryContributions.delete(executionId);
+      this.executionToContextTerritories.delete(executionId);
       this.provisionalTerritoryContributions.delete(executionId);
       this.executionToBoundaryStatus.delete(executionId);
       this.stopObservingBoundaryPorts(executionId);
@@ -4918,6 +5545,7 @@ export class AgentGateway {
       return { ...rest, state: "revoked", checkedAt: Date.now() };
     });
     this.executionToAgent.delete(sessionId);
+    this.executionToActor.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
     this.executionToMainRepoRoot.delete(sessionId);
@@ -4928,6 +5556,7 @@ export class AgentGateway {
     this.executionToDesignDirectory.delete(sessionId);
     this.executionToTerritoryIdentity.delete(sessionId);
     this.executionToTerritoryContributions.delete(sessionId);
+    this.executionToContextTerritories.delete(sessionId);
     this.provisionalTerritoryContributions.delete(sessionId);
     this.executionToBoundaryStatus.delete(sessionId);
     const adapter = this.adapters.get(resolvedAgentId);
@@ -5040,11 +5669,14 @@ export class AgentGateway {
   private parseInstructionCtx(
     env: Record<string, string> | undefined,
     designDirectory?: string,
+    designDirectories?: readonly string[],
   ): {
     additionalDirectories: string[];
     targetBranch?: string;
     customInstructions?: string;
     designDirectory?: string;
+    designDirectories?: string[];
+    agentRole?: "code" | "design";
   } {
     const e = env ?? {};
     let dirs: string[] = [];
@@ -5066,7 +5698,25 @@ export class AgentGateway {
       targetBranch: e.ZEROS_TARGET_BRANCH?.trim() || undefined,
       customInstructions: e.ZEROS_PROMPTS_GENERAL || undefined,
       ...(designDirectory ? { designDirectory } : {}),
+      ...(designDirectories && designDirectories.length > 0
+        ? { designDirectories: [...designDirectories] }
+        : {}),
     };
+  }
+
+  /** Strip the retired committed-projection courier before any provider sees
+   * the environment. Code providers read the live Design root directly from
+   * the native worktree; Design admission receives its mounts from ZSR. */
+  private sanitizeProviderEnv(
+    env: Record<string, string> | undefined,
+  ): Record<string, string> | undefined {
+    // This capability is minted by the engine, never accepted from renderer,
+    // settings, ambient, or resumed provider environment. Clear a couriered
+    // value even when no projection is needed so it cannot turn an arbitrary
+    // host directory into a provider discovery/read-only grant.
+    const providerBase = env ? { ...env } : undefined;
+    if (providerBase) delete providerBase.ZEROS_ISOLATION_CONTEXT_DIRS;
+    return providerBase;
   }
 
   /** The first-turn instruction body for a NATIVE-channel adapter (see
@@ -5084,6 +5734,8 @@ export class AgentGateway {
       additionalDirectories: ctx.additionalDirectories,
       customInstructions: ctx.customInstructions ?? null,
       designDirectory: ctx.designDirectory ?? null,
+      designDirectories: ctx.designDirectories,
+      agentRole: ctx.agentRole ?? "code",
     });
     return body || undefined;
   }
@@ -5104,11 +5756,18 @@ export class AgentGateway {
     if (this.sessionsInstructed.has(sessionId)) {
       if (!this.sessionsTerritoryNoticePending.delete(sessionId)) return prompt;
       const ctx = this.executionToInstructionCtx.get(sessionId);
-      const territoryBlock = wrapSystemInstruction(
-        buildCodeAgentDesignTerritoryNotice(ctx?.designDirectory ?? null),
+      const isolationBlock = wrapSystemInstruction(
+        ctx?.agentRole === "design"
+          ? buildDesignAgentNotice(ctx.designDirectory ?? null)
+          : buildCodeAgentDesignTerritoryNotice(
+              effectiveCodeAgentDesignDirectories(
+                ctx?.designDirectories,
+                ctx?.designDirectory,
+              ),
+            ),
       );
-      return territoryBlock
-        ? [{ type: "text", text: territoryBlock }, ...prompt]
+      return isolationBlock
+        ? [{ type: "text", text: isolationBlock }, ...prompt]
         : prompt;
     }
     this.sessionsInstructed.add(sessionId);
@@ -5122,6 +5781,8 @@ export class AgentGateway {
       additionalDirectories: ctx?.additionalDirectories ?? [],
       customInstructions: ctx?.customInstructions ?? null,
       designDirectory: ctx?.designDirectory ?? null,
+      designDirectories: ctx?.designDirectories,
+      agentRole: ctx?.agentRole ?? "code",
     });
     if (!block) return prompt;
     return [{ type: "text", text: block }, ...prompt];
@@ -5367,7 +6028,9 @@ export class AgentGateway {
     const updateConfig =
       resolveAgentCapabilityPorts(adapter).runtimeConfiguration?.updateConfig;
     if (!updateConfig) return;
-    await updateConfig({ sessionId, env });
+    const protectedEnv = { ...env };
+    delete protectedEnv.ZEROS_ISOLATION_CONTEXT_DIRS;
+    await updateConfig({ sessionId, env: protectedEnv });
   }
 
   async readMemorySettings(agentId: string) {
@@ -5595,9 +6258,6 @@ export class AgentGateway {
       clearTimeout(timer);
     }
     this.boundaryRetirementRecoveryTimers.clear();
-    // Engine shutdown must not leave warm container machines behind: refuse
-    // idling for every release below, then stop the already-idle ones.
-    suspendSharedContainerWorkerIdling();
     const boundaryEntries = [...this.executionBoundaries.entries()];
     const boundaries = boundaryEntries.map(([, boundary]) => boundary);
     const failures: unknown[] = [];
@@ -5609,7 +6269,6 @@ export class AgentGateway {
         if (result.status === "rejected") failures.push(result.reason);
       }
     };
-    await settle([() => stopIdleSharedContainerWorkers()]);
     for (const executionId of this.boundaryPortSubscriptions.keys()) {
       this.stopObservingBoundaryPorts(executionId);
     }
@@ -5658,6 +6317,7 @@ export class AgentGateway {
     this.failedBoundaryRetirements.clear();
     this.adapters.clear();
     this.executionToAgent.clear();
+    this.executionToActor.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();
     this.executionToMainRepoRoot.clear();
@@ -5665,7 +6325,9 @@ export class AgentGateway {
     this.executionToDesignDirectory.clear();
     this.executionToTerritoryIdentity.clear();
     this.executionToTerritoryContributions.clear();
+    this.executionToContextTerritories.clear();
     this.provisionalTerritoryContributions.clear();
+    this.provisionalExecutionActors.clear();
     this.executionToBoundaryStatus.clear();
     this.sessionsTerritoryNoticePending.clear();
     this.sessionsCwdHinted.clear();

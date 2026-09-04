@@ -401,6 +401,7 @@ export class WorkOSBrowserSessions {
 
   async start(options: {
     returnPath: string;
+    maxAge?: 300;
   }): Promise<{ credential: string; authorizationUrl: string }> {
     const credential = this.token();
     const state = this.token();
@@ -417,6 +418,7 @@ export class WorkOSBrowserSessions {
       state,
       codeChallenge: pkceChallenge(codeVerifier),
       redirectUri,
+      ...(options.maxAge !== undefined ? { maxAge: options.maxAge } : {}),
     });
     const parsed = new URL(authorizationUrl);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
@@ -870,6 +872,9 @@ export function createWorkOSBrowserSessionRoutes(
           requestUrl.searchParams.get("return"),
           appOrigin,
         ),
+        ...(requestUrl.searchParams.get("max_age") === "300"
+          ? { maxAge: 300 as const }
+          : {}),
       });
       const headers = new Headers({
         location: started.authorizationUrl,

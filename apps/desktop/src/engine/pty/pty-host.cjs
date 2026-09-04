@@ -173,7 +173,22 @@ function killProc(p, tree) {
 function handleSpawn(m) {
   let proc;
   try {
-    proc = pty.spawn(m.shell, Array.isArray(m.args) ? m.args : [], {
+    const args = Array.isArray(m.args) ? [...m.args] : [];
+    if (m.immediateParentPidArgIndex !== undefined) {
+      const index = m.immediateParentPidArgIndex;
+      if (
+        !Number.isSafeInteger(index) ||
+        index <= 0 ||
+        index >= args.length ||
+        args[index - 1] !== "--parent-pid" ||
+        typeof args[index] !== "string" ||
+        !/^\d+$/.test(args[index])
+      ) {
+        throw new Error("invalid trusted-launcher parent pid binding");
+      }
+      args[index] = String(process.pid);
+    }
+    proc = pty.spawn(m.shell, args, {
       name: typeof m.name === "string" && m.name ? m.name : "xterm-256color",
       cwd: m.cwd,
       cols: typeof m.cols === "number" && m.cols > 0 ? m.cols : 80,

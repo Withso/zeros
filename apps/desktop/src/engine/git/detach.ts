@@ -7,7 +7,8 @@
 //
 // Mechanism:
 //   1. Snapshot the root's current HEAD.
-//   2. Make a checkpoint commit in the workspace (`commit --allow-empty`).
+//   2. Build a tracked-Code checkpoint commit on a private ref with a scratch
+//      index. The workspace branch and real index never move.
 //   3. `git read-tree --reset -u <checkpoint-sha>` in the root — swaps
 //      working files to match the checkpoint without moving any ref.
 //   4. chokidar monitors workspace path changes; on each change
@@ -25,11 +26,15 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import chokidar, { type FSWatcher } from "chokidar";
 
 import { GitError } from "./errors";
 import { getWorkspace } from "./worktree";
 import { runGit } from "./git-exec";
+import { withWorkspaceGitMutation } from "./mutation-lock";
 import { getInProgressState } from "./repo";
 import {
   clearDetachState,
@@ -38,31 +43,25 @@ import {
   setDetachState,
   zerosStateRoot,
 } from "./state";
+import {
+  discoverDesignDirectories,
+  resolveDesignDirectoryPointerState,
+} from "../design/directory";
+import { designDirectoryNameFor } from "../design/directory-registry";
+import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 
 interface ActiveDetach {
   workspaceId: string;
   watcher: FSWatcher;
   debounceTimer: NodeJS.Timeout | null;
+  syncTail: Promise<void>;
+  stopping: boolean;
 }
 
 let active: ActiveDetach | null = null;
 
-/** Commit message stamped on every detach checkpoint. Shared so the
- *  stop-time unwind can recognise (and only unwind) its own commits. */
+/** Commit message stamped on private detach checkpoint objects. */
 const CHECKPOINT_MESSAGE = "zeros: detach checkpoint";
-
-/** Count the leading (newest-first) consecutive detach-checkpoint commits in
- *  a commit-subject list — how many to `reset --soft` off the workspace
- *  branch on stop so detach doesn't litter history. Stops at the first real
- *  commit, so a commit the user made mid-detach is preserved. */
-export function trailingCheckpointCount(subjects: string[]): number {
-  let n = 0;
-  for (const s of subjects) {
-    if (s.trim() !== CHECKPOINT_MESSAGE) break;
-    n++;
-  }
-  return n;
-}
 
 // ── Lockfile ─────────────────────────────────────────────
 
@@ -115,11 +114,17 @@ const DEBOUNCE_MS = 150;
  *  emit dozens) collapses into one re-sync. 150ms balances responsiveness
  *  against thrashing. */
 function scheduleSync(workspaceId: string, rootPath: string): void {
-  if (!active) return;
-  if (active.debounceTimer) clearTimeout(active.debounceTimer);
-  active.debounceTimer = setTimeout(() => {
-    active!.debounceTimer = null;
-    syncWorkspaceToRoot(workspaceId, rootPath).catch((err) => {
+  const owner = active;
+  if (!owner || owner.stopping) return;
+  if (owner.debounceTimer) clearTimeout(owner.debounceTimer);
+  owner.debounceTimer = setTimeout(() => {
+    owner.debounceTimer = null;
+    if (active !== owner || owner.stopping) return;
+    const next = owner.syncTail.then(async () => {
+      if (active !== owner || owner.stopping) return;
+      await syncWorkspaceToRoot(workspaceId, rootPath);
+    });
+    owner.syncTail = next.catch((err) => {
       // We can't surface this to the renderer without an event channel
       // (the engine module doesn't depend on Electron). Best-effort
       // log; the renderer can poll detach_status and notice if active
@@ -129,25 +134,94 @@ function scheduleSync(workspaceId: string, rootPath: string): void {
   }, DEBOUNCE_MS);
 }
 
+async function detachDesignRoots(
+  workspacePath: string,
+  repoRoot: string,
+): Promise<string[]> {
+  const [discovered, sticky, pointer] = await Promise.all([
+    discoverDesignDirectories(workspacePath),
+    stickyRecognizedDesignDirectories(workspacePath),
+    resolveDesignDirectoryPointerState({ repoRoot, workspacePath }),
+  ]);
+  return [
+    ...new Set([
+      designDirectoryNameFor(workspacePath),
+      ...(pointer.configured ? [pointer.directory] : []),
+      ...discovered,
+      ...sticky,
+    ]),
+  ];
+}
+
+function detachCheckpointRef(workspaceId: string): string {
+  return `refs/zeros/detach/${workspaceId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+}
+
+/** Build a tracked-Code projection in a scratch index. The workspace's real
+ * index and HEAD never move, and every recognized Design root is reset to the
+ * committed HEAD tree before the checkpoint object is written. */
+async function createDetachCheckpoint(workspaceId: string): Promise<string> {
+  const ws = getWorkspace(workspaceId);
+  const scratchDir = await mkdtemp(path.join(tmpdir(), "zeros-detach-index-"));
+  const env = { GIT_INDEX_FILE: path.join(scratchDir, "index") };
+  try {
+    const { stdout: headOut } = await runGit(ws.path, ["rev-parse", "HEAD"]);
+    const head = headOut.trim();
+    await runGit(ws.path, ["read-tree", head], { env });
+    await runGit(ws.path, ["add", "-u"], { env });
+    const designRoots = await detachDesignRoots(ws.path, ws.repoRoot);
+    for (const designRoot of designRoots) {
+      const { stdout: tracked } = await runGit(
+        ws.path,
+        [
+          "ls-tree",
+          "-r",
+          "--name-only",
+          "-z",
+          head,
+          "--",
+          `:(literal)${designRoot}`,
+        ],
+        { readOnly: true },
+      );
+      if (!tracked) continue;
+      await runGit(
+        ws.path,
+        ["reset", "-q", head, "--", `:(literal)${designRoot}`],
+        { env },
+      );
+    }
+    const { stdout: treeOut } = await runGit(ws.path, ["write-tree"], { env });
+    const { stdout: checkpointOut } = await runGit(
+      ws.path,
+      ["commit-tree", treeOut.trim(), "-p", head, "-m", CHECKPOINT_MESSAGE],
+      { env },
+    );
+    const checkpointSha = checkpointOut.trim();
+    await runGit(ws.path, [
+      "update-ref",
+      detachCheckpointRef(workspaceId),
+      checkpointSha,
+    ]);
+    return checkpointSha;
+  } finally {
+    await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
 async function syncWorkspaceToRoot(
   workspaceId: string,
   rootPath: string,
 ): Promise<void> {
   const ws = getWorkspace(workspaceId);
-  // Stage all tracked changes. Untracked files are intentionally excluded:
-  // mirroring them would pollute the root checkout with build artefacts and
-  // scratch files the user never asked to see there.
-  await runGit(ws.path, ["add", "-u"]);
-  // Empty checkpoint commits are allowed — they make a parent-less ref
-  // chain if the user edited nothing tracked but the watcher still fired.
-  await runGit(ws.path, ["commit", "--allow-empty", "-m", CHECKPOINT_MESSAGE]);
-  const { stdout } = await runGit(ws.path, ["rev-parse", "HEAD"]);
-  const checkpointSha = stdout.trim();
-  await runGit(rootPath, ["read-tree", "--reset", "-u", checkpointSha]);
-  const current = getDetachState();
-  if (current) {
-    setDetachState({ ...current, checkpointSha });
-  }
+  await withWorkspaceGitMutation(ws.path, async () => {
+    const checkpointSha = await createDetachCheckpoint(workspaceId);
+    await runGit(rootPath, ["read-tree", "--reset", "-u", checkpointSha]);
+    const current = getDetachState();
+    if (current?.workspaceId === workspaceId) {
+      setDetachState({ ...current, checkpointSha });
+    }
+  });
 }
 
 // ── Public API ───────────────────────────────────────────
@@ -231,12 +305,14 @@ export async function detachStart(
   const { stdout: rootHeadOut } = await runGit(rootPath, ["rev-parse", "HEAD"]);
   const rootHead = rootHeadOut.trim();
 
-  // 2. Initial checkpoint commit + 3. read-tree into root.
-  await runGit(ws.path, ["add", "-u"]);
-  await runGit(ws.path, ["commit", "--allow-empty", "-m", CHECKPOINT_MESSAGE]);
-  const { stdout: shaOut } = await runGit(ws.path, ["rev-parse", "HEAD"]);
-  const checkpointSha = shaOut.trim();
-  await runGit(rootPath, ["read-tree", "--reset", "-u", checkpointSha]);
+  // 2. Build a scratch tracked-Code checkpoint + 3. read-tree into root. No
+  // workspace branch/index mutation occurs, so staged Code and Design lanes
+  // stay exactly as the user left them.
+  let checkpointSha = "";
+  await withWorkspaceGitMutation(ws.path, async () => {
+    checkpointSha = await createDetachCheckpoint(opts.workspaceId);
+    await runGit(rootPath, ["read-tree", "--reset", "-u", checkpointSha]);
+  });
 
   // 4. Start the watcher. chokidar (v4, pure-JS — no native bindings) so the
   // engine still boots as a Bun single-file executable. @parcel/watcher's
@@ -279,6 +355,8 @@ export async function detachStart(
     workspaceId: opts.workspaceId,
     watcher: fsWatcher,
     debounceTimer: null,
+    syncTail: Promise.resolve(),
+    stopping: false,
   };
   setDetachState({
     workspaceId: opts.workspaceId,
@@ -310,42 +388,40 @@ export async function detachStop(): Promise<DetachStopResult> {
     });
   }
   // Stop the watcher first so a stray event during read-tree doesn't
-  // trigger a checkpoint commit on the way out.
+  // trigger a checkpoint refresh on the way out.
+  active.stopping = true;
   try {
     await active.watcher.close();
   } catch {
     /* best effort */
   }
   if (active.debounceTimer) clearTimeout(active.debounceTimer);
-  active = null;
+  await active.syncTail;
 
   const ws = getWorkspace(state.workspaceId);
   // Restore the root's working tree to what it was before detach.
-  await runGit(ws.repoRoot, ["read-tree", "--reset", "-u", state.preRootHead]);
-  // Unwind the trailing detach-checkpoint commits off the WORKSPACE branch so
-  // detach doesn't leave "zeros: detach checkpoint" commits in history. The
-  // cumulative edits survive as STAGED changes (reset --soft keeps the index +
-  // working tree). Only consecutive trailing checkpoints are removed — a real
-  // commit the user made mid-detach stops the unwind. Best-effort: a failure
-  // here must not block stop (the root is already restored).
   try {
-    const { stdout } = await runGit(ws.path, [
-      "log",
-      "--format=%s",
-      "-n",
-      "500",
-    ]);
-    const n = trailingCheckpointCount(stdout.split("\n"));
-    if (n > 0) {
-      await runGit(ws.path, ["reset", "--soft", `HEAD~${n}`]);
-    }
-  } catch (err) {
-    console.warn(
-      `[detach] could not unwind checkpoint commits on stop: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+    await withWorkspaceGitMutation(ws.path, async () => {
+      await runGit(ws.repoRoot, [
+        "read-tree",
+        "--reset",
+        "-u",
+        state.preRootHead,
+      ]);
+      await runGit(ws.path, [
+        "update-ref",
+        "-d",
+        detachCheckpointRef(state.workspaceId),
+      ]).catch(() => {});
+    });
+  } catch (error) {
+    // The watcher is already closed, but retaining the handle and durable
+    // state lets the user retry restoration instead of stranding the root on
+    // the checkpoint tree behind a same-process lockfile.
+    active.stopping = false;
+    throw error;
   }
+  active = null;
   clearDetachState();
   removeLock();
   return { stoppedAt: Date.now(), restoredHead: state.preRootHead };

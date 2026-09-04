@@ -28,7 +28,7 @@ import { useResizeHint } from "../use-resize-hint";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
-import { WorkspaceModeHeader } from "../../shared/ui/workspace-mode-header";
+import { WorkspaceModeToggle } from "../../shared/ui/workspace-mode-header";
 
 // ── Conversation pane className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-conversation pane family
@@ -39,10 +39,13 @@ import { WorkspaceModeHeader } from "../../shared/ui/workspace-mode-header";
 // 2026-06-16: dropped `border-r border-border1`. 2026-07-11 flush redesign:
 // the conversation/workbench seam line came back, but workbench owns it now (`border-l` on
 // WORKBENCH_PANE_CLS) — conversation pane stays borderless so the seam is a single 1px line.
-// No top gutter (2026-07-12): the h-10 topbar is the column's full 0..40px
-// title strip, centering its content at y=20 — the traffic lights' midline —
-// like repository panel's and workbench's first rows (and the lights line up in the
-// repository panel-collapsed state too).
+// No top gutter (2026-07-12, restated 2026-09-01): the column's first row IS
+// its chrome band — it butts straight against the global TopBar with nothing
+// between them, like repository panel's and workbench's first rows. That row
+// used to be the workspace/mode header; since its removal the chat strip is the
+// band, and it carries the column-level mode toggle and the collapsed-workbench
+// expand control as fixed slots. It shares Workbench's h-10 header height so the
+// expand control does not shift when the panel opens or collapses.
 const CONVERSATION_BASE_CLS = "flex flex-col bg-bg1 overflow-hidden relative";
 // Width policy (2026-07-17 — proportional columns):
 //   - Conversation pane's share of the two-column row is a RATIO, not a pixel
@@ -370,18 +373,13 @@ export function ConversationPane({
       }}
       aria-label="Agent Workspace"
     >
-      <WorkspaceModeHeader
-        workspace={workspace}
-        separator
-        trailing={
-          workbenchCollapsed && onToggleWorkbench ? (
-            <WorkbenchToggleButton
-              workbenchCollapsed
-              onToggle={onToggleWorkbench}
-            />
-          ) : undefined
-        }
-      />
+      {/* 2026-09-01: the column's own h-10 workspace row is GONE. It carried
+          only the branch name (the global TopBar already shows it) plus the
+          mode toggle, so the whole band was a 40px tax on the transcript. The
+          toggle and the collapsed-workbench expand control now ride the chat
+          strip below as fixed, non-scrolling slots — the strip is the column's
+          first row, and ConversationPaneLayout hands each control to the pane
+          that owns its corner (see conversation/pane-layout.tsx). */}
       {/* The per-workspace bar (project › workspace breadcrumb +
           "Open in" dropdown) is HIDDEN — the global TopBar already
           carries the breadcrumb, so a second one was pure noise. It
@@ -389,7 +387,7 @@ export function ConversationPane({
           the ⌘O (open in default app) and ⌘C (copy path) window-level
           shortcuts it registers keep working. Window dragging is
           unaffected (the global TopBar above the columns owns the drag
-          region). The visible workspace row above now owns the workbench
+          region). The chat strip's trailing slot now owns the workbench
           expand button while the panel is collapsed. Remove the `hidden`
           wrapper to bring this legacy row back. */}
       <div className="hidden">
@@ -403,7 +401,18 @@ export function ConversationPane({
             never tears down xterm; its layers portal into pane hosts. */}
         <div className={BODY_STACK_CLS}>
           <div className={PANE_TREE_ROOT_CLS}>
-            <ConversationPaneLayout onMinimumSizeChange={setPaneMinimumSize} />
+            <ConversationPaneLayout
+              onMinimumSizeChange={setPaneMinimumSize}
+              stripLeading={<WorkspaceModeToggle workspace={workspace} />}
+              stripTrailing={
+                workbenchCollapsed && onToggleWorkbench ? (
+                  <WorkbenchToggleButton
+                    workbenchCollapsed
+                    onToggle={onToggleWorkbench}
+                  />
+                ) : null
+              }
+            />
           </div>
           <ChatDeck />
           {/* Terminal-agent deck — every `kind: "terminal"` chat lives

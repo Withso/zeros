@@ -6,11 +6,11 @@ and database tests exist.
 
 ## Scope and release boundary
 
-Phases 0–5 cover the single-member cloud-workspace foundation for Personal and
-Organization tenants. This execution deliberately excludes cloud creation,
-catalog, details, onboarding, and management UI wiring. It also excludes
-Organization multiplayer, presence, active ownership transfer, mobile clients,
-and collaborative source or Design editing.
+Phases 0–5 cover the single-owner cloud-workspace foundation for Organization
+tenants. Personal workspaces remain device-local. This execution deliberately
+excludes cloud creation, catalog, details, onboarding, and management UI wiring.
+It also excludes Organization multiplayer, presence, active ownership transfer,
+mobile clients, and collaborative source or Design editing.
 
 Local-to-cloud and cloud-to-local are immutable copy/fork operations:
 
@@ -30,7 +30,7 @@ CLOUD_WORKSPACE_SETUP_WORKER_ENABLED must remain false until they pass.
 
 Repository status: implemented.
 
-- Personal/Organization ownership, fixed workspace placement, immutable fork,
+- Organization cloud ownership, fixed workspace placement, immutable fork,
   receive-only replica, Design routing, SSH/preview/tunnel, retention, and
   customer-managed deployment seams are documented.
 - The remote bridge is account- and capability-gated with bounded framing,
@@ -53,14 +53,14 @@ External exit evidence:
 
 ## Phase 1 — Identity, authorization, settings, and paid authority
 
-Repository status: implemented by forward migrations 0024–0025 and 0039–0045,
-plus their control-plane services and tests.
+Repository status: implemented by forward migrations 0026–0027, 0041–0047,
+and 0053, plus their control-plane services and tests.
 
 - WorkOS is the identity and Organization-membership source. Zeros maps WorkOS
   identities to canonical database UUIDs and remains authoritative for Team,
   repository, workspace, role, entitlement, seat, quota, and billing policy.
-- Personal cloud requires exactly one Personal member and a current Pro account
-  entitlement.
+- Personal is permanently device-local and is rejected as a cloud-workspace
+  owner by both authorization and database constraints.
 - A Pro Organization supports at most five collaborators and requires every
   collaborator to have current Pro. Business and Enterprise require active
   seats within the purchased limit.
@@ -126,7 +126,7 @@ The setup worker remains disabled until every item above is reviewed.
 
 ## Phase 3 — Durable record, checkpoints, recovery, and deletion
 
-Repository status: implemented by migrations 0026–0029 and 0034–0036, plus the
+Repository status: implemented by migrations 0028–0031 and 0036–0038, plus the
 durable-record, content, object-store, maintenance, recovery, and fork services.
 
 - Chats, messages, turns, agent sessions, runs, terminals, Design transactions,
@@ -204,7 +204,7 @@ External exit evidence:
 Repository status: non-UI services implemented; production operations and
 release approval open.
 
-- Personal and Organization cloud creation, lifecycle, settings, repository,
+- Organization cloud creation, lifecycle, settings, repository,
   provider connection, quota, usage, checkpoint, export, replica, access,
   retention, and deletion APIs share the same authorization spine.
 - Phase 5 runtime is owner-only even when an Organization has other members.

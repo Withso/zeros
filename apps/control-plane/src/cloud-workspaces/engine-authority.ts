@@ -88,7 +88,7 @@ export async function assertCloudEngineIdentityForIdempotentReplay(
 }
 
 /** Caller must use a system transaction. Workspace-first locking preserves the
- * global revocation/engine lock order established by migration 0023. */
+ * global revocation/engine lock order established by migration 0025. */
 export async function assertCurrentCloudEngineAuthority(
   tx: Tx,
   input: {

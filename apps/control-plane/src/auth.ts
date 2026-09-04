@@ -34,6 +34,7 @@ import {
   type AuthTokenContractConfig,
 } from "./auth-token-contract.js";
 import { materializeProjectedMemberships } from "./workos-sync-events.js";
+import { isDeletionRecoveryRequest } from "./deletion-lifecycle.js";
 
 export type IdentityProvider = "auth0" | "workos";
 
@@ -67,6 +68,14 @@ export type AuthedUser = {
   displayName: string | null;
   avatarUrl: string | null;
   accountRevision: number;
+  /** Server-only lifecycle state. Public account responses expose only
+   * deliberately bounded deletion details from the lifecycle routes. */
+  accountStatus:
+    | "active"
+    | "identity_disabled"
+    | "suspended"
+    | "deletion_pending"
+    | "deleted";
   /** Server-only verified session context. Never serialize this object as part
    * of a public account response. */
   authentication: {
@@ -139,7 +148,10 @@ export function createAuthMiddleware(
     const header = c.req.header("authorization") ?? "";
     const token = header.startsWith("Bearer ") ? header.slice(7) : null;
     if (!token) {
-      return c.json({ error: { code: "unauthorized", message: "Missing bearer token" } }, 401);
+      return c.json(
+        { error: { code: "unauthorized", message: "Missing bearer token" } },
+        401,
+      );
     }
 
     let payload: JWTPayload;
@@ -284,9 +296,16 @@ export function createAuthMiddleware(
       };
     }
 
-    const user = await resolveAuthenticatedUser(pool, {
-      ...identity,
-    });
+    const user = await resolveAuthenticatedUser(
+      pool,
+      { ...identity },
+      {
+        allowDeletionPending: isDeletionRecoveryRequest(
+          c.req.method,
+          c.req.path,
+        ),
+      },
+    );
     c.set("user", user);
     await next();
   };
@@ -319,7 +338,8 @@ function recoveryPublicCode(): string {
 }
 
 function chargeSignupBudget(now: number): void {
-  if (now >= signupWindow.resetAt) signupWindow = { count: 0, resetAt: now + SIGNUP_WINDOW_MS };
+  if (now >= signupWindow.resetAt)
+    signupWindow = { count: 0, resetAt: now + SIGNUP_WINDOW_MS };
   signupWindow.count += 1;
   if (signupWindow.count > SIGNUP_MAX_PER_WINDOW) {
     console.warn(
@@ -379,6 +399,7 @@ function authenticationContext(
 function activePrincipal(
   row: PrincipalRow,
   input: AuthenticatedIdentityInput,
+  options: { allowDeletionPending: boolean },
 ): AuthedUser {
   if (row.identity_status !== "active") {
     throw new HttpError(
@@ -389,12 +410,12 @@ function activePrincipal(
       "This sign-in identity is no longer active.",
     );
   }
-  if (row.deleted_at || row.auth_status !== "active") {
+  const deletionRecovery =
+    options.allowDeletionPending && row.auth_status === "deletion_pending";
+  if (!deletionRecovery && (row.deleted_at || row.auth_status !== "active")) {
     throw new HttpError(
       401,
-      row.auth_status === "suspended"
-        ? "account_suspended"
-        : "account_deleted",
+      row.auth_status === "suspended" ? "account_suspended" : "account_deleted",
       row.auth_status === "suspended"
         ? "This account is suspended."
         : "This account is no longer active.",
@@ -411,6 +432,7 @@ function activePrincipal(
     avatarUrl: row.avatar_url,
     staffRole: row.staff_role,
     accountRevision: Number(row.auth_revision),
+    accountStatus: row.auth_status,
     authentication: authenticationContext(input),
   };
 }
@@ -510,6 +532,7 @@ async function registerAuthenticatedSession(
 export async function resolveAuthenticatedUser(
   pool: pg.Pool,
   input: AuthenticatedIdentityInput,
+  options: { allowDeletionPending?: boolean } = {},
 ): Promise<AuthedUser> {
   const existing = await withSystemTx(pool, async (tx) => {
     const result = await tx.query<PrincipalRow>(
@@ -522,7 +545,9 @@ export async function resolveAuthenticatedUser(
       [input.provider, input.providerSubject],
     );
     if (!result.rows[0]) return null;
-    const user = activePrincipal(result.rows[0], input);
+    const user = activePrincipal(result.rows[0], input, {
+      allowDeletionPending: options.allowDeletionPending === true,
+    });
     await registerAuthenticatedSession(tx, user, input);
     return user;
   });
@@ -564,12 +589,9 @@ export async function ensureUser(
       // but without this lock the losing transaction surfaces an opaque 500
       // instead of reusing the row the winner just provisioned. Hash collisions
       // cause harmless extra serialization.
-      await tx.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
-        [
-          `identity:${input.provider.length}:${input.provider}:${input.providerSubject}`,
-        ],
-      );
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+        `identity:${input.provider.length}:${input.provider}:${input.providerSubject}`,
+      ]);
       linked = await tx.query<{
         user_id: string;
         status: IdentityLifecycleStatus;
@@ -652,10 +674,9 @@ export async function ensureUser(
       // Different provider identities can race with the same case-insensitive
       // email. Serialize that narrower signup branch so the loser observes the
       // committed owner below and receives the deliberate account_exists 409.
-      await tx.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`,
-        [`email:${input.email.toLowerCase()}`],
-      );
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 1))`, [
+        `email:${input.email.toLowerCase()}`,
+      ]);
       // No identity link yet for this (provider, sub). If a DIFFERENT identity
       // already owns this email, this is a SECOND sign-in method for the same
       // person (e.g. GitHub after Google). We deliberately do NOT auto-link on
@@ -686,7 +707,8 @@ export async function ensureUser(
         const owner = emailOwner.rows[0];
         if (
           input.provider === "workos" &&
-          owner.auth_status === "identity_disabled" &&
+          (owner.auth_status === "identity_disabled" ||
+            owner.auth_status === "deletion_pending") &&
           owner.recovery_identity_id
         ) {
           if (!input.session) {
@@ -783,6 +805,7 @@ export async function ensureUser(
         avatarUrl: row.avatar_url,
         staffRole: row.staff_role,
         accountRevision: Number(row.auth_revision),
+        accountStatus: row.auth_status,
         authentication: authenticationContext(input),
       },
     };
@@ -869,10 +892,10 @@ export async function ensurePersonalOrganization(
       // squatter that commits between attempts. The follow-up owner read
       // distinguishes a concurrent same-user winner from a slug collision.
       const created = await tx.query<{ id: string }>(
-         `INSERT INTO organizations (
+        `INSERT INTO organizations (
            slug, name, created_by, is_personal, cloud_workspaces_allowed
          )
-         VALUES ($1, $2, $3, true, true)
+         VALUES ($1, $2, $3, true, false)
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [slug, displayName, user.id],

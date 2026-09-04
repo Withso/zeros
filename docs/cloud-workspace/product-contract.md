@@ -8,10 +8,10 @@ through the same versioned bridge concepts used locally. Remote placement must
 not create a second, incompatible workspace model.
 
 Tenant ownership, the workspace's immutable execution placement, and an
-optional local replica are independent. Personal and Organization workspaces
-may be created locally or in cloud. A local Organization workspace remains
-Organization-governed but its live source, chat, paths, and processes remain
-private to its device. See
+optional local replica are distinct. Personal workspaces are permanently
+device-local; Organization workspaces may be created locally or in cloud. A
+local Organization workspace remains Organization-governed but its live source,
+chat, paths, and processes remain private to its device. See
 [data, copies, and local sync](data-and-sync.md).
 
 ## User-visible guarantees
@@ -44,19 +44,18 @@ private to its device. See
 
 ## Initial product scope
 
-The target product permits both Personal and Organization cloud workspaces.
-Personal is single-member and cannot enable multiplayer. Organization
-capability metadata is necessary but never replaces server-side membership,
-role, plan, quota, repository, provider-connection, and policy authorization.
+The target product permits Organization-owned cloud workspaces only. Personal
+is permanently device-local and cannot own a `cloud_workspaces` row; migrations
+`0018_deletion_lifecycle.sql` and
+`0053_cloud_workspace_personal_organization_invariant.sql`, together with the
+authorization layer, enforce that boundary. Organization capability metadata is necessary but never replaces
+server-side membership, role, plan, quota, repository, provider-connection, and
+policy authorization.
 
-Migration `0024_cloud_workspace_identity_and_entitlements.sql` removes the
-legacy Personal-local-only constraint. Personal cloud still fails closed unless
-the deployment gate is enabled, the Personal tenant has exactly one member, and
-its owner has a current Pro account entitlement. Organization paid admission is
-separate: Pro Organizations are limited to five collaborators and require every
-collaborator to have Pro; Business/Enterprise Organizations require current
-seat assignments within the purchased limit. WorkOS membership alone never
-authorizes paid compute.
+For Organization paid admission, Pro Organizations are limited to five
+collaborators and require every collaborator to have Pro; Business/Enterprise
+Organizations require current seat assignments within the purchased limit.
+WorkOS membership alone never authorizes paid compute.
 
 The first supported release should provide:
 
@@ -71,12 +70,13 @@ The first supported release should provide:
 8. an optional per-user/per-device receive-only local replica; and
 9. quotas, audit records, and owner-visible cost/lifecycle information.
 
-The Phase 0–5 non-UI foundations support single-member Personal and
-Organization ownership. “Seamless” remains a release claim only after the
-deferred UI and protected live-provider/macOS qualification pass. Phase 6A adds
-Organization multiplayer, presence, shared live chats, assignment, and
-ownership transfer execution. Native iOS/Android, automatic bidirectional file
-sync, and collaborative source/Design editing remain deferred.
+The Phase 0–5 non-UI foundations support single-owner Organization cloud
+workspaces and explicit copies to or from local workspaces. “Seamless” remains
+a release claim only after the deferred UI and protected live-provider/macOS
+qualification pass. Phase 6A adds Organization multiplayer, presence, shared
+live chats, assignment, and ownership transfer execution. Native iOS/Android,
+automatic bidirectional file sync, and collaborative source/Design editing
+remain deferred.
 
 ## Compatibility
 

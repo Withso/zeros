@@ -5,8 +5,8 @@ import type pg from "pg";
 import { withSystemTx, type Tx } from "../db.js";
 
 /**
- * Seed the normalized identity/provider rows required by migrations 0024 and
- * 0025. Older cloud-workspace tests intentionally exercise low-level worker
+ * Seed the normalized identity/provider rows required by migrations 0026 and
+ * 0027. Older cloud-workspace tests intentionally exercise low-level worker
  * services and therefore create rows directly instead of going through the
  * HTTP create route. Keeping their fixture authority explicit prevents those
  * tests from accidentally depending on migration backfills.

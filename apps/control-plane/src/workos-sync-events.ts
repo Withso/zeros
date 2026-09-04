@@ -338,6 +338,10 @@ async function applyOrganizationEvent(
     }>(
       `UPDATE organizations
        SET deleted_at = COALESCE(deleted_at, now()),
+           lifecycle_status = CASE
+             WHEN lifecycle_status = 'purging' THEN lifecycle_status
+             ELSE 'provider_deleted'::organization_lifecycle_status
+           END,
            authorization_revision = authorization_revision +
              CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END,
            data_revision = data_revision +

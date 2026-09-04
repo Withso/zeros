@@ -87,7 +87,7 @@ d("schema + signup transaction", () => {
     expect(organizations.rows[0]).toMatchObject({
       name: "Test User",
       is_personal: true,
-      cloud_workspaces_allowed: true,
+      cloud_workspaces_allowed: false,
     });
     const memberships = await pool.query(
       `SELECT om.role AS organization_role, tm.role AS team_role

@@ -6,6 +6,7 @@ import { designWebTransactionAdapter } from "@zeros/design-web";
 import {
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   rm,
   symlink,
@@ -20,8 +21,10 @@ import {
   createDesignFrame,
   DESIGN_DIRECTORY_NAME,
   DESIGN_TRANSACTION_JOURNAL_FILE,
+  designTransactionRecoveryDirectory,
   designWebDocumentId,
   initializeDesignDocument,
+  recoverPendingDesignTransaction,
   readDesignFrame,
   readDesignWebDocumentState,
   readDesignWorkspaceSnapshot,
@@ -29,13 +32,18 @@ import {
 
 describe("filesystem Design API repository", () => {
   let root: string;
+  let previousDataDir: string | undefined;
 
   beforeEach(async () => {
     root = await mkdtemp(path.join(tmpdir(), "zeros-design-api-repository-"));
+    previousDataDir = process.env.ZEROS_DATA_DIR;
+    process.env.ZEROS_DATA_DIR = path.join(root, ".engine-data");
     await initializeDesignDocument(root);
   });
 
   afterEach(async () => {
+    if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
+    else process.env.ZEROS_DATA_DIR = previousDataDir;
     await rm(root, { recursive: true, force: true });
   });
 
@@ -444,7 +452,7 @@ describe("filesystem Design API repository", () => {
     ).toContain("Shared");
   });
 
-  it("fails closed without applying a journal whose target revision is forged", async () => {
+  it("quarantines a forged journal without applying it or wedging later reads", async () => {
     const frame = await createDesignFrame(root, { title: "Forged journal" });
     const current = await readDesignWebDocumentState(root, frame.file);
     const forged = current.files[frame.file]!.replace(
@@ -470,14 +478,42 @@ describe("filesystem Design API repository", () => {
       })}\n`,
       "utf8",
     );
-    await expect(readDesignWebDocumentState(root, frame.file)).rejects.toThrow(
-      "target revision",
+    const recovered = await readDesignWebDocumentState(root, frame.file);
+    expect(recovered.files[frame.file]).not.toContain(
+      "This must not be written",
     );
-    expect(
-      await readFile(
-        path.join(root, DESIGN_DIRECTORY_NAME, frame.file),
+    await expect(
+      readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, DESIGN_TRANSACTION_JOURNAL_FILE),
         "utf8",
       ),
-    ).not.toContain("This must not be written");
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    const recoveryDirectory = designTransactionRecoveryDirectory(root);
+    const quarantined = await readdir(recoveryDirectory);
+    expect(quarantined).toHaveLength(1);
+    expect(
+      await readFile(path.join(recoveryDirectory, quarantined[0]!), "utf8"),
+    ).toContain("This must not be written");
+    await expect(
+      readDesignWebDocumentState(root, frame.file),
+    ).resolves.toMatchObject({ revision: recovered.revision });
+  });
+
+  it("quarantines orphaned atomic-write files before they can become authored content", async () => {
+    const orphan = path.join(
+      root,
+      DESIGN_DIRECTORY_NAME,
+      `tokens.css.123.${"a".repeat(8)}.zeros-tmp`,
+    );
+    await writeFile(orphan, "orphaned transaction bytes\n", "utf8");
+
+    await expect(recoverPendingDesignTransaction(root)).resolves.toBe(false);
+    await expect(readFile(orphan, "utf8")).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    const quarantined = await readdir(
+      designTransactionRecoveryDirectory(root),
+    );
+    expect(quarantined).toHaveLength(1);
   });
 });

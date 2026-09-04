@@ -110,6 +110,10 @@ export interface AgentUsage {
 export interface AgentSessionState {
   agentId: string | null;
   agentName: string | null;
+  /** Immutable engine execution actor. Recovery must recreate Design sessions
+   * with the same scoped document instead of silently widening them to Code. */
+  agentRole: "code" | "design";
+  designDocumentId: string | null;
   /** Canonical Zeros-owned ephemeral route. */
   executionId: string | null;
   /** @deprecated Compatibility alias for executionId. */

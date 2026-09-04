@@ -1,4 +1,6 @@
 import type { OrganizationSummary } from "./control-plane";
+import { getKnownPersonalOrganizationIds } from "./organization-membership-history";
+import { PERSONAL_ORGANIZATION_ID } from "./personal-organization";
 
 export type WorkspacePlacement = "local" | "cloud";
 
@@ -35,16 +37,23 @@ export function localWorkspaceOwner(
   organizationId: string | null;
   placement: "local";
 } {
+  const ownerId = organization?.id ?? confirmedOrganizationId;
+  const isPersonal =
+    ownerId === PERSONAL_ORGANIZATION_ID ||
+    (organization
+      ? organization.isPersonal
+      : ownerId != null && getKnownPersonalOrganizationIds().includes(ownerId));
   return {
-    organizationId: organization?.id ?? confirmedOrganizationId,
+    organizationId: isPersonal ? null : ownerId,
     placement: "local",
   };
 }
 
 type OrganizationOwned = {
   /** Missing and null are the durable compatibility representation for
-   * workspaces created before organization ownership existed. */
+   * device-local Personal workspaces, including pre-ownership workspaces. */
   organizationId?: string | null;
+  placement?: WorkspacePlacement;
 };
 
 /** Select rows for the active semantic owner without allocating when every row
@@ -56,10 +65,21 @@ export function filterRowsForOrganization<T extends OrganizationOwned>(
   organization: OrganizationSummary | null,
 ): T[] {
   if (!organization) return rows as T[];
+  const personalIds = organization.isPersonal
+    ? new Set(
+        organization.legacyPersonalOrganizationIds ??
+          getKnownPersonalOrganizationIds(),
+      )
+    : null;
   const filtered = rows.filter((row) =>
-    organization.isPersonal || organization.legacyFlat
-      ? row.organizationId == null || row.organizationId === organization.id
-      : row.organizationId === organization.id,
+    organization.isPersonal
+      ? row.placement !== "cloud" &&
+        (row.organizationId == null ||
+          row.organizationId === organization.id ||
+          personalIds!.has(row.organizationId))
+      : organization.legacyFlat
+        ? row.organizationId == null || row.organizationId === organization.id
+        : row.organizationId === organization.id,
   );
   return filtered.length === rows.length ? (rows as T[]) : filtered;
 }

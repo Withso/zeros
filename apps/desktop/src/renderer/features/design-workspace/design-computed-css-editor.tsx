@@ -219,7 +219,7 @@ function validateSupportedCss(
 
 /** A declaration editor backed by computed runtime values. Valid edits paint
  * immediately, coalesce into one source mutation, and flush before focus leaves
- * so the Design surface's global Command-S can stage the newest source. */
+ * so the Design surface's global Command-S can validate the newest source. */
 export function DesignComputedCssEditor({
   details,
   disabled = false,

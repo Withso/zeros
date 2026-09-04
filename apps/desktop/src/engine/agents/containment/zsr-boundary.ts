@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
 import {
@@ -9,7 +9,6 @@ import {
   lstat,
   mkdtemp,
   readdir,
-  realpath,
   rm,
   symlink,
   writeFile,
@@ -26,19 +25,9 @@ import {
 
 import {
   nextCommandDescriptorPath,
-  isDeniedZerosControlPort,
   prepareZsrPolicy,
   type PreparedZsrPolicy,
 } from "./policy";
-import {
-  discoverCanonicalGitRepository,
-  type CanonicalGitRepository,
-} from "./canonical-git-repository";
-import {
-  MacosContainerWorkerUnavailableError,
-  MacosOrbStackContainerWorker,
-  type MacosContainerWorkerLease,
-} from "./macos-orbstack-container-worker";
 import {
   MacosProcessDomain,
   probeMacosProcessDomainHelper,
@@ -91,8 +80,8 @@ const FAILED_PROBE_CACHE_MS = 5_000;
  * this long deserves an answer in the log about which stage they waited on. */
 const SLOW_ADMISSION_REPORT_MS = 1_500;
 /** Retirement's twin of `SLOW_ADMISSION_REPORT_MS`. Teardown does real IO under
- * the promotion lock, so a slow one delays the NEXT admission — and reported
- * nothing until now. */
+ * the generation lifecycle lock, so a slow one delays the next admission and
+ * deserves the same stage-level diagnostics. */
 const SLOW_RETIREMENT_REPORT_MS = 1_500;
 const PORT_DISCOVERY_INTERVAL_MS = 250;
 /** Idle cadence once nothing has changed for the hot window. Discovery spawns
@@ -104,6 +93,8 @@ const PORT_DISCOVERY_HOT_WINDOW_MS = 10_000;
 const PORT_DISCOVERY_MISSING_POLLS = 8;
 const MAX_AUTO_PORT_LEASES = 64;
 const COMMAND_DESCRIPTOR_VERSION = 6 as const;
+const CLOUD_CONTAINER_ENGINE = "/usr/bin/podman";
+const CLOUD_CONTAINER_WORKER_FILENAME = "cloud-container-worker.mjs";
 
 function finalSupervisorDiagnostic(
   stderr: string,
@@ -132,6 +123,41 @@ function canonicalExecutablePath(candidate: string): string | null {
       : null;
   } catch {
     return null;
+  }
+}
+
+/** Cloud container authority is image-owned, never selected from the agent's
+ * PATH. Validate the complete physical chain because a root-owned leaf below a
+ * writable/symlinked parent would not be immutable deployment authority. */
+function isRootControlledCloudPath(
+  candidate: string,
+  executable: boolean,
+): boolean {
+  if (!path.isAbsolute(candidate) || candidate.includes("\0")) return false;
+  try {
+    if (realpathSync(candidate) !== candidate) return false;
+    let cursor = candidate;
+    for (;;) {
+      const metadata = lstatSync(cursor);
+      const leaf = cursor === candidate;
+      if (
+        metadata.isSymbolicLink() ||
+        metadata.uid !== 0 ||
+        (metadata.mode & 0o022) !== 0 ||
+        (leaf
+          ? !metadata.isFile() ||
+            metadata.nlink !== 1 ||
+            (executable && (metadata.mode & 0o111) === 0)
+          : !metadata.isDirectory())
+      ) {
+        return false;
+      }
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return true;
+      cursor = parent;
+    }
+  } catch {
+    return false;
   }
 }
 
@@ -206,470 +232,6 @@ export const CA_TRUST_ENV_NAMES = [
   "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
 ] as const;
 
-/** How long a released private OrbStack worker stays warm before its machine
- * is deleted. Rebuilding the VM costs the user roughly a minute on their next
- * `docker`/`podman` command, so a short idle window converts session churn in
- * one workspace into instant container reuse. Idling is refused entirely while
- * the workspace's Design territory is in transition (see the suspension hooks
- * below), because an idle machine keeps the mount protections of the boundary
- * that created it. */
-const SHARED_CONTAINER_WORKER_IDLE_MS_DEFAULT = 300_000;
-
-function sharedContainerWorkerIdleMs(): number {
-  const configured = Number.parseInt(
-    process.env.ZEROS_ZSR_CONTAINER_WORKER_IDLE_MS ?? "",
-    10,
-  );
-  return Number.isInteger(configured) && configured >= 0
-    ? configured
-    : SHARED_CONTAINER_WORKER_IDLE_MS_DEFAULT;
-}
-
-interface SharedMacosContainerEntry {
-  readonly key: string;
-  readonly workspaceRoot: string;
-  readonly lease: Promise<MacosContainerWorkerLease>;
-  readonly controlExecutionId: string;
-  references: number;
-  activationFailed: boolean;
-  activationFailure?: unknown;
-  idleTimer?: NodeJS.Timeout;
-  stopping?: Promise<void>;
-}
-
-const sharedMacosContainerWorkers = new Map<
-  string,
-  SharedMacosContainerEntry
->();
-
-/** Workspace roots whose released workers must stop immediately instead of
- * idling. A count supports overlapping transitions, mirroring the utility
- * pool's suspension semantics. The `null` key is the global gate. */
-const suspendedContainerWorkerIdling = new Map<string | null, number>();
-
-/** Canonical key for a workspace root used across shared-container idling.
- * The shared-worker key derives its roots via realpath (see
- * localWorkspaceContainerIdentity), so idling suspend/stop must resolve
- * symlinks the same way or an engine-passed non-canonical path could miss the
- * realpath'd entry. Falls back to a lexical resolve for a not-yet-existing
- * path. */
-function containerWorkspaceKey(workspaceRoot: string): string {
-  return physicalPathIfPresent(path.resolve(workspaceRoot));
-}
-
-function containerWorkerIdlingSuspended(workspaceRoot: string): boolean {
-  if (sharedContainerWorkerIdleMs() === 0) return true;
-  if ((suspendedContainerWorkerIdling.get(null) ?? 0) > 0) return true;
-  return (
-    (suspendedContainerWorkerIdling.get(containerWorkspaceKey(workspaceRoot)) ??
-      0) > 0
-  );
-}
-
-/** Close (or reopen) the idle window. While suspended, a release stops the
- * machine inline and its proof failure surfaces exactly where the pre-idle
- * design surfaced it: in the releasing boundary's teardown. */
-export function suspendSharedContainerWorkerIdling(
-  workspaceRoot?: string,
-): void {
-  const key =
-    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
-  suspendedContainerWorkerIdling.set(
-    key,
-    (suspendedContainerWorkerIdling.get(key) ?? 0) + 1,
-  );
-}
-
-export function resumeSharedContainerWorkerIdling(
-  workspaceRoot?: string,
-): void {
-  const key =
-    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
-  const count = suspendedContainerWorkerIdling.get(key) ?? 0;
-  if (count <= 1) suspendedContainerWorkerIdling.delete(key);
-  else suspendedContainerWorkerIdling.set(key, count - 1);
-}
-
-function retireSharedContainerEntry(
-  entry: SharedMacosContainerEntry,
-): Promise<void> {
-  if (entry.idleTimer) {
-    clearTimeout(entry.idleTimer);
-    entry.idleTimer = undefined;
-  }
-  if (entry.stopping) return entry.stopping;
-  const flight = (async () => {
-    const lease = await entry.lease.catch(() => null);
-    if (lease) await lease.stopAndProve();
-    await removeSessionDir(entry.controlExecutionId);
-  })();
-  entry.stopping = flight;
-  flight.then(
-    () => {
-      if (sharedMacosContainerWorkers.get(entry.key) === entry) {
-        sharedMacosContainerWorkers.delete(entry.key);
-      }
-    },
-    () => {
-      // Keep the failed entry latched in the map. The machine name is derived
-      // from the shared key, so admitting a fresh worker before this one is
-      // proven gone would collide with the surviving machine; the next acquire
-      // retries this same retirement instead.
-      entry.stopping = undefined;
-    },
-  );
-  return flight;
-}
-
-/** Stop every idle shared worker now (all of them, or one workspace's).
- * Territory transitions call this before publishing a changed Design map so a
- * warm machine admitted under the old protections cannot outlive them. */
-export async function stopIdleSharedContainerWorkers(
-  workspaceRoot?: string,
-): Promise<void> {
-  const root =
-    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
-  const failures: unknown[] = [];
-  await Promise.all(
-    [...sharedMacosContainerWorkers.values()]
-      .filter(
-        (entry) =>
-          entry.references === 0 &&
-          (root === null || entry.workspaceRoot === root),
-      )
-      .map(async (entry) => {
-        try {
-          await retireSharedContainerEntry(entry);
-        } catch (error) {
-          failures.push(error);
-        }
-      }),
-  );
-  if (failures.length === 1) throw failures[0];
-  if (failures.length > 1) {
-    throw new AggregateError(
-      failures,
-      "idle shared container workers could not all be proven stopped",
-    );
-  }
-}
-
-class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
-  readonly hostPort: number;
-  readonly machineName: string;
-  readonly environment: Readonly<Record<string, string>>;
-  private stopPromise: Promise<void> | null = null;
-  private released = false;
-
-  constructor(
-    private readonly entry: SharedMacosContainerEntry,
-    private readonly delegate: MacosContainerWorkerLease,
-  ) {
-    this.hostPort = delegate.hostPort;
-    this.machineName = delegate.machineName;
-    this.environment = delegate.environment;
-  }
-
-  async start(
-    request: Parameters<MacosContainerWorkerLease["start"]>[0],
-  ): Promise<void> {
-    try {
-      await this.delegate.start(request);
-    } catch (error) {
-      // A lease that could not be armed must never enter the warm pool. It may
-      // own a listening socket or a partially provisioned machine, and handing
-      // that shared entry to a later boundary would replay broken authority.
-      this.entry.activationFailed = true;
-      this.entry.activationFailure = error;
-      throw error;
-    }
-  }
-
-  stopAndProve(): Promise<void> {
-    if (this.stopPromise) return this.stopPromise;
-    const attempt = (async () => {
-      if (!this.released) {
-        this.released = true;
-        this.entry.references -= 1;
-      }
-      if (this.entry.references > 0) return;
-      if (
-        this.entry.activationFailed ||
-        containerWorkerIdlingSuspended(this.entry.workspaceRoot)
-      ) {
-        await retireSharedContainerEntry(this.entry);
-        return;
-      }
-      // Keep the machine warm for the idle window. A failed deferred stop
-      // latches the entry (see retireSharedContainerEntry) so the shared
-      // machine name can never be double-allocated.
-      if (this.entry.idleTimer) clearTimeout(this.entry.idleTimer);
-      const timer = setTimeout(() => {
-        entryIdleStop(this.entry);
-      }, sharedContainerWorkerIdleMs());
-      timer.unref?.();
-      this.entry.idleTimer = timer;
-    })();
-    // The catch runs asynchronously (after this const initializes), so
-    // referencing `wrapped` inside it is safe.
-    const wrapped: Promise<void> = attempt.catch((error) => {
-      // The release itself is durable; only the stop proof may be retried.
-      if (this.stopPromise === wrapped) this.stopPromise = null;
-      throw error;
-    });
-    this.stopPromise = wrapped;
-    return wrapped;
-  }
-}
-
-function entryIdleStop(entry: SharedMacosContainerEntry): void {
-  if (entry.references > 0) return;
-  void retireSharedContainerEntry(entry).catch((error) => {
-    console.error(
-      `[zsr] idle container worker ${entry.controlExecutionId} could not be proven stopped: ` +
-        (error instanceof Error ? error.message : String(error)),
-    );
-  });
-}
-
-function localWorkspaceContainerIdentity(request: BoundaryRequest): {
-  key: string;
-  controlExecutionId: string;
-} {
-  const physicalDirectory = (candidate: string, label: string): string => {
-    if (!path.isAbsolute(candidate) || !existsSync(candidate)) {
-      throw new Error(`${label} is unavailable`);
-    }
-    const resolved = realpathSync(candidate);
-    const metadata = lstatSync(resolved);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new Error(`${label} is not a physical directory`);
-    }
-    return resolved;
-  };
-  // OrbStack canonicalizes every host mount before constructing the lease.
-  // Build the sharing key from that same physical namespace: a lexical symlink
-  // outside the workspace can point at a protected directory inside it, and
-  // filtering the key before realpath used to collapse distinct deny sets onto
-  // whichever shared worker happened to start first.
-  const workspaceRoot = physicalDirectory(
-    request.workspaceRoot,
-    "workspace root",
-  );
-  const additionalWriteRoots = [...(request.additionalReadWriteRoots ?? [])]
-    .map((root) => physicalDirectory(root, "additional write root"))
-    .sort();
-  const projectionRoots = [workspaceRoot, ...additionalWriteRoots];
-  const key = JSON.stringify({
-    workspaceRoot,
-    additionalWriteRoots,
-    protectedDesignRoots: [
-      ...(request.territory?.protectedDesignDirectories ?? []),
-    ]
-      .map((root) => physicalDirectory(root, "protected Design root"))
-      // Match the worker's actual authority, not the host fence's app-wide
-      // union. Unmounted sibling roots cannot change this VM's descriptor and
-      // must not force a second private machine/port for the same workspace.
-      .filter((root) =>
-        projectionRoots.some((projected) => pathInsideOrEqual(root, projected)),
-      )
-      .sort(),
-    executable: request.containerWorker?.executable
-      ? realpathSync(request.containerWorker.executable)
-      : null,
-  });
-  const digest = createHash("sha256").update(key).digest("hex").slice(0, 20);
-  return { key, controlExecutionId: `zsrw-${digest}` };
-}
-
-async function acquireSharedMacosContainerWorker(
-  key: string,
-  workspaceRoot: string,
-  controlExecutionId: string,
-  create: () => Promise<MacosContainerWorkerLease>,
-): Promise<MacosContainerWorkerLease> {
-  // A territory or grant change produces a different key for the same
-  // workspace. Retire any idle worker still warm under the superseded key
-  // before admitting the new one, so at most one warm machine serves a
-  // workspace and a stale protection map never outlives its replacement.
-  const canonicalWorkspace = containerWorkspaceKey(workspaceRoot);
-  for (const stale of [...sharedMacosContainerWorkers.values()]) {
-    if (
-      stale.key !== key &&
-      stale.workspaceRoot === canonicalWorkspace &&
-      stale.references === 0 &&
-      !stale.stopping
-    ) {
-      await retireSharedContainerEntry(stale);
-    }
-  }
-  let entry = sharedMacosContainerWorkers.get(key);
-  if (entry?.stopping) {
-    // A failed retirement keeps the entry latched; retry the stop proof here
-    // rather than colliding with the surviving machine's shared name.
-    await entry.stopping.catch(() => undefined);
-    if (sharedMacosContainerWorkers.get(key) === entry) {
-      await retireSharedContainerEntry(entry);
-    }
-    return acquireSharedMacosContainerWorker(
-      key,
-      workspaceRoot,
-      controlExecutionId,
-      create,
-    );
-  }
-  if (entry?.activationFailed) {
-    // Do not add a new owner to an entry whose activation already failed.
-    // Existing owners release it through their exact cleanup; after the final
-    // release, a later admission can retire it and reserve a fresh worker.
-    if (entry.references > 0) {
-      throw (
-        entry.activationFailure ??
-        new Error("shared container worker activation failed")
-      );
-    }
-    await retireSharedContainerEntry(entry);
-    return acquireSharedMacosContainerWorker(
-      key,
-      workspaceRoot,
-      controlExecutionId,
-      create,
-    );
-  }
-  if (entry?.idleTimer) {
-    clearTimeout(entry.idleTimer);
-    entry.idleTimer = undefined;
-  }
-  if (!entry) {
-    entry = {
-      key,
-      workspaceRoot: canonicalWorkspace,
-      lease: Promise.resolve().then(create),
-      controlExecutionId,
-      references: 0,
-      activationFailed: false,
-    };
-    sharedMacosContainerWorkers.set(key, entry);
-  }
-  entry.references += 1;
-  try {
-    return new SharedMacosContainerWorkerLease(entry, await entry.lease);
-  } catch (error) {
-    entry.references -= 1;
-    if (
-      entry.references === 0 &&
-      sharedMacosContainerWorkers.get(key) === entry
-    ) {
-      sharedMacosContainerWorkers.delete(key);
-    }
-    throw error;
-  }
-}
-
-function pathInsideOrEqual(candidate: string, parent: string): boolean {
-  const relative = path.relative(parent, candidate);
-  return (
-    relative === "" ||
-    (relative !== ".." &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
-}
-
-function minimalCoveringPaths(candidates: readonly string[]): string[] {
-  const unique = [
-    ...new Set(candidates.map((candidate) => path.resolve(candidate))),
-  ];
-  return unique.filter(
-    (candidate) =>
-      !unique.some(
-        (parent) =>
-          parent !== candidate && pathInsideOrEqual(candidate, parent),
-      ),
-  );
-}
-
-/** Electron-as-Node still asks the dynamic loader and Electron bootstrap to
- * read immutable files beside the executable. Dev-channel app bundles live
- * below Zeros' otherwise unreadable engine-state root, so admit only the
- * physical bundle contents that own the trusted runtime. The surrounding app
- * instance and all engine state remain absent, and the engine-root write deny
- * continues to cover this read-only carve-out. */
-async function discoverBoundaryGitRepositories(
-  request: BoundaryRequest,
-  options: { includeDesignActor?: boolean } = {},
-): Promise<readonly CanonicalGitRepository[]> {
-  if (request.actor === "design-agent" && !options.includeDesignActor) {
-    return [];
-  }
-  const repositories: CanonicalGitRepository[] = [];
-  const primary = await discoverCanonicalGitRepository(request.workspaceRoot);
-  if (primary) repositories.push(primary);
-
-  const requested = request.additionalGitWorkspaceRoots ?? [];
-  if (requested.length > 32 || new Set(requested).size !== requested.length) {
-    throw new Error(
-      "additional Git workspace roots must be unique and bounded",
-    );
-  }
-  const grants = await Promise.all(
-    (request.additionalReadWriteRoots ?? []).map(async (root) => {
-      if (!path.isAbsolute(root) || root.includes("\0")) {
-        throw new Error("additional Git workspace grant is invalid");
-      }
-      try {
-        return await realpath(root);
-      } catch {
-        return path.resolve(root);
-      }
-    }),
-  );
-  const protectedRoots = (
-    request.territory?.protectedDesignDirectories ?? []
-  ).map((root) => path.resolve(root));
-  const deniedPaths = (
-    request.territory?.writeCapabilities.deniedPaths ?? []
-  ).map((root) => path.resolve(root));
-
-  for (const requestedRoot of requested) {
-    if (!path.isAbsolute(requestedRoot) || requestedRoot.includes("\0")) {
-      throw new Error("additional Git workspace root is invalid");
-    }
-    const root = await realpath(requestedRoot);
-    if (
-      root === primary?.workspaceRoot ||
-      repositories.some((repository) => repository.workspaceRoot === root)
-    ) {
-      throw new Error("additional Git workspace root duplicates a repository");
-    }
-    if (!grants.some((grant) => pathInsideOrEqual(root, grant))) {
-      throw new Error("additional Git workspace root is outside write grants");
-    }
-    if (!protectedRoots.some((design) => pathInsideOrEqual(design, root))) {
-      throw new Error(
-        "additional Git workspace root has no protected Design territory",
-      );
-    }
-    const repository = await discoverCanonicalGitRepository(root);
-    if (!repository || repository.workspaceRoot !== root) {
-      throw new Error("additional Git workspace owner could not be verified");
-    }
-    if (
-      !deniedPaths.some(
-        (denied) =>
-          denied === repository.gitEntry ||
-          pathInsideOrEqual(repository.gitEntry, denied),
-      )
-    ) {
-      throw new Error(
-        "additional Git workspace metadata is not part of the denied territory",
-      );
-    }
-    repositories.push(repository);
-  }
-  return repositories;
-}
-
 /** Only the trusted supervisor sees this environment. In particular it never
  * receives provider/session values: those are carried in the private command
  * descriptor and materialized by `/usr/bin/env -i` inside Seatbelt/bwrap. */
@@ -732,12 +294,12 @@ function containedChildEnv(
       delete env[name];
     }
   }
-  // This is the pre-ZSR child environment except for engine control
+  // This is the native-host-compatible child environment except for engine control
   // capabilities that were never user authority. The prepared boundary may
   // subsequently prefix its read-only Git integration dispatcher to PATH;
   // HOME, XDG roots, user Git settings, Keychain/SSH sockets, GH tokens,
   // proxy settings, and language-tool variables survive. Ambient container
-  // selectors do not: only a generation-private worker may add them back.
+  // selectors do not: the retired local worker is never recreated implicitly.
   return env;
 }
 
@@ -905,15 +467,6 @@ export interface ZsrBoundaryOptions {
   supervisorRuntime?: string;
   /** Product-owned ripgrep executable required by SRT policy construction. */
   ripgrepPath?: string;
-  containerWorkerScript?: string;
-  /** Linux helper copied into the dedicated OrbStack container machine. */
-  macosContainerHostScript?: string;
-  /** Immutable provisioning contract for the dedicated OrbStack machine. */
-  macosContainerCloudInit?: string;
-  /** Deterministic test seam; production constructs the real controller. */
-  macosContainerWorkerFactory?: (
-    orbPath: string,
-  ) => Pick<MacosOrbStackContainerWorker, "reserve">;
   /** Package-owned Darwin helper used to identify Seatbelt descendants that
    * escaped their original POSIX process group. */
   macosProcessDomainHelper?: string;
@@ -990,10 +543,9 @@ async function prepareCloudWorkerPrivateState(
     if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
       throw new Error("cloud container-worker state is not physical");
     }
-    // This durable tree can contain an OCI image store with hundreds of
-    // thousands of entries. Its only writer is this fixed worker uid, so once
-    // the empty root is handed over, recursively chowning every image layer on
-    // every admission is both unnecessary and a severe startup regression.
+    // Image layers may persist across multiple provider commands in the same
+    // execution. Hand over only the exact private root; never recursively
+    // chown an existing OCI graph during every admission.
     await chown(policy.paths.containerState, identity.uid, identity.gid);
     await chmod(policy.paths.containerState, 0o700);
   }
@@ -1038,6 +590,7 @@ function processGroupExists(pid: number): boolean {
  * states remain in the protocol, but this backend reports only native or
  * not-applicable. */
 function boundaryGitState(request: BoundaryRequest): ExecutionBoundaryGitState {
+  if (request.actor === "design-agent") return "not-applicable";
   // `.git` is a directory in a normal checkout and a file in a linked worktree;
   // either proves the session is operating inside a repository. A submodule or
   // nested owner resolves to its own root before admission, so this does not
@@ -1051,19 +604,17 @@ function statusFor(
   request: BoundaryRequest,
   generation: ReturnType<typeof newTerritoryGeneration>,
   backend: "zeros-srt" | "cloud-worker",
+  containerWorkflowAvailable = false,
 ): ExecutionBoundaryStatus {
-  const restrictions = boundaryParityRestrictions(request);
+  const restrictions = boundaryParityRestrictions(request, {
+    containerWorkflowAvailable,
+  });
   const containerRemediation =
-    request.containerWorkerUnavailableReason === "insufficient-disk-space"
-      ? "Free at least 4 GiB on the Mac startup volume to enable the isolated OrbStack Docker/Podman worker."
-      : request.containerWorkerUnavailableReason === "design-actor-refused"
-        ? "Design sessions never run containers. Run Docker/Podman work from a code session in this workspace."
-        : request.containerWorkerUnavailableReason ===
-            "private-runtime-unavailable"
-          ? "Start or update the qualified OrbStack runtime, then retry the session to enable isolated Docker/Podman workflows."
-          : process.platform === "darwin"
-            ? "Install a qualified OrbStack runtime to enable isolated Docker/Podman workflows for this session."
-            : "Install rootless Podman in the qualified worker image to enable isolated Docker/Podman workflows.";
+    request.actor === "design-agent"
+      ? "Design sessions never run containers. Run Docker/Podman work from a code session in this workspace."
+      : backend === "zeros-srt"
+        ? "Use lightweight native isolation for host Docker/Podman parity, or run the container workflow in a cloud workspace."
+        : "Install rootless Podman in the qualified worker image to enable isolated Docker/Podman workflows.";
   const remediation = [
     ...(restrictions.includes("container-workflows-unavailable")
       ? [containerRemediation]
@@ -1085,7 +636,7 @@ function statusFor(
       level: restrictions.length === 0 ? "full" : "restricted",
       restrictions,
     },
-    ...(request.containerWorker
+    ...(containerWorkflowAvailable
       ? {
           services: {
             state: "ready" as const,
@@ -1419,9 +970,9 @@ class PreparedZsrBoundary implements PreparedBoundary {
     private readonly runtime: string,
     private readonly supervisorScript: string,
     private readonly cloudWorkerToolchain: CloudWorkerToolchain | undefined,
+    private readonly cloudContainerEngine: string | null,
     private readonly ripgrepPath: string | null,
     private readonly gitIntegrationBroker: ZsrGitIntegrationBroker | null,
-    private readonly macosContainerWorker: MacosContainerWorkerLease | null,
     private readonly macosProcessDomain: MacosProcessDomain | null,
     generation: ReturnType<typeof newTerritoryGeneration>,
     backend: "zeros-srt" | "cloud-worker",
@@ -1429,9 +980,18 @@ class PreparedZsrBoundary implements PreparedBoundary {
     private readonly onRetirementProven: () => void,
   ) {
     this.generation = generation;
-    this.status = statusFor(request, generation, backend);
+    this.status = statusFor(
+      request,
+      generation,
+      backend,
+      cloudContainerEngine !== null,
+    );
     this.providerHomePath =
-      request.providerStateEnv?.HOME ?? process.env.HOME ?? policy.paths.home;
+      request.actor === "design-agent"
+        ? policy.paths.providerState
+        : (request.providerStateEnv?.HOME ??
+          process.env.HOME ??
+          policy.paths.home);
   }
 
   get attestation(): Promise<void> {
@@ -1470,6 +1030,18 @@ class PreparedZsrBoundary implements PreparedBoundary {
       request.env,
     ).filter((socket) => !allowedUnixSockets.has(socket));
     const childEnvironment = containedChildEnv(request);
+    if (this.request.actor === "design-agent") {
+      // Provider caches/history are disposable run state. Keep credential
+      // reads available through the ordinary read-only host view, but direct
+      // every conventional write location into generation-private storage.
+      Object.assign(childEnvironment, {
+        TMPDIR: this.policy.paths.scratch,
+        XDG_CACHE_HOME: path.join(this.policy.paths.providerState, "cache"),
+        XDG_CONFIG_HOME: path.join(this.policy.paths.providerState, "config"),
+        XDG_DATA_HOME: path.join(this.policy.paths.providerState, "data"),
+        XDG_STATE_HOME: path.join(this.policy.paths.providerState, "state"),
+      });
+    }
     if (
       this.request.actor !== "design-agent" &&
       (this.request.territory?.protectedDesignDirectories.length ?? 0) > 0
@@ -1489,16 +1061,15 @@ class PreparedZsrBoundary implements PreparedBoundary {
       );
     }
     const containerWorker =
-      this.request.containerWorker?.backend === "embedded-linux" &&
-      this.policy.paths.containerState
+      this.cloudContainerEngine && this.policy.paths.containerState
         ? {
             version: 1 as const,
             runtime: "podman" as const,
             node: realpathSync(this.runtime),
-            engine: this.request.containerWorker.executable,
+            engine: this.cloudContainerEngine,
             launcher: path.join(
               this.policy.paths.tools,
-              "zsr-container-worker.mjs",
+              CLOUD_CONTAINER_WORKER_FILENAME,
             ),
             state: this.policy.paths.containerState,
             socket: path.join(this.policy.paths.containerState, "podman.sock"),
@@ -1509,8 +1080,6 @@ class PreparedZsrBoundary implements PreparedBoundary {
         DOCKER_HOST: `unix://${containerWorker.socket}`,
         CONTAINER_HOST: `unix://${containerWorker.socket}`,
       });
-    } else if (this.macosContainerWorker) {
-      Object.assign(childEnvironment, this.macosContainerWorker.environment);
     }
     writeFileSync(
       descriptor,
@@ -1907,7 +1476,6 @@ class PreparedZsrBoundary implements PreparedBoundary {
     const attempt = (async () => {
       const results = await Promise.allSettled([
         ...[...this.portLeases].map((lease) => lease.revoke()),
-        this.macosContainerWorker?.stopAndProve() ?? Promise.resolve(),
         this.gitIntegrationBroker?.close() ?? Promise.resolve(),
       ]);
       this.discoveredPorts.clear();
@@ -1924,8 +1492,8 @@ class PreparedZsrBoundary implements PreparedBoundary {
         );
       }
     })();
-    // Every revocation step is idempotent (leases self-deactivate, the broker
-    // close latches, the container lease release is durable), so a failed
+    // Every revocation step is idempotent (port leases self-deactivate and the
+    // Git broker close latches), so a failed
     // revoke may be retried; `revoked` itself stays latched either way.
     const wrapped: Promise<void> = attempt.catch((error) => {
       if (this.revokePromise === wrapped) this.revokePromise = null;
@@ -2110,9 +1678,8 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
   private readonly supervisorScript: string;
   private readonly supervisorRuntime: string;
   private readonly ripgrepPath: string | null;
-  private readonly containerWorkerSource: string;
-  private readonly macosContainerHostSource: string;
-  private readonly macosContainerCloudInit: string;
+  private readonly cloudContainerWorkerSource: string | null;
+  private readonly cloudContainerEngine: string | null;
   private readonly macosProcessDomainHelper: string;
   private readonly gitDispatchBinary: string;
   private capabilityProbeResult: CachedProbe | null = null;
@@ -2163,27 +1730,16 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           ? undefined
           : process.env.ZEROS_ZSR_RIPGREP_PATH),
     );
-    this.containerWorkerSource =
-      options.containerWorkerScript ??
-      process.env.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT ??
-      path.join(
-        options.projectRoot,
-        "apps/desktop/src/engine/agents/containment/zsr-container-worker.mjs",
-      );
-    this.macosContainerHostSource =
-      options.macosContainerHostScript ??
-      process.env.ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT ??
-      path.join(
-        options.projectRoot,
-        "apps/desktop/src/engine/agents/containment/zsr-orbstack-container-host.mjs",
-      );
-    this.macosContainerCloudInit =
-      options.macosContainerCloudInit ??
-      process.env.ZEROS_ZSR_ORBSTACK_CLOUD_INIT ??
-      path.join(
-        options.projectRoot,
-        "apps/desktop/src/engine/agents/containment/zsr-orbstack-cloud-init.yaml",
-      );
+    this.cloudContainerWorkerSource = options.cloudWorker
+      ? path.join(
+          options.projectRoot,
+          "apps/desktop/src/engine/agents/containment",
+          CLOUD_CONTAINER_WORKER_FILENAME,
+        )
+      : null;
+    this.cloudContainerEngine = options.cloudWorker
+      ? CLOUD_CONTAINER_ENGINE
+      : null;
     this.macosProcessDomainHelper =
       options.macosProcessDomainHelper ??
       process.env.ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER ??
@@ -2192,20 +1748,6 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       options.gitDispatchBinary ??
       process.env.ZEROS_ZSR_GIT_DISPATCH_BINARY ??
       path.join(options.projectRoot, "binaries", "zsr-git-dispatch");
-  }
-
-  private macosContainerWorker(
-    orbPath: string,
-  ): Pick<MacosOrbStackContainerWorker, "reserve"> {
-    return (
-      this.options.macosContainerWorkerFactory?.(orbPath) ??
-      new MacosOrbStackContainerWorker({
-        orbPath,
-        cloudInitPath: this.macosContainerCloudInit,
-        hostScriptPath: this.macosContainerHostSource,
-        containerWorkerPath: this.containerWorkerSource,
-      })
-    );
   }
 
   private async throwAfterPreparationCleanup(
@@ -2264,6 +1806,20 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       canonicalExecutablePath(this.ripgrepPath) === null
     ) {
       reasons.push("ZSR ripgrep runtime is missing");
+    }
+    if (this.options.cloudWorker) {
+      if (
+        !this.cloudContainerWorkerSource ||
+        !isRootControlledCloudPath(this.cloudContainerWorkerSource, false)
+      ) {
+        reasons.push("cloud container-worker launcher is unavailable");
+      }
+      if (
+        !this.cloudContainerEngine ||
+        !isRootControlledCloudPath(this.cloudContainerEngine, true)
+      ) {
+        reasons.push("cloud Podman runtime is unavailable");
+      }
     }
     if (process.platform === "darwin" && reasons.length === 0) {
       try {
@@ -2615,10 +2171,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       const processDomainMatched = processDomain
         ? Number.isSafeInteger(live?.sandboxPid) &&
           Number(live?.sandboxPid) > 0 &&
-          (await boundary.matchesMacosProcessDomain(
-            Number(live?.sandboxPid),
-            { reportMismatch: true },
-          ))
+          (await boundary.matchesMacosProcessDomain(Number(live?.sandboxPid), {
+            reportMismatch: true,
+          }))
         : true;
       if (processDomain) {
         await writeFile(releaseFile, "release\n", { mode: 0o600, flag: "wx" });
@@ -2649,13 +2204,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         environmentExact?: boolean;
         environmentUninjected?: boolean;
       };
-      const designShouldBeWritable = policy.document.actor === "design-agent";
+      const codeShouldBeWritable = policy.document.actor !== "design-agent";
+      const designShouldBeWritable = false;
       const reasons: string[] = [];
-      if (Boolean(result.codeWrite) === designShouldBeWritable) {
+      if (Boolean(result.codeWrite) !== codeShouldBeWritable) {
         reasons.push(
-          designShouldBeWritable
-            ? "host-parity design actor can write code territory"
-            : "host-parity code actor cannot write code territory",
+          codeShouldBeWritable
+            ? "host-parity code actor cannot write code territory"
+            : "host-parity design actor can write code territory",
         );
       }
       if (
@@ -2723,12 +2279,15 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     signal?: AbortSignal,
     attestationMode: "blocking" | "background" = "blocking",
   ): Promise<PreparedBoundary> {
-    let request = initialRequest;
-    let macosContainerWorker: MacosContainerWorkerLease | null = null;
+    const request = initialRequest;
+    const cloudContainerWorker = Boolean(
+      this.options.cloudWorker &&
+      request.actor !== "design-agent" &&
+      request.containerWorkflowExpected,
+    );
     let macosProcessDomain: MacosProcessDomain | null = null;
     let gitIntegrationBroker: ZsrGitIntegrationBroker | null = null;
     let policy: PreparedZsrPolicy | null = null;
-    let designGitRepositories: readonly CanonicalGitRepository[] = [];
     const admissionStages = new Map<string, number>();
     const preflightFinishedAt = Date.now();
     admissionStages.set("preflight", preflightFinishedAt - admissionStartedAt);
@@ -2768,95 +2327,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       abortIfCancelled();
       await this.claimSessionOwnership(request);
       stage("ownership");
-      if (request.containerWorker?.backend === "orbstack-machine") {
-        const containerIdentity = localWorkspaceContainerIdentity(request);
-        const containerControl = await ensureSessionDir(
-          containerIdentity.controlExecutionId,
-        );
-        try {
-          macosContainerWorker = await acquireSharedMacosContainerWorker(
-            containerIdentity.key,
-            request.workspaceRoot,
-            containerIdentity.controlExecutionId,
-            async () => {
-              const controller = this.macosContainerWorker(
-                request.containerWorker!.executable,
-              );
-              for (let attempt = 0; attempt < 16; attempt += 1) {
-                const candidate = await controller.reserve(
-                  {
-                    executionId: containerIdentity.controlExecutionId,
-                    workspaceRoot: request.workspaceRoot,
-                    additionalWriteRoots: request.additionalReadWriteRoots,
-                    sessionRoot: containerControl.root,
-                  },
-                  { activation: "on-first-connection" },
-                );
-                if (!isDeniedZerosControlPort(candidate.hostPort)) {
-                  return candidate;
-                }
-                await candidate.stopAndProve();
-              }
-              throw new Error(
-                "could not allocate a safe private container port",
-              );
-            },
-          );
-          request = {
-            ...request,
-            allowedLocalPorts: [
-              ...(request.allowedLocalPorts ?? []),
-              macosContainerWorker.hostPort,
-            ],
-          };
-        } catch (error) {
-          if (
-            error instanceof MacosContainerWorkerUnavailableError &&
-            !macosContainerWorker
-          ) {
-            request = {
-              ...request,
-              containerWorker: undefined,
-              containerWorkerUnavailableReason: error.reason,
-            };
-            await removeSessionDir(containerIdentity.controlExecutionId);
-            console.warn(`[zsr] ${error.message}`);
-          } else {
-            throw error;
-          }
-        }
-      }
-      stage("container-reserve");
-
       abortIfCancelled();
-      if (request.actor === "design-agent") {
-        designGitRepositories = await discoverBoundaryGitRepositories(request, {
-          includeDesignActor: true,
-        });
-      }
       stage("territory");
       abortIfCancelled();
       policy = await prepareZsrPolicy(request, generation, {
         ...(this.options.cloudWorker
           ? { cloudWorker: this.options.cloudWorker }
           : {}),
-        ...(designGitRepositories.length > 0
-          ? {
-              // Git replaces its index and refs atomically. Mounting an
-              // individual existing index as a writable island makes rename(2)
-              // fail with EBUSY even though opening the file succeeds. Grant
-              // the minimal canonical metadata directories instead; this also
-              // covers linked-worktree/common-dir and alternate-object layouts
-              // without reopening any code-tree path.
-              localHostParityWriteIslands: minimalCoveringPaths(
-                designGitRepositories.flatMap((repository) => [
-                  repository.gitDir,
-                  repository.commonDir,
-                  repository.objectDir,
-                ]),
-              ),
-            }
-          : {}),
+        ...(cloudContainerWorker ? { cloudContainerWorker: true } : {}),
       });
       stage("policy");
       const toolWork = (async () => {
@@ -2873,12 +2351,12 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           // repository origin.
           [request.workspaceRoot],
         );
-        if (request.containerWorker?.backend === "embedded-linux") {
+        if (cloudContainerWorker) {
           const target = path.join(
             policy!.paths.tools,
-            "zsr-container-worker.mjs",
+            CLOUD_CONTAINER_WORKER_FILENAME,
           );
-          await copyFile(this.containerWorkerSource, target);
+          await copyFile(this.cloudContainerWorkerSource!, target);
           await chmod(target, 0o500);
         }
       })();
@@ -2944,12 +2422,6 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       // any throw, or a cancel that lands here would abandon a live kernel
       // fingerprint instead of retiring it in the cleanup path below.
       abortIfCancelled();
-      if (macosContainerWorker) {
-        await macosContainerWorker.start({
-          generation,
-          protectedRoots: request.territory?.protectedDesignDirectories ?? [],
-        });
-      }
       stage("activation");
     } catch (error) {
       reportFailedAdmission(error);
@@ -2957,7 +2429,6 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         generation,
         error,
         [
-          () => macosContainerWorker?.stopAndProve() ?? Promise.resolve(),
           () => gitIntegrationBroker?.close() ?? Promise.resolve(),
           ...(policy
             ? [
@@ -2985,9 +2456,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       this.supervisorRuntime,
       this.supervisorScript,
       this.options.cloudWorkerToolchain,
+      cloudContainerWorker ? this.cloudContainerEngine : null,
       this.ripgrepPath,
       gitIntegrationBroker,
-      macosContainerWorker,
       macosProcessDomain,
       generation,
       this.backend,
@@ -3051,50 +2522,8 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     if (!probe.available || !probe.secureNestedIsolation) {
       throw new Error(probe.reasons.join("; ") || "ZSR is unavailable");
     }
-    let request = initialRequest;
-    if (request.actor === "design-agent" && request.containerWorker) {
-      request = {
-        ...request,
-        containerWorker: undefined,
-        containerWorkerUnavailableReason: "design-actor-refused",
-      };
-    }
-    if (request.containerWorker) {
-      const injectedMacosController = Boolean(
-        this.options.macosContainerWorkerFactory &&
-        request.containerWorker.backend === "orbstack-machine",
-      );
-      if (
-        request.containerWorker.runtime !== "podman" ||
-        (process.platform === "linux" &&
-          request.containerWorker.backend !== "embedded-linux" &&
-          !injectedMacosController) ||
-        (process.platform === "darwin" &&
-          request.containerWorker.backend !== "orbstack-machine") ||
-        (process.platform !== "linux" &&
-          process.platform !== "darwin" &&
-          !injectedMacosController) ||
-        !path.isAbsolute(request.containerWorker.executable) ||
-        request.containerWorker.executable.includes("\0")
-      ) {
-        throw new Error("container-worker request is invalid");
-      }
-      const executable = realpathSync(request.containerWorker.executable);
-      const metadata = lstatSync(executable);
-      if (
-        !metadata.isFile() ||
-        metadata.isSymbolicLink() ||
-        (metadata.mode & 0o111) === 0
-      ) {
-        throw new Error("container-worker executable is unavailable");
-      }
-      request = {
-        ...request,
-        containerWorker: { ...request.containerWorker, executable },
-      };
-    }
     return this.admitLocalHostParity(
-      request,
+      initialRequest,
       newTerritoryGeneration(),
       admissionStartedAt,
       control?.signal,
