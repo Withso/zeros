@@ -48,6 +48,22 @@ function createLegacyLayoutRepository(): string {
   return cwd;
 }
 
+function createCurrentLayoutRepository(sql: string): string {
+  const cwd = mkdtempSync(path.join(tmpdir(), "zeros-migration-guard-"));
+  temporaryRepositories.push(cwd);
+
+  mkdirSync(path.join(cwd, "apps/control-plane/migrations"), {
+    recursive: true,
+  });
+  writeFileSync(
+    path.join(cwd, "apps/control-plane/migrations/0001_init.sql"),
+    sql,
+  );
+  git(cwd, "init", "--quiet");
+
+  return cwd;
+}
+
 afterEach(() => {
   for (const cwd of temporaryRepositories.splice(0)) {
     rmSync(cwd, { recursive: true, force: true });
@@ -64,5 +80,38 @@ describe("control-plane migration guard", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("migration 0001_init.sql was EDITED");
+  });
+
+  it("rejects top-level transaction control inside a migration", () => {
+    const cwd = createCurrentLayoutRepository(
+      "BEGIN;\nCREATE TABLE example (id integer);\nCOMMIT;\n",
+    );
+    const result = spawnSync(process.execPath, [GUARD], {
+      cwd,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "0001_init.sql contains top-level transaction control BEGIN",
+    );
+  });
+
+  it("allows transaction words inside comments, strings, and PL/pgSQL bodies", () => {
+    const cwd = createCurrentLayoutRepository(`
+-- BEGIN and COMMIT here are documentation, not statements.
+CREATE TABLE example (value text DEFAULT 'ROLLBACK;');
+DO $body$
+BEGIN
+  INSERT INTO example (value) VALUES ('COMMIT;');
+END
+$body$;
+`);
+    const result = spawnSync(process.execPath, [GUARD], {
+      cwd,
+      encoding: "utf8",
+    });
+
+    expect(result.status).toBe(0);
   });
 });

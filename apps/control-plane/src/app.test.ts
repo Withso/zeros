@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 
 import { createApp } from "./app.js";
@@ -223,6 +223,74 @@ describe("app assembly — healthz", () => {
         reasons: ["deletion_jobs_failed"],
       },
     });
+  });
+
+  it("exposes a boot-deferred migration while cloud runtime remains disabled", async () => {
+    const healthy = createApp(
+      config(null),
+      {
+        query: async () => ({ rows: [] }),
+      } as unknown as pg.Pool,
+      emailConfig as never,
+      {
+        migrationStatus: {
+          state: "controlled_migration_pending",
+          migration: "0025_cloud_workspace_engine_authority.sql",
+          dependentRuntime: "cloud_workspaces",
+        },
+      },
+    );
+
+    const response = await healthy.request("/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      migrations: {
+        state: "controlled_migration_pending",
+        migration: "0025_cloud_workspace_engine_authority.sql",
+        dependentRuntime: "cloud_workspaces",
+      },
+    });
+  });
+
+  it("rejects every cloud route before auth or database access while migration is pending", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    const pending = createApp(
+      config(null),
+      { query } as unknown as pg.Pool,
+      emailConfig as never,
+      {
+        migrationStatus: {
+          state: "controlled_migration_pending",
+          migration: "0025_cloud_workspace_engine_authority.sql",
+          dependentRuntime: "cloud_workspaces",
+        },
+      },
+    );
+    const paths = [
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces",
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces/22222222-2222-4222-8222-222222222222",
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspace-management/provider-connections",
+      "/v1/devices",
+      "/v1/devices/33333333-3333-4333-8333-333333333333",
+      "/internal/v1/cloud-workspaces/engine/heartbeat",
+    ];
+
+    for (const requestPath of paths) {
+      const response = await pending.request(requestPath);
+      expect(response.status, requestPath).toBe(503);
+      expect(await response.json(), requestPath).toMatchObject({
+        error: {
+          code: "controlled_migration_pending",
+          migration: "0025_cloud_workspace_engine_authority.sql",
+        },
+      });
+    }
+    expect(query).not.toHaveBeenCalled();
+
+    const unrelated = await pending.request("/v1/me");
+    expect(unrelated.status).toBe(401);
+    expect(query).not.toHaveBeenCalled();
   });
 });
 

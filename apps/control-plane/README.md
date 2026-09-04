@@ -59,7 +59,7 @@ Core environment variables:
 | `DATABASE_URL`           | PostgreSQL connection string; use Railway's private-network URL in production                                                                    |
 | `AUTH_PROVIDER`          | `auth0` during compatibility rollout, or `workos` after client cutover                                                                           |
 | `AUTH_AUDIENCE`          | Expected access-token audience                                                                                                                   |
-| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                 |
+| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                   |
 | `AUTH_JWKS_URL`          | Exact public signing JWKS for that WorkOS environment/default Application; required in WorkOS mode                                               |
 | `AUTH_WEB_CLIENT_ID`     | Allowed WorkOS Web Application client ID                                                                                                         |
 | `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID                                                                                                     |
@@ -95,20 +95,76 @@ enforces exact recipient equality instead.
 ## Database migrations
 
 SQL migrations live in `migrations/` and use contiguous names of the form
-`NNNN_snake_case_name.sql`. The service applies them transactionally at startup
-before accepting traffic.
+`NNNN_snake_case_name.sql`. Before accepting traffic, service boot examines the
+ledger and applies only migrations that are safe for automatic startup.
 
 Released migrations are immutable, including comments. Add a new migration for
-every schema or data change; editing an applied file does not cause it to run
-again and makes the repository diverge from deployed databases.
+every schema or data change. The runner stores an exact SHA-256 content checksum
+beside each canonical filename and refuses a later mismatch. On the first run of
+this hardened runner, canonical rows from the former filename-only ledger are
+bound to the files in that release; recognized historical alias rows remain as
+evidence while their canonical rows receive checksums.
 
-A migration whose header contains `zeros:requires-controlled-downtime` is
-blocked in `NODE_ENV=production` until its exact filename appears in
-`CONTROL_PLANE_MIGRATION_APPROVALS`. Migration `0009` uses this guard because
-the prior server binary cannot run against its renamed schema. Follow the
-one-time procedure in
+One dedicated PostgreSQL client holds a fixed, session-level advisory lock for
+the complete run. Its ordinary request `statement_timeout` is disabled only for
+that run and restored before the client returns to the pool. Each file and its
+ledger insert commit in one runner-owned transaction. Migration SQL must not
+contain top-level `BEGIN`, `COMMIT`, `ROLLBACK`, savepoint, or other transaction
+control; `check:control-plane-migrations` and the runtime both reject it.
+
+A migration whose header contains `zeros:requires-controlled-downtime` can be
+approved in `NODE_ENV=production` only for the explicit strict migrator, by
+putting its exact filename in `CONTROL_PLANE_MIGRATION_APPROVALS`. Production
+service boot never consumes that variable. Migration `0009` uses the guard
+because the prior and new server binaries require incompatible core schemas;
+an unapproved `0009` always fails startup. Follow the one-time procedure in
 [`docs/deployment-environments.md`](../../docs/deployment-environments.md);
 do not approve it during a rolling deploy.
+
+The strict operator command never skips an unapproved boundary. From a source
+checkout use the first command; inside the production image (where `tsx` and
+`src/` are intentionally absent) use the supported compiled entrypoint:
+
+```bash
+pnpm --dir apps/control-plane migrate
+node dist/migrate.js
+```
+
+Automatic service boot has exactly one filename-specific, fail-safe pause
+policy: `0025_cloud_workspace_engine_authority.sql`. It may stop before `0025`
+and serve the non-cloud control plane only when the resolved cloud runtime is
+disabled (`CLOUD_WORKSPACES_ENABLED=false` and
+`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`), every pre-`0025` cloud state
+table is empty, and no later migration is recorded. A leaked or standing
+`CONTROL_PLANE_MIGRATION_APPROVALS` value does not change that decision. Boot
+neither records `0025` nor applies any suffix; only a completed strict operator
+run can advance the ledger. The current `0025`–`0054` cloud-only suffix is
+classified explicitly; appending any migration makes this pause fail closed
+until its runtime dependency is reviewed. `/healthz` remains HTTP 200 for
+Railway but exposes the incomplete schema explicitly:
+
+```json
+{
+  "ok": true,
+  "migrations": {
+    "state": "controlled_migration_pending",
+    "migration": "0025_cloud_workspace_engine_authority.sql",
+    "dependentRuntime": "cloud_workspaces"
+  }
+}
+```
+
+While that state is present, every `/v1/devices`, Organization
+`cloud-workspaces`/`cloud-workspace-management`, and
+`/internal/v1/cloud-workspaces` endpoint returns a non-cacheable `503` with
+`error.code=controlled_migration_pending` before authentication or database
+access. Unrelated APIs remain available.
+
+If cloud runtime is enabled, any quota/workspace/resource/authority row already
+exists, the ledger has crossed the missing boundary, or a controlled migration
+(including `0009` or any future marker) has no explicit boot-pause policy,
+startup fails closed. Follow the exact `0025` procedure in
+[`docs/cloud-workspace/infrastructure-and-operations.md`](../../docs/cloud-workspace/infrastructure-and-operations.md).
 
 The current tenant hierarchy is Account → Personal/Organization → Team →
 Member. Personal is permanent and local-only; every tenant currently receives
@@ -117,12 +173,12 @@ one default child team. The compatibility and rollout contract is documented in
 
 Authentication foundation migrations after the original Hosted AuthKit slice:
 
-| Migration | Durable contract |
-| --------- | ---------------- |
-| `0013_auth_lifecycle.sql` | stable account/identity/session lifecycle, provider tombstones, auth revisions |
-| `0014_workos_organization_sync.sql` | collaborative organization/member/invitation projections plus ordered command/event outboxes |
-| `0015_security_events.sql` | organization/account/data revisions, replayable security events, endpoint-grant revocation hooks |
-| `0016_account_recovery.sql` | fresh-auth reviewed recovery and at-least-once security-notification outbox |
+| Migration                           | Durable contract                                                                                 |
+| ----------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `0013_auth_lifecycle.sql`           | stable account/identity/session lifecycle, provider tombstones, auth revisions                   |
+| `0014_workos_organization_sync.sql` | collaborative organization/member/invitation projections plus ordered command/event outboxes     |
+| `0015_security_events.sql`          | organization/account/data revisions, replayable security events, endpoint-grant revocation hooks |
+| `0016_account_recovery.sql`         | fresh-auth reviewed recovery and at-least-once security-notification outbox                      |
 
 Two checks protect the migration ladder:
 
@@ -155,22 +211,23 @@ does not print the database URL.
 2. Record the target fingerprint and row counts. Take a restorable backup and
    complete a restore drill before continuing.
 3. Copy the non-secret approval value printed by the plan. Because the empty
-   schema replays the full migration ladder, also include every currently
-   required controlled-downtime migration approval (currently `0009`), then
-   execute:
+   schema replays the full migration ladder through the strict operator runner,
+   include the exact two currently required controlled-downtime approvals as
+   one comma-separated value, then execute:
 
    ```bash
    CONTROL_PLANE_RESET_CHANNEL=alpha \
    CONTROL_PLANE_RESET_BACKUP_CONFIRMED=true \
    CONTROL_PLANE_RESET_APPROVAL='reset:alpha:<target-fingerprint>' \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql \
    pnpm reset:database -- --execute
    ```
 
 Execution drops and recreates the entire `public` schema, then replays every
-migration. It is not a partial user deletion. `RAILWAY_ENVIRONMENT_NAME`, when
-present, must exactly match the selected channel. Keep the previous database or
-backup available until Alpha acceptance is complete.
+migration with `runMigrations`; it never uses the service-boot deferral policy.
+It is not a partial user deletion. `RAILWAY_ENVIRONMENT_NAME`, when present,
+must exactly match the selected channel. Keep the previous database or backup
+available until Alpha acceptance is complete.
 
 ## Railway deployment
 
@@ -395,7 +452,11 @@ Set `DATABASE_URL` plus these target-bound inputs:
 Generate a read-only plan first:
 
 ```sh
+# Source checkout
 pnpm --dir apps/control-plane cloud-quota:manage
+
+# Production image (/app)
+node dist/manage-cloud-workspace-quota.js
 ```
 
 The command prints an approval string bound to the database fingerprint,
@@ -404,7 +465,11 @@ reason. Copy the exact value into `CONTROL_PLANE_CLOUD_QUOTA_APPROVAL`, then
 execute:
 
 ```sh
+# Source checkout
 pnpm --dir apps/control-plane cloud-quota:manage --execute
+
+# Production image (/app)
+node dist/manage-cloud-workspace-quota.js --execute
 ```
 
 Production additionally requires

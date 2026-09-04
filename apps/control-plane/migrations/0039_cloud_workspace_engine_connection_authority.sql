@@ -1,5 +1,3 @@
-BEGIN;
-
 -- Endpoint capabilities issued before this migration cannot prove which
 -- execution authority epoch minted them. Retire them rather than silently
 -- blessing them with the workspace's current epoch.
@@ -25,5 +23,3 @@ CREATE INDEX cloud_workspace_endpoint_grants_live_authority_idx
 CREATE INDEX cloud_workspace_endpoint_grants_engine_instance_idx
   ON cloud_workspace_endpoint_grants (engine_instance_id)
   WHERE engine_instance_id IS NOT NULL;
-
-COMMIT;

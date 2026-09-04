@@ -278,10 +278,10 @@ RLS only through a narrowly privileged fixed-search-path function, so a normal
 user-context self-leave cannot retain a provider bearer.
 WorkOS identity, account lifecycle, and notification migrations own `0011`
 through `0019`; cloud workspace additions resume at `0020` and continue
-forward through `0053`. The migration runner recognizes the pre-merge cloud
-filenames `0018`–`0050` as aliases for their renumbered `0020`–`0052`
-equivalents, and `0053` repairs the Personal local-only constraint for those
-databases.
+forward through `0054`. The migration runner explicitly recognizes the
+`a80ac25` `0013`–`0018` and `c2b7418` `0018`–`0050` histories as aliases for
+their canonical `0020`–`0052` equivalents. `0053` repairs the Personal
+local-only constraint for those databases.
 Never rename a migration after deployment and never edit
 `0010_cloud_workspace_control_plane.sql` in place.
 

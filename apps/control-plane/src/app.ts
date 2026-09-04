@@ -58,6 +58,7 @@ import {
 } from "./security-events.js";
 import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
 import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
+import type { MigrationStatus } from "./migrate.js";
 
 export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
@@ -69,7 +70,20 @@ export type CreateAppDependencies = {
   cloudWorkspaceHealthService?: { read(): Promise<CloudWorkspaceHealth> };
   securityEventBroker?: PostgresSecurityEventBroker;
   workosProvider?: RailwayWorkOSProvider;
+  migrationStatus?: MigrationStatus;
 };
+
+function isCloudWorkspaceApiPath(requestPath: string): boolean {
+  return (
+    requestPath === "/v1/devices" ||
+    requestPath.startsWith("/v1/devices/") ||
+    requestPath === "/internal/v1/cloud-workspaces" ||
+    requestPath.startsWith("/internal/v1/cloud-workspaces/") ||
+    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management)(?:\/|$)/u.test(
+      requestPath,
+    )
+  );
+}
 
 export function createApp(
   config: Config,
@@ -78,6 +92,36 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): Hono {
   const app = new Hono();
+  const pendingMigration =
+    dependencies.migrationStatus?.state === "controlled_migration_pending"
+      ? dependencies.migrationStatus
+      : null;
+
+  // A deferred 0025 means later cloud columns (starting in 0026) do not exist.
+  // Keep the complete public and internal cloud surface behind one first-in-
+  // chain barrier so neither auth nor a router can touch that partial schema.
+  // Unrelated control-plane APIs remain available for the safe boot mode.
+  if (pendingMigration) {
+    app.use("*", async (c, next) => {
+      if (!isCloudWorkspaceApiPath(c.req.path)) {
+        await next();
+        return;
+      }
+      c.header("Cache-Control", "no-store");
+      c.header("Pragma", "no-cache");
+      return c.json(
+        {
+          error: {
+            code: "controlled_migration_pending",
+            message:
+              "Cloud workspaces are disabled until the pending controlled migration is applied",
+            migration: pendingMigration.migration,
+          },
+        },
+        503,
+      );
+    });
+  }
   const workosProvider =
     config.auth.provider === "workos" && config.workos
       ? (dependencies.workosProvider ??
@@ -123,12 +167,17 @@ export function createApp(
   app.get("/healthz", async (c) => {
     try {
       await pool.query("SELECT 1");
+      const migrationState =
+        dependencies.migrationStatus?.state === "controlled_migration_pending"
+          ? { migrations: dependencies.migrationStatus }
+          : {};
       if (!dependencies.cloudWorkspaceHealthService) {
-        return c.json({ ok: true });
+        return c.json({ ok: true, ...migrationState });
       }
       try {
         return c.json({
           ok: true,
+          ...migrationState,
           cloudWorkspaces:
             await dependencies.cloudWorkspaceHealthService.read(),
         });
@@ -138,6 +187,7 @@ export function createApp(
         // WorkOS, team, invitation, GitHub, and settings APIs.
         return c.json({
           ok: true,
+          ...migrationState,
           cloudWorkspaces: {
             enabled: true,
             operationalState: "unknown",
@@ -167,10 +217,7 @@ export function createApp(
       "/",
       createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
     );
-    if (
-      config.workos.opsOrigin &&
-      config.deploymentChannel !== "beta"
-    ) {
+    if (config.workos.opsOrigin && config.deploymentChannel !== "beta") {
       const opsSessions = new WorkOSBrowserSessions(
         new PostgresWorkOSBrowserSessionRepository(pool),
         workosProvider,
@@ -180,10 +227,7 @@ export function createApp(
       // its Pages facade forwards only to this separate upstream namespace.
       app.route(
         "/ops",
-        createWorkOSBrowserSessionRoutes(
-          opsSessions,
-          config.workos.opsOrigin,
-        ),
+        createWorkOSBrowserSessionRoutes(opsSessions, config.workos.opsOrigin),
       );
     }
     app.route(
@@ -406,10 +450,7 @@ export function createApp(
   app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createAccountRecoveryRoutes(pool));
   app.route("/", createDeletionLifecycleRoutes(pool));
-  if (
-    config.workos?.opsOrigin &&
-    config.deploymentChannel !== "beta"
-  ) {
+  if (config.workos?.opsOrigin && config.deploymentChannel !== "beta") {
     app.route(
       "/",
       createOpsRoutes(

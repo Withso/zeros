@@ -8,7 +8,7 @@
 import { serve } from "@hono/node-server";
 import { loadConfig } from "./config.js";
 import { createPool } from "./db.js";
-import { runMigrations } from "./migrate.js";
+import { runServiceBootMigrations } from "./migrate.js";
 import { loadEmailConfig } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
@@ -38,7 +38,17 @@ const workosProvider =
   config.auth.provider === "workos" && config.workos
     ? new RailwayWorkOSProvider(config.auth, config.workos)
     : undefined;
-await runMigrations(pool);
+const migrationResult = await runServiceBootMigrations(pool, {
+  cloudWorkspacesEnabled: config.cloudWorkspaces !== null,
+});
+if (migrationResult.status.state === "controlled_migration_pending") {
+  console.warn(
+    `[migrate] service boot stopped before ${migrationResult.status.migration}; ` +
+      `${migrationResult.status.dependentRuntime} runtime is disabled. ` +
+      "Service boot ignores approval values; run the strict one-shot migrator " +
+      "during a drained window before enabling it.",
+  );
+}
 if (config.github) startGithubOauthCleanup(pool);
 const workosSync = workosProvider
   ? startWorkOSSyncRuntime({
@@ -417,6 +427,7 @@ if (config.cloudWorkspaces) {
 
 const app = createApp(config, pool, emailConfig, {
   securityEventBroker,
+  migrationStatus: migrationResult.status,
   ...(workosProvider ? { workosProvider } : {}),
   ...(cloudWorkspaceInternalSetupService
     ? { cloudWorkspaceInternalSetupService }
