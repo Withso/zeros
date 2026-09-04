@@ -563,6 +563,72 @@ describe("cloud durability scanner", () => {
 
 describe("cloud durability projection validation", () => {
   checkpointIt(
+    "rejects a repeated non-adjacent cursor before scanning or writing",
+    async () => {
+      const pages = [
+        {
+          entries: [
+            {
+              operation: "delete",
+              path: "a.txt",
+              entryType: null,
+              mode: null,
+              blobId: null,
+              contentSha256: null,
+              sizeBytes: null,
+            },
+            {
+              operation: "delete",
+              path: "b.txt",
+              entryType: null,
+              mode: null,
+              blobId: null,
+              contentSha256: null,
+              sizeBytes: null,
+            },
+          ],
+          nextAfterPath: "a.txt",
+        },
+        { entries: [], nextAfterPath: "b.txt" },
+        { entries: [], nextAfterPath: "a.txt" },
+      ];
+      let headCalls = 0;
+      const writes: string[] = [];
+      const runtime = new CloudWorkspaceDurabilityRuntime("/unused", {
+        fetch: (async (input, init) => {
+          const pathname = new URL(String(input)).pathname;
+          if (!pathname.endsWith("/content/head") || init?.method !== "GET") {
+            writes.push(pathname);
+            throw new Error(`unexpected durability write: ${pathname}`);
+          }
+          const page = pages[headCalls];
+          headCalls += 1;
+          if (!page) throw new Error("unexpected fourth projection page");
+          return Response.json({
+            checkpointId: null,
+            currentRevision: 1,
+            durableRevision: 1,
+            ...page,
+          });
+        }) as typeof fetch,
+      });
+
+      await expect(
+        runtime.checkpoint(
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            reason: "manual",
+            deadlineAtMs: Date.now() + 60_000,
+          },
+          authority,
+        ),
+      ).rejects.toThrow("cloud durability projection cursor is invalid");
+      expect(headCalls).toBe(3);
+      expect(writes).toEqual([]);
+    },
+  );
+
+  checkpointIt(
     "cancels a chunked response as soon as it crosses the JSON byte limit",
     async () => {
       let pulls = 0;

@@ -993,7 +993,8 @@ export class CloudWorkspaceDurabilityRuntime {
     let afterPath: string | null = null;
     let revision: number | null = null;
     const entries = new Map<string, ProjectionEntry>();
-    for (;;) {
+    const seenCursors = new Set<string>();
+    for (let page = 0; page < 100_000; page += 1) {
       const url = new URL(this.endpoint(authority, CONTENT_HEAD_PATH));
       for (const [key, value] of Object.entries(this.scope(authority))) {
         url.searchParams.set(key, value);
@@ -1106,11 +1107,13 @@ export class CloudWorkspaceDurabilityRuntime {
         return { currentRevision: revision, entries };
       }
       const next = normalizedPath(raw.nextAfterPath);
-      if (next === afterPath || !entries.has(next)) {
+      if (seenCursors.has(next) || !entries.has(next)) {
         throw new Error("cloud durability projection cursor is invalid");
       }
+      seenCursors.add(next);
       afterPath = next;
     }
+    throw new Error("cloud durability projection exceeded its page bound");
   }
 
   private async upload(
