@@ -10,6 +10,7 @@ import type { CloudReplicaMutation } from "../cloud-replica-apply";
 import {
   CloudReplicaBrokerError,
   CloudReplicaSyncBroker,
+  parseBootstrapManifest,
 } from "../cloud-replica-broker";
 import type {
   CloudReplicaApi,
@@ -93,6 +94,60 @@ function descriptor(
     blobId,
     contentSha256: createHash("sha256").update(bytes).digest("hex"),
     sizeBytes: bytes.length,
+  };
+}
+
+function bootstrapManifestInput(
+  document: unknown,
+  page: Partial<{
+    fileCount: number;
+    totalBytes: number;
+    gitBaseCommit: string | null;
+    gitHeadRef: string | null;
+  }> = {},
+) {
+  const serialized = JSON.stringify(document);
+  if (typeof serialized !== "string") {
+    throw new Error("bootstrap manifest test document must serialize");
+  }
+  const bytes = Buffer.from(serialized, "utf8");
+  return {
+    bytes,
+    page: {
+      integritySha256: createHash("sha256").update(bytes).digest("hex"),
+      fileCount: 1,
+      totalBytes: 1,
+      gitBaseCommit: null,
+      gitHeadRef: null,
+      ...page,
+    },
+  };
+}
+
+function checkpointManifestEntry(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    path: "entry.txt",
+    entryType: "file",
+    mode: 33188,
+    contentSha256: "a".repeat(64),
+    sizeBytes: 1,
+    ...overrides,
+  };
+}
+
+function checkpointManifest(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    version: 1,
+    audience: "zeros-cloud-workspace-checkpoint-manifest-v1",
+    gitBaseCommit: null,
+    gitHeadRef: null,
+    entries: [checkpointManifestEntry()],
+    deletions: [],
+    ...overrides,
   };
 }
 
@@ -244,6 +299,64 @@ function remoteFor(
 }
 
 describe("cloud replica receive-only broker", () => {
+  it("keeps the documented local-to-cloud legacy descriptor compatible", () => {
+    expect(
+      parseBootstrapManifest(
+        bootstrapManifestInput({
+          audience: "zeros-local-to-cloud-fork-v1",
+          forkIntentId: randomUUID(),
+          sourceLocalWorkspaceId: randomUUID(),
+          sourceRevision: 1,
+          sourceSnapshotSha256: "a".repeat(64),
+          gitBaseCommit: "b".repeat(40),
+          gitHeadRef: "refs/heads/main",
+          targetCloudWorkspaceId: randomUUID(),
+          entryCount: 1,
+          fileCount: 1,
+          totalBytes: 1,
+          recordCount: 0,
+        }),
+      ),
+    ).toEqual({ kind: "legacy" });
+  });
+
+  it.each([
+    ["a missing audience", undefined],
+    ["an unknown audience", "zeros-unrecognized-checkpoint-v1"],
+  ])("rejects %s instead of treating it as a legacy descriptor", (_, audience) => {
+    const document = checkpointManifest();
+    if (audience === undefined) delete document.audience;
+    else document.audience = audience;
+
+    expect(() =>
+      parseBootstrapManifest(bootstrapManifestInput(document)),
+    ).toThrowError(expect.objectContaining({ code: "remote_protocol_error" }));
+  });
+
+  it.each([
+    ["gitBaseCommit", {}],
+    ["gitBaseCommit", []],
+    ["gitHeadRef", {}],
+    ["gitHeadRef", []],
+    ["entryType", {}],
+    ["entryType", []],
+    ["mode", {}],
+    ["mode", []],
+  ])(
+    "fails closed for an object or array %s value",
+    (field, value) => {
+      const document = checkpointManifest(
+        field === "gitBaseCommit" || field === "gitHeadRef"
+          ? { [field]: value }
+          : { entries: [checkpointManifestEntry({ [field]: value })] },
+      );
+
+      expect(() =>
+        parseBootstrapManifest(bootstrapManifestInput(document)),
+      ).toThrowError(expect.objectContaining({ code: "remote_protocol_error" }));
+    },
+  );
+
   it("bootstraps an exact checkpoint then consumes ordered event pages", async () => {
     const fixture = await localFixture();
     const initial = Buffer.from("checkpoint\n", "utf8");

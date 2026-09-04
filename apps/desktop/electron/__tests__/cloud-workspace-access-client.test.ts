@@ -359,6 +359,39 @@ describe("CloudWorkspaceAccessClient", () => {
     });
   });
 
+  it("rejects an array-encoded preview capability instead of returning it as a string", async () => {
+    const client = new CloudWorkspaceAccessClient({
+      baseUrl: "https://api.zeros.test",
+      fetch: vi.fn(async () =>
+        json(
+          {
+            grant: grant("preview", 4173),
+            preview: {
+              logicalUrl: "http://localhost:4173/",
+              origin:
+                "https://0123456789abcdef0123456789abcdef.preview.zeros.test",
+              capability: [PREVIEW_CAPABILITY],
+              headerName: "x-zeros-preview-capability",
+            },
+          },
+          201,
+        ),
+      ) as typeof fetch,
+      now: () => NOW,
+      allowedPreviewHostSuffixes: ["preview.zeros.test"],
+    });
+
+    await expect(
+      client.issuePreview("account-access-token", {
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+        port: 4173,
+        expiresInMinutes: 30,
+        idempotencyKey: "desktop:preview:array-capability",
+      }),
+    ).rejects.toMatchObject({ code: "bad_response" });
+  });
+
   it("rejects and reclaims a preview outside the configured DNS boundary", async () => {
     const fetchImpl = vi
       .fn()

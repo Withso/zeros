@@ -17,6 +17,34 @@ const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 const GRANT_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const EXPORT_GRANT_PATTERN = /^zwe_[A-Za-z0-9_-]{43}$/;
 const FULL_COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const REPLICA_DESIRED_STATES = ["active", "paused", "removed"] as const;
+const REPLICA_OBSERVED_STATES = [
+  "bootstrapping",
+  "pending",
+  "syncing",
+  "in_sync",
+  "diverged",
+  "paused",
+  "detached",
+  "failed",
+  "removed",
+] as const;
+const DEVICE_PLATFORMS = ["macos", "windows", "linux"] as const;
+const MUTATION_OPERATIONS = ["upsert", "delete"] as const;
+const MUTATION_ENTRY_TYPES = ["file", "symlink"] as const;
+const MUTATION_MODES = [33188, 33261, 40960] as const;
+const FORK_RECORD_ENTITY_KINDS = [
+  "workspace",
+  "chat",
+  "message",
+  "turn",
+  "agent_session",
+  "run",
+  "terminal",
+  "design_transaction",
+  "metadata",
+] as const;
+const FORK_RECORD_OPERATIONS = ["upsert", "tombstone"] as const;
 // A single content revision is atomic and may contain an 8 MiB mutation body;
 // bootstrap pages can also carry 1,000 portable 4 KiB paths. Keep the response
 // ceiling above both legal server shapes while retaining a hard memory bound.
@@ -339,6 +367,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
+function isStringEnum<T extends string>(
+  value: unknown,
+  values: readonly T[],
+): value is T {
+  return (
+    typeof value === "string" &&
+    values.some((candidate) => candidate === value)
+  );
+}
+
+function isNumberEnum<T extends number>(
+  value: unknown,
+  values: readonly T[],
+): value is T {
+  return (
+    typeof value === "number" &&
+    values.some((candidate) => candidate === value)
+  );
+}
+
 function secureBaseUrl(value: string, allowInsecureLoopback: boolean): string {
   let url: URL;
   try {
@@ -613,6 +661,8 @@ function nullableHash(value: unknown): string | null | undefined {
 
 function parseReplica(value: unknown): CloudReplicaRemoteState {
   if (!isRecord(value)) throw new Error("Cloud replica response is invalid");
+  const desiredState = value.desiredState;
+  const observedState = value.observedState;
   const authority = positive(value.workspaceAuthorityEpoch);
   const grantEpoch = positive(value.grantEpoch);
   const cursor = natural(value.eventCursor);
@@ -630,18 +680,8 @@ function parseReplica(value: unknown): CloudReplicaRemoteState {
     typeof value.deviceId !== "string" ||
     !UUID_PATTERN.test(value.deviceId) ||
     value.mode !== "receive_only" ||
-    !["active", "paused", "removed"].includes(String(value.desiredState)) ||
-    ![
-      "bootstrapping",
-      "pending",
-      "syncing",
-      "in_sync",
-      "diverged",
-      "paused",
-      "detached",
-      "failed",
-      "removed",
-    ].includes(String(value.observedState)) ||
+    !isStringEnum(desiredState, REPLICA_DESIRED_STATES) ||
+    !isStringEnum(observedState, REPLICA_OBSERVED_STATES) ||
     authority === null ||
     grantEpoch === null ||
     cursor === null ||
@@ -661,8 +701,8 @@ function parseReplica(value: unknown): CloudReplicaRemoteState {
     organizationId: value.organizationId,
     deviceId: value.deviceId,
     mode: "receive_only",
-    desiredState: value.desiredState as CloudReplicaRemoteState["desiredState"],
-    observedState: value.observedState as string,
+    desiredState,
+    observedState,
     workspaceAuthorityEpoch: authority,
     grantEpoch,
     checkpointId: value.checkpointId as string | null,
@@ -695,7 +735,7 @@ function parseDevice(value: unknown): CloudReplicaRemoteDevice {
     !UUID_PATTERN.test(value.id) ||
     typeof value.label !== "string" ||
     value.label.length < 1 ||
-    !["macos", "windows", "linux"].includes(String(value.platform)) ||
+    !isStringEnum(value.platform, DEVICE_PLATFORMS) ||
     value.keyAlgorithm !== "ed25519" ||
     typeof value.keyFingerprint !== "string" ||
     !SHA256_PATTERN.test(value.keyFingerprint) ||
@@ -707,7 +747,7 @@ function parseDevice(value: unknown): CloudReplicaRemoteDevice {
   return {
     id: value.id,
     label: value.label,
-    platform: value.platform as CloudReplicaRemoteDevice["platform"],
+    platform: value.platform,
     keyAlgorithm: "ed25519",
     keyFingerprint: value.keyFingerprint,
     keyVersion: Number(value.keyVersion),
@@ -720,44 +760,73 @@ function parseMutation(
   includeOrder: boolean,
 ): CloudReplicaMutation | Omit<CloudReplicaMutation, "revision" | "sequence"> {
   if (!isRecord(value)) throw new Error("Cloud replica mutation is invalid");
-  const normalizedPath = normalizeCloudReplicaPath(String(value.path ?? ""));
-  const operation = value.operation;
-  const base = {
-    path: normalizedPath,
-    operation,
-    entryType: value.entryType,
-    mode: value.mode,
-    blobId: value.blobId,
-    contentSha256: value.contentSha256,
-    sizeBytes: value.sizeBytes,
-  };
-  if (
-    !["upsert", "delete"].includes(String(operation)) ||
-    (operation === "delete" &&
-      [
-        base.entryType,
-        base.mode,
-        base.blobId,
-        base.contentSha256,
-        base.sizeBytes,
-      ].some((part) => part !== null)) ||
-    (operation === "upsert" &&
-      (!(["file", "symlink"] as unknown[]).includes(base.entryType) ||
-        !([33188, 33261, 40960] as unknown[]).includes(base.mode) ||
-        (base.entryType === "symlink") !== (base.mode === 40960) ||
-        typeof base.blobId !== "string" ||
-        !UUID_PATTERN.test(base.blobId) ||
-        typeof base.contentSha256 !== "string" ||
-        !SHA256_PATTERN.test(base.contentSha256) ||
-        natural(base.sizeBytes) === null ||
-        Number(base.sizeBytes) > MAX_BLOB_BYTES ||
-        (base.entryType === "symlink" &&
-          (Number(base.sizeBytes) < 1 ||
-            Number(base.sizeBytes) > MAX_SYMLINK_BYTES))))
-  ) {
+  if (typeof value.path !== "string") {
     throw new Error("Cloud replica mutation is invalid");
   }
-  const mutation = base as Omit<CloudReplicaMutation, "revision" | "sequence">;
+  let normalizedPath: string;
+  try {
+    normalizedPath = normalizeCloudReplicaPath(value.path);
+  } catch {
+    throw new Error("Cloud replica mutation is invalid");
+  }
+  const operation = value.operation;
+  if (!isStringEnum(operation, MUTATION_OPERATIONS)) {
+    throw new Error("Cloud replica mutation is invalid");
+  }
+
+  let mutation: Omit<CloudReplicaMutation, "revision" | "sequence">;
+  if (operation === "delete") {
+    if (
+      [
+        value.entryType,
+        value.mode,
+        value.blobId,
+        value.contentSha256,
+        value.sizeBytes,
+      ].some((part) => part !== null)
+    ) {
+      throw new Error("Cloud replica mutation is invalid");
+    }
+    mutation = {
+      path: normalizedPath,
+      operation,
+      entryType: null,
+      mode: null,
+      blobId: null,
+      contentSha256: null,
+      sizeBytes: null,
+    };
+  } else {
+    const entryType = value.entryType;
+    const mode = value.mode;
+    const blobId = value.blobId;
+    const contentSha256 = value.contentSha256;
+    const sizeBytes = natural(value.sizeBytes);
+    if (
+      !isStringEnum(entryType, MUTATION_ENTRY_TYPES) ||
+      !isNumberEnum(mode, MUTATION_MODES) ||
+      (entryType === "symlink") !== (mode === 40960) ||
+      typeof blobId !== "string" ||
+      !UUID_PATTERN.test(blobId) ||
+      typeof contentSha256 !== "string" ||
+      !SHA256_PATTERN.test(contentSha256) ||
+      sizeBytes === null ||
+      sizeBytes > MAX_BLOB_BYTES ||
+      (entryType === "symlink" &&
+        (sizeBytes < 1 || sizeBytes > MAX_SYMLINK_BYTES))
+    ) {
+      throw new Error("Cloud replica mutation is invalid");
+    }
+    mutation = {
+      path: normalizedPath,
+      operation,
+      entryType,
+      mode,
+      blobId,
+      contentSha256,
+      sizeBytes,
+    };
+  }
   if (!includeOrder) return mutation;
   const revision = positive(value.revision);
   const sequence = positive(value.sequence);
@@ -830,37 +899,29 @@ function parseForkEntry(value: unknown): CloudWorkspaceForkImportEntry {
 
 function parseForkRecordEvent(value: unknown): CloudWorkspaceForkRecordEvent {
   if (!isRecord(value)) throw new Error("Cloud fork record is invalid");
+  const entityKind = value.entityKind;
+  const operation = value.operation;
   const revision = positive(value.revision);
   const occurredAt = exactIso(value.occurredAt);
   if (
     revision === null ||
-    ![
-      "workspace",
-      "chat",
-      "message",
-      "turn",
-      "agent_session",
-      "run",
-      "terminal",
-      "design_transaction",
-      "metadata",
-    ].includes(String(value.entityKind)) ||
+    !isStringEnum(entityKind, FORK_RECORD_ENTITY_KINDS) ||
     typeof value.entityId !== "string" ||
     value.entityId.length < 1 ||
     Buffer.byteLength(value.entityId, "utf8") > 255 ||
-    !["upsert", "tombstone"].includes(String(value.operation)) ||
+    !isStringEnum(operation, FORK_RECORD_OPERATIONS) ||
     positive(value.schemaVersion) === null ||
     occurredAt === null ||
-    (value.operation === "upsert") !== isRecord(value.document) ||
-    (value.operation === "tombstone" && value.document !== null)
+    (operation === "upsert") !== isRecord(value.document) ||
+    (operation === "tombstone" && value.document !== null)
   ) {
     throw new Error("Cloud fork record is invalid");
   }
   return {
     revision,
-    entityKind: value.entityKind as CloudWorkspaceForkRecordEvent["entityKind"],
+    entityKind,
     entityId: value.entityId,
-    operation: value.operation as CloudWorkspaceForkRecordEvent["operation"],
+    operation,
     schemaVersion: Number(value.schemaVersion),
     document: value.document as Record<string, unknown> | null,
     occurredAt,
