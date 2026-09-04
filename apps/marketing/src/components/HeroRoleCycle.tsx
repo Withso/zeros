@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
-import './hero-role.css?v=role-doto-3'
+import './hero-role.css?v=role-doto-4'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 
@@ -19,7 +19,7 @@ type Role = (typeof ROLES)[number]
  * The live word is clipped to the hidden `developers` sizer so
  * scramble cannot wrap, leak, or resize the headline. Settled
  * role words and scramble text use Doto ExtraBold 800 at
- * hsl(0 0% 90%).
+ * hsl(0 0% 80%).
  */
 export function HeroRoleCycle() {
   const textRef = useRef<HTMLSpanElement>(null)

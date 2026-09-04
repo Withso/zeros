@@ -3,7 +3,7 @@
  * that box so scramble glyphs cannot grow, wrap, or leak the headline.
  *
  * Settled builders / developers / designers and scramble text use
- * Doto ExtraBold 800 at hsl(0 0% 90%). Design marks stay SVG. */
+ * Doto ExtraBold 800 at hsl(0 0% 80%). Design marks stay SVG. */
 
 .hero-role {
   position: relative;
@@ -14,8 +14,8 @@
   font-weight: 800;
   font-style: normal;
   font-synthesis: none;
-  /* White at lightness 90, a step under the headline. */
-  color: hsl(0 0% 90%);
+  /* White at lightness 80, a step under the headline. */
+  color: hsl(0 0% 80%);
 }
 
 .hero-role-sizer {

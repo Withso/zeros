@@ -100,7 +100,7 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/font-family: "Doto"/);
     expect(css).toMatch(/font-weight: 800/);
     expect(css).toMatch(/margin-left: 0\.2em/);
-    expect(css).toMatch(/color: hsl\(0 0% 90%\)/);
+    expect(css).toMatch(/color: hsl\(0 0% 80%\)/);
     expect(css).not.toMatch(/#ffffff/i);
     expect(css).not.toMatch(/#fff\b/i);
     expect(css).not.toMatch(/PF Pixelscript/);
@@ -172,7 +172,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=role-doto-3/);
+    expect(cycle).toMatch(/hero-role\.css\?v=role-doto-4/);
     expect(cycle).toMatch(/Doto ExtraBold 800/);
     expect(cycle).not.toMatch(/PF Pixelscript/);
     expect(cycle).not.toMatch(/Geist/);
