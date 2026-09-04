@@ -49,49 +49,96 @@ const ICON_COLORS = [
   SCRAMBLE_PALETTE[5],
 ] as const
 
-const lucide = (
+/** Square dots sized like Doto ExtraBold, not Lucide strokes. */
+const DOT = 8
+const STEP = 10
+
+function dotIcon(
   name: string,
   color: string,
-  inner: string,
+  rows: readonly string[],
   kind: 'tool' | 'key' = 'tool',
-) =>
-  `<svg class="hero-scramble-icon${kind === 'key' ? ' is-key' : ''}" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${kind === 'key' ? '1.75' : '2'}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`
+): string {
+  const rects: string[] = []
+  let cols = 1
+  for (let y = 0; y < rows.length; y += 1) {
+    const row = rows[y]!
+    cols = Math.max(cols, row.length)
+    for (let x = 0; x < row.length; x += 1) {
+      if (row[x] !== '#') continue
+      rects.push(
+        `<rect x="${x * STEP}" y="${y * STEP}" width="${DOT}" height="${DOT}" fill="${color}"/>`,
+      )
+    }
+  }
+  return `<svg class="hero-scramble-icon${kind === 'key' ? ' is-key' : ''}" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 ${cols * STEP} ${rows.length * STEP}" shape-rendering="crispEdges" aria-hidden="true" focusable="false">${rects.join('')}</svg>`
+}
 
 /**
- * Lucide design marks (ISC, same drawings as lucide-react).
- * One hardcoded hue each; marketing scramble is allowed off tokens.
+ * Design marks as Doto-like square dots. One hardcoded hue each;
+ * marketing scramble is allowed off tokens.
  */
 export const DESIGN_ICONS = [
-  lucide(
-    'frame',
-    ICON_COLORS[0],
-    '<line x1="22" x2="2" y1="6" y2="6"/><line x1="22" x2="2" y1="18" y2="18"/><line x1="6" x2="6" y1="2" y2="22"/><line x1="18" x2="18" y1="2" y2="22"/>',
-  ),
-  lucide(
-    'pentagon',
-    ICON_COLORS[1],
-    '<path d="M10.83 2.38a2 2 0 0 1 2.34 0l8 5.74a2 2 0 0 1 .73 2.25l-3.04 9.26a2 2 0 0 1-1.9 1.37H7.04a2 2 0 0 1-1.9-1.37L2.1 10.37a2 2 0 0 1 .73-2.25z"/>',
-  ),
-  lucide(
-    'tangent',
-    ICON_COLORS[2],
-    '<circle cx="17" cy="4" r="2"/><path d="M15.59 5.41 5.41 15.59"/><circle cx="4" cy="17" r="2"/><path d="M12 22s-4-9-1.5-11.5S22 12 22 12"/>',
-  ),
-  lucide(
-    'align-horizontal-space-around',
-    ICON_COLORS[3],
-    '<rect width="6" height="10" x="9" y="7" rx="2"/><path d="M4 22V2"/><path d="M20 22V2"/>',
-  ),
-  lucide(
-    'palette',
-    ICON_COLORS[4],
-    `<circle cx="13.5" cy="6.5" r=".5" fill="${ICON_COLORS[4]}"/><circle cx="17.5" cy="10.5" r=".5" fill="${ICON_COLORS[4]}"/><circle cx="8.5" cy="7.5" r=".5" fill="${ICON_COLORS[4]}"/><circle cx="6.5" cy="12.5" r=".5" fill="${ICON_COLORS[4]}"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>`,
-  ),
-  lucide(
-    'panels-top-left',
-    ICON_COLORS[5],
-    '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>',
-  ),
+  dotIcon('frame', ICON_COLORS[0], [
+    '.#....#.',
+    '########',
+    '.#....#.',
+    '.#....#.',
+    '.#....#.',
+    '.#....#.',
+    '########',
+    '.#....#.',
+  ]),
+  dotIcon('pentagon', ICON_COLORS[1], [
+    '...##...',
+    '..#..#..',
+    '.#....#.',
+    '#......#',
+    '#......#',
+    '.#....#.',
+    '.#....#.',
+    '..####..',
+  ]),
+  dotIcon('tangent', ICON_COLORS[2], [
+    '......##',
+    '.....##.',
+    '....##..',
+    '...##...',
+    '..##....',
+    '.##.....',
+    '##......',
+    '........',
+  ]),
+  dotIcon('align-horizontal-space-around', ICON_COLORS[3], [
+    '#......#',
+    '#..##..#',
+    '#..##..#',
+    '#..##..#',
+    '#..##..#',
+    '#..##..#',
+    '#......#',
+    '#......#',
+  ]),
+  dotIcon('palette', ICON_COLORS[4], [
+    '..####..',
+    '.#....#.',
+    '#.#..#.#',
+    '#......#',
+    '#.#....#',
+    '.#....#.',
+    '..#..#..',
+    '...##...',
+  ]),
+  dotIcon('panels-top-left', ICON_COLORS[5], [
+    '########',
+    '#......#',
+    '########',
+    '#..#...#',
+    '#..#...#',
+    '#..#...#',
+    '#..#...#',
+    '########',
+  ]),
 ] as const
 
 export const KEYBOARD_MARKS = [
@@ -111,36 +158,128 @@ const KEY_MUTED = SCRAMBLE_PALETTE[7]
 const KEY_COOL = SCRAMBLE_PALETTE[6]
 
 /**
- * Quiet keyboard layer (Lucide + simple C/V strokes). One of four slots;
+ * Quiet keyboard layer as the same square dots. One of five slots;
  * these recede beside the design marks.
  */
 export const KEYBOARD_ICONS = [
-  lucide('shift', KEY_MUTED, '<path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/>', 'key'),
-  lucide('control', KEY_MUTED, '<path d="m18 15-6-6-6 6"/>', 'key'),
-  lucide(
+  dotIcon(
+    'shift',
+    KEY_MUTED,
+    [
+      '...##...',
+      '..####..',
+      '.######.',
+      '...##...',
+      '...##...',
+      '...##...',
+      '...##...',
+      '..####..',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'control',
+    KEY_MUTED,
+    [
+      '...##...',
+      '..#..#..',
+      '.#....#.',
+      '#......#',
+      '........',
+      '........',
+      '........',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
     'option',
     KEY_MUTED,
-    '<path d="M3 3h6l6 18h6"/><path d="M14 3h7"/>',
+    [
+      '###.....',
+      '..##....',
+      '...##...',
+      '....####',
+      '........',
+      '.....###',
+      '........',
+      '........',
+    ],
     'key',
   ),
-  lucide(
+  dotIcon(
     'command',
     KEY_MUTED,
-    '<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/>',
+    [
+      '##....##',
+      '##.##.##',
+      '..#..#..',
+      '.##..##.',
+      '.##..##.',
+      '..#..#..',
+      '##.##.##',
+      '##....##',
+    ],
     'key',
   ),
-  lucide('key-c', KEY_COOL, '<path d="M16.8 7.4a5.8 5.8 0 1 0 0 9.2"/>', 'key'),
-  lucide('key-v', KEY_COOL, '<path d="M7 7.2 12 16.8 17 7.2"/>', 'key'),
-  lucide(
+  dotIcon(
+    'key-c',
+    KEY_COOL,
+    [
+      '..####..',
+      '.##..##.',
+      '##......',
+      '##......',
+      '##......',
+      '.##..##.',
+      '..####..',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'key-v',
+    KEY_COOL,
+    [
+      '##....##',
+      '##....##',
+      '.##..##.',
+      '.##..##.',
+      '..####..',
+      '..####..',
+      '...##...',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
     'enter',
     KEY_MUTED,
-    '<polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>',
+    [
+      '......##',
+      '......##',
+      '#.....##',
+      '.#...###',
+      '..#####.',
+      '.#......',
+      '#.......',
+      '........',
+    ],
     'key',
   ),
-  lucide(
+  dotIcon(
     'delete',
     KEY_MUTED,
-    '<path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/>',
+    [
+      '.#######',
+      '##.....#',
+      '#..#.#.#',
+      '#...#..#',
+      '#..#.#.#',
+      '##.....#',
+      '.#######',
+      '........',
+    ],
     'key',
   ),
 ] as const
@@ -232,7 +371,7 @@ export function scrambleGlyphKind(i: number, t: number, count: number): 'from' |
   return 'to'
 }
 
-/** Crop each mark to its ink so small Lucide drawings sit on the same floor. */
+/** Crop each mark to its ink so the dotted drawings sit on the same floor. */
 export function fitScrambleIconInk(root: ParentNode) {
   for (const svg of root.querySelectorAll<SVGSVGElement>('svg.hero-scramble-icon')) {
     try {

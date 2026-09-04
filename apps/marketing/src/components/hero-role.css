@@ -101,6 +101,7 @@
   display: inline-block;
   overflow: hidden;
   vertical-align: baseline;
+  shape-rendering: crispEdges;
 }
 
 .hero-role-word.scramble-developers .hero-scramble-icon {

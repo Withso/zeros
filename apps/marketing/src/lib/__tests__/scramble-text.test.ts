@@ -150,8 +150,11 @@ describe("hero scramble fill", () => {
     expect(catalog).toMatch(/hero-scramble-icon/);
     expect(catalog).toMatch(/width="50"/);
     expect(catalog).toMatch(/height="50"/);
-    expect(catalog).toMatch(/<circle /);
     expect(catalog).toMatch(/<rect /);
+    expect(catalog).not.toMatch(/<circle /);
+    expect(catalog).not.toMatch(/stroke-linecap/);
+    expect(catalog).not.toMatch(/stroke-linejoin/);
+    expect(catalog).toMatch(/shape-rendering="crispEdges"/);
     expect(catalog).not.toMatch(/<ellipse /);
     expect(catalog).not.toMatch(/currentColor/);
     expect(catalog).not.toMatch(/data-hero-scramble-icon="arrow"/);
@@ -176,7 +179,9 @@ describe("hero scramble fill", () => {
 
     const keys = KEYBOARD_ICONS.join("");
     expect(keys).toMatch(/is-key/);
-    expect(keys).toMatch(/stroke-width="1.75"/);
+    expect(keys).toMatch(/<rect /);
+    expect(keys).not.toMatch(/stroke-width="1.75"/);
+    expect(keys).not.toMatch(/stroke-linecap/);
     expect(keys).toMatch(/#E8E8E8/);
     expect(keys).toMatch(/#3888F0/);
     const keyNamed = [
