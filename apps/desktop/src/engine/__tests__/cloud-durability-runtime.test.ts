@@ -308,6 +308,71 @@ describe("cloud durability scanner", () => {
   );
 
   it.runIf(process.platform === "linux")(
+    "opens portable leaves before inspecting their mutable names",
+    async () => {
+      const root = await checkpointRepository();
+      const leaf = path.join(root, "README.md");
+      const link = path.join(root, "portable-link");
+      await symlink("README.md", link);
+      const events = new Map<string, string[]>([
+        [leaf, []],
+        [link, []],
+      ]);
+      const originalOpen = fs.open.bind(fs);
+      const originalLstat = fs.lstat.bind(fs);
+      const platform = vi
+        .spyOn(process, "platform", "get")
+        .mockReturnValue("darwin");
+      const open = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+        const pathname = String(args[0]);
+        events.get(pathname)?.push("open");
+        try {
+          return await originalOpen(...args);
+        } catch (error) {
+          events
+            .get(pathname)
+            ?.push(
+              `error:${(error as NodeJS.ErrnoException).code ?? "unknown"}`,
+            );
+          throw error;
+        }
+      });
+      const lstat = vi
+        .spyOn(fs, "lstat")
+        .mockImplementation(async (...args) => {
+          events.get(String(args[0]))?.push("lstat");
+          return originalLstat(...args);
+        });
+      try {
+        const scan = await scanCloudWorkspaceChanges(root);
+        try {
+          expect(scan.entries.get("README.md")?.bytes.toString("utf8")).toBe(
+            "checkpoint\n",
+          );
+          expect(scan.entries.get("portable-link")).toMatchObject({
+            entryType: "symlink",
+            mode: 40960,
+          });
+          expect(
+            scan.entries.get("portable-link")?.bytes.toString("utf8"),
+          ).toBe("README.md");
+          expect(events.get(leaf)?.[0]).toBe("open");
+          expect(events.get(leaf)).toContain("lstat");
+          expect(events.get(link)?.[0]).toBe("open");
+          expect(events.get(link)).toContain("error:ELOOP");
+          expect(events.get(link)).toContain("lstat");
+        } finally {
+          for (const entry of scan.entries.values()) entry.bytes.fill(0);
+        }
+      } finally {
+        lstat.mockRestore();
+        open.mockRestore();
+        platform.mockRestore();
+      }
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
     "classifies a raced FIFO without opening it for data",
     async () => {
       const root = await checkpointRepository();

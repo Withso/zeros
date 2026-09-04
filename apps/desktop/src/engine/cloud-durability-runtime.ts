@@ -560,10 +560,23 @@ async function readPortableBoundLeaf(
   relativePath: string,
   verifyParents: () => Promise<void>,
 ): Promise<ScannedEntry> {
-  const before = await fs.lstat(leafPath);
   let bytes: Buffer | null = null;
+  let handle: FileHandle | null = null;
   try {
-    if (before.isSymbolicLink()) {
+    try {
+      // Open before inspecting the mutable pathname. O_NOFOLLOW turns a final
+      // symlink into ELOOP, while O_NONBLOCK prevents a raced FIFO from
+      // stalling before the descriptor type is rejected below.
+      handle = await fs.open(
+        leafPath,
+        fsConstants.O_RDONLY | noFollowFlag() | nonBlockingFlag(),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ELOOP") throw error;
+      const before = await fs.lstat(leafPath);
+      if (!before.isSymbolicLink()) {
+        throw new Error("cloud checkpoint symlink changed during scan");
+      }
       bytes = await fs.readlink(leafPath, { encoding: "buffer" });
       validateSymlinkTarget(relativePath, bytes);
       await verifyParents();
@@ -580,49 +593,42 @@ async function readPortableBoundLeaf(
       }
       return scannedEntry(relativePath, "symlink", 40960, bytes);
     }
-    if (!before.isFile()) {
+
+    const opened = await handle.stat();
+    if (!opened.isFile()) {
       throw new Error("cloud checkpoint path type is unsupported");
     }
-    if (before.size > MAX_FILE_BYTES || before.nlink !== 1) {
+    if (opened.size > MAX_FILE_BYTES || opened.nlink !== 1) {
       throw new Error("cloud checkpoint file is unsupported or too large");
     }
-
-    // Portable capture is a non-privileged desktop compatibility path. The
-    // opened descriptor is identity-checked before any read, and O_NONBLOCK
-    // prevents a raced FIFO from stalling; privileged capture is Linux-only.
-    const handle = await fs.open(
-      leafPath,
-      fsConstants.O_RDONLY | noFollowFlag() | nonBlockingFlag(),
-    ); // lgtm[js/file-system-race]
-    try {
-      const opened = await handle.stat();
-      if (
-        !opened.isFile() ||
-        opened.nlink !== 1 ||
-        !sameStableEntry(opened, before)
-      ) {
-        throw new Error("cloud checkpoint file changed during scan");
-      }
-      bytes = await handle.readFile();
-      await verifyParents();
-      const after = await handle.stat();
-      if (
-        !after.isFile() ||
-        after.nlink !== 1 ||
-        after.size > MAX_FILE_BYTES ||
-        bytes.length !== after.size ||
-        !sameStableEntry(after, opened)
-      ) {
-        throw new Error("cloud checkpoint file changed during scan");
-      }
-      const mode = (opened.mode & 0o111) === 0 ? 33188 : 33261;
-      return scannedEntry(relativePath, "file", mode, bytes);
-    } finally {
-      await handle.close();
+    const namedBefore = await fs.lstat(leafPath);
+    if (!namedBefore.isFile() || !sameStableEntry(namedBefore, opened)) {
+      throw new Error("cloud checkpoint file changed during scan");
     }
+    bytes = await handle.readFile();
+    await verifyParents();
+    const [after, namedAfter] = await Promise.all([
+      handle.stat(),
+      fs.lstat(leafPath),
+    ]);
+    if (
+      !after.isFile() ||
+      !namedAfter.isFile() ||
+      after.nlink !== 1 ||
+      after.size > MAX_FILE_BYTES ||
+      bytes.length !== after.size ||
+      !sameStableEntry(after, opened) ||
+      !sameStableEntry(namedAfter, opened)
+    ) {
+      throw new Error("cloud checkpoint file changed during scan");
+    }
+    const mode = (opened.mode & 0o111) === 0 ? 33188 : 33261;
+    return scannedEntry(relativePath, "file", mode, bytes);
   } catch (error) {
     bytes?.fill(0);
     throw error;
+  } finally {
+    await handle?.close().catch(() => undefined);
   }
 }
 
