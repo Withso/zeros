@@ -102,9 +102,8 @@ function exchangeReason(
   return "exchange_failed";
 }
 
-function accountFailure(
-  error: unknown,
-): {
+/** Map account lookup failures to renderer-safe reasons and recovery codes. */
+function accountFailure(error: unknown): {
   reason: Extract<
     WorkOSDesktopFlowErrorReason,
     | "account_failed"
@@ -219,6 +218,13 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
   /** Revoke a provider session that was minted but could not be installed. */
   revokeSession: (accessToken: string) => Promise<void>;
   onComplete: () => void;
+  /** Dev-only routing when the OS delivers the callback to a sibling instance.
+   * The verifier is intentionally absent from this boundary. */
+  registerCallback?: (
+    state: string,
+    expiresAt: number,
+    accept: (input: WorkOSDesktopAuthorizationCallback) => boolean,
+  ) => () => void;
   onError: (
     reason: Exclude<WorkOSDesktopFlowErrorReason, "cancelled">,
     context?: { recoveryCode: string },
@@ -231,6 +237,14 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
 interface PendingFlow {
   callback: HostedCallback;
   verifier: string;
+  disposeRouting?: () => void;
+}
+
+/** Release optional cross-process routing once, including cancellation races. */
+function stopRouting(pending: PendingFlow): void {
+  const dispose = pending.disposeRouting;
+  pending.disposeRouting = undefined;
+  dispose?.();
 }
 
 function authorizationPageUrl(
@@ -263,6 +277,8 @@ export class WorkOSDesktopAuthorizationFlow {
 
   constructor(private readonly deps: WorkOSDesktopAuthorizationFlowDeps) {}
 
+  /** Replace the previous attempt, register PKCE callback routing, and open the
+   * browser with a bounded launch acknowledgement; return the main-owned expiry. */
   async start(): Promise<{ expiresAt: number }> {
     this.cancel();
     if (!DESKTOP_SCHEME.test(this.deps.deepLinkScheme)) {
@@ -281,9 +297,19 @@ export class WorkOSDesktopAuthorizationFlow {
     const timeoutMs = this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const expiresAt = Date.now() + timeoutMs;
     const callback = createHostedCallback(state, timeoutMs);
-    const pending = { callback, verifier };
+    const pending: PendingFlow = { callback, verifier };
     this.pending = pending;
     void this.complete(pending);
+    try {
+      pending.disposeRouting = this.deps.registerCallback?.(
+        state,
+        expiresAt,
+        (input) => callback.accept(input),
+      );
+    } catch (error) {
+      this.cancel();
+      throw error;
+    }
     const opening = Promise.resolve()
       .then(() => this.deps.openExternal(startUrl))
       .then(
@@ -294,8 +320,7 @@ export class WorkOSDesktopAuthorizationFlow {
     const launchTimeout = new Promise<null>((resolve) => {
       launchTimer = setTimeout(
         () => resolve(null),
-        this.deps.openExternalTimeoutMs ??
-          DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS,
+        this.deps.openExternalTimeoutMs ?? DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS,
       );
     });
     const launch = await Promise.race([opening, launchTimeout]);
@@ -328,14 +353,19 @@ export class WorkOSDesktopAuthorizationFlow {
     return this.pending?.callback.accept(input) ?? false;
   }
 
+  /** Cancel the active callback and routing registration without clearing any
+   * previously completed shared session. Returns whether an attempt existed. */
   cancel(): boolean {
     const pending = this.pending;
     if (!pending) return false;
     this.pending = null;
+    stopRouting(pending);
     pending.callback.close();
     return true;
   }
 
+  /** Exchange and verify the matching callback, persist only the active
+   * attempt, revoke abandoned sessions, and always release its routing entry. */
   private async complete(pending: PendingFlow): Promise<void> {
     let session: WorkOSDesktopSession | null = null;
     let persisted = false;
@@ -360,10 +390,7 @@ export class WorkOSDesktopAuthorizationFlow {
       } catch (error) {
         logSignInFailure("account lookup", error);
         const failure = accountFailure(error);
-        throw new WorkOSDesktopFlowError(
-          failure.reason,
-          failure.recoveryCode,
-        );
+        throw new WorkOSDesktopFlowError(failure.reason, failure.recoveryCode);
       }
       if (this.pending !== pending) {
         await this.revokeAbandoned(session);
@@ -404,6 +431,8 @@ export class WorkOSDesktopAuthorizationFlow {
           this.deps.onError(reason);
         }
       }
+    } finally {
+      stopRouting(pending);
     }
   }
 

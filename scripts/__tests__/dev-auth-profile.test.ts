@@ -1,12 +1,25 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   devAuthProfilePath,
   loadDevAuthEnvironment,
+  ensureDevAuthEnvironment,
 } from "../dev-auth-profile.mjs";
 
 const VALID_ALPHA_PROFILE = {
@@ -21,8 +34,12 @@ const VALID_ALPHA_PROFILE = {
 
 const temporaryRoots: string[] = [];
 
+/** Allocate a canonical fake home so macOS temporary-path aliases do not mask
+ * the symlink behavior being tested, and register it for cleanup. */
 function temporaryRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "zeros-dev-auth-profile-"));
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "zeros-dev-auth-profile-")),
+  );
   temporaryRoots.push(root);
   return root;
 }
@@ -38,9 +55,229 @@ function writeEnvFile(path: string, values: Record<string, string>): void {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+describe("automatic Dev public configuration", () => {
+  /** Model the versioned public response, allowing invalid profile overrides
+   * to exercise the launcher's validation boundary. */
+  function response(env = VALID_ALPHA_PROFILE): Response {
+    return Response.json({ version: 1, environment: "alpha", env });
+  }
+
+  it.each([0o770, 0o707])(
+    "rejects a writable profile directory before trusting a fresh cache (%o)",
+    async (mode) => {
+      const homeDir = temporaryRoot();
+      const profile = devAuthProfilePath(homeDir);
+      writeEnvFile(profile, VALID_ALPHA_PROFILE);
+      chmodSync(dirname(profile), mode);
+      const fetchImpl = vi.fn(async () => response());
+      await expect(
+        ensureDevAuthEnvironment({ homeDir, processEnv: {}, fetchImpl }),
+      ).rejects.toThrow(/unsafe.*directory/i);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a profile directory owned by another UID before cache reads", async () => {
+    const homeDir = temporaryRoot();
+    const profile = devAuthProfilePath(homeDir);
+    writeEnvFile(profile, VALID_ALPHA_PROFILE);
+    vi.spyOn(process, "getuid").mockReturnValue(
+      statSync(dirname(profile)).uid + 1,
+    );
+    await expect(
+      ensureDevAuthEnvironment({ homeDir, processEnv: {} }),
+    ).rejects.toThrow(/unsafe.*directory/i);
+  });
+
+  it.each(["auth", ".zeros-dev"])(
+    'rejects a symlinked "%s" directory before trusting the cache',
+    async (component) => {
+      const homeDir = temporaryRoot();
+      const target = temporaryRoot();
+      const parent =
+        component === "auth" ? join(homeDir, ".zeros-dev") : homeDir;
+      mkdirSync(parent, { recursive: true });
+      symlinkSync(target, join(parent, component), "dir");
+      writeEnvFile(devAuthProfilePath(homeDir), VALID_ALPHA_PROFILE);
+      await expect(
+        ensureDevAuthEnvironment({ homeDir, processEnv: {} }),
+      ).rejects.toThrow(/unsafe.*directory/i);
+    },
+  );
+
+  it("rechecks directory trust after download before publishing the cache", async () => {
+    const homeDir = temporaryRoot();
+    const profile = devAuthProfilePath(homeDir);
+    mkdirSync(dirname(profile), { recursive: true, mode: 0o700 });
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: {},
+        fetchImpl: async () => {
+          chmodSync(dirname(profile), 0o777);
+          return response();
+        },
+      }),
+    ).rejects.toThrow(/unsafe.*directory/i);
+    expect(existsSync(profile)).toBe(false);
+  });
+
+  it("rejects an ancestor symlink before creating a first-use profile directory", async () => {
+    const homeDir = temporaryRoot();
+    const target = temporaryRoot();
+    symlinkSync(target, join(homeDir, ".zeros-dev"), "dir");
+    const fetchImpl = vi.fn(async () => response());
+    await expect(
+      ensureDevAuthEnvironment({ homeDir, processEnv: {}, fetchImpl }),
+    ).rejects.toThrow(/unsafe.*directory/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(existsSync(join(target, "auth"))).toBe(false);
+  });
+
+  it("bootstraps a fresh Mac once and reuses its private cache across worktrees and restarts", async () => {
+    const homeDir = temporaryRoot();
+    const fetchImpl = vi.fn(async () => response());
+    const first = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: {},
+      fetchImpl,
+    });
+    expect(first.env).toEqual(VALID_ALPHA_PROFILE);
+    expect(first.issue).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api-alpha.zeros.build/auth/desktop/dev-config",
+      expect.objectContaining({ redirect: "error", credentials: "omit" }),
+    );
+    expect(statSync(devAuthProfilePath(homeDir)).mode & 0o777).toBe(0o600);
+    for (let instance = 0; instance < 3; instance++) {
+      expect(
+        (await ensureDevAuthEnvironment({ homeDir, processEnv: {}, fetchImpl }))
+          .env,
+      ).toEqual(first.env);
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes a stale cache atomically without persisting a shell override or server secrets", async () => {
+    const homeDir = temporaryRoot();
+    writeEnvFile(devAuthProfilePath(homeDir), VALID_ALPHA_PROFILE);
+    utimesSync(devAuthProfilePath(homeDir), new Date(0), new Date(0));
+    const rotated = {
+      ...VALID_ALPHA_PROFILE,
+      AUTH_DESKTOP_CLIENT_ID: "client_rotated",
+    };
+    const fetchImpl = vi.fn(async () =>
+      response({
+        ...rotated,
+        WORKOS_API_KEY: "server-only-fixture",
+      } as typeof rotated),
+    );
+    const result = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: { AUTH_DESKTOP_CLIENT_ID: "client_override" },
+      fetchImpl,
+    });
+    expect(result.env.AUTH_DESKTOP_CLIENT_ID).toBe("client_override");
+    expect(loadDevAuthEnvironment({ homeDir, processEnv: {} }).env).toEqual(
+      rotated,
+    );
+    expect(readFileSync(devAuthProfilePath(homeDir), "utf8")).not.toContain(
+      "server-only-fixture",
+    );
+  });
+
+  it("keeps the last validated profile during an outage", async () => {
+    const homeDir = temporaryRoot();
+    writeEnvFile(devAuthProfilePath(homeDir), VALID_ALPHA_PROFILE);
+    utimesSync(devAuthProfilePath(homeDir), new Date(0), new Date(0));
+    const result = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: {},
+      fetchImpl: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect(result.env).toEqual(VALID_ALPHA_PROFILE);
+    expect(result.issue).toBeNull();
+  });
+
+  it.each([
+    {
+      ...VALID_ALPHA_PROFILE,
+      VITE_CONTROL_PLANE_URL: "https://api.zeros.build",
+    },
+    {
+      ...VALID_ALPHA_PROFILE,
+      AUTH_ISSUER: "https://untrusted.example.test/issuer",
+    },
+    { ...VALID_ALPHA_PROFILE, AUTH_DESKTOP_CLIENT_ID: "client_web_alpha" },
+  ])("rejects an unsafe downloaded profile without writing it", async (env) => {
+    const homeDir = temporaryRoot();
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: {},
+        fetchImpl: async () => response(env),
+      }),
+    ).rejects.toThrow(/Alpha/);
+    expect(existsSync(devAuthProfilePath(homeDir))).toBe(false);
+  });
+
+  it("refuses an unsafe shell override before installing downloaded defaults", async () => {
+    const homeDir = temporaryRoot();
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: { VITE_APP_BASE_URL: "https://app.zeros.build" },
+        fetchImpl: async () => response(),
+      }),
+    ).rejects.toThrow(/Alpha/);
+    expect(existsSync(devAuthProfilePath(homeDir))).toBe(false);
+  });
+
+  it("reports a fresh-install outage without echoing response bodies", async () => {
+    const homeDir = temporaryRoot();
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: {},
+        fetchImpl: async () =>
+          new Response("private-diagnostic", { status: 503 }),
+      }),
+    ).rejects.toThrow("Could not load Alpha sign-in configuration");
+    expect(existsSync(devAuthProfilePath(homeDir))).toBe(false);
+  });
+
+  it("keeps a valid cache when the config connection drops during the body", async () => {
+    const homeDir = temporaryRoot();
+    const profilePath = devAuthProfilePath(homeDir);
+    writeEnvFile(profilePath, VALID_ALPHA_PROFILE);
+    const stale = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(profilePath, stale, stale);
+    const result = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: {},
+      fetchImpl: async () =>
+        new Response(
+          new ReadableStream({
+            /** Fail after response headers to distinguish an interrupted body
+             * from an invalid configuration document. */
+            pull(controller) {
+              controller.error(new Error("connection interrupted"));
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    expect(result.cachedOffline).toBe(true);
+    expect(result.env).toEqual(VALID_ALPHA_PROFILE);
+  });
 });
 
 describe("shared Zeros Dev Alpha authentication profile", () => {
