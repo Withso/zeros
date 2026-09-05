@@ -674,14 +674,26 @@ Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
 
 Local `pnpm electron:dev` is a fourth desktop scheme, not a fourth data
-environment. Every checkout loads the same user-level public profile from
-`~/.zeros-dev/auth/alpha.env`. The launcher ignores checkout-local auth files
+environment. On first launch, Dev fetches the seven public-client fields from
+`https://api-alpha.zeros.build/auth/desktop/dev-config` and atomically caches
+them at `~/.zeros-dev/auth/alpha.env` with mode `0600`. The versioned endpoint
+is anonymous, Alpha-only, and projects public fields explicitly; it never
+returns WorkOS management credentials or user/session data. Deploy the Alpha
+control-plane endpoint before rolling out the automatic launcher to new Macs.
+Every checkout loads that same user-level profile. The launcher refreshes a
+cache older than one hour with a bounded request to the fixed Alpha origin;
+it refuses redirects and invalid contracts. A service outage retains a valid
+cache; first-use failure gives an actionable launcher error. Explicit complete
+shell profiles still work without discovery. The launcher ignores checkout-local auth files
 and injects the shared values with process-level precedence, which prevents an
 old worktree from pinning a stale client ID after rotation; explicit shell
-values may override one run and have final precedence. Provision the profile
-owner-only (`0600`). Its effective values must use the Alpha app origin,
+values may override one run and have final precedence; overrides are never
+written back to the cache. Its effective values must use the Alpha app origin,
 API/audience,
 Desktop Application client ID, and Web Application issuer/JWKS pair atomically.
+Cached reads and publication require a canonical profile directory owned by
+the current OS user, without group or world write permissions; symlinks in the
+directory path are rejected, including on first use.
 Zeros terminals remove the parent app's public auth selectors from their child
 environment, so a nested Dev launch reloads this profile instead of inheriting
 stale Alpha or release-channel values; an operator can still export an explicit
@@ -690,10 +702,30 @@ override after the terminal starts.
 The launcher validates that boundary before starting the stack and Electron
 main validates it again before any browser handoff. Alpha Pages alone accepts
 both `zeros-alpha://` and `zeros-dev://` returns; Beta and Production continue
-to accept only their exact release scheme. A missing profile disables sign-in;
+to accept only their exact release scheme. First use provisions the profile;
 a partial, legacy-Auth0, or non-Alpha profile is rejected and never falls back
 to the retired ticket handoff. Never place `WORKOS_API_KEY` or any WorkOS
 management credential in the profile or a desktop launch environment.
+
+Dev instances share the channel's encrypted session store and coordinate token
+rotation with a cross-process lock. Signing in once makes the session available
+to existing worktrees through file notifications and to future launches through
+durable storage. Once a complete Alpha WorkOS configuration is active, a legacy
+Auth0 Dev session is removed with compare-and-swap and requires one WorkOS
+sign-in. A concurrent WorkOS replacement, unrelated credentials, local data,
+and packaged Auth0 rollback sessions are preserved. A late legacy handoff cannot
+overwrite a migrated Dev session.
+
+The OS may deliver a `zeros-dev://` callback to a sibling worktree. Matching
+callbacks are relayed through a bounded, expiring encrypted mailbox; only the
+initiating main process retains the PKCE verifier and exchanges the code.
+Cancellation and expiry remove routing entries, and a consumed callback cannot
+be replayed. In-progress browser ceremonies are cancelled by an app restart;
+completed sessions persist. Shared login applies to normal Dev launches;
+`ZEROS_ISOLATE=1` retains its separate credential-store behavior.
+Malformed routing data is repaired with compare-and-swap, retaining valid
+sibling entries. Newer schema versions are preserved and require an updated
+checkout; valid sibling records with larger deadlines or capacity are retained.
 
 ## Rollout and rollback
 

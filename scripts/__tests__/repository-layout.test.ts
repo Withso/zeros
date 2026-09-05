@@ -27,7 +27,7 @@ describe("repository layout contracts", () => {
     const profile = read("scripts/dev-auth-profile.mjs");
 
     expect(launcher).toContain(
-      'import { loadDevAuthEnvironment } from "./dev-auth-profile.mjs"',
+      'import { ensureDevAuthEnvironment } from "./dev-auth-profile.mjs"',
     );
     expect(profile).toContain('".zeros-dev", "auth", "alpha.env"');
     expect(profile).toContain("DEV_AUTH_ENV_KEYS");
