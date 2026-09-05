@@ -18,6 +18,9 @@ function sharedStore() {
     });
   };
   return {
+    seed: (value: string) => {
+      raw = value;
+    },
     read: () => raw,
     create: (_key: string, value: string) => {
       if (raw !== null) return false;
@@ -47,6 +50,99 @@ afterEach(() => {
 });
 
 describe("shared Dev WorkOS callback routing", () => {
+  it.each(["{", JSON.stringify({ version: 1, entries: {} })])(
+    "recovers malformed routing data using compare-and-swap",
+    (raw) => {
+      const store = sharedStore();
+      store.seed(raw);
+      const relay = new WorkOSDevCallbackRelay(store);
+      disposers.push(
+        relay.register(state("a"), Date.now() + 60_000, () => true),
+      );
+      expect(
+        JSON.parse(store.read()!).entries.map(
+          (entry: { state: string }) => entry.state,
+        ),
+      ).toEqual([state("a")]);
+    },
+  );
+
+  it("preserves a sibling replacement raced against corruption recovery", () => {
+    const store = sharedStore();
+    store.seed("{");
+    const expiresAt = Date.now() + 60_000;
+    const replace = store.replace;
+    vi.spyOn(store, "replace")
+      .mockImplementationOnce(() => {
+        store.seed(
+          JSON.stringify({
+            version: 1,
+            entries: [{ state: state("b"), expiresAt, callback: null }],
+          }),
+        );
+        return false;
+      })
+      .mockImplementation(replace);
+    const relay = new WorkOSDevCallbackRelay(store);
+    disposers.push(relay.register(state("a"), expiresAt, () => true));
+    expect(
+      JSON.parse(store.read()!).entries.map(
+        (entry: { state: string }) => entry.state,
+      ),
+    ).toEqual([state("b"), state("a")]);
+  });
+
+  it("preserves newer schemas without downgrading their pending callbacks", () => {
+    const store = sharedStore();
+    const raw = JSON.stringify({
+      version: 2,
+      entries: [{ state: state("b"), future: "opaque" }],
+    });
+    store.seed(raw);
+    const relay = new WorkOSDevCallbackRelay(store);
+    expect(() =>
+      relay.register(state("a"), Date.now() + 60_000, () => true),
+    ).toThrow(/newer version/i);
+    expect(relay.deliver({ state: state("b"), code: "callback" })).toBe(false);
+    expect(store.read()).toBe(raw);
+  });
+
+  it("drops corrupt entries while preserving valid longer-lived sibling records", () => {
+    const store = sharedStore();
+    const sibling = {
+      state: state("b"),
+      expiresAt: Date.now() + 24 * 60 * 60_000,
+      callback: null,
+    };
+    store.seed(
+      JSON.stringify({ version: 1, entries: [{ state: "invalid" }, sibling] }),
+    );
+    const relay = new WorkOSDevCallbackRelay(store);
+    disposers.push(relay.register(state("a"), Date.now() + 60_000, () => true));
+    expect(JSON.parse(store.read()!).entries).toEqual([
+      sibling,
+      expect.objectContaining({ state: state("a") }),
+    ]);
+  });
+
+  it("does not erase valid records that exceed this version's registration limit", () => {
+    const store = sharedStore();
+    const raw = JSON.stringify({
+      version: 1,
+      entries: [..."abcdefghi"].map((character) => ({
+        state: state(character),
+        expiresAt: Date.now() + 60_000,
+        callback: null,
+      })),
+    });
+    store.seed(raw);
+    const relay = new WorkOSDevCallbackRelay(store);
+    expect(() =>
+      relay.register(state("j"), Date.now() + 60_000, () => true),
+    ).toThrow(/too many/i);
+    expect(store.read()).toBe(raw);
+  });
+
   it("routes a callback received by a sibling to the initiating process exactly once", async () => {
     const store = sharedStore();
     const initiator = new WorkOSDevCallbackRelay(store);

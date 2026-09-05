@@ -691,6 +691,9 @@ values may override one run and have final precedence; overrides are never
 written back to the cache. Its effective values must use the Alpha app origin,
 API/audience,
 Desktop Application client ID, and Web Application issuer/JWKS pair atomically.
+Cached reads and publication require a canonical profile directory owned by
+the current OS user, without group or world write permissions; symlinks in the
+directory path are rejected, including on first use.
 Zeros terminals remove the parent app's public auth selectors from their child
 environment, so a nested Dev launch reloads this profile instead of inheriting
 stale Alpha or release-channel values; an operator can still export an explicit
@@ -720,6 +723,9 @@ Cancellation and expiry remove routing entries, and a consumed callback cannot
 be replayed. In-progress browser ceremonies are cancelled by an app restart;
 completed sessions persist. Shared login applies to normal Dev launches;
 `ZEROS_ISOLATE=1` retains its separate credential-store behavior.
+Malformed routing data is repaired with compare-and-swap, retaining valid
+sibling entries. Newer schema versions are preserved and require an updated
+checkout; valid sibling records with larger deadlines or capacity are retained.
 
 ## Rollout and rollback
 

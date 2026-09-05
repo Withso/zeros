@@ -1,10 +1,13 @@
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
+  symlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
@@ -32,7 +35,9 @@ const VALID_ALPHA_PROFILE = {
 const temporaryRoots: string[] = [];
 
 function temporaryRoot(): string {
-  const root = mkdtempSync(join(tmpdir(), "zeros-dev-auth-profile-"));
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "zeros-dev-auth-profile-")),
+  );
   temporaryRoots.push(root);
   return root;
 }
@@ -48,6 +53,7 @@ function writeEnvFile(path: string, values: Record<string, string>): void {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -57,6 +63,78 @@ describe("automatic Dev public configuration", () => {
   function response(env = VALID_ALPHA_PROFILE): Response {
     return Response.json({ version: 1, environment: "alpha", env });
   }
+
+  it.each([0o770, 0o707])(
+    "rejects a writable profile directory before trusting a fresh cache (%o)",
+    async (mode) => {
+      const homeDir = temporaryRoot();
+      const profile = devAuthProfilePath(homeDir);
+      writeEnvFile(profile, VALID_ALPHA_PROFILE);
+      chmodSync(dirname(profile), mode);
+      const fetchImpl = vi.fn(async () => response());
+      await expect(
+        ensureDevAuthEnvironment({ homeDir, processEnv: {}, fetchImpl }),
+      ).rejects.toThrow(/unsafe.*directory/i);
+      expect(fetchImpl).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects a profile directory owned by another UID before cache reads", async () => {
+    const homeDir = temporaryRoot();
+    const profile = devAuthProfilePath(homeDir);
+    writeEnvFile(profile, VALID_ALPHA_PROFILE);
+    vi.spyOn(process, "getuid").mockReturnValue(
+      statSync(dirname(profile)).uid + 1,
+    );
+    await expect(
+      ensureDevAuthEnvironment({ homeDir, processEnv: {} }),
+    ).rejects.toThrow(/unsafe.*directory/i);
+  });
+
+  it.each(["auth", ".zeros-dev"])(
+    'rejects a symlinked "%s" directory before trusting the cache',
+    async (component) => {
+      const homeDir = temporaryRoot();
+      const target = temporaryRoot();
+      const parent =
+        component === "auth" ? join(homeDir, ".zeros-dev") : homeDir;
+      mkdirSync(parent, { recursive: true });
+      symlinkSync(target, join(parent, component), "dir");
+      writeEnvFile(devAuthProfilePath(homeDir), VALID_ALPHA_PROFILE);
+      await expect(
+        ensureDevAuthEnvironment({ homeDir, processEnv: {} }),
+      ).rejects.toThrow(/unsafe.*directory/i);
+    },
+  );
+
+  it("rechecks directory trust after download before publishing the cache", async () => {
+    const homeDir = temporaryRoot();
+    const profile = devAuthProfilePath(homeDir);
+    mkdirSync(dirname(profile), { recursive: true, mode: 0o700 });
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: {},
+        fetchImpl: async () => {
+          chmodSync(dirname(profile), 0o777);
+          return response();
+        },
+      }),
+    ).rejects.toThrow(/unsafe.*directory/i);
+    expect(existsSync(profile)).toBe(false);
+  });
+
+  it("rejects an ancestor symlink before creating a first-use profile directory", async () => {
+    const homeDir = temporaryRoot();
+    const target = temporaryRoot();
+    symlinkSync(target, join(homeDir, ".zeros-dev"), "dir");
+    const fetchImpl = vi.fn(async () => response());
+    await expect(
+      ensureDevAuthEnvironment({ homeDir, processEnv: {}, fetchImpl }),
+    ).rejects.toThrow(/unsafe.*directory/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(existsSync(join(target, "auth"))).toBe(false);
+  });
 
   it("bootstraps a fresh Mac once and reuses its private cache across worktrees and restarts", async () => {
     const homeDir = temporaryRoot();

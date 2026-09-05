@@ -37,6 +37,39 @@ function assertAlphaProfile(env) {
     throw new Error(`Invalid Alpha public sign-in configuration (${issue}).`);
 }
 
+function assertDevAuthDirectory(directory) {
+  const requested = path.resolve(directory);
+  const unsafe = () =>
+    new Error(
+      "Unsafe Zeros Dev auth profile directory. Use a real directory owned by your user without group or world write permissions.",
+    );
+  let existing = requested;
+  let stat;
+  for (;;) {
+    try {
+      stat = fs.lstatSync(existing);
+      break;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw unsafe();
+      const parent = path.dirname(existing);
+      if (parent === existing) throw unsafe();
+      existing = parent;
+    }
+  }
+  // A missing first-use directory still needs a canonical ancestor: mkdir
+  // must not follow a symlink before the final directory can be checked.
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    fs.realpathSync(existing) !== existing ||
+    (existing === requested &&
+      ((typeof process.getuid === "function" &&
+        stat.uid !== process.getuid()) ||
+        (stat.mode & 0o022) !== 0))
+  )
+    throw unsafe();
+}
+
 async function fetchAlphaProfile(fetchImpl) {
   let response;
   try {
@@ -104,12 +137,9 @@ async function fetchAlphaProfile(fetchImpl) {
 
 function cacheAlphaProfile(filePath, env) {
   const directory = path.dirname(filePath);
+  assertDevAuthDirectory(directory);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-  if (fs.lstatSync(directory).isSymbolicLink()) {
-    throw new Error(
-      "The Alpha sign-in configuration directory must not be a symbolic link.",
-    );
-  }
+  assertDevAuthDirectory(directory);
   const temporary = `${filePath}.${randomUUID()}.tmp`;
   try {
     // Every value has passed the exact Alpha contract. Only the public fields
@@ -119,6 +149,7 @@ function cacheAlphaProfile(filePath, env) {
       `${DEV_AUTH_ENV_KEYS.map((key) => `${key}=${env[key]}`).join("\n")}\n`,
       { flag: "wx", mode: 0o600 },
     );
+    assertDevAuthDirectory(directory);
     fs.renameSync(temporary, filePath);
   } finally {
     fs.rmSync(temporary, { force: true });
@@ -261,6 +292,9 @@ export function loadDevAuthEnvironment({
   processEnv = process.env,
 } = {}) {
   const sharedProfilePath = devAuthProfilePath(homeDir);
+  // Both bootstrap reads pass here before the freshness check can trust a
+  // cached profile. Validate again when publishing after the network request.
+  assertDevAuthDirectory(path.dirname(sharedProfilePath));
   const shared = readPublicAuthFile(sharedProfilePath);
   const explicit = publicAuthValues(processEnv);
   const env = { ...shared, ...explicit };

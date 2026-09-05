@@ -55,32 +55,32 @@ export class WorkOSDevCallbackRelay {
     try {
       parsed = JSON.parse(raw);
     } catch {
-      throw new Error("Invalid pending Dev sign-in store");
+      // This is disposable routing data, not a session. Recover only through
+      // update's CAS so a sibling's valid replacement is never overwritten.
+      return [];
     }
-    if (
-      parsed?.version !== 1 ||
-      !Array.isArray(parsed.entries) ||
-      parsed.entries.length > MAX_PENDING
-    ) {
-      throw new Error("Invalid pending Dev sign-in store");
+    if (Number.isInteger(parsed?.version) && parsed.version > 1) {
+      // An unchanged newer record is not corruption. Older worktrees cannot
+      // safely interpret or downgrade it, even while holding the CAS lock.
+      throw new Error(
+        "Pending Dev sign-in data requires a newer version; update this checkout",
+      );
     }
-    for (const entry of parsed.entries) {
-      if (
-        !entry ||
-        typeof entry.state !== "string" ||
-        !STATE.test(entry.state) ||
-        !Number.isFinite(entry.expiresAt) ||
-        entry.expiresAt > this.now() + MAX_LIFETIME_MS ||
-        (entry.callback !== null &&
-          (!entry.callback ||
-            !validCallback(entry.callback) ||
-            entry.callback.state !== entry.state))
-      ) {
-        throw new Error("Invalid pending Dev sign-in store");
-      }
-    }
+    if (parsed?.version !== 1 || !Array.isArray(parsed.entries)) return [];
+    // Bound registrations made by this version, not valid sibling records:
+    // another version may allow more attempts or a longer browser deadline.
+    // Drop corrupt individual entries without discarding their valid siblings.
     return parsed.entries.filter(
-      (entry: PendingCallback) => entry.expiresAt > this.now(),
+      (entry: PendingCallback) =>
+        entry &&
+        typeof entry.state === "string" &&
+        STATE.test(entry.state) &&
+        Number.isFinite(entry.expiresAt) &&
+        entry.expiresAt > this.now() &&
+        (entry.callback === null ||
+          (entry.callback &&
+            validCallback(entry.callback) &&
+            entry.callback.state === entry.state)),
     );
   }
 
