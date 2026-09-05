@@ -92,3 +92,7 @@ auditConfig:
 # change must refresh this patch and rerun the live qualification matrix.
 patchedDependencies:
   "@anthropic-ai/sandbox-runtime@0.0.73": patches/@anthropic-ai__sandbox-runtime@0.0.73.patch
+  # electron-builder v26 passes the certificate import password to a command
+  # that authenticates the temporary keychain. This is the exact upstream fix
+  # from electron-builder#10101; remove it once a v26 release contains that fix.
+  "app-builder-lib@26.8.1": patches/app-builder-lib@26.8.1.patch
