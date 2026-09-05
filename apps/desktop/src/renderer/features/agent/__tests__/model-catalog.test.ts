@@ -16,6 +16,7 @@ import {
   effectiveEffort,
   effortLevelsFor,
   effortLabel,
+  displayNameForModelValue,
   displayModelLabel,
   configuredModelLabel,
   configuredModelLabelParts,
@@ -225,6 +226,53 @@ describe("modelsForAgent (curated catalog)", () => {
     });
     expect(router?.parameters?.[0]?.id).toBe("speed");
     expect(router?.variants?.[0]?.isDefault).toBe(true);
+  });
+
+  it("shows legacy Grok 4.5 only when this account still advertises it", () => {
+    expect(
+      modelsForAgent("cursor", null).map((model) => model.value),
+    ).not.toContain("grok-4.5");
+
+    const currentAccount = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          { value: "default", label: "Auto", selectable: true },
+          { value: "grok-4.6", label: "Cursor Grok 4.6", selectable: true },
+          { value: "composer-2.5", label: "Composer 2.5", selectable: true },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    expect(
+      modelsForAgent("cursor", currentAccount).map((model) => model.value),
+    ).not.toContain("grok-4.5");
+
+    const legacyAccount = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          { value: "default", label: "Auto", selectable: true },
+          { value: "grok-4.5", label: "Cursor Grok 4.5", selectable: true },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    expect(
+      modelsForAgent("cursor", legacyAccount).find(
+        (model) => model.value === "grok-4.5",
+      ),
+    ).toMatchObject({ label: "Cursor Grok 4.5", selectable: true });
+  });
+
+  it("keeps a hidden legacy selection label without making it cold-selectable", () => {
+    expect(resolveModelOption("cursor", "grok-4.5", null)).toMatchObject({
+      value: "grok-4.5",
+      label: "Cursor Grok 4.5",
+      liveRequired: true,
+      selectable: false,
+    });
+    expect(displayNameForModelValue("cursor", "grok-4.5-xhigh")).toBe(
+      "Cursor Grok 4.5",
+    );
   });
 
   it("hides any curated model that the live provider marks non-selectable", () => {

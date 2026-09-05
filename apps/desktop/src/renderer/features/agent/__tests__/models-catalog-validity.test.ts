@@ -213,7 +213,6 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(catalog.families.cursor[0]).not.toHaveProperty("liveRequired");
     expect(catalog.aliases.cursor.auto).toBe("default");
     expect(catalog.aliases.cursor["grok-4.5-xhigh"]).toBe("grok-4.5");
-
     const byFamily = Object.fromEntries(
       Object.entries(catalog.families).map(([family, models]) => [
         family,
@@ -235,6 +234,11 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     });
     expect(byFamily.cursor["grok-4.6"]).toMatchObject({
       effortLevels: ["low", "medium", "high", "xhigh"],
+      supportsFast: true,
+    });
+    expect(byFamily.cursor["grok-4.5"]).toMatchObject({
+      liveRequired: true,
+      effortLevels: ["low", "medium", "high"],
       supportsFast: true,
     });
   });

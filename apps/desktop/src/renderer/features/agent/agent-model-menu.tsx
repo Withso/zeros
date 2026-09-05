@@ -23,8 +23,9 @@
 //     name without adding another glyph to the requested row anatomy. A fresh
 //     chat (nothing sent) and the dispatcher switch freely.
 //
-// Pre-session, `modelsForAgent(agentId, null)` returns the curated catalog,
-// which is exactly the stable list the picker shows.
+// Pre-session, `modelsForAgent(agentId, null)` returns the stable curated rows
+// that do not require account discovery. Account-qualified compatibility rows
+// join only when the live provider marks them selectable.
 // ──────────────────────────────────────────────────────────
 
 import {
@@ -61,6 +62,7 @@ import {
   effortLabel,
   effortLevelsFor,
   modelsForAgent,
+  resolveModelOption,
   type ModelOption,
 } from "./model-catalog";
 import { effectiveFavoriteModel, useFavoritesVersion } from "./model-favorites";
@@ -329,10 +331,11 @@ export function AgentModelMenu({
       groups.find((candidate) => candidate.family === currentFamily);
     const model = group?.models.find(
       (option) => option.value === activeModel,
-    ) ?? {
-      value: activeModel,
-      label: activeModel,
-    };
+    ) ??
+      resolveModelOption(value.agentId, activeModel, initialize) ?? {
+        value: activeModel,
+        label: activeModel,
+      };
     return {
       agent:
         group?.agent ??

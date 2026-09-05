@@ -25,6 +25,13 @@ boundary.
   field is "unknown" and keeps the curated fallback, while `[]`/`false` mean
   "this runtime says no" and strip the control. Never normalize an absent
   field into an empty answer.
+- `liveRequired: true` marks account-dependent compatibility data. The row is
+  selectable only after exact live discovery marks it selectable; it stays out
+  of cold/current-account menus otherwise. Persisted exact IDs and aliases still
+  retain their identity and catalog label while hidden, and live qualification
+  treats only these explicitly marked rows as optional. Cursor Grok 4.5 uses
+  this contract because availability differs across accounts; it is never
+  aliased or retargeted to Grok 4.6.
 - `defaultFavorites` and `aliases` participate in persisted model selection.
   Do not retarget them silently. Add a compatibility migration and regression
   test if an existing selection must resolve differently.

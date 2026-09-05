@@ -10,28 +10,28 @@
 // variants are live therefore works fine for users, and failing on it would be a
 // false red in a job that runs weekly with a secret.
 //
-// NOT a bug observed in production: as of 2026-07-31 the live catalog does offer a
-// bare `grok-4.5`, so the "exact" arm is what fires today (see LIVE_TODAY). The
-// suffixed arm covers the shape the adapter already handles, which no version
-// number would announce.
+// Account catalogs differ: the current fixture does not offer Grok 4.5, while a
+// legacy fixture does. The suffixed arm covers another shape the adapter already
+// handles, which no package version would announce.
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 // @ts-expect-error — .mjs has no type declarations; it exports one plain function.
-import { resolvesAgainst } from "../cursor-curated-ids.mjs";
+import { qualifiesAgainst, resolvesAgainst } from "../cursor-curated-ids.mjs";
 
 const ROOT = path.resolve(__dirname, "..", "..");
 
-/** The catalog @cursor/sdk 1.0.31 reports: canonical `default` (Auto), Grok 4.6,
- *  and Grok 4.5 as bare parameterized ids. Verified with a real key 2026-09-05. */
-const LIVE_TODAY = new Set([
+/** One current @cursor/sdk 1.0.31 account response. Grok 4.5 is
+ * account-dependent compatibility data, not assumed globally retired. */
+const CURRENT_ACCOUNT = new Set([
   "default",
   "composer-2",
   "composer-2.5",
   "grok-4.6",
-  "grok-4.5",
 ]);
+
+const LEGACY_ACCOUNT = new Set([...CURRENT_ACCOUNT, "grok-4.5"]);
 
 /** The shape the adapter's suffixed fallback exists for: the base is gone and only
  *  level-suffixed variants remain. HYPOTHETICAL today — kept because the switch
@@ -51,8 +51,8 @@ const LIVE_SUFFIXED_ONLY = new Set([
 
 describe("resolvesAgainst", () => {
   it("accepts an id the account offers verbatim", () => {
-    expect(resolvesAgainst("composer-2.5", LIVE_TODAY)).toBe("exact");
-    expect(resolvesAgainst("grok-4.5", LIVE_TODAY)).toBe("exact");
+    expect(resolvesAgainst("composer-2.5", CURRENT_ACCOUNT)).toBe("exact");
+    expect(resolvesAgainst("grok-4.5", LEGACY_ACCOUNT)).toBe("exact");
   });
 
   it("accepts a level-free base that survives only as suffixed variants", () => {
@@ -64,15 +64,15 @@ describe("resolvesAgainst", () => {
   it("rejects an id with neither an exact nor a suffixed match", () => {
     // A genuinely retired base leaves no `<base>-…` ids behind either, which is
     // what keeps the loosened rule a real check rather than a rubber stamp.
-    expect(resolvesAgainst("composer-1", LIVE_TODAY)).toBe(false);
+    expect(resolvesAgainst("composer-1", CURRENT_ACCOUNT)).toBe(false);
     expect(resolvesAgainst("grok-3", LIVE_SUFFIXED_ONLY)).toBe(false);
   });
 
   it("requires the separator — a base is not certified by a longer sibling", () => {
     // `grok-4` must NOT pass on the strength of `grok-4.5`: different models. This
     // is the false-PASS direction, so it matters more than the false-fail above.
-    expect(resolvesAgainst("grok-4", LIVE_TODAY)).toBe(false);
-    expect(resolvesAgainst("composer-2.", LIVE_TODAY)).toBe(false);
+    expect(resolvesAgainst("grok-4", LEGACY_ACCOUNT)).toBe(false);
+    expect(resolvesAgainst("composer-2.", LEGACY_ACCOUNT)).toBe(false);
   });
 
   it("rejects an empty catalog rather than certifying everything", () => {
@@ -84,14 +84,35 @@ describe("resolvesAgainst", () => {
   it("rejects a missing or non-string id instead of throwing", () => {
     // The caller maps `m.value` out of the catalog, so a renamed key yields
     // undefined — the gate must report that, not crash.
-    expect(resolvesAgainst("", LIVE_TODAY)).toBe(false);
-    expect(resolvesAgainst(undefined, LIVE_TODAY)).toBe(false);
+    expect(resolvesAgainst("", CURRENT_ACCOUNT)).toBe(false);
+    expect(resolvesAgainst(undefined, CURRENT_ACCOUNT)).toBe(false);
   });
 
-  it("every id curated for cursor today resolves under BOTH catalog shapes", () => {
-    // The shipped catalog against the real shape and the suffixed-only one. Fails
-    // if a future curated id is neither live nor completable — here, in unit tests,
-    // instead of weekly in the keyed job.
+  it("allows only explicitly optional models to be absent for a current account", () => {
+    expect(
+      qualifiesAgainst(
+        { value: "grok-4.5", liveRequired: true },
+        CURRENT_ACCOUNT,
+      ),
+    ).toBe("optional-unavailable");
+    expect(
+      qualifiesAgainst(
+        { value: "grok-4.5", liveRequired: false },
+        CURRENT_ACCOUNT,
+      ),
+    ).toBe(false);
+    expect(
+      qualifiesAgainst(
+        { value: "grok-4.5", liveRequired: true },
+        LEGACY_ACCOUNT,
+      ),
+    ).toBe("exact");
+    expect(qualifiesAgainst({ liveRequired: true }, CURRENT_ACCOUNT)).toBe(
+      false,
+    );
+  });
+
+  it("qualifies the shipped catalog for both current and legacy account fixtures", () => {
     const catalog = JSON.parse(
       readFileSync(path.join(ROOT, "catalogs", "models-v1.json"), "utf-8"),
     ) as {
@@ -99,14 +120,21 @@ describe("resolvesAgainst", () => {
         cursor: Array<{ value: string; liveRequired?: boolean }>;
       };
     };
-    const curated = catalog.families.cursor.map((model) => model.value);
+    const curated = catalog.families.cursor;
 
     expect(curated.length).toBeGreaterThan(0); // an empty list would prove nothing
-    for (const id of curated) {
-      expect(resolvesAgainst(id, LIVE_TODAY), `${id} vs today`).toBeTruthy();
+    for (const model of curated) {
       expect(
-        resolvesAgainst(id, LIVE_SUFFIXED_ONLY),
-        `${id} vs suffixed-only`,
+        qualifiesAgainst(model, CURRENT_ACCOUNT),
+        `${model.value} vs current account`,
+      ).toBeTruthy();
+      expect(
+        qualifiesAgainst(model, LEGACY_ACCOUNT),
+        `${model.value} vs legacy account`,
+      ).toBeTruthy();
+      expect(
+        qualifiesAgainst(model, LIVE_SUFFIXED_ONLY),
+        `${model.value} vs legacy suffixed-only`,
       ).toBeTruthy();
     }
   });

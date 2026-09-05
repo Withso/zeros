@@ -84,6 +84,10 @@ const MODEL_CONTEXT_TOKENS: Array<[RegExp, number]> = [
   // these numbers are NOT independently verifiable from inside this repo —
   // the authoritative figure is `tokenUsage.modelContextWindow`, which the
   // codex adapter already reports to the gauge at runtime.
+  // GPT-6 Astra's official model metadata publishes a 1,050,000-token context
+  // window (128,000 max output). This is the pre-runtime attachment fallback;
+  // a live tokenUsage.modelContextWindow remains authoritative.
+  [/^gpt-6-astra(?:$|-)/i, 1_050_000],
   [/gpt-5\.5|gpt-5\.4/i, 256_000],
   [/gpt-5\.3-codex|gpt-5\.3/i, 200_000],
   [/gpt-5-nano/i, 128_000],

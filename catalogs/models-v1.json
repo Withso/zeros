@@ -101,6 +101,7 @@
       {
         "value": "grok-4.5",
         "label": "Cursor Grok 4.5",
+        "liveRequired": true,
         "effortLevels": ["low", "medium", "high"],
         "supportsFast": true
       }

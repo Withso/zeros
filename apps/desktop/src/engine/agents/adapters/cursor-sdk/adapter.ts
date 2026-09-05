@@ -1502,10 +1502,10 @@ export class CursorSdkAdapter implements AgentAdapter {
         ? (state.discoveredModelAliases.get(requested) ?? requested)
         : undefined;
     const base = liveRequested ?? resolveCursorModelId(envModel);
-    // Apply the reasoning swap before catalog validation. The curated Grok
-    // base is the level-free `grok-4.5`, which is NOT a live id itself:
-    // validating it first would fall back to Composer before the effort
-    // suffix could ever apply. applyCursorReasoning only ever returns ids
+    // Apply the legacy reasoning-id swap before catalog validation. Some
+    // accounts advertise a saved/base model (notably Grok 4.5) only through
+    // suffixed variants; validating the base first would fall back to Composer
+    // before the effort suffix could ever apply. applyCursorReasoning only returns ids
     // verified against the live catalog, so a successful swap needs no
     // re-validation; an unswapped base still goes through resolveValidModelId
     // (whose Composer fallback then gets its own best-effort reasoning pass,

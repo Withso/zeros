@@ -1061,7 +1061,7 @@ try {
     .getByRole("group", { name: "Cursor" })
     .locator("[data-model-section-title]")
     .hover();
-  const cursorName = catalogRow("Cursor Grok 4.5").locator("[data-model-name]");
+  const cursorName = catalogRow("Cursor Grok 4.6").locator("[data-model-name]");
   const cursorNameAtRest = await cursorName.evaluate((name) => ({
     clientWidth: name.clientWidth,
     scrollWidth: name.scrollWidth,
@@ -1072,9 +1072,9 @@ try {
     JSON.stringify(cursorNameAtRest),
   );
   const cursorRowHeightBeforeHover = await catalogRow(
-    "Cursor Grok 4.5",
+    "Cursor Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
-  const cursorActionOverlay = catalogRow("Cursor Grok 4.5").locator(
+  const cursorActionOverlay = catalogRow("Cursor Grok 4.6").locator(
     "[data-model-row-actions]",
   );
   const cursorActionLayout = await cursorActionOverlay
@@ -1083,9 +1083,9 @@ try {
       right: getComputedStyle(overlay).right,
     }))
     .catch(() => null);
-  await catalogRow("Cursor Grok 4.5").hover();
+  await catalogRow("Cursor Grok 4.6").hover();
   const cursorRowHeightAfterHover = await catalogRow(
-    "Cursor Grok 4.5",
+    "Cursor Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
   check(
     "hover actions overlay long labels without reflowing the row",
