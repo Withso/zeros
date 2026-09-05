@@ -1,9 +1,12 @@
 import { execFile } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import {
+  chmod,
   link,
+  lstat,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   realpath,
   rename,
@@ -36,6 +39,8 @@ import type { AgentAdapter, AgentFilesystemTerritory } from "../types";
 import type { BoundaryRequest, ExecutionBoundary } from "../containment/types";
 import * as projectState from "../../db/projects";
 import * as gitState from "../../git/state";
+import { firstUseDesignDirectoryNameForRepo } from "../../design/directory";
+import { stickyRecognizedDesignDirectories } from "../../design/recognition-store";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 const execFileAsync = promisify(execFile);
@@ -66,6 +71,25 @@ type TerritoryAdmission = {
     stage: "newSession" | "loadSession",
     opts?: { cliBinary?: string },
   ): Promise<AgentFilesystemTerritory | undefined>;
+};
+
+type ProviderEnvAdmission = {
+  sanitizeProviderEnv(
+    env: Record<string, string> | undefined,
+  ): Record<string, string> | undefined;
+};
+
+type NativeContextSetAdmission = TerritoryAdmission & {
+  resolveTerritorySet(
+    primary: AgentFilesystemTerritory | undefined,
+    cwd: string,
+    workspaceRoot: string | undefined,
+    env: Record<string, string> | undefined,
+    stage: "newSession" | "loadSession" | "forkSession",
+  ): Promise<{
+    territory?: AgentFilesystemTerritory;
+    contextTerritories: readonly AgentFilesystemTerritory[];
+  }>;
 };
 
 async function fixture(): Promise<string> {
@@ -187,6 +211,27 @@ async function prospectiveDesignFixture(): Promise<string> {
 let previousDataDir: string | undefined;
 let engineDataRoot: string;
 
+async function makeTreeOwnerWritableForCleanup(
+  candidate: string,
+): Promise<void> {
+  const stat = await lstat(candidate).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!stat || stat.isSymbolicLink()) return;
+  if (!stat.isDirectory()) {
+    if (stat.isFile()) await chmod(candidate, 0o600);
+    return;
+  }
+  await chmod(candidate, 0o700);
+  const entries = await readdir(candidate, { withFileTypes: true });
+  await Promise.all(
+    entries.map((entry) =>
+      makeTreeOwnerWritableForCleanup(path.join(candidate, entry.name)),
+    ),
+  );
+}
+
 beforeAll(async () => {
   previousDataDir = process.env.ZEROS_DATA_DIR;
   engineDataRoot = await realpath(
@@ -198,6 +243,7 @@ beforeAll(async () => {
 afterAll(async () => {
   if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
   else process.env.ZEROS_DATA_DIR = previousDataDir;
+  await makeTreeOwnerWritableForCleanup(engineDataRoot);
   await rm(engineDataRoot, { recursive: true, force: true });
 });
 
@@ -208,6 +254,105 @@ afterEach(async () => {
 });
 
 describe("code-agent territory resolution", () => {
+  it("uses the live Design tree without an alternate checkout or context export", async () => {
+    const root = await singleDesignFixture();
+    const design = path.join(root, "Zeros Design");
+    const territory = await resolveCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+    });
+
+    expect(territory?.protectedDesignDirectories).toEqual([design]);
+    expect(existsSync(path.join(design, "frame.html"))).toBe(true);
+    await expect(
+      readFile(path.join(design, "frame.html"), "utf8"),
+    ).resolves.toBe("design\n");
+
+    const env = { PATH: process.env.PATH ?? "" };
+    await expect(
+      (gateway() as unknown as ProviderEnvAdmission).sanitizeProviderEnv(env),
+    ).toEqual(env);
+  });
+
+  it("persists recognition observed by unrestricted native Code admission", async () => {
+    const root = await singleDesignFixture();
+    const gw = gateway({ ...testExecutionBoundary(), backend: "none" });
+
+    await (gw as unknown as TerritoryAdmission).prepareCodeAgentTerritory(
+      { agentId: "codex" } as AgentAdapter,
+      path.join(root, "src"),
+      root,
+      root,
+      "newSession",
+    );
+
+    await expect(stickyRecognizedDesignDirectories(root)).resolves.toEqual([
+      "Zeros Design",
+    ]);
+    await gw.dispose();
+  });
+
+  it("includes attached workspaces' Design roots in native Code context", async () => {
+    const primary = await singleDesignFixture();
+    const attached = await singleDesignFixture();
+    const gw = gateway({ ...testExecutionBoundary(), backend: "none" });
+    const admission = gw as unknown as NativeContextSetAdmission;
+    const primaryTerritory = await admission.prepareCodeAgentTerritory(
+      { agentId: "codex" } as AgentAdapter,
+      primary,
+      primary,
+      primary,
+      "newSession",
+    );
+
+    const resolved = await admission.resolveTerritorySet(
+      primaryTerritory,
+      primary,
+      primary,
+      { ZEROS_ADDITIONAL_DIRS: JSON.stringify([attached]) },
+      "newSession",
+    );
+
+    expect(resolved.territory?.protectedDesignDirectories).toEqual(
+      [
+        path.join(attached, "Zeros Design"),
+        path.join(primary, "Zeros Design"),
+      ].sort(),
+    );
+    expect(
+      resolved.contextTerritories.map((territory) => territory.workspaceRoot),
+    ).toEqual([primary, attached]);
+    await gw.dispose();
+  });
+
+  it("keeps parent and nested Design roots live without a committed projection", async () => {
+    const root = await singleDesignFixture();
+    const nested = path.join(root, "Zeros Design", "Embedded Design");
+    await mkdir(nested, { recursive: true });
+    await writeFile(path.join(nested, ".zeros-canvas.json"), "{}\n");
+    await writeFile(path.join(nested, "nested.html"), "nested design\n");
+    await execFileAsync("git", ["add", "Zeros Design/Embedded Design"], {
+      cwd: root,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "nested design"], {
+      cwd: root,
+    });
+
+    const territory = await previewCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+    });
+    const parent = path.join(root, "Zeros Design");
+
+    expect(territory?.protectedDesignDirectories).toEqual([parent, nested]);
+    const providerEnv = await (
+      gateway() as unknown as ProviderEnvAdmission
+    ).sanitizeProviderEnv({ PATH: process.env.PATH ?? "" });
+    expect(providerEnv).toEqual({ PATH: process.env.PATH ?? "" });
+  });
+
   it("names the recognition inputs separately from Design content", async () => {
     const root = await singleDesignFixture();
     const design = path.join(root, "Zeros Design");
@@ -226,7 +371,7 @@ describe("code-agent territory resolution", () => {
       path.join(design, ".zeros-canvas.json"),
     ]);
     for (const entry of territory!.designRecognitionPaths) {
-      expect(territory!.writeCapabilities.deniedPaths).toContain(entry);
+      expect(territory!.writeCapabilities.deniedPaths).not.toContain(entry);
     }
   });
 
@@ -303,6 +448,10 @@ describe("code-agent territory resolution", () => {
   it("forgets a remembered Design folder the user actually deleted", async () => {
     const root = await singleDesignFixture();
     const design = path.join(root, "Zeros Design");
+    const nextDesign = path.join(
+      root,
+      firstUseDesignDirectoryNameForRepo(root),
+    );
     expect(
       (
         await resolveCodeAgentTerritory({
@@ -329,7 +478,12 @@ describe("code-agent territory resolution", () => {
         workspaceRoot: root,
         repoRoot: root,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({
+      designDirectory: nextDesign,
+      protectedDesignDirectories: [nextDesign],
+    });
+    expect(existsSync(design)).toBe(false);
+    expect(existsSync(nextDesign)).toBe(false);
   });
 
   it("protects an explicitly configured Design destination before it exists", async () => {
@@ -371,41 +525,41 @@ describe("code-agent territory resolution", () => {
     expect(await readdir(designRoot)).toEqual([]);
   });
 
-  it("does not create the default Design directory for a code-only workspace", async () => {
+  it("does not require a context export for an empty protected destination", async () => {
     const root = await prospectiveDesignFixture();
-    await writeFile(path.join(root, ".zeros", "settings.toml"), "");
-    const defaultDesignRoot = path.join(root, "Zeros Design");
+    const designRoot = path.join(root, "Future Design");
+    const territory = await previewCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+    });
+    const env = { PATH: process.env.PATH ?? "" };
 
-    expect(
-      await resolveCodeAgentTerritory({
-        cwd: path.join(root, "src"),
-        workspaceRoot: root,
-        repoRoot: root,
-      }),
-    ).toBeUndefined();
-    expect(existsSync(defaultDesignRoot)).toBe(false);
+    expect(territory).toMatchObject({ designDirectory: designRoot });
+    await expect(
+      (gateway() as unknown as ProviderEnvAdmission).sanitizeProviderEnv(env),
+    ).toEqual(env);
+    expect(existsSync(designRoot)).toBe(false);
   });
 
-  it("reserves the default Design territory when a managed agent admission opts in", async () => {
+  it("reserves the default Design directory before a managed Code session starts", async () => {
     const root = await prospectiveDesignFixture();
     await writeFile(path.join(root, ".zeros", "settings.toml"), "");
-    const defaultDesignRoot = path.join(root, "Zeros Design");
+    const defaultDesignRoot = path.join(
+      root,
+      firstUseDesignDirectoryNameForRepo(root),
+    );
 
     const territory = await resolveCodeAgentTerritory({
       cwd: path.join(root, "src"),
       workspaceRoot: root,
       repoRoot: root,
-      reserveDefaultDesignDirectory: true,
     });
-
     expect(territory).toMatchObject({
-      workspaceRoot: root,
       designDirectory: defaultDesignRoot,
       protectedDesignDirectories: [defaultDesignRoot],
     });
-    expect(territory!.writeCapabilities.deniedPaths).toContain(
-      defaultDesignRoot,
-    );
+    expect(existsSync(defaultDesignRoot)).toBe(true);
     expect(await readdir(defaultDesignRoot)).toEqual([]);
   });
 
@@ -514,8 +668,6 @@ describe("code-agent territory resolution", () => {
       expect.arrayContaining([
         path.join(root, "Product Design"),
         path.join(root, "Zeros Design"),
-        path.join(root, ".zeros"),
-        path.join(root, ".git"),
       ]),
     );
     // The ignored nested draft is intentionally absent from the policy list:
@@ -634,7 +786,7 @@ describe("code-agent territory resolution", () => {
     ).rejects.toThrow(/nested Git owner/i);
   });
 
-  it("protects both linked-worktree and common Git metadata", async () => {
+  it("keeps linked-worktree and common Git metadata writable", async () => {
     const main = await singleDesignFixture();
     const worktreeParent = await realpath(
       await mkdtemp(path.join(tmpdir(), "zeros-linked-worktree-")),
@@ -670,13 +822,16 @@ describe("code-agent territory resolution", () => {
       repoRoot: main,
     });
 
-    expect(territory!.writeCapabilities.deniedPaths).toEqual(
+    expect(territory!.writeCapabilities.deniedPaths).not.toEqual(
       expect.arrayContaining([
         path.join(canonicalWorktree, ".git"),
         gitDir,
         commonDir,
       ]),
     );
+    expect(territory!.writeCapabilities.deniedPaths).toEqual([
+      path.join(canonicalWorktree, "Zeros Design"),
+    ]);
   });
 
   it("fails admission when any Design inode has a writable alias outside the protected subtree", async () => {
@@ -722,12 +877,47 @@ describe("code-agent territory resolution", () => {
     ).not.toBe(agentTerritoryIdentity(territory));
   });
 
-  it("does not require a provider-specific sandbox once uniform ZSR is available", async () => {
+  it("keeps Code authority stable across both Code and Design commits", async () => {
+    const root = await singleDesignFixture();
+    const resolve = () =>
+      previewCodeAgentTerritory({
+        cwd: root,
+        workspaceRoot: root,
+        repoRoot: root,
+      });
+    const initial = (await resolve())!;
+
+    await writeFile(path.join(root, "src", "code.ts"), "export const n = 1;\n");
+    await execFileAsync("git", ["add", "src/code.ts"], { cwd: root });
+    await execFileAsync("git", ["commit", "-q", "-m", "code only"], {
+      cwd: root,
+    });
+    const afterCode = (await resolve())!;
+    expect(agentTerritoryIdentity(afterCode)).toBe(
+      agentTerritoryIdentity(initial),
+    );
+
+    await writeFile(
+      path.join(root, "Zeros Design", "frame.html"),
+      "updated design\n",
+    );
+    await execFileAsync("git", ["add", "Zeros Design/frame.html"], {
+      cwd: root,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "design update"], {
+      cwd: root,
+    });
+    const afterDesign = (await resolve())!;
+    expect(agentTerritoryIdentity(afterDesign)).toBe(
+      agentTerritoryIdentity(afterCode),
+    );
+  });
+
+  it("recognizes Design territory without requiring a provider-specific Code sandbox", async () => {
     const root = await fixture();
     const admission = gateway() as unknown as TerritoryAdmission;
     const unsupported = {
       agentId: "unsupported",
-      enforcesFilesystemTerritory: false,
     } as AgentAdapter;
 
     await expect(
@@ -742,6 +932,171 @@ describe("code-agent territory resolution", () => {
       workspaceRoot: root,
       designDirectory: path.join(root, "Product Design"),
     });
+  });
+
+  it("keeps local Code native when Design identity is damaged or reached through an alias", async () => {
+    const root = await fixture();
+    await writeFile(
+      path.join(root, ".zeros", "settings.toml"),
+      '[design]\ndirectory = "../unsafe"\n',
+    );
+    const alias = `${root}-alias`;
+    roots.push(alias);
+    await symlink(root, alias, "dir");
+
+    const workspace = {
+      id: "ws_native_code",
+      path: alias,
+      repoRoot: alias,
+      placement: "local",
+    } as ReturnType<typeof gitState.listWorkspaces>[number];
+    const workspaceByIdSpy = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(workspace);
+    const requests: BoundaryRequest[] = [];
+    const secureTestBoundary = testExecutionBoundary({
+      onPrepare: (request) => requests.push(request),
+    });
+    const localBoundary: ExecutionBoundary = {
+      ...secureTestBoundary,
+      backend: "none",
+    };
+    const diagnostics: string[] = [];
+    const gw = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: localBoundary,
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: (_agentId, line) => diagnostics.push(line),
+        onAgentExit: () => {},
+      },
+    });
+    const newSession = vi.fn(
+      async (opts: { executionId?: string; systemInstruction?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      }),
+    );
+    const adapter = {
+      agentId: "native-code",
+      nativeSystemInstruction: true,
+      newSession,
+      disposeSession: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "native-code",
+      adapter,
+    );
+
+    try {
+      const session = await gw.newSession("native-code", {
+        cwd: alias,
+        workspaceId: workspace.id,
+      });
+
+      expect(newSession).toHaveBeenCalledOnce();
+      expect(diagnostics.join("\n")).toContain(
+        "configured Design directory is invalid",
+      );
+      const instruction = newSession.mock.calls[0]![0]
+        .systemInstruction as string;
+      expect(instruction).toContain(path.join(alias, "Product Design"));
+      expect(instruction).toContain(path.join(alias, "Zeros Design"));
+      const request = requests.find(
+        (candidate) => candidate.executionId === session.executionId,
+      );
+      expect(request).toMatchObject({
+        actor: "agent-code",
+        cwd: alias,
+        workspaceRoot: alias,
+        backendHint: "none",
+      });
+      expect(request).not.toHaveProperty("protectedWorkspaceDirectories");
+      expect(request).not.toHaveProperty("protectedCodeDirectories");
+      expect(request).not.toHaveProperty("gitIntegrationRoots");
+    } finally {
+      await gw.dispose();
+      workspaceByIdSpy.mockRestore();
+    }
+  });
+
+  it("fails a local Design-agent admission closed for the same damaged identity", async () => {
+    const root = await fixture();
+    await writeFile(
+      path.join(root, ".zeros", "settings.toml"),
+      '[design]\ndirectory = "../unsafe"\n',
+    );
+    const workspace = {
+      id: "ws_contained_design",
+      path: root,
+      repoRoot: root,
+      placement: "local",
+    } as ReturnType<typeof gitState.listWorkspaces>[number];
+    const workspaceByIdSpy = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(workspace);
+    const gw = new AgentGateway({
+      projectRoot: root,
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const adapter = {
+      agentId: "contained-design",
+      newSession: vi.fn(),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "contained-design",
+      adapter,
+    );
+
+    try {
+      await expect(
+        gw.newDesignSession(
+          "contained-design",
+          {
+            actor: "design-agent",
+            agentRunId: "run-damaged-design",
+            env: {
+              ZEROS_DESIGN_AGENT_CAPABILITY: `Bearer ${"a".repeat(64)}`,
+            },
+            mcpServers: [
+              {
+                name: "design-draft",
+                transport: "http",
+                url: "http://127.0.0.1:43123/mcp",
+                headersFromEnv: {
+                  Authorization: "ZEROS_DESIGN_AGENT_CAPABILITY",
+                },
+              },
+            ],
+            trustedLocalPorts: [43123],
+          },
+          { cwd: root, workspaceId: workspace.id },
+        ),
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "protocol-error",
+          stage: "newSession",
+          message: expect.stringContaining("Design agent cannot start"),
+        },
+      });
+      expect(adapter.newSession).not.toHaveBeenCalled();
+    } finally {
+      await gw.dispose();
+      workspaceByIdSpy.mockRestore();
+    }
   });
 
   it("prepares the exact uniform territory and propagates a ZSR refusal", async () => {
@@ -862,6 +1217,7 @@ describe("code-agent territory resolution", () => {
     const attached = await singleDesignFixture();
     const onPrepare = vi.fn();
     let adapterTerritory: AgentFilesystemTerritory | undefined;
+    let adapterEnv: Record<string, string> | undefined;
     const gw = gateway(testExecutionBoundary({ onPrepare }));
     const adapter = {
       agentId: "contained",
@@ -869,8 +1225,10 @@ describe("code-agent territory resolution", () => {
         async (opts: {
           executionId?: string;
           territory?: AgentFilesystemTerritory;
+          env?: Record<string, string>;
         }) => {
           adapterTerritory = opts.territory;
+          adapterEnv = opts.env;
           return {
             session: {
               executionId: opts.executionId!,
@@ -889,7 +1247,18 @@ describe("code-agent territory resolution", () => {
 
     const session = await gw.newSession("contained", {
       cwd: primary,
-      env: { ZEROS_ADDITIONAL_DIRS: JSON.stringify([attached]) },
+      env: {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify([attached]),
+        // Keep this territory test independent from Docker/OrbStack binaries
+        // installed on the machine running it. Container parity has dedicated
+        // boundary tests; this case exercises attached Design authority only.
+        PATH: "",
+        DOCKER_HOST: "",
+        DOCKER_CONTEXT: "",
+        CONTAINER_HOST: "",
+        PODMAN_HOST: "",
+        CONTAINER_CONNECTION: "",
+      },
     });
     const attachedDesign = path.join(attached, "Zeros Design");
 
@@ -898,14 +1267,17 @@ describe("code-agent territory resolution", () => {
         workspaceRoot: primary,
         additionalReadWriteRoots: [attached],
         additionalGitWorkspaceRoots: [attached],
+        codeTerritoryOwners: [
+          {
+            workspaceRoot: attached,
+            protectedDesignDirectories: [attachedDesign],
+          },
+        ],
         territory: expect.objectContaining({
           workspaceRoot: primary,
           protectedDesignDirectories: [attachedDesign],
           writeCapabilities: expect.objectContaining({
-            deniedPaths: expect.arrayContaining([
-              attachedDesign,
-              path.join(attached, ".git"),
-            ]),
+            deniedPaths: [attachedDesign],
           }),
         }),
       }),
@@ -914,6 +1286,8 @@ describe("code-agent territory resolution", () => {
     expect(adapterTerritory?.protectedDesignDirectories).toEqual([
       attachedDesign,
     ]);
+    expect(adapterEnv).not.toHaveProperty("ZEROS_ISOLATION_CONTEXT_DIRS");
+    expect(existsSync(attachedDesign)).toBe(true);
     expect(session.boundary?.parity).toEqual({
       level: "full",
       restrictions: [],
@@ -1116,7 +1490,7 @@ describe("code-agent territory resolution", () => {
     }
   });
 
-  it("protects future managed siblings without adding each sibling to the immutable territory", async () => {
+  it("reserves active and explicitly attached managed Code owners", async () => {
     const previousWorkspacesDir = process.env.ZEROS_WORKSPACES_DIR;
     const container = await realpath(
       await mkdtemp(path.join(tmpdir(), "zeros-managed-territory-")),
@@ -1133,6 +1507,10 @@ describe("code-agent territory resolution", () => {
     const registeredMain = await singleDesignFixture();
     const primary = path.join(managed, "zeros", "Shocking");
     const sibling = path.join(managed, "zeros", "Onyx");
+    const prospectiveDesignName =
+      firstUseDesignDirectoryNameForRepo(registeredMain);
+    const primaryDesign = path.join(primary, prospectiveDesignName);
+    const siblingDesign = path.join(sibling, prospectiveDesignName);
     await Promise.all([
       mkdir(path.dirname(primary), { recursive: true }),
       mkdir(path.dirname(sibling), { recursive: true }),
@@ -1192,7 +1570,9 @@ describe("code-agent territory resolution", () => {
 
     try {
       await gw.listSessions("contained", { cwd: primary });
-      expect(await readdir(path.join(primary, "Zeros Design"))).toEqual([]);
+      await expect(readdir(primaryDesign)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
       requests.length = 0;
 
       const session = await gw.newSession("contained", {
@@ -1205,14 +1585,14 @@ describe("code-agent territory resolution", () => {
 
       expect(request.protectedWorkspaceDirectories).toContain(managed);
       expect(request.territory?.protectedDesignDirectories).toContain(
-        path.join(primary, "Zeros Design"),
+        primaryDesign,
       );
-      expect(await readdir(path.join(primary, "Zeros Design"))).toEqual([]);
+      await expect(readdir(primaryDesign)).resolves.toEqual([]);
       expect(request.territory?.protectedDesignDirectories).toContain(
         path.join(registeredMain, "Zeros Design"),
       );
       expect(request.territory?.protectedDesignDirectories).not.toContain(
-        path.join(sibling, "Zeros Design"),
+        siblingDesign,
       );
       expect(gw.workspaceSessionIds("ws_onyx", sibling)).toEqual([]);
 
@@ -1230,9 +1610,9 @@ describe("code-agent territory resolution", () => {
         expect.arrayContaining([primary, sibling]),
       );
       expect(requests[0]?.territory?.protectedDesignDirectories).toContain(
-        path.join(sibling, "Zeros Design"),
+        siblingDesign,
       );
-      expect(await readdir(path.join(sibling, "Zeros Design"))).toEqual([]);
+      await expect(readdir(siblingDesign)).resolves.toEqual([]);
       await gw.endSession("contained", attachedSession.executionId, {
         failClosed: true,
       });
@@ -1309,7 +1689,7 @@ describe("code-agent territory resolution", () => {
 
       // Session discovery and title generation intentionally reuse one
       // policy-identical utility boundary; the CLI probe has its own root.
-      expect(requests).toHaveLength(2);
+      expect(requests).toHaveLength(3);
       const registeredDesign = path.join(registered, "Zeros Design");
       for (const request of requests) {
         expect(request.actor).toBe("agent-code");

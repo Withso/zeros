@@ -22,6 +22,21 @@ function sourceFiles(root: string): string[] {
 }
 
 describe("repository layout contracts", () => {
+  it("loads one shared public Dev auth profile before launching Electron", () => {
+    const launcher = read("scripts/dev-instance.mjs");
+    const profile = read("scripts/dev-auth-profile.mjs");
+
+    expect(launcher).toContain(
+      'import { loadDevAuthEnvironment } from "./dev-auth-profile.mjs"',
+    );
+    expect(profile).toContain('".zeros-dev", "auth", "alpha.env"');
+    expect(profile).toContain("DEV_AUTH_ENV_KEYS");
+    expect(profile).not.toContain('".env.development.local"');
+    expect(launcher).toMatch(
+      /const env = \{\s+\.\.\.process\.env,(?:.|\n)*?\.\.\.devAuth\.env,/,
+    );
+  });
+
   it("runs the required actionlint check for every pull request", () => {
     const workflowLint = read(".github/workflows/lint-ci.yml");
 
@@ -51,7 +66,7 @@ describe("repository layout contracts", () => {
     );
   });
 
-  it("keeps required source-sync red until every ZSR architecture qualifies", () => {
+  it("keeps required source-sync red until every ZSR runtime architecture qualifies", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
     expect(preflight).toContain("  source-sync-workload:");
@@ -61,6 +76,20 @@ describe("repository layout contracts", () => {
     expect(preflight).toContain("SOURCE_SYNC_RESULT:");
     expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
     expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
+    // The broad test job already owns every source-level ZSR contract. These
+    // architecture jobs must exercise only the real target kernel/runtime so a
+    // host-specific unit fixture cannot mask or duplicate that evidence.
+    expect(preflight.match(/pnpm check:zsr:runtime/g)).toHaveLength(3);
+    expect(preflight).not.toMatch(/run: .*pnpm check:zsr$/m);
+  });
+
+  it("routes the control-plane audit through the findings-first retry wrapper", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+
+    expect(preflight).toMatch(
+      /- name: Audit control-plane production dependencies\n(?:.|\n)*?working-directory: apps\/control-plane\n\s+run: node \.\.\/\.\.\/scripts\/check-audit\.mjs/,
+    );
+    expect(preflight).not.toContain("CONTROL_PLANE_AUDIT_ATTEMPTS");
   });
 
   it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
@@ -123,9 +152,17 @@ describe("repository layout contracts", () => {
       .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(token));
     expect(files.length).toBeGreaterThan(0);
     expect(files.filter((file) => !existsSync(file))).toEqual([]);
+    for (const lightweightContract of [
+      "apps/desktop/src/engine/design/__tests__/design-agent-capability.test.ts",
+      "apps/desktop/src/engine/design/__tests__/design-agent-admission.test.ts",
+      "apps/desktop/src/engine/design/__tests__/design-agent-mcp.test.ts",
+      "apps/desktop/src/engine/git/__tests__/mutation-lock.test.ts",
+    ]) {
+      expect(files).toContain(lightweightContract);
+    }
   });
 
-  it("gates every ZSR boundary suite plus interactive init/resume contracts", () => {
+  it("gates every execution-boundary suite plus interactive init/resume contracts", () => {
     const rootPackage = JSON.parse(read("package.json")) as {
       scripts: Record<string, string>;
     };
@@ -169,7 +206,9 @@ describe("repository layout contracts", () => {
       ...automaticallyRequired,
       ...interactiveContracts,
     ]) {
-      expect(runner, `${testFile} must be ZSR-gated`).toContain(testFile);
+      expect(runner, `${testFile} must be execution-boundary-gated`).toContain(
+        testFile,
+      );
     }
   });
 
@@ -437,8 +476,8 @@ describe("repository layout contracts", () => {
       // so its platform package must carry terms — not just the JS wrapper.
       // npm publishes it as an alias, hence the platform-suffixed version.
       "@openai/codex@0.149.0-darwin-arm64",
-      "@tiptap/extension-bubble-menu@3.26.0",
-      "@tiptap/extension-floating-menu@3.26.0",
+      "@tiptap/extension-bubble-menu@3.31.2",
+      "@tiptap/extension-floating-menu@3.31.2",
       "@types/trusted-types@2.0.7",
       "@workos-inc/node@10.12.0",
     ]) {
@@ -491,6 +530,21 @@ describe("repository layout contracts", () => {
     expect(read("scripts/generate-third-party-licenses.mjs")).toContain(
       'packageName: "@openai/codex-darwin-arm64"',
     );
+  });
+
+  it("packages and exports the native host process supervisor", () => {
+    const packaging = read("electron-builder.yml");
+    const sidecar = read("apps/desktop/electron/sidecar.ts");
+    const packagingCheck = read("scripts/check-packaging-paths.mjs");
+    const source =
+      "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
+
+    expect(existsSync(source)).toBe(true);
+    expect(packaging).toContain(`from: ${source}`);
+    expect(sidecar).toContain("ZEROS_HOST_SUPERVISOR_RUNTIME");
+    expect(sidecar).toContain("ZEROS_HOST_SUPERVISOR_SCRIPT");
+    expect(packagingCheck).toContain(source);
+    expect(packagingCheck).toContain("ZEROS_HOST_SUPERVISOR_SCRIPT");
   });
 
   it("does not let an enclosing Zeros parent watchdog kill the engine smoke", () => {
@@ -668,6 +722,7 @@ describe("repository layout contracts", () => {
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "product-contract.md",
+      "root-coordinator-threat-model.md",
       "security.md",
     ];
 
@@ -731,6 +786,27 @@ describe("repository layout contracts", () => {
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
+  });
+
+  it("bakes the default-off desktop cloud capability into every release process", () => {
+    const releaseCapability =
+      "ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}";
+    for (const workflow of [
+      ".github/workflows/release-alpha.yml",
+      ".github/workflows/release-beta.yml",
+      ".github/workflows/release.yml",
+    ]) {
+      expect(read(workflow)).toContain(releaseCapability);
+    }
+
+    const bakedIdentifier = "__ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__";
+    expect(read("tsup.config.ts")).toContain(bakedIdentifier);
+    expect(read("apps/desktop/electron/tsup.config.ts")).toContain(
+      bakedIdentifier,
+    );
+    const packagedEngineBuild = read("scripts/build-sidecar.mjs");
+    expect(packagedEngineBuild).toContain(bakedIdentifier);
+    expect(packagedEngineBuild).toContain('"--define"');
   });
 
   it("verifies every shipped macOS updater archive before publication", () => {

@@ -138,8 +138,7 @@ function validatePolicy(policy) {
   if (
     process.platform !== "linux" ||
     !cloudWorker ||
-    Object.keys(cloudWorker).sort().join("\0") !==
-      expectedKeys.join("\0") ||
+    Object.keys(cloudWorker).sort().join("\0") !== expectedKeys.join("\0") ||
     cloudWorker.version !== 1 ||
     !Number.isInteger(cloudWorker.uid) ||
     cloudWorker.uid <= 0 ||
@@ -185,7 +184,7 @@ function canonicalExecutable(file, label) {
   return canonical;
 }
 
-function validateContainerWorker(command, policy, policyPath) {
+function validateCloudContainerWorker(command, policy, policyPath) {
   const worker = command.containerWorker;
   if (worker === undefined) return;
   const expectedKeys = [
@@ -199,6 +198,7 @@ function validateContainerWorker(command, policy, policyPath) {
   ];
   if (
     process.platform !== "linux" ||
+    !policy.runtime.cloudWorker ||
     !worker ||
     typeof worker !== "object" ||
     Array.isArray(worker) ||
@@ -206,7 +206,7 @@ function validateContainerWorker(command, policy, policyPath) {
     worker.version !== 1 ||
     worker.runtime !== "podman"
   ) {
-    throw new Error("invalid container-worker descriptor");
+    throw new Error("invalid cloud container-worker descriptor");
   }
   for (const name of ["engine", "launcher", "node", "socket", "state"]) {
     if (
@@ -215,18 +215,18 @@ function validateContainerWorker(command, policy, policyPath) {
       worker[name].includes("\0") ||
       /[\r\n]/.test(worker[name])
     ) {
-      throw new Error("invalid container-worker path");
+      throw new Error("invalid cloud container-worker path");
     }
   }
-  canonicalExecutable(worker.node, "container-worker Node runtime");
-  canonicalExecutable(worker.engine, "container-worker engine");
+  trustedRootExecutable(worker.node, "cloud container-worker Node runtime");
+  trustedRootExecutable(worker.engine, "cloud container-worker engine");
   const expectedLauncher = path.join(
     path.dirname(policyPath),
     "tools",
-    "zsr-container-worker.mjs",
+    "cloud-container-worker.mjs",
   );
   if (worker.launcher !== expectedLauncher) {
-    throw new Error("container-worker launcher is outside private tools");
+    throw new Error("cloud container-worker launcher is outside private tools");
   }
   const launcherStat = lstatSync(worker.launcher);
   if (
@@ -234,40 +234,31 @@ function validateContainerWorker(command, policy, policyPath) {
     launcherStat.isSymbolicLink() ||
     launcherStat.nlink !== 1 ||
     realpathSync(worker.launcher) !== worker.launcher ||
+    launcherStat.uid !== 0 ||
     (launcherStat.mode & 0o222) !== 0 ||
-    (launcherStat.mode & 0o111) === 0 ||
-    (typeof process.getuid === "function" &&
-      launcherStat.uid !== process.getuid())
+    (launcherStat.mode & 0o111) === 0
   ) {
-    throw new Error("container-worker launcher is not immutable");
+    throw new Error("cloud container-worker launcher is not immutable");
   }
   const stateStat = lstatSync(worker.state);
-  const stateOwner = policy.runtime.cloudWorker?.uid ?? process.getuid?.();
   if (
     !stateStat.isDirectory() ||
     stateStat.isSymbolicLink() ||
     realpathSync(worker.state) !== worker.state ||
     (stateStat.mode & 0o077) !== 0 ||
-    (stateOwner !== undefined && stateStat.uid !== stateOwner) ||
+    stateStat.uid !== policy.runtime.cloudWorker.uid ||
     !policy.filesystem.allowRead.includes(worker.state) ||
     !policy.filesystem.allowWrite.includes(worker.state)
   ) {
-    throw new Error("container-worker state is not an admitted private root");
+    throw new Error(
+      "cloud container-worker state is not an admitted private root",
+    );
   }
   if (
     worker.socket !== path.join(worker.state, "podman.sock") ||
     !policy.runtime.allowedUnixSockets.includes(worker.socket)
   ) {
-    throw new Error("container-worker socket is not admitted");
-  }
-  for (const executable of [worker.node, worker.engine]) {
-    if (
-      !policy.filesystem.allowRead.some((allowed) =>
-        pathInsideOrEqual(executable, allowed),
-      )
-    ) {
-      throw new Error("container-worker executable is outside read authority");
-    }
+    throw new Error("cloud container-worker socket is not admitted");
   }
 }
 
@@ -294,16 +285,15 @@ function validateCommand(command, policy, policyPath, commandPath) {
     command.command.includes("\0") ||
     !path.isAbsolute(command.cwd) ||
     command.cwd.includes("\0") ||
-    path.dirname(commandPath) !== path.join(path.dirname(policyPath), "commands")
+    path.dirname(commandPath) !==
+      path.join(path.dirname(policyPath), "commands")
   ) {
     throw new Error("invalid command identity");
   }
   if (
     !Array.isArray(command.args) ||
     command.args.length > MAX_ARGUMENTS ||
-    command.args.some(
-      (arg) => typeof arg !== "string" || arg.includes("\0"),
-    ) ||
+    command.args.some((arg) => typeof arg !== "string" || arg.includes("\0")) ||
     command.args.reduce((total, arg) => total + Buffer.byteLength(arg), 0) >
       MAX_ARGUMENT_BYTES
   ) {
@@ -360,7 +350,7 @@ function validateCommand(command, policy, policyPath, commandPath) {
   ) {
     throw new Error("container socket subtraction is invalid");
   }
-  validateContainerWorker(command, policy, policyPath);
+  validateCloudContainerWorker(command, policy, policyPath);
 }
 
 function executableOnPath(name) {

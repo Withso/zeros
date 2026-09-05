@@ -22,10 +22,12 @@
 // styles, images, and other subresources retain their original headers.
 //
 // Daytona signed-preview origins are a separate exact, volatile allowlist.
-// Requests to one of those origins receive only the provider's documented
-// warning-page bypass header; no provider API key or preview token is present.
-// The authorization is frame-scoped for picker injection, expires with the
-// signed origin, and is replaced atomically when the renderer renews it.
+// Requests to one of those origins receive the provider's documented warning-
+// page bypass header. Control-plane cloud-preview origins additionally receive
+// a short-lived Zeros capability kept only in Electron main. Both headers are
+// exact-origin and frame-ancestry scoped; no provider API key enters the
+// renderer or request. The authorization expires with the signed origin and is
+// replaced atomically when the renderer renews it.
 //
 // Iframe trade-offs:
 //   - Lose per-tab Chromium process isolation. All iframes share the
@@ -44,8 +46,30 @@
 // This policy stays isolated because weakening upstream framing controls is a
 // security-sensitive browser-session decision, not ordinary renderer layout.
 
-import { type Session } from "electron";
+import { type Session, type WebFrameMain } from "electron";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
+
+function frameTreeNodeIds(frame: WebFrameMain | null | undefined): number[] {
+  const ids: number[] = [];
+  const seen = new Set<number>();
+  let current = frame ?? null;
+  // A malicious preview can create nested frames, but it cannot make header
+  // admission walk an unbounded or cyclic frame graph.
+  try {
+    while (current && ids.length < 32) {
+      const id = current.frameTreeNodeId;
+      if (!Number.isSafeInteger(id) || id < 1 || seen.has(id)) break;
+      ids.push(id);
+      seen.add(id);
+      current = current.parent;
+    }
+  } catch {
+    // WebFrameMain can be disposed between any two native property reads.
+    // Partial ancestry is unsafe because it could contain an authorized frame.
+    return [];
+  }
+  return ids;
+}
 
 /** Strip iframe-blocking headers from this session's http(s)
  *  responses. Idempotent — calling twice replaces the listener.
@@ -54,7 +78,17 @@ export function installIframeHeaderStripping(session: Session): void {
   session.webRequest.onBeforeSendHeaders(
     { urls: ["https://*/*"] },
     (details, callback) => {
-      if (!previewFrameAuthorizations.allowsOrigin(details.url)) {
+      let ancestry: number[] = [];
+      try {
+        ancestry = frameTreeNodeIds(details.frame);
+      } catch {
+        // `details.frame` itself may be backed by a disposed native frame.
+      }
+      const extraHeaders = previewFrameAuthorizations.requestHeaders(
+        details.url,
+        ancestry,
+      );
+      if (!extraHeaders) {
         callback({ cancel: false });
         return;
       }
@@ -62,7 +96,7 @@ export function installIframeHeaderStripping(session: Session): void {
         cancel: false,
         requestHeaders: {
           ...details.requestHeaders,
-          "X-Daytona-Skip-Preview-Warning": "true",
+          ...extraHeaders,
         },
       });
     },

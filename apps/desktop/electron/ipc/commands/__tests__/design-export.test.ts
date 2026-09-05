@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   decodeDesignPng,
+  designPngTemporaryPath,
   designPngSaveDialogOptions,
   designPngSuggestedName,
 } from "../design-export";
@@ -24,6 +25,14 @@ describe("design PNG export", () => {
       defaultPath: "Frame.png",
       filters: [{ name: "PNG image", extensions: ["png"] }],
     });
+  });
+
+  it("keeps exported PNG writes outside Design transaction recovery", () => {
+    const target = "/workspace/Zeros Design/Launch.png";
+    const temporary = designPngTemporaryPath(target);
+
+    expect(temporary).not.toMatch(/\.zeros-tmp$/);
+    expect(temporary).not.toBe(target);
   });
 
   it("rejects malformed base64, non-PNG bytes, and oversized payloads", () => {

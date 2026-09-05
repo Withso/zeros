@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+import { loadDevAuthEnvironment } from "./dev-auth-profile.mjs";
 import { portFree } from "./dev-ports.mjs";
 import { pruneStaleDevCaches } from "./dev-cache-prune.mjs";
 
@@ -48,6 +49,29 @@ const RUN_ONLY =
   process.env.ZEROS_RUN_ONLY === "1" || process.argv.includes("--run-only");
 // pnpm runs package scripts from the repo root, so cwd is the worktree root.
 const REPO_ROOT = process.cwd();
+
+// Every worktree inherits one user-level PUBLIC Alpha profile. Explicit shell
+// variables remain available for a deliberate one-run override, but a
+// checkout-local env file cannot drift behind the shared profile after a client
+// rotation. Only the seven public-client fields are read; WorkOS management
+// credentials cannot enter through the profile. Electron main independently
+// repeats the exact Alpha-only validation at the browser boundary.
+const devAuth = loadDevAuthEnvironment();
+if (devAuth.source !== "none" && devAuth.issue) {
+  throw new Error(
+    `Unsafe Zeros Dev auth configuration (${devAuth.issue}). ` +
+      `Use the complete Alpha public-client profile at ${devAuth.sharedProfilePath}.`,
+  );
+}
+if (devAuth.source === "none") {
+  console.warn(
+    `[dev-instance] Alpha WorkOS profile is missing at ${devAuth.sharedProfilePath}; sign-in will remain disabled`,
+  );
+} else {
+  console.log(
+    `[dev-instance] Alpha WorkOS auth configuration validated (source=${devAuth.source})`,
+  );
+}
 
 // Engine port grid — must match apps/desktop/src/engine/runtime.ts. Instance blocks are laid
 // on a stride wider than the walk span so the walk range AND the MCP gateway
@@ -219,6 +243,10 @@ const binPath = prepareBundle();
 // VAR TO THAT DROP LIST TOO.
 const env = {
   ...process.env,
+  // Re-apply the normalized public values. Explicit shell overrides are already
+  // represented in devAuth.env, so they keep precedence without reintroducing
+  // whitespace or another unvalidated representation from process.env.
+  ...devAuth.env,
   ZEROS_DEV: "1",
   ZEROS_VITE_PORT: String(vitePort),
   ELECTRON_RENDERER_URL: `http://localhost:${vitePort}`,

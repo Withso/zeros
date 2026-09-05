@@ -15,9 +15,31 @@ describe("resolveSettings — precedence", () => {
       show_agent_cursor: true,
       navigation_approval: "always-ask",
     });
+    expect(r.effective.design).toBeUndefined();
     expect(r.sources["git.remote"]).toBe("default");
     expect(r.sources["scripts.run_mode"]).toBe("default");
     expect(r.warnings).toEqual([]);
+  });
+
+  it("does not expose the retired Design isolation setting as policy", () => {
+    const r = resolveSettings({
+      user: { design: { isolation: { mode: "sparse" } } },
+      team: { design: { isolation: { mode: "sandbox" } } },
+      repo: { design: { isolation: { mode: "sandbox" } } },
+      repoLocal: {
+        design: { isolation: { mode: "sandbox+hardening" } },
+      },
+      workspaceLocal: { design: { isolation: { mode: "sandbox" } } },
+      managed: {
+        design: { isolation: { mode: "sandbox+hardening" } },
+      },
+    });
+
+    expect(r.effective.design).toBeUndefined();
+    expect(r.sources["design.isolation.mode"]).toBeUndefined();
+    expect(
+      r.warnings.filter((warning) => warning.includes("design.isolation")),
+    ).toHaveLength(6);
   });
 
   it("user overrides defaults; repo overrides user; managed overrides all — repo-local scripts never win", () => {

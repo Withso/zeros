@@ -1,18 +1,16 @@
 // ──────────────────────────────────────────────────────────
-// Synchronous access-token bridge (AuthProvider → relay transport)
+// Synchronous access-token bridge (AuthProvider → local engine binding)
 // ──────────────────────────────────────────────────────────
 //
-// The relay client (ws-client.ts) must attach the current Auth0 access token to
-// its CONNECTED frame so an account-binding engine can verify it — but the
-// transport's send path is synchronous and lives below the React tree, so it
-// can't await the main-process IPC round-trip. AuthProvider owns the session and
-// pushes the latest access token here on every auth-state change (initial
-// restore, sign-in, token refresh, sign-out); the transport reads it
-// synchronously when it announces itself and on every reconnect.
+// The local sidecar client (ws-client.ts) attaches the current access token to
+// its CONNECTED frame so the engine can bind itself to the signed-in Zeros
+// account. The send path is synchronous and lives below the React tree, so it
+// cannot await an Electron-main round trip. AuthProvider owns the session and
+// pushes the latest token here on restore, sign-in, refresh, and sign-out.
 //
-// This is the user's OWN token riding INSIDE the already-E2EE relay channel — it
-// is never exposed to the blind relay. It is intentionally NOT persisted here
-// (main owns persistence via auth-session.ts); this is a live mirror only,
+// Cloud engines never receive this reusable WorkOS bearer: their WebSocket is
+// bound by a one-use control-plane admission. The value is intentionally not
+// persisted here (Electron main owns persistence); this is a live mirror only,
 // cleared on sign-out.
 // ──────────────────────────────────────────────────────────
 

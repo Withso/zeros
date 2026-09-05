@@ -154,6 +154,49 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
     transport?.dispose();
     expect(stopAndProve).toHaveBeenCalledOnce();
   });
+
+  it("does not force Node proxy behavior on an unrestricted native host", () => {
+    const tracked = {
+      pid: 43_210,
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      wait: vi.fn(),
+      signal: vi.fn(),
+      stopAndProve: vi.fn(async () => undefined),
+    } as unknown as BoundaryProcess;
+    const wrapSpawn = vi.fn((request) => ({
+      command: request.command,
+      args: request.args,
+      cwd: request.cwd,
+      env: request.env,
+      stdio: "pipe" as const,
+    }));
+    const boundary = {
+      generation: "native-generation" as TerritoryGeneration,
+      status: { backend: "none" },
+      wrapSpawn,
+      trackProcess: vi.fn(() => tracked),
+    } as unknown as PreparedBoundary;
+
+    spawnSubprocessTransport({
+      executionBoundary: boundary,
+      cwd: "/worktree",
+      env: {
+        SAFE: "visible",
+        HTTPS_PROXY: "http://proxy.test:8080",
+      },
+    });
+
+    const request = wrapSpawn.mock.calls[0]?.[0] as {
+      env: Record<string, string>;
+    };
+    expect(request.env).toMatchObject({
+      SAFE: "visible",
+      HTTPS_PROXY: "http://proxy.test:8080",
+    });
+    expect(request.env).not.toHaveProperty("NODE_USE_ENV_PROXY");
+  });
 });
 
 describe("formatHostStderrLines", () => {

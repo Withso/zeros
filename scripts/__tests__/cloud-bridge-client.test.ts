@@ -27,6 +27,33 @@ async function rejectingServer(): Promise<string> {
 }
 
 describe("cloud qualification BridgeClient", () => {
+  it("stops dispatching PTY data after an idempotent unsubscribe", () => {
+    const client = new BridgeClient({ url: "ws://127.0.0.1:1/ws" });
+    const listener = vi.fn();
+    const unsubscribe = client.onPtyData(listener);
+    const dispatch = (
+      client as unknown as {
+        dispatch(message: Record<string, unknown> & { type: string }): void;
+      }
+    ).dispatch.bind(client);
+
+    dispatch({
+      type: "PTY_DATA",
+      sessionId: "validation-session",
+      data: "before",
+    });
+    unsubscribe();
+    unsubscribe();
+    dispatch({
+      type: "PTY_DATA",
+      sessionId: "validation-session",
+      data: "after",
+    });
+
+    expect(listener).toHaveBeenCalledOnce();
+    expect(listener).toHaveBeenCalledWith("validation-session", "before");
+  });
+
   it("rejects promptly when a peer closes after open but before ENGINE_READY", async () => {
     const client = new BridgeClient({ url: await rejectingServer() });
     const verdict = await Promise.race([

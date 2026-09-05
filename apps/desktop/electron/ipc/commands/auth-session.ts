@@ -8,6 +8,7 @@ import {
   deleteSecret,
   getSecret,
   replaceSecretIfUnchanged,
+  SecretStoreReadError,
   secretsFilePath,
   setSecret,
 } from "../../secret-store";
@@ -319,8 +320,9 @@ function toMainSession(value: StoredTokens): MainAuthSession {
   };
 }
 
-export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
-  const tokens = readTokens();
+async function getValidSessionFromTokens(
+  tokens: StoredTokens | null,
+): Promise<MainAuthSession | null> {
   if (!tokens) return null;
   if (tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
     return toMainSession(tokens);
@@ -337,6 +339,10 @@ export async function getValidSessionForMain(): Promise<MainAuthSession | null> 
   }
   const latest = readTokens() ?? tokens;
   return latest.expiresAt - Date.now() > 0 ? toMainSession(latest) : null;
+}
+
+export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
+  return getValidSessionFromTokens(readTokens());
 }
 
 export async function getValidAccessTokenForMain(): Promise<string | null> {
@@ -383,11 +389,28 @@ export function clearWorkOSSessionAfterServerRevocation(expected: {
   return removed;
 }
 
-export const authGetAccessToken: CommandHandler = async () => ({
-  access_token: await getValidAccessTokenForMain(),
-});
+export const authGetAccessToken: CommandHandler = async () => {
+  let tokens: StoredTokens | null;
+  try {
+    tokens = readTokens();
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) return { access_token: null };
+    throw error;
+  }
+  return {
+    access_token:
+      (await getValidSessionFromTokens(tokens))?.accessToken ?? null,
+  };
+};
 
-export const authGetSessionUser: CommandHandler = () => getSessionUserForMain();
+export const authGetSessionUser: CommandHandler = () => {
+  try {
+    return getSessionUserForMain();
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) return null;
+    throw error;
+  }
+};
 
 function sameAccount(left: StoredTokens, right: StoredTokens): boolean {
   return (left.accountId || left.sub) === (right.accountId || right.sub);

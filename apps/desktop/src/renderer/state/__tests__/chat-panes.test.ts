@@ -24,6 +24,7 @@ import {
   setActiveInPane,
   setSplitRatio,
   splitLeaf,
+  topRightLeafId,
 } from "../chat-panes";
 
 const chat = (id: string, createdAt = 0) => ({ id, createdAt });
@@ -347,5 +348,43 @@ describe("hasLeaf", () => {
     layout = splitLeaf(layout, "p2", "column", "p3", null)!;
     expect(hasLeaf(layout.root, "p3")).toBe(true);
     expect(hasLeaf(layout.root, "nope")).toBe(false);
+  });
+});
+
+// The conversation column pins the workbench expand control to whichever pane
+// owns the TOP-RIGHT corner, so the control stays at the window's right edge in
+// every split shape. `leafIds().at(-1)` is the wrong answer: after a Split Down
+// the last leaf is the BOTTOM pane.
+describe("topRightLeafId", () => {
+  it("is the only leaf in the default layout", () => {
+    expect(topRightLeafId(DEFAULT_PANE_LAYOUT.root)).toBe(MAIN_PANE_ID);
+  });
+
+  it("follows a row split to its right child", () => {
+    const layout = splitRight(DEFAULT_PANE_LAYOUT, MAIN_PANE_ID, "p2");
+    expect(topRightLeafId(layout.root)).toBe("p2");
+    expect(leafIds(layout.root).at(-1)).toBe("p2");
+  });
+
+  it("follows a column split to its TOP child, not the last leaf", () => {
+    const layout = splitLeaf(
+      DEFAULT_PANE_LAYOUT,
+      MAIN_PANE_ID,
+      "column",
+      "p2",
+      null,
+    )!;
+    expect(topRightLeafId(layout.root)).toBe(MAIN_PANE_ID);
+    expect(leafIds(layout.root).at(-1)).toBe("p2");
+  });
+
+  it("walks right then up through a mixed tree", () => {
+    // main | (p2 over p3) — the corner is p2, and neither the first nor the
+    // last leaf in visual order.
+    let layout = splitRight(DEFAULT_PANE_LAYOUT, MAIN_PANE_ID, "p2");
+    layout = splitLeaf(layout, "p2", "column", "p3", null)!;
+    expect(topRightLeafId(layout.root)).toBe("p2");
+    expect(firstLeafId(layout.root)).toBe(MAIN_PANE_ID);
+    expect(leafIds(layout.root).at(-1)).toBe("p3");
   });
 });

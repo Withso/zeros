@@ -334,6 +334,82 @@ d("schema + signup transaction", () => {
     expect(result.rows[0]).toEqual({ users: 1, personal: 1 });
   });
 
+  it("does not reserve a second pool connection for WorkOS authentication", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const firstInput = {
+      provider: "workos" as const,
+      providerSubject: `user_auth_pool_first_${suffix}`,
+      email: `auth-pool-first-${suffix}@example.com`,
+      displayName: "First Auth Pool User",
+    };
+    const secondInput = {
+      provider: "workos" as const,
+      providerSubject: `user_auth_pool_second_${suffix}`,
+      email: `auth-pool-second-${suffix}@example.com`,
+      displayName: "Second Auth Pool User",
+    };
+    const applicationName = `auth-pool-${suffix}`;
+    const authUrl = new URL(url!);
+    authUrl.searchParams.set("application_name", applicationName);
+    const authPool = new pg.Pool({
+      connectionString: authUrl.toString(),
+      max: 2,
+    });
+    const blocker = await pool.connect();
+    await blocker.query(
+      `SELECT pg_advisory_lock(hashtextextended($1::text, 1))`,
+      [`email:${firstInput.email.toLowerCase()}`],
+    );
+
+    const first = ensureUser(authPool, firstInput);
+    let second: ReturnType<typeof ensureUser> | null = null;
+    let settlements: PromiseSettledResult<
+      Awaited<ReturnType<typeof ensureUser>>
+    >[] = [];
+    try {
+      let observedBlockedTransaction = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const activity = await pool.query(
+          `SELECT 1 FROM pg_stat_activity
+           WHERE application_name = $1 AND wait_event_type = 'Lock'
+           LIMIT 1`,
+          [applicationName],
+        );
+        if (activity.rows[0]) {
+          observedBlockedTransaction = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(observedBlockedTransaction).toBe(true);
+
+      second = ensureUser(authPool, secondInput);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const completedWhileFirstWasBlocked = await Promise.race([
+        second.then(() => true),
+        new Promise<false>((resolve) => {
+          timer = setTimeout(() => resolve(false), 300);
+        }),
+      ]);
+      if (timer) clearTimeout(timer);
+      expect(completedWhileFirstWasBlocked).toBe(true);
+    } finally {
+      await blocker.query(
+        `SELECT pg_advisory_unlock(hashtextextended($1::text, 1))`,
+        [`email:${firstInput.email.toLowerCase()}`],
+      );
+      blocker.release();
+      settlements = await Promise.allSettled(
+        second ? [first, second] : [first],
+      );
+      await authPool.end();
+    }
+    expect(settlements).toHaveLength(2);
+    expect(settlements.every(({ status }) => status === "fulfilled")).toBe(
+      true,
+    );
+  });
+
   it("stores and returns the organization logo data URL", async () => {
     const { id } = await signup();
     const logo = "data:image/png;base64,iVBORw0KGgo=";
@@ -357,9 +433,10 @@ d("schema + signup transaction", () => {
       ),
     );
 
-    await pool.query(`UPDATE organizations SET deleted_at = now() WHERE id = $1`, [
-      orgId,
-    ]);
+    await pool.query(
+      `UPDATE organizations SET deleted_at = now() WHERE id = $1`,
+      [orgId],
+    );
 
     // The accept path's join must refuse invites into a deleted team.
     const inv = await pool.query(
@@ -375,9 +452,10 @@ d("schema + signup transaction", () => {
   it("removes a soft-deleted organization from former members' RLS scope", async () => {
     const { id } = await signup();
     const orgId = await createOrganization(id, "Invisible");
-    await pool.query(`UPDATE organizations SET deleted_at = now() WHERE id = $1`, [
-      orgId,
-    ]);
+    await pool.query(
+      `UPDATE organizations SET deleted_at = now() WHERE id = $1`,
+      [orgId],
+    );
 
     const visible = await withUserTx(pool, id, (tx) =>
       tx.query(`SELECT id FROM organizations WHERE id = $1`, [orgId]),

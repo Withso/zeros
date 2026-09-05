@@ -12,13 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import {
-  assertClaudeManagedPolicyCompatible,
-  ClaudeSdkAdapter,
-  claudeAbsoluteEditDenyRule,
-  claudeContainedProcessEnv,
-  probeClaudeSandboxRuntime,
-} from "../adapter";
+import { ClaudeSdkAdapter } from "../adapter";
 import {
   AgentFailureError,
   type AgentAdapterContext,
@@ -60,150 +54,6 @@ function codeTerritory(
     },
   };
 }
-
-describe("Claude literal Design path rules", () => {
-  it("emits an exact absolute rule for an ordinary path", () => {
-    expect(claudeAbsoluteEditDenyRule("/tmp/Zeros Design")).toBe(
-      "Edit(//tmp/Zeros Design/**)",
-    );
-  });
-
-  it("fails closed when Claude cannot represent a literal path", () => {
-    for (const character of [
-      "\0",
-      "\r",
-      "\n",
-      "*",
-      "?",
-      "[",
-      "]",
-      "(",
-      ")",
-      "\\",
-    ]) {
-      expect(() =>
-        claudeAbsoluteEditDenyRule(`/tmp/literal${character}path`),
-      ).toThrow(/cannot safely encode this workspace path/i);
-    }
-  });
-});
-
-describe("Claude managed-policy qualification", () => {
-  function resolved(settings: Record<string, unknown>) {
-    return {
-      effective: settings,
-      provenance: {},
-      sources: [{ source: "managed", settings }],
-    } as never;
-  }
-
-  it("accepts absent and narrowing administrator policy", () => {
-    expect(() =>
-      assertClaudeManagedPolicyCompatible(resolved({})),
-    ).not.toThrow();
-    expect(() =>
-      assertClaudeManagedPolicyCompatible(
-        resolved({
-          sandbox: {
-            filesystem: { denyWrite: ["/private"] },
-            network: { deniedDomains: ["internal.invalid"] },
-          },
-          permissions: { deny: ["Bash(rm *)"] },
-        }),
-      ),
-    ).not.toThrow();
-  });
-
-  it.each([
-    ["filesystem isolation", { sandbox: { filesystem: { disabled: true } } }],
-    ["write roots", { sandbox: { filesystem: { allowWrite: ["/tmp"] } } }],
-    ["excluded commands", { sandbox: { excludedCommands: ["git"] } }],
-    ["unsandboxed commands", { sandbox: { allowUnsandboxedCommands: true } }],
-    ["Apple Events", { sandbox: { allowAppleEvents: true } }],
-    ["Unix sockets", { sandbox: { network: { allowAllUnixSockets: true } } }],
-    [
-      "working directories",
-      { permissions: { additionalDirectories: ["/tmp"] } },
-    ],
-    ["managed-only rules", { allowManagedPermissionRulesOnly: true }],
-    ["process wrapper", { processWrapper: "/managed/wrapper" }],
-    [
-      "hooks",
-      {
-        hooks: {
-          PreToolUse: [
-            {
-              hooks: [{ type: "command", command: "/managed/hook" }],
-            },
-          ],
-        },
-      },
-    ],
-    ["plugins", { enabledPlugins: { "managed@company": true } }],
-    ["guard override", { disableAllHooks: false }],
-    ["plan writes", { plansDirectory: "/tmp/plans" }],
-    ["dynamic policy", { policyHelper: { path: "/managed/helper" } }],
-  ] as const)(
-    "rejects managed %s that widens authority",
-    (_label, settings) => {
-      expect(() =>
-        assertClaudeManagedPolicyCompatible(resolved(settings)),
-      ).toThrow(/incompatible with administrator-managed Claude settings/i);
-    },
-  );
-
-  it("removes the ambient pre-sandbox process wrapper without mutating input", () => {
-    const ambientEnv = {
-      CLAUDE_CODE_PROCESS_WRAPPER: "/ambient/wrapper --flag",
-      CLAUDE_CODE_MANAGED_SETTINGS_PATH: "/ambient/managed.json",
-      CLAUDE_CODE_PLUGIN_CACHE_DIR: "/ambient/plugins",
-      CLAUDE_CODE_SANDBOXED: "1",
-      CLAUDE_TMPDIR: "/ambient/tmp",
-      NODE_OPTIONS: "--require=/ambient/preload.js",
-      GIT_CONFIG_COUNT: "1",
-      PATH: "/trusted/bin",
-      SAFE: "visible",
-    };
-    const overrides = {
-      PATH: "/repo/bin",
-      NODE_OPTIONS: "--require=/repo/preload.js",
-      SAFE_OVERRIDE: "visible",
-    };
-    expect(claudeContainedProcessEnv(ambientEnv, overrides)).toMatchObject({
-      PATH: "/trusted/bin",
-      SAFE: "visible",
-      SAFE_OVERRIDE: "visible",
-    });
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides)
-        .CLAUDE_CODE_PROCESS_WRAPPER,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides)
-        .CLAUDE_CODE_MANAGED_SETTINGS_PATH,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides)
-        .CLAUDE_CODE_PLUGIN_CACHE_DIR,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).CLAUDE_CODE_SANDBOXED,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).CLAUDE_TMPDIR,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).NODE_OPTIONS,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).GIT_CONFIG_COUNT,
-    ).toBeUndefined();
-    expect(ambientEnv.CLAUDE_CODE_PROCESS_WRAPPER).toBe(
-      "/ambient/wrapper --flag",
-    );
-    expect(overrides.PATH).toBe("/repo/bin");
-  });
-});
 
 interface PermCapture {
   id: string;
@@ -2678,219 +2528,6 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
-  it("proves the host sandbox before admitting an immutable filesystem territory", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const settingsResolver = vi.fn().mockResolvedValue({
-      effective: {},
-      provenance: {},
-      sources: [],
-    });
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
-      sandboxProbe,
-      settingsResolver,
-    });
-    const territory = codeTerritory();
-
-    await adapter.prepareFilesystemTerritory(territory);
-
-    expect(settingsResolver).toHaveBeenCalledWith({
-      cwd: territory.workspaceRoot,
-      settingSources: [],
-    });
-    expect(sandboxProbe).toHaveBeenCalledOnce();
-    expect(sandboxProbe).toHaveBeenCalledWith(process.platform);
-    await adapter.dispose();
-  });
-
-  it("refuses managed Claude settings that weaken the qualified sandbox", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
-      sandboxProbe,
-      settingsResolver: vi.fn().mockResolvedValue({
-        effective: { sandbox: { filesystem: { disabled: true } } },
-        provenance: {},
-        sources: [
-          {
-            source: "managed",
-            settings: { sandbox: { filesystem: { disabled: true } } },
-          },
-        ],
-      }),
-    });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory()),
-    ).rejects.toThrow(/disabled filesystem isolation/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses admission when the host sandbox probe cannot establish containment", async () => {
-    const sandboxProbe = vi
-      .fn()
-      .mockRejectedValue(new Error("namespace creation denied"));
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { sandboxProbe });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory()),
-    ).rejects.toThrow("namespace creation denied");
-    await adapter.dispose();
-  });
-
-  it("refuses a pinned Claude runtime below the built-in Write path-rule floor", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
-      sandboxProbe,
-      runtimeVersionProbe: vi.fn().mockResolvedValue("2.1.227"),
-    });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory()),
-    ).rejects.toThrow(/requires Claude Code >= 2\.1\.228/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses an unqualified custom Claude executable for a Design-bearing session", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { sandboxProbe });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory(), {
-        cliBinary: process.execPath,
-      }),
-    ).rejects.toThrow(/runtime pinned and shipped with this Zeros build/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses admission when the Design path cannot be encoded literally", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { sandboxProbe });
-    const territory = codeTerritory("/tmp/zeros-contained");
-    const unsafeDesign = path.join(territory.workspaceRoot, "Design [draft]");
-    const unsafeTerritory: AgentFilesystemTerritory = {
-      ...territory,
-      designDirectory: unsafeDesign,
-      protectedDesignDirectories: [unsafeDesign],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write",
-        deniedPaths: [
-          unsafeDesign,
-          path.join(territory.workspaceRoot, ".zeros"),
-          path.join(territory.workspaceRoot, ".git"),
-        ],
-      },
-    };
-
-    await expect(
-      adapter.prepareFilesystemTerritory(unsafeTerritory),
-    ).rejects.toThrow(/cannot safely encode this workspace path/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  const containmentRuntimeRequired =
-    process.env.ZEROS_REQUIRE_CONTAINMENT_RUNTIME === "1";
-  (containmentRuntimeRequired ? it : it.skip)(
-    "starts Claude's real OS sandbox primitive on a qualified release host",
-    async () => {
-      await expect(probeClaudeSandboxRuntime()).resolves.toBeUndefined();
-    },
-  );
-
-  it.each([
-    ["default", "default"],
-    ["auto", "auto"],
-    ["bypass", "acceptEdits"],
-  ] as const)(
-    "keeps a Design-bearing code session contained in the %s posture",
-    async (requestedMode, expectedSdkMode) => {
-      const emitted: SessionNotification[] = [];
-      const { queryFn, captured } = makeScriptedQuery([
-        [initMsg("sdk-1"), resultOk("sdk-1")],
-      ]);
-      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
-      const territory = codeTerritory();
-      const { session } = await adapter.newSession({
-        cwd: territory.workspaceRoot,
-        territory,
-      });
-      const modes = session.modes as unknown as {
-        availableModes: Array<{ id: string }>;
-      };
-      expect(modes.availableModes.map((mode) => mode.id)).not.toContain(
-        "bypass",
-      );
-
-      // The control path is also clamped: a stale renderer, persisted chat, or
-      // forged protocol request cannot restore native bypass behind the UI.
-      await adapter.setMode({
-        sessionId: session.sessionId,
-        modeId: requestedMode,
-      });
-      await adapter.prompt({
-        sessionId: session.sessionId,
-        prompt: [textBlock("hi")] as never,
-      });
-
-      const options = captured[0];
-      expect(options.permissionMode).toBe(expectedSdkMode);
-      expect(options.allowDangerouslySkipPermissions).toBeUndefined();
-      expect(options.canUseTool).toBeDefined();
-      expect(options.settingSources).toEqual([]);
-      expect(options.strictMcpConfig).toBe(true);
-      expect(options.mcpServers).toEqual({});
-      expect(options.plugins).toEqual([]);
-      expect(options.sandbox).toMatchObject({
-        enabled: true,
-        failIfUnavailable: true,
-        autoAllowBashIfSandboxed: false,
-        allowUnsandboxedCommands: false,
-        filesystem: {
-          allowWrite: [territory.workspaceRoot],
-          denyWrite: territory.writeCapabilities.deniedPaths,
-        },
-        network: {
-          allowedDomains: ["*"],
-          deniedDomains: ["localhost", "127.0.0.1", "::1"],
-          strictAllowlist: true,
-          allowAllUnixSockets: false,
-          allowLocalBinding: false,
-        },
-      });
-      expect(options.spawnClaudeCodeProcess).toBeTypeOf("function");
-      const settings = options.settings as {
-        disableAllHooks?: boolean;
-        permissions?: { deny?: string[] };
-      };
-      expect(settings.disableAllHooks).toBe(true);
-      expect(settings.permissions?.deny).toEqual(
-        expect.arrayContaining([
-          "Edit(//tmp/zeros-contained/Zeros Design/**)",
-          "Edit(//tmp/zeros-contained/.zeros/**)",
-          "Edit(//tmp/zeros-contained/.git/**)",
-          "Agent",
-          "Workflows",
-          "Artifact",
-          "mcp__*",
-        ]),
-      );
-      if (requestedMode === "bypass") {
-        const update = emitted
-          .filter(
-            (event) => event.update.sessionUpdate === "current_mode_update",
-          )
-          .pop();
-        expect(
-          (update?.update as { currentModeId?: string }).currentModeId,
-        ).toBe("accept-edits");
-      }
-      await adapter.dispose();
-    },
-  );
-
   it("switching to Full Access on a live (flagless) query rebuilds it WITH the flag", async () => {
     // keepAliveAfterResult → the born-default query stays alive after turn 1, so
     // setMode hits a LIVE query built without the creation-only flag.
@@ -3151,6 +2788,80 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("keeps native Code capabilities without installing provider containment", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const additionalRoot = "/tmp/linked-project";
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/zeros-contained",
+      env: {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify([additionalRoot]),
+      },
+      territory: codeTerritory(),
+      // The host boundary owns process lifecycle only. It is deliberately not
+      // a Code filesystem sandbox.
+      executionBoundary: { status: { backend: "none" } } as never,
+    });
+    await adapter.setMode({
+      sessionId: session.sessionId,
+      modeId: "bypass",
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+
+    const settings = captured[0]?.settings as {
+      disableAllHooks?: boolean;
+      permissions?: {
+        additionalDirectories?: string[];
+        deny?: string[];
+      };
+    };
+    expect(settings.permissions?.additionalDirectories).toEqual([
+      additionalRoot,
+    ]);
+    expect(settings.permissions?.deny).toEqual([]);
+    expect(captured[0]?.permissionMode).toBe("bypassPermissions");
+    expect(captured[0]?.allowDangerouslySkipPermissions).toBe(true);
+    expect(captured[0]?.sandbox).toBeUndefined();
+    expect(captured[0]?.settingSources).toEqual(["user", "project", "local"]);
+    expect(settings.disableAllHooks).toBeUndefined();
+    await adapter.dispose();
+  });
+
+  it("does not reject an outer-boundary session when optional Edit denies cannot encode its host paths", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const workspaceRoot = "/tmp/zeros (contained)";
+    const contextRoot = "/tmp/zeros (data)/isolation-context/design/abc123";
+    const { session } = await adapter.newSession({
+      cwd: workspaceRoot,
+      env: {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify([contextRoot]),
+        ZEROS_ISOLATION_CONTEXT_DIRS: JSON.stringify([contextRoot]),
+      },
+      territory: codeTerritory(workspaceRoot),
+      executionBoundary: { status: { backend: "none" } } as never,
+    });
+
+    await expect(
+      adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("hi")] as never,
+      }),
+    ).resolves.toBeDefined();
+    expect(
+      (captured[0]?.settings as { permissions?: { deny?: string[] } })
+        .permissions?.deny,
+    ).toEqual([]);
+    await adapter.dispose();
+  });
+
   it("passes Claude auto-memory as an explicit live-mutable SDK setting", async () => {
     const { queryFn, captured, control } = makeScriptedQuery([
       [initMsg("sdk-1")],
@@ -3182,48 +2893,6 @@ describe("ClaudeSdkAdapter", () => {
         }
       ).autoMemoryEnabled,
     ).toBe(true);
-    await adapter.dispose();
-  });
-
-  it("force-disables auto memory in the provider-native Design fallback", async () => {
-    const { queryFn, captured } = makeScriptedQuery([
-      [initMsg("sdk-1"), resultOk("sdk-1")],
-    ]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/zeros-contained",
-      env: { ZEROS_CLAUDE_AUTO_MEMORY: "1" },
-      territory: codeTerritory(),
-    });
-    await adapter.prompt({
-      sessionId: session.sessionId,
-      prompt: [textBlock("hi")] as never,
-    });
-    expect(
-      (captured[0]?.settings as { autoMemoryEnabled?: boolean })
-        .autoMemoryEnabled,
-    ).toBe(false);
-    await adapter.dispose();
-  });
-
-  it("keeps additional directories out of a Design-contained session", async () => {
-    const { queryFn, captured } = makeScriptedQuery([
-      [initMsg("sdk-1"), resultOk("sdk-1")],
-    ]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/zeros-contained",
-      env: { ZEROS_ADDITIONAL_DIRS: '["/work/api"]' },
-      territory: codeTerritory(),
-    });
-    await adapter.prompt({
-      sessionId: session.sessionId,
-      prompt: [textBlock("hi")] as never,
-    });
-    const settings = captured[0]?.settings as {
-      permissions?: { additionalDirectories?: string[] };
-    };
-    expect(settings.permissions?.additionalDirectories).toEqual([]);
     await adapter.dispose();
   });
 

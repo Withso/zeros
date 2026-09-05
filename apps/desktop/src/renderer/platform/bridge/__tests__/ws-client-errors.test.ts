@@ -5,28 +5,40 @@ import {
   cloudRuntimeWebSocketProtocols,
   describeConnectionRejection,
   isRejectionRetryableAfterEngineRestart,
+  parseInboundBridgeWebSocketFrame,
   parseRuntimeConnectionTarget,
 } from "../ws-client";
+import { setAuthAccessToken } from "../../../features/auth/auth-token";
+
+const RUNTIME_ID = "11111111-1111-4111-8111-111111111111";
+const ORGANIZATION_ID = "22222222-2222-4222-8222-222222222222";
+const WORKSPACE_ID = "33333333-3333-4333-8333-333333333333";
+const ENGINE_INSTANCE_ID = "44444444-4444-4444-8444-444444444444";
+const CLOUD_TOKEN = `zws_${"a".repeat(43)}`;
+
+function cloudTarget(now: number) {
+  return {
+    kind: "cloud" as const,
+    channel: "electron-ssh-tunnel" as const,
+    runtimeId: RUNTIME_ID,
+    organizationId: ORGANIZATION_ID,
+    workspaceId: WORKSPACE_ID,
+    generation: 7,
+    authorityEpoch: 11,
+    engineInstanceId: ENGINE_INSTANCE_ID,
+    connectionSequence: 1,
+    url: "ws://127.0.0.1:54173/ws",
+    cloudToken: CLOUD_TOKEN,
+    expiresAt: now + 60_000,
+  };
+}
 
 describe("qualified cloud runtime connection target", () => {
-  it("uses WSS and a subprotocol bearer, never a token query", () => {
+  it("uses an exact Electron loopback tunnel and a subprotocol bearer", () => {
     const now = 1_800_000_000_000;
-    const target = parseRuntimeConnectionTarget(
-      {
-        kind: "cloud",
-        url: "wss://engine.preview.example/ws",
-        cloudToken: "worker-minted-connection-token",
-        expiresAt: now + 60_000,
-      },
-      now,
-    );
+    const target = parseRuntimeConnectionTarget(cloudTarget(now), now);
     if (target.kind !== "cloud") throw new Error("expected cloud target");
-    expect(target).toEqual({
-      kind: "cloud",
-      url: "wss://engine.preview.example/ws",
-      cloudToken: "worker-minted-connection-token",
-      expiresAt: now + 60_000,
-    });
+    expect(target).toEqual(cloudTarget(now));
     const protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
     expect(protocols[0]).toBe("zeros-v1");
     expect(protocols.join(",")).not.toContain(target.cloudToken);
@@ -35,33 +47,23 @@ describe("qualified cloud runtime connection target", () => {
 
   it.each([
     {
-      kind: "cloud",
+      ...cloudTarget(1_800_000_000_000),
       url: "ws://engine.example/ws",
-      cloudToken: "x".repeat(20),
-      expiresAt: 1_800_000_060_000,
     },
     {
-      kind: "cloud",
-      url: "wss://engine.example/ws?token=leak",
-      cloudToken: "x".repeat(20),
-      expiresAt: 1_800_000_060_000,
+      ...cloudTarget(1_800_000_000_000),
+      url: "ws://127.0.0.1:54173/ws?token=leak",
     },
     {
-      kind: "cloud",
-      url: "wss://engine.example/not-ws",
-      cloudToken: "x".repeat(20),
-      expiresAt: 1_800_000_060_000,
+      ...cloudTarget(1_800_000_000_000),
+      url: "ws://127.0.0.1:54173/not-ws",
     },
     {
-      kind: "cloud",
-      url: "wss://engine.example/ws",
+      ...cloudTarget(1_800_000_000_000),
       cloudToken: "short",
-      expiresAt: 1_800_000_060_000,
     },
     {
-      kind: "cloud",
-      url: "wss://engine.example/ws",
-      cloudToken: "x".repeat(20),
+      ...cloudTarget(1_800_000_000_000),
       expiresAt: 1_799_999_999_999,
     },
   ])("rejects an unsafe or expired target %#", (target) => {
@@ -77,12 +79,7 @@ describe("qualified cloud runtime connection target", () => {
       .spyOn(console, "error")
       .mockImplementation(() => {});
     try {
-      const client = new RuntimeClient({
-        kind: "cloud",
-        url: "wss://engine.preview.example/ws",
-        cloudToken: "worker-minted-connection-token",
-        expiresAt: 1_800_000_060_000,
-      });
+      const client = new RuntimeClient(cloudTarget(1_800_000_000_000));
       const expired: number[] = [];
       client.onConnectionTargetExpired(() => {
         throw new Error("broken observer");
@@ -102,6 +99,79 @@ describe("qualified cloud runtime connection target", () => {
     } finally {
       consoleError.mockRestore();
       vi.useRealTimers();
+    }
+  });
+
+  it("refreshes a consumed descriptor with an exact monotonic session sequence", async () => {
+    const now = Date.now();
+    const first = cloudTarget(now);
+    const refresh = vi.fn(async () => ({
+      ...first,
+      connectionSequence: 2,
+      cloudToken: `zws_${"b".repeat(43)}`,
+      expiresAt: now + 120_000,
+    }));
+    const client = new RuntimeClient(first, {
+      refreshCloudConnectionTarget: refresh,
+    });
+    const internals = client as unknown as {
+      cloudTargetNeedsRefresh: boolean;
+      connectionTarget: unknown;
+      refreshCurrentCloudTarget(): Promise<boolean>;
+    };
+    internals.cloudTargetNeedsRefresh = true;
+
+    await expect(internals.refreshCurrentCloudTarget()).resolves.toBe(true);
+    expect(internals.connectionTarget).toMatchObject({
+      runtimeId: RUNTIME_ID,
+      connectionSequence: 2,
+      cloudToken: `zws_${"b".repeat(43)}`,
+    });
+    expect(refresh).toHaveBeenCalledWith(first);
+    client.dispose();
+  });
+
+  it("rejects a refresh that changes the runtime identity or skips sequence", async () => {
+    const now = Date.now();
+    const first = cloudTarget(now);
+    const client = new RuntimeClient(first, {
+      refreshCloudConnectionTarget: vi.fn(async () => ({
+        ...first,
+        runtimeId: "99999999-9999-4999-8999-999999999999",
+        connectionSequence: 3,
+        expiresAt: now + 120_000,
+      })),
+    });
+    const internals = client as unknown as {
+      refreshCurrentCloudTarget(): Promise<boolean>;
+    };
+
+    await expect(internals.refreshCurrentCloudTarget()).resolves.toBe(false);
+    client.dispose();
+  });
+
+  it("never sends the reusable WorkOS bearer into an admitted cloud engine", () => {
+    setAuthAccessToken("workos-access-token-must-stay-on-mac");
+    try {
+      const client = new RuntimeClient(cloudTarget(Date.now()));
+      const send = vi.fn();
+      const internals = client as unknown as {
+        send: (message: Record<string, unknown>) => void;
+        onTransportOpen(): void;
+      };
+      internals.send = send;
+      internals.onTransportOpen();
+
+      expect(send).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "CONNECTED" }),
+      );
+      expect(send.mock.calls[0]![0]).not.toHaveProperty("authToken");
+      expect(JSON.stringify(send.mock.calls[0]![0])).not.toContain(
+        "workos-access-token-must-stay-on-mac",
+      );
+      client.dispose();
+    } finally {
+      setAuthAccessToken(null);
     }
   });
 });
@@ -144,6 +214,45 @@ describe("RuntimeClient correlated domain errors", () => {
 
     await expect(response).resolves.toBe(message);
     expect(internals.pendingRequests.has("request-1")).toBe(false);
+  });
+});
+
+describe("untrusted WebSocket frame validation", () => {
+  it("accepts a compatible engine envelope while dropping malformed or wrong-direction frames", () => {
+    const compatible = JSON.stringify({
+      id: "engine-ready-1",
+      source: "engine",
+      timestamp: Date.now(),
+      type: "ENGINE_READY",
+      futureEngineField: { tolerated: true },
+    });
+    expect(parseInboundBridgeWebSocketFrame(compatible)).toMatchObject({
+      source: "engine",
+      type: "ENGINE_READY",
+    });
+    expect(parseInboundBridgeWebSocketFrame("{not json")).toBeNull();
+    expect(
+      parseInboundBridgeWebSocketFrame(
+        JSON.stringify({
+          id: "browser-spoof",
+          source: "browser",
+          timestamp: Date.now(),
+          type: "ENGINE_READY",
+        }),
+      ),
+    ).toBeNull();
+    // A newer engine's unrecognised type is deliberately ignored, matching
+    // the old dispatch behavior rather than disconnecting mixed versions.
+    expect(
+      parseInboundBridgeWebSocketFrame(
+        JSON.stringify({
+          id: "future-engine-message",
+          source: "engine",
+          timestamp: Date.now(),
+          type: "FUTURE_ENGINE_MESSAGE",
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

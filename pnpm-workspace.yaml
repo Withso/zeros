@@ -37,24 +37,27 @@ overrides:
   "@hono/node-server": "2.1.0"
   body-parser: "2.3.0"
   fast-uri: "3.1.6"
+  fflate: "0.4.9"
   hono: "4.13.0"
   ip-address: "10.3.1"
   js-yaml: "4.3.1"
   nanoid: "3.3.18"
-  qs: "6.15.2"
+  qs: "6.16.0"
 
-# Accepted advisories — reviewed 2026-08-15. Every entry below is the same
+# Accepted advisories — reviewed 2026-09-04. Every entry below is the same
 # story: the ONLY undici in the production graph is
 #   @cursor/sdk 1.0.28 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
 # (`pnpm audit --prod` / `pnpm why undici`). The fixes land in undici >= 6.24
 # and 6.27 — a different major than connect-node 1.x's declared `^5.28.4`, with
-# no patched 5.x release and no newer SDK to move to (1.0.28 is the latest and
-# pins @connectrpc v1). Forcing undici 6 through an override would run a vendor
-# SDK on an untested major on the agent-run path, a worse trade than the
-# exposure — which is nil in practice: connect-node's only undici import is the
-# `Headers` polyfill in node-headers-polyfill.js, applied ONLY when Node < 18,
-# and the app always runs it on far newer Node (Electron's embedded Node 24 in
-# the packaged app, Node >= 22 in dev). None of the vulnerable undici code —
+# no patched 5.x release. The newer @cursor/sdk 1.0.31 remains on @connectrpc
+# v1 and does not remove this dependency; upgrading that exact-pinned agent
+# runtime is a separate qualification. Forcing undici 6 through an override
+# would run a vendor SDK on an untested major on the agent-run path, a worse
+# trade than the exposure — which is nil in practice: connect-node's only
+# undici import is the `Headers` polyfill in node-headers-polyfill.js, applied
+# ONLY when Node < 18. The app always runs it on far newer Node (Electron's
+# embedded Node 24 in the packaged app, Node >= 22 in dev). None of the
+# vulnerable undici code —
 # WebSocket client, fetch, the HTTP client — ever executes.
 # Drop these entries once `pnpm why undici` shows the production path off 5.x
 # (a future @cursor/sdk on @connectrpc v2 removes undici entirely).

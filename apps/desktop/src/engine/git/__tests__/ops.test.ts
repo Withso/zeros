@@ -13,6 +13,7 @@ import {
   commit,
   createWorkspace,
   getWorkspace,
+  merge,
   pull,
   push,
   rebase,
@@ -21,6 +22,7 @@ import {
   stashPop,
   stashSave,
 } from "..";
+import { designDirectoryNameFor } from "../../design/directory-registry";
 
 const execFileAsync = promisify(execFile);
 
@@ -121,12 +123,13 @@ describe("write ops", () => {
 
   it("refuses a direct code commit when a Design path was staged outside the service", async () => {
     const ws = getWorkspace(workspaceId);
-    const designDir = path.join(ws.path, "Zeros Design");
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
     await mkdir(designDir, { recursive: true });
     await writeFile(path.join(designDir, "rogue.html"), "<main>rogue</main>\n");
     // Simulate a shell/agent bypass of the service's git.stage guard. The
     // commit primitive itself is the final backstop.
-    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+    await execFileAsync("git", ["-C", ws.path, "add", "--", designName]);
     const before = (
       await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
     ).stdout.trim();
@@ -139,7 +142,238 @@ describe("write ops", () => {
       }),
     ).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      remediation: expect.stringMatching(/Save designs/),
+      remediation: expect.stringMatching(/stage and commit/i),
+    });
+    const after = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+    expect(after).toBe(before);
+  });
+
+  it("commits only the staged Code lane while leaving staged Design changes intact", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
+    await mkdir(designDir, { recursive: true });
+    await Promise.all([
+      writeFile(path.join(ws.path, "code.txt"), "code\n"),
+      writeFile(path.join(designDir, ".zeros-canvas.json"), "{}\n"),
+      writeFile(path.join(designDir, "frame.html"), "<main>draft</main>\n"),
+    ]);
+    await execFileAsync("git", ["add", "--", "code.txt", designName], {
+      cwd: ws.path,
+    });
+
+    await expect(
+      commit({ workspaceId, message: "Commit Code lane", authority: "code" }),
+    ).resolves.toMatchObject({ sha: expect.any(String) });
+    const committed = (
+      await execFileAsync(
+        "git",
+        ["show", "--pretty=format:", "--name-only", "HEAD"],
+        { cwd: ws.path },
+      )
+    ).stdout;
+    const stillStaged = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: ws.path,
+      })
+    ).stdout;
+    expect(committed).toContain("code.txt");
+    expect(committed).not.toContain(`${designName}/`);
+    expect(stillStaged).toContain(`${designName}/frame.html`);
+    expect(stillStaged).not.toContain("code.txt");
+  });
+
+  it("commits the Code lane from an unborn HEAD while leaving staged Design changes intact", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designName = designDirectoryNameFor(ws.path);
+    await execFileAsync(
+      "git",
+      ["update-ref", "-d", `refs/heads/${ws.branch}`],
+      { cwd: ws.path },
+    );
+    await mkdir(path.join(ws.path, designName), { recursive: true });
+    await Promise.all([
+      writeFile(path.join(ws.path, "code.txt"), "code\n"),
+      writeFile(path.join(ws.path, designName, ".zeros-canvas.json"), "{}\n"),
+      writeFile(path.join(ws.path, designName, "frame.html"), "<main />\n"),
+    ]);
+    await execFileAsync("git", ["add", "--", "code.txt", designName], {
+      cwd: ws.path,
+    });
+
+    await expect(
+      commit({ workspaceId, message: "Initial Code lane", authority: "code" }),
+    ).resolves.toMatchObject({ sha: expect.any(String) });
+
+    const committed = (
+      await execFileAsync(
+        "git",
+        ["show", "--pretty=format:", "--name-only", "HEAD"],
+        { cwd: ws.path },
+      )
+    ).stdout;
+    const stillStaged = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: ws.path,
+      })
+    ).stdout;
+    expect(committed).toContain("code.txt");
+    expect(committed).not.toContain(`${designName}/`);
+    expect(stillStaged).toContain(`${designName}/frame.html`);
+  });
+
+  it("commits only the staged Design lane while leaving staged Code changes intact", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
+    await mkdir(designDir, { recursive: true });
+    await Promise.all([
+      writeFile(path.join(ws.path, "code.txt"), "code\n"),
+      writeFile(path.join(designDir, ".zeros-canvas.json"), "{}\n"),
+      writeFile(path.join(designDir, "frame.html"), "<main>draft</main>\n"),
+    ]);
+    await execFileAsync("git", ["add", "--", "code.txt", designName], {
+      cwd: ws.path,
+    });
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "Commit Design lane",
+        authority: "design",
+      }),
+    ).resolves.toMatchObject({ sha: expect.any(String) });
+    const committed = (
+      await execFileAsync(
+        "git",
+        ["show", "--pretty=format:", "--name-only", "HEAD"],
+        { cwd: ws.path },
+      )
+    ).stdout;
+    const stillStaged = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: ws.path,
+      })
+    ).stdout;
+    expect(committed).toContain(`${designName}/frame.html`);
+    expect(committed).not.toContain("code.txt");
+    expect(stillStaged).toContain("code.txt");
+    expect(stillStaged).not.toContain(`${designName}/`);
+  });
+
+  it("refuses to amend a Design checkpoint through Code authority", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
+    await mkdir(designDir, { recursive: true });
+    await writeFile(
+      path.join(designDir, "frame.html"),
+      "<main>checkpoint</main>\n",
+    );
+    await execFileAsync("git", ["add", "--", designName], {
+      cwd: ws.path,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "Design checkpoint"], {
+      cwd: ws.path,
+    });
+    await writeFile(path.join(ws.path, "code.txt"), "code\n");
+    await execFileAsync("git", ["add", "--", "code.txt"], { cwd: ws.path });
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "Do not fold Code into Design",
+        amend: true,
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/Design checkpoint/i),
+    });
+  });
+
+  it("preserves the original author identity when Code authority amends", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, "authored.txt"), "first\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "authored.txt"]);
+    await execFileAsync(
+      "git",
+      ["-C", ws.path, "commit", "-q", "-m", "authored"],
+      {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "Original Author",
+          GIT_AUTHOR_EMAIL: "original@example.test",
+        },
+      },
+    );
+    await writeFile(path.join(ws.path, "authored.txt"), "amended\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "authored.txt"]);
+
+    await commit({
+      workspaceId,
+      message: "amended",
+      amend: true,
+      authority: "code",
+    });
+
+    const author = (
+      await execFileAsync("git", [
+        "-C",
+        ws.path,
+        "show",
+        "-s",
+        "--format=%an <%ae>",
+        "HEAD",
+      ])
+    ).stdout.trim();
+    expect(author).toBe("Original Author <original@example.test>");
+  });
+
+  it("refuses a normal commit while an explicit Git continuation is required", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, "code.txt"), "code\n");
+    await execFileAsync("git", ["add", "--", "code.txt"], { cwd: ws.path });
+    const head = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: ws.path })
+    ).stdout.trim();
+    const mergeHead = (
+      await execFileAsync("git", ["rev-parse", "--git-path", "MERGE_HEAD"], {
+        cwd: ws.path,
+      })
+    ).stdout.trim();
+    await writeFile(path.resolve(ws.path, mergeHead), `${head}\n`);
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "bypass continuation",
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({ code: "MERGE_IN_PROGRESS" });
+  });
+
+  it("defaults internal commit callers to code authority instead of bypassing Design protection", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
+    await mkdir(designDir, { recursive: true });
+    await writeFile(path.join(designDir, "rogue.html"), "<main>rogue</main>\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "--", designName]);
+    const before = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "implicit authority bypass",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/stage and commit/i),
     });
     const after = (
       await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
@@ -149,10 +383,11 @@ describe("write ops", () => {
 
   it("treats an empty code pathspec as an ordinary commit and still blocks staged Design paths", async () => {
     const ws = getWorkspace(workspaceId);
-    const designDir = path.join(ws.path, "Zeros Design");
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
     await mkdir(designDir, { recursive: true });
     await writeFile(path.join(designDir, "rogue.html"), "<main>rogue</main>\n");
-    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+    await execFileAsync("git", ["-C", ws.path, "add", "--", designName]);
 
     await expect(
       commit({
@@ -163,7 +398,7 @@ describe("write ops", () => {
       }),
     ).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      remediation: expect.stringMatching(/Save designs/),
+      remediation: expect.stringMatching(/stage and commit/i),
     });
   });
 
@@ -196,7 +431,10 @@ describe("write ops", () => {
     const nestedDesign = path.join(ws.path, "apps", "web", "canvas");
     await mkdir(nestedDesign, { recursive: true });
     await writeFile(path.join(nestedDesign, ".zeros-canvas.json"), "{}\n");
-    await writeFile(path.join(nestedDesign, "frame.html"), "<main>frame</main>\n");
+    await writeFile(
+      path.join(nestedDesign, "frame.html"),
+      "<main>frame</main>\n",
+    );
     await execFileAsync("git", ["-C", ws.path, "add", "--", "apps"]);
     const before = (
       await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
@@ -211,7 +449,7 @@ describe("write ops", () => {
       }),
     ).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      remediation: expect.stringMatching(/Save designs/),
+      remediation: expect.stringMatching(/stage and commit/i),
     });
     const after = (
       await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
@@ -221,10 +459,11 @@ describe("write ops", () => {
 
   it("blocks the Design source of a staged rename out of the active directory", async () => {
     const ws = getWorkspace(workspaceId);
-    const designDir = path.join(ws.path, "Zeros Design");
+    const designName = designDirectoryNameFor(ws.path);
+    const designDir = path.join(ws.path, designName);
     await mkdir(designDir, { recursive: true });
     await writeFile(path.join(designDir, "frame.html"), "<main>frame</main>\n");
-    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+    await execFileAsync("git", ["-C", ws.path, "add", "--", designName]);
     await execFileAsync("git", [
       "-C",
       ws.path,
@@ -237,7 +476,7 @@ describe("write ops", () => {
       "-C",
       ws.path,
       "mv",
-      "Zeros Design/frame.html",
+      `${designName}/frame.html`,
       "escaped-frame.html",
     ]);
 
@@ -249,7 +488,7 @@ describe("write ops", () => {
       }),
     ).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      remediation: expect.stringMatching(/Save designs/),
+      remediation: expect.stringMatching(/stage and commit/i),
     });
   });
 
@@ -278,7 +517,7 @@ describe("write ops", () => {
       }),
     ).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      remediation: expect.stringMatching(/Save designs/),
+      remediation: expect.stringMatching(/stage and commit/i),
     });
   });
 
@@ -298,6 +537,33 @@ describe("write ops", () => {
       `branch.${ws.branch}.remote`,
     ]);
     expect(stdout.trim()).toBe("origin");
+  });
+
+  it("pushes the branch actually checked out by an unrestricted native Git command", async () => {
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["checkout", "-q", "-b", "manual-current"], {
+      cwd: ws.path,
+    });
+    await writeFile(path.join(ws.path, "manual.txt"), "manual\n");
+    await execFileAsync("git", ["add", "--", "manual.txt"], { cwd: ws.path });
+    await execFileAsync("git", ["commit", "-q", "-m", "manual branch"], {
+      cwd: ws.path,
+    });
+
+    await expect(push({ workspaceId })).resolves.toMatchObject({
+      remoteRef: "origin/manual-current",
+    });
+    const remoteBranch = (
+      await execFileAsync(
+        "git",
+        ["--git-dir", bareRemote, "rev-parse", "refs/heads/manual-current"],
+        { cwd: workdir },
+      )
+    ).stdout.trim();
+    const localHead = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: ws.path })
+    ).stdout.trim();
+    expect(remoteBranch).toBe(localHead);
   });
 
   it("pull --rebase when behind main with no conflicts → fast-forwards", async () => {
@@ -344,6 +610,158 @@ describe("write ops", () => {
     expect(b).toBe("b\n");
   });
 
+  it("pulls code-only commits while an untracked Design draft stays live", async () => {
+    const ws = getWorkspace(workspaceId);
+    await push({ workspaceId });
+    await mkdir(path.join(ws.path, "Zeros Design"), { recursive: true });
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>local draft</main>\n");
+
+    const teammate = path.join(workdir, "teammate-code-only");
+    await execFileAsync("git", ["clone", "-q", bareRemote, teammate]);
+    await execFileAsync("git", [
+      "-C",
+      teammate,
+      "config",
+      "user.email",
+      "t2@t",
+    ]);
+    await execFileAsync("git", ["-C", teammate, "config", "user.name", "t2"]);
+    await execFileAsync("git", ["-C", teammate, "checkout", "-q", ws.branch]);
+    await writeFile(path.join(teammate, "code-only.txt"), "code\n");
+    await execFileAsync("git", ["-C", teammate, "add", "code-only.txt"]);
+    await execFileAsync("git", [
+      "-C",
+      teammate,
+      "commit",
+      "-q",
+      "-m",
+      "code only",
+    ]);
+    await execFileAsync("git", ["-C", teammate, "push", "-q"]);
+
+    await expect(
+      pull({ workspaceId, strategy: "rebase" }),
+    ).resolves.toMatchObject({ conflicts: [] });
+    await expect(readFile(draft, "utf8")).resolves.toBe(
+      "<main>local draft</main>\n",
+    );
+    await expect(
+      readFile(path.join(ws.path, "code-only.txt"), "utf8"),
+    ).resolves.toBe("code\n");
+  });
+
+  it("refuses an incoming Design commit before it can overwrite an untracked draft", async () => {
+    const ws = getWorkspace(workspaceId);
+    await push({ workspaceId });
+    await mkdir(path.join(ws.path, "Zeros Design"), { recursive: true });
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>local draft</main>\n");
+    const headBefore = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+
+    const teammate = path.join(workdir, "teammate-design-untracked");
+    await execFileAsync("git", ["clone", "-q", bareRemote, teammate]);
+    await execFileAsync("git", [
+      "-C",
+      teammate,
+      "config",
+      "user.email",
+      "t2@t",
+    ]);
+    await execFileAsync("git", ["-C", teammate, "config", "user.name", "t2"]);
+    await execFileAsync("git", ["-C", teammate, "checkout", "-q", ws.branch]);
+    await mkdir(path.join(teammate, "Zeros Design"), { recursive: true });
+    await writeFile(
+      path.join(teammate, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await writeFile(
+      path.join(teammate, "Zeros Design", "draft.html"),
+      "<main>remote design</main>\n",
+    );
+    await execFileAsync("git", ["-C", teammate, "add", "Zeros Design"]);
+    await execFileAsync("git", [
+      "-C",
+      teammate,
+      "commit",
+      "-q",
+      "-m",
+      "design",
+    ]);
+    await execFileAsync("git", ["-C", teammate, "push", "-q"]);
+
+    await expect(
+      pull({ workspaceId, strategy: "rebase" }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/commit.*Design|Design.*commit/i),
+    });
+    await expect(readFile(draft, "utf8")).resolves.toBe(
+      "<main>local draft</main>\n",
+    );
+    await expect(
+      execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"]),
+    ).resolves.toMatchObject({ stdout: `${headBefore}\n` });
+  });
+
+  it("refuses an incoming Design commit before Git can silently overwrite an ignored draft", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, ".gitignore"), "Zeros Design/\n");
+    await execFileAsync("git", ["-C", ws.path, "add", ".gitignore"]);
+    await execFileAsync("git", [
+      "-C",
+      ws.path,
+      "commit",
+      "-q",
+      "-m",
+      "ignore draft",
+    ]);
+    await push({ workspaceId });
+    await mkdir(path.join(ws.path, "Zeros Design"), { recursive: true });
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>ignored local draft</main>\n");
+
+    const teammate = path.join(workdir, "teammate-design-ignored");
+    await execFileAsync("git", ["clone", "-q", bareRemote, teammate]);
+    await execFileAsync("git", [
+      "-C",
+      teammate,
+      "config",
+      "user.email",
+      "t2@t",
+    ]);
+    await execFileAsync("git", ["-C", teammate, "config", "user.name", "t2"]);
+    await execFileAsync("git", ["-C", teammate, "checkout", "-q", ws.branch]);
+    await mkdir(path.join(teammate, "Zeros Design"), { recursive: true });
+    await writeFile(
+      path.join(teammate, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await writeFile(
+      path.join(teammate, "Zeros Design", "draft.html"),
+      "<main>remote design</main>\n",
+    );
+    await execFileAsync("git", ["-C", teammate, "add", "-f", "Zeros Design"]);
+    await execFileAsync("git", [
+      "-C",
+      teammate,
+      "commit",
+      "-q",
+      "-m",
+      "design",
+    ]);
+    await execFileAsync("git", ["-C", teammate, "push", "-q"]);
+
+    await expect(
+      pull({ workspaceId, strategy: "merge" }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(readFile(draft, "utf8")).resolves.toBe(
+      "<main>ignored local draft</main>\n",
+    );
+  });
+
   it("rebase onto main with uncommitted changes + autoStash=true succeeds", async () => {
     const ws = getWorkspace(workspaceId);
     // Add a commit to the root repo's main so the workspace branch
@@ -374,6 +792,117 @@ describe("write ops", () => {
     // The main update should now be in the worktree.
     const mainNew = await readFile(path.join(ws.path, "main-new.txt"), "utf8");
     expect(mainNew).toBe("main\n");
+  });
+
+  it("refuses rebase before it can overwrite an ignored live Design draft", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, ".gitignore"), "Zeros Design/\n");
+    await execFileAsync("git", ["add", ".gitignore"], { cwd: ws.path });
+    await execFileAsync("git", ["commit", "-q", "-m", "ignore design"], {
+      cwd: ws.path,
+    });
+    await mkdir(path.join(ws.path, "Zeros Design"), { recursive: true });
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>local ignored draft</main>\n");
+
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", "draft.html"),
+      "<main>target design</main>\n",
+    );
+    await execFileAsync("git", ["add", "Zeros Design"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "target design"], {
+      cwd: repoRoot,
+    });
+
+    await expect(
+      rebase({ workspaceId, ontoBranch: "main" }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(readFile(draft, "utf8")).resolves.toBe(
+      "<main>local ignored draft</main>\n",
+    );
+  });
+
+  it("refuses rebase before committed Design revisions can conflict", async () => {
+    const ws = getWorkspace(workspaceId);
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      ),
+      writeFile(
+        path.join(repoRoot, "Zeros Design", "draft.html"),
+        "<main>base</main>\n",
+      ),
+    ]);
+    await execFileAsync("git", ["add", "Zeros Design"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "design base"], {
+      cwd: repoRoot,
+    });
+    await merge({ workspaceId, branch: "main" });
+
+    await writeFile(
+      path.join(repoRoot, "Zeros Design", "draft.html"),
+      "<main>target</main>\n",
+    );
+    await execFileAsync("git", ["commit", "-aqm", "target design"], {
+      cwd: repoRoot,
+    });
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>local</main>\n");
+    await execFileAsync("git", ["commit", "-aqm", "local design"], {
+      cwd: ws.path,
+    });
+
+    await expect(
+      rebase({ workspaceId, ontoBranch: "main" }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/Design.*conflict/i),
+    });
+    await expect(readFile(draft, "utf8")).resolves.toBe("<main>local</main>\n");
+  });
+
+  it("refuses Git autostash while a live Design draft is dirty", async () => {
+    const ws = getWorkspace(workspaceId);
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      ),
+      writeFile(
+        path.join(repoRoot, "Zeros Design", "draft.html"),
+        "<main>baseline</main>\n",
+      ),
+    ]);
+    await execFileAsync("git", ["add", "Zeros Design"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "design baseline"], {
+      cwd: repoRoot,
+    });
+    await merge({ workspaceId, branch: "main" });
+
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>live draft</main>\n");
+    await writeFile(path.join(repoRoot, "code-after-design.txt"), "code\n");
+    await execFileAsync("git", ["add", "code-after-design.txt"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "code update"], {
+      cwd: repoRoot,
+    });
+
+    await expect(
+      rebase({ workspaceId, ontoBranch: "main", autoStash: true }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(readFile(draft, "utf8")).resolves.toBe(
+      "<main>live draft</main>\n",
+    );
   });
 
   it("change target branch + rebase=true updates DB", async () => {
@@ -445,5 +974,52 @@ describe("write ops", () => {
     expect(pop.conflicts).toEqual([]);
     const restored = await readFile(path.join(ws.path, "README.md"), "utf8");
     expect(restored).toBe("# saved\n");
+  });
+
+  it("stashes only Code work and leaves the live Design draft in place", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designDir = path.join(ws.path, designDirectoryNameFor(ws.path));
+    await mkdir(designDir, { recursive: true });
+    const designDraft = path.join(designDir, "draft.html");
+    await writeFile(designDraft, "<main>live design</main>\n");
+    await writeFile(path.join(ws.path, "README.md"), "# code work\n");
+
+    const save = await stashSave({ workspaceId, message: "code only" });
+    await expect(readFile(designDraft, "utf8")).resolves.toBe(
+      "<main>live design</main>\n",
+    );
+    await expect(
+      readFile(path.join(ws.path, "README.md"), "utf8"),
+    ).resolves.toBe("# initial\n");
+
+    await stashPop({ workspaceId, stashRef: save.stashRef });
+    await expect(
+      readFile(path.join(ws.path, "README.md"), "utf8"),
+    ).resolves.toBe("# code work\n");
+    await expect(readFile(designDraft, "utf8")).resolves.toBe(
+      "<main>live design</main>\n",
+    );
+  });
+
+  it("does not return an older stash when only Design work is present", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, "README.md"), "# first code stash\n");
+    const existing = await stashSave({ workspaceId, message: "existing" });
+    const designDir = path.join(ws.path, designDirectoryNameFor(ws.path));
+    await mkdir(designDir, { recursive: true });
+    await writeFile(
+      path.join(designDir, "draft.html"),
+      "<main>only design</main>\n",
+    );
+
+    await expect(
+      stashSave({ workspaceId, message: "design only" }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+    });
+    const latest = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "stash@{0}"])
+    ).stdout.trim();
+    expect(latest).toBe(existing.stashRef);
   });
 });

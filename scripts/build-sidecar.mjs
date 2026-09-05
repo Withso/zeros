@@ -56,6 +56,8 @@ const binariesDir = resolve(repoRoot, "binaries");
 mkdirSync(binariesDir, { recursive: true });
 
 const outfile = resolve(binariesDir, `zeros-engine-${mapping.rustTriple}`);
+const cloudWorkspacesEnabled =
+  process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true";
 
 // NOT .join(" ") into a shell. `entry` and `outfile` are absolute paths derived
 // from the checkout location, so a repo cloned to a path containing a space
@@ -68,6 +70,8 @@ const cmdArgs = [
   entry,
   "--compile",
   `--target=${mapping.bunTarget}`,
+  "--define",
+  `__ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__=${JSON.stringify(cloudWorkspacesEnabled)}`,
   "--outfile",
   outfile,
 ];

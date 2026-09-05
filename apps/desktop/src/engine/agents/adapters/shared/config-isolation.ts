@@ -41,6 +41,8 @@ export const ENGINE_AUTHORITY_ENV_VARS = [
   "ZEROS_LOCAL_WS_TOKEN",
   "ZEROS_CLOUD_TOKEN",
   "ZEROS_CLOUD_PORT",
+  "ZEROS_CLOUD_RUNTIME_B64",
+  "ZEROS_CLOUD_SETUP_BOOT",
   "ZEROS_CONTROL_FD",
   "ZEROS_SECRETS_FILE",
   "ZEROS_DATA_DIR",
@@ -67,6 +69,7 @@ export const ENGINE_AUTHORITY_ENV_VARS = [
 function isEngineAuthorityEnvName(name: string): boolean {
   return (
     (ENGINE_AUTHORITY_ENV_VARS as readonly string[]).includes(name) ||
+    name.startsWith("ZEROS_HOST_SUPERVISOR_") ||
     name.startsWith("ZEROS_ZSR_") ||
     /^CONDUCTOR_.*(?:TOKEN|SECRET|AUTH|CREDENTIAL|COOKIE|PRIVATE_KEY)$/.test(
       name,

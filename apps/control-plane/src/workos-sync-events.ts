@@ -11,6 +11,13 @@ import type {
   WorkOSManagementEvent,
   WorkOSManagementProvider,
 } from "./workos-provider.js";
+import {
+  resolveWorkOSProviderLockKeys,
+  withWorkOSProviderLocks,
+  workOSProviderErasureFenceStatus,
+  type WorkOSProviderSubject,
+} from "./workos-provider-locks.js";
+import { HttpError } from "./authz.js";
 
 export const WORKOS_SYNC_EVENT_NAMES = [
   "user.created",
@@ -147,18 +154,16 @@ export function normalizeWorkOSManagementEvent(
     createdAt: value.createdAt,
     data: parsed as unknown as Record<string, unknown>,
     objectId: parsed.id,
-    organizationId:
-      value.event.startsWith("organization.")
-        ? parsed.id
-        : typeof membership === "string"
-          ? membership
-          : null,
-    userId:
-      value.event.startsWith("user.")
-        ? parsed.id
-        : typeof userId === "string"
-          ? userId
-          : null,
+    organizationId: value.event.startsWith("organization.")
+      ? parsed.id
+      : typeof membership === "string"
+        ? membership
+        : null,
+    userId: value.event.startsWith("user.")
+      ? parsed.id
+      : typeof userId === "string"
+        ? userId
+        : null,
   };
 }
 
@@ -178,7 +183,10 @@ async function finishInbox(
   return { status: state };
 }
 
-async function applyUserEvent(tx: Tx, event: NormalizedEvent): Promise<InboxState> {
+async function applyUserEvent(
+  tx: Tx,
+  event: NormalizedEvent,
+): Promise<InboxState> {
   if (event.event === "user.created") return "ignored";
   const user = UserData.parse(event.data);
   const identityEvent: WorkOSIdentityEvent = {
@@ -284,6 +292,24 @@ async function linkedOrganization(
   state: string;
   lastProviderEventAt: Date | null;
 } | null> {
+  const normalizedExternalId =
+    externalId && Uuid.safeParse(externalId).success ? externalId : null;
+  const discovered = await tx.query<{ organization_id: string }>(
+    `SELECT organization_id
+     FROM workos_organization_links
+     WHERE workos_organization_id = $1
+        OR ($2::uuid IS NOT NULL AND external_id = $2::text)
+     ORDER BY workos_organization_id = $1 DESC
+     LIMIT 1`,
+    [providerId, normalizedExternalId],
+  );
+  const organizationId = discovered.rows[0]?.organization_id;
+  if (!organizationId) return null;
+  const organization = await tx.query(
+    `SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (!organization.rows[0]) return null;
   const link = await tx.query<{
     organization_id: string;
     state: string;
@@ -291,12 +317,13 @@ async function linkedOrganization(
   }>(
     `SELECT organization_id, state, last_provider_event_at
      FROM workos_organization_links
-     WHERE workos_organization_id = $1
-        OR ($2::uuid IS NOT NULL AND external_id = $2::text)
+     WHERE organization_id = $3
+       AND (workos_organization_id = $1
+         OR ($2::uuid IS NOT NULL AND external_id = $2::text))
      ORDER BY workos_organization_id = $1 DESC
      LIMIT 1
      FOR UPDATE`,
-    [providerId, externalId && Uuid.safeParse(externalId).success ? externalId : null],
+    [providerId, normalizedExternalId, organizationId],
   );
   return link.rows[0]
     ? {
@@ -398,8 +425,7 @@ async function applyOrganizationEvent(
     [link.organizationId],
   );
   const changed =
-    current.rows[0] !== undefined &&
-    current.rows[0].name !== organization.name;
+    current.rows[0] !== undefined && current.rows[0].name !== organization.name;
   const updated = changed
     ? await tx.query<{ data_revision: string | number }>(
         `UPDATE organizations
@@ -451,11 +477,7 @@ async function removeLocalMembership(
          OR workos_membership_id = $3
        )
      RETURNING user_id`,
-    [
-      input.organizationId,
-      input.userId,
-      input.workosMembershipId ?? null,
-    ],
+    [input.organizationId, input.userId, input.workosMembershipId ?? null],
   );
   if (!removed.rows[0]) return;
   const revision = await tx.query<{ authorization_revision: string | number }>(
@@ -493,13 +515,9 @@ async function applyMembershipEvent(
   const membership = MembershipData.parse(event.data);
   const role = Role.safeParse(membership.role.slug);
   if (!role.success) return "quarantined";
-  const link = await tx.query<{ organization_id: string; state: string }>(
-    `SELECT organization_id, state FROM workos_organization_links
-     WHERE workos_organization_id = $1 FOR UPDATE`,
-    [membership.organizationId],
-  );
-  const organizationId = link.rows[0]?.organization_id ?? null;
-  if (!organizationId) return "ignored";
+  const link = await linkedOrganization(tx, membership.organizationId, null);
+  const organizationId = link?.organizationId ?? null;
+  if (!organizationId || !link) return "ignored";
   const identity = await tx.query<{ user_id: string }>(
     `SELECT ui.user_id
      FROM user_identities ui
@@ -569,7 +587,7 @@ async function applyMembershipEvent(
   );
   if (desiredStatePending.rows[0]) return "applied";
 
-  if (status !== "active" || link.rows[0]?.state !== "active") {
+  if (status !== "active" || link.state !== "active") {
     await removeLocalMembership(tx, {
       organizationId,
       userId,
@@ -634,7 +652,9 @@ async function applyMembershipEvent(
     [organizationId, userId, role.data],
   );
   if (changed) {
-    const revision = await tx.query<{ authorization_revision: string | number }>(
+    const revision = await tx.query<{
+      authorization_revision: string | number;
+    }>(
       `UPDATE organizations
        SET authorization_revision = authorization_revision + 1
        WHERE id = $1 RETURNING authorization_revision`,
@@ -774,6 +794,35 @@ async function applyNormalizedEvent(
   return applyInvitationEvent(tx, event);
 }
 
+function providerSubjects(event: NormalizedEvent): WorkOSProviderSubject[] {
+  return [
+    ...(event.userId ? [{ kind: "user" as const, id: event.userId }] : []),
+    ...(event.organizationId
+      ? [{ kind: "organization" as const, id: event.organizationId }]
+      : []),
+  ];
+}
+
+async function recordErasureFencedEvent(
+  tx: Tx,
+  event: NormalizedEvent,
+  source: "webhook" | "events_api",
+): Promise<{ status: InboxState | "duplicate" }> {
+  const inserted = await tx.query(
+    `INSERT INTO workos_event_inbox (
+       event_id, event_type, event_created_at, source, data, state,
+       attempt_count, last_error_code, processed_at
+     ) VALUES (
+       $1, $2, $3, $4, '{}'::jsonb, 'ignored', 1,
+       'target_erasure_fenced', now()
+     )
+     ON CONFLICT (event_id) DO NOTHING
+     RETURNING event_id`,
+    [event.id, event.event, event.createdAt, source],
+  );
+  return inserted.rows[0] ? { status: "ignored" } : { status: "duplicate" };
+}
+
 export async function ingestWorkOSManagementEvent(
   pool: pg.Pool,
   input: WorkOSManagementEvent,
@@ -806,27 +855,51 @@ export async function ingestWorkOSManagementEvent(
         : { status: "duplicate" as const };
     });
   }
-  return withSystemTx(pool, async (tx) => {
-    const inserted = await tx.query(
-      `INSERT INTO workos_event_inbox (
-         event_id, event_type, event_created_at, source, object_id,
-         workos_organization_id, workos_user_id, data
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-       ON CONFLICT (event_id) DO NOTHING
-       RETURNING event_id`,
-      [
-        event.id,
-        event.event,
-        event.createdAt,
-        source,
-        event.objectId,
-        event.organizationId,
-        event.userId,
-        JSON.stringify(event.data),
-      ],
-    );
-    if (!inserted.rows[0]) return { status: "duplicate" as const };
-    try {
+  const subjects = providerSubjects(event);
+  const organizationExternalIds = event.event.startsWith("organization.")
+    ? [OrganizationData.parse(event.data).externalId].filter(
+        (value): value is string => value !== null,
+      )
+    : [];
+  const lockKeys = await resolveWorkOSProviderLockKeys(pool, {
+    userIds: event.userId ? [event.userId] : [],
+    organizationIds: event.organizationId ? [event.organizationId] : [],
+    organizationExternalIds,
+  });
+  return withWorkOSProviderLocks(pool, lockKeys, () =>
+    withSystemTx(pool, async (tx) => {
+      const fenceStatus = await workOSProviderErasureFenceStatus(tx, subjects);
+      if (fenceStatus === "not_ready") {
+        throw new HttpError(
+          503,
+          "workos_provider_erasure_reconciliation_pending",
+          "WorkOS event ingestion is temporarily unavailable.",
+        );
+      }
+      if (fenceStatus === "fenced") {
+        return recordErasureFencedEvent(tx, event, source);
+      }
+      const inserted = await tx.query(
+        `INSERT INTO workos_event_inbox (
+           event_id, event_type, event_created_at, source, object_id,
+           workos_organization_id, workos_user_id, data
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         ON CONFLICT (event_id) DO NOTHING
+         RETURNING event_id`,
+        [
+          event.id,
+          event.event,
+          event.createdAt,
+          source,
+          event.objectId,
+          event.organizationId,
+          event.userId,
+          JSON.stringify(event.data),
+        ],
+      );
+      if (!inserted.rows[0]) return { status: "duplicate" as const };
+      // A thrown error rolls the transaction back so Events API reconciliation
+      // can retry without advancing its cursor. Never persist raw errors.
       const state = await applyNormalizedEvent(tx, event);
       return finishInbox(
         tx,
@@ -834,12 +907,8 @@ export async function ingestWorkOSManagementEvent(
         state,
         state === "quarantined" ? "unsupported_role" : null,
       );
-    } catch (error) {
-      // The transaction intentionally rolls back so Events API reconciliation
-      // can retry without advancing its cursor. Never persist raw errors.
-      throw error;
-    }
-  });
+    }),
+  );
 }
 
 /** Materialize SCIM/SSO membership projections that arrived before a user's
@@ -928,7 +997,9 @@ export class WorkOSEventsReconciler {
         "events_api",
       );
       if (result.status === "invalid") {
-        throw new Error("WorkOS Events API returned an invalid subscribed event");
+        throw new Error(
+          "WorkOS Events API returned an invalid subscribed event",
+        );
       }
       await withSystemTx(this.pool, (tx) =>
         tx.query(
@@ -1011,7 +1082,18 @@ export function createWorkOSManagementEventRoutes(
     ) {
       return webhookJson({ accepted: true, ignored: true }, 200);
     }
-    const result = await ingestWorkOSManagementEvent(pool, event, "webhook");
+    let result: Awaited<ReturnType<typeof ingestWorkOSManagementEvent>>;
+    try {
+      result = await ingestWorkOSManagementEvent(pool, event, "webhook");
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        error.code === "workos_provider_erasure_reconciliation_pending"
+      ) {
+        return webhookJson({ error: error.code }, 503);
+      }
+      throw error;
+    }
     if (result.status === "invalid") {
       return webhookJson({ error: "invalid_event" }, 400);
     }

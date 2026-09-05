@@ -14,6 +14,11 @@ import { runMigrations } from "./migrate.js";
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
 
+/** PostgreSQL identifiers cannot be query parameters. Escape the catalog-owned
+ * current_user value so this test also works with hosted principals containing
+ * characters such as `-`, without treating it as executable SQL. */
+const quoteIdentifier = (value: string) => `"${value.replaceAll('"', '""')}"`;
+
 d("owner-managed staff roles", () => {
   let pool: pg.Pool;
 
@@ -235,9 +240,7 @@ d("owner-managed staff roles", () => {
       `SELECT current_user AS principal`,
     );
     const originalOwner = current.rows[0]!.principal;
-    if (!/^[a-z_][a-z0-9_]*$/i.test(originalOwner)) {
-      throw new Error("Test database owner is not a safe SQL identifier");
-    }
+    const quotedOriginalOwner = quoteIdentifier(originalOwner);
     const migrationOwner = `staff_owner_${suffix.slice(0, 16)}`;
     const migrationPassword = `owner_${suffix.slice(16, 40)}`;
     // Both identifiers and the test-only password are bounded to randomUUID()
@@ -312,9 +315,9 @@ d("owner-managed staff roles", () => {
       });
     } finally {
       await ownerPool.end();
-      await pool.query(`ALTER TABLE users OWNER TO ${originalOwner}`);
+      await pool.query(`ALTER TABLE users OWNER TO ${quotedOriginalOwner}`);
       await pool.query(
-        `ALTER TABLE staff_role_changes OWNER TO ${originalOwner}`,
+        `ALTER TABLE staff_role_changes OWNER TO ${quotedOriginalOwner}`,
       );
       await pool.query(`DROP OWNED BY ${migrationOwner}`);
       await pool.query(`DROP ROLE ${migrationOwner}`);

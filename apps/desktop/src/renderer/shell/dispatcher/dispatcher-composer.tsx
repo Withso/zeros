@@ -16,10 +16,23 @@
 //
 // Empty composer → Create still works: the parent creates the workspace on the
 // chosen agent/model with no first turn. Non-empty → seed + auto-send.
+//
+// Design mode (the page's Code/Design toggle): a design workspace takes no
+// agent prompt, so the editor, pills and attachment menu step aside — hidden
+// and inert, NOT unmounted, so a typed prompt survives a round trip through
+// the toggle — and a summary of what Design entry will do to the repository
+// takes the editor's place. "Create" (button or ↵) then runs the parent's
+// design create instead of the prompt create.
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useRef, useState } from "react";
-import { CornerDownLeft, FolderInput, Paperclip, Plus } from "lucide-react";
+import {
+  CornerDownLeft,
+  FolderInput,
+  Paperclip,
+  PenTool,
+  Plus,
+} from "lucide-react";
 
 import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -57,11 +70,45 @@ import { AddedDirectories } from "../../features/agent/added-directories";
 import { WorkspaceDirectoryPicker } from "../../features/agent/workspace-directory-picker";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type { ChatEffort, ChatPermissionMode } from "../../state/store";
+import type { DesignDirectoryTarget } from "../../state/design-directory-target";
+import type { WorkspaceMode } from "../../shared/ui/workspace-mode-header";
 import {
   AgentModelPicker,
   type AgentModelSelection,
 } from "./agent-model-picker";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+
+/** What the page knows about creating a DESIGN workspace for the selected
+ *  repository — the composer only presents it. */
+export interface DispatcherDesignCreate {
+  /** Selected repository's display name, for the summary copy. */
+  projectName: string | null;
+  /** The engine's entry preview: undefined while unknown, null when the engine
+   *  could not preview, else the folder and whether it already exists. */
+  target: DesignDirectoryTarget | null | undefined;
+  loading: boolean;
+  /** Create pressed while in Design mode. */
+  onCreate: () => void;
+}
+
+/** The sentence the Design summary shows for an entry preview. Pure, so the
+ *  copy has a test without a React tree. */
+export function designCreateSummary(
+  design: Pick<DispatcherDesignCreate, "target" | "loading">,
+): string {
+  const { target, loading } = design;
+  if (target === undefined) {
+    return loading
+      ? "Checking this repository's design folder…"
+      : "Opens on the design canvas. The design folder is resolved when the workspace is created.";
+  }
+  if (target === null) {
+    return "Opens on the design canvas. The design folder is resolved when the workspace is created.";
+  }
+  return target.exists
+    ? `Opens the design folder “${target.directory}” on the canvas.`
+    : `Creates the design folder “${target.directory}” in this repository and opens it on the canvas.`;
+}
 
 /** Everything the parent needs to create + (optionally) dispatch. `serialized`
  *  is null when the composer is empty — create the workspace with no first
@@ -93,6 +140,11 @@ interface DispatcherComposerProps {
   onCreate: (payload: DispatcherCreatePayload) => void;
   /** Disable the controls while a create is in flight. */
   busy?: boolean;
+  /** Which mode the new workspace opens in. Defaults to Code — the composer
+   *  as it always was. */
+  mode?: WorkspaceMode;
+  /** Design-mode presentation + create. Required when `mode` is "design". */
+  design?: DispatcherDesignCreate;
 }
 
 export function DispatcherComposer({
@@ -101,7 +153,10 @@ export function DispatcherComposer({
   originUrl,
   onCreate,
   busy,
+  mode = "code",
+  design,
 }: DispatcherComposerProps) {
+  const designMode = mode === "design" && design !== undefined;
   const [selection, setSelection] = useState<AgentModelSelection | null>(null);
   const [effort, setEffort] = useState<ChatEffort>("high");
   const [fast, setFast] = useState(false);
@@ -199,7 +254,12 @@ export function DispatcherComposer({
   } = composer;
 
   submitRef.current = () => {
-    if (busy || !selection) return;
+    if (busy) return;
+    if (designMode) {
+      design.onCreate();
+      return;
+    }
+    if (!selection) return;
     const snapshot = serialize();
     const hasContent = snapshot != null && !snapshot.isEmpty;
     onCreate({
@@ -237,11 +297,11 @@ export function DispatcherComposer({
   return (
     <div
       className="relative flex w-full min-w-0 flex-col"
-      {...(dragHandlers ?? {})}
+      {...(designMode ? {} : (dragHandlers ?? {}))}
     >
       {/* @ / # / slash pickers anchor to this surface (position: relative). */}
-      {suggestionPopup}
-      {dragActive && (
+      {!designMode && suggestionPopup}
+      {!designMode && dragActive && (
         <div
           className="bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs"
           aria-hidden="true"
@@ -257,25 +317,56 @@ export function DispatcherComposer({
         }}
       >
         <PromptInputBody className="items-stretch gap-0 rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0 dark:bg-transparent">
-          {/* Linked workspaces (Claude /add-dir) — removable chips above the
-              editor, same as the chat composer. */}
-          {linkedDirs.length > 0 && (
-            <div className="px-4 pt-3">
-              <AddedDirectories
-                dirs={linkedDirs}
-                onRemove={(dir) =>
-                  setLinkedDirs((prev) => prev.filter((d) => d !== dir))
-                }
-              />
+          {/* Design mode: the editor's slot carries what entry will do to the
+              repository. Same min height as the editor so the card does not
+              jump when the toggle flips. */}
+          {designMode && (
+            <div
+              data-dispatcher-design-summary=""
+              className="text-fg2 flex min-h-[96px] flex-col gap-1.5 px-4 pt-3 text-sm"
+            >
+              <span className="text-fg1 inline-flex items-center gap-2 font-medium">
+                <PenTool size={14} strokeWidth={1.5} aria-hidden="true" />
+                <span>
+                  Design workspace
+                  {design.projectName ? ` · ${design.projectName}` : ""}
+                </span>
+              </span>
+              <span>{designCreateSummary(design)}</span>
             </div>
           )}
-          {/* TipTap editor — tall body so it reads as a "what do you want to
+          {/* Code mode's prompt surface. Hidden + inert (not unmounted) in
+              Design mode so a typed prompt survives a toggle round trip. */}
+          <div
+            data-dispatcher-prompt=""
+            className={designMode ? "hidden" : "contents"}
+            {...(designMode ? { inert: "" } : {})}
+          >
+            {/* Linked workspaces (Claude /add-dir) — removable chips above the
+              editor, same as the chat composer. */}
+            {linkedDirs.length > 0 && (
+              <div className="px-4 pt-3">
+                <AddedDirectories
+                  dirs={linkedDirs}
+                  onRemove={(dir) =>
+                    setLinkedDirs((prev) => prev.filter((d) => d !== dir))
+                  }
+                />
+              </div>
+            )}
+            {/* TipTap editor — tall body so it reads as a "what do you want to
               work on?" canvas. Full-width with an px-4 text inset. */}
-          <div className="min-h-[96px] px-4 pt-3">{editorContent}</div>
+            <div className="min-h-[96px] px-4 pt-3">{editorContent}</div>
+          </div>
           <PromptInputToolbar className="min-w-0 gap-1.5 px-4 pt-1.5 pb-3">
             {/* gap-0.5: exactly 2px between + / configured model / permission,
-                matching the chat composer. */}
-            <PromptInputTools className="gap-0.5">
+                matching the chat composer. The agent pills are Code's; Design
+                keeps only the Create button (hidden + inert, same reasoning as
+                the editor above). */}
+            <PromptInputTools
+              className={designMode ? "hidden" : "gap-0.5"}
+              {...(designMode ? { inert: "" } : {})}
+            >
               {/* "+" menu — add an attachment, link a workspace, or set the
                   permission posture. The same composer affordance the chat uses.
                   Actions deferred past menu-close so the file dialog / modal
@@ -349,13 +440,18 @@ export function DispatcherComposer({
                 />
               )}
             </PromptInputTools>
-            <Tooltip label="Create workspace" shortcut="↵">
+            <Tooltip
+              label={
+                designMode ? "Create design workspace" : "Create workspace"
+              }
+              shortcut="↵"
+            >
               <Button
                 variant="default"
                 size="sm"
                 type="submit"
                 className="h-7 gap-1.5"
-                disabled={busy || !selection}
+                disabled={busy || (!designMode && !selection)}
               >
                 {busy ? (
                   <ZerosSpinner size={16} tone="inverted" />

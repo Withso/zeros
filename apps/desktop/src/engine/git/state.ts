@@ -15,6 +15,7 @@
 // recovered by the legacy scan for back-compat.
 
 import type Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -171,6 +172,7 @@ export function closeState(): void {
 
 interface WorkspaceRow {
   id: string;
+  canonical_id: string;
   kind: string;
   view_mode: string;
   organization_id: string | null;
@@ -197,6 +199,7 @@ interface WorkspaceRow {
 function rowToWorkspace(r: WorkspaceRow): Workspace {
   return {
     id: r.id,
+    canonicalId: r.canonical_id,
     viewMode: r.view_mode === "design" ? "design" : "code",
     kind: r.view_mode === "design" ? "design" : "code",
     organizationId: r.organization_id,
@@ -226,15 +229,16 @@ export function insertWorkspace(w: Workspace): void {
   handle
     .prepare(
       `INSERT INTO workspaces
-        (id, kind, view_mode, organization_id, placement,
+        (id, canonical_id, kind, view_mode, organization_id, placement,
          repo_slug, repo_root, branch, base_branch, path, status,
          created_at, archived_at, stash_ref, archived_head, archive_snapshot,
          pr_number, pr_state, pr_url,
          agent_id, last_active_at, setup_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       w.id,
+      w.canonicalId ?? randomUUID(),
       workspaceViewMode(w),
       workspaceViewMode(w),
       w.organizationId ?? null,
@@ -281,6 +285,18 @@ export function getWorkspaceById(id: string): Workspace | null {
   const row = handle
     .prepare<[string], WorkspaceRow>(`SELECT * FROM workspaces WHERE id = ?`)
     .get(id);
+  return row ? rowToWorkspace(row) : null;
+}
+
+/** Resolve the immutable cross-placement identity used by cloud copy/sync.
+ * The legacy human-readable id remains the local routing key. */
+export function getWorkspaceByCanonicalId(canonicalId: string): Workspace | null {
+  const row = open()
+    .prepare<
+      [string],
+      WorkspaceRow
+    >(`SELECT * FROM workspaces WHERE canonical_id = ? LIMIT 1`)
+    .get(canonicalId);
   return row ? rowToWorkspace(row) : null;
 }
 

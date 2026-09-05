@@ -2,6 +2,7 @@ import {
   chmodSync,
   linkSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -9,16 +10,19 @@ import {
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   cloudOwnerSubjectSha256,
+  installCloudGithubCredentialProjection,
   readCloudGithubCredentialProjection,
+  watchCloudGithubCredentialProjection,
 } from "../cloud-credential-projection";
 
 const roots: string[] = [];
 
 afterEach(() => {
+  vi.useRealTimers();
   for (const root of roots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
@@ -131,5 +135,75 @@ describe("cloud GitHub credential projection", () => {
         now,
       }),
     ).toThrow(/unsafe/i);
+  });
+
+  it("atomically installs only an owner-bound control-plane working copy", () => {
+    const now = 1_800_000_000_000;
+    const ownerSubject = "auth0|owner";
+    const initial = writeFixture(fixture(now, ownerSubject));
+    const replacement = {
+      ...fixture(now, ownerSubject),
+      generation: "replacement-projection-generation-1",
+      method: "github-app" as const,
+      credential: {
+        method: "github-app" as const,
+        accessToken: "ghs_replacement-working-copy",
+        gitHost: "github.com",
+        gitHttpUsername: "x-access-token",
+        expiresAtMs: now + 55_000,
+      },
+    };
+    expect(
+      installCloudGithubCredentialProjection({
+        document: replacement,
+        ownerSubject,
+        file: initial.file,
+        expectedUid: initial.expectedUid,
+        now,
+      }),
+    ).toEqual(replacement);
+    expect(JSON.parse(readFileSync(initial.file, "utf8"))).toEqual(replacement);
+    expect(() =>
+      installCloudGithubCredentialProjection({
+        document: { ...replacement, ownerSubjectSha256: "b".repeat(64) },
+        ownerSubject,
+        file: initial.file,
+        expectedUid: initial.expectedUid,
+        now,
+      }),
+    ).toThrow(/document is invalid/i);
+  });
+
+  it("requests one proactive rotation before a GitHub App token expires", () => {
+    vi.useFakeTimers();
+    const now = 1_800_000_000_000;
+    const ownerSubject = "auth0|owner";
+    const value = {
+      ...fixture(now, ownerSubject),
+      method: "github-app" as const,
+      expiresAt: now + 9 * 60_000,
+      credential: {
+        method: "github-app" as const,
+        accessToken: "ghs_expiring-working-copy",
+        gitHost: "github.com",
+        gitHttpUsername: "x-access-token",
+        expiresAtMs: now + 9 * 60_000,
+      },
+    };
+    const { file, expectedUid } = writeFixture(value);
+    const onRefreshNeeded = vi.fn();
+    const watcher = watchCloudGithubCredentialProjection({
+      file,
+      expectedUid,
+      ownerSubject,
+      now: () => now,
+      pollMs: 100,
+      onChange: vi.fn(),
+      onRefreshNeeded,
+    });
+    expect(onRefreshNeeded).toHaveBeenCalledOnce();
+    vi.advanceTimersByTime(1_000);
+    expect(onRefreshNeeded).toHaveBeenCalledOnce();
+    watcher.stop();
   });
 });

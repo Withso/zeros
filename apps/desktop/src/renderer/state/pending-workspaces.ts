@@ -204,8 +204,10 @@ export function usePendingWorkspaceKind(
 
 // ── Code / Design presentation transitions ────────────────────────────────
 
-/** Publish the user's requested view synchronously, before the engine RPC.
- * The opaque token prevents an older completion from clearing a newer intent. */
+/** Publish the user's requested selection/busy state before the engine RPC.
+ * The mounted surface remains keyed by the confirmed Workspace row until the
+ * response commits atomically. The opaque token prevents an older completion
+ * from clearing a newer intent. */
 export function beginWorkspaceModeSwitch(
   workspaceId: string,
   mode: "code" | "design",

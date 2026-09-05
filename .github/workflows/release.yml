@@ -83,7 +83,7 @@ jobs:
       - name: Setup pnpm
         # Reads pnpm version from package.json's `packageManager` field —
         # passing `with: version:` here conflicts ("Multiple versions of pnpm").
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -158,6 +158,10 @@ jobs:
     # names + title) so it never recomputes and risks a mismatch.
     outputs:
       version: ${{ steps.version.outputs.version }}
+    env:
+      # Protected release capability, baked into both Electron main and the
+      # packaged engine. Unset environments remain explicitly fail-closed.
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
 
     steps:
       - name: Require signing credentials
@@ -204,7 +208,7 @@ jobs:
           fetch-tags: true
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
 
       - name: Setup Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -271,6 +275,8 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
+          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
@@ -284,6 +290,8 @@ jobs:
           # client secrets remain backend-only.
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
+          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}

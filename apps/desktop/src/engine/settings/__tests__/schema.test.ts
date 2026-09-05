@@ -91,6 +91,27 @@ describe("sanitizeLayer", () => {
     expect(r.warnings).toEqual([]);
   });
 
+  it("drops the retired Design isolation switch from every settings layer", () => {
+    const policy = {
+      design: { isolation: { mode: "sandbox+hardening" } },
+    };
+
+    for (const layer of [
+      "user",
+      "team",
+      "repo",
+      "repo-local",
+      "workspace-local",
+      "managed",
+    ] as const) {
+      const result = sanitizeLayer(policy, layer);
+      expect(result.doc).toEqual({});
+      expect(result.warnings).toEqual([
+        expect.stringContaining("design.isolation"),
+      ]);
+    }
+  });
+
   it("non-table document → empty doc with warning", () => {
     expect(sanitizeLayer("nope", "user").doc).toEqual({});
     expect(sanitizeLayer("nope", "user").warnings).toHaveLength(1);

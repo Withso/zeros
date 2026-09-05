@@ -1,12 +1,12 @@
 import type { AgentFailure } from "../../platform/bridge/failure";
 
-/** A real, first-use OrbStack 2.2.1 admission is qualified at roughly 70s.
- * Keep the user-visible request alive for that bounded engine operation rather
- * than timing out at 10s and starting overlapping private machines. */
+/** Provider startup and a cold optional kernel boundary can approach 90s.
+ * Keep the user-visible request alive for bounded cleanup rather than timing
+ * out early and starting an overlapping session admission. */
 export const AGENT_NEW_SESSION_TIMEOUT_MS = 2 * 60_000;
 
 /** A timed-out create may still be unwinding inside the engine. Retrying it
- * automatically would overlap another expensive boundary admission. Genuine
+ * automatically would overlap another provider/boundary admission. Genuine
  * transport replacement and an expired provider binding are safe to retry. */
 export function shouldRetrySessionAdmission(
   kind: AgentFailure["kind"],

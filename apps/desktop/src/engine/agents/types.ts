@@ -40,9 +40,7 @@ import type {
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import type {
-  ExecutionBoundaryBackend,
   ExecutionBoundaryPortsSnapshot,
-  ExecutionBoundaryRestriction,
   ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
 import type { ExecutionBoundary, PreparedBoundary } from "./containment/types";
@@ -205,6 +203,12 @@ export type McpServerRegistration =
       transport: "http";
       url: string;
       headers?: Record<string, string>;
+      /** HTTP header name -> session environment variable name. This keeps
+       * short-lived capabilities out of provider argv/config literals while
+       * still allowing providers that support env-backed MCP headers to use
+       * their native mechanism. Adapters without that mechanism materialize
+       * the value only in their in-memory SDK options. */
+      headersFromEnv?: Record<string, string>;
     };
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
@@ -212,8 +216,9 @@ export type McpServerRegistration =
 export interface AgentGatewayOptions {
   projectRoot: string;
   events: AgentGatewayEvents;
-  /** Production defaults to ZSR. Tests and platform coordinators may inject a
-   * contract-compatible backend; omission must never mean uncontained. */
+  /** Production injects the engine-wide actor router: local Code runs on the
+   * native host, local Design runs in ZSR, and cloud may force its qualified
+   * worker boundary. Standalone callers receive the same local actor routing. */
   executionBoundary?: ExecutionBoundary;
   /** Browser-preview ingress. Local sessions use loopback; a qualified cloud
    * coordinator injects a root-owned signed-port factory. */
@@ -238,37 +243,36 @@ export interface AgentAdapterContext {
 
 export type AgentRole = "code";
 
-/** Immutable write authority for one provider sandbox. Read access is broader
- * by design: code actors may inspect the repository and Design documents for
- * context, but writes are carved out at the provider/OS boundary. */
+/** Semantic write territory for one Code session. Native Code execution keeps
+ * its normal host authority; these paths drive Design recognition, lifecycle
+ * checks, and the Code-agent instruction rather than an OS write fence. */
 export interface AgentWriteCapabilities {
   workspace: "write";
   deniedPaths: readonly string[];
 }
 
-/** Immutable filesystem authority attached to one agent session. This is
- * intentionally independent of workspace `viewMode`: switching UI surfaces
- * can never change a running process's role or widen its capabilities. */
+/** Filesystem territory attached to one Code session. It is intentionally
+ * independent of workspace `viewMode`: switching UI surfaces never changes a
+ * running process's role or selects a different execution backend. */
 export interface AgentFilesystemTerritory {
   agentRole: AgentRole;
   workspaceRoot: string;
   /** Active Design document used for orientation and Design-surface identity. */
   designDirectory: string;
-  /** Every recognized Design document carved out of this process's writable
-   * workspace. Kept explicit so lifecycle reconciliation can compare semantic
-   * authority without guessing which denied path is Design, Git, or policy. */
+  /** Every recognized Design document covered by the Code-agent behavioral
+   * contract. Kept explicit so lifecycle reconciliation can compare semantic
+   * territory without guessing which denied path is Design, Git, or policy. */
   protectedDesignDirectories: readonly string[];
   /** Files that decide whether those folders are recognized as Design: repo
    * `.zeros` settings plus each folder's canvas marker. Host parity leaves the
    * committed settings native so tree-level Git can update them; sticky engine
    * recognition prevents an edit from de-registering an existing Design root,
    * while the marker remains unwritable inside that root. Kept explicit for
-   * lifecycle comparison and provider-native fallback policy. */
+   * lifecycle comparison and Design identity checks. */
   designRecognitionPaths: readonly string[];
-  /** Complete semantic carveout discovered for this territory. The current ZSR
-   * host-parity policy derives its exact subtraction from the recognized Design
-   * roots and engine-owned state rather than blindly applying every entry; in
-   * particular, canonical Git metadata remains writable to a code actor. */
+  /** Complete semantic Design protection set discovered for this Code
+   * territory. It also supplies the denied-path input to a Design-agent ZSR
+   * policy; canonical Git metadata remains writable to a native Code actor. */
   writeCapabilities: AgentWriteCapabilities;
 }
 
@@ -460,28 +464,6 @@ export interface AgentAdapter {
   /** Preferred adapter surface for optional product behavior. Explicit ports
    * take precedence over same-named legacy methods during migration. */
   readonly capabilityPorts?: AgentCapabilityPorts;
-
-  /** True only when this adapter turns `territory` into a non-bypassable
-   * runtime filesystem restriction in every permission posture. The gateway
-   * refuses a Design-enabled session when this is absent/false. */
-  readonly enforcesFilesystemTerritory?: boolean;
-
-  /** Diagnostic identity for the implementation enforcing `territory`.
-   * Authority never depends on this label; admission still requires the live
-   * probe below. During migration provider-native is the explicit fallback. */
-  readonly filesystemTerritoryBackend?: ExecutionBoundaryBackend;
-
-  /** Honest normal-vs-contained differences for this temporary backend.
-   * ZSR-qualified adapters expose an empty list. */
-  readonly filesystemTerritoryRestrictions?: readonly ExecutionBoundaryRestriction[];
-
-  /** Resolve runtime dependencies and prove that this exact immutable
-   * territory can be established before the session is admitted. Implementors
-   * must throw instead of degrading to an unsandboxed process. */
-  prepareFilesystemTerritory?(
-    territory: AgentFilesystemTerritory,
-    opts?: { cliBinary?: string },
-  ): Promise<void>;
 
   /** Declares that this adapter delivers Zeros' first-turn system instruction
    *  over the agent's NATIVE instruction channel (e.g. Codex

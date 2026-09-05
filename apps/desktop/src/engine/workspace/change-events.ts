@@ -63,6 +63,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.token.update",
   "design.stage",
   "design.save",
+  "design.commit",
   "git.initInPlace",
   "detach.start",
   "detach.stop",

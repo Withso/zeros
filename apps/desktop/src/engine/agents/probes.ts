@@ -111,8 +111,8 @@ interface VersionCacheEntry {
 const versionCache = new Map<string, VersionCacheEntry>();
 
 /** Process-execution seam for provider-owned discovery commands. Production
- * supplies a ZSR-backed runner; direct execution remains only as a compatibility
- * fallback for isolated tests and non-engine consumers. */
+ * supplies a selected-boundary runner; direct execution remains only as a
+ * compatibility fallback for isolated tests and non-engine consumers. */
 export interface ProbeCommandRunner {
   /** Distinguishes contained/runtime contexts in the version cache. */
   cacheKey: string;
@@ -329,8 +329,8 @@ async function commandExitsZero(
   args: string[],
   runner?: ProbeCommandRunner,
 ): Promise<boolean> {
-  // A contained runner reports a normal provider rejection as a non-zero exit
-  // code. A rejection of the Promise means the ZSR probe itself could not run
+  // A boundary runner reports a normal provider rejection as a non-zero exit
+  // code. A rejected Promise means the execution prerequisite itself failed
   // and must propagate so callers can render "check unavailable" truthfully.
   if (runner) {
     const result = await runner.run(binary, args, {

@@ -21,16 +21,16 @@ function shortcutEvent(
 }
 
 describe("design workspace shortcuts", () => {
-  it("maps the native Mac and Windows stage, undo, and redo chords", () => {
+  it("maps the native Mac and Windows save, undo, and redo chords", () => {
     expect(
       resolveDesignWorkspaceShortcut(shortcutEvent({ key: "s" }), false),
-    ).toBe("stage");
+    ).toBe("save");
     expect(
       resolveDesignWorkspaceShortcut(
         shortcutEvent({ key: "S", metaKey: false, ctrlKey: true }),
         false,
       ),
-    ).toBe("stage");
+    ).toBe("save");
     expect(resolveDesignWorkspaceShortcut(shortcutEvent(), false)).toBe("undo");
     expect(
       resolveDesignWorkspaceShortcut(
@@ -40,10 +40,10 @@ describe("design workspace shortcuts", () => {
     ).toBe("redo");
   });
 
-  it("stages from an editable draft but leaves its native undo history alone", () => {
+  it("saves from an editable draft but leaves its native undo history alone", () => {
     expect(
       resolveDesignWorkspaceShortcut(shortcutEvent({ key: "s" }), true),
-    ).toBe("stage");
+    ).toBe("save");
     expect(resolveDesignWorkspaceShortcut(shortcutEvent(), true)).toBeNull();
     expect(
       resolveDesignWorkspaceShortcut(shortcutEvent({ shiftKey: true }), true),
@@ -74,7 +74,7 @@ describe("design workspace shortcuts", () => {
   it("dispatches every rapid history command without dropping an in-flight press", () => {
     const preventDefault = vi.fn();
     const undo = vi.fn();
-    const actions = { stage: vi.fn(), undo, redo: vi.fn() };
+    const actions = { save: vi.fn(), undo, redo: vi.fn() };
     const event = { ...shortcutEvent(), preventDefault };
 
     expect(dispatchDesignWorkspaceShortcut(event, false, actions)).toBe(true);

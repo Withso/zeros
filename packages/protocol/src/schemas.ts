@@ -411,6 +411,22 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       break;
     case "AGENT_NEW_SESSION":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (
+        env.agentRole !== undefined &&
+        env.agentRole !== "code" &&
+        env.agentRole !== "design"
+      )
+        bad("agentRole");
+      if (env.agentRole === "design") {
+        if (!isNonEmptyStr(env.workspaceId)) bad("workspaceId");
+        if (
+          !isNonEmptyStr(env.designDocumentId) ||
+          env.designDocumentId.length > 256
+        )
+          bad("designDocumentId");
+      } else if (env.designDocumentId !== undefined) {
+        bad("designDocumentId");
+      }
       if (!isNonEmptyStr(env.cwd) && !isNonEmptyStr(env.workspaceId))
         bad("cwd/workspaceId");
       if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");

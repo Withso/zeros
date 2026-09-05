@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — .mjs has no type declarations; it exports a plain function.
-import { protocolSourceSignature } from "../protocol-source-signature.mjs";
+import {
+  exportedIntegerConstant,
+  protocolSourceSignature,
+} from "../protocol-source-signature.mjs";
 
 describe("protocolSourceSignature", () => {
   it("ignores comment-only edits after template literals", () => {
@@ -43,5 +46,26 @@ describe("protocolSourceSignature", () => {
     ).not.toBe(
       protocolSourceSignature("export interface WireMessage { id: string }"),
     );
+  });
+
+  it.each([
+    "CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION",
+    "MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION",
+  ])("reads %s from its export instead of a preceding comment", (name) => {
+    expect(
+      exportedIntegerConstant(
+        `// export const ${name} = 1\nexport const ${name} = 14 as const;`,
+        name,
+      ),
+    ).toBe("14");
+  });
+
+  it("rejects a fractional protocol version instead of truncating it", () => {
+    expect(
+      exportedIntegerConstant(
+        "export const CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION = 14.5 as const;",
+        "CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION",
+      ),
+    ).toBeNull();
   });
 });

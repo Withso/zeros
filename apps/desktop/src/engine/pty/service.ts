@@ -96,6 +96,8 @@ export interface PtyLaunchRequest {
   cwd: string;
   env: Readonly<Record<string, string>>;
   stdio: "inherit";
+  /** Trusted wrapper argv slot rebound by the Node PTY host at spawn time. */
+  immediateParentPidArgIndex?: number;
 }
 
 export type PtySpawnWrapper = (request: PtyLaunchRequest) => PtyLaunchRequest;

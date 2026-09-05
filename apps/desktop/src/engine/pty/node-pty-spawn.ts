@@ -92,6 +92,9 @@ export function createNodePtyShell(req: PtySpawnRequest): PtyHandle {
     // (that is what makes setup-hooks.ts's allowlist auditable).
     env: { ...launch.env },
     name: "xterm-256color",
+    ...(launch.immediateParentPidArgIndex === undefined
+      ? {}
+      : { immediateParentPidArgIndex: launch.immediateParentPidArgIndex }),
   });
 }
 

@@ -108,6 +108,7 @@ import {
   bridgeDesignLint,
   bridgeDesignRenameFrame,
   bridgeDesignProvenance,
+  bridgeDesignCommit,
   bridgeDesignSave,
   bridgeDesignStage,
   bridgeDesignSetText,
@@ -751,9 +752,19 @@ export async function designStage(workspaceId: string): Promise<{ ok: true }> {
 
 export async function designSave(
   workspaceId: string,
+): Promise<{ ok: true }> {
+  return bridgeDesignSave(requireBridge("validate designs"), workspaceId);
+}
+
+export async function designCommit(
+  workspaceId: string,
   message?: string,
 ): Promise<{ sha: string; branch: string }> {
-  return bridgeDesignSave(requireBridge("save designs"), workspaceId, message);
+  return bridgeDesignCommit(
+    requireBridge("commit designs"),
+    workspaceId,
+    message,
+  );
 }
 
 export async function workspaceList(

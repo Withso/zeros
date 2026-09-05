@@ -46,6 +46,8 @@ const ENGINE_INTERNAL_SECRETS = [
   "ZEROS_ACCOUNT_JWT_CLIENT_ID",
   "ZEROS_REQUIRE_ACCOUNT",
   "ZEROS_CLOUD_OWNER_SUB",
+  "ZEROS_HOST_SUPERVISOR_RUNTIME",
+  "ZEROS_HOST_SUPERVISOR_SCRIPT",
   "ZEROS_ZSR_SUPERVISOR_SCRIPT",
   "CONDUCTOR_API_TOKEN",
   "CONDUCTOR_INTERNAL_WORKSPACE_AUTH",
@@ -170,6 +172,38 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
     expect(env.ZEROS_WORKTREE_PATH).toBe("/repo/wt");
     expect(env.ZEROS_WORKSPACE_ID).toBe("ws-1");
     expect(env.ZEROS_TERMINAL).toBe("1");
+  });
+
+  it("drops inherited desktop auth selectors so nested Dev reloads the shared profile", () => {
+    const parentAuth = {
+      AUTH_PROVIDER: "workos",
+      AUTH_DESKTOP_CLIENT_ID: "client_parent_desktop",
+      AUTH_ISSUER: "https://api.workos.com/user_management/client_parent_web",
+      AUTH_JWKS_URL: "https://api.workos.com/sso/jwks/client_parent_web",
+      AUTH_AUDIENCE: "https://api.zeros.build",
+      VITE_APP_BASE_URL: "https://app.zeros.build",
+      VITE_CONTROL_PLANE_URL: "https://api.zeros.build",
+      ZEROS_AUTH_PROVIDER: "workos",
+    };
+    const previousAuth = Object.fromEntries(
+      Object.keys(parentAuth).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, parentAuth);
+    try {
+      for (const env of [buildPtyEnv(), buildPtyEnv({ scrub: true })]) {
+        for (const key of Object.keys(parentAuth)) {
+          expect(
+            env[key],
+            `${key} belongs to the parent app — nested Dev must reload ~/.zeros-dev/auth/alpha.env`,
+          ).toBeUndefined();
+        }
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previousAuth)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   // The channel is the COARSER half of the same identity, and it leaks from a

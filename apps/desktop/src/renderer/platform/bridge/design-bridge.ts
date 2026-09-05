@@ -830,9 +830,18 @@ export async function bridgeDesignStage(
 export async function bridgeDesignSave(
   bridge: RuntimeClient,
   workspaceId: string,
+): Promise<{ ok: true }> {
+  return (await workspaceOp(bridge, "design.save", {
+    workspaceId,
+  })) as { ok: true };
+}
+
+export async function bridgeDesignCommit(
+  bridge: RuntimeClient,
+  workspaceId: string,
   message?: string,
 ): Promise<{ sha: string; branch: string }> {
-  return (await workspaceOp(bridge, "design.save", {
+  return (await workspaceOp(bridge, "design.commit", {
     workspaceId,
     ...(message ? { message } : {}),
   })) as { sha: string; branch: string };
@@ -842,13 +851,27 @@ export async function bridgeDesignSave(
  *  `.zeros-canvas.json` marker) plus the resolved `[design] directory`
  *  pointer. `workspaceId` may be a workspace id or a known repo root — the
  *  repo settings Design tab passes the main checkout. */
+export interface DesignDirectoryListingWire {
+  /** Every folder recognized by a committed `.zeros-canvas.json` marker. */
+  directories: string[];
+  /** The resolved `[design] directory` pointer ("Zeros Design" when unset). */
+  pointer: string;
+  /** The folder the engine currently treats as active for this checkout. */
+  active: string;
+  /** The folder Design mode WOULD use on entry and whether its Design document
+   *  is initialized. `exists: false` means switching to Design creates the
+   *  document, even if an empty isolation-reservation folder is already on
+   *  disk. Omitted by older engines; null when the engine's preview refused. */
+  target?: { directory: string; exists: boolean } | null;
+}
+
 export async function bridgeDesignListDirectories(
   bridge: RuntimeClient,
   workspaceId: string,
-): Promise<{ directories: string[]; pointer: string; active: string }> {
+): Promise<DesignDirectoryListingWire> {
   return (await workspaceOp(bridge, "design.listDirectories", {
     workspaceId,
-  })) as { directories: string[]; pointer: string; active: string };
+  })) as DesignDirectoryListingWire;
 }
 
 /** Rename the repo's design folder — `git mv` + the committed pointer update

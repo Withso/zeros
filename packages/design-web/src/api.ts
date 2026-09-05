@@ -626,11 +626,16 @@ export class DesignApi {
   async undo(
     documentId: string,
     actor?: DesignActor,
+    options: { expectedRevision?: string } = {},
   ): Promise<DesignApiApplyResult | null> {
     const exactDocumentId = validatedDocumentId(documentId);
     const exactActor = actor ? designActorSchema.parse(actor) : undefined;
+    const expectedRevision = validatedExpectedRevision(
+      options.expectedRevision,
+    );
     return this.withDocumentTurn(exactDocumentId, async () => {
       const entry = await this.load(exactDocumentId);
+      this.assertRevision(entry.session.currentState(), expectedRevision);
       const checkpoint = entry.session.checkpoint();
       const outcome = entry.session.undo(exactActor);
       if (!outcome) return null;
@@ -653,11 +658,16 @@ export class DesignApi {
   async redo(
     documentId: string,
     actor?: DesignActor,
+    options: { expectedRevision?: string } = {},
   ): Promise<DesignApiApplyResult | null> {
     const exactDocumentId = validatedDocumentId(documentId);
     const exactActor = actor ? designActorSchema.parse(actor) : undefined;
+    const expectedRevision = validatedExpectedRevision(
+      options.expectedRevision,
+    );
     return this.withDocumentTurn(exactDocumentId, async () => {
       const entry = await this.load(exactDocumentId);
+      this.assertRevision(entry.session.currentState(), expectedRevision);
       const checkpoint = entry.session.checkpoint();
       const outcome = entry.session.redo(exactActor);
       if (!outcome) return null;

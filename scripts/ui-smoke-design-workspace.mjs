@@ -18,6 +18,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const workspaceModeHeader = designSidebar.locator(
     "[data-workspace-mode-header]",
   );
+  const workspaceModeToggle = workspaceModeHeader.locator(
+    "[data-workspace-mode-toggle]",
+  );
+  const designDirectoryName = workspaceModeHeader.locator(
+    "[data-design-directory-name]",
+  );
   await layersPanel.waitFor({ state: "visible", timeout: 10_000 });
   await designSidebar.waitFor({ state: "visible", timeout: 10_000 });
   await workspaceModeHeader.waitFor({ state: "visible", timeout: 10_000 });
@@ -27,6 +33,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     .locator("[data-design-inspector]")
     .boundingBox();
   const workspaceModeHeaderBox = await workspaceModeHeader.boundingBox();
+  const workspaceModeToggleBox = await workspaceModeToggle.boundingBox();
+  const designDirectoryNameBox = await designDirectoryName.boundingBox();
   check(
     "design Layers fill a dedicated native sidebar",
     !!initialLayersBox &&
@@ -42,14 +50,18 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       Math.abs(initialSidebarBox.width - 240) < 0.5,
   );
   check(
-    "workspace name and icon-only mode toggle sit above Layers",
+    "mode toggle stays first and the Design directory name follows above Layers",
     !!workspaceModeHeaderBox &&
+      !!workspaceModeToggleBox &&
+      !!designDirectoryNameBox &&
       !!initialLayersBox &&
       workspaceModeHeaderBox.y + workspaceModeHeaderBox.height <=
         initialLayersBox.y &&
-      (await workspaceModeHeader
-        .locator("[data-workspace-mode-name]")
-        .count()) === 1 &&
+      Math.abs(workspaceModeToggleBox.x - workspaceModeHeaderBox.x - 8) < 0.5 &&
+      designDirectoryNameBox.x >=
+        workspaceModeToggleBox.x + workspaceModeToggleBox.width &&
+      (await designDirectoryName.count()) === 1 &&
+      ((await designDirectoryName.textContent())?.trim().length ?? 0) > 0 &&
       (await workspaceModeHeader.getByRole("button").count()) === 2 &&
       (await workspaceModeHeader
         .getByRole("button", { name: "Code mode" })
@@ -2863,69 +2875,106 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       }),
     "design-static-offset-removal-settled",
   );
-  const beforeStageShortcut = await page.evaluate(
+  const beforeExplicitGitActions = await page.evaluate(
+    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
+  );
+  await page.getByLabel("Design Git actions").click();
+  await page.getByLabel("Stage Design changes").click();
+  await waitFor(
+    async () =>
+      (await page.evaluate(
+        (start) =>
+          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
+          start + 2,
+        beforeExplicitGitActions,
+      )) === true,
+    "design-explicit-stage",
+  );
+  await page.getByLabel("Design Git actions").click();
+  await page.getByLabel("Commit staged Design changes").click();
+  const explicitGitActionsSettled = await waitFor(async () => {
+    const operations = await page.evaluate(
+      (start) =>
+        (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
+      beforeExplicitGitActions,
+    );
+    return operations.length >= 3;
+  }, "design-explicit-commit");
+  const explicitGitActions = await page.evaluate(
+    (start) =>
+      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
+    beforeExplicitGitActions,
+  );
+  check(
+    "Design staging and commit remain separate explicit actions",
+    explicitGitActionsSettled &&
+      explicitGitActions.slice(0, 3).join(",") ===
+        "stage:start,stage:end,commit",
+    JSON.stringify(explicitGitActions),
+  );
+  const beforeSaveShortcut = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );
   await xField.fill("16px");
   await xField.press("ControlOrMeta+S");
-  const stageShortcutSettled = await waitFor(
+  const saveShortcutSettled = await waitFor(
     async () =>
       (await page.evaluate(
         (start) =>
           (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
           start + 4,
-        beforeStageShortcut,
+        beforeSaveShortcut,
       )) === true,
-    "design-command-stage",
+    "design-command-save",
   );
-  const stageShortcutOperations = await page.evaluate(
+  const saveShortcutOperations = await page.evaluate(
     (start) =>
       (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-    beforeStageShortcut,
+    beforeSaveShortcut,
   );
   check(
-    "Command-S stages a focused inspector draft without creating a commit",
-    stageShortcutSettled &&
-      stageShortcutOperations.slice(0, 4).join(",") ===
-        "style:start,style:end,stage:start,stage:end" &&
+    "Command-S saves a focused draft without staging or committing",
+    saveShortcutSettled &&
+      saveShortcutOperations.slice(0, 4).join(",") ===
+        "style:start,style:end,save:start,save:end" &&
       (await selectedHeading.evaluate(
         (element) => element.style.getPropertyValue("left") === "16px",
       )),
-    JSON.stringify(stageShortcutOperations),
+    JSON.stringify(saveShortcutOperations),
   );
-  const beforeRapidStageShortcuts = await page.evaluate(
+  const beforeRapidSaveShortcuts = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );
   await xField.fill("20px");
   await xField.press("ControlOrMeta+S");
   await xField.fill("24px");
   await xField.press("ControlOrMeta+S");
-  const rapidStageShortcutsSettled = await waitFor(
+  const rapidSaveShortcutsSettled = await waitFor(
     async () =>
       (await page.evaluate(
         (start) =>
           (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
           start + 8,
-        beforeRapidStageShortcuts,
+        beforeRapidSaveShortcuts,
       )) === true,
-    "design-rapid-command-stage",
+    "design-rapid-command-save",
   );
-  const rapidStageShortcutOperations = await page.evaluate(
+  const rapidSaveShortcutOperations = await page.evaluate(
     (start) =>
       (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
-    beforeRapidStageShortcuts,
+    beforeRapidSaveShortcuts,
   );
   check(
-    "rapid Command-S requests stage every newly published inspector draft",
-    rapidStageShortcutsSettled &&
-      rapidStageShortcutOperations.slice(0, 8).join(",") ===
-        "style:start,style:end,stage:start,stage:end,style:start,style:end,stage:start,stage:end" &&
+    "rapid Command-S requests validate every newly published inspector draft",
+    rapidSaveShortcutsSettled &&
+      rapidSaveShortcutOperations.slice(0, 8).join(",") ===
+        "style:start,style:end,save:start,save:end,style:start,style:end,save:start,save:end" &&
       (await selectedHeading.evaluate(
         (element) => element.style.getPropertyValue("left") === "24px",
       )),
-    JSON.stringify(rapidStageShortcutOperations),
+    JSON.stringify(rapidSaveShortcutOperations),
   );
-  const beforeStageShortcutReset = await page.evaluate(
+  const beforeSaveShortcutReset = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );
   await xField.fill("");
@@ -2939,9 +2988,9 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         (start) =>
           (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
           start + 2,
-        beforeStageShortcutReset,
+        beforeSaveShortcutReset,
       )),
-    "design-command-stage-reset",
+    "design-command-save-reset",
   );
 
   const beforeHistoryShortcuts = await page.evaluate(
@@ -3983,8 +4032,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "cancelling intrinsic-width text restores its exact authored line",
     await waitFor(
-      async () =>
-        (await runtimeAction.textContent()) === actionTextBeforeEdit,
+      async () => (await runtimeAction.textContent()) === actionTextBeforeEdit,
       "design-inline-text-intrinsic-cancel-restored",
     ),
   );

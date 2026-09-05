@@ -16,12 +16,12 @@ import { GITHUB_URL } from '../lib/site'
 //   • apps/desktop/src/renderer/platform/observability/analytics/consent.ts   — opt-OUT model, Settings → Profile
 //   • apps/desktop/src/renderer/features/feedback/submit-feedback.ts — what the feedback form sends
 //   • apps/desktop/electron/updater.ts              — the GitHub Releases update feeds
-//   • apps/web/lib/hub.ts       — the Auth0 sign-in handoff
+//   • apps/web/lib/workos-browser.mjs — the WorkOS Hosted AuthKit handoff
 // ──────────────────────────────────────────────────────────
 
 export function PrivacyPage() {
   return (
-    <LegalLayout title="Privacy" updated="2026-07-26">
+    <LegalLayout title="Privacy" updated="2026-09-04">
       <p>
         Zeros is a local-first Mac app. Agents run on your machine, against
         your checkout, using your own model credentials. This page describes
@@ -44,10 +44,12 @@ export function PrivacyPage() {
       <h2>Sign-in</h2>
       <p>
         Signing in opens a browser handoff through{' '}
-        <code>app.zeros.build</code>, which uses Auth0 as the identity
-        provider. We receive the email address and the provider identity
-        (Google or GitHub) that Auth0 returns, and store them so the app knows
-        who you are across restarts.
+        <code>app.zeros.build</code> and WorkOS Hosted AuthKit. WorkOS verifies
+        your email, Google or GitHub identity and manages the sign-in
+        credentials. Zeros receives your verified email address, provider
+        identity and profile details, when supplied, and stores the account
+        mapping and protected session material needed to recognize you across
+        restarts.
       </p>
 
       <h2>Product analytics</h2>

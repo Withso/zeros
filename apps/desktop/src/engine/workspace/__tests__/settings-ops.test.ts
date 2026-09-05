@@ -341,10 +341,9 @@ describe("WorkspaceService settings ops", () => {
     expect(svc.isRemoteAllowed("settings.migrateLegacy")).toBe(false);
   });
 
-  it("a cloud client can configure contained scripts/providers/env files/MCP, while Design authority stays typed", async () => {
-    // Every process these settings can start is now causally contained:
-    // scripts use repo-code-task ZSR, provider binaries and stdio MCP children
-    // inherit agent-code ZSR, and env files stay repo-relative + spawn-scrubbed.
+  it("a cloud client can configure scripts/providers/env files/MCP, while Design authority stays typed", async () => {
+    // Settings preserve actor routing: local Code remains native, cloud Code
+    // stays on the cloud boundary, and Design authority remains API-only.
     await expect(
       svc.handle(
         "settings.write",

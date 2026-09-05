@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 import { loadConfig } from "./config.js";
+import {
+  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+  MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+} from "./cloud-workspaces/engine-protocol-version.js";
 
 function baseEnv(): NodeJS.ProcessEnv {
   return {
@@ -34,6 +38,19 @@ function cloudEnv(): NodeJS.ProcessEnv {
     DAYTONA_API_KEY: "daytona-api-key-for-control-plane-tests",
     DAYTONA_SNAPSHOT_ID: "snap_immutable_123",
     ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
+  };
+}
+
+function cloudSetupEnv(): NodeJS.ProcessEnv {
+  const setupKey = randomBytes(32).toString("base64url");
+  return {
+    ...cloudEnv(),
+    CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+    CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+    DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test",
+    CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
+    CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
+    CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/var/lib/zeros/workspace-objects",
   };
 }
 
@@ -115,9 +132,7 @@ describe("provider-neutral authentication configuration", () => {
   it("fails closed when WorkOS client IDs are missing or shared", () => {
     const missingDesktop = workosEnv();
     delete missingDesktop.AUTH_DESKTOP_CLIENT_ID;
-    expect(() => loadConfig(missingDesktop)).toThrow(
-      /AUTH_DESKTOP_CLIENT_ID/,
-    );
+    expect(() => loadConfig(missingDesktop)).toThrow(/AUTH_DESKTOP_CLIENT_ID/);
 
     expect(() =>
       loadConfig({
@@ -501,7 +516,263 @@ describe("cloud workspace backend configuration", () => {
       operationTimeoutSeconds: 180,
       autoArchiveMinutes: 10_080,
       reconcileIntervalMs: 5_000,
+      access: {
+        allowedSshHosts: ["ssh.app.daytona.io"],
+        allowedPreviewHostSuffixes: ["proxy.daytona.work"],
+        previewBaseDomain: null,
+      },
+      providerCredentialKeys: {},
+      settingsSecretEncryptionKeys: {},
+      currentSettingsSecretEncryptionKeyVersion: null,
+      settingsSecretKeyV1: null,
+      durability: null,
+      outbox: null,
+      setupExecution: null,
     });
+  });
+
+  it("loads only a complete HTTPS cloud event outbox sink", () => {
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "https://events.example.test/v1/cloud-workspaces",
+        CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32),
+        CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS: "12000",
+      }).cloudWorkspaces?.outbox,
+    ).toEqual({
+      endpoint: "https://events.example.test/v1/cloud-workspaces",
+      signingSecret: "s".repeat(32),
+      timeoutMs: 12_000,
+    });
+
+    for (const override of [
+      {
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "https://events.example.test/v1/cloud-workspaces",
+      },
+      { CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32) },
+      {
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "http://events.example.test/v1/cloud-workspaces",
+        CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32),
+      },
+      {
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "https://user:secret@events.example.test/v1/cloud-workspaces",
+        CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32),
+      },
+    ]) {
+      expect(() => loadConfig({ ...cloudEnv(), ...override })).toThrow(
+        /cloud workspace outbox/i,
+      );
+    }
+  });
+
+  it("pins provider access hosts and an isolated wildcard preview domain", () => {
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        DAYTONA_SSH_HOSTS:
+          "ssh.provider.example,ssh-secondary.provider.example",
+        DAYTONA_PREVIEW_HOST_SUFFIXES:
+          "preview.provider.example,preview-alt.provider.example",
+        CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: "cloud-preview.example.test",
+      }).cloudWorkspaces?.access,
+    ).toEqual({
+      allowedSshHosts: [
+        "ssh.provider.example",
+        "ssh-secondary.provider.example",
+      ],
+      allowedPreviewHostSuffixes: [
+        "preview.provider.example",
+        "preview-alt.provider.example",
+      ],
+      previewBaseDomain: "cloud-preview.example.test",
+    });
+  });
+
+  it("rejects wildcard, URL, and IP-shaped provider access hosts", () => {
+    for (const override of [
+      { DAYTONA_SSH_HOSTS: "*.example.test" },
+      { DAYTONA_PREVIEW_HOST_SUFFIXES: "https://preview.example.test" },
+      { CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: "127.0.0.1" },
+    ]) {
+      expect(() => loadConfig({ ...cloudEnv(), ...override })).toThrow(
+        /cloud workspace environment/i,
+      );
+    }
+  });
+
+  it("keeps setup behind an independent complete image-qualification gate", () => {
+    const setupKey = randomBytes(32).toString("base64url");
+    expect(
+      loadConfig({
+        ...cloudSetupEnv(),
+        DAYTONA_TOOLBOX_ORIGINS:
+          "https://proxy-a.example.test,https://proxy-b.example.test",
+        CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
+        CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
+      }).cloudWorkspaces,
+    ).toEqual({
+      ...loadConfig(cloudEnv()).cloudWorkspaces,
+      settingsSecretEncryptionKeys: { 1: setupKey },
+      currentSettingsSecretEncryptionKeyVersion: 1,
+      settingsSecretKeyV1: setupKey,
+      durability: {
+        objectEncryptionKeys: { 1: setupKey },
+        currentObjectEncryptionKeyVersion: 1,
+        objectStoreDirectory: "/var/lib/zeros/workspace-objects",
+      },
+      setupExecution: {
+        controlPlaneOrigin: "https://api.example.test",
+        allowedToolboxOrigins: [
+          "https://proxy-a.example.test",
+          "https://proxy-b.example.test",
+        ],
+        setupSecretEncryptionKeys: { 1: setupKey },
+        currentSetupSecretEncryptionKeyVersion: 1,
+        setupSecretKeyV1: setupKey,
+        engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        enginePort: 39_393,
+        intervalMs: 1_000,
+        timeoutSeconds: 1_800,
+        leaseMs: 60_000,
+        admissionTtlSeconds: 120,
+      },
+    });
+  });
+
+  it("defaults cloud setup to the shared engine protocol while retaining an explicit compatible-image override", () => {
+    expect(
+      loadConfig(cloudSetupEnv()).cloudWorkspaces?.setupExecution
+        ?.engineProtocolVersion,
+    ).toBe(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION);
+    expect(
+      loadConfig({
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: String(
+          MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        ),
+      }).cloudWorkspaces?.setupExecution?.engineProtocolVersion,
+    ).toBe(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION);
+  });
+
+  it("keeps durable fork and recovery storage available while setup stays paused", () => {
+    const objectKey = randomBytes(32).toString("base64url");
+    const cloud = loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_WORKSPACE_OBJECT_KEY_V1: objectKey,
+      CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY:
+        "/var/lib/zeros/workspace-objects",
+    }).cloudWorkspaces;
+    expect(cloud?.setupExecution).toBeNull();
+    expect(cloud?.durability).toEqual({
+      objectEncryptionKeys: { 1: objectKey },
+      currentObjectEncryptionKeyVersion: 1,
+      objectStoreDirectory: "/var/lib/zeros/workspace-objects",
+    });
+  });
+
+  it("keeps encrypted cloud settings available while setup stays paused", () => {
+    const settingsKey = randomBytes(32).toString("base64url");
+    const cloud = loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_WORKSPACE_SECRET_KEY_V1: settingsKey,
+    }).cloudWorkspaces;
+
+    expect(cloud?.settingsSecretKeyV1).toBe(settingsKey);
+    expect(cloud?.setupExecution).toBeNull();
+  });
+
+  it("loads an explicit object-key rotation keyring without dropping V1", () => {
+    const oldKey = randomBytes(32).toString("base64url");
+    const newKey = randomBytes(32).toString("base64url");
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OBJECT_KEY_V1: oldKey,
+        CLOUD_WORKSPACE_OBJECT_KEYS_JSON: JSON.stringify({
+          1: oldKey,
+          2: newKey,
+        }),
+        CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION: "2",
+        CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY:
+          "/var/lib/zeros/workspace-objects",
+      }).cloudWorkspaces?.durability,
+    ).toEqual({
+      objectEncryptionKeys: { 1: oldKey, 2: newKey },
+      currentObjectEncryptionKeyVersion: 2,
+      objectStoreDirectory: "/var/lib/zeros/workspace-objects",
+    });
+  });
+
+  it("loads a versioned secret keyring and selects an explicit current key", () => {
+    const oldKey = randomBytes(32).toString("base64url");
+    const newKey = randomBytes(32).toString("base64url");
+    const cloud = loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SECRET_KEY_V1: oldKey,
+      CLOUD_WORKSPACE_SECRET_KEYS_JSON: JSON.stringify({
+        1: oldKey,
+        2: newKey,
+      }),
+      CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION: "2",
+    }).cloudWorkspaces;
+
+    expect(cloud?.settingsSecretEncryptionKeys).toEqual({
+      1: oldKey,
+      2: newKey,
+    });
+    expect(cloud?.currentSettingsSecretEncryptionKeyVersion).toBe(2);
+  });
+
+  it("rejects partial durability and missing rotation keys", () => {
+    const objectKey = randomBytes(32).toString("base64url");
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OBJECT_KEY_V1: objectKey,
+      }),
+    ).toThrow(/CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY/);
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OBJECT_KEYS_JSON: JSON.stringify({ 1: objectKey }),
+        CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION: "2",
+        CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY:
+          "/var/lib/zeros/workspace-objects",
+      }),
+    ).toThrow(/current object key version/i);
+  });
+
+  it("rejects partial or unsafe setup execution configuration", () => {
+    expect(() =>
+      loadConfig({
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_CONTROL_PLANE_URL: undefined,
+      }),
+    ).toThrow(/CLOUD_WORKSPACE_CONTROL_PLANE_URL/);
+    expect(() =>
+      loadConfig({
+        ...cloudSetupEnv(),
+        DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test/path",
+      }),
+    ).toThrow(/DAYTONA_TOOLBOX_ORIGINS/);
+    expect(() =>
+      loadConfig({
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_SECRET_KEY_V1: "not-a-32-byte-key",
+      }),
+    ).toThrow(/exactly 32 bytes/);
+    expect(() =>
+      loadConfig({
+        ...validEnv(),
+        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+      }),
+    ).toThrow(/requires CLOUD_WORKSPACES_ENABLED=true/);
   });
 
   it("fails boot when the explicit gate lacks provider or GitHub mint authority", () => {
@@ -535,6 +806,12 @@ describe("cloud workspace backend configuration", () => {
     expect(() =>
       loadConfig({ ...validEnv(), CLOUD_WORKSPACES_ENABLED: "yes" }),
     ).toThrow(/must be true or false/);
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(41),
+      }),
+    ).toThrow(/ZEROS_CLOUD_SOURCE_COMMIT/);
   });
 });
 
