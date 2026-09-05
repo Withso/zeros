@@ -153,12 +153,16 @@ Each fence contains only a domain-separated SHA-256 digest of the
 provider-issued opaque identifier; it never stores the raw identifier or an
 email digest. Migration `0061` projects that evidence into an exact-key,
 append-only fence and records whether every historical purge was reconciled.
+Both evidence tables reference the associated `deletion_requests` row with
+`ON DELETE RESTRICT`; finalizers mark that request `purged` rather than deleting
+it. The request and both evidence tables are therefore one retention unit.
 The digest is pseudonymous and can still link repeated appearances of the same
 opaque provider subject, so access is limited to the system role and database
 owner. Retain fences and reconciliation evidence indefinitely: they are the
 minimum denial record that prevents a delayed token, callback, or event from
-recreating an erased subject. They must be included in backup and restore
-validation and must not be exported as ordinary customer data.
+recreating an erased subject. Include all three parts of the retention unit in
+backup, restore, and purge-retention validation; none is exported as ordinary
+customer data.
 
 Webhook and Events API ingestion resolve all currently linked targets before
 taking those same sorted locks, then recheck the durable digest fence before
@@ -755,10 +759,14 @@ Manual Alpha acceptance must verify:
 - account and Organization purge racing event ingress, plus delayed User,
   session, membership, invitation, and Organization events after final
   erasure, proving that rejected late events create only redacted deduplication
-  rows while provider-erasure fences and reconciliation evidence remain under
-  their indefinite retention contract, and Organization-owned invitation/audit
-  records survive account erasure while an Organization purge removes them
-  under the Organization's own deletion/retention policy;
+  rows while the purged deletion request, provider-erasure fences, and
+  reconciliation evidence survive the exercised purge and enforcement paths,
+  and Organization-owned invitation/audit records survive account erasure while
+  an Organization purge removes them under the Organization's own
+  deletion/retention policy. Record separate evidence that the append-only and
+  `ON DELETE RESTRICT` constraints, backup/restore procedure, and retention jobs
+  preserve the indefinite retention contract; one Alpha run proves only the
+  finite paths it exercises;
 - one and only one native WorkOS invitation email, proving there is no Zepto
   duplicate and `invitation_token` accepts through exact server-side
   correlation, strict state/PKCE on web, and the exact release-channel deep
