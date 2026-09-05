@@ -2,7 +2,6 @@ import type { JWTPayload } from "jose";
 
 export const AUTH_CLAIM_NAMESPACE = "https://zeros.build/";
 
-const WORKOS_API_ORIGIN = "https://api.workos.com";
 const AUTHENTICATE_PATH = "/user_management/authenticate";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REFRESH_ATTEMPTS = 3;
@@ -368,7 +367,10 @@ export class WorkOSDesktopClient {
     this.fetchImpl = options.fetch ?? fetch;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.sleepImpl = options.sleep ?? sleep;
-    this.apiOrigin = new URL(options.apiOrigin ?? WORKOS_API_ORIGIN).origin;
+    // The validated operator configuration owns the API host. A production
+    // custom domain must also handle code exchange and refresh; token claims
+    // never select a network destination or replace the exact expected issuer.
+    this.apiOrigin = new URL(options.apiOrigin ?? options.config.issuer).origin;
     this.verifyToken =
       options.verifyAccessToken ?? this.createRemoteVerifier(options.config);
   }
