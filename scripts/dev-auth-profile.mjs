@@ -202,6 +202,7 @@ export async function ensureDevAuthEnvironment({
   return loadDevAuthEnvironment({ homeDir, processEnv });
 }
 
+/** Locate the one user-level Alpha public profile shared by Dev checkouts. */
 export function devAuthProfilePath(homeDir = os.homedir()) {
   return path.join(homeDir, ".zeros-dev", "auth", "alpha.env");
 }

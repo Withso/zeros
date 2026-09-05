@@ -9,6 +9,8 @@ vi.mock("../secret-store", () => ({
 
 import { WorkOSDevCallbackRelay } from "../workos-dev-callback-relay";
 
+/** Model compare-and-swap with deferred notifications and a raw seeding seam
+ * for corruption tests; encryption and file watching are covered separately. */
 function sharedStore() {
   let raw: string | null = null;
   const listeners = new Set<(keys: readonly string[]) => void>();

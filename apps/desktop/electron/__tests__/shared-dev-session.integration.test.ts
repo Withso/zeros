@@ -90,6 +90,8 @@ describe("Dev session sharing across independent processes", () => {
       plugins: [
         {
           name: "external-auth-fixtures",
+          /** Bundle production session modules while substituting only Electron
+           * credential access and the external WorkOS refresh exchange. */
           setup(builder) {
             builder.onResolve({ filter: /^electron$/ }, () => ({
               path: path.join(fixtures, "dev-session-electron.ts"),

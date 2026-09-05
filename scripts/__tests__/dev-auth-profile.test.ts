@@ -34,6 +34,8 @@ const VALID_ALPHA_PROFILE = {
 
 const temporaryRoots: string[] = [];
 
+/** Allocate a canonical fake home so macOS temporary-path aliases do not mask
+ * the symlink behavior being tested, and register it for cleanup. */
 function temporaryRoot(): string {
   const root = realpathSync(
     mkdtempSync(join(tmpdir(), "zeros-dev-auth-profile-")),
@@ -60,6 +62,8 @@ afterEach(() => {
 });
 
 describe("automatic Dev public configuration", () => {
+  /** Model the versioned public response, allowing invalid profile overrides
+   * to exercise the launcher's validation boundary. */
   function response(env = VALID_ALPHA_PROFILE): Response {
     return Response.json({ version: 1, environment: "alpha", env });
   }
@@ -262,6 +266,8 @@ describe("automatic Dev public configuration", () => {
       fetchImpl: async () =>
         new Response(
           new ReadableStream({
+            /** Fail after response headers to distinguish an interrupted body
+             * from an invalid configuration document. */
             pull(controller) {
               controller.error(new Error("connection interrupted"));
             },

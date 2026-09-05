@@ -106,6 +106,7 @@ describe("app assembly — Railway WorkOS boundary", () => {
 });
 
 describe("public Alpha Dev onboarding configuration", () => {
+  /** Build a valid Alpha discovery contract with placeholder public client IDs. */
   function alphaConfig(): Config {
     const configured = workosConfig();
     configured.deploymentChannel = "alpha";

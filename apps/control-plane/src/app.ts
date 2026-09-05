@@ -86,6 +86,8 @@ function isCloudWorkspaceApiPath(requestPath: string): boolean {
   );
 }
 
+/** Assemble the control plane's public, browser, and authenticated API boundaries,
+ * retaining migration gates and injectable service dependencies for tests. */
 export function createApp(
   config: Config,
   pool: pg.Pool,
