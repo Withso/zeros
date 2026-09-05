@@ -17,9 +17,9 @@ overrides:
   qs: 6.16.0
 
 patchedDependencies:
-  '@anthropic-ai/sandbox-runtime@0.0.73':
-    hash: c735e8d05a72a47439e88888ae878289d5f2d3256e26da9cc4cc8ca5cc3abf3c
-    path: patches/@anthropic-ai__sandbox-runtime@0.0.73.patch
+  '@anthropic-ai/sandbox-runtime@0.0.75':
+    hash: 57c1a1602505e3467d5a1b81e79bf363313766222308452aa8e0e13170486f92
+    path: patches/@anthropic-ai__sandbox-runtime@0.0.75.patch
   app-builder-lib@26.8.1:
     hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
     path: patches/app-builder-lib@26.8.1.patch
@@ -32,8 +32,8 @@ importers:
         specifier: 0.3.238
         version: 0.3.238(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.30.0(zod@4.3.6))(zod@4.3.6)
       '@anthropic-ai/sandbox-runtime':
-        specifier: 0.0.73
-        version: 0.0.73(patch_hash=c735e8d05a72a47439e88888ae878289d5f2d3256e26da9cc4cc8ca5cc3abf3c)
+        specifier: 0.0.75
+        version: 0.0.75(patch_hash=57c1a1602505e3467d5a1b81e79bf363313766222308452aa8e0e13170486f92)
       '@codemirror/autocomplete':
         specifier: ^6.20.3
         version: 6.20.3
@@ -527,8 +527,8 @@ packages:
       '@modelcontextprotocol/sdk': ^1.29.0
       zod: ^4.0.0
 
-  '@anthropic-ai/sandbox-runtime@0.0.73':
-    resolution: {integrity: sha512-F608iUirrCqwvInZYGRRgJWDQj0tt6fNVE9aPagpotLJ5LhC4JbrMFIIZww5MFjb+HRCkpE0+xdI79c30tdVYg==}
+  '@anthropic-ai/sandbox-runtime@0.0.75':
+    resolution: {integrity: sha512-oqAKi6QtkT2DpLwFoDCDD757zw2i6ftpLTyV8rNSV9QWF53q2m1JxEs0RYXv2CIXtCoje4RGYQylagn15RKmww==}
     engines: {node: '>=20.11.0'}
     hasBin: true
 
@@ -7014,7 +7014,7 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.238
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.238
 
-  '@anthropic-ai/sandbox-runtime@0.0.73(patch_hash=c735e8d05a72a47439e88888ae878289d5f2d3256e26da9cc4cc8ca5cc3abf3c)':
+  '@anthropic-ai/sandbox-runtime@0.0.75(patch_hash=57c1a1602505e3467d5a1b81e79bf363313766222308452aa8e0e13170486f92)':
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0

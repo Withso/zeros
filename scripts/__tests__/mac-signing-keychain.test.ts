@@ -107,6 +107,10 @@ describe("macOS signing keychain credentials", () => {
       );
       expect(created[2]).toBeTruthy();
       expect([application, installer]).not.toContain(created[2]);
+      const unlocks = commands.filter(([action]) => action === "unlock-keychain");
+      expect(unlocks).toHaveLength(1);
+      expect(unlocks[0][2]).toBe(created[2]);
+      expect(unlocks[0].at(-1)).toBe(result.keychainFile);
       expect(imports.map((args) => args[args.indexOf("-P") + 1])).toEqual(
         installer === undefined ? [application] : [application, installer],
       );

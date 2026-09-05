@@ -46,7 +46,7 @@ PACKAGE INVENTORY (602 resolved package/version records)
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/sandbox-runtime@0.0.73
+@anthropic-ai/sandbox-runtime@0.0.75
   License: Apache-2.0
   Surfaces: root pnpm workspace
   Author: Anthropic PBC
@@ -5296,8 +5296,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 1210bc93eb85
 SHA-256: 1210bc93eb85dd786c33192d5bcb7153a93922fa99fbc1512af6a7199cb41080
-Applies to: @anthropic-ai/sandbox-runtime@0.0.73
-Source labels: @anthropic-ai/sandbox-runtime@0.0.73 — LICENSE
+Applies to: @anthropic-ai/sandbox-runtime@0.0.75
+Source labels: @anthropic-ai/sandbox-runtime@0.0.75 — LICENSE
 ================================================================================
 
                                  Apache License

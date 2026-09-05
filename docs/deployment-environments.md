@@ -389,7 +389,7 @@ the promotion ladder.
 The pinned `app-builder-lib@26.8.1` dependency has a pnpm patch that passes its
 generated temporary-keychain password to `security set-key-partition-list`.
 Each P12 password remains scoped to importing that certificate. Using a P12
-password to unlock the separately created keychain fails with
+password to unlock the separately created keychain can fail with
 `SecKeychainUnlock`, preventing the signed Alpha release and its gated Railway
 deployment from completing.
 
