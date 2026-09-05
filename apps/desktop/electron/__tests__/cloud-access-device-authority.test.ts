@@ -401,11 +401,9 @@ describe("main cloud access device authority", () => {
       );
     });
     const warning = vi.fn();
+    const written: string[] = [];
     const writeToEngine = vi.fn((line: string) => {
-      expect(JSON.parse(line)).toEqual({
-        type: "host.cloudReplicaSession",
-        session: null,
-      });
+      written.push(line);
       throw new Error(`do not log ${pending.active.privateKey}`);
     });
 
@@ -440,6 +438,11 @@ describe("main cloud access device authority", () => {
     ).resolves.toBe(true);
 
     expect(writeToEngine).toHaveBeenCalledOnce();
+    expect(written).toHaveLength(1);
+    expect(JSON.parse(written[0]!)).toEqual({
+      type: "host.cloudReplicaSession",
+      session: null,
+    });
     expect(warning).toHaveBeenCalledWith("device_registration_reseed_failed");
     expect(JSON.stringify(warning.mock.calls)).not.toContain(
       pending.active.privateKey,
