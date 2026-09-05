@@ -469,13 +469,13 @@ describe("repository layout contracts", () => {
     const generator = read("scripts/generate-third-party-licenses.mjs");
 
     for (const packageName of [
-      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238",
-      "@cursor/sdk-darwin-arm64@1.0.28",
+      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.261",
+      "@cursor/sdk-darwin-arm64@1.0.31",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
       // The staged Codex runtime is redistributed inside Contents/Resources,
       // so its platform package must carry terms — not just the JS wrapper.
       // npm publishes it as an alias, hence the platform-suffixed version.
-      "@openai/codex@0.149.0-darwin-arm64",
+      "@openai/codex@0.153.4-darwin-arm64",
       "@tiptap/extension-bubble-menu@3.31.2",
       "@tiptap/extension-floating-menu@3.31.2",
       "@types/trusted-types@2.0.7",
@@ -487,7 +487,7 @@ describe("repository layout contracts", () => {
     expect(licenses).not.toMatch(
       /@(?:anthropic-ai\/claude-agent-sdk|cursor\/sdk|vscode\/ripgrep)-linux-/,
     );
-    expect(licenses).not.toContain("@openai/codex@0.149.0-linux-x64");
+    expect(licenses).not.toContain("@openai/codex@0.153.4-linux-x64");
     expect(generator).not.toContain('"--no-optional"');
     expect(generator).toContain("runNpmLicenseInventory");
     expect(generator).toContain("web Pages functions");

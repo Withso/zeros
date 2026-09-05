@@ -1213,8 +1213,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
               ),
               ...(model ? { model } : {}),
               ...(effort ? { effort } : {}),
-              // ZEROS_FAST_MODE → Codex "fast" service tier (priority inference, GPT-5.x).
-              ...(fast ? { serviceTier: "fast" } : {}),
+              // Use the per-turn override introduced in Codex 0.153.4 so
+              // turning Fast back off cannot inherit a prior thread-level
+              // "fast" tier. "default" explicitly requests standard speed.
+              serviceTierForTurn: fast ? "fast" : "default",
               ...(collabModel
                 ? {
                     collaborationMode: {
@@ -2895,7 +2897,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  alongside the parent's. item/started is tracked too (it carries
    *  {threadId, turnId}) as a belt-and-braces for any subagent turn whose
    *  turn/started we didn't see — subagent items demonstrably stream (they
-   *  render in the timeline), so this path always has the live pairs. */
+   *  render in the timeline), so this path always has the live pairs. A
+   *  terminal subAgentActivity marker is lifecycle output, not evidence that
+   *  its attributed parent turn is still live, so it may only confirm an
+   *  already-tracked pair. */
   private wireTurnTracking(
     session: CodexSession,
     runtime: CodexAppServerHandle,
@@ -2936,7 +2941,25 @@ export class CodexAppServerAdapter implements AgentAdapter {
       track(p?.threadId, p?.turn?.id);
     });
     runtime.onNotification("item/started", (params) => {
-      const p = params as { threadId?: string; turnId?: string };
+      const p = params as {
+        threadId?: string;
+        turnId?: string;
+        item?: { type?: string; kind?: string };
+      };
+      // Codex 0.153.4 emits a subAgentActivity:completed start/completion
+      // pair on the ORIGINAL parent turn after that turn's turn/completed.
+      // Its queued child result uses trigger_turn=false, so no later parent
+      // turn/completed is guaranteed to evict a re-created entry. Keep the
+      // row flowing through the translator, but do not let this terminal
+      // lifecycle marker create or replace liveness. If the same pair is
+      // genuinely still tracked, track() remains a harmless confirmation.
+      if (
+        p?.item?.type === "subAgentActivity" &&
+        p.item.kind === "completed" &&
+        session.activeTurns.get(p.threadId ?? "") !== p.turnId
+      ) {
+        return;
+      }
       track(p?.threadId, p?.turnId);
     });
     runtime.onNotification("turn/completed", (params) => {
@@ -4236,6 +4259,8 @@ export function mapApprovalToCanonical(
   const reason = stringField(params, "reason");
   const command = commandField(params, "command");
   const cwd = stringField(params, "cwd");
+  const commandApprovalKind =
+    stringField(params, "kind") === "writeStdin" ? "writeStdin" : "command";
 
   let title: string;
   let kind: "execute" | "edit" | "switch_mode";
@@ -4243,9 +4268,21 @@ export function mapApprovalToCanonical(
   switch (request.method) {
     case "item/commandExecution/requestApproval":
     case "execCommandApproval":
-      title = command ? `Run: ${truncate(command, 60)}` : "Run shell command";
+      title =
+        request.method === "item/commandExecution/requestApproval" &&
+        commandApprovalKind === "writeStdin"
+          ? "Send input to running terminal"
+          : command
+            ? `Run: ${truncate(command, 60)}`
+            : "Run shell command";
       kind = "execute";
       rawInput = {
+        ...(request.method === "item/commandExecution/requestApproval"
+          ? {
+              approvalKind: commandApprovalKind,
+              approvalId: stringField(params, "approvalId"),
+            }
+          : {}),
         command,
         cwd,
         reason,
