@@ -20,6 +20,9 @@ patchedDependencies:
   '@anthropic-ai/sandbox-runtime@0.0.75':
     hash: 57c1a1602505e3467d5a1b81e79bf363313766222308452aa8e0e13170486f92
     path: patches/@anthropic-ai__sandbox-runtime@0.0.75.patch
+  app-builder-lib@26.8.1:
+    hash: c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd
+    path: patches/app-builder-lib@26.8.1.patch
 
 importers:
 
@@ -10562,7 +10565,7 @@ snapshots:
 
   app-builder-bin@5.0.0-alpha.12: {}
 
-  app-builder-lib@26.8.1(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1):
+  app-builder-lib@26.8.1(patch_hash=c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd)(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1):
     dependencies:
       '@develar/schema-utils': 2.6.5
       '@electron/asar': 3.4.1
@@ -11043,7 +11046,7 @@ snapshots:
 
   dmg-builder@26.8.1(electron-builder-squirrel-windows@26.8.1):
     dependencies:
-      app-builder-lib: 26.8.1(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1)
+      app-builder-lib: 26.8.1(patch_hash=c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd)(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1)
       builder-util: 26.8.1
       fs-extra: 10.1.0
       iconv-lite: 0.6.3
@@ -11092,7 +11095,7 @@ snapshots:
 
   electron-builder-squirrel-windows@26.8.1(dmg-builder@26.8.1):
     dependencies:
-      app-builder-lib: 26.8.1(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1)
+      app-builder-lib: 26.8.1(patch_hash=c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd)(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1)
       builder-util: 26.8.1
       electron-winstaller: 5.4.0
     transitivePeerDependencies:
@@ -11101,7 +11104,7 @@ snapshots:
 
   electron-builder@26.8.1(electron-builder-squirrel-windows@26.8.1):
     dependencies:
-      app-builder-lib: 26.8.1(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1)
+      app-builder-lib: 26.8.1(patch_hash=c51a788676a8229e1a823c54da53c14efc2450c327f323e0d724c5ba0d2daedd)(dmg-builder@26.8.1)(electron-builder-squirrel-windows@26.8.1)
       builder-util: 26.8.1
       builder-util-runtime: 9.5.1
       chalk: 4.1.2

@@ -92,3 +92,5 @@ auditConfig:
 # change must refresh this patch and rerun the live qualification matrix.
 patchedDependencies:
   "@anthropic-ai/sandbox-runtime@0.0.75": patches/@anthropic-ai__sandbox-runtime@0.0.75.patch
+  # Keep the generated macOS keychain password separate from P12 passwords.
+  "app-builder-lib@26.8.1": patches/app-builder-lib@26.8.1.patch
