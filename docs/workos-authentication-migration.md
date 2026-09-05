@@ -584,6 +584,46 @@ Recorded initial session policy was 30-day maximum / 7-day inactivity for web
 and 90-day maximum / 30-day inactivity for desktop; the dashboard remains the
 authority and must be re-audited before deployment.
 
+### Authentication API custom-domain changes
+
+The WorkOS SDK in Railway and the desktop public client's code exchange and
+refresh requests use the origin of the validated `AUTH_ISSUER` configuration.
+For example, an issuer under `https://auth-api.zeros.build/user_management/…`
+routes API requests through `https://auth-api.zeros.build`. The complete issuer
+string is still matched byte-for-byte during JWT verification. Neither the
+issuer nor the network destination is taken from an unverified token. Keep
+`AUTH_JWKS_URL` explicitly configured to the environment's published JWKS URL.
+
+When enabling or changing a production Authentication API domain:
+
+1. Set the WorkOS AuthKit, Authentication API, and Admin Portal CNAMEs to **DNS
+   only** in Cloudflare, preserving their WorkOS-provided targets. WorkOS domain
+   verification alone does not establish that the proxy setting is correct.
+2. Read the environment's discovery metadata and qualify the exact issuer and
+   JWKS against fresh Web and Desktop tokens using the token-contract probe.
+   Do not guess a trailing slash or substitute an AuthKit UI domain for the API
+   domain.
+3. Update `AUTH_ISSUER` and `AUTH_JWKS_URL` together in Railway production and the
+   GitHub production release environment. Keep the audience and separate client
+   IDs unchanged unless a separately qualified Application migration requires
+   them to change. Sandbox and shared Dev Alpha settings remain independent.
+4. Promote the tested backend and rebuild the signed desktop from the same
+   Beta-validated release commit. Existing installed binaries retain their
+   compiled issuer and API behavior until updated; changing release variables
+   does not repair those binaries.
+5. Verify browser login, desktop handoff, API identity, and token refresh on the
+   released build. Record the deployment SHA, release version, and test results.
+   Preserve strict issuer, audience, client, signature, and verified-email
+   checks throughout the migration.
+
+Rollback must restore a coordinated provider-domain, backend configuration,
+and desktop token contract. Reverting only one issuer variable can leave the
+other clients unable to authenticate. Follow the frozen release promotion
+process in [deployment-environments.md](deployment-environments.md).
+
+References: [WorkOS Authentication API domains](https://workos.com/docs/custom-domains/auth-api)
+and [AuthKit DNS requirements](https://workos.com/docs/custom-domains/authkit).
+
 ## WorkOS dashboard checklist
 
 Perform this independently for Alpha, Beta, and Production and record the
