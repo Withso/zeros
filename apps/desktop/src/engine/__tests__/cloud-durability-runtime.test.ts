@@ -1028,6 +1028,47 @@ describe("cloud durability checkpoint coordination", () => {
   });
 
   checkpointIt(
+    "kills a stalled Git scan at the directive deadline before remote writes",
+    async () => {
+      const root = await checkpointRepository();
+      const fakeBin = await mkdtemp(path.join(tmpdir(), "zeros-cloud-git-"));
+      roots.push(fakeBin);
+      const marker = path.join(fakeBin, "started");
+      await writeFile(
+        path.join(fakeBin, "git"),
+        `#!/bin/sh\n: > ${JSON.stringify(marker)}\nexec /bin/sleep 60\n`,
+        { mode: 0o755 },
+      );
+      const writes: string[] = [];
+      const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+        fetch: recordingCheckpointFetch(writes),
+      });
+      const originalPath = process.env.PATH;
+      const startedAt = Date.now();
+      try {
+        process.env.PATH = fakeBin;
+        await expect(
+          runtime.checkpoint(
+            {
+              id: "13131313-1313-4131-8131-131313131313",
+              reason: "before_stop",
+              deadlineAtMs: Date.now() + 1_000,
+            },
+            authority,
+          ),
+        ).rejects.toThrow("cloud checkpoint deadline expired");
+      } finally {
+        if (originalPath === undefined) delete process.env.PATH;
+        else process.env.PATH = originalPath;
+      }
+
+      expect(Date.now() - startedAt).toBeLessThan(5_000);
+      await expect(fs.stat(marker)).resolves.toBeDefined();
+      expect(writes).toEqual([]);
+    },
+  );
+
+  checkpointIt(
     "does not reload the projection after a conflict at the directive deadline",
     async () => {
       const root = await checkpointRepository();

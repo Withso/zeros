@@ -219,26 +219,47 @@ function validateSymlinkTarget(relativePath: string, bytes: Buffer): void {
   }
 }
 
-async function gitBuffer(root: string, args: string[]): Promise<Buffer> {
-  const result = await execFileAsync("git", args, {
-    cwd: root,
-    encoding: "buffer",
-    maxBuffer: 64 * 1024 * 1024,
-    env: {
-      HOME: process.env.HOME,
-      LANG: "C.UTF-8",
-      PATH: process.env.PATH,
-      GIT_CONFIG_NOSYSTEM: "1",
-      GIT_CONFIG_GLOBAL: "/dev/null",
-      GIT_OPTIONAL_LOCKS: "0",
-      GIT_TERMINAL_PROMPT: "0",
-    },
-  });
-  return Buffer.from(result.stdout);
+async function gitBuffer(
+  root: string,
+  args: string[],
+  deadlineAtMs?: number,
+): Promise<Buffer> {
+  const timeout = deadlineAtMs === undefined ? 0 : deadlineAtMs - Date.now();
+  if (deadlineAtMs !== undefined && timeout <= 0) {
+    throw new CloudCheckpointDeadlineError();
+  }
+  try {
+    const result = await execFileAsync("git", args, {
+      cwd: root,
+      encoding: "buffer",
+      maxBuffer: 64 * 1024 * 1024,
+      timeout,
+      killSignal: "SIGKILL",
+      env: {
+        HOME: process.env.HOME,
+        LANG: "C.UTF-8",
+        PATH: process.env.PATH,
+        GIT_CONFIG_NOSYSTEM: "1",
+        GIT_CONFIG_GLOBAL: "/dev/null",
+        GIT_OPTIONAL_LOCKS: "0",
+        GIT_TERMINAL_PROMPT: "0",
+      },
+    });
+    return Buffer.from(result.stdout);
+  } catch (error) {
+    if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
+      throw new CloudCheckpointDeadlineError();
+    }
+    throw error;
+  }
 }
 
-async function gitText(root: string, args: string[]): Promise<string> {
-  return (await gitBuffer(root, args)).toString("utf8").trim();
+async function gitText(
+  root: string,
+  args: string[],
+  deadlineAtMs?: number,
+): Promise<string> {
+  return (await gitBuffer(root, args, deadlineAtMs)).toString("utf8").trim();
 }
 
 type NamedDirectoryBinding = {
@@ -702,6 +723,7 @@ async function scanCloudWorkspaceChangesOnce(
   baseCommit: string | null,
   includeRepositorySettings: boolean,
   requireDescriptorSafety: boolean,
+  deadlineAtMs: number | undefined,
 ): Promise<CloudWorkspaceChangeScan> {
   return withCaptureRoot(
     root,
@@ -709,38 +731,49 @@ async function scanCloudWorkspaceChangesOnce(
     async (captureRoot, commandRoot) => {
       const revision = baseCommit ?? "HEAD";
       const [commit, tracked, changed, untracked] = await Promise.all([
-        gitText(commandRoot, ["rev-parse", "--verify", `${revision}^{commit}`]),
-        gitBuffer(commandRoot, ["ls-files", "-z", "--cached", "--"]),
-        gitBuffer(commandRoot, [
-          "diff",
-          "--name-only",
-          "-z",
-          "--no-ext-diff",
-          "--no-renames",
-          revision,
-          "--",
-        ]),
-        gitBuffer(commandRoot, [
-          "ls-files",
-          "-z",
-          "--others",
-          "--exclude-standard",
-          "--",
-        ]),
+        gitText(
+          commandRoot,
+          ["rev-parse", "--verify", `${revision}^{commit}`],
+          deadlineAtMs,
+        ),
+        gitBuffer(
+          commandRoot,
+          ["ls-files", "-z", "--cached", "--"],
+          deadlineAtMs,
+        ),
+        gitBuffer(
+          commandRoot,
+          [
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-ext-diff",
+            "--no-renames",
+            revision,
+            "--",
+          ],
+          deadlineAtMs,
+        ),
+        gitBuffer(
+          commandRoot,
+          ["ls-files", "-z", "--others", "--exclude-standard", "--"],
+          deadlineAtMs,
+        ),
       ]);
       if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
         throw new Error("cloud checkpoint Git base is invalid");
       }
       let headRef: string | null = null;
       try {
-        const candidate = await gitText(commandRoot, [
-          "symbolic-ref",
-          "-q",
-          "HEAD",
-        ]);
+        const candidate = await gitText(
+          commandRoot,
+          ["symbolic-ref", "-q", "HEAD"],
+          deadlineAtMs,
+        );
         headRef =
           candidate.length > 0 && candidate.length <= 512 ? candidate : null;
-      } catch {
+      } catch (error) {
+        if (error instanceof CloudCheckpointDeadlineError) throw error;
         headRef = null;
       }
       // The durable projection is the complete safe working tree, not merely the
@@ -835,6 +868,8 @@ export async function scanCloudWorkspaceChanges(
     includeRepositorySettings?: boolean;
     /** Privileged cloud-engine capture has no pathname-only fallback. */
     requireDescriptorSafety?: boolean;
+    /** Absolute control-plane deadline for privileged checkpoint capture. */
+    deadlineAtMs?: number;
   } = {},
 ): Promise<CloudWorkspaceChangeScan> {
   const baseCommit = options.baseCommit ?? null;
@@ -850,6 +885,7 @@ export async function scanCloudWorkspaceChanges(
     baseCommit,
     includeRepositorySettings,
     options.requireDescriptorSafety === true,
+    options.deadlineAtMs,
   );
   if (!options.verifyStable) return first;
   let confirmation: CloudWorkspaceChangeScan | null = null;
@@ -859,6 +895,7 @@ export async function scanCloudWorkspaceChanges(
       baseCommit,
       includeRepositorySettings,
       options.requireDescriptorSafety === true,
+      options.deadlineAtMs,
     );
     if (confirmation.fingerprint !== first.fingerprint) {
       throw new Error("cloud checkpoint changed while it was being captured");
@@ -1317,6 +1354,7 @@ export class CloudWorkspaceDurabilityRuntime {
         }
         const scan = await scanCloudWorkspaceChanges(this.repositoryRoot, {
           requireDescriptorSafety: true,
+          deadlineAtMs: directive.deadlineAtMs,
         });
         if (Date.now() >= directive.deadlineAtMs) {
           for (const entry of scan.entries.values()) entry.bytes.fill(0);
@@ -1372,7 +1410,10 @@ export class CloudWorkspaceDurabilityRuntime {
         assertCheckpointBeforeDeadline(directive.deadlineAtMs);
         const confirmation = await scanCloudWorkspaceChanges(
           this.repositoryRoot,
-          { requireDescriptorSafety: true },
+          {
+            requireDescriptorSafety: true,
+            deadlineAtMs: directive.deadlineAtMs,
+          },
         );
         if (Date.now() >= directive.deadlineAtMs) {
           for (const entry of confirmation.entries.values())
@@ -1477,6 +1518,7 @@ export class CloudWorkspaceDurabilityRuntime {
           assertCheckpointBeforeDeadline(directive.deadlineAtMs);
           settled = await scanCloudWorkspaceChanges(this.repositoryRoot, {
             requireDescriptorSafety: true,
+            deadlineAtMs: directive.deadlineAtMs,
           });
         } catch (error) {
           for (const entry of confirmation.entries.values())
