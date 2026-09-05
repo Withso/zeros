@@ -1,16 +1,21 @@
-/* Hero role cycle: scramble decode. HOLD_MS / SCRAMBLE_MS live in TS. */
+/* Hero role cycle: scramble decode. HOLD_MS / SCRAMBLE_MS live in TS.
+ * The hidden sizer is the only in-flow size. The live word paints inside
+ * that box so scramble glyphs cannot grow, wrap, or leak the headline.
+ *
+ * Settled builders / developers / designers and scramble text use
+ * Doto ExtraBold 800 at hsl(0 0% 80%). Design marks stay SVG. */
 
 .hero-role {
   position: relative;
-  display: inline-grid;
-  justify-items: start;
-  align-items: end;
+  display: inline-block;
   vertical-align: baseline;
-}
-
-.hero-role-sizer,
-.hero-role-word {
-  grid-area: 1 / 1;
+  margin-left: 0.2em;
+  font-family: "Doto", "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 800;
+  font-style: normal;
+  font-synthesis: none;
+  /* White at lightness 80, a step under the headline. */
+  color: hsl(0 0% 80%);
 }
 
 .hero-role-sizer {
@@ -21,63 +26,99 @@
 }
 
 .hero-role-word {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
   white-space: nowrap;
 }
 
-/* Same size/weight as the h1. Tabular digits keep the matrix flicker stable. */
 .hero-role-word.is-scrambling {
   font-variant-numeric: tabular-nums;
 }
 
 .hero-scramble-text,
 .hero-scramble-symbol {
-  font-size: 1em;
   font-weight: inherit;
   font-family: inherit;
   letter-spacing: inherit;
 }
 
-/* Fixed roles: settled letters, then a quieter scramble tail. */
 .hero-scramble-text,
 .hero-role-revealed {
   color: inherit;
+  font-size: 1em;
+  letter-spacing: inherit;
+  font-variant-numeric: normal;
+  vertical-align: baseline;
 }
 
-.hero-scramble-symbol {
-  color: color-mix(in srgb, var(--blue-fg) 18%, var(--fg1));
+/* Never larger than the headline em: 60px / 50px glyphs otherwise add
+   ascent, drop the line, and the settled word jumps up on complete. */
+.hero-role-word.is-scrambling .hero-scramble-symbol {
+  display: inline-block;
+  font-size: min(60px, 1em);
+  line-height: 1;
   vertical-align: baseline;
+}
+
+/* Designers pass only: one shared ground on the headline baseline.
+   Fill the sizer (not a shorter top-pinned band) so the row does not
+   sit high during scramble and drop when `designers` settles. */
+.hero-role-word.scramble-developers.is-scrambling {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+}
+
+.hero-role-word.scramble-developers.is-scrambling::before {
+  content: "A";
+  flex: 0 0 auto;
+  width: 0;
+  color: transparent;
+  font: inherit;
+  line-height: inherit;
+  pointer-events: none;
+}
+
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol,
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-icon,
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-text,
+.hero-role-word.scramble-developers.is-scrambling .hero-role-revealed {
+  flex: 0 0 auto;
+}
+
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol {
+  font-size: min(60px, 1em);
+  line-height: 1;
+  margin: 0 2px 0 0;
+}
+
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
+  margin-right: 0;
 }
 
 .hero-scramble-icon {
   display: inline-block;
-  width: 0.58em;
-  height: 0.74em;
-  margin: 0 0.015em;
-  overflow: visible;
-  vertical-align: -0.1em;
-  color: color-mix(in srgb, var(--violet-fg) 42%, var(--fg1));
+  overflow: hidden;
+  vertical-align: baseline;
+  shape-rendering: crispEdges;
 }
 
-.hero-scramble-icon[data-hero-scramble-icon="component"] {
-  color: color-mix(in srgb, var(--violet-fg) 68%, var(--fg1));
+.hero-role-word.scramble-developers .hero-scramble-icon {
+  width: min(50px, 1em);
+  height: min(50px, 1em);
+  max-width: min(50px, 1em);
+  max-height: min(50px, 1em);
+  margin: 0 2px 0 0;
+  vertical-align: baseline;
 }
 
-.hero-scramble-icon[data-hero-scramble-icon="align"] {
-  color: color-mix(in srgb, var(--blue-fg) 30%, var(--fg1));
+.hero-role-word.scramble-developers .hero-scramble-icon:last-child {
+  margin-right: 0;
 }
 
-.hero-scramble-icon[data-hero-scramble-icon="rect"],
-.hero-scramble-icon[data-hero-scramble-icon="circle"],
-.hero-scramble-icon[data-hero-scramble-icon="triangle"] {
-  color: color-mix(in srgb, var(--violet-fg) 28%, var(--fg1));
-}
-
-.hero-role-word.is-scrambling.scramble-developers .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--violet-fg) 22%, var(--fg1));
-}
-
-.hero-role-word.is-scrambling.scramble-designers .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--green-fg) 22%, var(--fg1));
+.hero-role-word.scramble-developers .hero-scramble-icon.is-key {
+  opacity: 0.55;
 }
 
 @media (prefers-reduced-motion: reduce) {

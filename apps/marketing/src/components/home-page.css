@@ -1,21 +1,35 @@
 /* Homepage canvas: Neutral Dark, no decorative field. */
 
-.home-ascii-page {
+.home-page {
   color-scheme: dark;
   background-color: var(--bg1);
-  /* KEEP IN SYNC with ProductPreview: top bar 40px + pane h-[560/620/680]. */
-  --hero-product-height: 600px;
+  --nav-h: 4rem;
+  /* First-fold product slice, as a fraction of the viewport (Linear). */
+  --hero-peek: 0.42;
+  --hero-air: 10dvh;
+  --hero-copy-gap: 2rem;
+  /* Native desktop canvas. Scaled to the column; never reflowed. */
+  --hero-preview-w: 1100px;
+  --hero-product-scale: 1;
+  /* Mock is taller than the peek so scroll reveals the rest. */
+  --hero-product-height: max(70rem, 120dvh);
 }
 
 @media (min-width: 640px) {
-  .home-ascii-page {
-    --hero-product-height: 660px;
+  .home-page {
+    --hero-peek: 0.48;
+    --hero-air: 14dvh;
+    --hero-copy-gap: 2.75rem;
+    --hero-product-height: max(70rem, 120dvh);
   }
 }
 
 @media (min-width: 1024px) {
-  .home-ascii-page {
-    --hero-product-height: 720px;
+  .home-page {
+    --hero-peek: 0.52;
+    --hero-air: 18dvh;
+    --hero-copy-gap: 3.25rem;
+    --hero-product-height: max(70rem, 110dvh);
   }
 }
 
@@ -25,7 +39,7 @@
  * apps/marketing/src/index.css :root.
  */
 @media (prefers-color-scheme: light) {
-  .home-ascii-page {
+  .home-page {
     --bg0: hsl(0 0% 5%);
     --bg1: hsl(0 0% 7%);
     --pane-bg: var(--bg1);
@@ -83,9 +97,62 @@
 }
 
 /* Lockup uses Tailwind `invert` for light OS; keep the white mark on black. */
-.home-ascii-page .invert {
+.home-page .invert {
   --tw-invert: invert(0);
   filter: none;
 }
 
-/* Unused. Homepage layout lives in home-page.css (.home-page .hero-copy). */
+/*
+ * Linear-like first fold: air under the nav, copy packed to the mock,
+ * then ~half the viewport of product. 4rem is the sticky nav (h-16).
+ * The mock itself is taller than --hero-peek so scrolling reveals it.
+ */
+.home-page .hero-copy {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: calc(100dvh - var(--nav-h) - (var(--hero-peek) * 100dvh));
+  padding-top: var(--hero-air);
+  padding-bottom: var(--hero-copy-gap);
+}
+
+.home-page .hero-product {
+  position: relative;
+}
+
+/*
+ * Linear-style product frame: the desktop mock stays a 1100px rectangle
+ * (chat + inspector side by side) and is scaled to the column width. Do not
+ * clip the bottom — the first fold peeks, scroll reveals the rest.
+ */
+.home-page .hero-product-fit {
+  width: 100%;
+  overflow: visible;
+  container-type: inline-size;
+}
+
+.home-page .hero-product-scale {
+  --hero-product-scale: min(1, 100cqi / var(--hero-preview-w));
+  width: var(--hero-preview-w);
+  transform: scale(var(--hero-product-scale));
+  transform-origin: top left;
+  margin-right: calc(
+    (var(--hero-product-scale) - 1) * var(--hero-preview-w)
+  );
+  margin-bottom: calc(
+    (var(--hero-product-scale) - 1) * var(--hero-product-height)
+  );
+}
+
+.home-page .hero-horizon {
+  pointer-events: none;
+  position: absolute;
+  inset: -12% -18% auto;
+  height: 70%;
+  z-index: 0;
+  background: radial-gradient(
+    70% 80% at 50% 100%,
+    color-mix(in srgb, var(--fg1) 8%, transparent),
+    transparent 72%
+  );
+}

@@ -35,29 +35,25 @@ export function ProductPreview() {
     <div className="relative">
       <div
         aria-hidden
-        className="pointer-events-none absolute -inset-x-10 -inset-y-12 -z-10 rounded-[40px] blur-2xl"
+        className="pointer-events-none absolute -inset-x-16 -inset-y-16 -z-10 rounded-[48px] blur-3xl"
         style={{
           background:
-            'radial-gradient(60% 60% at 50% 30%, color-mix(in srgb, var(--fg1) 6%, transparent), transparent 70%)',
+            'radial-gradient(70% 70% at 50% 18%, color-mix(in srgb, var(--fg1) 10%, transparent), transparent 72%)',
         }}
       />
 
       <div
-        className="relative overflow-hidden rounded-lg border border-border2 bg-bg1 shadow-[var(--shadow-product)]"
+        className="relative w-full overflow-hidden rounded-xl border border-border2 bg-bg1 shadow-[var(--shadow-product)]"
         aria-label="Zeros workspace preview"
       >
         <TopBar />
 
-        <div className="relative overflow-x-auto lg:overflow-x-visible">
-          <div className="relative h-[560px] min-w-[980px] sm:h-[620px] lg:h-[680px] lg:min-w-0">
-            <ChatPane />
-            <FloatingInspector />
-          </div>
-
-          <div
-            aria-hidden
-            className="pointer-events-none absolute top-0 right-0 bottom-0 w-10 bg-gradient-to-l from-bg1 to-transparent lg:hidden"
-          />
+        <div
+          className="hero-preview-pane relative w-full"
+          style={{ height: 'calc(var(--hero-product-height, 44rem) - 40px)' }}
+        >
+          <ChatPane />
+          <FloatingInspector />
         </div>
       </div>
     </div>

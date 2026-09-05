@@ -1,11 +1,10 @@
 /**
- * Pure-dark ASCII cloud field for the marketing hero.
+ * ASCII cloud atmosphere for the marketing hero.
  *
- * Density is a domain-warped ridged fBm framed into the upper sky
- * (nav + headline band, especially top-right). The product preview
- * covers the lower hero, so that region stays empty black. A well
- * keeps left-aligned type readable. Glyphs are the terminal ramp;
- * sparse `+` / `x` / `.` glints fill the open sky.
+ * The upper void stays empty so the left-aligned tagline can breathe.
+ * Luminous billows, rim-lit like terminal clouds, sit on the horizon
+ * around the product peek. Cyan streaks cut through that band. The
+ * clipped UI at the bottom is thinned so chrome stays readable.
  */
 
 export const ASCII_CLOUD_RAMP = [
@@ -26,14 +25,16 @@ export const ASCII_CLOUD_RAMP = [
 export const ASCII_STAR_GLYPHS = [".", "+", "x"] as const;
 
 export const HERO_ASCII_VOID = "#000000";
-export const HERO_ASCII_GLYPH_RGB = [220, 220, 220] as const;
+export const HERO_ASCII_GLYPH_RGB = [220, 232, 255] as const;
+export const HERO_ASCII_CYAN_RGB = [110, 214, 255] as const;
 
-const DENSITY_FLOOR = 0.055;
-const STAR_CHANCE = 0.02;
+const DENSITY_FLOOR = 0.05;
+const STAR_CHANCE = 0.018;
 
 export type AsciiGlyph = {
   ch: string;
   alpha: number;
+  rgb: readonly [number, number, number];
 };
 
 export function clamp01(value: number): number {
@@ -123,22 +124,27 @@ function gauss(
   return Math.exp(-0.5 * (dx * dx + dy * dy));
 }
 
+function gauss1d(x: number, sigma: number): number {
+  const t = x / sigma;
+  return Math.exp(-0.5 * t * t);
+}
+
 function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = clamp01((x - edge0) / (edge1 - edge0));
   return t * t * (3 - 2 * t);
 }
 
 /**
- * 1 inside the left-aligned type block, 0 outside. The very top of the
- * nav strip is left open so billows can sit above the headline.
+ * 1 inside the left-aligned type block, 0 outside. Extra air sits above
+ * the headline, so the well is lower than the nav strip.
  */
 export function headlineWell(nx: number, ny: number, aspect: number): number {
   const landscape = aspect >= 1.05;
-  const left = 0.1;
-  const right = landscape ? 0.58 : 0.78;
-  const top = landscape ? 0.06 : 0.05;
-  const bottom = landscape ? 0.32 : 0.24;
-  const feather = landscape ? 0.09 : 0.07;
+  const left = 0.08;
+  const right = landscape ? 0.62 : 0.84;
+  const top = landscape ? 0.16 : 0.12;
+  const bottom = landscape ? 0.52 : 0.4;
+  const feather = landscape ? 0.1 : 0.08;
   const dx = nx < left ? left - nx : nx > right ? nx - right : 0;
   const dy = ny < top ? top - ny : ny > bottom ? ny - bottom : 0;
   const dist = Math.hypot(dx, dy);
@@ -147,76 +153,123 @@ export function headlineWell(nx: number, ny: number, aspect: number): number {
 }
 
 /**
- * 1 in the upper sky (visible above the product preview), 0 in the
- * lower hero where the UI screen covers the field.
+ * 1 on the horizon band around the product peek, 0 in the upper void.
  */
-export function skyGate(ny: number, aspect: number): number {
-  const fadeStart = aspect >= 1.05 ? 0.3 : 0.24;
-  const fadeEnd = aspect >= 1.05 ? 0.46 : 0.38;
-  if (ny <= fadeStart) return 1;
-  if (ny >= fadeEnd) return 0;
-  return 1 - smoothstep(fadeStart, fadeEnd, ny);
+export function horizonGate(ny: number, aspect: number): number {
+  const landscape = aspect >= 1.05;
+  const rise = landscape ? 0.4 : 0.34;
+  const full = landscape ? 0.54 : 0.48;
+  const hold = landscape ? 0.8 : 0.74;
+  const fade = landscape ? 0.98 : 0.94;
+  if (ny <= rise) return smoothstep(rise - 0.14, rise, ny) * 0.22;
+  if (ny < full) return 0.22 + 0.78 * smoothstep(rise, full, ny);
+  if (ny <= hold) return 1;
+  return 1 - 0.55 * smoothstep(hold, fade, ny);
 }
 
-/** 1 in the upper sky, 0 behind the product preview. */
+/**
+ * 1 in the clear upper sky (stars), 0 on the horizon.
+ */
+export function skyGate(ny: number, aspect: number): number {
+  return clamp01(1 - horizonGate(ny, aspect) * 1.35);
+}
+
+/** 1 above the product peek, 0 inside the clipped UI band. */
 export function productSkyline(ny: number, aspect = 1.6): number {
-  return skyGate(ny, aspect);
+  const start = aspect >= 1.05 ? 0.62 : 0.58;
+  return 1 - smoothstep(start, start + 0.14, ny);
+}
+
+/**
+ * Thin the field over the product chrome so the window stays readable.
+ */
+export function productWell(nx: number, ny: number, aspect: number): number {
+  const landscape = aspect >= 1.05;
+  const left = landscape ? 0.07 : 0.04;
+  const right = landscape ? 0.93 : 0.96;
+  const top = landscape ? 0.64 : 0.6;
+  const feather = landscape ? 0.09 : 0.07;
+  if (ny < top - feather) return 0;
+  const dx = nx < left ? left - nx : nx > right ? nx - right : 0;
+  const dy = ny < top ? top - ny : 0;
+  const dist = Math.hypot(dx, dy);
+  const inside = dist === 0 ? 1 : 1 - smoothstep(0, feather, dist);
+  return inside * smoothstep(top - feather, top + 0.04, ny);
+}
+
+/** Cyan data-stream streaks through the horizon clouds. */
+export function streakField(nx: number, ny: number): number {
+  const s1 = gauss1d(nx * 0.72 + ny * 1.05 - 1.12, 0.034);
+  const s2 = gauss1d(nx * 0.9 + ny * 0.88 - 0.78, 0.026);
+  const s3 = gauss1d(nx * 0.48 + ny * 1.22 - 1.28, 0.02);
+  return clamp01(s1 * 0.95 + s2 * 0.55 + s3 * 0.4);
 }
 
 function moundField(nx: number, ny: number, aspect: number): number {
   if (aspect >= 1.05) {
     return (
-      1.45 * gauss(nx, ny, 0.96, 0.12, 0.34, 0.2) +
-      1.18 * gauss(nx, ny, 1.02, 0.22, 0.28, 0.18) +
-      0.95 * gauss(nx, ny, 0.78, 0.08, 0.3, 0.14) +
-      0.7 * gauss(nx, ny, 0.64, 0.1, 0.22, 0.12) +
-      0.62 * gauss(nx, ny, 0.02, 0.1, 0.18, 0.14) +
-      0.48 * gauss(nx, ny, -0.02, 0.2, 0.16, 0.14)
+      1.18 * gauss(nx, ny, 0.12, 0.7, 0.2, 0.16) +
+      0.88 * gauss(nx, ny, 0.34, 0.76, 0.18, 0.12) +
+      0.7 * gauss(nx, ny, 0.52, 0.8, 0.2, 0.1) +
+      0.95 * gauss(nx, ny, 0.7, 0.7, 0.18, 0.14) +
+      1.28 * gauss(nx, ny, 0.88, 0.58, 0.22, 0.2) +
+      0.78 * gauss(nx, ny, 0.94, 0.42, 0.14, 0.12) +
+      0.55 * gauss(nx, ny, 0.04, 0.52, 0.12, 0.12)
     );
   }
   return (
-    1.32 * gauss(nx, ny, 0.94, 0.1, 0.24, 0.16) +
-    1.1 * gauss(nx, ny, 1.02, 0.2, 0.22, 0.16) +
-    0.78 * gauss(nx, ny, 0.04, 0.1, 0.16, 0.12) +
-    0.52 * gauss(nx, ny, -0.02, 0.2, 0.14, 0.12)
+    1.05 * gauss(nx, ny, 0.14, 0.66, 0.18, 0.14) +
+    0.78 * gauss(nx, ny, 0.5, 0.76, 0.22, 0.1) +
+    1.15 * gauss(nx, ny, 0.88, 0.58, 0.18, 0.16) +
+    0.6 * gauss(nx, ny, 0.72, 0.7, 0.16, 0.1)
   );
 }
 
-function edgeBias(nx: number, ny: number, aspect: number): number {
-  const top = clamp01((0.4 - ny) / 0.4);
-  if (aspect >= 1.05) {
-    return Math.max(
-      top * 0.32,
-      clamp01((nx - 0.68) / 0.32) * top,
-      clamp01((0.14 - nx) / 0.14) * top * 0.55,
-    );
-  }
-  return Math.max(
-    top * 0.45,
-    clamp01((nx - 0.72) / 0.28) * top,
-    clamp01((0.16 - nx) / 0.16) * top * 0.7,
-  );
+/**
+ * Peak on the cloud rim, fall off in the core so billows read as
+ * outlined ASCII volumes instead of a solid 0/1 slab.
+ */
+function shellFromRaw(raw: number): number {
+  if (raw < 0.08) return 0;
+  const rim = Math.exp(-Math.pow((raw - 0.4) / 0.13, 2));
+  const inner = raw > 0.42 ? 0.1 + 0.22 * (1 - raw) : 0;
+  const mist = raw < 0.28 ? raw * 0.7 : 0;
+  return clamp01(rim * 0.95 + inner + mist);
 }
 
 /** 0..1 cloud coverage at normalized coordinates. */
 export function cloudDensity(nx: number, ny: number, aspect: number): number {
-  const sky = skyGate(ny, aspect);
-  if (sky <= 0) return 0;
-  const w1 = fbm(nx * 1.8 + 2.1, ny * 1.6, 4, 3);
-  const w2 = fbm(nx * 1.7 + 8.4, ny * 1.9 + 1.2, 4, 9);
-  const wx = nx * (2.6 + 0.4 * Math.min(aspect, 2.2)) + w1 * 1.05;
-  const wy = ny * 2.2 + w2 * 0.95;
+  const horizon = horizonGate(ny, aspect);
+  if (horizon <= 0.02) return 0;
+  const w1 = fbm(nx * 1.7 + 2.1, ny * 1.8, 4, 3);
+  const w2 = fbm(nx * 1.6 + 8.4, ny * 2.1 + 1.2, 4, 9);
+  const wx = nx * (2.5 + 0.35 * Math.min(aspect, 2.2)) + w1 * 1.1;
+  const wy = ny * 2.6 + w2 * 1.05;
   const ridges = ridged(wx, wy, 5, 11);
-  const fluff = fbm(nx * 5.5 + w1, ny * 5.0 + w2, 4, 21);
-  const body = (ridges * 0.72 + fluff * 0.28) ** 1.15;
+  const fluff = fbm(nx * 5.8 + w1, ny * 5.4 + w2, 4, 21);
+  const body = Math.pow(ridges * 0.62 + fluff * 0.38, 1.05);
   const mounds = moundField(nx, ny, aspect);
-  const edge = edgeBias(nx, ny, aspect);
-  let dens =
-    body * (0.22 + 0.95 * Math.min(1.55, mounds)) * (0.2 + 1.1 * edge);
-  const well = headlineWell(nx, ny, aspect);
-  dens *= 1 - 0.97 * well;
-  dens *= sky;
-  return clamp01(dens * 1.95 - 0.03);
+  const streak = streakField(nx, ny);
+  let raw =
+    body * (0.28 + 1.05 * Math.min(1.45, mounds)) * (0.3 + 0.85 * horizon);
+  raw += streak * 0.18 * horizon;
+  raw *= 1 - 0.97 * headlineWell(nx, ny, aspect);
+  raw *= 1 - 0.88 * productWell(nx, ny, aspect);
+  raw *= horizon;
+  return clamp01(shellFromRaw(raw));
+}
+
+function mixRgb(
+  a: readonly [number, number, number],
+  b: readonly [number, number, number],
+  t: number,
+): [number, number, number] {
+  const k = clamp01(t);
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * k),
+    Math.round(a[1] + (b[1] - a[1]) * k),
+    Math.round(a[2] + (b[2] - a[2]) * k),
+  ];
 }
 
 export function glyphAt(
@@ -230,28 +283,41 @@ export function glyphAt(
   const aspect = cols / rows;
   const well = headlineWell(nx, ny, aspect);
   const sky = skyGate(ny, aspect);
-  if (sky <= 0) return null;
   const density = cloudDensity(nx, ny, aspect);
   if (density < DENSITY_FLOOR) {
-    if (sky < 0.45) return null;
+    if (sky < 0.55) return null;
     if (well > 0.28) return null;
+    if (ny > 0.48) return null;
     const star = hash2(col, row, 77);
     if (star >= STAR_CHANCE) return null;
     const pick = hash2(col, row, 91);
     const ch =
       ASCII_STAR_GLYPHS[Math.floor(pick * ASCII_STAR_GLYPHS.length)] ?? "+";
-    return { ch, alpha: ch === "+" ? 0.72 : 0.42 };
+    return {
+      ch,
+      alpha: ch === "+" ? 0.62 : 0.36,
+      rgb: HERO_ASCII_GLYPH_RGB,
+    };
   }
-  const t = clamp01((density - DENSITY_FLOOR) / 0.72);
+  const t = clamp01((density - DENSITY_FLOOR) / 0.62);
+  const rim = 4 * density * (1 - density);
+  const streak = streakField(nx, ny);
+  const maxIdx = streak > 0.4 ? ASCII_CLOUD_RAMP.length - 1 : 8;
   let idx = Math.min(
-    ASCII_CLOUD_RAMP.length - 1,
-    Math.floor(t * ASCII_CLOUD_RAMP.length),
+    maxIdx,
+    Math.floor((0.12 + t * 0.55 + rim * 0.22 + streak * 0.18) * ASCII_CLOUD_RAMP.length),
   );
   const jitter = hash2(col, row, 4);
   if (jitter > 0.74 && idx < ASCII_CLOUD_RAMP.length - 1) idx += 1;
   else if (jitter < 0.16 && idx > 0) idx -= 1;
   const ch = ASCII_CLOUD_RAMP[idx] ?? ".";
-  return { ch, alpha: 0.36 + t * 0.56 };
+  const alpha = clamp01(0.22 + t * 0.42 + rim * 0.4 + streak * 0.38);
+  const rgb = mixRgb(
+    HERO_ASCII_GLYPH_RGB,
+    HERO_ASCII_CYAN_RGB,
+    streak * 1.35 + rim * 0.28,
+  );
+  return { ch, alpha, rgb };
 }
 
 export function cellSizeForWidth(cssWidth: number): number {
@@ -263,7 +329,7 @@ type PaintContext = Pick<
   "fillRect" | "fillText" | "font" | "textAlign" | "textBaseline" | "fillStyle"
 >;
 
-/** Paint a black void + ASCII clouds. Safe to call with a 2d canvas ctx. */
+/** Paint a black void + lit ASCII clouds. Safe to call with a 2d canvas ctx. */
 export function paintHeroAsciiField(
   ctx: PaintContext,
   cssWidth: number,
@@ -278,11 +344,11 @@ export function paintHeroAsciiField(
   ctx.font = `${cell}px "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  const [r, g, b] = HERO_ASCII_GLYPH_RGB;
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
       const glyph = glyphAt(col, row, cols, rows);
       if (!glyph) continue;
+      const [r, g, b] = glyph.rgb;
       ctx.fillStyle = `rgba(${r}, ${g}, ${b}, ${glyph.alpha.toFixed(3)})`;
       ctx.fillText(glyph.ch, (col + 0.5) * cell, (row + 0.5) * cell);
     }

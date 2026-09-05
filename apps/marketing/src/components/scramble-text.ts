@@ -2,47 +2,290 @@ import gsap from 'gsap'
 
 export const SCRAMBLE_MS = 1500
 
+/** Bright fills from the marketing design-tool icon sheet. */
+export const SCRAMBLE_PALETTE = [
+  '#68E098',
+  '#F0C840',
+  '#E87038',
+  '#E84848',
+  '#E840A8',
+  '#B838F0',
+  '#3888F0',
+  '#E8E8E8',
+] as const
+
 export const DESIGN_MARKS = [
   'frame',
-  'component',
-  'align',
-  'rect',
-  'circle',
-  'triangle',
+  'pentagon',
+  'tangent',
+  'align-horizontal-space-around',
+  'palette',
+  'panels-top-left',
 ] as const
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-const mark = (name: DesignMark, inner: string) =>
-  `<svg class="hero-scramble-icon" data-hero-scramble-icon="${name}" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${inner}</svg>`
+/**
+ * developers → designers: five unique slots (design marks, one keyboard
+ * mark, and ~30% A-Z), then a left-to-right decode into `designers`.
+ * Code and matrix still follow word length.
+ */
+export const DESIGN_VISIBLE = 5
 
-const path = (d: string) =>
-  `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`
+/** At most one quiet keyboard mark in the five-slot row. */
+export const DESIGN_KEY_SLOTS = 1
+
+/** Share of designers scramble slots that flicker A-Z. */
+export const DESIGN_TEXT_RATIO = 0.3
+
+export const DESIGN_TEXT_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+const ICON_COLORS = [
+  SCRAMBLE_PALETTE[0],
+  SCRAMBLE_PALETTE[1],
+  SCRAMBLE_PALETTE[2],
+  SCRAMBLE_PALETTE[3],
+  SCRAMBLE_PALETTE[4],
+  SCRAMBLE_PALETTE[5],
+] as const
+
+/** Square dots sized like Doto ExtraBold, not Lucide strokes. */
+const DOT = 8
+const STEP = 10
+
+function dotIcon(
+  name: string,
+  color: string,
+  rows: readonly string[],
+  kind: 'tool' | 'key' = 'tool',
+): string {
+  const rects: string[] = []
+  let cols = 1
+  for (let y = 0; y < rows.length; y += 1) {
+    const row = rows[y]!
+    cols = Math.max(cols, row.length)
+    for (let x = 0; x < row.length; x += 1) {
+      if (row[x] !== '#') continue
+      rects.push(
+        `<rect x="${x * STEP}" y="${y * STEP}" width="${DOT}" height="${DOT}" fill="${color}"/>`,
+      )
+    }
+  }
+  return `<svg class="hero-scramble-icon${kind === 'key' ? ' is-key' : ''}" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 ${cols * STEP} ${rows.length * STEP}" shape-rendering="crispEdges" aria-hidden="true" focusable="false">${rects.join('')}</svg>`
+}
 
 /**
- * Six Figma-like marks: frame, component diamond, align-left, rectangle,
- * circle, triangle. Named so the scramble can cycle them instead of
- * reprinting one stroke.
+ * Design marks as Doto-like square dots. One hardcoded hue each;
+ * marketing scramble is allowed off tokens.
  */
 export const DESIGN_ICONS = [
-  mark('frame', path('M2.2 5.5V2.2h3.3M10.5 2.2h3.3v3.3M13.8 10.5v3.3h-3.3M5.5 13.8H2.2v-3.3')),
-  mark(
-    'component',
-    path(
-      'M8 1.5l1.85 5.15L8 8 6.15 6.65zM14.5 8l-5.15 1.85L8 8l1.35-1.85zM8 14.5l-1.85-5.15L8 8l1.85 1.35zM1.5 8l5.15-1.85L8 8 6.65 9.85z',
-    ),
-  ),
-  mark('align', path('M2.3 2.2v11.6M5.1 3.5h8.6M5.1 7.4h5.5M5.1 11.3h8.6')),
-  mark(
-    'rect',
-    '<rect x="2.5" y="3.4" width="10.9" height="9.2" rx="1.55" fill="none" stroke="currentColor" stroke-width="1.5"/>',
-  ),
-  mark(
-    'circle',
-    '<circle cx="8" cy="8" r="5.35" fill="none" stroke="currentColor" stroke-width="1.5"/>',
-  ),
-  mark('triangle', path('M8 2.35L13.75 13.55H2.25z')),
+  dotIcon('frame', ICON_COLORS[0], [
+    '.#....#.',
+    '########',
+    '.#....#.',
+    '.#....#.',
+    '.#....#.',
+    '.#....#.',
+    '########',
+    '.#....#.',
+  ]),
+  dotIcon('pentagon', ICON_COLORS[1], [
+    '...##...',
+    '..#..#..',
+    '.#....#.',
+    '#......#',
+    '#......#',
+    '.#....#.',
+    '.#....#.',
+    '..####..',
+  ]),
+  dotIcon('tangent', ICON_COLORS[2], [
+    '......##',
+    '.....##.',
+    '....##..',
+    '...##...',
+    '..##....',
+    '.##.....',
+    '##......',
+    '........',
+  ]),
+  dotIcon('align-horizontal-space-around', ICON_COLORS[3], [
+    '#......#',
+    '#..##..#',
+    '#..##..#',
+    '#..##..#',
+    '#..##..#',
+    '#..##..#',
+    '#......#',
+    '#......#',
+  ]),
+  dotIcon('palette', ICON_COLORS[4], [
+    '..####..',
+    '.#....#.',
+    '#.#..#.#',
+    '#......#',
+    '#.#....#',
+    '.#....#.',
+    '..#..#..',
+    '...##...',
+  ]),
+  dotIcon('panels-top-left', ICON_COLORS[5], [
+    '########',
+    '#......#',
+    '########',
+    '#..#...#',
+    '#..#...#',
+    '#..#...#',
+    '#..#...#',
+    '########',
+  ]),
 ] as const
+
+export const KEYBOARD_MARKS = [
+  'shift',
+  'control',
+  'option',
+  'command',
+  'key-c',
+  'key-v',
+  'enter',
+  'delete',
+] as const
+
+export type KeyboardMark = (typeof KEYBOARD_MARKS)[number]
+
+const KEY_MUTED = SCRAMBLE_PALETTE[7]
+const KEY_COOL = SCRAMBLE_PALETTE[6]
+
+/**
+ * Quiet keyboard layer as the same square dots. One of five slots;
+ * these recede beside the design marks.
+ */
+export const KEYBOARD_ICONS = [
+  dotIcon(
+    'shift',
+    KEY_MUTED,
+    [
+      '...##...',
+      '..####..',
+      '.######.',
+      '...##...',
+      '...##...',
+      '...##...',
+      '...##...',
+      '..####..',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'control',
+    KEY_MUTED,
+    [
+      '...##...',
+      '..#..#..',
+      '.#....#.',
+      '#......#',
+      '........',
+      '........',
+      '........',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'option',
+    KEY_MUTED,
+    [
+      '###.....',
+      '..##....',
+      '...##...',
+      '....####',
+      '........',
+      '.....###',
+      '........',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'command',
+    KEY_MUTED,
+    [
+      '##....##',
+      '##.##.##',
+      '..#..#..',
+      '.##..##.',
+      '.##..##.',
+      '..#..#..',
+      '##.##.##',
+      '##....##',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'key-c',
+    KEY_COOL,
+    [
+      '..####..',
+      '.##..##.',
+      '##......',
+      '##......',
+      '##......',
+      '.##..##.',
+      '..####..',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'key-v',
+    KEY_COOL,
+    [
+      '##....##',
+      '##....##',
+      '.##..##.',
+      '.##..##.',
+      '..####..',
+      '..####..',
+      '...##...',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'enter',
+    KEY_MUTED,
+    [
+      '......##',
+      '......##',
+      '#.....##',
+      '.#...###',
+      '..#####.',
+      '.#......',
+      '#.......',
+      '........',
+    ],
+    'key',
+  ),
+  dotIcon(
+    'delete',
+    KEY_MUTED,
+    [
+      '.#######',
+      '##.....#',
+      '#..#.#.#',
+      '#...#..#',
+      '#..#.#.#',
+      '##.....#',
+      '.#######',
+      '........',
+    ],
+    'key',
+  ),
+] as const
+
+/** Five-slot designers pass: design marks, a quiet keyboard layer, and A-Z. */
+export const DESIGN_SCRAMBLE_ICONS = [...DESIGN_ICONS, ...KEYBOARD_ICONS]
 
 export type ScrambleSet = {
   chars: string
@@ -54,15 +297,15 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — letter-sized marks, sparse #|+. */
+/** developers → designers — five unique slots; marks, keyboard, and A-Z. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
-  chars: '#|+',
-  icons: DESIGN_ICONS,
+  chars: DESIGN_TEXT_CHARS,
+  icons: DESIGN_SCRAMBLE_ICONS,
 }
 
-/** designers → builders: matrix digits, no CJK. */
+/** designers → builders: 0-9 and A-Z, no CJK. */
 export const MATRIX_SCRAMBLE: ScrambleSet = {
-  chars: '01',
+  chars: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
 }
 
 export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {
@@ -74,11 +317,12 @@ export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {
 export type GlyphKind = 'from' | 'scramble' | 'to' | 'icon'
 
 export type Glyph =
-  | { kind: 'from' | 'to' | 'scramble'; ch: string }
+  | { kind: 'from' | 'to'; ch: string }
+  | { kind: 'scramble'; ch: string; color: string }
   | { kind: 'icon'; html: string }
 
 export type ScrambleCell =
-  | { kind: 'char'; ch: string }
+  | { kind: 'char'; ch: string; color: string }
   | { kind: 'icon'; html: string }
 
 function pickChar(chars: string): string {
@@ -103,6 +347,10 @@ export function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
 }
 
+function colorAttr(color: string): string {
+  return /^#[0-9A-Fa-f]{6}$/.test(color) ? ` style="color:${color}"` : ''
+}
+
 /** Random glyphs of a fixed length. Character-level only — no planted words. */
 export function scrambleFill(length: number, chars: string): string {
   if (length <= 0) return ''
@@ -123,6 +371,23 @@ export function scrambleGlyphKind(i: number, t: number, count: number): 'from' |
   return 'to'
 }
 
+/** Crop each mark to its ink so the dotted drawings sit on the same floor. */
+export function fitScrambleIconInk(root: ParentNode) {
+  for (const svg of root.querySelectorAll<SVGSVGElement>('svg.hero-scramble-icon')) {
+    try {
+      const box = svg.getBBox()
+      if (!(box.width > 0 && box.height > 0)) continue
+      const pad = Math.max(box.width, box.height) * 0.08
+      svg.setAttribute(
+        'viewBox',
+        `${box.x - pad} ${box.y - pad} ${box.width + pad * 2} ${box.height + pad * 2}`,
+      )
+    } catch {
+      /* getBBox throws when the svg is not rendered */
+    }
+  }
+}
+
 export function renderGlyphRun(glyphs: readonly Glyph[]): string {
   let html = ''
   let i = 0
@@ -133,33 +398,50 @@ export function renderGlyphRun(glyphs: readonly Glyph[]): string {
       i += 1
       continue
     }
-    const { kind } = glyph
+    if (glyph.kind === 'scramble') {
+      html += `<span class="hero-scramble-symbol"${colorAttr(glyph.color)}>${escapeHtml(glyph.ch)}</span>`
+      i += 1
+      continue
+    }
     let run = ''
-    while (i < glyphs.length && glyphs[i]!.kind === kind) {
+    while (i < glyphs.length && glyphs[i]!.kind === glyph.kind) {
       run += escapeHtml((glyphs[i] as { ch: string }).ch)
       i += 1
     }
-    const cls =
-      kind === 'scramble' ? 'hero-scramble-symbol' : 'hero-scramble-text hero-role-revealed'
-    html += `<span class="${cls}">${run}</span>`
+    html += `<span class="hero-scramble-text hero-role-revealed">${run}</span>`
   }
   return html
 }
 
-function pickScrambleCell(set: ScrambleSet): ScrambleCell {
-  return { kind: 'char', ch: pickChar(set.chars) }
+function pickScrambleCell(set: ScrambleSet, color?: string): ScrambleCell {
+  if (set.icons && set.icons.length > 0) {
+    return { kind: 'icon', html: set.icons[Math.floor(Math.random() * set.icons.length)]! }
+  }
+  return {
+    kind: 'char',
+    ch: pickChar(set.chars),
+    color: color ?? pickPaletteColor(),
+  }
 }
 
-/** Deal `count` icons from shuffled decks so neighbors never match. */
-function dealDistinct(icons: readonly string[], count: number): string[] {
+function pickPaletteColor(except?: string): string {
+  const pool =
+    except === undefined
+      ? SCRAMBLE_PALETTE
+      : SCRAMBLE_PALETTE.filter((color) => color !== except)
+  return pool[Math.floor(Math.random() * pool.length)] ?? SCRAMBLE_PALETTE[0]
+}
+
+/** Deal `count` values from shuffled decks so neighbors never match. */
+function dealDistinct(items: readonly string[], count: number): string[] {
   const out: string[] = []
   let deck: string[] = []
   while (out.length < count) {
     if (deck.length === 0) {
-      deck = shuffle(icons)
+      deck = shuffle(items)
       const prev = out[out.length - 1]
       if (prev !== undefined && deck[0] === prev && deck.length > 1) {
-        const swap = deck.findIndex((html) => html !== prev)
+        const swap = deck.findIndex((item) => item !== prev)
         if (swap > 0) {
           const a = deck[0]!
           deck[0] = deck[swap]!
@@ -169,8 +451,8 @@ function dealDistinct(icons: readonly string[], count: number): string[] {
     }
     const next = deck.shift()!
     const prev = out[out.length - 1]
-    if (prev === next && icons.length > 1) {
-      const alt = deck.find((html) => html !== prev) ?? icons.find((html) => html !== prev)
+    if (prev === next && items.length > 1) {
+      const alt = deck.find((item) => item !== prev) ?? items.find((item) => item !== prev)
       if (alt && alt !== prev) {
         out.push(alt)
         deck.push(next)
@@ -182,30 +464,68 @@ function dealDistinct(icons: readonly string[], count: number): string[] {
   return out
 }
 
+function mixLayeredIconCells(count: number): ScrambleCell[] {
+  const textSlots = designTextSlotCount(count)
+  const keySlots = Math.min(
+    DESIGN_KEY_SLOTS,
+    KEYBOARD_ICONS.length,
+    Math.max(0, count - textSlots - 1),
+  )
+  const designSlots = Math.min(
+    Math.max(0, count - keySlots - textSlots),
+    DESIGN_ICONS.length,
+  )
+  const design = shuffle([...DESIGN_ICONS]).slice(0, designSlots)
+  const keys = shuffle([...KEYBOARD_ICONS]).slice(0, keySlots)
+  const icons = [...design, ...keys].map((html) => ({
+    kind: 'icon' as const,
+    html,
+  }))
+  return shuffle([...icons, ...fillDesignLetterCells(textSlots)])
+}
+
+export function designTextSlotCount(count: number): number {
+  if (count < 3) return 0
+  return Math.min(
+    count - 2,
+    Math.max(0, Math.round(count * DESIGN_TEXT_RATIO)),
+  )
+}
+
+function fillDesignLetterCells(count: number): ScrambleCell[] {
+  if (count <= 0) return []
+  const letters = dealDistinct([...DESIGN_TEXT_CHARS], count)
+  const colors = dealDistinct(SCRAMBLE_PALETTE, count)
+  return letters.map((ch, i) => ({
+    kind: 'char' as const,
+    ch,
+    color: colors[i] ?? SCRAMBLE_PALETTE[0],
+  }))
+}
+
+function flickerDesignLetters(cells: ScrambleCell[]): ScrambleCell[] {
+  const next = fillDesignLetterCells(
+    cells.filter((cell) => cell.kind === 'char').length,
+  )
+  let i = 0
+  return cells.map((cell) => (cell.kind === 'char' ? next[i++]! : cell))
+}
+
+function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
+  if (length <= 0 || icons.length === 0) return []
+  const count = Math.min(DESIGN_VISIBLE, length, icons.length)
+  if (icons === DESIGN_SCRAMBLE_ICONS) return mixLayeredIconCells(count)
+  return shuffle(icons)
+    .slice(0, count)
+    .map((html) => ({ kind: 'icon' as const, html }))
+}
+
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {
   if (length <= 0) return []
   const icons = set.icons
-  if (!icons || icons.length === 0) {
-    return Array.from({ length }, () => pickScrambleCell(set))
-  }
-
-  const punctCount =
-    set.chars.length === 0 ? 0 : Math.min(Math.floor(length / 5), Math.round(length / 8))
-  const punctAt = new Set(
-    shuffle(Array.from({ length }, (_, i) => i)).slice(0, Math.min(punctCount, length)),
-  )
-  const sequence = dealDistinct(icons, length - punctAt.size)
-  const cells: ScrambleCell[] = []
-  let k = 0
-  for (let i = 0; i < length; i += 1) {
-    if (punctAt.has(i)) {
-      cells.push(pickScrambleCell(set))
-      continue
-    }
-    cells.push({ kind: 'icon', html: sequence[k]! })
-    k += 1
-  }
-  return cells
+  if (icons && icons.length > 0) return fillIconCells(length, icons)
+  const colors = dealDistinct(SCRAMBLE_PALETTE, length)
+  return Array.from({ length }, (_, i) => pickScrambleCell(set, colors[i]))
 }
 
 function hasAdjacentRepeat(htmls: readonly string[]): boolean {
@@ -268,19 +588,121 @@ export function rotateScrambleIcons(cells: ScrambleCell[], by = 1): ScrambleCell
   })
 }
 
+function sineInOut(t: number): number {
+  return 0.5 - Math.cos(Math.PI * Math.min(1, Math.max(0, t))) / 2
+}
+
 function cellToGlyph(cell: ScrambleCell): Glyph {
   if (cell.kind === 'icon') return { kind: 'icon', html: cell.html }
-  return { kind: 'scramble', ch: cell.ch }
+  return { kind: 'scramble', ch: cell.ch, color: cell.color }
+}
+
+export function isIconScramble(set: ScrambleSet): boolean {
+  return iconScrambleCount(set) > 0
+}
+
+function iconScrambleCount(set: ScrambleSet): number {
+  const icons = set.icons
+  if (!icons || icons.length === 0) return 0
+  return Math.min(DESIGN_VISIBLE, icons.length)
+}
+
+/**
+ * Icon pass: hold a compact unique row, then lock `to` left-to-right.
+ * Unrevealed slots stay marks or A-Z, never leftover `from` text.
+ */
+export function iconDecodeKind(
+  i: number,
+  t: number,
+  count: number,
+): 'scramble' | 'to' {
+  const n = Math.max(1, count)
+  const hold = 0.4
+  if (t <= hold) return 'scramble'
+  const lock = hold + (i / n) * 0.58
+  return t >= lock ? 'to' : 'scramble'
+}
+
+function iconRevealCounts(
+  to: string,
+  t: number,
+  iconCount: number,
+): { revealed: number; icons: number } {
+  const visualT = sineInOut(Math.min(1, Math.max(0, t)))
+  const n = Math.max(1, to.length)
+  let revealed = 0
+  let scramble = 0
+  for (let i = 0; i < to.length; i += 1) {
+    if (iconDecodeKind(i, visualT, n) === 'to') revealed += 1
+    else scramble += 1
+  }
+  return { revealed, icons: Math.min(iconCount, scramble) }
+}
+
+/** Slot count for one scramble frame. Icon passes stay compact until decode. */
+export function scrambleSlotCount(
+  from: string,
+  to: string,
+  t: number,
+  set: ScrambleSet,
+): number {
+  const icons = iconScrambleCount(set)
+  if (icons > 0) {
+    const plan = iconRevealCounts(to, t, icons)
+    const count = plan.revealed + plan.icons
+    return count > 0 ? count : icons
+  }
+  const visualT = sineInOut(Math.min(1, Math.max(0, t)))
+  const startLen = Math.max(1, from.length)
+  const endLen = to.length
+  return Math.max(1, Math.round(startLen + (endLen - startLen) * visualT))
+}
+
+/** One decode frame. Icon passes: compact marks, then left-to-right `to`. */
+export function buildScrambleGlyphs(
+  from: string,
+  to: string,
+  t: number,
+  set: ScrambleSet,
+  slots: ScrambleCell[],
+): Glyph[] {
+  const iconCount = iconScrambleCount(set)
+  if (iconCount > 0) {
+    const plan = iconRevealCounts(to, t, iconCount)
+    const glyphs: Glyph[] = []
+    for (let i = 0; i < plan.revealed; i += 1) {
+      glyphs.push({ kind: 'to', ch: to[i]! })
+    }
+    for (let i = 0; i < plan.icons; i += 1) {
+      const cell = slots[i]
+      if (cell) glyphs.push(cellToGlyph(cell))
+    }
+    return glyphs
+  }
+
+  const visualT = sineInOut(Math.min(1, Math.max(0, t)))
+  const startLen = Math.max(1, from.length)
+  const endLen = to.length
+  const maxLen = Math.max(startLen, endLen)
+  const len = scrambleSlotCount(from, to, t, set)
+  const glyphs: Glyph[] = []
+  for (let i = 0; i < len; i += 1) {
+    const kind = scrambleGlyphKind(i, visualT, maxLen)
+    if (kind === 'from' && i < from.length) {
+      glyphs.push({ kind: 'from', ch: from[i]! })
+    } else if (kind === 'to' && i < to.length) {
+      glyphs.push({ kind: 'to', ch: to[i]! })
+    } else {
+      glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
+    }
+  }
+  return glyphs
 }
 
 /** HTML tail of scramble glyphs. Each slot is one character or icon. */
 export function scrambleTail(length: number, set: ScrambleSet): string {
   if (length <= 0) return ''
   return renderGlyphRun(fillScrambleCells(length, set).map(cellToGlyph))
-}
-
-function sineInOut(t: number): number {
-  return 0.5 - Math.cos(Math.PI * Math.min(1, Math.max(0, t))) / 2
 }
 
 /**
@@ -305,56 +727,55 @@ export function playScramble(
   },
 ): gsap.core.Tween {
   const from = el.textContent ?? ''
+  const iconCount = iconScrambleCount(set)
   const startLen = Math.max(1, from.length)
   const endLen = text.length
-  const maxLen = Math.max(startLen, endLen)
   const refreshMs = Math.max(28, 40 / Math.max(0.4, speed))
-  let slots = fillScrambleCells(maxLen, set)
+  let slots = fillScrambleCells(
+    iconCount > 0 ? iconCount : Math.max(startLen, endLen),
+    set,
+  )
   let lastRefresh = -Infinity
   let lastHtml = ''
-  let tick = 0
   const state = { t: 0 }
+  let iconTick = 0
 
   return gsap.to(state, {
     t: 1,
     duration,
     ease: 'none',
     onUpdate: () => {
-      const visualT = sineInOut(state.t)
-      const len = Math.max(1, Math.round(startLen + (endLen - startLen) * visualT))
       const now = performance.now()
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
-        tick += 1
-        const next =
-          set.icons && slots.length >= len && tick % 3 !== 0
-            ? rotateScrambleIcons(slots.slice(0, len), 1)
-            : fillScrambleCells(len, set)
-        for (let i = 0; i < len; i += 1) {
-          if (scrambleGlyphKind(i, visualT, maxLen) === 'scramble') {
-            slots[i] = next[i] ?? pickScrambleCell(set)
+        if (iconCount > 0) {
+          iconTick += 1
+          if (slots.length !== iconCount || iconTick % 4 === 0) {
+            slots = fillScrambleCells(iconCount, set)
+          } else {
+            slots = flickerDesignLetters(rotateScrambleIcons(slots, 1))
           }
-        }
-      }
-      const glyphs: Glyph[] = []
-      for (let i = 0; i < len; i += 1) {
-        const kind = scrambleGlyphKind(i, visualT, maxLen)
-        if (kind === 'from' && i < from.length) {
-          glyphs.push({ kind: 'from', ch: from[i]! })
-        } else if (kind === 'to' && i < text.length) {
-          glyphs.push({ kind: 'to', ch: text[i]! })
         } else {
-          glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
+          slots = fillScrambleCells(scrambleSlotCount(from, text, state.t, set), set)
         }
       }
-      const html = renderGlyphRun(glyphs)
+      const html = renderGlyphRun(
+        buildScrambleGlyphs(from, text, state.t, set, slots),
+      )
       if (html !== lastHtml) {
         lastHtml = html
         el.innerHTML = html
+        if (iconCount > 0) fitScrambleIconInk(el)
       }
     },
     onComplete: () => {
       el.textContent = text
+      el.classList.remove(
+        'is-scrambling',
+        'scramble-builders',
+        'scramble-developers',
+        'scramble-designers',
+      )
     },
   })
 }
