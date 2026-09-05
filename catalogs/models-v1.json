@@ -1,10 +1,17 @@
 {
   "$schema": "./models-v1.schema.json",
-  "version": 10,
-  "updatedAt": "2026-08-08",
+  "version": 11,
+  "updatedAt": "2026-09-05",
   "notes": "Curated model-picker source of truth. See catalogs/README.md for capability precedence, compatibility contracts, runtime context handling, verification, and update requirements.",
   "families": {
     "claude": [
+      {
+        "value": "claude-fable-5-1[1m]",
+        "label": "Claude Fable 5.1",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": false,
+        "minCliVersion": "2.1.255"
+      },
       {
         "value": "claude-fable-5[1m]",
         "label": "Claude Fable 5",
@@ -41,6 +48,12 @@
     ],
     "codex": [
       {
+        "value": "gpt-6-astra",
+        "label": "GPT-6 Astra",
+        "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
+        "supportsFast": true
+      },
+      {
         "value": "gpt-5.6-sol",
         "label": "GPT-5.6 Sol",
         "effortLevels": ["low", "medium", "high", "xhigh", "max", "ultracode"],
@@ -68,11 +81,16 @@
     "cursor": [
       {
         "value": "default",
-        "label": "Router",
+        "label": "Auto",
         "description": "Let Cursor choose the model for this turn.",
-        "liveRequired": true,
         "effortLevels": [],
-        "supportsFast": false
+        "supportsFast": true
+      },
+      {
+        "value": "grok-4.6",
+        "label": "Cursor Grok 4.6",
+        "effortLevels": ["low", "medium", "high", "xhigh"],
+        "supportsFast": true
       },
       {
         "value": "composer-2.5",
@@ -108,10 +126,12 @@
       "default": "claude-opus-4-8",
       "opus-4.8": "claude-opus-4-8",
       "opus-5": "claude-opus-5",
-      "sonnet-5": "claude-sonnet-5"
+      "sonnet-5": "claude-sonnet-5",
+      "fable-5.1": "claude-fable-5-1"
     },
     "codex": {},
     "cursor": {
+      "auto": "default",
       "grok-4.5-xhigh": "grok-4.5"
     }
   }

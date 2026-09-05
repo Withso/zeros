@@ -194,6 +194,42 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     expect(model?.supportsFast).toBe(false);
   });
 
+  it("advertises Astra's shipped Ultra and Fast capabilities exactly", async () => {
+    rt.modelList = {
+      data: [
+        {
+          id: "gpt-6-astra",
+          displayName: "GPT-6 Astra",
+          supportedReasoningEfforts: [
+            { reasoningEffort: "low" },
+            { reasoningEffort: "medium" },
+            { reasoningEffort: "high" },
+            { reasoningEffort: "xhigh" },
+            { reasoningEffort: "max" },
+            { reasoningEffort: "ultra" },
+          ],
+          serviceTiers: [{ id: "fast" }],
+        },
+      ],
+    };
+    const { adapter } = makeAdapter();
+    const { initialize } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const model = (
+      initialize._meta as {
+        models?: Array<{
+          value: string;
+          effortLevels?: string[];
+          supportsFast?: boolean;
+        }>;
+      }
+    ).models?.find((entry) => entry.value === "gpt-6-astra");
+
+    expect(model).toMatchObject({
+      effortLevels: ["low", "medium", "high", "xhigh", "max", "ultracode"],
+      supportsFast: true,
+    });
+  });
+
   it("leaves omitted capability fields unknown instead of answering none", async () => {
     // An app-server that never mentions reasoning efforts or service tiers has
     // told us nothing. Reporting [] / false here would out-rank the bundled
@@ -275,6 +311,51 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     });
 
     expect(sent?.effort).toBeUndefined();
+  });
+
+  it("uses the per-turn service tier so disabling Astra Fast cannot inherit a stale fast thread", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        OPENAI_MODEL: "gpt-6-astra",
+        ZEROS_FAST_MODE: "1",
+      },
+    });
+    const turns: Array<Record<string, unknown>> = [];
+    rt.runTurnImpl = async (params, options) => {
+      turns.push(params as Record<string, unknown>);
+      options.onTurnStarted?.(`turn-${turns.length}`);
+      return {
+        turnId: `turn-${turns.length}`,
+        status: "completed",
+        raw: {},
+      };
+    };
+
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("fast"),
+    });
+    await adapter.updateConfig({
+      sessionId: session.sessionId,
+      env: { OPENAI_MODEL: "gpt-6-astra" },
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("standard"),
+    });
+
+    expect(turns[0]).toMatchObject({
+      model: "gpt-6-astra",
+      serviceTierForTurn: "fast",
+    });
+    expect(turns[1]).toMatchObject({
+      model: "gpt-6-astra",
+      serviceTierForTurn: "default",
+    });
+    expect(turns[0]).not.toHaveProperty("serviceTier");
+    expect(turns[1]).not.toHaveProperty("serviceTier");
   });
 
   it("throws a recoverable transport-closed when the child dies mid-turn", async () => {

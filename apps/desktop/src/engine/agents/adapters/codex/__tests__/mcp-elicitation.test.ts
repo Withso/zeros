@@ -40,6 +40,51 @@ function answered(
 }
 
 describe("Codex MCP elicitation mapping", () => {
+  it("maps the camel-case openaiForm wire alias through the same typed form response", () => {
+    const native = request({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      serverName: "deploy",
+      mode: "openaiForm",
+      message: "Choose a release channel",
+      requestedSchema: {
+        type: "object",
+        properties: {
+          channel: {
+            type: "string",
+            enum: ["stable", "preview"],
+          },
+        },
+        required: ["channel"],
+      },
+      _meta: null,
+    });
+
+    const canonical = mapCodexQuestionToCanonical("session-1", native);
+    expect(canonical.questions).toMatchObject([
+      {
+        id: "channel",
+        options: [
+          { id: "value:0", label: "stable" },
+          { id: "value:1", label: "preview" },
+        ],
+      },
+    ]);
+    expect(
+      mapCodexQuestionAnswer(
+        native,
+        canonical,
+        answered([{ questionId: "channel", selectedOptionIds: ["value:0"] }]),
+      ),
+    ).toEqual({
+      response: {
+        action: "accept",
+        content: { channel: "stable" },
+        _meta: null,
+      },
+    });
+  });
+
   it("maps every standard MCP primitive form shape into answerable questions", () => {
     vi.spyOn(Date, "now").mockReturnValue(1_000);
     const native = request({

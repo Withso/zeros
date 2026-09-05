@@ -394,18 +394,23 @@ describe("applyCursorReasoning (pure) — Effort/Fast pills swap to a variant id
     ).toBe("grok-4.5-high");
   });
 
-  it("treats non-low/medium/high effort (xhigh/max/ultra) as no level", () => {
-    // Only low/medium/high are real Cursor reasoning levels; anything else → no
-    // level candidate, so with fast off (and the bare base live in the
-    // catalog) there's nothing to swap to.
+  it("maps xhigh exactly while still rejecting non-Cursor max/ultracode tiers", () => {
     expect(
       applyCursorReasoning(
-        "grok-4.5",
+        "grok-4.6",
         "xhigh",
         false,
-        new Set(["grok-4.5", "grok-4.5-thinking-xhigh"]),
+        new Set(["grok-4.6", "grok-4.6-thinking-xhigh"]),
       ),
-    ).toBe("grok-4.5");
+    ).toBe("grok-4.6-thinking-xhigh");
+    expect(
+      applyCursorReasoning(
+        "grok-4.6",
+        "ultracode",
+        false,
+        new Set(["grok-4.6", "grok-4.6-thinking-ultracode"]),
+      ),
+    ).toBe("grok-4.6");
   });
 
   // The curated Grok base is the level-free grok-4.5,
@@ -453,6 +458,170 @@ describe("applyCursorReasoning (pure) — Effort/Fast pills swap to a variant id
 });
 
 describe("CursorSdkAdapter — model is always passed AND validated", () => {
+  it("preserves cold Auto and its Fast request instead of coercing to Composer", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "auto",
+        ZEROS_FAST_MODE: "1",
+        ZEROS_THINKING_EFFORT: "xhigh",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(createSpy.mock.calls[0][0].model).toEqual({
+      id: "auto",
+      params: [{ id: "fast", value: "true" }],
+    });
+    expect(sendSpy.mock.calls[0][1].model).toEqual({
+      id: "auto",
+      params: [{ id: "fast", value: "true" }],
+    });
+  });
+
+  it("maps live Auto to Cursor's canonical default without carrying Grok effort", async () => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "default",
+        displayName: "Auto",
+        aliases: ["auto"],
+        variants: [{ displayName: "Auto", params: [], isDefault: true }],
+      },
+      {
+        id: "grok-4.6",
+        displayName: "Cursor Grok 4.6",
+        parameters: [
+          {
+            id: "effort",
+            values: [
+              { value: "low" },
+              { value: "medium" },
+              { value: "high" },
+              { value: "xhigh" },
+            ],
+          },
+          { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+        ],
+        variants: [
+          {
+            displayName: "Cursor Grok 4.6",
+            params: [
+              { id: "effort", value: "high" },
+              { id: "fast", value: "false" },
+            ],
+            isDefault: true,
+          },
+        ],
+      },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "auto",
+        ZEROS_FAST_MODE: "1",
+        ZEROS_THINKING_EFFORT: "xhigh",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(createSpy.mock.calls[0][0].model).toEqual({
+      id: "default",
+      params: [{ id: "fast", value: "true" }],
+    });
+    expect(sendSpy.mock.calls[0][1].model).toEqual({
+      id: "default",
+      params: [{ id: "fast", value: "true" }],
+    });
+    const auto = (await adapter.initialize())._meta?.models?.find(
+      (model) => model.value === "default",
+    );
+    expect(auto).toMatchObject({
+      value: "default",
+      label: "Auto",
+      selectable: true,
+    });
+    expect(auto).not.toHaveProperty("effortLevels");
+    expect(
+      (await adapter.initialize())._meta?.models?.find(
+        (model) => model.value === "grok-4.6",
+      ),
+    ).toMatchObject({
+      effortLevels: ["low", "medium", "high", "xhigh"],
+      supportsFast: true,
+    });
+  });
+
+  it("maps Grok 4.6 effort and Fast to SDK params on create, send, and resume", async () => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "grok-4.6",
+        displayName: "Cursor Grok 4.6",
+        parameters: [
+          {
+            id: "effort",
+            values: [
+              { value: "low" },
+              { value: "medium" },
+              { value: "high" },
+              { value: "xhigh" },
+            ],
+          },
+          { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+        ],
+        variants: [
+          {
+            displayName: "Cursor Grok 4.6",
+            params: [
+              { id: "effort", value: "high" },
+              { id: "fast", value: "false" },
+            ],
+            isDefault: true,
+          },
+        ],
+      },
+    ]);
+    const env = {
+      CURSOR_API_KEY: "key_test",
+      CURSOR_MODEL: "grok-4.6",
+      ZEROS_THINKING_EFFORT: "xhigh",
+      ZEROS_FAST_MODE: "1",
+    };
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const fresh = await adapter.newSession({ cwd: "/tmp/proj", env });
+    await adapter.prompt({ sessionId: fresh.session.sessionId, prompt: TEXT });
+    await adapter.loadSession({
+      executionId: "resumed-grok-46",
+      sessionId: "prior-grok-46",
+      cwd: "/tmp/proj",
+      env,
+    });
+
+    const expected = {
+      id: "grok-4.6",
+      params: [
+        { id: "effort", value: "xhigh" },
+        { id: "fast", value: "true" },
+      ],
+    };
+    expect(createSpy.mock.calls[0][0].model).toEqual(expected);
+    expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+    expect(resumeSpy.mock.calls.at(-1)?.[1].model).toEqual(expected);
+  });
+
+  it("keeps a saved default Router selection instead of silently choosing Composer", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.loadSession({
+      sessionId: "saved-router",
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "default" },
+    });
+    expect(resumeSpy.mock.calls[0][1].model).toEqual({ id: "default" });
+  });
+
   it("passes the resolved default (composer-2.5) to send() on a fresh session", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     const { session } = await adapter.newSession({
@@ -760,7 +929,7 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       label: "Router",
       description: "Choose automatically",
       aliases: ["auto"],
-      selectable: false,
+      selectable: true,
     });
     expect(
       models.find((model) => model.value === "composer-2.5"),
@@ -789,12 +958,12 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     });
   });
 
-  it("allows a future runtime to explicitly advertise Router as locally selectable", async () => {
+  it("honors an explicit live non-selectable answer for Auto/Router", async () => {
     modelsListSpy.mockResolvedValue([
       {
         id: "default",
         displayName: "Router",
-        selectable: true,
+        selectable: false,
       },
       { id: "composer-2.5", displayName: "Composer 2.5" },
     ]);
@@ -808,8 +977,8 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       (await adapter.initialize())._meta?.models?.find(
         (model) => model.value === "default",
       ),
-    ).toMatchObject({ selectable: true });
-    expect(createSpy.mock.calls[0][0].model).toEqual({ id: "default" });
+    ).toMatchObject({ selectable: false });
+    expect(createSpy.mock.calls[0][0].model).toEqual({ id: "composer-2.5" });
   });
 
   it("invalidates account model metadata when the API key changes", async () => {

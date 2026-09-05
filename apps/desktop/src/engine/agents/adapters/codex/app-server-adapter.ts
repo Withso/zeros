@@ -1213,8 +1213,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
               ),
               ...(model ? { model } : {}),
               ...(effort ? { effort } : {}),
-              // ZEROS_FAST_MODE → Codex "fast" service tier (priority inference, GPT-5.x).
-              ...(fast ? { serviceTier: "fast" } : {}),
+              // Use the per-turn override introduced in Codex 0.153.4 so
+              // turning Fast back off cannot inherit a prior thread-level
+              // "fast" tier. "default" explicitly requests standard speed.
+              serviceTierForTurn: fast ? "fast" : "default",
               ...(collabModel
                 ? {
                     collaborationMode: {
@@ -4236,6 +4238,8 @@ export function mapApprovalToCanonical(
   const reason = stringField(params, "reason");
   const command = commandField(params, "command");
   const cwd = stringField(params, "cwd");
+  const commandApprovalKind =
+    stringField(params, "kind") === "writeStdin" ? "writeStdin" : "command";
 
   let title: string;
   let kind: "execute" | "edit" | "switch_mode";
@@ -4243,9 +4247,21 @@ export function mapApprovalToCanonical(
   switch (request.method) {
     case "item/commandExecution/requestApproval":
     case "execCommandApproval":
-      title = command ? `Run: ${truncate(command, 60)}` : "Run shell command";
+      title =
+        request.method === "item/commandExecution/requestApproval" &&
+        commandApprovalKind === "writeStdin"
+          ? "Send input to running terminal"
+          : command
+            ? `Run: ${truncate(command, 60)}`
+            : "Run shell command";
       kind = "execute";
       rawInput = {
+        ...(request.method === "item/commandExecution/requestApproval"
+          ? {
+              approvalKind: commandApprovalKind,
+              approvalId: stringField(params, "approvalId"),
+            }
+          : {}),
         command,
         cwd,
         reason,

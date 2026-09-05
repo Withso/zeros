@@ -643,7 +643,7 @@ export class CodexAppServerTranslator {
 
       case "collabAgentToolCall": {
         // Codex multi-agent collaboration — the model coordinating subagent
-        // threads (spawnAgent / sendInput / wait / resumeAgent / closeAgent).
+        // threads (spawnAgent / messaging / wait / resume / interrupt / close).
         // spawnAgent routes to the Agent card (kind "subagent", like Claude's
         // Task); the coordination verbs render as plain rows with a human
         // title instead of the raw JSON blob they'd get from the unknown-item
@@ -1404,8 +1404,8 @@ type ThreadItemUnion =
   | { type: "contextCompaction"; id: string };
 
 /** Generated `collabAgentToolCall` ThreadItem — one row per collab-tool
- *  invocation (CollabAgentTool = spawnAgent | sendInput | resumeAgent |
- *  wait | closeAgent). `receiverThreadIds` are the target subagent
+ *  invocation (including spawn, messaging, wait, resume, interrupt, and
+ *  close). `receiverThreadIds` are the target subagent
  *  thread(s); `agentsStates` is their last known status at completion. */
 type CollabItem = {
   type: "collabAgentToolCall";
@@ -1447,6 +1447,14 @@ function describeCollabTool(item: CollabItem): {
       return { kind: "other", title: `Waiting for ${target}` };
     case "sendInput":
       return { kind: "other", title: `Sending input to ${target}` };
+    case "sendMessage":
+      return { kind: "other", title: `Messaging ${target}` };
+    case "followupTask":
+      return { kind: "other", title: `Following up with ${target}` };
+    case "interruptAgent":
+      return { kind: "other", title: `Interrupting ${target}` };
+    case "listAgents":
+      return { kind: "other", title: "Listing agents" };
     case "resumeAgent":
       return { kind: "other", title: `Resuming ${target}` };
     case "closeAgent":
@@ -1628,7 +1636,9 @@ function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
     return item.success === false ? "failed" : "completed";
   }
   if (item.type === "collabAgentToolCall") {
-    return item.status === "failed" ? "failed" : "completed";
+    return item.status === "failed" || item.status === "interrupted"
+      ? "failed"
+      : "completed";
   }
   return "completed";
 }
@@ -1862,6 +1872,13 @@ function classifyCodexErrorInfo(info: unknown): {
         rateLimited: true,
         stopReason: "end_turn",
         label: "Usage limit exceeded",
+      };
+    case "rateLimitExceeded":
+      return {
+        authQuota: false,
+        rateLimited: true,
+        stopReason: "end_turn",
+        label: "Rate limit exceeded",
       };
     case "contextWindowExceeded":
       return {

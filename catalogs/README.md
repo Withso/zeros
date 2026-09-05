@@ -33,16 +33,18 @@ boundary.
 - Labels do not claim a context-window size. Runtime-reported context sizes are
   preferred, while shared static fallbacks live in
   `packages/protocol/src/model-context.ts`.
-- Cursor effort and fast modes select concrete model identifiers. Codex's `max`
-  tier maps to native `max`; the Zeros `ultracode` display tier maps to Codex's
-  native `ultra` effort.
+- Cursor effort and fast controls map to the selected SDK model's native
+  parameters. Cursor's canonical `default` model and its `auto` alias identify
+  the same Auto router and remain compatible with saved selections. Codex's
+  `max` tier maps to native `max`; the Zeros `ultracode` display tier maps to
+  Codex's native `ultra` effort.
 - `minCliVersion` is a build-time compatibility gate. It does not hide a model
   at runtime, so a catalog entry and the pinned SDK that supports it must ship
   together.
 
 The current defaults are Claude Opus 5, Codex GPT-5.6 Sol, and Cursor Composer
 2.5. The minimum Claude CLI versions recorded by the catalog are 2.1.170 for
-Fable 5, 2.1.206 for Sonnet 5, and 2.1.219 for Opus 5.
+Fable 5, 2.1.206 for Sonnet 5, 2.1.219 for Opus 5, and 2.1.255 for Fable 5.1.
 
 ## Updating the catalog
 

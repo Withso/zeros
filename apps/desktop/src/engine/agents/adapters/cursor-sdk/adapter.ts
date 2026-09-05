@@ -56,9 +56,10 @@ import { configurationProvenanceFor } from "../../provider-diagnostics";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
- *  EXPLICIT, concrete model — the cloud auto-select ids ("auto" / "default")
- *  are rejected with "Local SDK agents require an explicit `model`". So when
- *  no concrete model is selected we substitute a real one.
+ *  EXPLICIT model selection. An absent selection therefore falls back to a
+ *  concrete model. Cursor SDK 1.0.31's live catalog exposes the real Auto
+ *  router as canonical id `default` with alias `auto`; both are valid explicit
+ *  selections and must pass through rather than silently becoming Composer.
  *
  *  IMPORTANT: the substitute MUST be a model the user's Cursor account
  *  actually offers, or `Agent.create/resume/send` throw "Cannot use this
@@ -71,8 +72,7 @@ const AGENT_ID = "cursor";
  *  a persisted chat or the bundled catalog — falls back instead of throwing.
  *  Overridable per-chat via the CURSOR_MODEL env the model pill writes. */
 const DEFAULT_MODEL = "composer-2.5";
-/** Non-concrete ids the local SDK can't run — mapped to DEFAULT_MODEL. */
-const AUTO_SELECT_IDS = new Set(["", "auto", "default"]);
+const CURSOR_AUTO_IDS = new Set(["auto", "default"]);
 /** Preferred concrete fallbacks, in order, when the resolved model isn't in
  *  the account's live catalog. Native Composer models need no external auth. */
 const FALLBACK_MODEL_PREFERENCE = [
@@ -156,10 +156,12 @@ const TLS_CERT_RX =
 const NETWORK_ERR_RX =
   /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE)\b|socket\s+hang\s*up|getaddrinfo|network\s+(?:error|timeout|unreachable)/i;
 
-/** Resolve a concrete Cursor model id, never an auto-select placeholder. */
+/** Resolve an explicit Cursor model id, defaulting only an absent pick. */
 export function resolveCursorModelId(envModel: string | undefined): string {
   const m = envModel?.trim();
-  if (!m || AUTO_SELECT_IDS.has(m.toLowerCase())) return DEFAULT_MODEL;
+  if (!m) return DEFAULT_MODEL;
+  const normalized = m.toLowerCase();
+  if (CURSOR_AUTO_IDS.has(normalized)) return normalized;
   return m;
 }
 
@@ -208,7 +210,10 @@ export function applyCursorReasoning(
   // Only ever swap to an id the account demonstrably offers.
   if (!available) return base;
   const eff = (effort ?? "").trim().toLowerCase();
-  const level = eff === "low" || eff === "medium" || eff === "high" ? eff : "";
+  const level =
+    eff === "low" || eff === "medium" || eff === "high" || eff === "xhigh"
+      ? eff
+      : "";
   // Retarget a level-suffixed base when the user explicitly picked
   // a DIFFERENT level. A persisted pre-v6 pick (grok-4.5-xhigh) must honour
   // the effort pill instead of silently ignoring it (the old "already encodes
@@ -660,12 +665,26 @@ export function cursorAdvertisedModel(
   );
   const supportsFast =
     parameters.some((parameter) =>
-      parameter.values.some((value) => /fast/i.test(value.value)),
+      parameter.values.some((value) => {
+        const normalized = value.value.trim().toLowerCase();
+        return (
+          /fast/i.test(normalized) ||
+          (/speed|fast/i.test(parameter.id) &&
+            ["true", "on", "1"].includes(normalized))
+        );
+      }),
     ) ||
     variants.some(
       (variant) =>
         /fast/i.test(variant.label) ||
-        variant.parameters.some((parameter) => /fast/i.test(parameter.value)),
+        variant.parameters.some((parameter) => {
+          const normalized = parameter.value.trim().toLowerCase();
+          return (
+            /fast/i.test(normalized) ||
+            (/speed|fast/i.test(parameter.id) &&
+              ["true", "on", "1"].includes(normalized))
+          );
+        }),
     );
   return {
     value: id,
@@ -691,10 +710,107 @@ export function cursorAdvertisedModel(
         ? item.selectable
         : typeof item.supportsLocal === "boolean"
           ? item.supportsLocal
-          : !AUTO_SELECT_IDS.has(id.toLowerCase()),
+          : true,
     ...(effortLevels.length > 0 ? { effortLevels } : {}),
     ...(supportsFast || hasSpeedMetadata ? { supportsFast } : {}),
   };
+}
+
+type CursorModelSelection = {
+  id: string;
+  params?: Array<{ id: string; value: string }>;
+};
+
+function cursorParameterValue(
+  parameter: CursorModelParameter,
+  candidates: string[],
+): string | undefined {
+  const byNormalized = new Map(
+    (parameter.values ?? []).map((value) => [
+      value.value.trim().toLowerCase(),
+      value.value,
+    ]),
+  );
+  for (const candidate of candidates) {
+    const value = byNormalized.get(candidate);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function setCursorModelParameter(
+  params: Array<{ id: string; value: string }>,
+  id: string,
+  value: string,
+): void {
+  const existing = params.findIndex((parameter) => parameter.id === id);
+  const next = { id, value };
+  if (existing >= 0) params[existing] = next;
+  else params.push(next);
+}
+
+/** Map Zeros' durable effort/Fast settings onto @cursor/sdk's native
+ * `ModelSelection.params` wire. SDK 1.0.31 advertises Grok 4.6 as one model id
+ * with `effort` + `fast` parameters rather than suffixed ids; starting from the
+ * advertised default variant preserves unrelated provider choices while the
+ * explicit composer controls override only their matching parameters.
+ *
+ * Auto is the one live model whose record currently omits a Fast definition.
+ * Cursor's SDK accepts and forwards model params without filtering them, and
+ * every Fast-capable record uses the same `{ id: "fast", value: "true" }`
+ * wire, so an enabled Auto Fast toggle uses that provider-native parameter too.
+ * No effort parameter is synthesized for Auto. */
+export function cursorModelSelection(
+  id: string,
+  model: CursorModelListItem | undefined,
+  effort: string | undefined,
+  fast: boolean,
+): CursorModelSelection {
+  const defaultVariant = model?.variants?.find(
+    (variant) => variant.isDefault === true,
+  );
+  const params = (defaultVariant?.params ?? []).flatMap((parameter) =>
+    parameter &&
+    typeof parameter.id === "string" &&
+    typeof parameter.value === "string"
+      ? [{ id: parameter.id, value: parameter.value }]
+      : [],
+  );
+
+  const normalizedEffort = effort?.trim().toLowerCase();
+  if (normalizedEffort) {
+    const effortCandidates =
+      normalizedEffort === "xhigh"
+        ? ["xhigh", "extra-high"]
+        : [normalizedEffort];
+    for (const parameter of model?.parameters ?? []) {
+      if (!/effort|reason/i.test(parameter.id)) continue;
+      const value = cursorParameterValue(parameter, effortCandidates);
+      if (value === undefined) continue;
+      setCursorModelParameter(params, parameter.id, value);
+      break;
+    }
+  }
+
+  let mappedFast = false;
+  for (const parameter of model?.parameters ?? []) {
+    if (!/fast|speed/i.test(parameter.id)) continue;
+    const value = cursorParameterValue(
+      parameter,
+      fast
+        ? ["true", "fast", "on"]
+        : ["false", "balanced", "standard", "normal", "off"],
+    );
+    if (value === undefined) continue;
+    setCursorModelParameter(params, parameter.id, value);
+    mappedFast = true;
+    break;
+  }
+  if (fast && !mappedFast && CURSOR_AUTO_IDS.has(id.toLowerCase())) {
+    setCursorModelParameter(params, "fast", "true");
+  }
+
+  return { id, ...(params.length > 0 ? { params } : {}) };
 }
 
 /** What we hand @cursor/sdk's `mcpServers` — structurally a Cursor
@@ -1058,25 +1174,16 @@ export class CursorSdkAdapter implements AgentAdapter {
   private modelSelection(
     modelId: string,
     state: CursorModelState = this.modelState,
-  ): {
-    id: string;
-    params?: Array<{ id: string; value: string }>;
-  } {
+    env?: Record<string, string>,
+  ): CursorModelSelection {
     const id = state.discoveredModelAliases.get(modelId) ?? modelId;
     const model = state.discoveredModels.get(id);
-    const defaultVariant = model?.variants?.find(
-      (variant) => variant.isDefault === true,
-    );
-    const params = defaultVariant?.params?.filter(
-      (parameter) =>
-        parameter &&
-        typeof parameter.id === "string" &&
-        typeof parameter.value === "string",
-    );
-    return {
+    return cursorModelSelection(
       id,
-      ...(params && params.length > 0 ? { params } : {}),
-    };
+      model,
+      env?.ZEROS_THINKING_EFFORT,
+      env?.ZEROS_FAST_MODE === "1",
+    );
   }
 
   /** Start catalog discovery without putting it on the session critical path.
@@ -1292,11 +1399,10 @@ export class CursorSdkAdapter implements AgentAdapter {
     const effort = env?.ZEROS_THINKING_EFFORT;
     const fast = env?.ZEROS_FAST_MODE === "1";
     const requested = envModel?.trim();
-    // Current Cursor SDKs expose `default`/`auto` as catalog metadata but do
-    // not accept it through Agent.create, hence resolveCursorModelId's safe
-    // Composer fallback. If a future runtime explicitly marks Router locally
-    // selectable, discovery includes the exact id/alias in this set and that
-    // provider capability takes precedence over the legacy fallback.
+    // Cursor SDK 1.0.31 exposes Auto as canonical `default` plus alias `auto`.
+    // Discovery canonicalizes the alias, while a cold selection stays intact
+    // for the SDK's own model-list validator to canonicalize. Only an absent
+    // selection takes the concrete Composer fallback.
     const liveRequested =
       requested && state.discoveredModelIds?.has(requested)
         ? (state.discoveredModelAliases.get(requested) ?? requested)
@@ -1428,7 +1534,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
       agent = await sdk.Agent.create({
         apiKey,
-        model: this.modelSelection(modelId, modelState),
+        model: this.modelSelection(modelId, modelState, opts.env),
         // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
         // executor roots shell commands at `local.cwd ?? process.cwd()`; the
         // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
@@ -1547,7 +1653,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         // `send()` throws "Local SDK agents require an explicit `model`" —
         // the exact error users hit on every reopened chat. `resume` takes a
         // Partial<AgentOptions>, which accepts `model`.
-        model: this.modelSelection(modelId, modelState),
+        model: this.modelSelection(modelId, modelState, opts.env),
         // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
         // and resuming a chat in a different worktree MUST retarget it (else
         // shells run wherever the agent was first created, or fall back to the
@@ -1589,7 +1695,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       try {
         agent = await sdk.Agent.create({
           apiKey,
-          model: this.modelSelection(modelId, modelState),
+          model: this.modelSelection(modelId, modelState, opts.env),
           // Same cwd pinning as the primary create — the fresh fallback agent
           // must also root at the worktree, never the host's process.cwd().
           cwd: opts.cwd,
@@ -1809,7 +1915,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           // Auto & Full access both run as sdk "agent"; they differ only by the
           // (create-time) autoReview already baked in via ensureAutoReview().
           mode: sdkModeFor(session.modeId),
-          model: this.modelSelection(modelId, session.modelState),
+          model: this.modelSelection(modelId, session.modelState, session.env),
           local: { force: true },
           // The engine-owned turn id survives renderer reconnect/resend. Hash
           // it before crossing the harness boundary so provider logs never
@@ -2117,7 +2223,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       const sessionMcp = this.mcpServers(session.mcpServers, session.env);
       session.agent = await sdk.Agent.resume(session.agent.agentId, {
         apiKey: session.apiKey,
-        model: this.modelSelection(session.modelId, session.modelState),
+        model: this.modelSelection(
+          session.modelId,
+          session.modelState,
+          session.env,
+        ),
         cwd: session.cwd,
         local: this.buildLocalOpts(session.cwd, session.env, want),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -2260,7 +2370,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       agent = await sdk.Agent.create({
         apiKey,
-        model: this.modelSelection(modelId, modelState),
+        model: this.modelSelection(modelId, modelState, opts.env),
         cwd,
         local: this.buildLocalOpts(cwd, opts.env),
         mode: "plan",
@@ -2269,7 +2379,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         { text: `${opts.systemPrompt}\n\n${opts.prompt}` },
         {
           mode: "plan",
-          model: this.modelSelection(modelId, modelState),
+          model: this.modelSelection(modelId, modelState, opts.env),
           local: { force: true },
         },
       );

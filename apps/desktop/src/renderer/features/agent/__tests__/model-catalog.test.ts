@@ -75,8 +75,11 @@ describe("familyForModelValue (catalog membership, not substring)", () => {
   it("resolves curated model values to their owning family", () => {
     expect(familyForModelValue("claude-opus-4-8[1m]")).toBe("claude");
     expect(familyForModelValue("claude-fable-5[1m]")).toBe("claude");
+    expect(familyForModelValue("claude-fable-5-1[1m]")).toBe("claude");
     expect(familyForModelValue("gpt-5.5")).toBe("codex");
     expect(familyForModelValue("gpt-5.6-sol")).toBe("codex");
+    expect(familyForModelValue("gpt-6-astra")).toBe("codex");
+    expect(familyForModelValue("default")).toBe("cursor");
     expect(familyForModelValue("composer-2.5")).toBe("cursor");
     // The curated Grok entry is the level-free
     // grok-4.5 (the effort pill id-swaps it); the previously-curated
@@ -110,10 +113,11 @@ describe("modelsForAgent (curated catalog)", () => {
     });
   }
 
-  it("shows the curated claude family (Fable 5 / Opus 4.8 / Sonnet 5 / Haiku), Fable first", () => {
+  it("shows the curated claude family with Fable 5.1 first", () => {
     // The user controls the displayed list via catalogs/models-v1.json (2026-07).
     const values = modelsForAgent("claude", null).map((m) => m.value);
     for (const v of [
+      "claude-fable-5-1[1m]",
       "claude-fable-5[1m]",
       "claude-opus-4-8[1m]",
       "claude-sonnet-5[1m]",
@@ -122,7 +126,7 @@ describe("modelsForAgent (curated catalog)", () => {
       expect(values).toContain(v);
     }
     // Fable sits at the very top (user request).
-    expect(values[0]).toBe("claude-fable-5[1m]");
+    expect(values[0]).toBe("claude-fable-5-1[1m]");
   });
 
   it("keeps the curated display list while exact live capabilities win", () => {
@@ -161,8 +165,8 @@ describe("modelsForAgent (curated catalog)", () => {
     ).toBe(false);
   });
 
-  it("shows a live-required Cursor Router only when the harness says it is locally selectable", () => {
-    expect(modelsForAgent("cursor", null).map((m) => m.value)).not.toContain(
+  it("shows Cursor Auto cold, honors live selectability, and overlays provider metadata", () => {
+    expect(modelsForAgent("cursor", null).map((m) => m.value)).toContain(
       "default",
     );
 
@@ -172,7 +176,7 @@ describe("modelsForAgent (curated catalog)", () => {
         models: [
           {
             value: "default",
-            label: "Router",
+            label: "Auto",
             selectable: false,
           },
         ],
@@ -188,7 +192,7 @@ describe("modelsForAgent (curated catalog)", () => {
         models: [
           {
             value: "default",
-            label: "Router",
+            label: "Auto",
             selectable: true,
             description: "Let Cursor choose the model for this turn.",
             aliases: ["auto"],
@@ -214,7 +218,7 @@ describe("modelsForAgent (curated catalog)", () => {
       (m) => m.value === "default",
     );
     expect(router).toMatchObject({
-      label: "Router",
+      label: "Auto",
       description: "Let Cursor choose the model for this turn.",
       aliases: ["auto"],
       selectable: true,
@@ -266,8 +270,10 @@ describe("agentSupportsEffort (EffortPill capability gate)", () => {
       expect(agentSupportsEffort(id)).toBe(false);
     }
   });
-  it("Cursor reasoning is per model: Grok 4.5 has a ladder and Composer 2.5 does not", () => {
+  it("Cursor reasoning is per model: Grok models have ladders while Auto and Composer do not", () => {
     expect(agentSupportsEffort("cursor", "grok-4.5")).toBe(true);
+    expect(agentSupportsEffort("cursor", "grok-4.6")).toBe(true);
+    expect(agentSupportsEffort("cursor", "auto")).toBe(false);
     expect(agentSupportsEffort("cursor", "composer-2.5")).toBe(false);
   });
 });
@@ -316,6 +322,16 @@ describe("effortLevelsFor (per-model ladder)", () => {
       "ultracode",
     ]);
   });
+  it("Claude Fable 5.1 (+1M) exposes all six levels (low…ultracode)", () => {
+    expect(effortLevelsFor("claude", "claude-fable-5-1[1m]")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultracode",
+    ]);
+  });
   it("a null Claude model (agent default) still exposes the full Opus ladder", () => {
     expect(effortLevelsFor("claude", null)).toContain("ultracode");
   });
@@ -328,7 +344,7 @@ describe("effortLevelsFor (per-model ladder)", () => {
     ]);
   });
   it("Codex 5.6 Sol / Terra expose the full six-tier ladder (…max, ultracode)", () => {
-    // Displayed as Light…Extra High / Max / Ultra; Max stays native `max` and
+    // Displayed as Low…Extra High / Max / Ultra; Max stays native `max` and
     // Ultra maps to native `ultra` in the Codex adapter.
     for (const model of ["gpt-5.6-sol", "gpt-5.6-terra"]) {
       expect(effortLevelsFor("codex", model)).toEqual([
@@ -341,6 +357,16 @@ describe("effortLevelsFor (per-model ladder)", () => {
       ]);
     }
   });
+  it("Codex GPT-6 Astra exposes the full durable ladder, including Ultra", () => {
+    expect(effortLevelsFor("codex", "gpt-6-astra")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+      "ultracode",
+    ]);
+  });
   it("returns [] for agents without an effort knob", () => {
     expect(effortLevelsFor("cursor", "composer-2.5")).toEqual([]);
   });
@@ -350,6 +376,34 @@ describe("effortLevelsFor (per-model ladder)", () => {
       "medium",
       "high",
     ]);
+  });
+  it("Grok 4.6 exposes Cursor's four-tier ladder and Auto exposes none", () => {
+    expect(effortLevelsFor("cursor", "grok-4.6")).toEqual([
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    expect(effortLevelsFor("cursor", "auto")).toEqual([]);
+  });
+
+  it("lets an exact live empty/false answer override Auto's catalog capabilities", () => {
+    const initialize = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "default",
+            label: "Auto",
+            effortLevels: [],
+            supportsFast: false,
+            selectable: true,
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    expect(effortLevelsFor("cursor", "default", initialize)).toEqual([]);
+    expect(agentSupportsFast("cursor", "default", initialize)).toBe(false);
   });
 });
 
@@ -488,15 +542,21 @@ describe("effectiveEffort (the one stale-tier clamp)", () => {
 });
 
 describe("agentSupportsFast (Fast-mode capability gate)", () => {
-  it("Claude: Opus 4.8 supports fast; Fable 5 / Sonnet 5 / Haiku do not", () => {
+  it("Claude: Opus 4.8 supports fast; Fable 5.1 / Fable 5 / Sonnet 5 / Haiku do not", () => {
     expect(agentSupportsFast("claude", "claude-opus-4-8[1m]")).toBe(true);
     expect(agentSupportsFast("claude", "claude-fable-5[1m]")).toBe(false);
+    expect(agentSupportsFast("claude", "claude-fable-5-1[1m]")).toBe(false);
     expect(agentSupportsFast("claude", "claude-sonnet-5[1m]")).toBe(false);
     expect(agentSupportsFast("claude", "claude-haiku-4-5")).toBe(false);
   });
-  it("Codex: GPT-5.x only", () => {
+  it("Codex: GPT-5.x and GPT-6 Astra", () => {
     expect(agentSupportsFast("codex", "gpt-5.5")).toBe(true);
     expect(agentSupportsFast("codex", "gpt-5.4")).toBe(true);
+    expect(agentSupportsFast("codex", "gpt-6-astra")).toBe(true);
+  });
+  it("Cursor: Auto and Grok 4.6 both expose Fast", () => {
+    expect(agentSupportsFast("cursor", "auto")).toBe(true);
+    expect(agentSupportsFast("cursor", "grok-4.6")).toBe(true);
   });
   it("null model resolves to the agent's GLOBAL default — matching what ModelPill shows", () => {
     // A null model = "the agent default" = the model the pill displays as
@@ -632,8 +692,8 @@ describe("permissionForAgentMode (native mode → posture)", () => {
 });
 
 describe("effortLabel (per-family effort vocabulary)", () => {
-  it("Codex renders Light / Extra High / Max / Ultra", () => {
-    expect(effortLabel("codex", "low")).toBe("Light");
+  it("Codex renders Low / Extra High / Max / Ultra", () => {
+    expect(effortLabel("codex", "low")).toBe("Low");
     expect(effortLabel("codex", "medium")).toBe("Medium");
     expect(effortLabel("codex", "high")).toBe("High");
     expect(effortLabel("codex", "xhigh")).toBe("Extra High");
@@ -642,9 +702,9 @@ describe("effortLabel (per-family effort vocabulary)", () => {
     expect(effortLabel("codex", "max")).toBe("Max");
     expect(effortLabel("codex", "ultracode")).toBe("Ultra");
   });
-  it("Claude renders Extra / Max / Ultracode for the top tiers", () => {
+  it("Claude renders Extra High / Max / Ultracode for the top tiers", () => {
     expect(effortLabel("claude", "low")).toBe("Low");
-    expect(effortLabel("claude", "xhigh")).toBe("Extra");
+    expect(effortLabel("claude", "xhigh")).toBe("Extra High");
     expect(effortLabel("claude", "max")).toBe("Max");
     expect(effortLabel("claude", "ultracode")).toBe("Ultracode");
   });
@@ -1054,7 +1114,9 @@ describe("a null ChatThread.model means ONE model everywhere", () => {
   it("resolves to the starred model, not the catalog list head", () => {
     // Claude is the family where the two differ, which is what made the
     // divergence observable at all.
-    expect(modelsForAgent("claude", null)[0]?.value).toBe("claude-fable-5[1m]");
+    expect(modelsForAgent("claude", null)[0]?.value).toBe(
+      "claude-fable-5-1[1m]",
+    );
     expect(resolveModelOption("claude", null, null)?.value).toBe(
       "claude-opus-5[1m]",
     );

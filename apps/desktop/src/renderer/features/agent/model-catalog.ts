@@ -478,10 +478,10 @@ export const EFFORT_LABELS: Record<ChatEffort, string> = {
 };
 
 /** Per-family effort-label overrides. Each agent brands its
- *  reasoning tiers differently: Codex reads "Light … Extra High … Max …
+ *  reasoning tiers differently: Codex reads "Low … Extra High … Max …
  *  Ultra". "Max" sits between "Extra High" and "Ultra", so max keeps its
  *  default label and the internal ultracode
- *  level carries "Ultra"), Claude "Low … Extra … Max … Ultracode". Only
+ *  level carries "Ultra"), Claude "Low … Extra High … Max … Ultracode". Only
  *  the levels that DIFFER from {@link EFFORT_LABELS} are listed; unlisted
  *  levels fall back to the default. Cursor (Grok low/medium/high) uses the
  *  defaults, so it needs no entry. */
@@ -489,8 +489,8 @@ const EFFORT_LABELS_BY_FAMILY: Record<
   string,
   Partial<Record<ChatEffort, string>>
 > = {
-  claude: { xhigh: "Extra", max: "Max", ultracode: "Ultracode" },
-  codex: { low: "Light", xhigh: "Extra High", ultracode: "Ultra" },
+  claude: { ultracode: "Ultracode" },
+  codex: { ultracode: "Ultra" },
 };
 
 /** The display label for an effort level in the given agent's vocabulary. Used

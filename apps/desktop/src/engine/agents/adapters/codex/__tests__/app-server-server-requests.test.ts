@@ -169,6 +169,121 @@ describe("codex app-server initiated requests", () => {
     await runtime.dispose();
   });
 
+  it("forwards the six new 0.153.4 notifications through the typed engine boundary", async () => {
+    const fake = createFakeProcess();
+    harness.proc = fake.proc;
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: "/tmp/project",
+      clientInfo: { name: "Zeros-test", version: "0.0.0" },
+    });
+    const received: Array<{ method: string; params: unknown }> = [];
+
+    runtime.onNotificationTyped(
+      "mcpServer/event/stream/notification",
+      (params) =>
+        received.push({
+          method: "mcpServer/event/stream/notification",
+          params,
+        }),
+    );
+    runtime.onNotificationTyped("modelProvider/authRecoveryStarted", (params) =>
+      received.push({ method: "modelProvider/authRecoveryStarted", params }),
+    );
+    runtime.onNotificationTyped(
+      "modelProvider/authRecoveryCompleted",
+      (params) =>
+        received.push({
+          method: "modelProvider/authRecoveryCompleted",
+          params,
+        }),
+    );
+    runtime.onNotificationTyped("thread/realtime/item/started", (params) =>
+      received.push({ method: "thread/realtime/item/started", params }),
+    );
+    runtime.onNotificationTyped(
+      "thread/realtime/item/transcript/delta",
+      (params) =>
+        received.push({
+          method: "thread/realtime/item/transcript/delta",
+          params,
+        }),
+    );
+    runtime.onNotificationTyped("thread/realtime/item/completed", (params) =>
+      received.push({ method: "thread/realtime/item/completed", params }),
+    );
+
+    const notifications = [
+      {
+        method: "mcpServer/event/stream/notification",
+        params: {
+          subscriptionId: "subscription-1",
+          notification: {
+            method: "notifications/tools/list_changed",
+            params: {},
+          },
+        },
+      },
+      {
+        method: "modelProvider/authRecoveryStarted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          provider: "openai",
+          message: "Refreshing authentication",
+        },
+      },
+      {
+        method: "modelProvider/authRecoveryCompleted",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          provider: "openai",
+          message: "Authentication refreshed",
+        },
+      },
+      {
+        method: "thread/realtime/item/started",
+        params: {
+          threadId: "thread-1",
+          item: {
+            id: "realtime-item-1",
+            realtimeSessionId: "realtime-session-1",
+            type: "transcriptSegment",
+            role: "assistant",
+            text: "",
+          },
+        },
+      },
+      {
+        method: "thread/realtime/item/transcript/delta",
+        params: {
+          threadId: "thread-1",
+          itemId: "realtime-item-1",
+          delta: "Hello",
+        },
+      },
+      {
+        method: "thread/realtime/item/completed",
+        params: {
+          threadId: "thread-1",
+          item: {
+            id: "realtime-item-1",
+            realtimeSessionId: "realtime-session-1",
+            type: "transcriptSegment",
+            role: "assistant",
+            text: "Hello",
+          },
+        },
+      },
+    ];
+    for (const notification of notifications) {
+      fake.send({ jsonrpc: "2.0", ...notification });
+    }
+
+    await vi.waitFor(() => expect(received).toEqual(notifications));
+    await runtime.dispose();
+  });
+
   it("answers currentTime/read instead of rejecting a native Codex request", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;

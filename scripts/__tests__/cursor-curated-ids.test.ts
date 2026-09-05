@@ -23,15 +23,26 @@ import { resolvesAgainst } from "../cursor-curated-ids.mjs";
 
 const ROOT = path.resolve(__dirname, "..", "..");
 
-/** The catalog as the account actually reports it today: `grok-4.5` bare, with no
- *  suffixed grok ids at all. Verified against a real key on 2026-07-31. */
-const LIVE_TODAY = new Set(["composer-2", "composer-2.5", "grok-4.5"]);
+/** The catalog @cursor/sdk 1.0.31 reports: canonical `default` (Auto), Grok 4.6,
+ *  and Grok 4.5 as bare parameterized ids. Verified with a real key 2026-09-05. */
+const LIVE_TODAY = new Set([
+  "default",
+  "composer-2",
+  "composer-2.5",
+  "grok-4.6",
+  "grok-4.5",
+]);
 
 /** The shape the adapter's suffixed fallback exists for: the base is gone and only
  *  level-suffixed variants remain. HYPOTHETICAL today — kept because the switch
  *  from one shape to the other bumps no version number. */
 const LIVE_SUFFIXED_ONLY = new Set([
   "composer-2.5",
+  "default",
+  "grok-4.6-low",
+  "grok-4.6-medium",
+  "grok-4.6-high",
+  "grok-4.6-xhigh",
   "grok-4.5-low",
   "grok-4.5-medium",
   "grok-4.5-high",
@@ -88,13 +99,7 @@ describe("resolvesAgainst", () => {
         cursor: Array<{ value: string; liveRequired?: boolean }>;
       };
     };
-    const router = catalog.families.cursor.find(
-      (model) => model.value === "default",
-    );
-    expect(router?.liveRequired).toBe(true);
-    const curated = catalog.families.cursor
-      .filter((model) => model.liveRequired !== true)
-      .map((model) => model.value);
+    const curated = catalog.families.cursor.map((model) => model.value);
 
     expect(curated.length).toBeGreaterThan(0); // an empty list would prove nothing
     for (const id of curated) {

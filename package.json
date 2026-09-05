@@ -24,7 +24,7 @@
       "!**/*.db-wal"
     ]
   },
-  "codexProtocolVersion": "0.149.0",
+  "codexProtocolVersion": "0.153.4",
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-helper.cjs",
     "codegen:codex": "node scripts/codegen-codex.mjs",
