@@ -17,6 +17,7 @@ import { isAbsolute } from "node:path";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
+import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
@@ -423,6 +424,50 @@ export interface CursorModelListItem {
   variants?: CursorModelVariant[];
 }
 
+type CuratedCursorModel = {
+  value: string;
+  effortLevels?: string[];
+  supportsFast?: boolean;
+};
+
+/** Parameter names verified against @cursor/sdk 1.0.31's models.list wire.
+ * The capability values stay owned by catalogs/models-v1.json, so the cold
+ * path cannot grow a second model menu or drift from renderer validation. */
+const CURSOR_CURATED_PARAMETER_WIRES: Readonly<
+  Record<string, { effort?: string; fast?: string }>
+> = {
+  "grok-4.6": { effort: "effort", fast: "fast" },
+};
+
+/** Build the native parameter record used only while asynchronous provider
+ * discovery is absent. Once a live record exists—even one with explicit empty
+ * values—it wins in full and this fallback is not consulted. */
+function curatedCursorModelWire(id: string): CursorModelListItem | undefined {
+  const wire = CURSOR_CURATED_PARAMETER_WIRES[id];
+  if (!wire) return undefined;
+  const curated = (
+    modelCatalogJson.families.cursor as CuratedCursorModel[]
+  ).find((candidate) => candidate.value === id);
+  if (!curated) return undefined;
+  const parameters: CursorModelParameter[] = [];
+  if (wire.effort && Array.isArray(curated.effortLevels)) {
+    parameters.push({
+      id: wire.effort,
+      values: curated.effortLevels.map((value) => ({ value })),
+    });
+  }
+  if (wire.fast && typeof curated.supportsFast === "boolean") {
+    parameters.push({
+      id: wire.fast,
+      values: [
+        { value: "false" },
+        ...(curated.supportsFast ? [{ value: "true" }] : []),
+      ],
+    });
+  }
+  return { id, parameters };
+}
+
 /** Parse ZEROS_ADDITIONAL_DIRS (the `/add-dir` JSON array of absolute paths)
  *  into a de-duplicated string[]. Tolerant by design — an unset or malformed
  *  value yields [], never throws into session creation. Mirrors the Claude
@@ -648,8 +693,10 @@ export function cursorAdvertisedModel(
       },
     ];
   });
-  const effortLevels = parameters
-    .filter((parameter) => /effort|reason|thinking/i.test(parameter.id))
+  const effortParameters = parameters.filter((parameter) =>
+    /effort|reason|thinking/i.test(parameter.id),
+  );
+  const effortLevels = effortParameters
     .flatMap((parameter) => parameter.values.map((value) => value.value))
     .filter((value, index, values) => {
       const normalized = value.toLowerCase();
@@ -711,7 +758,7 @@ export function cursorAdvertisedModel(
         : typeof item.supportsLocal === "boolean"
           ? item.supportsLocal
           : true,
-    ...(effortLevels.length > 0 ? { effortLevels } : {}),
+    ...(effortParameters.length > 0 ? { effortLevels } : {}),
     ...(supportsFast || hasSpeedMetadata ? { supportsFast } : {}),
   };
 }
@@ -1177,7 +1224,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     env?: Record<string, string>,
   ): CursorModelSelection {
     const id = state.discoveredModelAliases.get(modelId) ?? modelId;
-    const model = state.discoveredModels.get(id);
+    // Live presence is authoritative, including explicit empty parameters.
+    // The curated wire is only a cold/rejected-discovery fallback, keeping the
+    // user's Grok effort/Fast choice on the first create/resume/send without a
+    // network wait.
+    const model = state.discoveredModels.get(id) ?? curatedCursorModelWire(id);
     return cursorModelSelection(
       id,
       model,

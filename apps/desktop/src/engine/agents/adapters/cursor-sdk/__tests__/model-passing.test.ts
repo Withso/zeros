@@ -17,6 +17,7 @@ import {
   applyCursorReasoning,
   isCursorModelGatedError,
   cursorAgentUsageDelta,
+  cursorAdvertisedModel,
   cursorModelStateFingerprint,
   cursorRipgrepPathFromEnvironment,
   parseCursorAdditionalDirs,
@@ -191,6 +192,27 @@ describe("resolveValidModelId (pure)", () => {
     expect(
       resolveValidModelId("bogus", new Set(["composer-9", "gpt-5.5"])),
     ).toBe("composer-9");
+  });
+});
+
+describe("cursorAdvertisedModel capability presence", () => {
+  it("preserves an explicit empty live effort definition", () => {
+    expect(
+      cursorAdvertisedModel({
+        id: "grok-4.6",
+        displayName: "Cursor Grok 4.6",
+        parameters: [{ id: "effort", values: [] }],
+      }),
+    ).toMatchObject({ effortLevels: [] });
+  });
+
+  it("omits effortLevels only when live discovery has no effort answer", () => {
+    expect(
+      cursorAdvertisedModel({
+        id: "grok-4.6",
+        displayName: "Cursor Grok 4.6",
+      }),
+    ).not.toHaveProperty("effortLevels");
   });
 });
 
@@ -553,6 +575,38 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       effortLevels: ["low", "medium", "high", "xhigh"],
       supportsFast: true,
     });
+  });
+
+  it("lets an explicit live empty Grok effort definition override the curated cold fallback", async () => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "grok-4.6",
+        displayName: "Cursor Grok 4.6",
+        parameters: [
+          { id: "effort", values: [] },
+          { id: "fast", values: [{ value: "false" }] },
+        ],
+      },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "grok-4.6",
+        ZEROS_THINKING_EFFORT: "xhigh",
+        ZEROS_FAST_MODE: "1",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(createSpy.mock.calls[0][0].model).toEqual({ id: "grok-4.6" });
+    expect(sendSpy.mock.calls[0][1].model).toEqual({ id: "grok-4.6" });
+    expect(
+      (await adapter.initialize())._meta?.models?.find(
+        (model) => model.value === "grok-4.6",
+      ),
+    ).toMatchObject({ effortLevels: [], supportsFast: false });
   });
 
   it("maps Grok 4.6 effort and Fast to SDK params on create, send, and resume", async () => {
@@ -1401,6 +1455,73 @@ describe("CursorSdkAdapter — multi-root workspaces (@cursor/sdk 1.0.28 local.d
 });
 
 describe("CursorSdkAdapter — model discovery never blocks session start", () => {
+  it("keeps curated Grok 4.6 effort/Fast on create, send, and a mode rebuild while discovery is pending", async () => {
+    let releaseCatalog = () => {};
+    modelsListSpy.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseCatalog = () => resolve([]);
+        }),
+    );
+    const expected = {
+      id: "grok-4.6",
+      params: [
+        { id: "effort", value: "xhigh" },
+        { id: "fast", value: "true" },
+      ],
+    };
+    try {
+      const adapter = new CursorSdkAdapter(makeCtx());
+      const { session } = await adapter.newSession({
+        cwd: "/tmp/proj",
+        env: {
+          CURSOR_API_KEY: "key_test",
+          CURSOR_MODEL: "grok-4.6",
+          ZEROS_THINKING_EFFORT: "xhigh",
+          ZEROS_FAST_MODE: "1",
+        },
+      });
+
+      expect(createSpy.mock.calls[0][0].model).toEqual(expected);
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+
+      await adapter.setMode({ sessionId: session.sessionId, modeId: "agent" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      expect(resumeSpy.mock.calls[0][1].model).toEqual(expected);
+      expect(sendSpy.mock.calls[1][1].model).toEqual(expected);
+    } finally {
+      releaseCatalog();
+    }
+  });
+
+  it("keeps curated Grok 4.6 effort/Fast on resume when discovery rejects", async () => {
+    modelsListSpy.mockRejectedValue(new Error("catalog unavailable"));
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const loaded = await adapter.loadSession({
+      executionId: "grok-after-restart",
+      sessionId: "provider-grok-agent",
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "grok-4.6",
+        ZEROS_THINKING_EFFORT: "xhigh",
+        ZEROS_FAST_MODE: "1",
+      },
+    });
+    const expected = {
+      id: "grok-4.6",
+      params: [
+        { id: "effort", value: "xhigh" },
+        { id: "fast", value: "true" },
+      ],
+    };
+
+    expect(resumeSpy.mock.calls[0][1].model).toEqual(expected);
+    await adapter.prompt({ sessionId: loaded.executionId!, prompt: TEXT });
+    expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+  });
+
   it("creates the agent immediately while a hung catalog request continues", async () => {
     let releaseCatalog = () => {};
     modelsListSpy.mockImplementation(
