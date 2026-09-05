@@ -39,6 +39,7 @@ import {
   enqueueSessionsRevokedNotification,
 } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
+import { createDevAuthConfigurationRoutes } from "./dev-auth-configuration.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
   createCloudWorkspaceInternalRoutes,
@@ -85,6 +86,8 @@ function isCloudWorkspaceApiPath(requestPath: string): boolean {
   );
 }
 
+/** Assemble the control plane's public, browser, and authenticated API boundaries,
+ * retaining migration gates and injectable service dependencies for tests. */
 export function createApp(
   config: Config,
   pool: pg.Pool,
@@ -199,6 +202,9 @@ export function createApp(
       return c.json({ ok: false }, 503);
     }
   });
+
+  // Dev discovery exposes only the anonymous public-client configuration.
+  app.route("/", createDevAuthConfigurationRoutes(config));
 
   // Railway owns the complete WorkOS browser/desktop authentication boundary:
   // Hosted AuthKit authorization, authorization-code exchange, encrypted

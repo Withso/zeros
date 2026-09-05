@@ -81,6 +81,43 @@ afterEach(() => {
 });
 
 describe("WorkOS desktop hosted authorization", () => {
+  it("registers Dev callback routing before opening the browser and removes it on completion or cancellation", async () => {
+    const dispose = vi.fn();
+    const registerCallback = vi.fn(
+      (
+        _state: string,
+        _expiresAt: number,
+        _accept: (input: {
+          state: string;
+          code?: string | null;
+          error?: string | null;
+        }) => boolean,
+      ) => dispose,
+    );
+    const harness = setup({ deepLinkScheme: "zeros-dev", registerCallback });
+    const attempt = await harness.flow.start();
+    expect(registerCallback).toHaveBeenCalledWith(
+      callbackState(harness.openedUrl!),
+      attempt.expiresAt,
+      expect.any(Function),
+    );
+    const accept = registerCallback.mock.calls[0][2] as (input: {
+      state: string;
+      code: string;
+    }) => boolean;
+    expect(
+      accept({
+        state: callbackState(harness.openedUrl!),
+        code: "relayed-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+    expect(dispose).toHaveBeenCalledTimes(1);
+    await harness.flow.start();
+    harness.flow.cancel();
+    expect(dispose).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects an invalid app origin without leaving a pending flow", async () => {
     const harness = setup({ appOrigin: "http://untrusted.example" });
 
@@ -143,9 +180,7 @@ describe("WorkOS desktop hosted authorization", () => {
 
     const outcome = await Promise.race([
       harness.flow.start().then(() => "started" as const),
-      new Promise<"stuck">((resolve) =>
-        setTimeout(() => resolve("stuck"), 50),
-      ),
+      new Promise<"stuck">((resolve) => setTimeout(() => resolve("stuck"), 50)),
     ]);
 
     expect(outcome).toBe("started");
@@ -374,9 +409,9 @@ describe("WorkOS desktop hosted authorization", () => {
 
       expect(onError).toHaveBeenCalledOnce();
       expect(onError).toHaveBeenCalledWith("expired");
-      expect(
-        harness.flow.acceptCallback({ state, code: "late-code" }),
-      ).toBe(false);
+      expect(harness.flow.acceptCallback({ state, code: "late-code" })).toBe(
+        false,
+      );
       expect(harness.exchangeCode).not.toHaveBeenCalled();
       expect(harness.persistSession).not.toHaveBeenCalled();
     } finally {

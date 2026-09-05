@@ -28,7 +28,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { loadDevAuthEnvironment } from "./dev-auth-profile.mjs";
+import { ensureDevAuthEnvironment } from "./dev-auth-profile.mjs";
 import { portFree } from "./dev-ports.mjs";
 import { pruneStaleDevCaches } from "./dev-cache-prune.mjs";
 
@@ -56,7 +56,7 @@ const REPO_ROOT = process.cwd();
 // rotation. Only the seven public-client fields are read; WorkOS management
 // credentials cannot enter through the profile. Electron main independently
 // repeats the exact Alpha-only validation at the browser boundary.
-const devAuth = loadDevAuthEnvironment();
+const devAuth = await ensureDevAuthEnvironment();
 if (devAuth.source !== "none" && devAuth.issue) {
   throw new Error(
     `Unsafe Zeros Dev auth configuration (${devAuth.issue}). ` +
@@ -70,6 +70,11 @@ if (devAuth.source === "none") {
 } else {
   console.log(
     `[dev-instance] Alpha WorkOS auth configuration validated (source=${devAuth.source})`,
+  );
+}
+if (devAuth.cachedOffline) {
+  console.warn(
+    "[dev-instance] Alpha configuration service unavailable; using the last validated public profile",
   );
 }
 
