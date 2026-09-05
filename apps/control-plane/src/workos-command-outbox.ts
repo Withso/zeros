@@ -9,6 +9,16 @@ import type {
   WorkOSMembershipRecord,
   WorkOSOrganizationRecord,
 } from "./workos-provider.js";
+import {
+  accountWorkOSProviderSubjects,
+  withWorkOSProviderLocks,
+  WorkOSProviderLockAbortedError,
+  WorkOSProviderLockTimeoutError,
+  workOSOrganizationProviderLockKey,
+  workOSProviderSubjectHash,
+  workOSProviderSubjectLockKey,
+  workOSUserProviderLockKey,
+} from "./workos-provider-locks.js";
 import { replayDeferredWorkOSInvitationEvents } from "./workos-sync-events.js";
 
 export type WorkOSCommandOperation =
@@ -37,10 +47,239 @@ export type EnqueueWorkOSCommandInput = {
   payload: Record<string, unknown>;
 };
 
+const WorkOSIdentifier = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
+const UserDeletePayload = z.object({
+  workosUserId: WorkOSIdentifier,
+  deletionRequestId: z.string().uuid(),
+});
+
+export function workOSUserDeletionIdempotencyKey(
+  deletionRequestId: string,
+  workosUserId: string,
+): string {
+  const requestId = z.string().uuid().parse(deletionRequestId);
+  const subject = WorkOSIdentifier.parse(workosUserId);
+  return `account.delete.${requestId}.${workOSProviderSubjectHash({ kind: "user", id: subject })}`;
+}
+
+const DELETION_SAFE_WORKOS_OPERATIONS: ReadonlySet<WorkOSCommandOperation> =
+  new Set([
+    "membership.delete",
+    "invitation.revoke",
+    "session.revoke",
+    "sessions.revoke_all",
+    "user.delete",
+  ]);
+
+function payloadString(
+  payload: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = payload[key];
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+async function associatedWorkOSUserIds(
+  tx: Tx,
+  input: Pick<
+    EnqueueWorkOSCommandInput,
+    "userId" | "providerObjectId" | "operation" | "payload"
+  >,
+): Promise<string[]> {
+  const providerSubjects = [
+    payloadString(input.payload, "workosUserId"),
+    payloadString(input.payload, "inviterWorkosUserId"),
+    ...(input.operation === "user.delete" ||
+    input.operation === "sessions.revoke_all"
+      ? [input.providerObjectId ?? null]
+      : []),
+  ].filter((value): value is string => value !== null);
+  const email = payloadString(input.payload, "email");
+  const sessionId =
+    input.operation === "session.revoke"
+      ? payloadString(input.payload, "sessionId")
+      : null;
+  const resolved = await tx.query<{ id: string }>(
+    `SELECT id
+     FROM (
+       SELECT $1::uuid AS id WHERE $1::uuid IS NOT NULL
+       UNION
+       SELECT identity.user_id
+       FROM user_identities identity
+       WHERE $2::text[] <> '{}'::text[]
+         AND identity.provider = 'workos'
+         AND identity.provider_sub = ANY($2::text[])
+       UNION
+       SELECT account.id
+       FROM users account
+       WHERE $3::citext IS NOT NULL AND account.email = $3::citext
+       UNION
+       SELECT browser.account_user_id
+       FROM workos_browser_sessions browser
+       WHERE $4::text IS NOT NULL
+         AND browser.provider_session_id = $4
+         AND browser.account_user_id IS NOT NULL
+       UNION
+       SELECT session.user_id
+       FROM auth_sessions session
+       WHERE $4::text IS NOT NULL
+         AND session.provider = 'workos'
+         AND session.provider_session_id = $4
+         AND session.user_id IS NOT NULL
+       UNION
+       SELECT identity.user_id
+       FROM auth_sessions session
+       JOIN user_identities identity
+         ON identity.provider = 'workos'
+        AND identity.provider_sub = session.provider_sub
+       WHERE $4::text IS NOT NULL
+         AND session.provider = 'workos'
+         AND session.provider_session_id = $4
+     ) associated
+     WHERE id IS NOT NULL
+     ORDER BY id`,
+    [input.userId ?? null, providerSubjects, email, sessionId],
+  );
+  return resolved.rows.map((row) => row.id);
+}
+
+async function assertWorkOSEnqueueLifecycle(
+  tx: Tx,
+  input: EnqueueWorkOSCommandInput,
+): Promise<void> {
+  if (input.operation === "organization.delete") {
+    if (!input.organizationId) {
+      throw new Error("WorkOS organization purge target is missing");
+    }
+    const authority = await tx.query<{
+      workos_organization_id: string | null;
+    }>(
+      `SELECT link.workos_organization_id
+       FROM organizations organization
+       JOIN deletion_requests request
+         ON request.id = organization.deletion_request_id
+        AND request.target_kind = 'organization'
+        AND request.target_id = organization.id
+        AND request.target_organization_id = organization.id
+       LEFT JOIN workos_organization_links link
+         ON link.organization_id = organization.id
+       WHERE organization.id = $1
+         AND organization.lifecycle_status = 'purging'
+         AND request.state = 'purging'`,
+      [input.organizationId],
+    );
+    if (!authority.rows[0]) {
+      throw new Error("WorkOS organization purge has not started");
+    }
+    if (
+      !input.providerObjectId ||
+      authority.rows[0].workos_organization_id !== input.providerObjectId
+    ) {
+      throw new Error("WorkOS organization provider target mismatch");
+    }
+  }
+
+  if (input.operation === "user.delete") {
+    if (!input.userId) throw new Error("WorkOS user purge target is missing");
+    const authority = await tx.query<{ deletion_request_id: string }>(
+      `SELECT request.id AS deletion_request_id
+       FROM deletion_requests request
+       JOIN users account
+         ON account.id = request.target_user_id
+        AND request.target_id = account.id
+       WHERE account.id = $1
+         AND request.id = account.deletion_request_id
+         AND request.target_kind = 'account'
+         AND request.state IN ('purging', 'provider_deleting', 'failed')
+         AND account.auth_status = 'deletion_pending'
+         AND account.deletion_request_id = request.id`,
+      [input.userId],
+    );
+    if (!authority.rows[0]) {
+      throw new Error("WorkOS user purge has not started");
+    }
+    const parsed = UserDeletePayload.safeParse(input.payload);
+    const providerUserId = parsed.success ? parsed.data.workosUserId : null;
+    const deletionRequestId = parsed.success
+      ? parsed.data.deletionRequestId
+      : null;
+    if (
+      !providerUserId ||
+      !deletionRequestId ||
+      !input.providerObjectId ||
+      input.providerObjectId !== providerUserId ||
+      input.idempotencyKey !==
+        workOSUserDeletionIdempotencyKey(deletionRequestId, providerUserId)
+    ) {
+      throw new Error("WorkOS user provider target mismatch");
+    }
+    if (deletionRequestId !== authority.rows[0].deletion_request_id) {
+      throw new Error("WorkOS user provider target mismatch");
+    }
+    const providerFence = await tx.query(
+      `SELECT 1 FROM workos_provider_erasure_fences
+       WHERE provider = 'workos' AND subject_kind = 'user'
+         AND hash_version = 1 AND deletion_request_id = $1
+         AND subject_hash = $2`,
+      [
+        deletionRequestId,
+        workOSProviderSubjectHash({ kind: "user", id: providerUserId }),
+      ],
+    );
+    if (!providerFence.rows[0]) {
+      throw new Error("WorkOS user provider target mismatch");
+    }
+    // A WorkOS identity first observed while the account purge owns the
+    // stable account lock has no durable source row by design. The exact
+    // request-bound fence above is its authority until local purge completes.
+    return;
+  }
+
+  if (input.organizationId) {
+    const organization = await tx.query<{ lifecycle_status: string }>(
+      `SELECT lifecycle_status FROM organizations
+       WHERE id = $1 FOR KEY SHARE`,
+      [input.organizationId],
+    );
+    const status = organization.rows[0]?.lifecycle_status;
+    const permitted =
+      input.operation === "organization.delete"
+        ? status === "purging"
+        : status === "active" || status === "scheduled";
+    if (!permitted) {
+      throw new Error(
+        `WorkOS organization provider command is unavailable while ${status ?? "missing"}`,
+      );
+    }
+  }
+
+  const userIds = await associatedWorkOSUserIds(tx, input);
+  if (userIds.length === 0) return;
+  const users = await tx.query<{ id: string; auth_status: string }>(
+    `SELECT id, auth_status FROM users
+     WHERE id = ANY($1::uuid[])
+     ORDER BY id
+     FOR KEY SHARE`,
+    [userIds],
+  );
+  const deletionSafe = DELETION_SAFE_WORKOS_OPERATIONS.has(input.operation);
+  const unavailable = users.rows.find((user) =>
+    deletionSafe
+      ? user.auth_status === "deleted"
+      : user.auth_status !== "active",
+  );
+  if (unavailable) {
+    throw new Error(
+      `WorkOS user provider command is unavailable while ${unavailable.auth_status}`,
+    );
+  }
+}
+
 export async function enqueueWorkOSCommand(
   tx: Tx,
   input: EnqueueWorkOSCommandInput,
 ): Promise<string> {
+  await assertWorkOSEnqueueLifecycle(tx, input);
   const inserted = await tx.query<{ id: string }>(
     `INSERT INTO workos_command_outbox (
        operation, idempotency_key, aggregate_key, ordering_key,
@@ -72,6 +311,94 @@ export async function enqueueWorkOSCommand(
   return existing.rows[0].id;
 }
 
+/**
+ * Allocate an append-only revision for one account-erasure subject. Callers
+ * hold the stable account provider lock, so a missing idempotency key and the
+ * following MAX revision read are one serialized decision.
+ */
+export async function enqueueWorkOSUserDeletionCommand(
+  tx: Tx,
+  input: {
+    deletionRequestId: string;
+    userId: string;
+    workosUserId: string;
+  },
+): Promise<string> {
+  const deletionRequestId = z.string().uuid().parse(input.deletionRequestId);
+  const userId = z.string().uuid().parse(input.userId);
+  const workosUserId = WorkOSIdentifier.parse(input.workosUserId);
+  const idempotencyKey = workOSUserDeletionIdempotencyKey(
+    deletionRequestId,
+    workosUserId,
+  );
+  const aggregateKey = `account-delete:${userId}`;
+  const orderingKey = `account:${userId}`;
+  const existing = await tx.query<{
+    id: string;
+    operation: string;
+    aggregate_key: string;
+    ordering_key: string;
+    aggregate_revision: string | number;
+    organization_id: string | null;
+    user_id: string | null;
+    provider_object_id: string | null;
+    payload: Record<string, unknown>;
+  }>(
+    `SELECT id, operation, aggregate_key, ordering_key, aggregate_revision,
+            organization_id, user_id, provider_object_id, payload
+     FROM workos_command_outbox WHERE idempotency_key = $1`,
+    [idempotencyKey],
+  );
+  const prior = existing.rows[0];
+  if (prior) {
+    const payload = UserDeletePayload.safeParse(prior.payload);
+    if (
+      prior.operation !== "user.delete" ||
+      prior.aggregate_key !== aggregateKey ||
+      prior.ordering_key !== orderingKey ||
+      prior.organization_id !== null ||
+      prior.user_id !== userId ||
+      prior.provider_object_id !== workosUserId ||
+      !payload.success ||
+      payload.data.deletionRequestId !== deletionRequestId ||
+      payload.data.workosUserId !== workosUserId
+    ) {
+      throw new Error("WorkOS user deletion idempotency conflict");
+    }
+    await assertWorkOSEnqueueLifecycle(tx, {
+      operation: "user.delete",
+      idempotencyKey,
+      aggregateKey,
+      orderingKey,
+      aggregateRevision: Number(prior.aggregate_revision),
+      userId,
+      providerObjectId: workosUserId,
+      payload: { workosUserId, deletionRequestId },
+    });
+    return prior.id;
+  }
+
+  const revision = await tx.query<{ next_revision: string | number }>(
+    `SELECT COALESCE(MAX(aggregate_revision), 0) + 1 AS next_revision
+     FROM workos_command_outbox WHERE aggregate_key = $1`,
+    [aggregateKey],
+  );
+  const aggregateRevision = Number(revision.rows[0]?.next_revision);
+  if (!Number.isSafeInteger(aggregateRevision) || aggregateRevision < 1) {
+    throw new Error("WorkOS user deletion revision is invalid");
+  }
+  return enqueueWorkOSCommand(tx, {
+    operation: "user.delete",
+    idempotencyKey,
+    aggregateKey,
+    orderingKey,
+    aggregateRevision,
+    userId,
+    providerObjectId: workosUserId,
+    payload: { workosUserId, deletionRequestId },
+  });
+}
+
 /** Keep normalized email addresses out of operational keys while serializing
  * every replacement/revocation for one WorkOS organization recipient. */
 export function workOSInvitationOrderingKey(
@@ -98,7 +425,7 @@ type ClaimedCommand = {
   attemptCount: number;
 };
 
-const Identifier = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
+const Identifier = WorkOSIdentifier;
 const Uuid = z.string().uuid();
 const Role = z.enum(["owner", "admin", "member"]);
 const OrganizationPayload = z.object({
@@ -120,7 +447,6 @@ const SessionsPayload = z.object({
   workosUserId: Identifier,
   createdBefore: z.string().datetime({ offset: true }),
 });
-const UserDeletePayload = z.object({ workosUserId: Identifier });
 
 export function sessionsEligibleForRevocation(
   sessions: ReadonlyArray<{
@@ -143,6 +469,13 @@ export function sessionsEligibleForRevocation(
 }
 
 type WorkOSCommandLogger = Pick<Console, "info" | "warn" | "error">;
+
+class WorkOSCommandLeaseLost extends Error {
+  constructor() {
+    super("WorkOS command lease ownership changed");
+    this.name = "WorkOSCommandLeaseLost";
+  }
+}
 
 function safeError(error: unknown): {
   code: string;
@@ -176,14 +509,38 @@ type CommandResult =
 export class WorkOSCommandProcessor {
   private readonly workerId: string;
   private readonly logger: WorkOSCommandLogger;
+  private readonly leaseDurationMs: number;
+  private readonly heartbeatIntervalMs: number;
+  private readonly providerLockTimeoutMs: number;
 
   constructor(
     private readonly pool: pg.Pool,
     private readonly provider: WorkOSManagementProvider,
-    options: { workerId?: string; logger?: WorkOSCommandLogger } = {},
+    options: {
+      workerId?: string;
+      logger?: WorkOSCommandLogger;
+      leaseDurationMs?: number;
+      heartbeatIntervalMs?: number;
+      providerLockTimeoutMs?: number;
+    } = {},
   ) {
     this.workerId = options.workerId ?? `workos:${randomUUID()}`;
     this.logger = options.logger ?? console;
+    this.leaseDurationMs = Math.max(
+      1_000,
+      Math.trunc(options.leaseDurationMs ?? 60_000),
+    );
+    this.heartbeatIntervalMs = Math.max(
+      250,
+      Math.min(
+        Math.trunc(options.heartbeatIntervalMs ?? 15_000),
+        Math.max(250, Math.trunc(this.leaseDurationMs / 2)),
+      ),
+    );
+    this.providerLockTimeoutMs = Math.max(
+      1,
+      Math.trunc(options.providerLockTimeoutMs ?? 30_000),
+    );
   }
 
   private async claim(): Promise<ClaimedCommand | null> {
@@ -243,14 +600,16 @@ export class WorkOSCommandProcessor {
          )
          UPDATE workos_command_outbox c
          SET state = 'processing', attempt_count = attempt_count + 1,
-             lease_owner = $1, lease_expires_at = now() + interval '60 seconds',
+             lease_owner = $1,
+             lease_expires_at = now() +
+               ($2::bigint * interval '1 millisecond'),
              updated_at = now()
          FROM candidate
          WHERE c.id = candidate.id
          RETURNING c.id, c.operation, c.idempotency_key, c.aggregate_key,
                    c.aggregate_revision, c.organization_id, c.user_id,
                    c.provider_object_id, c.payload, c.attempt_count`,
-        [this.workerId],
+        [this.workerId, this.leaseDurationMs],
       );
       const command = claimed.rows[0];
       return command
@@ -270,6 +629,203 @@ export class WorkOSCommandProcessor {
     });
   }
 
+  private async providerLockTargets(command: ClaimedCommand): Promise<{
+    keys: string[];
+    userIds: string[];
+  }> {
+    const userIds = await withSystemTx(this.pool, (tx) =>
+      associatedWorkOSUserIds(tx, command),
+    );
+    const userDeletion =
+      command.operation === "user.delete"
+        ? UserDeletePayload.safeParse(command.payload)
+        : null;
+    return {
+      keys: [
+        ...(command.organizationId
+          ? [workOSOrganizationProviderLockKey(command.organizationId)]
+          : []),
+        ...userIds.map(workOSUserProviderLockKey),
+        ...(userDeletion?.success
+          ? [
+              workOSProviderSubjectLockKey({
+                kind: "user",
+                id: userDeletion.data.workosUserId,
+              }),
+            ]
+          : []),
+      ],
+      userIds,
+    };
+  }
+
+  private async executionTargetIsAvailable(
+    tx: Tx,
+    command: ClaimedCommand,
+    userIds: readonly string[],
+  ): Promise<boolean> {
+    if (command.operation === "organization.delete") {
+      if (!command.organizationId || !command.providerObjectId) return false;
+      const authoritative = await tx.query(
+        `SELECT 1
+         FROM organizations organization
+         JOIN deletion_requests request
+           ON request.id = organization.deletion_request_id
+          AND request.target_kind = 'organization'
+          AND request.target_id = organization.id
+          AND request.target_organization_id = organization.id
+         JOIN workos_organization_links link
+           ON link.organization_id = organization.id
+          AND link.workos_organization_id = $3
+         WHERE organization.id = $1
+           AND organization.lifecycle_status = 'purging'
+           AND request.state = 'provider_deleting'
+           AND request.purge_command_id = $2`,
+        [command.organizationId, command.id, command.providerObjectId],
+      );
+      return authoritative.rows[0] !== undefined;
+    }
+    if (command.operation === "user.delete") {
+      const parsed = UserDeletePayload.safeParse(command.payload);
+      const providerUserId = parsed.success ? parsed.data.workosUserId : null;
+      const deletionRequestId = parsed.success
+        ? parsed.data.deletionRequestId
+        : null;
+      if (
+        !command.userId ||
+        !command.providerObjectId ||
+        !providerUserId ||
+        !deletionRequestId ||
+        command.providerObjectId !== providerUserId ||
+        command.idempotencyKey !==
+          workOSUserDeletionIdempotencyKey(deletionRequestId, providerUserId)
+      ) {
+        return false;
+      }
+      const authoritative = await tx.query(
+        `SELECT 1
+         FROM deletion_requests request
+         JOIN users account
+           ON account.id = request.target_user_id
+          AND request.target_id = account.id
+         JOIN workos_provider_erasure_fences fence
+           ON fence.deletion_request_id = request.id
+          AND fence.provider = 'workos'
+          AND fence.subject_kind = 'user'
+          AND fence.hash_version = 1
+          AND fence.subject_hash = $3
+         WHERE account.id = $1 AND request.id = $2
+           AND request.target_kind = 'account'
+           AND request.state IN ('purging', 'provider_deleting', 'failed')
+           AND account.auth_status = 'deletion_pending'
+           AND account.deletion_request_id = request.id`,
+        [
+          command.userId,
+          deletionRequestId,
+          workOSProviderSubjectHash({ kind: "user", id: providerUserId }),
+        ],
+      );
+      return authoritative.rows[0] !== undefined;
+    }
+
+    const deletionSafe = DELETION_SAFE_WORKOS_OPERATIONS.has(command.operation);
+    if (command.organizationId) {
+      const organization = await tx.query<{ lifecycle_status: string }>(
+        `SELECT lifecycle_status FROM organizations WHERE id = $1`,
+        [command.organizationId],
+      );
+      const status = organization.rows[0]?.lifecycle_status;
+      if (!status || status === "purged") return false;
+      if (status !== "active" && status !== "scheduled" && !deletionSafe) {
+        return false;
+      }
+    }
+    if (userIds.length === 0) return command.userId === null;
+    const users = await tx.query<{
+      id: string;
+      auth_status: string;
+      deletion_state: string | null;
+    }>(
+      `SELECT account.id, account.auth_status,
+              request.state AS deletion_state
+       FROM users account
+       LEFT JOIN deletion_requests request
+         ON request.id = account.deletion_request_id
+       WHERE account.id = ANY($1::uuid[])`,
+      [userIds],
+    );
+    if (
+      command.userId &&
+      !users.rows.some((row) => row.id === command.userId)
+    ) {
+      return false;
+    }
+    return users.rows.every((user) => {
+      if (user.auth_status === "deleted") return false;
+      if (deletionSafe) return true;
+      return (
+        user.auth_status === "active" ||
+        (user.auth_status === "deletion_pending" &&
+          user.deletion_state === "scheduled")
+      );
+    });
+  }
+
+  private async beginExecution(
+    command: ClaimedCommand,
+    userIds: readonly string[],
+  ): Promise<boolean> {
+    return withSystemTx(this.pool, async (tx) => {
+      const owned = await tx.query(
+        `SELECT 1 FROM workos_command_outbox
+         WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $3
+           AND lease_expires_at > clock_timestamp()
+         FOR UPDATE`,
+        [command.id, this.workerId, command.attemptCount],
+      );
+      if (!owned.rows[0]) return false;
+      if (!(await this.executionTargetIsAvailable(tx, command, userIds))) {
+        await tx.query(
+          `UPDATE workos_command_outbox
+           SET state = 'dead', completed_at = now(), updated_at = now(),
+               lease_owner = NULL, lease_expires_at = NULL,
+               last_error_code = 'target_deleting'
+           WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+             AND attempt_count = $3`,
+          [command.id, this.workerId, command.attemptCount],
+        );
+        return false;
+      }
+      await tx.query(
+        `UPDATE workos_command_outbox
+         SET lease_expires_at = now() +
+               ($4::bigint * interval '1 millisecond'),
+             updated_at = now()
+         WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $3`,
+        [command.id, this.workerId, command.attemptCount, this.leaseDurationMs],
+      );
+      return true;
+    });
+  }
+
+  private async renewLease(command: ClaimedCommand): Promise<boolean> {
+    const renewed = await withSystemTx(this.pool, (tx) =>
+      tx.query(
+        `UPDATE workos_command_outbox
+         SET lease_expires_at = now() +
+               ($4::bigint * interval '1 millisecond'),
+             updated_at = now()
+         WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $3
+           AND lease_expires_at > clock_timestamp()`,
+        [command.id, this.workerId, command.attemptCount, this.leaseDurationMs],
+      ),
+    );
+    return (renewed.rowCount ?? 0) === 1;
+  }
+
   private async workosOrganizationId(command: ClaimedCommand): Promise<string> {
     if (!command.organizationId) throw new Error("command has no organization");
     const result = await withSystemTx(this.pool, (tx) =>
@@ -281,7 +837,9 @@ export class WorkOSCommandProcessor {
     );
     const id = result.rows[0]?.workos_organization_id;
     if (!id) {
-      const dependency = new Error("WorkOS organization is not ready") as Error & {
+      const dependency = new Error(
+        "WorkOS organization is not ready",
+      ) as Error & {
         status: number;
       };
       dependency.status = 503;
@@ -290,7 +848,20 @@ export class WorkOSCommandProcessor {
     return id;
   }
 
-  private async execute(command: ClaimedCommand): Promise<CommandResult> {
+  private async execute(
+    command: ClaimedCommand,
+    checkpoint: () => Promise<void>,
+  ): Promise<CommandResult> {
+    const provider = new Proxy(this.provider, {
+      get(target, property, receiver) {
+        const value = Reflect.get(target, property, receiver);
+        if (typeof value !== "function") return value;
+        return async (...args: unknown[]) => {
+          await checkpoint();
+          return Reflect.apply(value, target, args);
+        };
+      },
+    }) as WorkOSManagementProvider;
     if (
       command.operation === "organization.create" ||
       command.operation === "organization.update"
@@ -300,7 +871,7 @@ export class WorkOSCommandProcessor {
         try {
           return {
             kind: "organization",
-            value: await this.provider.createOrganization({
+            value: await provider.createOrganization({
               name: payload.name,
               externalId: payload.externalId,
               idempotencyKey: command.idempotencyKey,
@@ -310,7 +881,7 @@ export class WorkOSCommandProcessor {
           if (safeError(error).status !== 409) throw error;
           return {
             kind: "organization",
-            value: await this.provider.getOrganizationByExternalId(
+            value: await provider.getOrganizationByExternalId(
               payload.externalId,
             ),
           };
@@ -318,7 +889,7 @@ export class WorkOSCommandProcessor {
       }
       return {
         kind: "organization",
-        value: await this.provider.updateOrganization({
+        value: await provider.updateOrganization({
           organizationId: await this.workosOrganizationId(command),
           name: payload.name,
           externalId: payload.externalId,
@@ -326,9 +897,10 @@ export class WorkOSCommandProcessor {
       };
     }
     if (command.operation === "organization.delete") {
-      const id = command.providerObjectId ?? (await this.workosOrganizationId(command));
+      const id =
+        command.providerObjectId ?? (await this.workosOrganizationId(command));
       try {
-        await this.provider.deleteOrganization(id);
+        await provider.deleteOrganization(id);
       } catch (error) {
         if (safeError(error).status !== 404) throw error;
       }
@@ -345,21 +917,24 @@ export class WorkOSCommandProcessor {
       ): Promise<WorkOSMembershipRecord> =>
         membership.roleSlug === payload.role
           ? membership
-          : this.provider.updateMembership({
+          : provider.updateMembership({
               membershipId: membership.id,
               roleSlug: payload.role,
             });
       const createMembership = (): Promise<WorkOSMembershipRecord> =>
-        this.provider.createMembership({
+        provider.createMembership({
           organizationId,
           userId: payload.workosUserId,
           roleSlug: payload.role,
         });
-      if (command.operation === "membership.update" && command.providerObjectId) {
+      if (
+        command.operation === "membership.update" &&
+        command.providerObjectId
+      ) {
         try {
           return {
             kind: "membership",
-            value: await this.provider.updateMembership({
+            value: await provider.updateMembership({
               membershipId: command.providerObjectId,
               roleSlug: payload.role,
             }),
@@ -375,7 +950,7 @@ export class WorkOSCommandProcessor {
         };
       } catch (error) {
         const failure = safeError(error);
-        const observed = await this.provider.listMemberships({
+        const observed = await provider.listMemberships({
           organizationId,
           userId: payload.workosUserId,
         });
@@ -408,7 +983,7 @@ export class WorkOSCommandProcessor {
         }
         for (const membership of pending) {
           try {
-            await this.provider.deleteMembership(membership.id);
+            await provider.deleteMembership(membership.id);
           } catch (deleteError) {
             if (safeError(deleteError).status !== 404) throw deleteError;
           }
@@ -419,7 +994,7 @@ export class WorkOSCommandProcessor {
           // The second response can also be lost after WorkOS commits. Observe
           // the provider before retrying so the command remains idempotent.
           const recovered = (
-            await this.provider.listMemberships({
+            await provider.listMemberships({
               organizationId,
               userId: payload.workosUserId,
             })
@@ -453,7 +1028,7 @@ export class WorkOSCommandProcessor {
         }
       }
       if (organizationId) {
-        for (const membership of await this.provider.listMemberships({
+        for (const membership of await provider.listMemberships({
           organizationId,
           userId: payload.workosUserId,
         })) {
@@ -462,7 +1037,7 @@ export class WorkOSCommandProcessor {
       }
       for (const id of ids) {
         try {
-          await this.provider.deleteMembership(id);
+          await provider.deleteMembership(id);
         } catch (error) {
           if (safeError(error).status !== 404) throw error;
         }
@@ -472,7 +1047,7 @@ export class WorkOSCommandProcessor {
     if (command.operation === "invitation.create") {
       const payload = InvitationPayload.parse(command.payload);
       const organizationId = await this.workosOrganizationId(command);
-      const existing = await this.provider.listInvitations({
+      const existing = await provider.listInvitations({
         organizationId,
         email: payload.email,
       });
@@ -485,7 +1060,7 @@ export class WorkOSCommandProcessor {
       for (const stale of pending) {
         if (stale.id === matching?.id) continue;
         try {
-          await this.provider.revokeInvitation(stale.id);
+          await provider.revokeInvitation(stale.id);
         } catch (error) {
           if (safeError(error).status !== 404) throw error;
         }
@@ -494,7 +1069,7 @@ export class WorkOSCommandProcessor {
         kind: "invitation",
         value:
           matching ??
-          (await this.provider.sendInvitation({
+          (await provider.sendInvitation({
             organizationId,
             email: payload.email,
             roleSlug: payload.role,
@@ -511,12 +1086,14 @@ export class WorkOSCommandProcessor {
       // (lost response, resend, or an accept/recreate race). Retire every
       // pending object for this exact organization/email pair. Do not attempt
       // to revoke an exact object already known to be accepted or expired.
-      const listed = await this.provider.listInvitations({
+      const listed = await provider.listInvitations({
         organizationId,
         email: payload.email,
       });
       const exact = command.providerObjectId
-        ? listed.find((invitation) => invitation.id === command.providerObjectId)
+        ? listed.find(
+            (invitation) => invitation.id === command.providerObjectId,
+          )
         : null;
       const ids = Array.from(
         new Set([
@@ -530,7 +1107,7 @@ export class WorkOSCommandProcessor {
       );
       for (const id of ids) {
         try {
-          await this.provider.revokeInvitation(id);
+          await provider.revokeInvitation(id);
         } catch (error) {
           const failure = safeError(error);
           if (failure.status === 404) continue;
@@ -545,13 +1122,11 @@ export class WorkOSCommandProcessor {
             // non-pending object is already converged; the membership command
             // serialized behind this one will create or remove coarse access
             // according to Zeros' current desired state.
-            const current = await this.provider.listInvitations({
+            const current = await provider.listInvitations({
               organizationId,
               email: payload.email,
             });
-            const observed = current.find(
-              (invitation) => invitation.id === id,
-            );
+            const observed = current.find((invitation) => invitation.id === id);
             if (observed && observed.state !== "pending") {
               continue;
             }
@@ -564,7 +1139,7 @@ export class WorkOSCommandProcessor {
     if (command.operation === "session.revoke") {
       const payload = SessionPayload.parse(command.payload);
       try {
-        await this.provider.revokeSession(payload.sessionId);
+        await provider.revokeSession(payload.sessionId);
       } catch (error) {
         if (safeError(error).status !== 404) throw error;
       }
@@ -574,11 +1149,9 @@ export class WorkOSCommandProcessor {
       const payload = SessionsPayload.parse(command.payload);
       let after: string | undefined;
       for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
-        let page: Awaited<
-          ReturnType<WorkOSManagementProvider["listSessions"]>
-        >;
+        let page: Awaited<ReturnType<WorkOSManagementProvider["listSessions"]>>;
         try {
-          page = await this.provider.listSessions(payload.workosUserId, {
+          page = await provider.listSessions(payload.workosUserId, {
             limit: 100,
             ...(after ? { after } : {}),
           });
@@ -596,7 +1169,7 @@ export class WorkOSCommandProcessor {
           payload.createdBefore,
         )) {
           try {
-            await this.provider.revokeSession(sessionId);
+            await provider.revokeSession(sessionId);
           } catch (error) {
             if (safeError(error).status !== 404) throw error;
           }
@@ -610,7 +1183,7 @@ export class WorkOSCommandProcessor {
     if (command.operation === "user.delete") {
       const payload = UserDeletePayload.parse(command.payload);
       try {
-        await this.provider.deleteUser(payload.workosUserId);
+        await provider.deleteUser(payload.workosUserId);
       } catch (error) {
         if (safeError(error).status !== 404) throw error;
       }
@@ -627,8 +1200,10 @@ export class WorkOSCommandProcessor {
       const owned = await tx.query(
         `SELECT 1 FROM workos_command_outbox
          WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $3
+           AND lease_expires_at > clock_timestamp()
          FOR UPDATE`,
-        [command.id, this.workerId],
+        [command.id, this.workerId, command.attemptCount],
       );
       if (!owned.rows[0]) return;
       if (result.kind === "organization" && command.organizationId) {
@@ -704,10 +1279,7 @@ export class WorkOSCommandProcessor {
           ],
         );
       }
-      if (
-        command.operation === "membership.delete" &&
-        command.organizationId
-      ) {
+      if (command.operation === "membership.delete" && command.organizationId) {
         const payload = MembershipPayload.parse(command.payload);
         for (const membershipId of result.kind === "void"
           ? (result.deletedMembershipIds ?? [])
@@ -738,7 +1310,10 @@ export class WorkOSCommandProcessor {
             ],
           );
         }
-        if ((result.kind === "void" ? result.deletedMembershipIds : [])?.length === 0) {
+        if (
+          (result.kind === "void" ? result.deletedMembershipIds : [])
+            ?.length === 0
+        ) {
           await tx.query(
             `UPDATE workos_membership_projections
              SET status = 'deleted', updated_at = now(),
@@ -785,11 +1360,13 @@ export class WorkOSCommandProcessor {
                $3,
                provider_object_id
              ), last_error_code = NULL
-         WHERE id = $1 AND lease_owner = $2`,
+         WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $4`,
         [
           command.id,
           this.workerId,
           result.kind === "void" ? null : result.value.id,
+          command.attemptCount,
         ],
       );
     });
@@ -808,13 +1385,16 @@ export class WorkOSCommandProcessor {
              completed_at = CASE WHEN $3 = 'dead' THEN now() ELSE NULL END,
              lease_owner = NULL, lease_expires_at = NULL,
              last_error_code = $5, updated_at = now()
-         WHERE id = $1 AND state = 'processing' AND lease_owner = $2`,
+         WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $6
+           AND lease_expires_at > clock_timestamp()`,
         [
           command.id,
           this.workerId,
           retry ? "queued" : "dead",
           retryDelayMs(command.attemptCount),
           failure.code,
+          command.attemptCount,
         ],
       ),
     );
@@ -823,17 +1403,98 @@ export class WorkOSCommandProcessor {
     );
   }
 
+  private async deferForProviderLock(
+    command: ClaimedCommand,
+    error: WorkOSProviderLockTimeoutError | WorkOSProviderLockAbortedError,
+  ): Promise<void> {
+    await withSystemTx(this.pool, (tx) =>
+      tx.query(
+        `UPDATE workos_command_outbox
+         SET state = 'queued', attempt_count = GREATEST(attempt_count - 1, 0),
+             next_attempt_at = now() + interval '1 second',
+             lease_owner = NULL, lease_expires_at = NULL,
+             last_error_code = $3, updated_at = now()
+         WHERE id = $1 AND state = 'processing' AND lease_owner = $2
+           AND attempt_count = $4`,
+        [command.id, this.workerId, error.code, command.attemptCount],
+      ),
+    );
+    this.logger.warn(
+      `[workos-sync] ${command.operation} waiting [${error.code}]`,
+    );
+  }
+
+  private async process(command: ClaimedCommand): Promise<void> {
+    const targets = await this.providerLockTargets(command);
+    try {
+      await withWorkOSProviderLocks(
+        this.pool,
+        targets.keys,
+        async () => {
+          if (!(await this.beginExecution(command, targets.userIds))) return;
+
+          let leaseLost = false;
+          let renewal: Promise<boolean> | null = null;
+          const renew = (): Promise<boolean> => {
+            if (renewal) return renewal;
+            renewal = this.renewLease(command)
+              .catch((error: unknown) => {
+                leaseLost = true;
+                this.logger.warn(
+                  `[workos-sync] ${command.operation} lease heartbeat failed [${safeError(error).code}]`,
+                );
+                return false;
+              })
+              .then((owned) => {
+                if (!owned) leaseLost = true;
+                return owned;
+              })
+              .finally(() => {
+                renewal = null;
+              });
+            return renewal;
+          };
+          const checkpoint = async (): Promise<void> => {
+            if (leaseLost || !(await renew())) {
+              throw new WorkOSCommandLeaseLost();
+            }
+          };
+          const timer = setInterval(() => {
+            void renew();
+          }, this.heartbeatIntervalMs);
+          timer.unref();
+          try {
+            const result = await this.execute(command, checkpoint);
+            await checkpoint();
+            await this.complete(command, result);
+          } catch (error) {
+            if (error instanceof WorkOSCommandLeaseLost || leaseLost) return;
+            await this.fail(command, error);
+          } finally {
+            clearInterval(timer);
+            await renewal;
+          }
+        },
+        { timeoutMs: this.providerLockTimeoutMs },
+      );
+    } catch (error) {
+      if (
+        error instanceof WorkOSProviderLockTimeoutError ||
+        error instanceof WorkOSProviderLockAbortedError
+      ) {
+        await this.deferForProviderLock(command, error);
+        return;
+      }
+      throw error;
+    }
+  }
+
   async tick(maxCommands = 20): Promise<number> {
     let processed = 0;
     for (; processed < maxCommands; processed++) {
       const command = await this.claim();
       if (!command) break;
-      try {
-        const result = await this.execute(command);
-        await this.complete(command, result);
-      } catch (error) {
-        await this.fail(command, error);
-      }
+      await this.process(command);
     }
     return processed;
   }

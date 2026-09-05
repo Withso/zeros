@@ -51,6 +51,12 @@ export default defineConfig([
     ],
     define: {
       __VERSION__: JSON.stringify(VERSION),
+      // Desktop cloud clients are release capabilities, not runtime prefs.
+      // Bake an exact boolean so a packaged/dev engine bundle cannot be turned
+      // on later by changing its inherited process environment.
+      __ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__: JSON.stringify(
+        process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true",
+      ),
     },
     banner: {
       js: "#!/usr/bin/env node",

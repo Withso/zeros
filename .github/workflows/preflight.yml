@@ -649,32 +649,11 @@ jobs:
         run: pnpm typecheck
       - name: Audit control-plane production dependencies
         # This service deploys from its independent lockfile, so the root audit
-        # cannot prove the graph Railway actually installs. npm's audit endpoint
-        # occasionally times out after pnpm's internal retries; retry only those
-        # transport failures, while a real advisory still fails immediately.
+        # cannot prove the graph Railway actually installs. Run the shared,
+        # findings-first bounded retry wrapper from this workspace so a registry
+        # transport message can never mask a real advisory in the same output.
         working-directory: apps/control-plane
-        env:
-          CONTROL_PLANE_AUDIT_ATTEMPTS: "3"
-        run: |
-          set -euo pipefail
-          audit_log="$RUNNER_TEMP/control-plane-audit.log"
-          for ((attempt = 1; attempt <= CONTROL_PLANE_AUDIT_ATTEMPTS; attempt++)); do
-            set +e
-            pnpm audit:prod 2>&1 | tee "$audit_log"
-            status=${PIPESTATUS[0]}
-            set -e
-            if [ "$status" -eq 0 ]; then
-              exit 0
-            fi
-            if ! grep -Eiq 'ERR_SOCKET_TIMEOUT|ECONNRESET|ETIMEDOUT|EAI_AGAIN|HTTP (408|429|5[0-9]{2})' "$audit_log"; then
-              exit "$status"
-            fi
-            if [ "$attempt" -eq "$CONTROL_PLANE_AUDIT_ATTEMPTS" ]; then
-              exit "$status"
-            fi
-            echo "::warning::npm audit transport failed (attempt $attempt/$CONTROL_PLANE_AUDIT_ATTEMPTS); retrying"
-            sleep "$((attempt * 10))"
-          done
+        run: node ../../scripts/check-audit.mjs
       - name: Control-plane tests (migrations + auth/invite contracts)
         working-directory: apps/control-plane
         env:

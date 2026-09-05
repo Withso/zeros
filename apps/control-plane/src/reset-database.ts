@@ -9,7 +9,10 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import pg from "pg";
 
-import { runMigrations } from "./migrate.js";
+import {
+  assertAllControlledMigrationsApproved,
+  runMigrations,
+} from "./migrate.js";
 
 const RESETTABLE_CHANNELS = new Set(["alpha", "beta", "development"]);
 const COUNT_TABLES = [
@@ -32,6 +35,8 @@ const COUNT_TABLES = [
   "github_installations",
   "github_audit_log",
   "cloud_workspace_quotas",
+  "cloud_workspace_quota_changes",
+  "cloud_workspace_entitlement_changes",
   "cloud_workspaces",
   "cloud_workspace_generations",
   "cloud_workspace_provider_bindings",
@@ -163,10 +168,26 @@ export function validateResetRequest(
 
 type MigrationRunner = (pool: pg.Pool) => Promise<string[]>;
 
+async function strictResetMigrationRunner(): Promise<MigrationRunner> {
+  // Reset always replays the production ladder, even from a development
+  // operator shell. Validate every controlled boundary before dropping the
+  // schema, then preserve that exact environment for the strict runner.
+  const env = { ...process.env, NODE_ENV: "production" };
+  try {
+    await assertAllControlledMigrationsApproved(env);
+  } catch (error) {
+    throw new DatabaseResetError(
+      `Migration approval preflight failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  return (pool) => runMigrations(pool, { env });
+}
+
 export async function resetPublicSchema(
   pool: pg.Pool,
-  migrate: MigrationRunner = runMigrations,
+  migrate?: MigrationRunner,
 ): Promise<string[]> {
+  const runResetMigrations = migrate ?? (await strictResetMigrationRunner());
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -183,7 +204,7 @@ export async function resetPublicSchema(
   } finally {
     client.release();
   }
-  return migrate(pool);
+  return runResetMigrations(pool);
 }
 
 async function inspectRowCounts(

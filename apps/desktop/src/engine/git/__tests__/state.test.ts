@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,6 +29,7 @@ function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   const id = overrides.id ?? "ws_aaa111-foo";
   return {
     id,
+    canonicalId: overrides.canonicalId ?? randomUUID(),
     repoSlug: "test-repo",
     repoRoot: "/tmp/test-repo",
     // Derived from the id, not a constant: (repo_slug, lower(branch)) is

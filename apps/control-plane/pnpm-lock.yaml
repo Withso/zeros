@@ -11,6 +11,9 @@ importers:
       '@daytona/api-client':
         specifier: 0.190.1
         version: 0.190.1
+      '@daytona/toolbox-api-client':
+        specifier: 0.190.1
+        version: 0.190.1
       '@hono/node-server':
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
@@ -53,6 +56,9 @@ packages:
 
   '@daytona/api-client@0.190.1':
     resolution: {integrity: sha512-69/J9B1YuJIVa4DT4/r5zSzy6vKpV7Cz2l6xZYhYyAjiLunqn7nlAxbDOXE08pmhuOK38C/8g/4SeBHdkARFQg==}
+
+  '@daytona/toolbox-api-client@0.190.1':
+    resolution: {integrity: sha512-vObFluXvY7tJpU4en58TrZHdjueUDpTD7yZlDnYHypPUdGsTUdyWbAJUOSs0WyV9HHWBzwEzauOdif0e5Xytkg==}
 
   '@esbuild/aix-ppc64@0.28.1':
     resolution: {integrity: sha512-Svl7tq8k/08+p6CXPpRjQ1fKX+1odH/BQbb48fV6fj3CWHhsoIOoY87w1oHXm0qEpkIK3ZfVgp0hed3XBXzXMQ==}
@@ -817,6 +823,13 @@ packages:
 snapshots:
 
   '@daytona/api-client@0.190.1':
+    dependencies:
+      axios: 1.19.0
+    transitivePeerDependencies:
+      - debug
+      - supports-color
+
+  '@daytona/toolbox-api-client@0.190.1':
     dependencies:
       axios: 1.19.0
     transitivePeerDependencies:

@@ -4,6 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import {
   mkdtemp,
@@ -1381,6 +1382,67 @@ printf ran > '${sentinel}'
     expect(dotGit.isFile()).toBe(true); // linked worktree checkout landed
     expect(getWorkspace(created.workspaceId).path).toBe(prepared.path);
     expect(getWorkspace(created.workspaceId).branch).toBe(prepared.branch);
+  });
+
+  it("materializes an internal cloud copy at an immutable Git base and publishes its canonical identity atomically", async () => {
+    const baseCommit = (
+      await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
+    ).stdout.trim();
+    await writeFile(path.join(repoRoot, "AFTER_EXPORT.txt"), "later\n");
+    await execFileAsync("git", ["add", "AFTER_EXPORT.txt"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "later"], {
+      cwd: repoRoot,
+    });
+    const canonicalId = randomUUID();
+    let published = 0;
+    const created = await createWorkspace(
+      { repoRoot, runRepoScripts: false },
+      {
+        canonicalId,
+        exactBaseCommit: baseCommit,
+        provision: async ({ workspacePath, canonicalId: observed }) => {
+          expect(observed).toBe(canonicalId);
+          expect(existsSync(path.join(workspacePath, "AFTER_EXPORT.txt"))).toBe(false);
+          await writeFile(path.join(workspacePath, "FROM_CLOUD.txt"), "cloud\n");
+        },
+        beforePublish: ({ workspaceId }) => {
+          expect(getWorkspaceLifecycle(workspaceId)?.phase).toBe("worktree-created");
+          published += 1;
+        },
+      },
+    );
+    const workspace = getWorkspace(created.workspaceId);
+    expect(workspace.canonicalId).toBe(canonicalId);
+    expect(workspace.baseBranch).toBe(baseCommit);
+    expect(await readFile(path.join(workspace.path, "FROM_CLOUD.txt"), "utf8")).toBe(
+      "cloud\n",
+    );
+    expect(published).toBe(1);
+    expect(getWorkspaceLifecycle(created.workspaceId)).toBeNull();
+  });
+
+  it("rolls back an internal cloud copy when its atomic publish hook fails", async () => {
+    const prepared = await prepareWorkspaceCreate({ repoRoot });
+    await expect(
+      createWorkspace(
+        {
+          repoRoot,
+          repoSlug: prepared.repoSlug,
+          preparedId: prepared.workspaceId,
+          preparedBranch: prepared.branch,
+          runRepoScripts: false,
+        },
+        {
+          canonicalId: randomUUID(),
+          beforePublish: () => {
+            throw new Error("portable record import failed");
+          },
+        },
+      ),
+    ).rejects.toThrow("portable record import failed");
+    expect(existsSync(prepared.path)).toBe(false);
+    expect(listWorkspaces().some((entry) => entry.id === prepared.workspaceId)).toBe(false);
+    expect(getWorkspaceLifecycle(prepared.workspaceId)).toBeNull();
   });
 
   // Workspace names are allocated colours with no random tail (2026-07-29).

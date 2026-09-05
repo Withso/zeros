@@ -4,7 +4,9 @@ name: ZSR cloud qualification
 # is deliberately separate from fork/PR preflight. Configure required reviewers
 # on the `zsr-cloud-qualification` GitHub Environment before adding its secrets.
 # A run is accepted only from main, mints a non-production asymmetric account
-# identity, requires all three live providers, and deletes sandbox + snapshot.
+# identity, requires all three live providers, and always deletes the sandbox.
+# Rehearsals delete their snapshot; a fully attested release-candidate retains
+# the exact qualified snapshot for an explicit later promotion decision.
 
 on:
   workflow_dispatch:
@@ -25,12 +27,25 @@ on:
         options:
           - "1"
           - "4"
+      artifact_disposition:
+        description: Delete after rehearsal or retain an attested release candidate
+        required: true
+        default: rehearsal
+        type: choice
+        options:
+          - rehearsal
+          - release-candidate
 
 permissions:
   contents: read
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
-  group: zsr-cloud-qualification-${{ inputs.region }}
+  # The named qualification tunnel has one protected hostname. Serialize all
+  # regions so two runners can never share its edge route or setup authority.
+  group: zsr-cloud-qualification
   # A replacement run must not hard-cancel the process that owns paid-resource
   # cleanup. Operators can cancel explicitly; the EXIT trap still runs.
   cancel-in-progress: false
@@ -42,6 +57,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 355
     environment: zsr-cloud-qualification
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Enforce immutable workflow source
         run: |
@@ -68,26 +95,79 @@ jobs:
         # so dependency lifecycle scripts cannot read them.
         run: pnpm install --frozen-lockfile
 
+      - name: Install trusted control-plane dependencies
+        run: pnpm --dir apps/control-plane install --frozen-lockfile
+
+      - name: Install pinned qualification tunnel client
+        env:
+          CLOUDFLARED_VERSION: 2026.7.2
+          CLOUDFLARED_LINUX_AMD64_SHA256: ec905ea7b7e327ff8abdde8cb64697a2152de74dbcdbf6aec9db8364eb3886cd
+        run: |
+          set -euo pipefail
+          destination="$RUNNER_TEMP/cloudflared-$CLOUDFLARED_VERSION-linux-amd64"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-linux-amd64" \
+            --output "$destination"
+          echo "$CLOUDFLARED_LINUX_AMD64_SHA256  $destination" | sha256sum --check --strict
+          chmod 0500 "$destination"
+          echo "ZEROS_CLOUDFLARED_BIN=$destination" >> "$GITHUB_ENV"
+
       - name: Verify qualification source before releasing credentials
         run: |
           pnpm typecheck
           pnpm exec vitest run --config vitest.config.ts \
             scripts/__tests__/cloud-bridge-client.test.ts \
             scripts/__tests__/cloud-egress-probe.test.ts \
+            scripts/__tests__/cloud-github-coordinator.test.ts \
             scripts/__tests__/cloud-provider-cleanup.test.ts \
+            scripts/__tests__/cloud-qualification-attestation.test.ts \
             scripts/__tests__/cloud-validation-identity.test.ts \
             scripts/__tests__/cloud-workspace-qualification-gates.test.ts \
             scripts/__tests__/cloud-workspace-runtime.test.ts \
+            scripts/__tests__/cloud-workspace-setup-helper.test.ts \
             scripts/__tests__/cloud-workspace-validation-config.test.ts \
+            apps/control-plane/src/cloud-workspaces/daytona-provider.test.ts \
+            apps/desktop/electron/__tests__/cloud-workspace-access-broker.test.ts \
+            apps/desktop/electron/__tests__/cloud-workspace-access-client.test.ts \
+            apps/desktop/electron/__tests__/cloud-workspace-ssh-runtime.test.ts \
+            apps/desktop/electron/__tests__/preview-frame-authorizations.test.ts \
             apps/desktop/src/engine/transport/__tests__/cloud-transport.test.ts \
             apps/desktop/src/engine/auth/__tests__/verify-jwt.test.ts \
             packages/protocol/src/__tests__/schemas.test.ts
+          pnpm --dir apps/control-plane typecheck
+          pnpm --dir apps/control-plane exec vitest run \
+            src/cloud-workspaces/live-setup-qualification.test.ts
 
       - name: Mint per-run asymmetric validation identity
         # The private RSA KeyObject never leaves this process. Only its public
         # key and an eight-hour account JWT reach later steps; neither is a
         # production tenant grant.
         run: pnpm tsx scripts/cloud-workspace-validation/prepare-ci-identity.ts
+
+      - name: Bind qualification resource identity
+        env:
+          QUALIFICATION_DISPOSITION: ${{ inputs.artifact_disposition }}
+        run: |
+          set -euo pipefail
+          case "$QUALIFICATION_DISPOSITION" in
+            rehearsal)
+              snapshot_name="zeros-zsr-ci-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              ;;
+            release-candidate)
+              snapshot_name="zeros-zsr-candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+              ;;
+            *)
+              echo "::error::Unknown cloud qualification disposition."
+              exit 1
+              ;;
+          esac
+          state_dir="${RUNNER_TEMP}/zeros-zsr-cloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          {
+            echo "ZEROS_CLOUD_QUALIFICATION_DISPOSITION=$QUALIFICATION_DISPOSITION"
+            echo "ZEROS_SNAPSHOT_NAME=$snapshot_name"
+            echo "ZEROS_CLOUD_VALIDATION_STATE_DIR=$state_dir"
+            echo "ZEROS_CLOUD_QUALIFICATION_ATTESTATION_FILE=$state_dir/qualification-attestation.json"
+          } >> "$GITHUB_ENV"
 
       - name: Qualify exact cloud image and clean all paid resources
         env:
@@ -96,14 +176,24 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ZSR_CLOUD_ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.ZSR_CLOUD_OPENAI_API_KEY }}
           CURSOR_API_KEY: ${{ secrets.ZSR_CLOUD_CURSOR_API_KEY }}
+          ZEROS_CLOUD_GITHUB_APP_ID: ${{ secrets.ZSR_CLOUD_GITHUB_APP_ID }}
+          ZEROS_CLOUD_GITHUB_APP_PRIVATE_KEY: ${{ secrets.ZSR_CLOUD_GITHUB_APP_PRIVATE_KEY }}
+          ZEROS_CLOUD_GITHUB_INSTALLATION_ID: ${{ secrets.ZSR_CLOUD_GITHUB_INSTALLATION_ID }}
+          ZEROS_CLOUD_GITHUB_REPOSITORY: ${{ secrets.ZSR_CLOUD_PRIVATE_REPOSITORY }}
+          ZEROS_CLOUD_GITHUB_REPOSITORY_COMMIT: ${{ secrets.ZSR_CLOUD_PRIVATE_REPOSITORY_COMMIT }}
+          ZEROS_CLOUD_QUALIFICATION_TOOLBOX_ORIGINS: ${{ secrets.ZSR_CLOUD_DAYTONA_TOOLBOX_ORIGINS }}
+          ZEROS_CLOUD_QUALIFICATION_TUNNEL_TOKEN: ${{ secrets.ZSR_CLOUD_QUALIFICATION_TUNNEL_TOKEN }}
+          ZEROS_CLOUD_QUALIFICATION_TUNNEL_ORIGIN: ${{ vars.ZSR_CLOUD_QUALIFICATION_TUNNEL_ORIGIN }}
+          ZEROS_CLOUD_QUALIFICATION_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+          ZEROS_CLOUD_QUALIFICATION_ALLOW_DATABASE_RESET: "1"
+          CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false"
+          DAYTONA_API_URL: https://app.daytona.io/api
           ZEROS_CLOUD_REQUIRED_AGENTS: claude,codex,cursor
           ZEROS_SOAK_HOURS: ${{ inputs.soak_hours }}
           ZEROS_SOAK_MAX_DROPS: "0"
           ZEROS_REPO_URL: https://github.com/${{ github.repository }}.git
           ZEROS_REPO_REF: main
           ZEROS_REPO_COMMIT: ${{ github.sha }}
-          ZEROS_SNAPSHOT_NAME: zeros-zsr-ci-${{ github.run_id }}-${{ github.run_attempt }}
-          ZEROS_CLOUD_VALIDATION_STATE_DIR: ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}
           # Backstop for a runner VM that is killed before bash can execute its
           # EXIT trap. A later run also reaps CI snapshots older than 24h.
           ZEROS_CLOUD_VALIDATION_AUTO_DELETE_MINUTES: "720"
@@ -111,7 +201,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          for required in DAYTONA_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY CURSOR_API_KEY ZEROS_ACCOUNT_ACCESS_TOKEN ZEROS_ACCOUNT_JWT_PUBLIC_KEY; do
+          for required in DAYTONA_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY CURSOR_API_KEY ZEROS_ACCOUNT_ACCESS_TOKEN ZEROS_ACCOUNT_JWT_PUBLIC_KEY ZEROS_ACCOUNT_JWT_KID ZEROS_CLOUD_GITHUB_APP_ID ZEROS_CLOUD_GITHUB_APP_PRIVATE_KEY ZEROS_CLOUD_GITHUB_INSTALLATION_ID ZEROS_CLOUD_GITHUB_REPOSITORY ZEROS_CLOUD_GITHUB_REPOSITORY_COMMIT ZEROS_CLOUD_QUALIFICATION_TOOLBOX_ORIGINS ZEROS_CLOUD_QUALIFICATION_TUNNEL_TOKEN ZEROS_CLOUD_QUALIFICATION_TUNNEL_ORIGIN ZEROS_CLOUDFLARED_BIN; do
             if [ -z "${!required:-}" ]; then
               echo "::error::Missing protected cloud-qualification value: $required"
               exit 1
@@ -120,7 +210,10 @@ jobs:
 
           snapshot_baked=0
           provisioned=0
+          qualified=0
           coordinator_pid=""
+          tunnel_pid=""
+          tunnel_token_file=""
 
           cleanup() {
             status=$?
@@ -130,12 +223,23 @@ jobs:
               kill "$coordinator_pid" 2>/dev/null || true
               wait "$coordinator_pid" 2>/dev/null || true
             fi
+            if [ -n "$tunnel_pid" ]; then
+              kill "$tunnel_pid" 2>/dev/null || true
+              wait "$tunnel_pid" 2>/dev/null || true
+            fi
+            if [ -n "$tunnel_token_file" ]; then
+              rm -f -- "$tunnel_token_file"
+            fi
             if [ "$provisioned" -eq 1 ]; then
               pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts --delete || cleanup_failed=1
             fi
-            # Snapshot cleanup is independent of sandbox/preview cleanup. A
-            # failure in one must not strand the other paid resource too.
-            if [ "$snapshot_baked" -eq 1 ]; then
+            # A candidate is retained only when every check and the sanitized
+            # identity write completed. Failure and rehearsal paths delete it.
+            retain_candidate=0
+            if [ "$status" -eq 0 ] && [ "$qualified" -eq 1 ] && [ "$ZEROS_CLOUD_QUALIFICATION_DISPOSITION" = "release-candidate" ]; then
+              retain_candidate=1
+            fi
+            if [ "$snapshot_baked" -eq 1 ] && [ "$retain_candidate" -eq 0 ]; then
               pnpm tsx scripts/cloud-workspace-validation/delete-ephemeral-snapshot.ts || cleanup_failed=1
             fi
             if [ "$cleanup_failed" -ne 0 ]; then
@@ -144,7 +248,11 @@ jobs:
             fi
             if [ "$status" -eq 0 ]; then
               echo "## ZSR cloud qualification" >> "$GITHUB_STEP_SUMMARY"
-              echo "Exact image admission, account binding, Claude/Codex/Cursor, bridge, PTY, egress, lifecycle, soak, SSH, and verified resource cleanup passed." >> "$GITHUB_STEP_SUMMARY"
+              if [ "$retain_candidate" -eq 1 ]; then
+                echo "Exact image admission, account binding, private GitHub App fetch, Claude/Codex/Cursor, bridge, PTY, egress, private preview, production-adapter stop/wake and rollback, soak, SSH forwarding, production setup worker, engine registration/heartbeat, and sandbox cleanup passed. The exact release-candidate snapshot is retained for signed evidence and explicit promotion." >> "$GITHUB_STEP_SUMMARY"
+              else
+                echo "Exact image admission, account binding, private GitHub App fetch, Claude/Codex/Cursor, bridge, PTY, egress, private preview, production-adapter stop/wake and rollback, soak, SSH forwarding, production setup worker, engine registration/heartbeat, and verified sandbox/snapshot cleanup passed." >> "$GITHUB_STEP_SUMMARY"
+              fi
             fi
             exit "$status"
           }
@@ -179,6 +287,69 @@ jobs:
           run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/test-client.ts
           run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/agent-smoke.ts
           run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/egress.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/preview-access.ts
           run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/provider-lifecycle.ts
           run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/soak-wss.ts
           run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/ssh-forward.ts
+
+          kill "$coordinator_pid"
+          wait "$coordinator_pid" || true
+          coordinator_pid=""
+          pnpm tsx scripts/cloud-workspace-validation/handoff-to-production-setup.ts
+
+          # cloudflared supports token files from 2025.4.0 onward. Keep the
+          # connector credential out of argv/process listings and remove it in
+          # the EXIT trap. The runner itself is ephemeral, but the explicit
+          # owner-only file also narrows accidental diagnostic exposure.
+          tunnel_token_file="$RUNNER_TEMP/zeros-cloudflared-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}.token"
+          umask 077
+          printf '%s' "$ZEROS_CLOUD_QUALIFICATION_TUNNEL_TOKEN" > "$tunnel_token_file"
+          unset ZEROS_CLOUD_QUALIFICATION_TUNNEL_TOKEN
+          "$ZEROS_CLOUDFLARED_BIN" tunnel --no-autoupdate run \
+            --token-file "$tunnel_token_file" \
+            >"$RUNNER_TEMP/zeros-cloudflared.log" 2>&1 &
+          tunnel_pid=$!
+          sleep 2
+          if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+            echo "::error::The protected qualification tunnel did not start."
+            exit 1
+          fi
+          pnpm --dir apps/control-plane exec tsx \
+            src/cloud-workspaces/live-setup-qualification.ts
+          if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+            echo "::error::The protected qualification tunnel stopped unexpectedly."
+            exit 1
+          fi
+          kill "$tunnel_pid"
+          wait "$tunnel_pid" || true
+          tunnel_pid=""
+
+          pnpm tsx scripts/cloud-workspace-validation/write-qualification-attestation.ts
+          qualified=1
+
+      - name: Attest exact release-candidate qualification identity
+        if: inputs.artifact_disposition == 'release-candidate'
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}/qualification-attestation.json
+
+      - name: Upload sanitized qualification evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zsr-cloud-${{ inputs.artifact_disposition }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}/qualification-attestation.json
+            ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}/qualification-attestation.json.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Delete an unpromotable release candidate
+        if: (failure() || cancelled()) && inputs.artifact_disposition == 'release-candidate'
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          DAYTONA_TARGET: ${{ inputs.region }}
+          ZEROS_SNAPSHOT_NAME: zeros-zsr-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          ZEROS_CLOUD_VALIDATION_STATE_DIR: ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}
+          ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE: "1"
+        run: pnpm tsx scripts/cloud-workspace-validation/delete-ephemeral-snapshot.ts

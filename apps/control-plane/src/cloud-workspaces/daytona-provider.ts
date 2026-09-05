@@ -2,17 +2,23 @@ import {
   Configuration,
   SandboxApi,
   type CreateSandbox,
+  type PortPreviewUrl,
   type Sandbox,
   type SandboxListItem,
+  type SshAccessDto,
 } from "@daytona/api-client";
 
 import {
+  assertProviderResourceIdentity,
   assertSingleProviderResource,
   CloudProviderError,
   type CloudProviderCreateInput,
   type CloudProviderIdentity,
   type CloudProviderObservedState,
   type CloudProviderResource,
+  type CloudProviderPreviewEndpoint,
+  type CloudProviderSshAccess,
+  type CloudWorkspaceAccessProvider,
   type CloudWorkspaceProvider,
 } from "./provider.js";
 
@@ -20,6 +26,12 @@ const MANAGED_LABEL = "zeros_managed";
 const WORKSPACE_LABEL = "zeros_workspace";
 const GENERATION_LABEL = "zeros_generation";
 const API_CLIENT_VERSION = "0.190.1";
+const ACCESS_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{16,4096}$/;
+const PROVIDER_ACCESS_ID_PATTERN = /^[A-Za-z0-9._:-]{1,512}$/;
+const HOST_PATTERN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+const DEFAULT_SSH_HOSTS = ["ssh.app.daytona.io"] as const;
+const DEFAULT_PREVIEW_HOST_SUFFIXES = ["proxy.daytona.work"] as const;
 
 export type DaytonaSandboxLike = Pick<
   Sandbox | SandboxListItem,
@@ -75,6 +87,15 @@ export interface DaytonaClientLike {
     timeoutSeconds: number,
   ): Promise<DaytonaSandboxLike>;
   delete(resourceId: string, timeoutSeconds: number): Promise<void>;
+  createSshAccess(
+    resourceId: string,
+    expiresInMinutes: number,
+  ): Promise<SshAccessDto>;
+  revokeSshAccess(
+    resourceId: string,
+    token?: string,
+  ): Promise<DaytonaSandboxLike>;
+  getPreviewUrl(resourceId: string, port: number): Promise<PortPreviewUrl>;
 }
 
 export type DaytonaWorkspaceProviderConfig = {
@@ -87,30 +108,45 @@ export type DaytonaWorkspaceProviderConfig = {
   memoryMiB: number;
   storageMiB: number;
   operationTimeoutSeconds: number;
+  /** Production uses 0 because the engine owns idleness. */
+  autoStopMinutes: number;
   autoArchiveMinutes: number;
+  /** -1 disables it in production; qualification uses a bounded orphan backstop. */
+  autoDeleteMinutes: number;
+  /** Exact provider SSH gateways accepted from the API response. */
+  allowedSshHosts?: readonly string[];
+  /** Exact DNS suffixes accepted for standard private preview URLs. */
+  allowedPreviewHostSuffixes?: readonly string[];
 };
 
 /** Test seam for transport failures without depending on Axios internals. */
 export class DaytonaTransportError extends Error {
   readonly statusCode: number | undefined;
   readonly transportCode: string | undefined;
+  readonly headers: Readonly<Record<string, string>> | undefined;
 
   constructor(
     message: string,
-    options: { statusCode?: number; transportCode?: string } = {},
+    options: {
+      statusCode?: number;
+      transportCode?: string;
+      headers?: Readonly<Record<string, string>>;
+    } = {},
   ) {
     super(message);
     this.name = "DaytonaTransportError";
     this.statusCode = options.statusCode;
     this.transportCode = options.transportCode;
+    this.headers = options.headers;
   }
 }
 
 type ErrorShape = {
   code?: unknown;
+  headers?: unknown;
   status?: unknown;
   statusCode?: unknown;
-  response?: { status?: unknown };
+  response?: { headers?: unknown; status?: unknown };
 };
 
 function errorShape(error: unknown): ErrorShape | null {
@@ -132,6 +168,41 @@ function transportCode(error: unknown): string | undefined {
   if (error instanceof DaytonaTransportError) return error.transportCode;
   const code = errorShape(error)?.code;
   return typeof code === "string" ? code.toUpperCase() : undefined;
+}
+
+const RETRY_AFTER_HEADERS = [
+  "retry-after-sandbox-create",
+  "retry-after-sandbox-lifecycle",
+  "retry-after-authenticated",
+  "retry-after-anonymous",
+  "retry-after",
+] as const;
+
+function retryAfterMilliseconds(error: unknown): number | undefined {
+  const shape = errorShape(error);
+  const headers = shape?.headers ?? shape?.response?.headers;
+  if (typeof headers !== "object" || headers === null) return undefined;
+
+  const values: unknown[] = [];
+  const get = (headers as { get?: unknown }).get;
+  if (typeof get === "function") {
+    for (const name of RETRY_AFTER_HEADERS) {
+      values.push((get as (name: string) => unknown).call(headers, name));
+    }
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    if (/^retry-after(?:-|$)/i.test(name)) values.push(value);
+  }
+
+  const seconds = values
+    .map((value) =>
+      typeof value === "number" || typeof value === "string"
+        ? Number(value)
+        : Number.NaN,
+    )
+    .filter((value) => Number.isFinite(value) && value >= 0);
+  if (seconds.length === 0) return undefined;
+  return Math.ceil(Math.max(...seconds) * 1_000);
 }
 
 function isNetworkFailure(error: unknown): boolean {
@@ -291,6 +362,48 @@ class GeneratedDaytonaClient implements DaytonaClientLike {
       requestTimeout(timeoutSeconds),
     );
   }
+
+  async createSshAccess(
+    resourceId: string,
+    expiresInMinutes: number,
+  ): Promise<SshAccessDto> {
+    return (
+      await this.api.createSshAccess(
+        resourceId,
+        undefined,
+        expiresInMinutes,
+        requestTimeout(this.config.operationTimeoutSeconds),
+      )
+    ).data;
+  }
+
+  async revokeSshAccess(
+    resourceId: string,
+    token?: string,
+  ): Promise<DaytonaSandboxLike> {
+    return (
+      await this.api.revokeSshAccess(
+        resourceId,
+        undefined,
+        token,
+        requestTimeout(this.config.operationTimeoutSeconds),
+      )
+    ).data;
+  }
+
+  async getPreviewUrl(
+    resourceId: string,
+    port: number,
+  ): Promise<PortPreviewUrl> {
+    return (
+      await this.api.getPortPreviewUrl(
+        resourceId,
+        port,
+        undefined,
+        requestTimeout(this.config.operationTimeoutSeconds),
+      )
+    ).data;
+  }
 }
 
 function providerName(identity: CloudProviderIdentity): string {
@@ -373,6 +486,7 @@ function parseIdentity(
 }
 
 function resource(sandbox: DaytonaSandboxLike): CloudProviderResource {
+  assertResourceId(sandbox.id);
   const identity = parseIdentity(sandbox.labels);
   return {
     resourceId: sandbox.id,
@@ -393,8 +507,63 @@ function resource(sandbox: DaytonaSandboxLike): CloudProviderResource {
   };
 }
 
+function resourceForId(
+  sandbox: DaytonaSandboxLike,
+  expectedResourceId: string,
+): CloudProviderResource {
+  const observed = resource(sandbox);
+  if (observed.resourceId !== expectedResourceId) {
+    throw new CloudProviderError(
+      "provider_resource_mismatch",
+      "Daytona resolved a different sandbox than the requested resource",
+      false,
+    );
+  }
+  return observed;
+}
+
 function sameNumber(actual: unknown, expected: number): boolean {
   return typeof actual === "number" && Math.abs(actual - expected) < 1e-9;
+}
+
+function invalidAccessResponse(message: string): CloudProviderError {
+  return new CloudProviderError(
+    "provider_access_response_invalid",
+    message,
+    false,
+  );
+}
+
+function exactAllowedHost(value: string, allowed: readonly string[]): boolean {
+  const normalized = value.toLowerCase();
+  return allowed.some((candidate) => normalized === candidate.toLowerCase());
+}
+
+function normalizedExpiry(value: unknown): Date | null {
+  const parsed =
+    value instanceof Date
+      ? new Date(value.getTime())
+      : typeof value === "string" || typeof value === "number"
+        ? new Date(value)
+        : null;
+  return parsed && Number.isFinite(parsed.getTime()) ? parsed : null;
+}
+
+function assertAccessToken(value: unknown, label: string): string {
+  if (typeof value !== "string" || !ACCESS_TOKEN_PATTERN.test(value)) {
+    throw invalidAccessResponse(`Daytona returned an invalid ${label}`);
+  }
+  return value;
+}
+
+function assertResourceId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !PROVIDER_ACCESS_ID_PATTERN.test(value)) {
+    throw new CloudProviderError(
+      "provider_resource_id_invalid",
+      "Provider resource identifier is invalid",
+      false,
+    );
+  }
 }
 
 function assertConfiguredResource(
@@ -410,9 +579,9 @@ function assertConfiguredResource(
     !sameNumber(metadata.memoryGiB, input.memoryMiB / 1_024) ||
     !sameNumber(metadata.diskGiB, input.storageMiB / 1_024) ||
     metadata.publicPreview !== false ||
-    metadata.autoStopMinutes !== 0 ||
+    metadata.autoStopMinutes !== config.autoStopMinutes ||
     metadata.autoArchiveMinutes !== config.autoArchiveMinutes ||
-    metadata.autoDeleteMinutes !== -1
+    metadata.autoDeleteMinutes !== config.autoDeleteMinutes
   ) {
     throw new CloudProviderError(
       "provider_resource_configuration_mismatch",
@@ -422,7 +591,10 @@ function assertConfiguredResource(
   }
 }
 
-function normalizeError(error: unknown, operation: string): CloudProviderError {
+export function normalizeDaytonaError(
+  error: unknown,
+  operation: string,
+): CloudProviderError {
   if (error instanceof CloudProviderError) return error;
   const message = `Daytona ${operation} did not complete`;
   const status = transportStatus(error);
@@ -448,6 +620,7 @@ function normalizeError(error: unknown, operation: string): CloudProviderError {
       true,
       {
         cause: error,
+        retryAfterMs: retryAfterMilliseconds(error),
       },
     );
   }
@@ -456,7 +629,9 @@ function normalizeError(error: unknown, operation: string): CloudProviderError {
   });
 }
 
-export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
+export class DaytonaWorkspaceProvider
+  implements CloudWorkspaceProvider, CloudWorkspaceAccessProvider
+{
   readonly name = "daytona";
   private readonly client: DaytonaClientLike;
 
@@ -476,12 +651,14 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
         labels: identityLabels(identity),
         limit: 100,
       })) {
-        resources.push(resource(sandbox));
+        const observed = resource(sandbox);
+        assertProviderResourceIdentity(observed, identity);
+        resources.push(observed);
         if (resources.length > 1) break;
       }
       return resources;
     } catch (error) {
-      throw normalizeError(error, "find");
+      throw normalizeDaytonaError(error, "find");
     }
   }
 
@@ -539,22 +716,28 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
             disk: input.storageMiB / 1_024,
             // The engine owns idleness because provider preview traffic and
             // background agents do not reliably update provider activity.
-            autoStopInterval: 0,
+            autoStopInterval: this.config.autoStopMinutes,
             autoArchiveInterval: this.config.autoArchiveMinutes,
-            autoDeleteInterval: -1,
+            autoDeleteInterval: this.config.autoDeleteMinutes,
           },
           { timeoutSeconds: this.config.operationTimeoutSeconds },
         ),
       );
+      assertProviderResourceIdentity(created, input);
       assertConfiguredResource(created, input, this.config);
       return created;
     } catch (error) {
       // Conflicts and retryable transport failures can mean the first request
       // committed remotely. Inspect immutable labels before a later retry can
       // create another resource.
+      const status = transportStatus(error);
+      const retryAfterMs = retryAfterMilliseconds(error);
       if (
-        transportStatus(error) === 409 ||
-        isRetryableTransportFailure(error)
+        status === 409 ||
+        (isRetryableTransportFailure(error) &&
+          status !== 425 &&
+          status !== 429 &&
+          retryAfterMs === undefined)
       ) {
         const recovered = assertSingleProviderResource(
           await this.find(input),
@@ -565,16 +748,17 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
           if (hydrated) return hydrated;
         }
       }
-      throw normalizeError(error, "create");
+      throw normalizeDaytonaError(error, "create");
     }
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
+    assertResourceId(resourceId);
     try {
-      return resource(await this.client.get(resourceId));
+      return resourceForId(await this.client.get(resourceId), resourceId);
     } catch (error) {
       if (transportStatus(error) === 404) return null;
-      throw normalizeError(error, "inspect");
+      throw normalizeDaytonaError(error, "inspect");
     }
   }
 
@@ -582,39 +766,70 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
     resourceId: string,
     operation: "start" | "stop" | "archive",
   ): Promise<CloudProviderResource> {
+    assertResourceId(resourceId);
     try {
-      const current = await this.client.get(resourceId);
+      if (operation !== "start") {
+        await this.revokeSshAccess(resourceId);
+      }
+      const currentRaw = await this.client.get(resourceId);
+      const current = resourceForId(currentRaw, resourceId);
+      const rawState = String(currentRaw.state ?? "unknown");
+      const observedState = current.state;
       if (operation === "start") {
-        return resource(
+        if (
+          observedState === "running" ||
+          ["starting", "resuming", "restoring"].includes(rawState)
+        ) {
+          return current;
+        }
+        return resourceForId(
           await this.client.start(
             resourceId,
             this.config.operationTimeoutSeconds,
           ),
+          resourceId,
         );
       }
       if (operation === "stop") {
-        return resource(
+        if (
+          observedState === "stopped" ||
+          observedState === "archived" ||
+          observedState === "stopping"
+        ) {
+          return current;
+        }
+        return resourceForId(
           await this.client.stop(
             resourceId,
             this.config.operationTimeoutSeconds,
           ),
+          resourceId,
         );
       }
-      if (mapDaytonaState(String(current.state)) !== "stopped") {
+      if (
+        observedState === "archived" ||
+        observedState === "archiving" ||
+        observedState === "stopping"
+      ) {
+        return current;
+      }
+      if (observedState !== "stopped") {
         // Archiving requires a stopped sandbox. Return the observed stop
         // transition; the durable reconciler will archive on its next pass.
-        return resource(
+        return resourceForId(
           await this.client.stop(
             resourceId,
             this.config.operationTimeoutSeconds,
           ),
+          resourceId,
         );
       }
-      return resource(
+      return resourceForId(
         await this.client.archive(
           resourceId,
           this.config.operationTimeoutSeconds,
         ),
+        resourceId,
       );
     } catch (error) {
       if (transportStatus(error) === 404) {
@@ -625,7 +840,7 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
           { cause: error },
         );
       }
-      throw normalizeError(error, operation);
+      throw normalizeDaytonaError(error, operation);
     }
   }
 
@@ -642,18 +857,185 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
   }
 
   async delete(resourceId: string): Promise<void> {
+    assertResourceId(resourceId);
+    const pending = (cause?: unknown) =>
+      new CloudProviderError(
+        "provider_delete_unverified",
+        "Daytona still reports the resource while deletion converges",
+        true,
+        cause === undefined ? undefined : { cause },
+      );
+    const before = await this.inspect(resourceId);
+    if (!before) return;
+    try {
+      await this.revokeSshAccess(resourceId);
+    } catch (error) {
+      const observed = await this.inspect(resourceId).catch(() => before);
+      if (!observed) return;
+      if (observed.state === "deleting" || transportStatus(error) === 409) {
+        throw pending(error);
+      }
+      throw normalizeDaytonaError(error, "delete access revocation");
+    }
+    if (before.state === "deleting") throw pending();
     try {
       await this.client.delete(resourceId, this.config.operationTimeoutSeconds);
-      if (await this.inspect(resourceId)) {
-        throw new CloudProviderError(
-          "provider_delete_unverified",
-          "Daytona still reports the resource after delete",
-          true,
+    } catch (error) {
+      if (transportStatus(error) === 404) return;
+      const observed = await this.inspect(resourceId).catch(() => before);
+      if (!observed) return;
+      if (observed.state === "deleting" || transportStatus(error) === 409) {
+        throw pending(error);
+      }
+      throw normalizeDaytonaError(error, "delete");
+    }
+    if (await this.inspect(resourceId)) throw pending();
+  }
+
+  async createSshAccess(
+    resourceId: string,
+    expiresInMinutes: number,
+  ): Promise<CloudProviderSshAccess> {
+    assertResourceId(resourceId);
+    if (
+      !Number.isSafeInteger(expiresInMinutes) ||
+      expiresInMinutes < 1 ||
+      expiresInMinutes > 60
+    ) {
+      throw new CloudProviderError(
+        "provider_access_ttl_invalid",
+        "SSH access expiry must be between 1 and 60 minutes",
+        false,
+      );
+    }
+    try {
+      const issuedAt = Date.now();
+      const result = await this.client.createSshAccess(
+        resourceId,
+        expiresInMinutes,
+      );
+      try {
+        const credential = assertAccessToken(result.token, "SSH credential");
+        const expiresAt = normalizedExpiry(result.expiresAt);
+        const commandMatch =
+          typeof result.sshCommand === "string"
+            ? /^ssh ([A-Za-z0-9._~-]{16,4096})@([A-Za-z0-9.-]{1,253})$/.exec(
+                result.sshCommand,
+              )
+            : null;
+        const host = commandMatch?.[2]?.toLowerCase() ?? "";
+        const allowedHosts = this.config.allowedSshHosts ?? DEFAULT_SSH_HOSTS;
+        if (
+          result.sandboxId !== resourceId ||
+          !PROVIDER_ACCESS_ID_PATTERN.test(result.id) ||
+          commandMatch?.[1] !== credential ||
+          !HOST_PATTERN.test(host) ||
+          !exactAllowedHost(host, allowedHosts) ||
+          !expiresAt ||
+          expiresAt.getTime() <= issuedAt ||
+          expiresAt.getTime() > issuedAt + expiresInMinutes * 60_000 + 120_000
+        ) {
+          throw invalidAccessResponse(
+            "Daytona returned an invalid SSH access contract",
+          );
+        }
+        return {
+          providerAccessId: result.id,
+          credential,
+          host,
+          command: `ssh ${credential}@${host}`,
+          expiresAt,
+        };
+      } catch (validationError) {
+        if (
+          validationError instanceof CloudProviderError &&
+          validationError.code === "provider_access_response_invalid"
+        ) {
+          try {
+            await this.revokeSshAccess(resourceId);
+          } catch (cleanupError) {
+            throw new CloudProviderError(
+              "provider_access_cleanup_unverified",
+              "Daytona SSH access response was invalid and provider-wide cleanup was not proven",
+              true,
+              {
+                cause: new AggregateError([validationError, cleanupError]),
+              },
+            );
+          }
+        }
+        throw validationError;
+      }
+    } catch (error) {
+      throw normalizeDaytonaError(error, "create SSH access");
+    }
+  }
+
+  async revokeSshAccess(resourceId: string): Promise<void> {
+    assertResourceId(resourceId);
+    try {
+      const result = await this.client.revokeSshAccess(resourceId, undefined);
+      if (result.id !== resourceId) {
+        throw invalidAccessResponse(
+          "Daytona acknowledged SSH revocation for another sandbox",
         );
       }
     } catch (error) {
+      // Revocation is idempotent once the whole sandbox no longer exists.
       if (transportStatus(error) === 404) return;
-      throw normalizeError(error, "delete");
+      throw normalizeDaytonaError(error, "revoke SSH access");
+    }
+  }
+
+  async getPreviewEndpoint(
+    resourceId: string,
+    port: number,
+  ): Promise<CloudProviderPreviewEndpoint> {
+    assertResourceId(resourceId);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+      throw new CloudProviderError(
+        "provider_preview_port_invalid",
+        "Preview port must be between 1 and 65535",
+        false,
+      );
+    }
+    try {
+      const result = await this.client.getPreviewUrl(resourceId, port);
+      const headerValue = assertAccessToken(result.token, "preview credential");
+      let url: URL;
+      try {
+        url = new URL(result.url);
+      } catch {
+        throw invalidAccessResponse("Daytona returned an invalid preview URL");
+      }
+      const suffixes =
+        this.config.allowedPreviewHostSuffixes ?? DEFAULT_PREVIEW_HOST_SUFFIXES;
+      const expectedHosts = suffixes.map((suffix) =>
+        `${port}-${resourceId}.${suffix}`.toLowerCase(),
+      );
+      if (
+        result.sandboxId !== resourceId ||
+        url.protocol !== "https:" ||
+        url.username ||
+        url.password ||
+        url.port ||
+        url.pathname !== "/" ||
+        url.search ||
+        url.hash ||
+        !HOST_PATTERN.test(url.hostname) ||
+        !expectedHosts.includes(url.hostname.toLowerCase())
+      ) {
+        throw invalidAccessResponse(
+          "Daytona returned an invalid private preview endpoint",
+        );
+      }
+      return {
+        url: url.toString(),
+        headerName: "x-daytona-preview-token",
+        headerValue,
+      };
+    } catch (error) {
+      throw normalizeDaytonaError(error, "get preview endpoint");
     }
   }
 
@@ -666,7 +1048,7 @@ export class DaytonaWorkspaceProvider implements CloudWorkspaceProvider {
         yield resource(sandbox);
       }
     } catch (error) {
-      throw normalizeError(error, "list managed resources");
+      throw normalizeDaytonaError(error, "list managed resources");
     }
   }
 }

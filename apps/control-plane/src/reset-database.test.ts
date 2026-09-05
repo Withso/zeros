@@ -1,5 +1,17 @@
-import { describe, expect, it, vi } from "vitest";
-import type pg from "pg";
+import { readdirSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
+import pg from "pg";
 
 import {
   resetApprovalText,
@@ -10,6 +22,16 @@ import {
 
 const DATABASE_URL =
   "postgres://reset_user:secret-password@127.0.0.1:5432/zeros_alpha?sslmode=require";
+const TEST_DATABASE_URL = process.env.TEST_DATABASE_URL;
+const databaseDescribe = TEST_DATABASE_URL ? describe : describe.skip;
+const MIGRATIONS_DIR = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "migrations",
+);
+const LADDER = readdirSync(MIGRATIONS_DIR)
+  .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+  .sort();
 
 describe("clean database reset safety", () => {
   it("derives a stable non-secret fingerprint instead of displaying the URL", () => {
@@ -17,9 +39,7 @@ describe("clean database reset safety", () => {
     expect(fingerprint).toMatch(/^[a-f0-9]{16}$/);
     expect(fingerprint).toBe(resetTargetFingerprint(DATABASE_URL, "alpha"));
     expect(fingerprint).not.toContain("secret-password");
-    expect(resetTargetFingerprint(DATABASE_URL, "beta")).not.toBe(
-      fingerprint,
-    );
+    expect(resetTargetFingerprint(DATABASE_URL, "beta")).not.toBe(fingerprint);
   });
 
   it("allows a dry-run plan without destructive approval", () => {
@@ -132,5 +152,92 @@ describe("resetPublicSchema", () => {
     expect(client.query).toHaveBeenCalledWith("ROLLBACK");
     expect(client.release).toHaveBeenCalledOnce();
     expect(migrate).not.toHaveBeenCalled();
+  });
+});
+
+databaseDescribe("resetPublicSchema controlled migration replay", () => {
+  let pool: pg.Pool;
+
+  beforeAll(() => {
+    pool = new pg.Pool({ connectionString: TEST_DATABASE_URL, max: 2 });
+  });
+  afterAll(async () => {
+    await pool.end();
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("uses strict mode and requires all four controlled approvals", async () => {
+    await pool.query(
+      "DROP SCHEMA public CASCADE; CREATE SCHEMA public; CREATE TABLE reset_preflight_sentinel (id integer);",
+    );
+    vi.stubEnv("NODE_ENV", "development");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
+    );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(
+      /0009_organization_team_hierarchy\.sql.*not approved/i,
+    );
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.reset_preflight_sentinel')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBe("reset_preflight_sentinel");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
+    );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(
+      /0025_cloud_workspace_engine_authority\.sql.*not approved/i,
+    );
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.reset_preflight_sentinel')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBe("reset_preflight_sentinel");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0061_workos_provider_erasure_fences.sql",
+    );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(
+      /0060_cloud_workspace_pending_blob_deletions\.sql.*not approved/i,
+    );
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.reset_preflight_sentinel')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBe("reset_preflight_sentinel");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql",
+    );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(
+      /0061_workos_provider_erasure_fences\.sql.*not approved/i,
+    );
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.reset_preflight_sentinel')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBe("reset_preflight_sentinel");
+
+    vi.stubEnv(
+      "CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
+    );
+    await expect(resetPublicSchema(pool)).resolves.toEqual(LADDER);
   });
 });

@@ -2,6 +2,19 @@ import { describe, expect, it } from "vitest";
 
 import { releaseEnvironmentErrors } from "../release-environment";
 
+function knownHostsDocument(host = "ssh.app.daytona.io"): string {
+  const algorithm = Buffer.from("ssh-ed25519", "ascii");
+  const key = Buffer.alloc(4 + algorithm.length + 4 + 32);
+  key.writeUInt32BE(algorithm.length, 0);
+  algorithm.copy(key, 4);
+  key.writeUInt32BE(32, 4 + algorithm.length);
+  Buffer.alloc(32, 7).copy(key, 8 + algorithm.length);
+  return Buffer.from(
+    `${host} ssh-ed25519 ${key.toString("base64")}\n`,
+    "utf8",
+  ).toString("base64url");
+}
+
 describe("desktop release environment routing", () => {
   it("accepts each channel's exact hosted origins", () => {
     for (const [environment, app, api, ref] of [
@@ -103,5 +116,71 @@ describe("desktop release environment routing", () => {
     ).toEqual([
       "WORKOS_ALPHA_WEB_API_KEY must never be present in a desktop build",
     ]);
+  });
+
+  it("keeps the desktop cloud capability default-off and rejects ambiguous values", () => {
+    const base = {
+      VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
+      VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
+      AUTH_PROVIDER: "auth0",
+    };
+
+    expect(
+      releaseEnvironmentErrors("alpha", {
+        ...base,
+        ZEROS_CLOUD_WORKSPACES_ENABLED: "false",
+      }),
+    ).toEqual([]);
+    expect(
+      releaseEnvironmentErrors("alpha", {
+        ...base,
+        ZEROS_CLOUD_WORKSPACES_ENABLED: "TRUE",
+      }),
+    ).toContain(
+      "ZEROS_CLOUD_WORKSPACES_ENABLED must be true or false when set",
+    );
+  });
+
+  it("requires valid preview and pinned SSH configuration before enabling desktop cloud", () => {
+    const enabled = {
+      VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
+      VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
+      AUTH_PROVIDER: "auth0",
+      ZEROS_CLOUD_WORKSPACES_ENABLED: "true",
+    };
+
+    expect(releaseEnvironmentErrors("alpha", enabled)).toEqual([
+      "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
+      "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 is required when ZEROS_CLOUD_WORKSPACES_ENABLED=true",
+    ]);
+    expect(
+      releaseEnvironmentErrors("alpha", {
+        ...enabled,
+        VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES:
+          "https://cloud-preview.example.com",
+        VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: "not-base64",
+      }),
+    ).toEqual([
+      "VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES must contain 1-8 exact lowercase DNS suffixes",
+      "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 must be canonical base64url for a valid OpenSSH known_hosts document covering every allowed SSH host",
+    ]);
+    expect(
+      releaseEnvironmentErrors("alpha", {
+        ...enabled,
+        VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "cloud-preview.example.com",
+        VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: knownHostsDocument(),
+      }),
+    ).toEqual([]);
+    expect(
+      releaseEnvironmentErrors("alpha", {
+        ...enabled,
+        VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: "cloud-preview.example.com",
+        VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: knownHostsDocument(
+          "unapproved.example.com",
+        ),
+      }),
+    ).toContain(
+      "VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 must be canonical base64url for a valid OpenSSH known_hosts document covering every allowed SSH host",
+    );
   });
 });

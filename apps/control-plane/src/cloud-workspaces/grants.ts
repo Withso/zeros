@@ -9,16 +9,43 @@ export type CloudWorkspaceGrantPurpose =
   | "repository-write"
   | "setup";
 
+export type CloudWorkspaceSetupGrantBinding = {
+  setupRunId: string;
+  executionFence: number;
+};
+
+type NonSetupGrantPurpose = Exclude<CloudWorkspaceGrantPurpose, "setup">;
+
+type CloudWorkspaceGrantPurposeInput =
+  | {
+      purpose: "setup";
+      setup: CloudWorkspaceSetupGrantBinding;
+    }
+  | {
+      purpose: "engine-connect";
+      engineInstanceId: string;
+      setup?: never;
+    }
+  | {
+      purpose: Exclude<NonSetupGrantPurpose, "engine-connect">;
+      engineInstanceId?: never;
+      setup?: never;
+    };
+
 export type IssuedCloudWorkspaceGrant = {
   id: string;
   token: string;
   workspaceId: string;
   generation: number;
+  authorityEpoch: number;
   organizationId: string;
   accountUserId: string;
   purpose: CloudWorkspaceGrantPurpose;
   audience: string;
   expiresAt: Date;
+  setupRunId: string | null;
+  executionFence: number | null;
+  engineInstanceId: string | null;
 };
 
 export type ConsumedCloudWorkspaceGrant = Omit<
@@ -27,7 +54,10 @@ export type ConsumedCloudWorkspaceGrant = Omit<
 > & { consumedAt: Date };
 
 export class CloudWorkspaceGrantError extends Error {
-  constructor(public readonly code: string, message: string) {
+  constructor(
+    public readonly code: string,
+    message: string,
+  ) {
     super(message);
     this.name = "CloudWorkspaceGrantError";
   }
@@ -57,6 +87,38 @@ function assertUuid(value: string, field: string): void {
       `${field} must be a UUID`,
     );
   }
+}
+
+function setupBinding(
+  input: CloudWorkspaceGrantPurposeInput,
+): CloudWorkspaceSetupGrantBinding | null {
+  if (input.purpose !== "setup") return null;
+  assertUuid(input.setup.setupRunId, "setupRunId");
+  if (
+    !Number.isSafeInteger(input.setup.executionFence) ||
+    input.setup.executionFence < 1
+  ) {
+    throw new CloudWorkspaceGrantError(
+      "grant_input_invalid",
+      "executionFence must be a positive integer",
+    );
+  }
+  return input.setup;
+}
+
+function databaseFence(
+  value: string | number | null,
+  label = "setup grant fence",
+): number | null {
+  if (value === null) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new CloudWorkspaceGrantError(
+      "grant_record_invalid",
+      `Stored ${label} is invalid`,
+    );
+  }
+  return parsed;
 }
 
 export function normalizeCloudWorkspaceGrantAudience(raw: string): string {
@@ -116,48 +178,63 @@ export async function issueCloudWorkspaceGrant(
     generation: number;
     organizationId: string;
     accountUserId: string;
-    purpose: CloudWorkspaceGrantPurpose;
     audience: string;
     ttlSeconds: number;
     issuedBy: string | null;
-  },
+    workosEnabled?: boolean;
+  } & CloudWorkspaceGrantPurposeInput,
 ): Promise<IssuedCloudWorkspaceGrant> {
   await assertSystemTransaction(tx);
   assertUuid(input.workspaceId, "workspaceId");
   assertUuid(input.organizationId, "organizationId");
   assertUuid(input.accountUserId, "accountUserId");
   if (input.issuedBy !== null) assertUuid(input.issuedBy, "issuedBy");
+  const binding = setupBinding(input);
+  const engineInstanceId =
+    input.purpose === "engine-connect" ? input.engineInstanceId : null;
+  if (engineInstanceId !== null) {
+    assertUuid(engineInstanceId, "engineInstanceId");
+  }
   if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
     throw new CloudWorkspaceGrantError(
       "grant_input_invalid",
       "generation must be a positive integer",
     );
   }
+  const maximumTtlSeconds = input.purpose === "setup" ? 7_200 : 900;
   if (
     !Number.isSafeInteger(input.ttlSeconds) ||
     input.ttlSeconds < 15 ||
-    input.ttlSeconds > 900
+    input.ttlSeconds > maximumTtlSeconds
   ) {
     throw new CloudWorkspaceGrantError(
       "grant_ttl_invalid",
-      "Grant TTL must be between 15 and 900 seconds",
+      `Grant TTL must be between 15 and ${maximumTtlSeconds} seconds`,
     );
   }
+
   const audience = normalizeCloudWorkspaceGrantAudience(input.audience);
 
   const authorized = await tx.query<{
     status: string;
     desired_state: string;
+    authority_epoch: string | number;
     account_revision: string | number;
     authorization_revision: string | number;
   }>(
-    `SELECT cw.status, cw.desired_state, u.auth_revision AS account_revision,
+    `SELECT cw.status, cw.desired_state, cw.authority_epoch,
+            u.auth_revision AS account_revision,
             om.authorization_revision
      FROM cloud_workspaces cw
      JOIN cloud_workspace_generations g
        ON g.workspace_id = cw.id
       AND g.org_id = cw.org_id
       AND g.generation = $2
+     JOIN organizations organization
+       ON organization.id = cw.org_id AND organization.deleted_at IS NULL
+     JOIN teams team
+       ON team.id = cw.team_id AND team.org_id = cw.org_id
+      AND team.deleted_at IS NULL
      JOIN organization_members om
        ON om.org_id = cw.org_id AND om.user_id = $4
      JOIN users u
@@ -170,12 +247,15 @@ export async function issueCloudWorkspaceGrant(
      WHERE cw.id = $1 AND cw.org_id = $3
        AND cw.current_generation = $2
        AND cw.deleted_at IS NULL
+       AND cloud_workspace_generation_policy_current(cw.id, $2, cw.org_id)
+       AND cloud_workspace_runtime_authority_live(cw.id, $2, $4, $5)
      FOR UPDATE OF cw`,
     [
       input.workspaceId,
       input.generation,
       input.organizationId,
       input.accountUserId,
+      input.workosEnabled === true,
     ],
   );
   const workspace = authorized.rows[0];
@@ -188,6 +268,39 @@ export async function issueCloudWorkspaceGrant(
       "grant_subject_not_authorized",
       "Workspace, generation, account, or lifecycle state is not eligible for this grant",
     );
+  }
+  const authorityEpoch = Number(workspace.authority_epoch);
+  if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) {
+    throw new CloudWorkspaceGrantError(
+      "grant_record_invalid",
+      "Workspace authority epoch is invalid",
+    );
+  }
+
+  // Preserve the global workspace → setup-run lock order used by lifecycle
+  // routes and the setup worker. A grant issuer must never invert that order.
+  if (binding) {
+    const setup = await tx.query(
+      `SELECT 1
+       FROM cloud_workspace_setup_runs
+       WHERE id = $1 AND workspace_id = $2 AND generation = $3 AND org_id = $4
+         AND execution_fence = $5 AND state = 'running'
+         AND lease_expires_at > now()
+       FOR UPDATE`,
+      [
+        binding.setupRunId,
+        input.workspaceId,
+        input.generation,
+        input.organizationId,
+        binding.executionFence,
+      ],
+    );
+    if ((setup.rowCount ?? 0) !== 1) {
+      throw new CloudWorkspaceGrantError(
+        "grant_subject_not_authorized",
+        "Setup execution is not eligible for this grant",
+      );
+    }
   }
 
   // Keep at most one unconsumed grant for the same account and purpose. The
@@ -207,19 +320,49 @@ export async function issueCloudWorkspaceGrant(
     ],
   );
 
+  // Endpoint-grant retirement precedes engine-instance retirement everywhere
+  // else. Preserve that lock order: rotate grants above, then validate the
+  // exact current engine while the workspace row is still locked.
+  if (engineInstanceId !== null) {
+    const engine = await tx.query(
+      `SELECT 1
+       FROM cloud_workspace_engine_instances
+       WHERE id = $1 AND workspace_id = $2 AND generation = $3 AND org_id = $4
+         AND state = 'ready' AND revoked_at IS NULL AND lease_expires_at > now()`,
+      [
+        engineInstanceId,
+        input.workspaceId,
+        input.generation,
+        input.organizationId,
+      ],
+    );
+    if ((engine.rowCount ?? 0) !== 1) {
+      throw new CloudWorkspaceGrantError(
+        "grant_subject_not_authorized",
+        "Current engine is not eligible for this grant",
+      );
+    }
+  }
+
   const token = TOKEN_PREFIX + randomBytes(32).toString("base64url");
   const inserted = await tx.query<{
     id: string;
     expires_at: Date;
+    setup_run_id: string | null;
+    setup_execution_fence: string | number | null;
+    authority_epoch: string | number;
+    engine_instance_id: string | null;
   }>(
     `INSERT INTO cloud_workspace_endpoint_grants (
        workspace_id, generation, org_id, account_user_id, purpose,
        audience, token_hash, account_revision, authorization_revision,
-       expires_at
+       expires_at, setup_run_id, setup_execution_fence, authority_epoch,
+       engine_instance_id
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-       now() + ($10::integer * interval '1 second')
-     ) RETURNING id, expires_at`,
+       now() + ($10::integer * interval '1 second'), $11, $12, $13, $14
+     ) RETURNING id, expires_at, setup_run_id, setup_execution_fence,
+                 authority_epoch, engine_instance_id`,
     [
       input.workspaceId,
       input.generation,
@@ -231,6 +374,10 @@ export async function issueCloudWorkspaceGrant(
       Number(workspace.account_revision),
       Number(workspace.authorization_revision),
       input.ttlSeconds,
+      binding?.setupRunId ?? null,
+      binding?.executionFence ?? null,
+      authorityEpoch,
+      engineInstanceId,
     ],
   );
   const row = inserted.rows[0]!;
@@ -245,6 +392,12 @@ export async function issueCloudWorkspaceGrant(
       generation: input.generation,
       accountUserId: input.accountUserId,
       purpose: input.purpose,
+      ...(binding
+        ? {
+            setupRunId: binding.setupRunId,
+            executionFence: binding.executionFence,
+          }
+        : {}),
       audience,
       expiresAt: row.expires_at.toISOString(),
     },
@@ -254,11 +407,15 @@ export async function issueCloudWorkspaceGrant(
     token,
     workspaceId: input.workspaceId,
     generation: input.generation,
+    authorityEpoch,
     organizationId: input.organizationId,
     accountUserId: input.accountUserId,
     purpose: input.purpose,
     audience,
     expiresAt: row.expires_at,
+    setupRunId: row.setup_run_id,
+    executionFence: databaseFence(row.setup_execution_fence),
+    engineInstanceId: row.engine_instance_id,
   };
 }
 
@@ -270,15 +427,21 @@ export async function consumeCloudWorkspaceGrant(
     generation: number;
     organizationId: string;
     accountUserId: string;
-    purpose: CloudWorkspaceGrantPurpose;
     audience: string;
-  },
+    workosEnabled?: boolean;
+  } & CloudWorkspaceGrantPurposeInput,
 ): Promise<ConsumedCloudWorkspaceGrant | null> {
   await assertSystemTransaction(tx);
   if (!TOKEN_PATTERN.test(input.token)) return null;
   assertUuid(input.workspaceId, "workspaceId");
   assertUuid(input.organizationId, "organizationId");
   assertUuid(input.accountUserId, "accountUserId");
+  let binding: CloudWorkspaceSetupGrantBinding | null;
+  try {
+    binding = setupBinding(input);
+  } catch {
+    return null;
+  }
   if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
     return null;
   }
@@ -287,12 +450,22 @@ export async function consumeCloudWorkspaceGrant(
     id: string;
     expires_at: Date;
     consumed_at: Date;
+    setup_run_id: string | null;
+    setup_execution_fence: string | number | null;
+    authority_epoch: string | number;
+    engine_instance_id: string | null;
   }>(
     `WITH eligible AS (
        SELECT eg.id
        FROM cloud_workspace_endpoint_grants eg
        JOIN cloud_workspaces cw
          ON cw.id = eg.workspace_id AND cw.org_id = eg.org_id
+       JOIN organizations organization
+         ON organization.id = cw.org_id
+        AND organization.deleted_at IS NULL
+       JOIN teams team
+         ON team.id = cw.team_id AND team.org_id = cw.org_id
+        AND team.deleted_at IS NULL
        JOIN organization_members om
          ON om.org_id = cw.org_id AND om.user_id = eg.account_user_id
         AND om.authorization_revision = eg.authorization_revision
@@ -308,10 +481,40 @@ export async function consumeCloudWorkspaceGrant(
          AND eg.workspace_id = $2 AND eg.generation = $3
          AND eg.org_id = $4 AND eg.account_user_id = $5
          AND eg.purpose = $6 AND eg.audience = $7
+         AND ($11::uuid IS NULL OR eg.engine_instance_id = $11)
+         AND (
+           (
+             $6 <> 'setup'
+             AND eg.setup_run_id IS NULL
+             AND eg.setup_execution_fence IS NULL
+           )
+           OR (
+             $6 = 'setup'
+             AND eg.setup_run_id = $8::uuid
+             AND eg.setup_execution_fence = $9::bigint
+             AND EXISTS (
+               SELECT 1 FROM cloud_workspace_setup_runs sr
+               WHERE sr.id = eg.setup_run_id
+                 AND sr.workspace_id = eg.workspace_id
+                 AND sr.generation = eg.generation
+                 AND sr.org_id = eg.org_id
+                 AND sr.execution_fence = eg.setup_execution_fence
+                 AND sr.state = 'running'
+                 AND sr.lease_expires_at > now()
+             )
+           )
+         )
          AND eg.revoked_at IS NULL AND eg.consumed_at IS NULL
          AND eg.expires_at > now() AND cw.deleted_at IS NULL
          AND cw.current_generation = eg.generation
+         AND eg.authority_epoch = cw.authority_epoch
          AND cw.desired_state = 'running'
+         AND cloud_workspace_generation_policy_current(
+           cw.id, eg.generation, cw.org_id
+         )
+         AND cloud_workspace_runtime_authority_live(
+           cw.id, eg.generation, eg.account_user_id, $10
+         )
          AND (
            (eg.purpose = 'engine-connect' AND cw.status IN ('ready', 'busy'))
            OR (eg.purpose = 'setup' AND cw.status = 'setting_up')
@@ -324,7 +527,9 @@ export async function consumeCloudWorkspaceGrant(
      SET consumed_at = now()
      FROM eligible
      WHERE eg.id = eligible.id
-     RETURNING eg.id, eg.expires_at, eg.consumed_at`,
+     RETURNING eg.id, eg.expires_at, eg.consumed_at,
+               eg.setup_run_id, eg.setup_execution_fence,
+               eg.authority_epoch, eg.engine_instance_id`,
     [
       tokenHash(input.token),
       input.workspaceId,
@@ -333,6 +538,10 @@ export async function consumeCloudWorkspaceGrant(
       input.accountUserId,
       input.purpose,
       audience,
+      binding?.setupRunId ?? null,
+      binding?.executionFence ?? null,
+      input.workosEnabled === true,
+      input.purpose === "engine-connect" ? input.engineInstanceId : null,
     ],
   );
   const row = consumed.rows[0];
@@ -347,6 +556,12 @@ export async function consumeCloudWorkspaceGrant(
       workspaceId: input.workspaceId,
       generation: input.generation,
       purpose: input.purpose,
+      ...(binding
+        ? {
+            setupRunId: binding.setupRunId,
+            executionFence: binding.executionFence,
+          }
+        : {}),
       audience,
     },
   );
@@ -354,11 +569,71 @@ export async function consumeCloudWorkspaceGrant(
     id: row.id,
     workspaceId: input.workspaceId,
     generation: input.generation,
+    authorityEpoch: databaseFence(row.authority_epoch, "authority epoch")!,
     organizationId: input.organizationId,
     accountUserId: input.accountUserId,
     purpose: input.purpose,
     audience,
     expiresAt: row.expires_at,
     consumedAt: row.consumed_at,
+    setupRunId: row.setup_run_id,
+    executionFence: databaseFence(row.setup_execution_fence),
+    engineInstanceId: row.engine_instance_id,
   };
+}
+
+/** Resolve an opaque engine-connect capability to its server-owned account
+ * binding and consume it through the same authorization/revision checks as all
+ * endpoint grants. The client and engine never need to transmit a user id. */
+export async function consumeCloudWorkspaceEngineConnectGrant(
+  tx: Tx,
+  input: {
+    token: string;
+    workspaceId: string;
+    generation: number;
+    organizationId: string;
+    engineInstanceId: string;
+    audience: string;
+    workosEnabled?: boolean;
+  },
+): Promise<ConsumedCloudWorkspaceGrant | null> {
+  await assertSystemTransaction(tx);
+  if (
+    !TOKEN_PATTERN.test(input.token) ||
+    !UUID_PATTERN.test(input.workspaceId) ||
+    !UUID_PATTERN.test(input.organizationId) ||
+    !Number.isSafeInteger(input.generation) ||
+    input.generation < 1
+  ) {
+    return null;
+  }
+  const audience = normalizeCloudWorkspaceGrantAudience(input.audience);
+  const candidates = await tx.query<{ account_user_id: string }>(
+    `SELECT account_user_id
+     FROM cloud_workspace_endpoint_grants
+     WHERE token_hash = $1 AND workspace_id = $2 AND generation = $3
+       AND org_id = $4 AND purpose = 'engine-connect' AND audience = $5
+     LIMIT 2`,
+    [
+      tokenHash(input.token),
+      input.workspaceId,
+      input.generation,
+      input.organizationId,
+      audience,
+    ],
+  );
+  if (candidates.rows.length !== 1) return null;
+  return consumeCloudWorkspaceGrant(tx, {
+    token: input.token,
+    workspaceId: input.workspaceId,
+    generation: input.generation,
+    organizationId: input.organizationId,
+    accountUserId: candidates.rows[0]!.account_user_id,
+    purpose: "engine-connect",
+    engineInstanceId: input.engineInstanceId,
+    audience,
+    ...(input.workosEnabled === undefined
+      ? {}
+      : { workosEnabled: input.workosEnabled }),
+  });
 }

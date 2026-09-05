@@ -821,11 +821,14 @@ describe("WorkspaceService", () => {
         },
       );
       const baseKey = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000write`;
-      // Seed both the historical key and the directory-aware key so this test
-      // exercises the same blocked lower flight before and after the fix.
+      // Seed the historical, directory-aware, and host-resource-aware keys so
+      // this test exercises the same blocked lower flight across every key
+      // generation.
       internals.designSnapshotFlights.set(baseKey, blockedOriginal);
+      const directoryKey = `${baseKey}\u0000${originalDirectory}`;
+      internals.designSnapshotFlights.set(directoryKey, blockedOriginal);
       internals.designSnapshotFlights.set(
-        `${baseKey}\u0000${originalDirectory}`,
+        `${directoryKey}\u0000host-resources`,
         blockedOriginal,
       );
       const getFlight = vi.spyOn(internals.designSnapshotFlights, "get");
@@ -3361,6 +3364,12 @@ describe("WorkspaceService", () => {
       };
     };
     expect(before.snapshot.protocolCapability).toBe(protocolCapability);
+    const cloudSnapshot = (await svc.handle(
+      "design.snapshot",
+      { workspaceId: workspace.workspaceId },
+      { hostLocalResources: false },
+    )) as { snapshot: { protocolCapability: string | null } };
+    expect(cloudSnapshot.snapshot.protocolCapability).toBeNull();
     const frame = before.snapshot.frames[0]!;
     expect(frame).not.toHaveProperty("tree");
     const hydrated = (await svc.handle("design.frame", {

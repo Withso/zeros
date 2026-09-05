@@ -4,10 +4,15 @@ import { Hono } from "hono";
 import pg from "pg";
 import { ensureUser, type AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
+import { withSystemTx } from "./db.js";
 import { runMigrations } from "./migrate.js";
 import { createRoutes } from "./routes.js";
 import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import type { WorkOSInvitationRecord } from "./workos-provider.js";
+import {
+  seedCanonicalCloudWorkspaceAuthority,
+  seedCanonicalCloudWorkspacePrerequisites,
+} from "./cloud-workspaces/test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -1038,30 +1043,52 @@ d("organization routes", () => {
       organization: { id: string; defaultTeamId: string };
     };
     const workspaceId = randomUUID();
-    await pool.query(
-      `WITH workspace AS (
-         INSERT INTO cloud_workspaces (
+    await withSystemTx(pool, async (tx) => {
+      const prerequisite = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+        organizationId: body.organization.id,
+        ownerUserId: owner.id,
+      });
+      await tx.query(
+        `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
-           repository_revision
+           repository_revision, repository_id, owner_user_id, assignee_user_id
          ) VALUES ($1, $2, $3, $4, 'Retained workspace',
-                   'github', 'withso', 'zeros', 'main')
-         RETURNING id, org_id
-       )
-       INSERT INTO cloud_workspace_generations (
-         workspace_id, generation, org_id, provider, image_ref,
-         architecture, cpu_millicores, memory_mib, storage_mib, created_by
-       )
-       SELECT id, 1, org_id, 'daytona', 'zeros:test', 'linux/amd64',
-              1000, 2048, 10240, $4
-       FROM workspace`,
-      [
+                   'github.com', 'withso', 'zeros', 'main', $5, $4, $4)`,
+        [
+          workspaceId,
+          body.organization.id,
+          body.organization.defaultTeamId,
+          owner.id,
+          prerequisite.repositoryId,
+        ],
+      );
+      await seedCanonicalCloudWorkspaceAuthority(tx, {
         workspaceId,
-        body.organization.id,
-        body.organization.defaultTeamId,
-        owner.id,
-      ],
-    );
+        organizationId: body.organization.id,
+        ownerUserId: owner.id,
+      });
+      await tx.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib, created_by,
+           provider_connection_id
+         ) VALUES ($1, 1, $2, 'daytona', 'zeros:test', 'linux/amd64',
+                   1000, 2048, 10240, $3, $4)`,
+        [
+          workspaceId,
+          body.organization.id,
+          owner.id,
+          prerequisite.providerConnectionId,
+        ],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_provider_bindings (
+           workspace_id, generation, org_id, provider
+         ) VALUES ($1, 1, $2, 'daytona')`,
+        [workspaceId, body.organization.id],
+      );
+    });
 
     const deleted = await request(
       `/v1/organizations/${body.organization.id}`,

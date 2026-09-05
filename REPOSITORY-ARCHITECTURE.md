@@ -93,12 +93,12 @@ scratch comparisons were intentionally not retained in the public source tree.
 
 ## Application boundaries
 
-| Directory              | Owns                                                                 | Build/deployment boundary                                             |
-| ---------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| `apps/desktop`         | Native shell, local engine, renderer, desktop assets                 | Root pnpm lock, Vite, tsup, Electron Builder, macOS release workflows |
-| `apps/control-plane`   | Hosted API, auth/authz, organizations, feedback, audit, rate limits, Postgres | Independent pnpm lock, Docker/Railway                           |
-| `apps/web`             | Browser auth handoff, launch hub, Cloudflare edge functions          | Independent npm lock, Cloudflare Pages                                |
-| `apps/marketing`       | Public site, changelog, legal pages, download surface                | Root workspace for development; standalone lock for Pages             |
+| Directory            | Owns                                                                          | Build/deployment boundary                                             |
+| -------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------- |
+| `apps/desktop`       | Native shell, local engine, renderer, desktop assets                          | Root pnpm lock, Vite, tsup, Electron Builder, macOS release workflows |
+| `apps/control-plane` | Hosted API, auth/authz, organizations, feedback, audit, rate limits, Postgres | Independent pnpm lock, Docker/Railway                                 |
+| `apps/web`           | Browser auth handoff, launch hub, Cloudflare edge functions                   | Independent npm lock, Cloudflare Pages                                |
+| `apps/marketing`     | Public site, changelog, legal pages, download surface                         | Root workspace for development; standalone lock for Pages             |
 
 Each app has a README describing its local boundary. A new app should be added
 only when it can be built, tested, deployed, and owned independently.
@@ -208,18 +208,29 @@ does not live in the coding workbench folder.
 
 ## Cloud workspaces and future clients
 
-Cloud workspaces are not a shipping deployable in this snapshot. The current
-non-production provider-validation harness remains isolated in
+Cloud workspaces are not a shipping product in this snapshot. The gated,
+disabled-by-default non-UI foundation now includes the control-plane registry,
+lifecycle/setup orchestration, durable record, encrypted object storage,
+integrity-checked local/cloud forks, and owner-only device replicas. The desktop
+engine and Electron main contain the corresponding remote transport, native
+access client, credential broker, frame-scoped preview admission, SSH owner,
+fork, and replica boundaries; renderer platform code exposes only narrow
+bearer-free receipts. Workspace management UI and Organization-member
+collaboration remain future work, with the latter owned by Phase 6A.
+
+The provider qualification harness remains isolated in
 `scripts/cloud-workspace-validation/`; it is not imported by an app or included
 in release packages. Its bridge probe imports the current shared protocol
 version, image construction fails closed through native SQLite rebuilding, and
 bearer-bearing state is owner-only and removed with successful sandbox cleanup.
 The current product contract, target architecture, security model, and phased
 delivery checklist live in `docs/cloud-workspace/`; the prior dated competitive
-research pack is not authoritative.
+research pack is not authoritative. `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`
+remains false until the exact image, root exception, lifecycle/rollback, access,
+and provider-edge qualification gates are satisfied.
 
-When the product is implemented, use existing boundaries before creating new
-ones:
+As the product is wired into end-user surfaces, use existing boundaries before
+creating new ones:
 
 - External workspace-control APIs belong in `apps/control-plane`.
 - A browser management surface can grow in `apps/web` while it shares that

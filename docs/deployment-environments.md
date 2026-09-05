@@ -150,8 +150,12 @@ For the clean-slate identity cutover, prefer provisioning a fresh database and
 running all migrations. An Alpha/Beta in-place reset must use the guarded
 `pnpm --dir apps/control-plane reset:database` procedure in the control-plane
 README. It is dry-run by default, requires a backup confirmation plus an exact
-target fingerprint, and refuses Production; Production always receives a fresh
-database service.
+target fingerprint, uses the strict migration runner, and currently requires
+the comma-separated `0009_organization_team_hierarchy.sql`,
+`0025_cloud_workspace_engine_authority.sql`,
+`0060_cloud_workspace_pending_blob_deletions.sql`, and
+`0061_workos_provider_erasure_fences.sql` migration approvals. It refuses
+Production; Production always receives a fresh database service.
 
 ### WorkOS application callbacks
 
@@ -344,20 +348,35 @@ renderer, and both are now also available to Electron main for Auth0, hosted
 WorkOS desktop authorization, and GitHub handoffs. A missing Alpha/Beta value
 cannot silently fall back to Production.
 
-Desktop releases additionally require these environment-scoped Actions
+Desktop release environments recognize these environment-scoped Actions
 variables:
 
-| Variable                 | Auth0 rollback build | WorkOS build                   |
-| ------------------------ | -------------------- | ------------------------------ |
-| `AUTH_PROVIDER`          | `auth0`              | `workos`                       |
-| `AUTH_DESKTOP_CLIENT_ID` | unused               | channel Desktop Application ID |
-| `AUTH_ISSUER`            | unused               | exact qualified issuer         |
-| `AUTH_JWKS_URL`          | unused               | exact qualified JWKS URL       |
-| `AUTH_AUDIENCE`          | unused               | matching channel API origin    |
+| Variable                                     | Auth0 rollback build      | WorkOS build                                                                    |
+| -------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------- |
+| `AUTH_PROVIDER`                              | `auth0`                   | `workos`                                                                        |
+| `AUTH_DESKTOP_CLIENT_ID`                     | unused                    | channel Desktop Application ID                                                  |
+| `AUTH_ISSUER`                                | unused                    | exact qualified issuer                                                          |
+| `AUTH_JWKS_URL`                              | unused                    | exact qualified JWKS URL                                                        |
+| `AUTH_AUDIENCE`                              | unused                    | matching channel API origin                                                     |
+| `ZEROS_CLOUD_WORKSPACES_ENABLED`             | `false`                   | `false` until that channel's desktop cloud client is release-approved           |
+| `VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES` | unused while cloud is off | 1-8 exact lowercase cloud-preview DNS suffixes when cloud is on                 |
+| `VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64`   | unused while cloud is off | canonical base64url OpenSSH pins covering `ssh.app.daytona.io` when cloud is on |
 
-These are public verification values baked only into Electron main. Never add a
-WorkOS API key—generic, web, desktop, or channel-prefixed—to a desktop release
-environment. The release gate rejects any `WORKOS_*_API_KEY` shape.
+The authentication entries are public verification values baked only into
+Electron main. Never add a WorkOS API key—generic, web, desktop, or channel-
+prefixed—to a desktop release environment. The release gate rejects any
+`WORKOS_*_API_KEY` shape.
+
+`ZEROS_CLOUD_WORKSPACES_ENABLED` is a separate exact-`true` desktop build
+capability, not the Railway `CLOUD_WORKSPACES_ENABLED` rollout flag and not an
+installed-app preference. The protected release environment supplies one value
+to both the packaged engine and Electron compile steps; each artifact bakes it,
+and Electron pins the child environment to the same decision. Leave it unset or
+set it to `false` until the channel is approved. Enabling only the backend does
+not activate a desktop client, and enabling only the desktop does not bypass
+backend admission. The release-environment check refuses an enabled build
+unless both public cloud-preview suffixes and a structurally valid, complete
+SSH host-key policy are present; flags-off builds remain valid without them.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` permits only `release/*`; `production` permits only `release/*`
@@ -392,43 +411,72 @@ window.
 ## One-time organization migration `0009`
 
 Migration `0009` renames tenant tables. The old control-plane binary is not
-compatible with the post-migration schema. Railway starts and health-checks the
-new deployment while the old deployment is still serving, so this migration
-must not run as an ordinary rolling deploy.
+compatible with the post-migration schema. It must not run as an ordinary
+rolling deploy in any channel, and production service boot intentionally
+ignores migration approvals.
 
-Alpha and Beta use their isolated databases first. For each, temporarily set:
+Exercise this procedure in Alpha and Beta before Production. For each channel:
 
-```text
-CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql
-```
+1. Verify the exact release SHA and build the production image that will be
+   promoted. Disable autodeploy, take and verify a fresh database backup, and
+   keep the existing frontend in place.
+2. Drain and prove stopped every old and new control-plane process. No API,
+   worker, pre-deploy command, or replacement deployment may overlap the
+   migration.
+3. In a database-owner shell inside that exact reviewed image, run only the
+   compiled strict migrator. Scope the approval to this one process; never save
+   it on the Railway web service. A database beginning before `0009` and
+   advancing through the current release requires all four current controlled
+   boundaries:
 
-Deploy, verify the migration log and API behavior, then remove the approval.
+   ```bash
+   NODE_ENV=production \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
+   node dist/migrate.js
+   ```
 
-For Production:
+   From a source checkout, `pnpm --dir apps/control-plane migrate` is the
+   equivalent entrypoint. If the database already records a controlled
+   boundary, omit only that already-recorded filename; the runner never skips
+   an unapproved pending boundary.
 
-1. Verify the exact release SHA in Alpha and Beta, including login,
-   organizations, invitations, settings, GitHub connection, and feedback.
-2. Take and verify a fresh Production database backup. Keep Cloudflare on the
-   existing frontend.
-3. Confirm Railway Production autodeploy is off and its source is the validated
-   `release/X.Y.Z` branch.
-4. Stage (but do not yet deploy) the one-time approval variable below, then
-   **Remove** the currently active Production control-plane deployment from its
-   deployment menu. A
-   short control-plane maintenance window begins; local desktop workspaces
-   remain local.
-5. Apply the staged variable change and choose **Deploy Latest Commit** for the
-   selected release branch. The new deployment applies the migration
-   transactionally and starts the new API. If your Railway UI cannot stage a
-   variable edit, remove the old deployment before saving the approval.
-6. Require `/healthz`, inspect the migration log, and smoke-test the old
-   `/v1/teams` compatibility API plus the new organization API.
-7. Remove the approval variable. Leave Production autodeploy off.
-8. Deploy the same release commit to `zeros-web`, verify browser login and the
-   dashboard, then release the matching stable desktop build.
+4. Verify the contiguous checksummed migration ledger and inspect the migration
+   log. Remove the one-shot approval environment, then start the same release
+   image normally with both cloud feature flags false.
+5. Require `/healthz`, smoke-test login, organizations, invitations, settings,
+   GitHub connection, feedback, the `/v1/teams` compatibility API, and the new
+   organization API. Keep Production autodeploy off until the complete
+   promotion is accepted.
+6. After Production succeeds, deploy the same release commit to `zeros-web`,
+   verify browser login and the dashboard, then release the matching stable
+   desktop build.
 
 Do not use Railway image rollback after `0009`: the old image expects the old
 schema. Restore the database backup or roll forward with corrected new code.
+
+## One-time cloud authority migration `0025`
+
+Alpha tracks `main`, so an unapproved controlled migration must not turn its
+automatic deploy into a restart loop. The service-boot runner may stop before
+`0025_cloud_workspace_engine_authority.sql` only while both cloud runtime flags
+are false, every pre-boundary cloud state table is empty, and no later migration
+is recorded. Railway then receives a healthy HTTP response whose `/healthz`
+body contains `migrations.state=controlled_migration_pending`; every cloud API
+returns `503 controlled_migration_pending`, unrelated APIs remain available,
+and no migration after `0024` is recorded or applied. Existing cloud state or
+an enabled cloud flag makes startup fail closed instead.
+
+That state is a maintenance signal, not approval and not cloud readiness.
+Production service boot never honors `CONTROL_PLANE_MIGRATION_APPROVALS` and
+never executes a controlled boundary; in particular, unapproved `0009` remains
+a startup failure because it changes core schema. Drain old processes, take a
+verified backup, record the commit and checksummed ledger, and run
+`node dist/migrate.js` inside that exact production image with
+`NODE_ENV=production` and the exact one-process approval for `0025`. Never put
+the approval on the web service. Remove it, restart the same commit, and require
+the pending state to disappear before enabling either cloud flag. The complete
+empty-state and existing-state sequences are in
+[`cloud-workspace/infrastructure-and-operations.md`](cloud-workspace/infrastructure-and-operations.md#controlled-migration-rollout).
 
 ## Normal promotion after the one-time migration
 

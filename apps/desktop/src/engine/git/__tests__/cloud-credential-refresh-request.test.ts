@@ -1,10 +1,11 @@
-import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
+import { link, mkdir, mkdtemp, open, rename, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  acknowledgeCloudGithubCredentialRefreshRequest,
   requestCloudGithubCredentialRefresh,
   readCloudGithubCredentialRefreshRequest,
 } from "../cloud-credential-refresh-request";
@@ -89,5 +90,62 @@ describe("cloud GitHub credential refresh request", () => {
     expect(
       readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
     ).toMatchObject({ generation: "c".repeat(32), method: "pat" });
+    expect(
+      acknowledgeCloudGithubCredentialRefreshRequest({
+        file,
+        expectedUid: uid,
+        generation: "b".repeat(32),
+      }),
+    ).toBe(false);
+    expect(
+      readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
+    ).toMatchObject({ generation: "c".repeat(32) });
+    expect(
+      acknowledgeCloudGithubCredentialRefreshRequest({
+        file,
+        expectedUid: uid,
+        generation: "c".repeat(32),
+      }),
+    ).toBe(true);
+    expect(
+      readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
+    ).toBeNull();
+  });
+
+  it("preserves a mismatched marker while another acknowledgement holds a hard link", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-cloud-github-refresh-race-"),
+    );
+    roots.push(root);
+    const file = path.join(root, "refresh.json");
+    const held = path.join(root, "held-by-other-acknowledgement");
+    const uid = process.getuid?.() ?? 0;
+    requestCloudGithubCredentialRefresh({
+      file,
+      expectedUid: uid,
+      ownerSubject: "owner",
+      method: "github-app",
+      reason: "credential-invalid",
+      generation: "c".repeat(32),
+      now: 1_800_000_000_000,
+    });
+    await rename(file, held);
+    await link(held, file);
+
+    let acknowledged: boolean | undefined;
+    try {
+      acknowledged = acknowledgeCloudGithubCredentialRefreshRequest({
+        file,
+        expectedUid: uid,
+        generation: "b".repeat(32),
+      });
+    } finally {
+      await rm(held, { force: true });
+    }
+
+    expect(acknowledged).toBe(false);
+    expect(
+      readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
+    ).toMatchObject({ generation: "c".repeat(32) });
   });
 });

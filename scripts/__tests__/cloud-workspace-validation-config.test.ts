@@ -29,6 +29,8 @@ import {
   loadState,
   loadSnapshotAttestation,
   NODE_BASE_IMAGE,
+  parseDaytonaPreviewHostSuffixes,
+  parseDaytonaSshHosts,
   parseCloudValidationPort,
   parseCloudValidationResources,
   parseCloudValidationState,
@@ -55,6 +57,23 @@ afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { force: true, recursive: true });
   }
+});
+
+describe("Daytona access host allowlists", () => {
+  it("keeps the production SSH default and parses explicit exact hosts", () => {
+    expect(parseDaytonaSshHosts(undefined)).toEqual(["ssh.app.daytona.io"]);
+    expect(parseDaytonaPreviewHostSuffixes(undefined)).toEqual([
+      "proxy.daytona.work",
+    ]);
+    expect(
+      parseDaytonaSshHosts(
+        "ssh.eu.example.test,ssh.us.example.test,ssh.eu.example.test",
+      ),
+    ).toEqual(["ssh.eu.example.test", "ssh.us.example.test"]);
+    expect(() => parseDaytonaSshHosts("*.example.test")).toThrow(
+      /DAYTONA_SSH_HOSTS/,
+    );
+  });
 });
 
 describe("collectAgentCredEnv", () => {
@@ -110,6 +129,50 @@ describe("qualified cloud owner and GitHub credential inputs", () => {
         ZEROS_CLOUD_OWNER_SUB: "auth0|owner",
       }),
     ).toThrow(/asymmetric account binding/i);
+  });
+
+  it("carries the exact WorkOS token contract into live image qualification", () => {
+    expect(
+      collectCloudAccountBindingEnv({
+        ZEROS_CLOUD_OWNER_SUB: "user_workos_owner",
+        ZEROS_ACCOUNT_JWT_JWKS_URL:
+          "https://api.workos.com/sso/jwks/client_desktop_example",
+        ZEROS_ACCOUNT_JWT_ISS:
+          "https://api.workos.com/user_management/client_example_web",
+        ZEROS_ACCOUNT_JWT_AUD: "https://api.zeros.build",
+        ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+        ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
+      }),
+    ).toMatchObject({
+      ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+      ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
+    });
+    expect(() =>
+      collectCloudAccountBindingEnv({
+        ZEROS_CLOUD_OWNER_SUB: "user_workos_owner",
+        ZEROS_ACCOUNT_JWT_JWKS_URL:
+          "https://api.workos.com/sso/jwks/client_desktop_example",
+        ZEROS_ACCOUNT_JWT_ISS:
+          "https://api.workos.com/user_management/client_example_web",
+        ZEROS_ACCOUNT_JWT_AUD: "https://api.zeros.build",
+        ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+      }),
+    ).toThrow(/client id/i);
+  });
+
+  it("preserves the exact slashless token issuer after URL validation", () => {
+    const issuer = "https://issuer.example.test";
+    expect(
+      collectCloudAccountBindingEnv({
+        ZEROS_CLOUD_OWNER_SUB: "user_workos_owner",
+        ZEROS_ACCOUNT_JWT_JWKS_URL:
+          "https://issuer.example.test/.well-known/jwks.json",
+        ZEROS_ACCOUNT_JWT_ISS: issuer,
+        ZEROS_ACCOUNT_JWT_AUD: "https://api.zeros.build",
+        ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+        ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
+      }).ZEROS_ACCOUNT_JWT_ISS,
+    ).toBe(issuer);
   });
 
   it("parses a working GitHub credential without putting it in cloud state", () => {
@@ -234,7 +297,7 @@ describe("cloud worker image contract", () => {
 describe("cloud validation connection state", () => {
   const state: CloudValidationState = {
     sandboxId: "sandbox-test",
-    previewUrl: "https://preview.example.test",
+    previewUrl: "https://39393-sandbox-id.proxy.daytona.work",
     previewToken: "preview-token-placeholder",
     cloudToken: "cloud-token-placeholder",
     region: "test",
@@ -274,7 +337,7 @@ describe("cloud validation connection state", () => {
       expiresAt: 1_800_000_060_000,
       port: ENGINE_CLOUD_PORT,
       token,
-      url: `https://${ENGINE_CLOUD_PORT}-${token}.preview.example/`,
+      url: `https://${ENGINE_CLOUD_PORT}-${token}.proxy.daytona.work/`,
       retiring: [
         {
           generation: "engine-ingress-generation-old",
@@ -310,7 +373,15 @@ describe("cloud validation connection state", () => {
       name: "wrong provider hostname token",
       mutate: (value: Record<string, unknown>) => {
         const ingress = value.engineIngress as Record<string, unknown>;
-        ingress.url = `https://${ENGINE_CLOUD_PORT}-other-token.preview.example/`;
+        ingress.url = `https://${ENGINE_CLOUD_PORT}-other-token.proxy.daytona.work/`;
+        value.previewUrl = ingress.url;
+      },
+    },
+    {
+      name: "an attacker-controlled provider suffix",
+      mutate: (value: Record<string, unknown>) => {
+        const ingress = value.engineIngress as Record<string, unknown>;
+        ingress.url = `https://${ENGINE_CLOUD_PORT}-signed-engine-token-1234.attacker.example/`;
         value.previewUrl = ingress.url;
       },
     },
@@ -331,14 +402,14 @@ describe("cloud validation connection state", () => {
     const token = "signed-engine-token-1234";
     const raw: Record<string, unknown> = {
       ...state,
-      previewUrl: `https://${ENGINE_CLOUD_PORT}-${token}.preview.example/`,
+      previewUrl: `https://${ENGINE_CLOUD_PORT}-${token}.proxy.daytona.work/`,
       previewToken: token,
       engineIngress: {
         generation: "engine-ingress-generation-one",
         expiresAt: 1_800_000_060_000,
         port: ENGINE_CLOUD_PORT,
         token,
-        url: `https://${ENGINE_CLOUD_PORT}-${token}.preview.example/`,
+        url: `https://${ENGINE_CLOUD_PORT}-${token}.proxy.daytona.work/`,
       },
     };
     mutate(raw);

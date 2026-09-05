@@ -1,17 +1,32 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocks = vi.hoisted(() => ({
-  raw: null as string | null,
-  refresh: vi.fn(),
-  revoke: vi.fn(),
-}));
+const mocks = vi.hoisted(() => {
+  class SecretStoreReadError extends Error {}
+
+  return {
+    raw: null as string | null,
+    readError: null as Error | null,
+    SecretStoreReadError,
+    deleteSecret: vi.fn(),
+    getSecret: vi.fn(),
+    network: vi.fn(),
+    replaceSecretIfUnchanged: vi.fn(),
+    refresh: vi.fn(),
+    revoke: vi.fn(),
+    setSecret: vi.fn(),
+  };
+});
 
 vi.mock("../secret-store", () => ({
-  deleteSecret: vi.fn(() => {
+  SecretStoreReadError: mocks.SecretStoreReadError,
+  deleteSecret: mocks.deleteSecret.mockImplementation(() => {
     mocks.raw = null;
   }),
-  getSecret: vi.fn(() => mocks.raw),
-  replaceSecretIfUnchanged: vi.fn(
+  getSecret: mocks.getSecret.mockImplementation(() => {
+    if (mocks.readError) throw mocks.readError;
+    return mocks.raw;
+  }),
+  replaceSecretIfUnchanged: mocks.replaceSecretIfUnchanged.mockImplementation(
     (_key: string, expected: string, next: string | null) => {
       if (mocks.raw !== expected) return false;
       mocks.raw = next;
@@ -19,9 +34,11 @@ vi.mock("../secret-store", () => ({
     },
   ),
   secretsFilePath: vi.fn(() => "/tmp/zeros-test-secrets.json"),
-  setSecret: vi.fn((_key: string, value: string) => {
-    mocks.raw = value;
-  }),
+  setSecret: mocks.setSecret.mockImplementation(
+    (_key: string, value: string) => {
+      mocks.raw = value;
+    },
+  ),
 }));
 
 vi.mock("../cross-process-lock", () => ({
@@ -45,6 +62,8 @@ vi.mock("../workos-desktop-revocation", () => ({
 import { parseStoredTokenSnapshot } from "../auth-session-record";
 import {
   authClearSession,
+  authGetAccessToken,
+  authGetSessionUser,
   authSignOutEverywhere,
   clearWorkOSSessionAfterServerRevocation,
   getValidSessionForMain,
@@ -68,10 +87,66 @@ function install(expiresAt = Date.now() + 300_000): void {
 
 describe("WorkOS desktop safe-storage session lifecycle", () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     mocks.raw = null;
+    mocks.readError = null;
+    mocks.network.mockReset();
+    vi.stubGlobal("fetch", mocks.network);
     mocks.refresh.mockReset();
     mocks.revoke.mockReset();
     mocks.revoke.mockResolvedValue(true);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("returns empty renderer session reads when the whole secret store is unreadable", async () => {
+    mocks.readError = new mocks.SecretStoreReadError("unreadable");
+
+    await expect(authGetAccessToken({}, {} as never)).resolves.toEqual({
+      access_token: null,
+    });
+    expect(authGetSessionUser({}, {} as never)).toBeNull();
+    expect(mocks.network).not.toHaveBeenCalled();
+    expect(mocks.refresh).not.toHaveBeenCalled();
+    expect(mocks.deleteSecret).not.toHaveBeenCalled();
+    expect(mocks.replaceSecretIfUnchanged).not.toHaveBeenCalled();
+    expect(mocks.setSecret).not.toHaveBeenCalled();
+  });
+
+  it("does not hide unexpected renderer session read failures", async () => {
+    const unexpected = new Error("unexpected read failure");
+    mocks.readError = unexpected;
+
+    await expect(authGetAccessToken({}, {} as never)).rejects.toBe(unexpected);
+    expect(() => authGetSessionUser({}, {} as never)).toThrow(unexpected);
+  });
+
+  it("keeps refresh persistence failures fail-closed", async () => {
+    install(Date.now() - 1);
+    mocks.refresh.mockResolvedValue({
+      status: "active",
+      session: {
+        accessToken: "access-next",
+        refreshToken: "refresh-next",
+        expiresAt: Date.now() + 300_000,
+        providerSubject: "user_example",
+        sessionId: "session_example",
+        clientKind: "desktop",
+        email: "person@example.com",
+        name: "Example Person",
+        authenticationMethod: "GoogleOAuth",
+      },
+    });
+    const mutationError = new mocks.SecretStoreReadError("mutation failed");
+    mocks.replaceSecretIfUnchanged.mockImplementationOnce(() => {
+      throw mutationError;
+    });
+
+    await expect(authGetAccessToken({}, {} as never)).rejects.toBe(
+      mutationError,
+    );
   });
 
   it("stores the provider session with its internal product owner", async () => {
