@@ -91,4 +91,4 @@ auditConfig:
 # ZSR is exact-pinned and patched as a reviewed runtime component. Any version
 # change must refresh this patch and rerun the live qualification matrix.
 patchedDependencies:
-  "@anthropic-ai/sandbox-runtime@0.0.73": patches/@anthropic-ai__sandbox-runtime@0.0.73.patch
+  "@anthropic-ai/sandbox-runtime@0.0.75": patches/@anthropic-ai__sandbox-runtime@0.0.75.patch
