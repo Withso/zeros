@@ -384,6 +384,22 @@ and requires a human reviewer. The stable workflow itself now rejects `main`
 and requires an exact `release/X.Y.Z` ref, so a manual dispatch cannot bypass
 the promotion ladder.
 
+### macOS signing keychain
+
+The pinned `app-builder-lib@26.8.1` dependency has a pnpm patch that passes its
+generated temporary-keychain password to `security set-key-partition-list`.
+Each P12 password remains scoped to importing that certificate. Using a P12
+password to unlock the separately created keychain fails with
+`SecKeychainUnlock`, preventing the signed Alpha release and its gated Railway
+deployment from completing.
+
+Keep this patch until a replacement dependency uses the generated keychain
+password for every partition update, including installer certificates. Run
+`mac-signing-keychain.test.ts` when updating the dependency; it exercises the
+installed implementation with a strict OS-command model and no real credentials.
+Actual Developer ID signing and installer/updater signature verification remain
+required in the release workflows.
+
 ## Feedback consolidation
 
 Feedback is now `POST /v1/feedback` on the Railway control plane. The desktop
