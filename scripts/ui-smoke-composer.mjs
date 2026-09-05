@@ -410,9 +410,22 @@ try {
       "search-open-focus",
     ),
   );
-  const modelRow = (label) =>
-    page.locator("[cmdk-item]").filter({ hasText: label }).first();
-  const rowText = async (label) => (await modelRow(label).textContent()) ?? "";
+  const modelRow = (label) => {
+    const exactLabel = new RegExp(
+      `^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+    );
+    return page
+      .locator("[cmdk-item]")
+      .filter({
+        has: page.locator("[data-model-name]", { hasText: exactLabel }),
+      })
+      .first();
+  };
+  const filteredModelNames = async () =>
+    page
+      .locator("[cmdk-item] [data-model-name]")
+      .allTextContents()
+      .then((labels) => labels.map((label) => label.trim()));
   const modelMenu = () => page.locator("[cmdk-root]").locator("xpath=..");
   const selectedModel = () => page.getByTestId("selected-model-browser");
   const catalog = () => page.getByTestId("model-catalog-sidecar");
@@ -1324,10 +1337,13 @@ try {
     searchItemGaps.join(","),
   );
   await searchInput.fill("Fable");
+  const expectedFableResults = ["Fable 5", "Fable 5.1"];
+  const fableSearchResults = await filteredModelNames();
   check(
-    "search filters to matching model results",
-    (await page.locator("[cmdk-item]").count()) === 1 &&
-      (await rowText("Fable 5")).includes("Fable 5"),
+    "search filters to both Fable model results",
+    fableSearchResults.length === expectedFableResults.length &&
+      expectedFableResults.every((label) => fableSearchResults.includes(label)),
+    JSON.stringify(fableSearchResults),
   );
   const searchRowHeight = await modelRow("Fable 5").evaluate(
     (row) => row.getBoundingClientRect().height,
@@ -1483,11 +1499,16 @@ try {
         .length === searchSelectionsBeforeEdit,
   );
   await page.keyboard.press("Escape");
+  const restoredFableResults = await filteredModelNames();
   check(
-    "closing a filtered result editor preserves its query and result",
+    "closing a filtered result editor preserves its query and both results",
     (await menuOpen()) &&
       (await searchInput.inputValue()) === "Fable" &&
-      (await page.locator("[cmdk-item]").count()) === 1,
+      restoredFableResults.length === expectedFableResults.length &&
+      expectedFableResults.every((label) =>
+        restoredFableResults.includes(label),
+      ),
+    JSON.stringify(restoredFableResults),
   );
   await searchInput.fill("");
   check(
