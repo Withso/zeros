@@ -184,11 +184,11 @@ export function resolveValidModelId(
   return composer ?? [...available][0] ?? modelId;
 }
 
-/** Cursor bakes reasoning depth + speed into the MODEL ID itself (e.g.
- *  `<base>-thinking-high`, `<base>-fast`) — @cursor/sdk exposes no separate
- *  reasoning/effort field on `Agent.create`, unlike Claude (fastMode) or Codex
- *  (service_tier). So the composer's Effort/Fast pills for a Cursor model can
- *  only take effect by SWAPPING to a concrete variant id the account offers.
+/** Compatibility mapper for older Cursor catalogs that bake reasoning depth +
+ *  speed into the MODEL ID itself (e.g. `<base>-thinking-high`, `<base>-fast`).
+ *  Current parameterized models use `cursorModelSelection` below; this legacy
+ *  path still lets saved/base ids resolve when an account advertises only
+ *  suffixed variants.
  *
  *  This maps (base id, effort, fast) → a variant id, and is BEST-EFFORT: we try
  *  the id shapes VERIFIED against `cursor-agent models` (2026-07-10, CLI
@@ -430,6 +430,9 @@ type CuratedCursorModel = {
   supportsFast?: boolean;
 };
 
+const CURSOR_EFFORT_PARAMETER_RX = /effort|reason|thinking/i;
+const CURSOR_FAST_PARAMETER_RX = /speed|fast/i;
+
 /** Parameter names verified against @cursor/sdk 1.0.31's models.list wire.
  * The capability values stay owned by catalogs/models-v1.json, so the cold
  * path cannot grow a second model menu or drift from renderer validation. */
@@ -466,6 +469,34 @@ function curatedCursorModelWire(id: string): CursorModelListItem | undefined {
     });
   }
   return { id, parameters };
+}
+
+/** Merge only capabilities a live record did not answer. Parameter presence is
+ * authoritative even when its values are empty/false-only; absence is unknown
+ * and inherits the verified curated wire so asynchronous partial discovery
+ * cannot discard a selection the renderer still exposes. */
+function cursorModelWireWithCuratedFallback(
+  id: string,
+  live: CursorModelListItem | undefined,
+): CursorModelListItem | undefined {
+  const fallback = curatedCursorModelWire(id);
+  if (!live || !fallback) return live ?? fallback;
+  const liveParameters = live.parameters ?? [];
+  const missingParameters = (fallback.parameters ?? []).filter((candidate) => {
+    if (CURSOR_EFFORT_PARAMETER_RX.test(candidate.id)) {
+      return !liveParameters.some((parameter) =>
+        CURSOR_EFFORT_PARAMETER_RX.test(parameter.id),
+      );
+    }
+    if (CURSOR_FAST_PARAMETER_RX.test(candidate.id)) {
+      return !liveParameters.some((parameter) =>
+        CURSOR_FAST_PARAMETER_RX.test(parameter.id),
+      );
+    }
+    return !liveParameters.some((parameter) => parameter.id === candidate.id);
+  });
+  if (missingParameters.length === 0) return live;
+  return { ...live, parameters: [...liveParameters, ...missingParameters] };
 }
 
 /** Parse ZEROS_ADDITIONAL_DIRS (the `/add-dir` JSON array of absolute paths)
@@ -694,7 +725,7 @@ export function cursorAdvertisedModel(
     ];
   });
   const effortParameters = parameters.filter((parameter) =>
-    /effort|reason|thinking/i.test(parameter.id),
+    CURSOR_EFFORT_PARAMETER_RX.test(parameter.id),
   );
   const effortLevels = effortParameters
     .flatMap((parameter) => parameter.values.map((value) => value.value))
@@ -708,7 +739,7 @@ export function cursorAdvertisedModel(
       );
     });
   const hasSpeedMetadata = parameters.some((parameter) =>
-    /speed|fast/i.test(parameter.id),
+    CURSOR_FAST_PARAMETER_RX.test(parameter.id),
   );
   const supportsFast =
     parameters.some((parameter) =>
@@ -716,7 +747,7 @@ export function cursorAdvertisedModel(
         const normalized = value.value.trim().toLowerCase();
         return (
           /fast/i.test(normalized) ||
-          (/speed|fast/i.test(parameter.id) &&
+          (CURSOR_FAST_PARAMETER_RX.test(parameter.id) &&
             ["true", "on", "1"].includes(normalized))
         );
       }),
@@ -728,7 +759,7 @@ export function cursorAdvertisedModel(
           const normalized = parameter.value.trim().toLowerCase();
           return (
             /fast/i.test(normalized) ||
-            (/speed|fast/i.test(parameter.id) &&
+            (CURSOR_FAST_PARAMETER_RX.test(parameter.id) &&
               ["true", "on", "1"].includes(normalized))
           );
         }),
@@ -831,7 +862,7 @@ export function cursorModelSelection(
         ? ["xhigh", "extra-high"]
         : [normalizedEffort];
     for (const parameter of model?.parameters ?? []) {
-      if (!/effort|reason/i.test(parameter.id)) continue;
+      if (!CURSOR_EFFORT_PARAMETER_RX.test(parameter.id)) continue;
       const value = cursorParameterValue(parameter, effortCandidates);
       if (value === undefined) continue;
       setCursorModelParameter(params, parameter.id, value);
@@ -841,7 +872,7 @@ export function cursorModelSelection(
 
   let mappedFast = false;
   for (const parameter of model?.parameters ?? []) {
-    if (!/fast|speed/i.test(parameter.id)) continue;
+    if (!CURSOR_FAST_PARAMETER_RX.test(parameter.id)) continue;
     const value = cursorParameterValue(
       parameter,
       fast
@@ -1225,10 +1256,13 @@ export class CursorSdkAdapter implements AgentAdapter {
   ): CursorModelSelection {
     const id = state.discoveredModelAliases.get(modelId) ?? modelId;
     // Live presence is authoritative, including explicit empty parameters.
-    // The curated wire is only a cold/rejected-discovery fallback, keeping the
-    // user's Grok effort/Fast choice on the first create/resume/send without a
-    // network wait.
-    const model = state.discoveredModels.get(id) ?? curatedCursorModelWire(id);
+    // The curated wire fills only cold/rejected or field-level unknowns,
+    // keeping the user's Grok effort/Fast choice on create/resume/send without
+    // a network wait while explicit live empty/false answers still win.
+    const model = cursorModelWireWithCuratedFallback(
+      id,
+      state.discoveredModels.get(id),
+    );
     return cursorModelSelection(
       id,
       model,
@@ -1432,12 +1466,12 @@ export class CursorSdkAdapter implements AgentAdapter {
   }
 
   /** Resolve CURSOR_MODEL → a concrete id, then validate it against the
-   *  account's live catalog (falling back to a known-good model). Applies the
-   *  composer's Effort/Fast pills BEST-EFFORT by swapping to a reasoning variant
-   *  id the account offers (see {@link applyCursorReasoning}) — a no-op when the
-   *  variant isn't discoverable, so it can't break the spawn. If the resolved id
-   *  was already rejected by the local backend this session (deniedModels), swap
-   *  to a confirmed-good retry model so we don't re-send a model we know can't run. */
+   *  account's live catalog (falling back to a known-good model). Current
+   *  parameterized effort/Fast settings are attached later by modelSelection;
+   *  this resolver also supports legacy suffixed variants via
+   *  {@link applyCursorReasoning}. If the resolved id was already rejected by
+   *  the local backend this session (deniedModels), swap to a confirmed-good
+   *  retry model so we don't re-send a model we know can't run. */
   private resolveModel(
     envModel: string | undefined,
     env?: Record<string, string>,
@@ -2236,10 +2270,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     session.modelId = this.resolveModel(model, session.env, session.modelState);
   }
 
-  /** Apply the renderer's complete composer snapshot. Effort and Fast are
-   * represented by concrete Cursor model variants, resolved immediately and
-   * sent on the next run. Keys encoded by omission must be removed first so
-   * toggling Fast off cannot leave a stale variant selected. */
+  /** Apply the renderer's complete composer snapshot. Effort and Fast become
+   * native model parameters for current models, with legacy suffixed variants
+   * resolved when advertised, and are sent on the next run. Keys encoded by
+   * omission must be removed first so toggling Fast off cannot leave stale
+   * model settings selected. */
   async updateConfig(opts: {
     sessionId: string;
     env: Record<string, string>;

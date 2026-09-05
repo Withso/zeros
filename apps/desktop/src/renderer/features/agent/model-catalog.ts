@@ -429,8 +429,8 @@ export function normalizeModelSlug(family: string, id: string): string {
  *  - Claude: the Agent SDK `effort` option (low|medium|high|xhigh|max) +
  *    the `ultracode` setting.
  *  - Codex: reads ZEROS_THINKING_EFFORT → `turn/start.effort`.
- *  - Cursor: an advertised effort ladder swaps to a concrete catalog-backed
- *    reasoning model variant; models without such a ladder hide the toggle. */
+ *  - Cursor: an advertised effort ladder maps to native model parameters (or
+ *    a legacy catalog-backed suffix); models without a ladder hide the toggle. */
 export function agentSupportsEffort(
   agentId: string | null,
   model: string | null = null,
@@ -1128,8 +1128,8 @@ export const EFFORT_ENV_VAR = "ZEROS_THINKING_EFFORT";
 
 /** Env var carrying the composer's Fast-mode toggle ("1" when on). Zeros
  *  convention. Read by the Claude SDK adapter (→ `fastMode` setting) and the
- *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to choose
- *  a live-catalog fast model variant. */
+ *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to set a
+ *  native model parameter / legacy live-catalog fast variant. */
 export const FAST_MODE_ENV_VAR = "ZEROS_FAST_MODE";
 
 /** Env var carrying the composer's local permission posture

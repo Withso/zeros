@@ -609,6 +609,74 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     ).toMatchObject({ effortLevels: [], supportsFast: false });
   });
 
+  it("fills both unknown Grok capabilities when an exact live record has no parameter metadata", async () => {
+    modelsListSpy.mockResolvedValue([
+      { id: "grok-4.6", displayName: "Cursor Grok 4.6" },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "grok-4.6",
+        ZEROS_THINKING_EFFORT: "xhigh",
+        ZEROS_FAST_MODE: "1",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    const expected = {
+      id: "grok-4.6",
+      params: [
+        { id: "effort", value: "xhigh" },
+        { id: "fast", value: "true" },
+      ],
+    };
+    expect(createSpy.mock.calls[0][0].model).toEqual(expected);
+    expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+    expect(
+      (await adapter.initialize())._meta?.models?.find(
+        (model) => model.value === "grok-4.6",
+      ),
+    ).not.toHaveProperty("effortLevels");
+  });
+
+  it.each([
+    {
+      name: "effort is explicitly empty but Fast is unknown",
+      parameters: [{ id: "effort", values: [] }],
+      expectedParams: [{ id: "fast", value: "true" }],
+    },
+    {
+      name: "Fast is explicitly unsupported but effort is unknown",
+      parameters: [{ id: "fast", values: [{ value: "false" }] }],
+      expectedParams: [{ id: "effort", value: "xhigh" }],
+    },
+  ])("fills only the unknown Grok capability when $name", async (fixture) => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "grok-4.6",
+        displayName: "Cursor Grok 4.6",
+        parameters: fixture.parameters,
+      },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "grok-4.6",
+        ZEROS_THINKING_EFFORT: "xhigh",
+        ZEROS_FAST_MODE: "1",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    const expected = { id: "grok-4.6", params: fixture.expectedParams };
+    expect(createSpy.mock.calls[0][0].model).toEqual(expected);
+    expect(sendSpy.mock.calls[0][1].model).toEqual(expected);
+  });
+
   it("maps Grok 4.6 effort and Fast to SDK params on create, send, and resume", async () => {
     modelsListSpy.mockResolvedValue([
       {
