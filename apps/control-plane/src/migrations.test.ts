@@ -70,7 +70,9 @@ describe("cloud migration regression contracts", () => {
           .filter(
             ({ sql }) =>
               /^SET search_path\s*=\s*pg_catalog\s*,\s*public\b/iu.test(sql) &&
-              !/,\s*pg_temp\b/iu.test(sql),
+              !/^SET search_path\s*=\s*pg_catalog\s*,\s*public\s*,\s*pg_temp\s*;?$/iu.test(
+                sql,
+              ),
           ),
     );
 
@@ -195,34 +197,48 @@ d("migration ladder", () => {
    *  from that point instead of re-running what's already there. This is how
    *  we reconstruct "a database at yesterday's revision". */
   const applyThrough = async (count: number) => {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
-        name       text PRIMARY KEY,
-        applied_at timestamptz NOT NULL DEFAULT now()
-      )
-    `);
-    for (const file of LADDER.slice(0, count)) {
-      const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
-      await pool.query("BEGIN");
-      await pool.query(sql);
-      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
-        file,
-      ]);
-      await pool.query("COMMIT");
+    const client = await pool.connect();
+    try {
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+          name       text PRIMARY KEY,
+          applied_at timestamptz NOT NULL DEFAULT now()
+        )
+      `);
+      for (const file of LADDER.slice(0, count)) {
+        const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+        await client.query("BEGIN");
+        try {
+          await client.query(sql);
+          await client.query(
+            "INSERT INTO schema_migrations (name) VALUES ($1)",
+            [file],
+          );
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      }
+    } finally {
+      client.release();
     }
   };
 
   const applyAndRecord = async (file: string) => {
-    await pool.query("BEGIN");
+    const client = await pool.connect();
     try {
-      await pool.query(migrationSource(file));
-      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+      await client.query("BEGIN");
+      await client.query(migrationSource(file));
+      await client.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
         file,
       ]);
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
     } catch (error) {
-      await pool.query("ROLLBACK");
+      await client.query("ROLLBACK");
       throw error;
+    } finally {
+      client.release();
     }
   };
 
@@ -237,13 +253,14 @@ d("migration ladder", () => {
       generations?: number;
     }>;
   }) => {
-    await pool.query("BEGIN");
+    const client = await pool.connect();
     try {
-      await pool.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [
+      await client.query("BEGIN");
+      await client.query(`INSERT INTO users (id, email) VALUES ($1, $2)`, [
         input.userId,
         `${input.userId}@example.test`,
       ]);
-      await pool.query(
+      await client.query(
         `INSERT INTO organizations (
            id, slug, name, created_by, is_personal, cloud_workspaces_allowed
          ) VALUES ($1, $2, 'Migration Regression', $3, false, true)`,
@@ -253,24 +270,24 @@ d("migration ladder", () => {
           input.userId,
         ],
       );
-      await pool.query(
+      await client.query(
         `INSERT INTO organization_members (org_id, user_id, role)
          VALUES ($1, $2, 'owner')`,
         [input.organizationId, input.userId],
       );
-      await pool.query(
+      await client.query(
         `INSERT INTO teams (
            id, org_id, slug, name, is_default, created_by
          ) VALUES ($1, $2, 'default', 'Default', true, $3)`,
         [input.teamId, input.organizationId, input.userId],
       );
-      await pool.query(
+      await client.query(
         `INSERT INTO team_members (team_id, org_id, user_id, role)
          VALUES ($1, $2, $3, 'maintainer')`,
         [input.teamId, input.organizationId, input.userId],
       );
       for (const workspace of input.workspaces) {
-        await pool.query(
+        await client.query(
           `INSERT INTO cloud_workspaces (
              id, org_id, team_id, created_by, display_name,
              repository_forge, repository_owner, repository_name,
@@ -286,7 +303,7 @@ d("migration ladder", () => {
             workspace.repositoryName,
           ],
         );
-        await pool.query(
+        await client.query(
           `INSERT INTO cloud_workspace_generations (
              workspace_id, generation, org_id, provider, image_ref,
              architecture, cpu_millicores, memory_mib, storage_mib, created_by
@@ -302,10 +319,12 @@ d("migration ladder", () => {
           ],
         );
       }
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
     } catch (error) {
-      await pool.query("ROLLBACK");
+      await client.query("ROLLBACK");
       throw error;
+    } finally {
+      client.release();
     }
   };
 
