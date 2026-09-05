@@ -90,6 +90,7 @@ function decodeJwtExp(token: string): number | null {
   }
 }
 
+/** Enable the one-time Dev migration only after the full Alpha contract passes. */
 function devUsesWorkOS(): boolean {
   if (channel() !== "dev") return false;
   try {
@@ -103,6 +104,8 @@ function devUsesWorkOS(): boolean {
   }
 }
 
+/** Read shared credentials, retiring only a matching legacy Dev snapshot and
+ * preserving a WorkOS session concurrently installed by another worktree. */
 function readTokenSnapshot(): StoredTokenSnapshot | null {
   const snapshot = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
   if (snapshot?.tokens.provider !== "auth0" || !devUsesWorkOS()) return snapshot;

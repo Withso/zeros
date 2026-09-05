@@ -39,6 +39,8 @@ function openExternal(url: string): void {
   else globalThis.open?.(url, "_blank", "noopener,noreferrer");
 }
 
+/** Present channel-appropriate onboarding and the main-owned sign-in attempt's
+ * waiting, cancellation, and recovery states. */
 export function LoginScreen() {
   const {
     startBrowserSignIn,

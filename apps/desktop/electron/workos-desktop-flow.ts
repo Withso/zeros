@@ -102,6 +102,7 @@ function exchangeReason(
   return "exchange_failed";
 }
 
+/** Map account lookup failures to renderer-safe reasons and recovery codes. */
 function accountFailure(error: unknown): {
   reason: Extract<
     WorkOSDesktopFlowErrorReason,
@@ -239,6 +240,7 @@ interface PendingFlow {
   disposeRouting?: () => void;
 }
 
+/** Release optional cross-process routing once, including cancellation races. */
 function stopRouting(pending: PendingFlow): void {
   const dispose = pending.disposeRouting;
   pending.disposeRouting = undefined;
@@ -275,6 +277,8 @@ export class WorkOSDesktopAuthorizationFlow {
 
   constructor(private readonly deps: WorkOSDesktopAuthorizationFlowDeps) {}
 
+  /** Replace the previous attempt, register PKCE callback routing, and open the
+   * browser with a bounded launch acknowledgement; return the main-owned expiry. */
   async start(): Promise<{ expiresAt: number }> {
     this.cancel();
     if (!DESKTOP_SCHEME.test(this.deps.deepLinkScheme)) {
@@ -349,6 +353,8 @@ export class WorkOSDesktopAuthorizationFlow {
     return this.pending?.callback.accept(input) ?? false;
   }
 
+  /** Cancel the active callback and routing registration without clearing any
+   * previously completed shared session. Returns whether an attempt existed. */
   cancel(): boolean {
     const pending = this.pending;
     if (!pending) return false;
@@ -358,6 +364,8 @@ export class WorkOSDesktopAuthorizationFlow {
     return true;
   }
 
+  /** Exchange and verify the matching callback, persist only the active
+   * attempt, revoke abandoned sessions, and always release its routing entry. */
   private async complete(pending: PendingFlow): Promise<void> {
     let session: WorkOSDesktopSession | null = null;
     let persisted = false;

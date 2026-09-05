@@ -94,6 +94,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthProviderInner>{children}</AuthProviderInner>;
 }
 
+/** Reconcile main-owned session updates and expose sign-in state, including
+ * actionable Dev setup errors, without moving credential storage into React. */
 function AuthProviderInner({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [session, setSession] = useState<AuthSessionInfo | null>(null);

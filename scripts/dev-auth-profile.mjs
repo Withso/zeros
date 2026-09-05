@@ -24,6 +24,7 @@ const CACHE_MAX_AGE_MS = 60 * 60_000;
 const MAX_CONFIG_BYTES = 8_192;
 
 class DevAuthUnavailableError extends Error {
+  /** Mark transport failures that may reuse a previously validated cache. */
   constructor() {
     super(
       "Could not load Alpha sign-in configuration. Check your connection and restart Zeros Dev.",
@@ -31,12 +32,15 @@ class DevAuthUnavailableError extends Error {
   }
 }
 
+/** Reject incomplete or cross-channel public values without echoing them. */
 function assertAlphaProfile(env) {
   const issue = devAuthEnvironmentIssue(env);
   if (issue)
     throw new Error(`Invalid Alpha public sign-in configuration (${issue}).`);
 }
 
+/** Trust only a canonical user-owned cache directory; validate its nearest
+ * existing ancestor before creating a missing first-use directory. */
 function assertDevAuthDirectory(directory) {
   const requested = path.resolve(directory);
   const unsafe = () =>
@@ -70,6 +74,8 @@ function assertDevAuthDirectory(directory) {
     throw unsafe();
 }
 
+/** Fetch the fixed Alpha endpoint with bounded time and bytes, then validate
+ * its versioned public projection before any value reaches disk or a child. */
 async function fetchAlphaProfile(fetchImpl) {
   let response;
   try {
@@ -135,6 +141,8 @@ async function fetchAlphaProfile(fetchImpl) {
   return env;
 }
 
+/** Atomically publish already validated public values in an owner-only file,
+ * rechecking directory trust after the request and before the rename. */
 function cacheAlphaProfile(filePath, env) {
   const directory = path.dirname(filePath);
   assertDevAuthDirectory(directory);

@@ -24,6 +24,7 @@ interface RelayStore {
   watch: typeof watchSecrets;
 }
 
+/** Accept only Dev state with a bounded code or the fixed provider-error tag. */
 function validCallback(value: WorkOSDesktopAuthorizationCallback): boolean {
   return (
     STATE.test(value.state) &&
@@ -39,6 +40,8 @@ function validCallback(value: WorkOSDesktopAuthorizationCallback): boolean {
  * matching, short-lived callback through the shared encrypted store. The PKCE
  * verifier and token exchange stay in the initiating Electron main process. */
 export class WorkOSDevCallbackRelay {
+  /** Use the encrypted shared store in production; store and clock injection
+   * let tests exercise races and expiry without native credential access. */
   constructor(
     private readonly store: RelayStore = {
       read: getSecret,
@@ -49,6 +52,8 @@ export class WorkOSDevCallbackRelay {
     private readonly now: () => number = Date.now,
   ) {}
 
+  /** Recover malformed v1 routing data while retaining valid sibling entries.
+   * Unknown newer schemas throw so update cannot downgrade or erase them. */
   private entries(raw: string | null): PendingCallback[] {
     if (raw === null) return [];
     let parsed;
@@ -84,6 +89,8 @@ export class WorkOSDevCallbackRelay {
     );
   }
 
+  /** Reapply a pure change against the latest value until CAS succeeds, with
+   * bounded retries that preserve concurrent writes from other worktrees. */
   private update<T>(
     change: (entries: PendingCallback[]) => {
       entries: PendingCallback[];
@@ -106,6 +113,8 @@ export class WorkOSDevCallbackRelay {
     throw new Error("Pending Dev sign-in store is busy");
   }
 
+  /** Register one expiring browser attempt and watch for its callback. Returns
+   * an idempotent disposer that removes only this attempt's routing state. */
   register(
     state: string,
     expiresAt: number,
@@ -135,6 +144,7 @@ export class WorkOSDevCallbackRelay {
     });
     let closed = false;
     let stopWatch: () => void = () => undefined;
+    /** Stop active observers before best-effort removal of this attempt. */
     const dispose = () => {
       if (closed) return;
       closed = true;
@@ -149,6 +159,7 @@ export class WorkOSDevCallbackRelay {
         // Expiry bounds a leftover callback if the OS credential store fails.
       }
     };
+    /** Consume a delivered callback atomically so a replay cannot reach accept. */
     const check = () => {
       if (closed) return;
       if (this.now() >= expiresAt) {
@@ -184,6 +195,8 @@ export class WorkOSDevCallbackRelay {
     return dispose;
   }
 
+  /** Publish a matching callback once, returning false for unknown, expired,
+   * replayed, incompatible, or temporarily inaccessible routing state. */
   deliver(input: WorkOSDesktopAuthorizationCallback): boolean {
     if (!validCallback(input)) return false;
     const callback = input.code

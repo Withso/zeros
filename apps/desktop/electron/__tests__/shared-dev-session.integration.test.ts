@@ -31,6 +31,7 @@ afterEach(async () => {
   root = "";
 });
 
+/** Await a matching worker message with bounded failure and listener cleanup. */
 function waitMessage(
   child: ChildProcess,
   predicate: (message: any) => boolean,
@@ -60,6 +61,7 @@ function waitMessage(
   });
 }
 
+/** Install the reply listener before sending a uniquely identified worker RPC. */
 function command(
   child: ChildProcess,
   command: string,
@@ -133,6 +135,8 @@ describe("Dev session sharing across independent processes", () => {
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
     const port = (server.address() as { port: number }).port;
+    /** Boot an independent worker with shared or isolated storage and wait for
+     * readiness before sending commands that could race its initialization. */
     const start = async (name: string, shared = true) => {
       const child = fork(bundle, [], {
         execArgv: [],
