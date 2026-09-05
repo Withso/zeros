@@ -2897,7 +2897,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  alongside the parent's. item/started is tracked too (it carries
    *  {threadId, turnId}) as a belt-and-braces for any subagent turn whose
    *  turn/started we didn't see — subagent items demonstrably stream (they
-   *  render in the timeline), so this path always has the live pairs. */
+   *  render in the timeline), so this path always has the live pairs. A
+   *  terminal subAgentActivity marker is lifecycle output, not evidence that
+   *  its attributed parent turn is still live, so it may only confirm an
+   *  already-tracked pair. */
   private wireTurnTracking(
     session: CodexSession,
     runtime: CodexAppServerHandle,
@@ -2938,7 +2941,25 @@ export class CodexAppServerAdapter implements AgentAdapter {
       track(p?.threadId, p?.turn?.id);
     });
     runtime.onNotification("item/started", (params) => {
-      const p = params as { threadId?: string; turnId?: string };
+      const p = params as {
+        threadId?: string;
+        turnId?: string;
+        item?: { type?: string; kind?: string };
+      };
+      // Codex 0.153.4 emits a subAgentActivity:completed start/completion
+      // pair on the ORIGINAL parent turn after that turn's turn/completed.
+      // Its queued child result uses trigger_turn=false, so no later parent
+      // turn/completed is guaranteed to evict a re-created entry. Keep the
+      // row flowing through the translator, but do not let this terminal
+      // lifecycle marker create or replace liveness. If the same pair is
+      // genuinely still tracked, track() remains a harmless confirmation.
+      if (
+        p?.item?.type === "subAgentActivity" &&
+        p.item.kind === "completed" &&
+        session.activeTurns.get(p.threadId ?? "") !== p.turnId
+      ) {
+        return;
+      }
       track(p?.threadId, p?.turnId);
     });
     runtime.onNotification("turn/completed", (params) => {
