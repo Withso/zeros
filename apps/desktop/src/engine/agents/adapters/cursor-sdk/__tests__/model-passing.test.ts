@@ -577,6 +577,45 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     });
   });
 
+  it.each([
+    {
+      name: "a false-only Fast definition",
+      parameter: { id: "fast", values: [{ value: "false" }] },
+    },
+    {
+      name: "an explicitly empty speed definition",
+      parameter: { id: "speed", values: [] },
+    },
+  ])("does not synthesize Auto Fast over $name", async ({ parameter }) => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "default",
+        displayName: "Auto",
+        aliases: ["auto"],
+        parameters: [parameter],
+      },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        CURSOR_MODEL: "auto",
+        ZEROS_FAST_MODE: "1",
+        ZEROS_THINKING_EFFORT: "xhigh",
+      },
+    });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(createSpy.mock.calls[0][0].model).toEqual({ id: "default" });
+    expect(sendSpy.mock.calls[0][1].model).toEqual({ id: "default" });
+    const auto = (await adapter.initialize())._meta?.models?.find(
+      (model) => model.value === "default",
+    );
+    expect(auto).not.toHaveProperty("effortLevels");
+    expect(auto).toMatchObject({ supportsFast: false });
+  });
+
   it("lets an explicit live empty Grok effort definition override the curated cold fallback", async () => {
     modelsListSpy.mockResolvedValue([
       {

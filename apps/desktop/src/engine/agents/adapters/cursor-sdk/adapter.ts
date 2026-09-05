@@ -833,11 +833,12 @@ function setCursorModelParameter(
  * advertised default variant preserves unrelated provider choices while the
  * explicit composer controls override only their matching parameters.
  *
- * Auto is the one live model whose record currently omits a Fast definition.
- * Cursor's SDK accepts and forwards model params without filtering them, and
- * every Fast-capable record uses the same `{ id: "fast", value: "true" }`
- * wire, so an enabled Auto Fast toggle uses that provider-native parameter too.
- * No effort parameter is synthesized for Auto. */
+ * Auto's current live record omits a Fast definition. Cursor's SDK accepts and
+ * forwards model params without filtering them, and every Fast-capable record
+ * uses the same `{ id: "fast", value: "true" }` wire, so an enabled Auto Fast
+ * toggle uses that provider-native parameter while the capability is unknown.
+ * An explicit live speed parameter—even empty/false-only—is authoritative, and
+ * no effort parameter is ever synthesized for Auto. */
 export function cursorModelSelection(
   id: string,
   model: CursorModelListItem | undefined,
@@ -870,6 +871,9 @@ export function cursorModelSelection(
     }
   }
 
+  const hasFastCapabilityAnswer = (model?.parameters ?? []).some((parameter) =>
+    CURSOR_FAST_PARAMETER_RX.test(parameter.id),
+  );
   let mappedFast = false;
   for (const parameter of model?.parameters ?? []) {
     if (!CURSOR_FAST_PARAMETER_RX.test(parameter.id)) continue;
@@ -884,7 +888,12 @@ export function cursorModelSelection(
     mappedFast = true;
     break;
   }
-  if (fast && !mappedFast && CURSOR_AUTO_IDS.has(id.toLowerCase())) {
+  if (
+    fast &&
+    !mappedFast &&
+    !hasFastCapabilityAnswer &&
+    CURSOR_AUTO_IDS.has(id.toLowerCase())
+  ) {
     setCursorModelParameter(params, "fast", "true");
   }
 
