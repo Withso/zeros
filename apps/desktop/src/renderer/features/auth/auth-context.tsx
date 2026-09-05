@@ -357,7 +357,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         return {
           ok: false,
           error:
-            "Zeros Dev sign-in is not configured for Alpha WorkOS. Add the shared Alpha development auth profile and restart Zeros Dev.",
+            "Zeros Dev could not load its sign-in settings. Check your connection and restart the Dev launcher to try again.",
         };
       }
       if (selected?.mode === "workos") {

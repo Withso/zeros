@@ -2,11 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const emitEvent = vi.fn();
 const acceptWorkOSDesktopCallback = vi.fn(() => true);
+const whenReady = vi.fn(async (): Promise<void> => undefined);
 
 vi.mock("electron", () => ({
   app: {
     on: vi.fn(),
     setAsDefaultProtocolClient: vi.fn(),
+    whenReady,
   },
 }));
 vi.mock("../sidecar", () => ({
@@ -43,6 +45,25 @@ describe("zeros-alpha:// WorkOS desktop callback", () => {
       error: null,
     });
     expect(emitEvent).not.toHaveBeenCalled();
+  });
+
+  it("waits for safeStorage readiness when macOS cold-launches the callback recipient", async () => {
+    let ready!: () => void;
+    whenReady.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          ready = resolve;
+        }),
+    );
+    const handling = handleUrl(
+      `zeros-alpha://auth/callback#code=authorization-code&state=zeros-alpha.${"s".repeat(43)}`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(whenReady).toHaveBeenCalledOnce();
+    expect(acceptWorkOSDesktopCallback).not.toHaveBeenCalled();
+    ready();
+    await handling;
+    expect(acceptWorkOSDesktopCallback).toHaveBeenCalledOnce();
   });
 
   it("maps provider details to one fixed error without forwarding descriptions", async () => {

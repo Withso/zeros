@@ -1,12 +1,22 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   devAuthProfilePath,
   loadDevAuthEnvironment,
+  ensureDevAuthEnvironment,
 } from "../dev-auth-profile.mjs";
 
 const VALID_ALPHA_PROFILE = {
@@ -41,6 +51,149 @@ afterEach(() => {
   for (const root of temporaryRoots.splice(0)) {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+describe("automatic Dev public configuration", () => {
+  function response(env = VALID_ALPHA_PROFILE): Response {
+    return Response.json({ version: 1, environment: "alpha", env });
+  }
+
+  it("bootstraps a fresh Mac once and reuses its private cache across worktrees and restarts", async () => {
+    const homeDir = temporaryRoot();
+    const fetchImpl = vi.fn(async () => response());
+    const first = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: {},
+      fetchImpl,
+    });
+    expect(first.env).toEqual(VALID_ALPHA_PROFILE);
+    expect(first.issue).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledWith(
+      "https://api-alpha.zeros.build/auth/desktop/dev-config",
+      expect.objectContaining({ redirect: "error", credentials: "omit" }),
+    );
+    expect(statSync(devAuthProfilePath(homeDir)).mode & 0o777).toBe(0o600);
+    for (let instance = 0; instance < 3; instance++) {
+      expect(
+        (await ensureDevAuthEnvironment({ homeDir, processEnv: {}, fetchImpl }))
+          .env,
+      ).toEqual(first.env);
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("refreshes a stale cache atomically without persisting a shell override or server secrets", async () => {
+    const homeDir = temporaryRoot();
+    writeEnvFile(devAuthProfilePath(homeDir), VALID_ALPHA_PROFILE);
+    utimesSync(devAuthProfilePath(homeDir), new Date(0), new Date(0));
+    const rotated = {
+      ...VALID_ALPHA_PROFILE,
+      AUTH_DESKTOP_CLIENT_ID: "client_rotated",
+    };
+    const fetchImpl = vi.fn(async () =>
+      response({
+        ...rotated,
+        WORKOS_API_KEY: "server-only-fixture",
+      } as typeof rotated),
+    );
+    const result = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: { AUTH_DESKTOP_CLIENT_ID: "client_override" },
+      fetchImpl,
+    });
+    expect(result.env.AUTH_DESKTOP_CLIENT_ID).toBe("client_override");
+    expect(loadDevAuthEnvironment({ homeDir, processEnv: {} }).env).toEqual(
+      rotated,
+    );
+    expect(readFileSync(devAuthProfilePath(homeDir), "utf8")).not.toContain(
+      "server-only-fixture",
+    );
+  });
+
+  it("keeps the last validated profile during an outage", async () => {
+    const homeDir = temporaryRoot();
+    writeEnvFile(devAuthProfilePath(homeDir), VALID_ALPHA_PROFILE);
+    utimesSync(devAuthProfilePath(homeDir), new Date(0), new Date(0));
+    const result = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: {},
+      fetchImpl: async () => {
+        throw new Error("offline");
+      },
+    });
+    expect(result.env).toEqual(VALID_ALPHA_PROFILE);
+    expect(result.issue).toBeNull();
+  });
+
+  it.each([
+    {
+      ...VALID_ALPHA_PROFILE,
+      VITE_CONTROL_PLANE_URL: "https://api.zeros.build",
+    },
+    {
+      ...VALID_ALPHA_PROFILE,
+      AUTH_ISSUER: "https://untrusted.example.test/issuer",
+    },
+    { ...VALID_ALPHA_PROFILE, AUTH_DESKTOP_CLIENT_ID: "client_web_alpha" },
+  ])("rejects an unsafe downloaded profile without writing it", async (env) => {
+    const homeDir = temporaryRoot();
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: {},
+        fetchImpl: async () => response(env),
+      }),
+    ).rejects.toThrow(/Alpha/);
+    expect(existsSync(devAuthProfilePath(homeDir))).toBe(false);
+  });
+
+  it("refuses an unsafe shell override before installing downloaded defaults", async () => {
+    const homeDir = temporaryRoot();
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: { VITE_APP_BASE_URL: "https://app.zeros.build" },
+        fetchImpl: async () => response(),
+      }),
+    ).rejects.toThrow(/Alpha/);
+    expect(existsSync(devAuthProfilePath(homeDir))).toBe(false);
+  });
+
+  it("reports a fresh-install outage without echoing response bodies", async () => {
+    const homeDir = temporaryRoot();
+    await expect(
+      ensureDevAuthEnvironment({
+        homeDir,
+        processEnv: {},
+        fetchImpl: async () =>
+          new Response("private-diagnostic", { status: 503 }),
+      }),
+    ).rejects.toThrow("Could not load Alpha sign-in configuration");
+    expect(existsSync(devAuthProfilePath(homeDir))).toBe(false);
+  });
+
+  it("keeps a valid cache when the config connection drops during the body", async () => {
+    const homeDir = temporaryRoot();
+    const profilePath = devAuthProfilePath(homeDir);
+    writeEnvFile(profilePath, VALID_ALPHA_PROFILE);
+    const stale = new Date(Date.now() - 2 * 60 * 60_000);
+    utimesSync(profilePath, stale, stale);
+    const result = await ensureDevAuthEnvironment({
+      homeDir,
+      processEnv: {},
+      fetchImpl: async () =>
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.error(new Error("connection interrupted"));
+            },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    });
+    expect(result.cachedOffline).toBe(true);
+    expect(result.env).toEqual(VALID_ALPHA_PROFILE);
+  });
 });
 
 describe("shared Zeros Dev Alpha authentication profile", () => {

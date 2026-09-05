@@ -102,9 +102,7 @@ function exchangeReason(
   return "exchange_failed";
 }
 
-function accountFailure(
-  error: unknown,
-): {
+function accountFailure(error: unknown): {
   reason: Extract<
     WorkOSDesktopFlowErrorReason,
     | "account_failed"
@@ -219,6 +217,13 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
   /** Revoke a provider session that was minted but could not be installed. */
   revokeSession: (accessToken: string) => Promise<void>;
   onComplete: () => void;
+  /** Dev-only routing when the OS delivers the callback to a sibling instance.
+   * The verifier is intentionally absent from this boundary. */
+  registerCallback?: (
+    state: string,
+    expiresAt: number,
+    accept: (input: WorkOSDesktopAuthorizationCallback) => boolean,
+  ) => () => void;
   onError: (
     reason: Exclude<WorkOSDesktopFlowErrorReason, "cancelled">,
     context?: { recoveryCode: string },
@@ -231,6 +236,13 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
 interface PendingFlow {
   callback: HostedCallback;
   verifier: string;
+  disposeRouting?: () => void;
+}
+
+function stopRouting(pending: PendingFlow): void {
+  const dispose = pending.disposeRouting;
+  pending.disposeRouting = undefined;
+  dispose?.();
 }
 
 function authorizationPageUrl(
@@ -281,9 +293,19 @@ export class WorkOSDesktopAuthorizationFlow {
     const timeoutMs = this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     const expiresAt = Date.now() + timeoutMs;
     const callback = createHostedCallback(state, timeoutMs);
-    const pending = { callback, verifier };
+    const pending: PendingFlow = { callback, verifier };
     this.pending = pending;
     void this.complete(pending);
+    try {
+      pending.disposeRouting = this.deps.registerCallback?.(
+        state,
+        expiresAt,
+        (input) => callback.accept(input),
+      );
+    } catch (error) {
+      this.cancel();
+      throw error;
+    }
     const opening = Promise.resolve()
       .then(() => this.deps.openExternal(startUrl))
       .then(
@@ -294,8 +316,7 @@ export class WorkOSDesktopAuthorizationFlow {
     const launchTimeout = new Promise<null>((resolve) => {
       launchTimer = setTimeout(
         () => resolve(null),
-        this.deps.openExternalTimeoutMs ??
-          DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS,
+        this.deps.openExternalTimeoutMs ?? DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS,
       );
     });
     const launch = await Promise.race([opening, launchTimeout]);
@@ -332,6 +353,7 @@ export class WorkOSDesktopAuthorizationFlow {
     const pending = this.pending;
     if (!pending) return false;
     this.pending = null;
+    stopRouting(pending);
     pending.callback.close();
     return true;
   }
@@ -360,10 +382,7 @@ export class WorkOSDesktopAuthorizationFlow {
       } catch (error) {
         logSignInFailure("account lookup", error);
         const failure = accountFailure(error);
-        throw new WorkOSDesktopFlowError(
-          failure.reason,
-          failure.recoveryCode,
-        );
+        throw new WorkOSDesktopFlowError(failure.reason, failure.recoveryCode);
       }
       if (this.pending !== pending) {
         await this.revokeAbandoned(session);
@@ -404,6 +423,8 @@ export class WorkOSDesktopAuthorizationFlow {
           this.deps.onError(reason);
         }
       }
+    } finally {
+      stopRouting(pending);
     }
   }
 

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => {
     refresh: vi.fn(),
     revoke: vi.fn(),
     setSecret: vi.fn(),
+    workosConfigured: false,
   };
 });
 
@@ -59,6 +60,23 @@ vi.mock("../workos-desktop-revocation", () => ({
   requestWorkOSDesktopRevocation: mocks.revoke,
 }));
 
+vi.mock("../workos-desktop-config", () => ({
+  desktopAuthConfig: () =>
+    mocks.workosConfigured
+      ? {
+          provider: "workos",
+          desktopClientId: "client_desktop_alpha",
+          issuer: "https://api.workos.com/user_management/client_web_alpha",
+          jwksUrl: "https://api.workos.com/sso/jwks/client_web_alpha",
+          audience: "https://api-alpha.zeros.build",
+        }
+      : { provider: "auth0" },
+}));
+
+vi.mock("../workos-desktop-account", () => ({
+  controlPlaneBaseUrl: () => "https://api-alpha.zeros.build",
+}));
+
 import { parseStoredTokenSnapshot } from "../auth-session-record";
 import {
   authClearSession,
@@ -68,6 +86,7 @@ import {
   clearWorkOSSessionAfterServerRevocation,
   getValidSessionForMain,
   persistWorkOSSession,
+  persistSession,
 } from "../ipc/commands/auth-session";
 
 function install(expiresAt = Date.now() + 300_000): void {
@@ -90,6 +109,7 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     vi.clearAllMocks();
     mocks.raw = null;
     mocks.readError = null;
+    mocks.workosConfigured = false;
     mocks.network.mockReset();
     vi.stubGlobal("fetch", mocks.network);
     mocks.refresh.mockReset();
@@ -99,6 +119,81 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  });
+
+  it("retires a legacy Dev session once after Alpha WorkOS is configured, without calling the old refresh endpoint", async () => {
+    vi.stubEnv("ZEROS_CHANNEL", "dev");
+    mocks.workosConfigured = true;
+    mocks.raw = JSON.stringify({
+      provider: "auth0",
+      accessToken: "legacy-access",
+      refreshToken: "legacy-refresh",
+      expiresAt: Date.now() + 300_000,
+      sub: "auth0|legacy",
+      email: "person@example.com",
+      name: null,
+    });
+    expect(authGetSessionUser({}, {} as never)).toBeNull();
+    await expect(getValidSessionForMain()).resolves.toBeNull();
+    expect(mocks.raw).toBeNull();
+    expect(mocks.network).not.toHaveBeenCalled();
+    expect(mocks.replaceSecretIfUnchanged).toHaveBeenCalledTimes(1);
+    install();
+    await expect(getValidSessionForMain()).resolves.toMatchObject({
+      provider: "workos",
+    });
+    expect(mocks.raw).not.toBeNull();
+  });
+
+  it("preserves release Auth0 rollback sessions and unconfigured Dev sessions", () => {
+    const legacy = JSON.stringify({
+      provider: "auth0",
+      accessToken: "legacy-access",
+      refreshToken: "legacy-refresh",
+      expiresAt: Date.now() + 300_000,
+      sub: "auth0|legacy",
+      email: "person@example.com",
+      name: null,
+    });
+    mocks.raw = legacy;
+    vi.stubEnv("ZEROS_CHANNEL", "alpha");
+    mocks.workosConfigured = true;
+    expect(authGetSessionUser({}, {} as never)).not.toBeNull();
+    vi.stubEnv("ZEROS_CHANNEL", "dev");
+    mocks.workosConfigured = false;
+    expect(authGetSessionUser({}, {} as never)).not.toBeNull();
+    expect(mocks.raw).toBe(legacy);
+  });
+
+  it("a migration cannot erase the WorkOS session a sibling just installed", () => {
+    vi.stubEnv("ZEROS_CHANNEL", "dev");
+    mocks.workosConfigured = true;
+    mocks.raw = JSON.stringify({
+      accessToken: "legacy-access",
+      refreshToken: "legacy-refresh",
+      expiresAt: 1,
+      sub: "auth0|legacy",
+      email: "person@example.com",
+      name: null,
+    });
+    mocks.replaceSecretIfUnchanged.mockImplementationOnce(() => {
+      install();
+      return false;
+    });
+    expect(authGetSessionUser({}, {} as never)).toMatchObject({
+      provider: "workos",
+    });
+    expect(parseStoredTokenSnapshot(mocks.raw)?.tokens.provider).toBe("workos");
+  });
+
+  it("rejects a late legacy handoff after Dev has moved to WorkOS", () => {
+    vi.stubEnv("ZEROS_CHANNEL", "dev");
+    mocks.workosConfigured = true;
+    install();
+    const current = mocks.raw;
+    expect(() => persistSession({ accessToken: "late-legacy", refreshToken: "late-refresh", sub: "auth0|legacy", email: "person@example.com", name: null })).toThrow(/WorkOS/);
+    expect(mocks.raw).toBe(current);
   });
 
   it("returns empty renderer session reads when the whole secret store is unreadable", async () => {

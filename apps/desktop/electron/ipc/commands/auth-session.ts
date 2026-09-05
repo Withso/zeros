@@ -24,6 +24,10 @@ import {
 import type { WorkOSDesktopSession } from "../../workos-desktop-client";
 import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
+import { channel } from "../../../src/engine/runtime";
+import { desktopAuthConfig } from "../../workos-desktop-config";
+import { devWorkOSConfigurationIssue } from "../../dev-workos-auth-policy";
+import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 
 const TOKENS_KEY = "auth-session:tokens";
 const REFRESH_SKEW_MS = 60_000;
@@ -86,8 +90,32 @@ function decodeJwtExp(token: string): number | null {
   }
 }
 
+function devUsesWorkOS(): boolean {
+  if (channel() !== "dev") return false;
+  try {
+    return devWorkOSConfigurationIssue({
+      auth: desktopAuthConfig(),
+      appOrigin: appBaseUrl(),
+      controlPlaneOrigin: controlPlaneBaseUrl(),
+    }) === null;
+  } catch {
+    return false;
+  }
+}
+
 function readTokenSnapshot(): StoredTokenSnapshot | null {
-  return parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
+  const snapshot = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
+  if (snapshot?.tokens.provider !== "auth0" || !devUsesWorkOS()) return snapshot;
+  // Retire only Dev's old login after the new Alpha contract is complete.
+  // CAS preserves a WorkOS sign-in concurrently installed by another worktree.
+  if (replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, null)) {
+    console.info(
+      "[auth] Legacy Dev session retired; sign in once with WorkOS for all Dev instances",
+    );
+    notifySessionChanged();
+  }
+  const latest = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
+  return latest?.tokens.provider === "workos" ? latest : null;
 }
 
 function readTokens(): StoredTokens | null {
@@ -106,6 +134,7 @@ export function persistSession(input: {
   email: string;
   name: string | null;
 }): void {
+  if (devUsesWorkOS()) throw new Error("Zeros Dev now requires WorkOS sign-in");
   if (!input.accessToken || !input.refreshToken || !input.sub || !input.email) {
     throw new Error("persistSession: missing required field");
   }

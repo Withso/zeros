@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseEnv } from "node:util";
+import { randomUUID } from "node:crypto";
 
 export const DEV_AUTH_ENV_KEYS = Object.freeze([
   "AUTH_PROVIDER",
@@ -18,6 +19,149 @@ const ALPHA_APP_ORIGIN = "https://app-alpha.zeros.build";
 const ALPHA_API_ORIGIN = "https://api-alpha.zeros.build";
 const WORKOS_API_ORIGIN = "https://api.workos.com";
 const WORKOS_CLIENT_ID = /^client_[A-Za-z0-9_-]{1,240}$/;
+const CONFIG_URL = `${ALPHA_API_ORIGIN}/auth/desktop/dev-config`;
+const CACHE_MAX_AGE_MS = 60 * 60_000;
+const MAX_CONFIG_BYTES = 8_192;
+
+class DevAuthUnavailableError extends Error {
+  constructor() {
+    super(
+      "Could not load Alpha sign-in configuration. Check your connection and restart Zeros Dev.",
+    );
+  }
+}
+
+function assertAlphaProfile(env) {
+  const issue = devAuthEnvironmentIssue(env);
+  if (issue)
+    throw new Error(`Invalid Alpha public sign-in configuration (${issue}).`);
+}
+
+async function fetchAlphaProfile(fetchImpl) {
+  let response;
+  try {
+    response = await fetchImpl(CONFIG_URL, {
+      signal: AbortSignal.timeout(5_000),
+      redirect: "error",
+      credentials: "omit",
+      headers: { accept: "application/json" },
+    });
+  } catch {
+    throw new DevAuthUnavailableError();
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new DevAuthUnavailableError();
+  }
+  if (
+    !response.headers
+      .get("content-type")
+      ?.toLowerCase()
+      .startsWith("application/json")
+  ) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error("Invalid Alpha public sign-in configuration response.");
+  }
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("Empty Alpha public sign-in configuration.");
+  const chunks = [];
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read().catch(() => {
+        throw new DevAuthUnavailableError();
+      });
+      if (done) break;
+      size += value.byteLength;
+      if (size > MAX_CONFIG_BYTES) {
+        throw new Error("Oversized Alpha public sign-in configuration.");
+      }
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+  let document;
+  try {
+    document = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch {
+    throw new Error("Invalid Alpha public sign-in configuration response.");
+  }
+  if (
+    document?.version !== 1 ||
+    document?.environment !== "alpha" ||
+    !document.env ||
+    typeof document.env !== "object" ||
+    Array.isArray(document.env)
+  ) {
+    throw new Error("Unsupported Alpha public sign-in configuration.");
+  }
+  const env = publicAuthValues(document.env);
+  assertAlphaProfile(env);
+  return env;
+}
+
+function cacheAlphaProfile(filePath, env) {
+  const directory = path.dirname(filePath);
+  fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
+  if (fs.lstatSync(directory).isSymbolicLink()) {
+    throw new Error(
+      "The Alpha sign-in configuration directory must not be a symbolic link.",
+    );
+  }
+  const temporary = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    // Every value has passed the exact Alpha contract. Only the public fields
+    // are serialized, and rename publishes a complete profile to other launches.
+    fs.writeFileSync(
+      temporary,
+      `${DEV_AUTH_ENV_KEYS.map((key) => `${key}=${env[key]}`).join("\n")}\n`,
+      { flag: "wx", mode: 0o600 },
+    );
+    fs.renameSync(temporary, filePath);
+  } finally {
+    fs.rmSync(temporary, { force: true });
+  }
+}
+
+/** Bootstrap once per Mac, then refresh the public cache at most hourly. An
+ * outage retains a validated cache. Invalid configuration never falls back to
+ * a different channel or to Auth0, and shell overrides are never persisted. */
+export async function ensureDevAuthEnvironment({
+  homeDir = os.homedir(),
+  processEnv = process.env,
+  fetchImpl = fetch,
+} = {}) {
+  const cached = loadDevAuthEnvironment({ homeDir, processEnv: {} });
+  const explicit = publicAuthValues(processEnv);
+  const effective = loadDevAuthEnvironment({ homeDir, processEnv });
+  if (
+    cached.source === "none" &&
+    effective.source === "environment" &&
+    !effective.issue
+  ) {
+    return effective;
+  }
+  if (cached.source !== "none") {
+    assertAlphaProfile(cached.env);
+    assertAlphaProfile(effective.env);
+    const age = Date.now() - fs.statSync(cached.sharedProfilePath).mtimeMs;
+    if (age >= 0 && age < CACHE_MAX_AGE_MS) return effective;
+  }
+  let downloaded;
+  try {
+    downloaded = await fetchAlphaProfile(fetchImpl);
+  } catch (error) {
+    if (error instanceof DevAuthUnavailableError && cached.source !== "none") {
+      return { ...effective, cachedOffline: true };
+    }
+    throw error;
+  }
+  assertAlphaProfile({ ...downloaded, ...explicit });
+  cacheAlphaProfile(cached.sharedProfilePath, downloaded);
+  return loadDevAuthEnvironment({ homeDir, processEnv });
+}
 
 export function devAuthProfilePath(homeDir = os.homedir()) {
   return path.join(homeDir, ".zeros-dev", "auth", "alpha.env");

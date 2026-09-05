@@ -15,8 +15,16 @@ import { emitEvent } from "../events";
 import type { CommandHandler } from "../router";
 import { cancelLegacyAuthHandoff } from "./auth-handoff";
 import { persistWorkOSSession } from "./auth-session";
+import { WorkOSDevCallbackRelay } from "../../workos-dev-callback-relay";
 
 let flow: WorkOSDesktopAuthorizationFlow | null = null;
+let callbackRelay: WorkOSDevCallbackRelay | null = null;
+
+function sharedDevCallbackRelay(): WorkOSDevCallbackRelay | null {
+  if (channel() !== "dev" || !process.env.ZEROS_SHARED_SECRETS_DIR?.trim())
+    return null;
+  return (callbackRelay ??= new WorkOSDevCallbackRelay());
+}
 
 function workOSFlow(): WorkOSDesktopAuthorizationFlow {
   flow ??= new WorkOSDesktopAuthorizationFlow({
@@ -26,6 +34,9 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
     openExternal: (url) => shell.openExternal(url),
     resolveAccountId: resolveWorkOSDesktopAccountId,
     persistSession: persistWorkOSSession,
+    registerCallback: (state, expiresAt, accept) =>
+      sharedDevCallbackRelay()?.register(state, expiresAt, accept) ??
+      (() => undefined),
     revokeSession: async (accessToken) => {
       if (!(await requestWorkOSDesktopRevocation("current", accessToken))) {
         throw new Error("The abandoned WorkOS session could not be revoked");
@@ -43,7 +54,8 @@ export function acceptWorkOSDesktopCallback(input: {
   code?: string | null;
   error?: string | null;
 }): boolean {
-  return flow?.acceptCallback(input) ?? false;
+  const relay = sharedDevCallbackRelay();
+  return relay ? relay.deliver(input) : (flow?.acceptCallback(input) ?? false);
 }
 
 /** Unified entry point: WorkOS stays entirely in Electron main; Auth0 tells the

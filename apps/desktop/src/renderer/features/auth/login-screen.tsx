@@ -28,6 +28,7 @@ import {
   desktopSignInSecondsRemaining,
 } from "./desktop-sign-in-expiry";
 import { workOSSignInFailureMessage } from "./auth-errors";
+import { CHANNEL } from "../../config/release-channel";
 
 const PRIVACY_URL = "https://zeros.build/privacy";
 const TERMS_URL = "https://zeros.build/terms";
@@ -135,7 +136,11 @@ export function LoginScreen() {
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="flex w-full max-w-[340px] flex-col items-start gap-6">
           <ZerosLogo />
-          <p className="text-fg2 text-sm">Sign in or sign up to continue</p>
+          <p className="text-fg2 text-sm">
+            {CHANNEL === "dev"
+              ? "Sign in once to continue across your Zeros Dev instances"
+              : "Sign in or sign up to continue"}
+          </p>
           <div className="flex flex-col items-start gap-3">
             <Button
               variant="primary"
