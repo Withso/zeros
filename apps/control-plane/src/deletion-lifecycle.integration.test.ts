@@ -1929,6 +1929,19 @@ d("account, organization, and operator deletion lifecycle", () => {
     expect(scheduled.status).toBe(202);
     const body = (await scheduled.json()) as DeletionResponse;
     await makeDue(body.deletion.id);
+    // This file deliberately retains rows across tests. On slower runners,
+    // short backoffs from earlier cases can mature and make tick(1) claim an
+    // unrelated request instead of the request whose fence is under test.
+    await pool.query(
+      `UPDATE deletion_requests
+       SET next_attempt_at = GREATEST(
+             next_attempt_at,
+             now() + interval '1 hour'
+           )
+       WHERE id <> $1
+         AND state IN ('scheduled', 'purging', 'provider_deleting', 'failed')`,
+      [body.deletion.id],
+    );
     const processor = new DeletionLifecycleProcessor(pool, {
       workerId: "test-organization-fence-purge",
       logger: { warn: () => undefined, error: () => undefined },
