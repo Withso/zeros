@@ -94,6 +94,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthProviderInner>{children}</AuthProviderInner>;
 }
 
+/** Reconcile main-owned session updates and expose sign-in state, including
+ * actionable Dev setup errors, without moving credential storage into React. */
 function AuthProviderInner({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
@@ -357,7 +359,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         return {
           ok: false,
           error:
-            "Zeros Dev sign-in is not configured for Alpha WorkOS. Add the shared Alpha development auth profile and restart Zeros Dev.",
+            "Zeros Dev could not load its sign-in settings. Check your connection and restart the Dev launcher to try again.",
         };
       }
       if (selected?.mode === "workos") {

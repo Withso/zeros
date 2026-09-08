@@ -52,6 +52,36 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("WorkOS desktop public client", () => {
+  it("exchanges and refreshes tokens through the configured custom issuer host", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(responseBody()));
+    const client = new WorkOSDesktopClient({
+      config: {
+        ...config,
+        issuer: "https://auth-api.zeros.build/user_management/client_web_example",
+        jwksUrl: "https://auth-api.zeros.build/sso/jwks/client_web_example",
+      },
+      fetch: fetchMock as typeof fetch,
+      verifyAccessToken: async () => claims,
+    });
+
+    await client.exchangeCode({
+      code: "authorization-code",
+      codeVerifier: "pkce-verifier",
+    });
+    await client.refresh({
+      refreshToken: "refresh-token-current",
+      expectedSubject: claims.providerSubject,
+      expectedSessionId: claims.sessionId,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    for (const [url] of fetchMock.mock.calls) {
+      expect(String(url)).toBe(
+        "https://auth-api.zeros.build/user_management/authenticate",
+      );
+    }
+  });
+
   it("exchanges a code as a public client and verifies identity before returning", async () => {
     const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);

@@ -160,6 +160,34 @@ describe("ZSR host-parity supervisor", () => {
       `(subpath "${privatePolicy}")`,
     );
   });
+
+  it("keeps grouped macOS denies after a writable-island carve-out", () => {
+    const writableIsland = "/Users/example/project";
+    const deniedPaths = ["alpha", "beta", "gamma", "delta", "epsilon"].map(
+      (name) => `${writableIsland}/worktrees/${name}/config.worktree`,
+    );
+    const command = wrapCommandWithSandboxMacOS({
+      command: "true",
+      hostParity: true,
+      needsNetworkRestriction: false,
+      readConfig: { denyOnly: [], allowWithinDeny: ["/"] },
+      writeConfig: {
+        allowOnly: ["/"],
+        denyWithinAllow: deniedPaths,
+        allowWithinDeny: [writableIsland],
+      },
+      disableMandatoryWriteProtection: true,
+    });
+
+    const carveOut = command.indexOf(
+      `(allow file-write* file-write-unlink file-write-create\n  (subpath "${writableIsland}")`,
+    );
+    const groupedDeny =
+      "worktrees/(alpha|beta|gamma|delta|epsilon)/(config\\\\.worktree)";
+
+    expect(carveOut).toBeGreaterThan(-1);
+    expect(command.lastIndexOf(groupedDeny)).toBeGreaterThan(carveOut);
+  });
 });
 
 describe("ZSR supervisor launch contract", () => {

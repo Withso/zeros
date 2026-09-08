@@ -7,12 +7,15 @@ const APP_ORIGIN = "https://app-alpha.zeros.build";
 const STATE = "s".repeat(43);
 const CHALLENGE = "c".repeat(43);
 
-function provider(client?: WorkOS): RailwayWorkOSProvider {
+function provider(
+  client?: WorkOS,
+  apiOrigin = "https://api.workos.com",
+): RailwayWorkOSProvider {
   return new RailwayWorkOSProvider(
     {
       provider: "workos",
-      issuer: "https://api.workos.com/user_management/client_web_example",
-      jwksUrl: "https://api.workos.com/sso/jwks/client_web_example",
+      issuer: `${apiOrigin}/user_management/client_web_example`,
+      jwksUrl: `${apiOrigin}/sso/jwks/client_web_example`,
       audience: "https://api-alpha.zeros.build",
       webClientId: "client_web_example",
       desktopClientId: "client_desktop_example",
@@ -28,6 +31,27 @@ function provider(client?: WorkOS): RailwayWorkOSProvider {
 }
 
 describe("WorkOS Hosted AuthKit authorization", () => {
+  it("routes web and desktop authorization through the custom issuer host", () => {
+    const customProvider = provider(undefined, "https://auth-api.zeros.build");
+    const options = {
+      state: STATE,
+      codeChallenge: CHALLENGE,
+      redirectUri: `${APP_ORIGIN}/auth/callback`,
+    };
+    for (const authorizationUrl of [
+      customProvider.authorizationUrl(options),
+      customProvider.desktopAuthorizationUrl({
+        ...options,
+        state: `zeros-alpha.${STATE}`,
+        redirectUri: `${APP_ORIGIN}/auth/desktop/callback`,
+      }),
+    ]) {
+      const url = new URL(authorizationUrl);
+      expect(url.origin).toBe("https://auth-api.zeros.build");
+      expect(url.pathname).toBe("/user_management/authorize");
+    }
+  });
+
   it("always starts the hosted UI for the web application with PKCE", () => {
     const url = new URL(
       provider().authorizationUrl({

@@ -105,6 +105,79 @@ describe("app assembly — Railway WorkOS boundary", () => {
   });
 });
 
+describe("public Alpha Dev onboarding configuration", () => {
+  /** Build a valid Alpha discovery contract with placeholder public client IDs. */
+  function alphaConfig(): Config {
+    const configured = workosConfig();
+    configured.deploymentChannel = "alpha";
+    configured.auth = {
+      provider: "workos",
+      issuer: "https://api.workos.com/user_management/client_web",
+      jwksUrl: "https://api.workos.com/sso/jwks/client_web",
+      audience: "https://api-alpha.zeros.build",
+      desktopClientId: "client_desktop",
+      webClientId: "client_web",
+    };
+    configured.workos!.appOrigin = "https://app-alpha.zeros.build";
+    return configured;
+  }
+
+  it("serves only the public Alpha contract without authentication or a database read", async () => {
+    const app = createApp(alphaConfig(), pool, emailConfig as never);
+    const response = await app.request("/auth/desktop/dev-config");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      version: 1,
+      environment: "alpha",
+      env: {
+        AUTH_PROVIDER: "workos",
+        AUTH_DESKTOP_CLIENT_ID: "client_desktop",
+        AUTH_ISSUER: "https://api.workos.com/user_management/client_web",
+        AUTH_JWKS_URL: "https://api.workos.com/sso/jwks/client_web",
+        AUTH_AUDIENCE: "https://api-alpha.zeros.build",
+        VITE_APP_BASE_URL: "https://app-alpha.zeros.build",
+        VITE_CONTROL_PLANE_URL: "https://api-alpha.zeros.build",
+      },
+    });
+  });
+
+  it.each(["beta", "production"] as const)(
+    "does not bootstrap Dev from %s",
+    async (channel) => {
+      const configured = alphaConfig();
+      configured.deploymentChannel = channel;
+      expect(
+        (
+          await createApp(configured, pool, emailConfig as never).request(
+            "/auth/desktop/dev-config",
+          )
+        ).status,
+      ).toBe(404);
+    },
+  );
+
+  it("fails closed while Alpha is unconfigured or mismatched", async () => {
+    const configured = alphaConfig();
+    configured.auth.audience = "https://api.zeros.build";
+    expect(
+      (
+        await createApp(configured, pool, emailConfig as never).request(
+          "/auth/desktop/dev-config",
+        )
+      ).status,
+    ).toBe(503);
+    const legacy = config(null);
+    legacy.deploymentChannel = "alpha";
+    expect(
+      (
+        await createApp(legacy, pool, emailConfig as never).request(
+          "/auth/desktop/dev-config",
+        )
+      ).status,
+    ).toBe(503);
+  });
+});
+
 describe("app assembly — isolated Ops browser namespace", () => {
   const configured = workosConfig();
   configured.deploymentChannel = "alpha";

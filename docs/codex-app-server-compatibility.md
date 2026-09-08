@@ -60,9 +60,21 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.149.0 pin this covers 239 methods: 151 client requests, 11 server
-requests, and 77 server notifications. The 23 added client requests and five
-added notifications are classified without making product-support claims. Run
+At the 0.153.4 pin this covers 250 methods: 156 client requests, 11 server
+requests, and 83 server notifications. Relative to 0.149.0, the five new client
+requests (`plugin/reconcile`, `turn/settings/update`, `thread/timeline/list`,
+and the MCP event-stream start/stop pair) remain generated-only because Zeros
+does not expose those provider-owned product surfaces. There are no new
+server-initiated request methods. The six new notifications—the MCP event
+stream, two auth-recovery lifecycle events, and three experimental realtime
+item events—are available through the typed engine subscription without a
+canonical renderer claim.
+
+Two existing server requests did change shape. Command-execution approvals now
+distinguish terminal-input callbacks with `kind: "writeStdin"` and a separate
+`approvalId`; the approval card preserves that identity and labels the action
+as terminal input. MCP elicitation accepts the new `openaiForm` spelling through
+the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
 ## Qualified Phase 2 product paths

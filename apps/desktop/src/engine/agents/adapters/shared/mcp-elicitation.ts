@@ -37,7 +37,7 @@ const MAX_APPROVAL_PARAM_CHARS = 120;
 export interface McpElicitationRequestLike {
   serverName?: string;
   message?: string;
-  mode?: "form" | "openai/form" | "url" | string;
+  mode?: "form" | "openai/form" | "openaiForm" | "url" | string;
   requestedSchema?: unknown;
   url?: string;
   elicitationId?: string;
@@ -170,9 +170,9 @@ export function answerMcpElicitation(
   // flow, so it must cancel rather than claim the app was installed.
   if (codexToolSuggestionMeta(request)) return cancelled();
 
-  // `openai/form` deliberately carries opaque JSON. Advertising support is
-  // allowed only when the client has a safe fallback for shapes it cannot
-  // validate. Never reinterpret an unsupported root/field as an empty object.
+  // The two OpenAI form spellings deliberately carry opaque JSON. Advertising
+  // support is allowed only when the client has a safe fallback for shapes it
+  // cannot validate. Never reinterpret an unsupported root/field as empty.
   if (!canRenderMcpForm(request)) return cancelled();
 
   const schema = asRecord(request.requestedSchema);
@@ -665,7 +665,8 @@ export function canRenderMcpForm(request: McpElicitationRequestLike): boolean {
   if (
     request.mode !== undefined &&
     request.mode !== "form" &&
-    request.mode !== "openai/form"
+    request.mode !== "openai/form" &&
+    request.mode !== "openaiForm"
   ) {
     return false;
   }

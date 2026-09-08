@@ -199,11 +199,18 @@ export class RailwayWorkOSProvider
     private readonly backend: WorkOSBackendConfig,
     client?: WorkOS,
   ) {
+    // Keep every SDK request on the validated environment's issuer host,
+    // including production custom domains. JWT validation still uses the full
+    // exact issuer string; this URL comes from configuration, never a token.
+    const apiUrl = new URL(auth.issuer);
     this.client =
       client ??
       new WorkOS({
         apiKey: backend.apiKey,
         clientId: auth.webClientId,
+        apiHostname: apiUrl.hostname,
+        https: apiUrl.protocol === "https:",
+        ...(apiUrl.port ? { port: Number(apiUrl.port) } : {}),
         timeout: 8_000,
         maxRetries: 2,
       });

@@ -15,7 +15,7 @@ const packageJsonPath = fileURLToPath(
     import.meta.url,
   ),
 );
-const expectedVersion = "0.0.73";
+const expectedVersion = "0.0.75";
 const args = new Set(process.argv.slice(2));
 
 function result(name, status, detail) {

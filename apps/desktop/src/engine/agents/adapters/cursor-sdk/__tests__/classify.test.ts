@@ -199,10 +199,13 @@ describe("classifyCursorSdkError", () => {
 });
 
 describe("resolveCursorModelId (local SDK needs an explicit model)", () => {
-  it("maps the cloud auto-select ids to a concrete model", () => {
-    // "Local SDK agents require an explicit `model`" — auto/default rejected.
-    for (const auto of ["auto", "default", "AUTO", "Default", "", "  "]) {
-      expect(resolveCursorModelId(auto)).toBe("composer-2.5");
+  it("preserves Cursor's Auto/Router ids and only defaults an absent pick", () => {
+    expect(resolveCursorModelId("auto")).toBe("auto");
+    expect(resolveCursorModelId("default")).toBe("default");
+    expect(resolveCursorModelId("AUTO")).toBe("auto");
+    expect(resolveCursorModelId("Default")).toBe("default");
+    for (const absent of ["", "  "]) {
+      expect(resolveCursorModelId(absent)).toBe("composer-2.5");
     }
     expect(resolveCursorModelId(undefined)).toBe("composer-2.5");
   });

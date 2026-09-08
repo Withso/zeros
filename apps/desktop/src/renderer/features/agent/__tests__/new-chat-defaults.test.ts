@@ -19,7 +19,7 @@ import {
   migrateDefaultModelSelection,
   setFavoriteModel,
 } from "../model-favorites";
-import { defaultFavoriteModelFor } from "../model-catalog";
+import { defaultFavoriteModelFor, resolveModelOption } from "../model-catalog";
 import {
   getChatTitleModel,
   hydrateModelsFromSettings,
@@ -364,6 +364,20 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     expect(getFavoriteModel("claude")).toBe("claude-opus-4-7");
     expect(effectiveFavoriteModel("claude")).toBe("claude-opus-5[1m]");
     expect(newChatBornDefaults("claude").model).toBe("claude-opus-5[1m]");
+  });
+
+  it("preserves a saved account-dependent Cursor model and legacy alias as the default identity", () => {
+    for (const saved of ["grok-4.5", "grok-4.5-xhigh"]) {
+      setFavoriteModel("cursor", saved);
+      expect(getFavoriteModel("cursor")).toBe(saved);
+      expect(effectiveFavoriteModel("cursor")).toBe(saved);
+      expect(newChatBornDefaults("cursor").model).toBe(saved);
+      expect(resolveModelOption("cursor", null, null)).toMatchObject({
+        value: saved,
+        label: "Cursor Grok 4.5",
+        selectable: false,
+      });
+    }
   });
 
   it("newChatBornDefaults opens on the effective favorite at High effort", () => {

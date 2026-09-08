@@ -27,12 +27,11 @@
  *  works fine for users, and failing the build over it would be a false red under
  *  `--require-models`.
  *
- *  ACCURACY NOTE, so nobody over-reads this: as of 2026-07-31 the live catalog
- *  DOES offer a bare `grok-4.5` (34 ids, and it is the only `grok*` id), so the
- *  "exact" arm is what actually fires and the suffixed fallback is dormant.
- *  That fallback is not fixing a failure observed today — it keeps the gate honest for the
- *  catalog shape the adapter already handles, since a base going suffixed-only
- *  bumps no version number and would otherwise read here as "retired".
+ *  ACCOUNT NOTE: model availability differs by Cursor account. A legacy account
+ *  may offer a bare `grok-4.5`, another may expose only suffixed variants, and a
+ *  current account may offer neither. The catalog marks such compatibility rows
+ *  `liveRequired`; {@link qualifiesAgainst} makes only that explicit absence
+ *  optional without weakening the required-model check.
  *
  *  `<id>-` as the test, rather than enumerating the level/fast shapes, is
  *  deliberate: every candidate applyCursorReasoning builds is `${base}-…`, so this
@@ -57,4 +56,21 @@ export function resolvesAgainst(id, live) {
     }
   }
   return false;
+}
+
+/** Qualify one catalog record against an account response. `liveRequired` means
+ * account-dependent availability: absence is allowed, but a present exact or
+ * suffixed form is still verified through the same resolution rule. */
+export function qualifiesAgainst(model, live) {
+  if (
+    !model ||
+    typeof model !== "object" ||
+    typeof model.value !== "string" ||
+    model.value.length === 0
+  ) {
+    return false;
+  }
+  const resolution = resolvesAgainst(model.value, live);
+  if (resolution) return resolution;
+  return model.liveRequired === true ? "optional-unavailable" : false;
 }

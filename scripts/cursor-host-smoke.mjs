@@ -47,18 +47,18 @@
 // source of truth to check curated ids against. `Cursor.models.list` is the
 // only authority and it needs a real API key.
 //
-// So: when CURSOR_API_KEY is set, this also asserts every curated cursor id in
-// catalogs/models-v1.json still RESOLVES against the account's catalog. Without
-// it the check SKIPS — loudly, never silently — and `--require-models` turns that
-// skip into a failure so a scheduled job holding the secret cannot quietly
-// degrade into testing nothing. Same trap agent-smoke.mjs's `--require` exists for.
+// So: when CURSOR_API_KEY is set, this asserts every required curated cursor id
+// still RESOLVES against the account's catalog. A `liveRequired` compatibility
+// row is allowed to be absent because availability is account-dependent, but is
+// still verified when offered. Without a key the check SKIPS — loudly, never
+// silently — and `--require-models` turns that skip into a failure so a scheduled
+// job holding the secret cannot quietly degrade into testing nothing.
 //
 // "Resolves", not "is offered verbatim": the catalog curates `grok-4.5` as a
 // LEVEL-FREE base, and the adapter completes such a base against this same live
 // catalog before spawning (applyCursorReasoning), so a suffixed
-// `grok-4.5-…` counts as resolvable. Today the bare id IS offered, so nothing is
-// completed in practice — see resolvesAgainst in ./cursor-curated-ids.mjs for the
-// rule and for why the gate must not depend on that staying true.
+// `grok-4.5-…` counts as resolvable for an account that still exposes that
+// compatibility family. See qualifiesAgainst in ./cursor-curated-ids.mjs.
 //
 // The env var is the ONLY source. The app's own store (`<userData>/secrets.json`,
 // which agent-smoke.mjs reaches via ZEROS_SECRETS_FILE) holds safeStorage-
@@ -84,7 +84,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { resolvesAgainst } from "./cursor-curated-ids.mjs";
+import { qualifiesAgainst } from "./cursor-curated-ids.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TIMEOUT_MS = 30000;
@@ -116,23 +116,23 @@ function resolveCursorKey() {
 
 /** Assertion failures collected from responses, reported together by finish().
  *  Declared up here rather than with the other per-run state because
- *  curatedCursorIds() below pushes to it — a `const` read from a function must
+ *  curatedCursorModels() below pushes to it — a `const` read from a function must
  *  not sit in its own TDZ if that function is ever called earlier than today. */
 const problems = [];
 
-/** Curated cursor ids the account must still offer, or `null` when the catalog
- *  could not be read at all.
+/** Curated cursor records to qualify against this account, or `null` when the
+ *  catalog could not be read at all.
  *
  *  Never a silent `[]`: an unreadable catalog and an empty one both make the
  *  comparison below vacuous, and a gate that compares nothing has to say so
  *  rather than printing "verified". `null` keeps "we could not look" reportable
  *  as its own cause instead of masquerading as "nothing to check". */
-function curatedCursorIds() {
+function curatedCursorModels() {
   try {
     const cat = JSON.parse(
       readFileSync(path.join(ROOT, "catalogs", "models-v1.json"), "utf-8"),
     );
-    return (cat.families?.cursor ?? []).map((m) => m.value).filter(Boolean);
+    return Array.isArray(cat.families?.cursor) ? cat.families.cursor : [];
   } catch (err) {
     problems.push(
       `could not read catalogs/models-v1.json: ${err?.message ?? err}`,
@@ -386,7 +386,7 @@ child.stdout.on("data", (chunk) => {
                 "inconclusive, so the curated-id check could not run.",
             );
           } else {
-            const curated = curatedCursorIds();
+            const curated = curatedCursorModels();
             // An empty curated list is a FAILURE, not a quiet no-op: the loop
             // below would compare nothing while finish() still printed
             // "Curated cursor model ids verified". Catches the family being
@@ -399,12 +399,18 @@ child.stdout.on("data", (chunk) => {
               );
             }
             let completed = 0;
-            for (const id of curated ?? []) {
-              const usable = resolvesAgainst(id, live);
+            let optionalUnavailable = 0;
+            for (const model of curated ?? []) {
+              const id = model?.value;
+              const usable = qualifiesAgainst(model, live);
               if (usable === "suffixed") completed++;
+              if (usable === "optional-unavailable") {
+                optionalUnavailable++;
+                continue;
+              }
               if (!usable) {
                 problems.push(
-                  `curated cursor model "${id}" is NOT offered by this account, and no ` +
+                  `required curated cursor model "${String(id)}" is NOT offered by this account, and no ` +
                     `suffixed variant of it is either (live: ${[...live].join(", ")}). ` +
                     "Cursor validates model picks, so the pick resolves to nothing this " +
                     "account can run. Either it was retired (drop it from " +
@@ -417,9 +423,16 @@ child.stdout.on("data", (chunk) => {
             // a glance instead of an assertion the reader has to take on trust.
             // Level-free bases are called out separately because "present" means
             // something weaker for them — a variant exists, not the id itself.
+            const required =
+              curated?.filter((model) => model?.liveRequired !== true).length ??
+              0;
+            const optional = (curated?.length ?? 0) - required;
             modelNote =
-              `all ${curated?.length ?? 0} curated id(s) resolvable, of ${live.size} ` +
+              `all ${required} required curated id(s) resolvable, of ${live.size} ` +
               `offered by the account (${cursorKey.from})` +
+              (optional
+                ? `; ${optionalUnavailable}/${optional} account-qualified optional unavailable`
+                : "") +
               (completed ? `; ${completed} via a suffixed variant` : "");
           }
         }

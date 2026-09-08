@@ -11,13 +11,13 @@
 // Protocol summary (verified against the codex version pinned in
 // `package.json#codexProtocolVersion`; generated bindings at
 // `./generated/v2/`):
-//   - Client → Server requests: 128 generated methods. This harness wraps the
+//   - Client → Server requests: 156 generated methods. This harness wraps the
 //     interactive lifecycle directly and keeps the rest available only to
 //     typed, Codex-only engine integrations.
 //   - Client → Server notifications: only `initialized` (post-init).
 //   - Server → Client requests: all 11 methods are deliberately handled or
 //     provider-conditional; none can silently strand the app-server.
-//   - Server → Client notifications: 72 generated events including thread/started,
+//   - Server → Client notifications: 83 generated events including thread/started,
 //     turn/{started,completed}, item/{started,completed}, item/agentMessage/
 //     delta, item/reasoning/textDelta, item/commandExecution/outputDelta,
 //     item/fileChange/patchUpdated, error, account/{updated,rateLimits/
@@ -1501,10 +1501,7 @@ export function buildMcpServerOverrides(
       if (s.headers && Object.keys(s.headers).length > 0) {
         args.push("-c", `${base}.http_headers=${tomlInlineTable(s.headers)}`);
       }
-      if (
-        s.headersFromEnv &&
-        Object.keys(s.headersFromEnv).length > 0
-      ) {
+      if (s.headersFromEnv && Object.keys(s.headersFromEnv).length > 0) {
         args.push(
           "-c",
           `${base}.env_http_headers=${tomlInlineTable(s.headersFromEnv)}`,

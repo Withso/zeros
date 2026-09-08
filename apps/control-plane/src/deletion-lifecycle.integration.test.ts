@@ -181,8 +181,20 @@ d("account, organization, and operator deletion lifecycle", () => {
     return { response, body };
   };
 
-  const makeDue = (requestId: string) =>
-    pool.query(
+  const makeDue = async (requestId: string) => {
+    // Cases retain their rows in this schema. Mature retries from an earlier
+    // case must not steal this case's tick(1) or private claim() calls.
+    await pool.query(
+      `UPDATE deletion_requests
+       SET next_attempt_at = GREATEST(
+             next_attempt_at,
+             now() + interval '1 hour'
+           )
+       WHERE id <> $1
+         AND state IN ('scheduled', 'purging', 'provider_deleting', 'failed')`,
+      [requestId],
+    );
+    await pool.query(
       `UPDATE deletion_requests
        SET requested_at = requested_at - interval '31 days',
            purge_after = purge_after - interval '31 days',
@@ -190,6 +202,7 @@ d("account, organization, and operator deletion lifecycle", () => {
        WHERE id = $1`,
       [requestId],
     );
+  };
 
   const succeedPurgeCommand = async (requestId: string) => {
     const request = await pool.query<{ purge_command_id: string | null }>(
@@ -1836,6 +1849,20 @@ d("account, organization, and operator deletion lifecycle", () => {
   });
 
   it("fences a reclaimed same-worker deletion lease with a monotonic revision", async () => {
+    // Model overdue work left by a prior case.
+    // The fixture must isolate the request being exercised from that backlog.
+    const previousOwner = await signup("PreviousDeletionLease");
+    const previous = await scheduleAccount(previousOwner);
+    expect(previous.response.status).toBe(202);
+    await makeDue(previous.body.deletion.id);
+    await pool.query(
+      `UPDATE deletion_requests
+       SET requested_at = requested_at - interval '1 day',
+           purge_after = purge_after - interval '1 day'
+       WHERE id = $1`,
+      [previous.body.deletion.id],
+    );
+
     const owner = await signup("DeletionLeaseFence");
     const organizationId = await createOrganization(
       owner,
@@ -1853,6 +1880,7 @@ d("account, organization, and operator deletion lifecycle", () => {
       method: "DELETE",
       body: { confirmation: "Lease Fence Company" },
     });
+    expect(scheduled.status).toBe(202);
     const body = (await scheduled.json()) as DeletionResponse;
     await makeDue(body.deletion.id);
     const processor = new DeletionLifecycleProcessor(pool, {
@@ -1860,18 +1888,23 @@ d("account, organization, and operator deletion lifecycle", () => {
       logger: { warn: () => undefined, error: () => undefined },
     });
     expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(`SELECT state FROM deletion_requests WHERE id = $1`, [
+        body.deletion.id,
+      ]),
+    ).resolves.toMatchObject({ rows: [{ state: "provider_deleting" }] });
     await pool.query(
       `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
       [body.deletion.id],
     );
 
-    type InternalClaim = { lease_revision: string | number };
+    type InternalClaim = { id: string; lease_revision: string | number };
     const controls = processor as unknown as {
       claim(): Promise<InternalClaim | null>;
       release(request: InternalClaim, delayMs: number): Promise<void>;
     };
     const first = await controls.claim();
-    expect(first).not.toBeNull();
+    expect(first).toMatchObject({ id: body.deletion.id });
     await pool.query(
       `UPDATE deletion_requests
        SET lease_expires_at = now() - interval '1 second', next_attempt_at = now()
@@ -1879,7 +1912,7 @@ d("account, organization, and operator deletion lifecycle", () => {
       [body.deletion.id],
     );
     const second = await controls.claim();
-    expect(second).not.toBeNull();
+    expect(second).toMatchObject({ id: body.deletion.id });
     expect(Number(second!.lease_revision)).toBeGreaterThan(
       Number(first!.lease_revision),
     );
@@ -1929,19 +1962,6 @@ d("account, organization, and operator deletion lifecycle", () => {
     expect(scheduled.status).toBe(202);
     const body = (await scheduled.json()) as DeletionResponse;
     await makeDue(body.deletion.id);
-    // This file deliberately retains rows across tests. On slower runners,
-    // short backoffs from earlier cases can mature and make tick(1) claim an
-    // unrelated request instead of the request whose fence is under test.
-    await pool.query(
-      `UPDATE deletion_requests
-       SET next_attempt_at = GREATEST(
-             next_attempt_at,
-             now() + interval '1 hour'
-           )
-       WHERE id <> $1
-         AND state IN ('scheduled', 'purging', 'provider_deleting', 'failed')`,
-      [body.deletion.id],
-    );
     const processor = new DeletionLifecycleProcessor(pool, {
       workerId: "test-organization-fence-purge",
       logger: { warn: () => undefined, error: () => undefined },
