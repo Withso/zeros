@@ -3,14 +3,25 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { scanNativeMcpConfigs } from "../mcp-scan";
+import {
+  codexPluginMcpServerNames,
+  scanCodexPluginMcp,
+  scanNativeMcpConfigs,
+} from "../mcp-scan";
 
 let home: string;
+// $CODEX_HOME wins over the scanned home dir in production, which is correct
+// there and would make these fixtures read the developer's real plugin cache
+// here. Clear it for the duration.
+const realCodexHome = process.env.CODEX_HOME;
 beforeEach(() => {
   home = mkdtempSync(path.join(tmpdir(), "zeros-mcp-scan-"));
+  delete process.env.CODEX_HOME;
 });
 afterEach(() => {
   rmSync(home, { recursive: true, force: true });
+  if (realCodexHome === undefined) delete process.env.CODEX_HOME;
+  else process.env.CODEX_HOME = realCodexHome;
 });
 
 function write(rel: string, content: string) {
@@ -141,5 +152,105 @@ describe("scanNativeMcpConfigs", () => {
     expect(bySource(out, "cursor").exists).toBe(true);
     expect(bySource(out, "cursor").warning).toMatch(/parse/i);
     expect(bySource(out, "codex").warning).toMatch(/parse/i);
+  });
+});
+
+describe("scanCodexPluginMcp — connectors installed from the Codex sidebar", () => {
+  const pluginManifest = (rel: string, servers: unknown) =>
+    write(
+      path.join(".codex/plugins/cache", rel, ".mcp.json"),
+      JSON.stringify({ mcpServers: servers }),
+    );
+
+  it("finds a server a plugin declares but config.toml never mentions", () => {
+    // This is the whole reason the source exists: `cloudflare-api` lives in the
+    // plugin bundle, so a config.toml-only scan reports nothing and the user is
+    // left with no way to adopt a server they are actively using.
+    pluginManifest("openai-curated-remote/cloudflare/0.1.2", {
+      "cloudflare-api": { type: "http", url: "https://mcp.cloudflare.com/mcp" },
+    });
+
+    const found = scanCodexPluginMcp(home);
+    expect(found.exists).toBe(true);
+    expect(found.servers).toEqual([
+      {
+        name: "cloudflare-api",
+        transport: "http",
+        url: "https://mcp.cloudflare.com/mcp",
+      },
+    ]);
+  });
+
+  it("skips a launcher whose command resolves against the plugin directory", () => {
+    // A relative command needs the manifest's `cwd`, which a Zeros
+    // registration cannot carry — importing it would create a server that
+    // cannot start.
+    pluginManifest("openai-bundled/computer-use/1.0.1", {
+      "computer-use": { command: "./bin/launcher", args: ["mcp"], cwd: "." },
+      absolute: { command: "/usr/local/bin/real" },
+    });
+
+    expect(scanCodexPluginMcp(home).servers.map((s) => s.name)).toEqual([
+      "absolute",
+    ]);
+  });
+
+  it("reads one version per plugin, not every cached copy", () => {
+    pluginManifest("m/dup/1.0.0", { dup: { type: "http", url: "https://a" } });
+    pluginManifest("m/dup/2.0.0", { dup: { type: "http", url: "https://b" } });
+
+    expect(scanCodexPluginMcp(home).servers).toHaveLength(1);
+  });
+
+  it("is absent, not an error, when no plugin cache exists", () => {
+    const found = scanCodexPluginMcp(home);
+    expect(found.exists).toBe(false);
+    expect(found.servers).toEqual([]);
+    expect(found.warning).toBeUndefined();
+    // An empty plugin cache must not add a noise row to the import dialog.
+    expect(
+      scanNativeMcpConfigs(home).some((s) => s.source === "codex-plugins"),
+    ).toBe(false);
+  });
+
+  it("joins the import list once it has something to offer", () => {
+    pluginManifest("openai-curated-remote/linear/5.0.1", {
+      linear: { type: "http", url: "https://mcp.linear.app/mcp" },
+    });
+
+    const source = scanNativeMcpConfigs(home).find(
+      (s) => s.source === "codex-plugins",
+    );
+    expect(source?.label).toBe("Codex plugins");
+    expect(source?.servers.map((s) => s.name)).toEqual(["linear"]);
+  });
+});
+
+describe("codexPluginMcpServerNames — the disable list", () => {
+  it("includes launchers the import scan deliberately drops", () => {
+    write(
+      ".codex/plugins/cache/openai-bundled/computer-use/1.0.1/.mcp.json",
+      JSON.stringify({
+        mcpServers: {
+          "computer-use": { command: "./bin/launcher", cwd: "." },
+          "cloudflare-api": { type: "http", url: "https://mcp.cloudflare.com" },
+        },
+      }),
+    );
+
+    // Importing wants a server that can start, so a relative launcher is not
+    // offered. Disabling only needs the name — skipping it would leave the
+    // server running, which is the opposite of the point.
+    expect(scanCodexPluginMcp(home).servers.map((s) => s.name)).toEqual([
+      "cloudflare-api",
+    ]);
+    expect(codexPluginMcpServerNames(home).sort()).toEqual([
+      "cloudflare-api",
+      "computer-use",
+    ]);
+  });
+
+  it("is empty, not an error, without a plugin cache", () => {
+    expect(codexPluginMcpServerNames(home)).toEqual([]);
   });
 });

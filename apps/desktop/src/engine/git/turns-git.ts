@@ -149,7 +149,11 @@ export function archiveSnapshotRef(workspaceId: string): string {
 export async function snapshotWorkingTree(
   cwd: string,
   ref: string,
-  opts: { parent?: string; forceAddPaths?: string[] } = {},
+  opts: {
+    parent?: string;
+    forceAddPaths?: string[];
+    excludePaths?: string[];
+  } = {},
 ): Promise<string | null> {
   try {
     const dir = await gitDir(cwd);
@@ -222,6 +226,21 @@ export async function snapshotWorkingTree(
             "--",
             ...forcedPathspecs.slice(offset, offset + 100),
           ],
+          { env },
+        );
+      }
+      for (const candidate of opts.excludePaths ?? []) {
+        const normalized = nodePath.normalize(candidate);
+        if (
+          !candidate ||
+          nodePath.isAbsolute(normalized) ||
+          normalized === ".." ||
+          normalized.startsWith(`..${nodePath.sep}`)
+        )
+          continue;
+        await runGit(
+          cwd,
+          ["update-index", "--force-remove", "--", normalized],
           { env },
         );
       }

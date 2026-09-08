@@ -20,6 +20,20 @@
 // ──────────────────────────────────────────────────────────
 
 import { createHash, randomUUID } from "node:crypto";
+import {
+  extensionQuerySchema,
+  saveZerosSkillSchema,
+  removeZerosSkillSchema,
+  type ExtensionInventory,
+  type ExtensionQuery,
+} from "@zeros/protocol/agent-extensions";
+import { nativeExtensionInventory } from "../agents/native-extensions";
+import { syncPersonalPreferences } from "../settings/preferences";
+import {
+  effectiveZerosSkills,
+  saveZerosSkill,
+  removeZerosSkill,
+} from "../agents/zeros-skills";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
@@ -182,6 +196,10 @@ import {
   type WritableLayer,
 } from "../settings/ops";
 import { getTeamContextMeta, setTeamContext } from "../settings/team-context";
+import {
+  personalRepoRoot,
+  personalWorkspaceRoot,
+} from "../settings/personal-repo";
 import {
   designDocumentIdForFrame,
   forgetWorkspaceDesignApi,
@@ -1570,6 +1588,14 @@ export class WorkspaceService {
   /** Live accessor for the engine's MCP gateway (created lazily after this
    *  service), wired by the engine so the mcp.gateway.* ops can reach it. */
   private gatewayAccessor: (() => McpGateway | null) | null = null;
+  private nativeExtensionReader:
+    | ((query: ExtensionQuery) => Promise<ExtensionInventory | null>)
+    | null = null;
+  setNativeExtensionReader(
+    reader: (query: ExtensionQuery) => Promise<ExtensionInventory | null>,
+  ): void {
+    this.nativeExtensionReader = reader;
+  }
   setGatewayAccessor(fn: () => McpGateway | null): void {
     this.gatewayAccessor = fn;
   }
@@ -1859,7 +1885,7 @@ export class WorkspaceService {
     this.assertWorkspaceProcessStartAllowed(ws);
     const command = await resolveSetupCommand({
       repoRoot: ws.repoRoot,
-      inlineCommand: resolveRepoScript(ws.repoRoot, "setup") || undefined,
+      inlineCommand: resolveRepoScript(ws.path, "setup") || undefined,
       allowAutoSetup: true,
     });
     if (!command) return false;
@@ -1955,6 +1981,8 @@ export class WorkspaceService {
   settingsRepoRoots(): string[] {
     const roots = new Set<string>([this.root]);
     try {
+      for (const workspace of listWorkspaces({ archived: false }))
+        roots.add(workspace.path);
       for (const p of listProjects(listWorkspaces({}))) {
         if (p.repoRoot) roots.add(p.repoRoot);
       }
@@ -4068,7 +4096,8 @@ export class WorkspaceService {
         }
         const command = await resolveSetupCommand({
           repoRoot,
-          inlineCommand: resolveRepoScript(repoRoot, "setup") || undefined,
+          inlineCommand:
+            resolveRepoScript(ws?.path ?? repoRoot, "setup") || undefined,
           allowAutoSetup: true,
         });
         // omitLog: the chat's provenance row needs `hasCommand` (to tell
@@ -4200,7 +4229,7 @@ export class WorkspaceService {
             message: "Not a run session id.",
           });
         }
-        const action = resolveRunActions(repoRoot).find(
+        const action = resolveRunActions(ws?.path ?? repoRoot).find(
           (a) => a.id === actionId,
         );
         if (!action || !this.runStarter) {
@@ -4416,6 +4445,56 @@ export class WorkspaceService {
             : {}),
         });
       }
+      case "settings.syncPreferences": {
+        if (remote)
+          throw new Error("Personal preferences belong to this device.");
+        return syncPersonalPreferences(
+          params.legacy ?? {},
+          params.changes ?? {},
+        );
+      }
+      case "extensions.list":
+      case "skills.listZeros":
+      case "skills.saveZeros":
+      case "skills.removeZeros": {
+        if (remote)
+          throw new Error(
+            "Local customization is available only on this device.",
+          );
+        const requestedRoot = optStr(params, "repoRoot");
+        if (requestedRoot) this.assertSettingsRepoRoot(requestedRoot, false);
+        const repoRoot = requestedRoot
+          ? personalRepoRoot(requestedRoot)
+          : undefined;
+        if (repoRoot) this.assertSettingsRepoRoot(repoRoot, false);
+        if (op === "skills.listZeros") return effectiveZerosSkills(repoRoot);
+        if (op === "skills.saveZeros") {
+          const input = saveZerosSkillSchema.parse({ ...params, repoRoot });
+          return saveZerosSkill(input, repoRoot, input.expectedRevision);
+        }
+        if (op === "skills.removeZeros") {
+          const input = removeZerosSkillSchema.parse({ ...params, repoRoot });
+          removeZerosSkill(input.name, repoRoot, input.expectedRevision);
+          return { ok: true };
+        }
+        const query = extensionQuerySchema.parse({ ...params, repoRoot });
+        let runtimeWarning: string | undefined;
+        if (this.nativeExtensionReader) {
+          try {
+            const result = await this.nativeExtensionReader(query);
+            if (result) return result;
+          } catch {
+            runtimeWarning =
+              "The native inventory is unavailable. Showing local declarations; use Refresh to retry.";
+          }
+        }
+        const result = nativeExtensionInventory(query);
+        if (runtimeWarning) {
+          result.warnings.push(runtimeWarning);
+          result.partial = true;
+        }
+        return result;
+      }
       case "settings.read": {
         const layer = reqStr(params, "layer");
         if (!(READABLE_LAYERS as readonly string[]).includes(layer)) {
@@ -4424,7 +4503,13 @@ export class WorkspaceService {
             message: `Unknown settings layer '${layer}'.`,
           });
         }
-        const repoRoot = optStr(params, "repoRoot");
+        const requestedRoot = optStr(params, "repoRoot");
+        if (requestedRoot) this.assertSettingsRepoRoot(requestedRoot, remote);
+        const repoRoot = requestedRoot
+          ? layer === "workspace-local"
+            ? personalWorkspaceRoot(requestedRoot)
+            : personalRepoRoot(requestedRoot)
+          : undefined;
         if (repoRoot) this.assertSettingsRepoRoot(repoRoot, remote);
         const result = this.settingsOp(() =>
           opSettingsRead(layer as ReadableLayer, repoRoot),
@@ -4443,7 +4528,13 @@ export class WorkspaceService {
             message: `Settings layer '${layer}' is not writable.`,
           });
         }
-        const repoRoot = optStr(params, "repoRoot");
+        const requestedRoot = optStr(params, "repoRoot");
+        if (requestedRoot) this.assertSettingsRepoRoot(requestedRoot, remote);
+        const repoRoot = requestedRoot
+          ? layer === "workspace-local"
+            ? personalWorkspaceRoot(requestedRoot)
+            : personalRepoRoot(requestedRoot)
+          : undefined;
         if (repoRoot) this.assertSettingsRepoRoot(repoRoot, remote);
         const patch = params.patch;
         if (
@@ -4479,11 +4570,16 @@ export class WorkspaceService {
         // Reject remote Design writes before projecting privileged local
         // settings. This prevents malformed files and live territory identity
         // from becoming a remote settings oracle.
-        if (remote && Object.prototype.hasOwnProperty.call(patch, "design")) {
+        if (
+          remote &&
+          ["design", "preferences", "preferences_version"].some((key) =>
+            Object.prototype.hasOwnProperty.call(patch, key),
+          )
+        ) {
           throw new GitError({
             code: "SETTINGS_REMOTE_KEY_DENIED",
             message:
-              "Remote clients cannot write settings keys: design. Edit this on the desktop.",
+              "Remote clients cannot write settings keys: design or personal preferences. Edit this on the desktop.",
           });
         }
         const designSettingsPreview =
@@ -4499,14 +4595,13 @@ export class WorkspaceService {
         const affectedDesignWorkspaces = hasDesignDirectoryPatch
           ? listWorkspaces({ archived: false }).filter((candidate) => {
               if (!repoRoot) return layer === "user";
-              if (layer === "workspace-local") {
+              if (layer === "workspace-local")
                 return (
-                  nodePath.resolve(candidate.path) ===
-                  nodePath.resolve(repoRoot)
+                  personalWorkspaceRoot(candidate.path) ===
+                  personalWorkspaceRoot(repoRoot)
                 );
-              }
               return (
-                nodePath.resolve(candidate.repoRoot) ===
+                personalRepoRoot(candidate.repoRoot) ===
                   nodePath.resolve(repoRoot) ||
                 nodePath.resolve(candidate.path) === nodePath.resolve(repoRoot)
               );
@@ -4686,7 +4781,13 @@ export class WorkspaceService {
             message: `Settings layer '${layer}' is not writable.`,
           });
         }
-        const repoRoot = optStr(params, "repoRoot");
+        const requestedRoot = optStr(params, "repoRoot");
+        if (requestedRoot) this.assertSettingsRepoRoot(requestedRoot, remote);
+        const repoRoot = requestedRoot
+          ? layer === "workspace-local"
+            ? personalWorkspaceRoot(requestedRoot)
+            : personalRepoRoot(requestedRoot)
+          : undefined;
         if (repoRoot) this.assertSettingsRepoRoot(repoRoot, remote);
         const text = params.text;
         if (typeof text !== "string") {
@@ -4713,13 +4814,13 @@ export class WorkspaceService {
         const rawAffected = listWorkspaces({ archived: false }).filter(
           (candidate) => {
             if (!repoRoot) return layer === "user";
-            if (layer === "workspace-local") {
+            if (layer === "workspace-local")
               return (
-                nodePath.resolve(candidate.path) === nodePath.resolve(repoRoot)
+                personalWorkspaceRoot(candidate.path) ===
+                personalWorkspaceRoot(repoRoot)
               );
-            }
             return (
-              nodePath.resolve(candidate.repoRoot) ===
+              personalRepoRoot(candidate.repoRoot) ===
                 nodePath.resolve(repoRoot) ||
               nodePath.resolve(candidate.path) === nodePath.resolve(repoRoot)
             );

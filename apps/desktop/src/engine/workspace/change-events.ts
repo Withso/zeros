@@ -24,6 +24,9 @@ const PROJECT_MUTATIONS = new Set([
 ]);
 
 const SETTINGS_MUTATIONS = new Set([
+  "settings.syncPreferences",
+  "skills.saveZeros",
+  "skills.removeZeros",
   "settings.write",
   "settings.writeRaw",
   "settings.migrateLegacy",

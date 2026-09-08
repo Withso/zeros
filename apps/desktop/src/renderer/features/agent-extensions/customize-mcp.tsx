@@ -725,8 +725,8 @@ export function CustomizeMcpSection({
     );
 
   const scopeBlurb = isUser
-    ? "Tools every agent can call, in every repo. Changes apply to each agent's next chat — no restart needed."
-    : `Tools available only in ${scope.kind === "repo" ? scope.project.name : "this repo"}. Saved on this Mac (never committed); changes apply to each agent's next chat here.`;
+    ? "MCP servers managed in Zeros apply to every local repo. View native configurations under each agent's tab, or import a server here to manage it in Zeros. Changes apply to new chats."
+    : `MCP servers for ${scope.kind === "repo" ? scope.project.name : "this repo"} and its local workspaces. Saved privately on this device; changes apply to new chats here.`;
 
   return (
     <div className="flex flex-col gap-4">

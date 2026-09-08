@@ -1262,3 +1262,103 @@ describe("CursorSdkAdapter — model discovery never blocks session start", () =
     }
   });
 });
+
+describe("CursorSdkAdapter — recovers when Cursor has retired the picked model", () => {
+  // The real SDK wording, observed 2026-09-06 on a chat persisted on grok-4.5
+  // after the account's catalog moved to grok-4.6. Discovery is detached from
+  // the session path, so with no catalog yet the stale pick reaches the SDK.
+  const REJECTION =
+    "Cannot use this model: grok-4.5. Available models: default, grok-4.6, composer-2.5, composer-2, gpt-5.5. Use Cursor.models.list() to discover valid selections.";
+  const ENV = { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.5" };
+
+  it("newSession: retries Agent.create once on a model the account lists", async () => {
+    createSpy
+      .mockReset()
+      .mockRejectedValueOnce(new Error(REJECTION))
+      .mockResolvedValue(fakeAgent);
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: ENV });
+
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    expect(createSpy.mock.calls[0][0]).toMatchObject({
+      model: { id: "grok-4.5" },
+    });
+    // The rejection's own list seeds the catalog: the preferred fallback that
+    // the account actually offers, never the "default" auto-select placeholder.
+    expect(createSpy.mock.calls[1][0]).toMatchObject({
+      model: { id: "composer-2.5" },
+    });
+    // The session keeps the recovered model for its turns.
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    const [, sendOpts] = sendSpy.mock.calls[0];
+    expect(sendOpts.model).toEqual({ id: "composer-2.5" });
+  });
+
+  it("loadSession: retries Agent.resume once instead of failing the reopen", async () => {
+    resumeSpy
+      .mockReset()
+      .mockRejectedValueOnce(new Error(REJECTION))
+      .mockResolvedValue(fakeAgent);
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    const res = await adapter.loadSession({
+      sessionId: "prior-agent-id",
+      cwd: "/tmp/proj",
+      env: ENV,
+    });
+
+    expect(resumeSpy).toHaveBeenCalledTimes(2);
+    expect(resumeSpy.mock.calls[1][0]).toBe("prior-agent-id");
+    expect(resumeSpy.mock.calls[1][1]).toMatchObject({
+      model: { id: "composer-2.5" },
+    });
+    // A model rejection is not a missing agent: no fresh agent is seeded.
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(res).toMatchObject({ resumedFresh: false });
+  });
+
+  it("does not retry — or reclassify — a failure that is not about the model", async () => {
+    createSpy.mockReset().mockRejectedValue(new Error("401 Unauthorized"));
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    await expect(
+      adapter.newSession({ cwd: "/tmp/proj", env: ENV }),
+    ).rejects.toMatchObject({ failure: { kind: "auth-required" } });
+    expect(createSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("gives up after one retry and tells the user which model to change", async () => {
+    createSpy.mockReset().mockRejectedValue(new Error(REJECTION));
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    await expect(
+      adapter.newSession({ cwd: "/tmp/proj", env: ENV }),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "protocol-error",
+        stage: "newSession",
+        advice: expect.stringContaining('"grok-4.5"'),
+      },
+    });
+    expect(createSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("still trusts a live catalog that DOES offer the pick (no spurious retry)", async () => {
+    modelsListSpy.mockResolvedValue([
+      { id: "grok-4.6", displayName: "Grok 4.6" },
+      { id: "composer-2.5", displayName: "Composer 2.5" },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.6" },
+    });
+
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect(createSpy.mock.calls[0][0]).toMatchObject({
+      model: { id: "grok-4.6" },
+    });
+  });
+});

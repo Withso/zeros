@@ -20,7 +20,14 @@ import { isDevRuntime } from "../../../runtime";
 
 import { AgentFailureError } from "../../types";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
+import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
+import {
+  extractUnavailableModelId,
+  isModelUnavailableError,
+  modelUnavailableAdvice,
+  parseAvailableModelsFromError,
+} from "../shared/model-availability";
 import type {
   AgentAdapter,
   AgentAdapterContext,
@@ -1344,6 +1351,81 @@ export class CursorSdkAdapter implements AgentAdapter {
     return null;
   }
 
+  /** Fold a "Cannot use this model: <id>. Available models: …" rejection from
+   *  `Agent.create`/`Agent.resume` back into the account's model state so the
+   *  next resolve lands on a model that exists. Returns true when the error WAS
+   *  a model rejection (caller re-resolves and retries once), false for any
+   *  other failure (caller rethrows untouched).
+   *
+   *  Why this exists: catalog discovery is deliberately detached from the
+   *  session critical path (see startModelDiscoveryForSession), so the FIRST
+   *  session in a process resolves against no catalog and passes the user's pick
+   *  through untouched. A pick that Cursor has since retired — a persisted chat
+   *  on `grok-4.5` after the account moved to `grok-4.6`, observed 2026-09 — then
+   *  throws on every reopen, and resolveModel never learns why. The rejection
+   *  itself carries the live list, so it is the catalog we were missing. */
+  private absorbModelRejection(
+    state: CursorModelState,
+    rejectedModelId: string,
+    message: string,
+  ): boolean {
+    if (!isModelUnavailableError(message)) return false;
+    state.deniedModels.add(rejectedModelId);
+    const named = extractUnavailableModelId(message);
+    if (named) state.deniedModels.add(named);
+    const listed = parseAvailableModelsFromError(message).filter(
+      (id) => !AUTO_SELECT_IDS.has(id.toLowerCase()),
+    );
+    if (listed.length > 0) {
+      // The provider's own list is authoritative — it just refused what the
+      // cached catalog (or the absence of one) let through.
+      state.discoveredModelIds = new Set(listed);
+    }
+    return true;
+  }
+
+  /** Run one `Agent.create`/`Agent.resume` with the resolved model, retrying
+   *  ONCE on a model rejection with a model the account offers. Anything other
+   *  than a model rejection — auth, network, a missing agent — propagates
+   *  unchanged so the existing classifiers keep owning it. */
+  private async withModelRecovery<T>(
+    opts: {
+      state: CursorModelState;
+      envModel: string | undefined;
+      env: Record<string, string> | undefined;
+      modelId: string;
+      stage: "newSession" | "loadSession";
+    },
+    attempt: (modelId: string) => Promise<T>,
+  ): Promise<{ result: T; modelId: string }> {
+    try {
+      return { result: await attempt(opts.modelId), modelId: opts.modelId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!this.absorbModelRejection(opts.state, opts.modelId, message)) {
+        throw err;
+      }
+      const retryModelId = this.resolveModel(
+        opts.envModel,
+        opts.env,
+        opts.state,
+      );
+      if (
+        retryModelId === opts.modelId ||
+        opts.state.deniedModels.has(retryModelId)
+      ) {
+        throw err;
+      }
+      this.ctx.emit.onAgentStderr(
+        AGENT_ID,
+        `[cursor-sdk] ${opts.stage}: model "${opts.modelId}" is not offered ` +
+          `on this account (${message.slice(0, 160)}); retrying with ` +
+          `${retryModelId}.`,
+      );
+      return { result: await attempt(retryModelId), modelId: retryModelId };
+    }
+  }
+
   /** Lazily open (and cache) the on-disk local agent store for a cwd. The store
    *  defaults its state root to the same place the SDK writes runs, so reads
    *  see the agent's own rows. Best-effort: null when unavailable. */
@@ -1417,7 +1499,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       runtime.sdk,
     );
-    const modelId = this.resolveModel(
+    let modelId = this.resolveModel(
       opts.env?.CURSOR_MODEL,
       opts.env,
       modelState,
@@ -1426,24 +1508,39 @@ export class CursorSdkAdapter implements AgentAdapter {
     let agent: SdkAgent;
     try {
       const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
-      agent = await sdk.Agent.create({
-        apiKey,
-        model: this.modelSelection(modelId, modelState),
-        // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
-        // executor roots shell commands at `local.cwd ?? process.cwd()`; the
-        // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
-        // host-client.ts), so an un-threaded cwd must never silently fall back
-        // there and run `git` inside the engine's own repo. Top-level `cwd` is
-        // belt-and-suspenders against SDK version drift.
-        cwd: opts.cwd,
-        local: this.buildLocalOpts(
-          opts.cwd,
-          opts.env,
-          autoReviewFor(CURSOR_DEFAULT_MODE),
-        ),
-        mode: sdkModeFor(CURSOR_DEFAULT_MODE),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      });
+      // Discovery above is detached, so a retired pick can reach the SDK here;
+      // withModelRecovery turns its "Cannot use this model" into one retry on
+      // a model the account lists instead of a failed chat.
+      const created = await this.withModelRecovery(
+        {
+          state: modelState,
+          envModel: opts.env?.CURSOR_MODEL,
+          env: opts.env,
+          modelId,
+          stage: "newSession",
+        },
+        (id) =>
+          sdk.Agent.create({
+            apiKey,
+            model: this.modelSelection(id, modelState),
+            // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
+            // executor roots shell commands at `local.cwd ?? process.cwd()`; the
+            // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
+            // host-client.ts), so an un-threaded cwd must never silently fall back
+            // there and run `git` inside the engine's own repo. Top-level `cwd` is
+            // belt-and-suspenders against SDK version drift.
+            cwd: opts.cwd,
+            local: this.buildLocalOpts(
+              opts.cwd,
+              opts.env,
+              autoReviewFor(CURSOR_DEFAULT_MODE),
+            ),
+            mode: sdkModeFor(CURSOR_DEFAULT_MODE),
+            ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+          }),
+      );
+      agent = created.result;
+      modelId = created.modelId;
     } catch (err) {
       await this.finalizeRejectedSessionRuntime(runtime);
       throw this.classify(err, "newSession");
@@ -1518,7 +1615,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       runtime.sdk,
     );
-    const modelId = this.resolveModel(
+    let modelId = this.resolveModel(
       opts.env?.CURSOR_MODEL,
       opts.env,
       modelState,
@@ -1537,29 +1634,44 @@ export class CursorSdkAdapter implements AgentAdapter {
     let resumedFresh = false;
     try {
       sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
-      agent = await sdk.Agent.resume(providerResumeId, {
-        apiKey,
-        // Bind the resolved model on resume too. `Agent.resume` reconstructs
-        // the agent from Cursor's local SQLite store, which may hold NO
-        // persisted model (a cross-worktree id, a rotated cache, or a
-        // pre-SDK cursor-agent CLI id). Without an explicit model the
-        // resumed agent's internal `_model` is undefined and the next
-        // `send()` throws "Local SDK agents require an explicit `model`" —
-        // the exact error users hit on every reopened chat. `resume` takes a
-        // Partial<AgentOptions>, which accepts `model`.
-        model: this.modelSelection(modelId, modelState),
-        // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
-        // and resuming a chat in a different worktree MUST retarget it (else
-        // shells run wherever the agent was first created, or fall back to the
-        // host's process.cwd()). See resolveHostCwd in host-client.ts.
-        cwd: opts.cwd,
-        local: this.buildLocalOpts(
-          opts.cwd,
-          opts.env,
-          autoReviewFor(CURSOR_DEFAULT_MODE),
-        ),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      });
+      // A reopened chat carries the model it was created on; if Cursor has
+      // retired it since, `Agent.resume` throws "Cannot use this model" on
+      // every reopen. withModelRecovery retries once on a listed model.
+      const resumed = await this.withModelRecovery(
+        {
+          state: modelState,
+          envModel: opts.env?.CURSOR_MODEL,
+          env: opts.env,
+          modelId,
+          stage: "loadSession",
+        },
+        (id) =>
+          sdk.Agent.resume(providerResumeId, {
+            apiKey,
+            // Bind the resolved model on resume too. `Agent.resume` reconstructs
+            // the agent from Cursor's local SQLite store, which may hold NO
+            // persisted model (a cross-worktree id, a rotated cache, or a
+            // pre-SDK cursor-agent CLI id). Without an explicit model the
+            // resumed agent's internal `_model` is undefined and the next
+            // `send()` throws "Local SDK agents require an explicit `model`" —
+            // the exact error users hit on every reopened chat. `resume` takes a
+            // Partial<AgentOptions>, which accepts `model`.
+            model: this.modelSelection(id, modelState),
+            // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
+            // and resuming a chat in a different worktree MUST retarget it (else
+            // shells run wherever the agent was first created, or fall back to the
+            // host's process.cwd()). See resolveHostCwd in host-client.ts.
+            cwd: opts.cwd,
+            local: this.buildLocalOpts(
+              opts.cwd,
+              opts.env,
+              autoReviewFor(CURSOR_DEFAULT_MODE),
+            ),
+            ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+          }),
+      );
+      agent = resumed.result;
+      modelId = resumed.modelId;
     } catch (err) {
       const failure = this.classify(err, "loadSession");
       // The stored agentId is gone from Cursor's local agent store — the
@@ -1587,20 +1699,32 @@ export class CursorSdkAdapter implements AgentAdapter {
         }); starting a fresh agent in ${opts.cwd}.`,
       );
       try {
-        agent = await sdk.Agent.create({
-          apiKey,
-          model: this.modelSelection(modelId, modelState),
-          // Same cwd pinning as the primary create — the fresh fallback agent
-          // must also root at the worktree, never the host's process.cwd().
-          cwd: opts.cwd,
-          local: this.buildLocalOpts(
-            opts.cwd,
-            opts.env,
-            autoReviewFor(CURSOR_DEFAULT_MODE),
-          ),
-          mode: sdkModeFor(CURSOR_DEFAULT_MODE),
-          ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-        });
+        const created = await this.withModelRecovery(
+          {
+            state: modelState,
+            envModel: opts.env?.CURSOR_MODEL,
+            env: opts.env,
+            modelId,
+            stage: "loadSession",
+          },
+          (id) =>
+            sdk.Agent.create({
+              apiKey,
+              model: this.modelSelection(id, modelState),
+              // Same cwd pinning as the primary create — the fresh fallback agent
+              // must also root at the worktree, never the host's process.cwd().
+              cwd: opts.cwd,
+              local: this.buildLocalOpts(
+                opts.cwd,
+                opts.env,
+                autoReviewFor(CURSOR_DEFAULT_MODE),
+              ),
+              mode: sdkModeFor(CURSOR_DEFAULT_MODE),
+              ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+            }),
+        );
+        agent = created.result;
+        modelId = created.modelId;
         resumedFresh = true;
       } catch (createErr) {
         await this.finalizeRejectedSessionRuntime(runtime);
@@ -2335,15 +2459,34 @@ export class CursorSdkAdapter implements AgentAdapter {
       cwd,
       ...(additionalDirs.length > 0 ? { dirs: [cwd, ...additionalDirs] } : {}),
       ...(autoReview ? { autoReview: true } : {}),
-      // Load the user's EXISTING Cursor settings layers from disk — their
-      // ~/.cursor/mcp.json + project .cursor/mcp.json MCP servers, repo rules,
-      // team/MDM/plugin layers. Without this the @cursor/sdk loads ONLY the
-      // servers we pass inline ("Without local.settingSources, only inline
-      // servers are loaded" — cursor.com/docs/sdk/typescript), so anything the
-      // user already configured in Cursor would silently NOT apply inside
-      // Zeros. Mirrors the Claude adapter's settingSources:["user","project",
-      // "local"]. Zeros' own injected mcpServers still win on name collision.
-      settingSources: ["user", "project", "team", "mdm", "plugins"],
+      // Ambient Cursor settings layers to load from disk. These carry repo
+      // rules and org policy — and, unavoidably, MCP servers.
+      //
+      // Native MCP pass-through is OFF (adapters/shared/mcp-passthrough.ts),
+      // but Cursor is the one provider with no MCP-only lever: `@cursor/sdk`
+      // exposes `settingSources` and nothing finer, so every layer is
+      // all-or-nothing across MCP AND rules. Dropping them all would enforce
+      // the policy exactly ("Without local.settingSources, only inline servers
+      // are loaded" — cursor.com/docs/sdk/typescript) and take repo rules and
+      // org policy down with it — a worse regression than the one being fixed,
+      // and one nobody asked for.
+      //
+      // So the layers are split by what they are FOR:
+      //   • dropped — `user` (~/.cursor/mcp.json) and `plugins`, the personal
+      //     "installed it once, now it is in every Zeros chat" sources that
+      //     motivated this policy. Their non-MCP content is personal
+      //     preference Zeros already owns.
+      //   • kept — `project` (repo rules, AGENTS.md) and `team`/`mdm` (org
+      //     policy an admin deliberately administers).
+      //
+      // Known residue: a repo's own committed `.cursor/mcp.json`, and a
+      // team/MDM-administered server, still reach Cursor. Both are declared by
+      // someone who meant to declare them for this repo or org, and both are
+      // already offered by the MCP import scan. Closing them needs an
+      // MCP-scoped option from `@cursor/sdk` that does not exist yet.
+      settingSources: nativeMcpPassthroughEnabled()
+        ? ["user", "project", "team", "mdm", "plugins"]
+        : ["project", "team", "mdm"],
     };
     if (env?.CURSOR_SANDBOX === "1") {
       local.sandboxOptions = { enabled: true };
@@ -2479,6 +2622,23 @@ export function classifyCursorSdkError(
       stage,
       agentId: AGENT_ID,
       advice: "Cursor is rate-limiting requests. Try again shortly.",
+    });
+  }
+  // The SDK refused the model id itself ("Cannot use this model: <id>.
+  // Available models: …"). create/resume already retried once on a listed
+  // model (withModelRecovery); reaching here means even that was refused, or
+  // the rejection came mid-turn. Terminal, but the user must learn WHICH pill
+  // to change — the toast drops `message`, so the fix travels as `advice`.
+  if (isModelUnavailableError(message)) {
+    return new AgentFailureError({
+      kind: "protocol-error",
+      message: `cursor-sdk ${stage} failed: ${message}`,
+      stage,
+      agentId: AGENT_ID,
+      advice: modelUnavailableAdvice(
+        "Cursor",
+        extractUnavailableModelId(message),
+      ),
     });
   }
   const isAuth =

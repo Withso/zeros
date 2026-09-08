@@ -7,7 +7,7 @@
 // which one is active. This section shows every recognized folder in the main
 // checkout — a repo can legitimately hold several after a copy-paste from
 // another repo or a monorepo migration — lets the user pick the active one
-// (written to the committed `.zeros/settings.toml`, the team default), and
+// (written to the personal `.zeros/settings.local.toml`), and
 // renames the active folder (git mv + pointer, one commit, engine-refused
 // while live design-mode workspaces exist).
 //
@@ -76,7 +76,7 @@ export function DesignSection({
   const resolved = useResolvedSettings(project.repoRoot);
   // The pointer is the TEAM default, so it edits the COMMITTED repo layer —
   // unlike Paths' workspaces.path, which is deliberately per-machine.
-  const repoLayer = useSettingsLayer("repo", project.repoRoot);
+  const repoLayer = useSettingsLayer("repo-local", project.repoRoot);
   const pointer = pickPointer({
     effective: resolved.resolved?.effective,
     sources: resolved.resolved?.sources,
@@ -148,15 +148,13 @@ export function DesignSection({
     if (!to || renaming || !bridge) return;
     setRenaming(true);
     try {
-      const result = await bridgeDesignRenameDirectory(bridge, {
+      await bridgeDesignRenameDirectory(bridge, {
         repoRoot: project.repoRoot,
         from: activeName,
         to,
       });
       toast.success(
-        result.committedPointer
-          ? `Renamed to “${to}” — folder and settings committed together`
-          : `Renamed to “${to}” — folder committed; .zeros/ is gitignored here, so the settings pointer stayed local`,
+        `Renamed to “${to}”. The folder was committed and your local settings were updated.`,
       );
       setRenameDraft("");
       refreshListing();
@@ -175,7 +173,7 @@ export function DesignSection({
     <div className="flex flex-col gap-8">
       <SettingsSection
         title="Design folder"
-        description="Where this repo's designs live. The folder is committed content — this choice is the team default (.zeros/settings.toml, committed). A workspace can pin a different folder in its own local settings."
+        description="Where this repo's designs live. The folder is committed content — this choice is your personal choice (.zeros/settings.local.toml, ignored by Git), used by every local worktree of this repository."
       >
         <SettingsList>
           {directoryPresentation.options.map((option) => {

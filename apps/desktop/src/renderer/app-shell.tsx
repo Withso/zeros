@@ -35,6 +35,7 @@ import {
   samePersistedChat,
 } from "./state/chat-reconciliation";
 import { hydrateAiApiKey } from "./shared/lib/openai";
+import { startPersonalPreferencesSync } from "./features/settings/personal-preferences-sync";
 import {
   BridgeProvider,
   useBridge,
@@ -744,11 +745,15 @@ function ReloadOnProjectChange() {
   const sessions = useAgentSessions();
   const bridge = useBridge();
   const dispatch = useWorkspaceDispatch();
+  useEffect(
+    () => (bridge ? startPersonalPreferencesSync(bridge) : undefined),
+    [bridge],
+  );
 
   // Settings foundation: import the legacy localStorage settings into the
   // engine-owned TOML files once, on APP BOOT — not only when the user opens
-  // Settings. Otherwise a user who never opens Settings never gets a committed
-  // `.zeros/settings.toml` and the engine spawn-time reads see no settings.
+  // Settings. The personal repo file is created only after local exclusion is
+  // established; existing file values take precedence over legacy caches.
   // Flag-guarded + merge-under engine-side, so calling on every bridge change
   // is safe.
   useEffect(() => {

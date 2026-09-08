@@ -7,7 +7,7 @@
 //
 //   ~/.zeros/settings.toml              user      (dev: ~/.zeros-dev)
 //   ~/.zeros/settings.managed.toml      managed
-//   <repo>/.zeros/settings.toml         repo      (shared — committed)
+//   <repo>/.zeros/settings.toml         legacy migration input only
 //   <repo>/.zeros/settings.local.toml   repo-local (personal — gitignored)
 //
 // Writes are FORMAT-PRESERVING: editing an existing file patches the TOML in
@@ -322,7 +322,7 @@ export function writeSettingsFile(
   mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    writeFileSync(tmp, text, "utf8");
+    writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
     renameSync(tmp, filePath);
   } catch (err) {
     try {
@@ -342,7 +342,7 @@ export function writeSettingsFileRaw(filePath: string, text: string): void {
   mkdirSync(path.dirname(filePath), { recursive: true });
   const tmp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    writeFileSync(tmp, text, "utf8");
+    writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
     renameSync(tmp, filePath);
   } catch (err) {
     try {

@@ -492,6 +492,36 @@ describe("resolveMcpServers (user + managed, plus opt-in repo-local)", () => {
     expect(r.sources).toEqual(["managed", "repo-local", "repo-local", "user"]);
   });
 
+  it.each(["settings.local.toml", "settings.toml"])(
+    "workspace %s can disable an inherited direct server without changing repository defaults",
+    async (filename) => {
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: repoDir, stdio: "pipe" });
+      git("add", ".gitignore");
+      git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "commit",
+        "-qm",
+        "init",
+      );
+      const checkout = path.join(repoDir, "worktree");
+      git("worktree", "add", "-qb", "workspace", checkout);
+      const server =
+        '[[mcp.servers]]\nname="tracker"\ntransport="http"\nurl="https://example.com/mcp"\n';
+      writeRepoFile(repoDir, "settings.local.toml", server);
+      writeFileSync(
+        path.join(repoDir, ".git/info/exclude"),
+        "/.zeros/settings.toml\n",
+      );
+      writeRepoFile(checkout, filename, `${server}enabled=false\n`);
+      expect((await resolveMcpServersForRepo(checkout)).servers).toEqual([]);
+      expect((await resolveMcpServersForRepo(repoDir)).servers).toHaveLength(1);
+    },
+  );
+
   it("rejects a tracked repo-local file even when .gitignore also names it", async () => {
     writeUser(
       `[[mcp.servers]]\nname = "safe"\ntransport = "http"\nurl = "https://safe/mcp"\n`,
@@ -530,7 +560,7 @@ describe("resolveMcpServers (user + managed, plus opt-in repo-local)", () => {
     ]);
   });
 
-  it("caches the check-ignore verdict by settings-file mtime (repeat spawns don't re-shell git)", async () => {
+  it("invalidates personal-file trust when ignore rules change without a file edit", async () => {
     writeRepoFile(
       repoDir,
       "settings.local.toml",
@@ -546,8 +576,8 @@ describe("resolveMcpServers (user + managed, plus opt-in repo-local)", () => {
     // can't create untracked files — see the cache comment in the module.)
     rmSync(path.join(repoDir, ".gitignore"));
     const cached = await resolveMcpServersForRepo(repoDir);
-    expect(cached.servers.map((s) => s.name)).toEqual(["local"]);
-    expect(cached.warnings).toEqual([]);
+    expect(cached.servers).toEqual([]);
+    expect(cached.warnings).toHaveLength(1);
 
     // Rewriting the file (what a Customize-tab save does) changes its mtime
     // and invalidates the cached verdict — the re-run check now fails closed.
@@ -564,6 +594,19 @@ describe("resolveMcpServers (user + managed, plus opt-in repo-local)", () => {
     expect(rechecked.warnings).toEqual([
       expect.stringContaining("untracked, ignored personal settings file"),
     ]);
+  });
+
+  it("revokes a cached personal MCP declaration when the file becomes tracked", async () => {
+    writeRepoFile(
+      repoDir,
+      "settings.local.toml",
+      '[[mcp.servers]]\nname="local"\ntransport="stdio"\ncommand="node"\n',
+    );
+    expect((await resolveMcpServersForRepo(repoDir)).servers).toHaveLength(1);
+    execFileSync("git", ["add", "-f", ".zeros/settings.local.toml"], {
+      cwd: repoDir,
+    });
+    expect((await resolveMcpServersForRepo(repoDir)).servers).toEqual([]);
   });
 
   it("the COMMITTED repo settings.toml stays inert even WITH a repoRoot (clone-borne gate)", async () => {

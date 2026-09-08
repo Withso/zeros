@@ -3,8 +3,8 @@
 // ──────────────────────────────────────────────────────────
 //
 // Pure functions only (no fs). Precedence, weakest → strongest:
-//   defaults < user < repo (shared) < repo-local (main checkout, machine-wide)
-//            < workspace-local (this worktree) < managed
+//   defaults < user < team (when present) < repo-local < workspace-local < managed
+// Repo-local belongs to the main checkout. Shared/worktree inputs are retired.
 //
 // Merge semantics: plain tables deep-merge per key; scalars and arrays
 // replace whole. Every winning leaf records WHICH layer set it — that
@@ -47,12 +47,12 @@ export interface SettingsLayers {
    *  engine in-memory — see team-context.ts). Weaker than every repo layer:
    *  team sets the baseline, a repo can always specialize. */
   team?: RawSettingsDoc | null;
+  /** Retired input retained for source compatibility; never merged. */
   repo?: RawSettingsDoc | null;
   /** Personal per-repo override from the MAIN checkout — machine-wide for the
    *  repo, so it reaches every worktree. */
   repoLocal?: RawSettingsDoc | null;
-  /** Personal override from a single worktree's own `.zeros/settings.local.toml`
-   *  — per-workspace, wins over repo-local. */
+  /** Private overrides from a distinct workspace checkout. */
   workspaceLocal?: RawSettingsDoc | null;
   managed?: RawSettingsDoc | null;
 }
@@ -141,7 +141,6 @@ export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
       ["default", DEFAULT_SETTINGS],
       ["user", layers.user],
       ["team", layers.team],
-      ["repo", layers.repo],
       ["repo-local", layers.repoLocal],
       ["workspace-local", layers.workspaceLocal],
       ["managed", layers.managed],

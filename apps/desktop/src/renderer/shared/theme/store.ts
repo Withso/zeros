@@ -1,3 +1,8 @@
+import {
+  readPreferenceCache,
+  writePreferenceCache,
+  subscribePreferenceCache,
+} from "../../platform/personal-preferences";
 // ──────────────────────────────────────────────────────────
 // Appearance store — useSyncExternalStore + localStorage
 // ──────────────────────────────────────────────────────────
@@ -119,7 +124,7 @@ function durableModeFallback(): StoredAppearancePrefs["mode"] | null {
 
 function readStoredPrefs(): StoredAppearancePrefs {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readPreferenceCache(STORAGE_KEY);
     if (!raw) {
       const mode = durableModeFallback();
       return mode ? { ...DEFAULT_STORED_PREFS, mode } : DEFAULT_STORED_PREFS;
@@ -157,7 +162,7 @@ function derivePrefs(
 
 function persist(next: StoredAppearancePrefs): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    writePreferenceCache(STORAGE_KEY, JSON.stringify(next));
   } catch {
     /* quota / private mode — fall through, next read returns defaults */
   }
@@ -270,3 +275,8 @@ if (typeof window !== "undefined") {
     }
   });
 }
+
+subscribePreferenceCache(STORAGE_KEY, () => {
+  stored = readStoredPrefs();
+  refresh();
+});

@@ -36,6 +36,7 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
+import { readCodexExtensions } from "./extensions";
 import {
   coerceProviderBinding,
   providerBindingForResume,
@@ -94,6 +95,12 @@ import {
   settleCodexBrowserUseTurn,
 } from "../../../browser/browser-tool-client";
 import { resolveCodexBinary } from "./binary-resolver";
+import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
+import {
+  extractUnavailableModelId,
+  isModelUnavailableError,
+  modelUnavailableAdvice,
+} from "../shared/model-availability";
 
 import {
   bootCodexAppServerRuntime,
@@ -107,6 +114,11 @@ import {
   type CodexUserInput,
   type CodexUserInputRequest,
 } from "./app-server";
+import {
+  mcpDisabledThreadConfig,
+  readNativeMcpSurface,
+  scopeNativeMcpSurface,
+} from "./native-mcp";
 import { CodexAppServerTranslator } from "./app-server-translator";
 import { listCodexSessions } from "./history";
 import {
@@ -433,6 +445,9 @@ export interface CodexSession {
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
   readonly capabilityPorts = {
+    extensions: {
+      list: (opts) => this.withMemoryRuntime(opts, (runtime) => readCodexExtensions(runtime, opts.category, opts.cwd)),
+    },
     browser: { nativeSession: true },
     account: {
       readQuota: (opts) => this.readProviderQuota(opts),
@@ -489,6 +504,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
     this.ctx = ctx;
   }
 
+  /** Throwaway runtime for the config/memory/quota reads. Every operation here
+   *  is a bare RPC — none of them calls `thread/start`, which is the only thing
+   *  that spins up MCP servers (`mcpServer/startupStatus/updated` is
+   *  thread-scoped by contract). So these runtimes really do run with no MCP,
+   *  and `mcpServers: []` below is honest for them.
+   *
+   *  It is honest only because of that. `mcpServers: []` means "Zeros injects
+   *  none"; the user's native `~/.codex/config.toml` servers still load, since
+   *  Zeros never relocates CODEX_HOME (shared/config-isolation.ts). An
+   *  operation added here that DOES start a thread must disable them
+   *  explicitly — see generateText for the pattern. */
   private async withMemoryRuntime<T>(
     opts: {
       cwd: string;
@@ -1789,6 +1815,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // No live runtime → boot a throwaway just to read the account. Spawns a
     // `codex app-server` child; disposed in finally even if the race below
     // times out. Verify on a Mac with codex signed in (not in the sandbox).
+    // `account/read` starts no thread, so no MCP server starts here — same
+    // reasoning as withMemoryRuntime.
     const boot = bootCodexAppServerRuntime({
       cwd: this.ctx.projectRoot,
       clientInfo: CLIENT_INFO,
@@ -1820,7 +1848,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  read-only never-approve turn on a fresh thread, accumulates the
    *  agentMessage text from `item/completed`, and disposes. The system
    *  instruction is prepended to the input text — the app-server protocol
-   *  has no per-turn system-prompt field. */
+   *  has no per-turn system-prompt field.
+   *
+   *  `mcpServers: []` only says "Zeros injects none" — it does NOT stop the
+   *  user's native servers, because Zeros deliberately never relocates
+   *  CODEX_HOME (see shared/config-isolation.ts). Native pass-through is right
+   *  for a real chat and wrong here: naming a chat never calls a tool, so
+   *  every native MCP server was being spawned — and failing, for anyone whose
+   *  set has a broken or unauthenticated entry — once per title. The thread
+   *  starts with all of them disabled instead, config-declared and
+   *  plugin-provided alike (an OAuth connector installed from the Codex
+   *  desktop sidebar is a plugin, and is the common case). */
   async generateText(opts: {
     model: string;
     systemPrompt: string;
@@ -1848,6 +1886,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       ]);
       const { approvalPolicy, sandboxMode, sandboxPolicy } =
         modePolicyFor("read-only");
+      // Best-effort: a title is worth no MCP servers, but it is also not worth
+      // failing over. If the reads error or time out we start the thread the
+      // old way rather than lose the title.
+      const nativeMcp = await readNativeMcpSurface(
+        runtime,
+        this.ctx.projectRoot,
+      ).catch(() => ({ serverNames: [] }));
       // Raced like boot/runTurn: a server that boots but wedges on
       // thread/start must not suspend this call forever (the finally below
       // only runs once the try block settles — an unraced hang would leak
@@ -1858,6 +1903,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           model: opts.model,
           approvalPolicy,
           sandbox: sandboxMode,
+          config: mcpDisabledThreadConfig(nativeMcp),
         }),
         new Promise<never>((_, reject) =>
           setTimeout(
@@ -2138,6 +2184,21 @@ export class CodexAppServerAdapter implements AgentAdapter {
       );
     }
 
+    // Keep the account app bridge: Customize reads Codex's account and callable
+    // inventories, while Codex owns connector authentication and tool policy.
+    // Other native MCP remains explicitly scoped; Zeros-injected names survive
+    // collisions in the same table. Tool-free helper threads disable all MCP.
+    const nativeMcpConfig = nativeMcpPassthroughEnabled()
+      ? {}
+      : mcpDisabledThreadConfig(
+          scopeNativeMcpSurface(
+            await readNativeMcpSurface(runtime, opts.cwd).catch(() => ({
+              serverNames: [],
+            })),
+            { serverNames: ["codex_apps", ...mcpServers.map((server) => server.name)] },
+          ),
+        );
+
     let threadId: string;
     let providerSessionId: string;
     let threadModel: string | null = null;
@@ -2163,9 +2224,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
             // has a conversation-owned native IAB host. Code sessions keep
             // Codex's normal provider capabilities regardless of whether a
             // Design directory is recognized in the worktree.
-            config: codexBrowserThreadConfig(
-              effectiveBrowserUse?.kind === "codex-app-server",
-            ),
+            config: {
+              ...nativeMcpConfig,
+              ...codexBrowserThreadConfig(
+                effectiveBrowserUse?.kind === "codex-app-server",
+              ),
+            },
             ...(opts.systemInstruction
               ? { developerInstructions: opts.systemInstruction }
               : {}),
@@ -2198,6 +2262,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
               initialMode,
               opts.systemInstruction,
               effectiveBrowserUse,
+              nativeMcpConfig,
             ),
           );
           threadId = fresh.threadId;
@@ -2213,6 +2278,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
             initialMode,
             opts.systemInstruction,
             effectiveBrowserUse,
+            nativeMcpConfig,
           ),
         );
         threadId = result.threadId;
@@ -3633,6 +3699,9 @@ export function buildThreadStartParams(
    *  baseInstructions, which would REPLACE it). */
   systemInstruction?: string,
   browserUse?: AgentBrowserUse,
+  /** Native-MCP disables for this thread (adapters/shared/mcp-passthrough.ts).
+   *  Merged UNDER the browser gate, which owns the Browser plugin's key. */
+  nativeMcpConfig?: CodexThreadStartParams["config"],
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
   const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
@@ -3643,7 +3712,10 @@ export function buildThreadStartParams(
     // Codex loads its official bundled Browser plugin and talks to the native
     // IAB pipe hosted by Electron. There is deliberately no `zeros_browser`
     // dynamic namespace or MCP fallback.
-    config: codexBrowserThreadConfig(browserUse?.kind === "codex-app-server"),
+    config: {
+      ...nativeMcpConfig,
+      ...codexBrowserThreadConfig(browserUse?.kind === "codex-app-server"),
+    },
     ...(model ? { model } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
     approvalPolicy,
@@ -4616,6 +4688,9 @@ function classifyBootFailure(
   if (RATE_LIMIT_RX.test(message)) {
     return codexRateLimitFailure(message, stage);
   }
+  if (isModelUnavailableError(message)) {
+    return codexModelUnavailableFailure(message, stage);
+  }
   if (AUTH_HINT_RX.test(message)) {
     return new AgentFailureError({
       kind: "auth-required",
@@ -4627,6 +4702,23 @@ function classifyBootFailure(
   // Surface unmodified so the upstream "boot failed" wrapper retains
   // its stderr-tail context.
   return err instanceof Error ? err : new Error(message);
+}
+
+/** Codex refused the model id (a retired or plan-gated OPENAI_MODEL). Terminal:
+ *  no automatic model swap here — Codex's catalog is the one the picker shows,
+ *  so the user's pick, not a guess, must change. The toast drops technical
+ *  `message` detail, so which pill to change travels as `advice`. */
+function codexModelUnavailableFailure(
+  message: string,
+  stage: "newSession" | "loadSession" | "forkSession" | "prompt",
+): AgentFailureError {
+  return new AgentFailureError({
+    kind: "protocol-error",
+    message: `Codex rejected the model: ${message}`,
+    stage,
+    agentId: AGENT_ID,
+    advice: modelUnavailableAdvice("Codex", extractUnavailableModelId(message)),
+  });
 }
 
 /** Classify a codex error from the thread/turn lifecycle.
@@ -4666,6 +4758,9 @@ export function classifyThreadFailure(
       stage,
       agentId: AGENT_ID,
     });
+  }
+  if (isModelUnavailableError(message)) {
+    return codexModelUnavailableFailure(message, stage);
   }
   if (AUTH_HINT_RX.test(message)) {
     return new AgentFailureError({

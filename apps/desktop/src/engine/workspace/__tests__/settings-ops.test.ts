@@ -1,12 +1,14 @@
 // Settings TOML ops over the workspace service — layering, remote clamps,
 // secret masking, gitignore hygiene, and the one-time legacy migration.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { WorkspaceService } from "../service";
 import { setStateRootForTesting, closeState } from "../../git";
+import { insertWorkspace } from "../../git/state";
+import { runSessionId } from "@zeros/protocol/run-actions";
 import { resolveSpawnEnv } from "../../settings/spawn-env";
 
 describe("WorkspaceService settings ops", () => {
@@ -31,6 +33,78 @@ describe("WorkspaceService settings ops", () => {
     closeState();
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(userDir, { recursive: true, force: true });
+  });
+
+  it("uses workspace script overrides for Setup and Run without rewriting repository settings", async () => {
+    const git = (...args: string[]) =>
+      execFileSync("git", args, { cwd: dir, stdio: "pipe" });
+    git(
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "--allow-empty",
+      "-qm",
+      "init",
+    );
+    const checkout = path.join(dir, "checkout");
+    git("worktree", "add", "-qb", "workspace", checkout);
+    insertWorkspace({
+      id: "ws_override",
+      repoRoot: dir,
+      repoSlug: "repo",
+      path: checkout,
+      branch: "workspace",
+      baseBranch: "main",
+      status: "in-progress",
+      createdAt: Date.now(),
+      archivedAt: null,
+      stashRef: null,
+      prNumber: null,
+      prState: null,
+      prUrl: null,
+      agentId: null,
+      lastActiveAt: null,
+    });
+    await svc.handle("settings.write", {
+      layer: "repo-local",
+      repoRoot: dir,
+      patch: { scripts: { setup: "echo repo", run: "echo repo run" } },
+    });
+    const main = fs.readFileSync(
+      path.join(dir, ".zeros/settings.local.toml"),
+      "utf8",
+    );
+    await svc.handle("settings.write", {
+      layer: "workspace-local",
+      repoRoot: checkout,
+      patch: {
+        scripts: { setup: "echo workspace", run: "echo workspace run" },
+      },
+    });
+    const setup = vi.fn();
+    const run = vi.fn(async () => ({ alreadyRunning: false }));
+    svc.setSetupRunner(setup);
+    svc.setRunStarter(run);
+    const info = await svc.handle("workspace.setupInfo", {
+      workspaceId: "ws_override",
+      omitLog: true,
+    });
+    expect(info).toMatchObject({ command: "echo workspace" });
+    await svc.handle("workspace.rerunSetup", { workspaceId: "ws_override" });
+    expect(setup).toHaveBeenCalledWith("ws_override", "echo workspace");
+    await svc.handle("workspace.startRun", {
+      workspaceId: "ws_override",
+      actionId: "run",
+      sessionId: runSessionId(checkout, "run"),
+    });
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ command: "echo workspace run", cwd: checkout }),
+    );
+    expect(
+      fs.readFileSync(path.join(dir, ".zeros/settings.local.toml"), "utf8"),
+    ).toBe(main);
   });
 
   it("resolves built-in defaults when no files exist", async () => {
@@ -61,7 +135,7 @@ describe("WorkspaceService settings ops", () => {
     expect(r.sources["git.base_branch"]).toBe("default");
   });
 
-  it("repo layer overrides user; repo-local overrides repo; null deletes fall back", async () => {
+  it("legacy repo writes address the personal file; null deletes fall back to user", async () => {
     // Probed with git — scripts became repo-layer-only (a personal-file
     // [scripts] is ignored; see the scripts test below).
     await svc.handle("settings.write", {
@@ -92,11 +166,11 @@ describe("WorkspaceService settings ops", () => {
       patch: { git: { remote: null } },
     });
     r = (await svc.handle("settings.resolve", { repoRoot: dir })) as typeof r;
-    expect(r.effective.git.remote).toBe("repo-remote");
-    expect(r.sources["git.remote"]).toBe("repo");
+    expect(r.effective.git.remote).toBe("user-remote");
+    expect(r.sources["git.remote"]).toBe("user");
   });
 
-  it("scripts resolve from the COMMITTED repo file only — a personal-file [scripts] never shadows it", async () => {
+  it("scripts resolve from the personal file, including writes from older clients", async () => {
     // Repo settings (setup / archive / run actions) live in settings.toml and
     // behave the same in every Zeros install that opens the repo; a stale
     // [scripts] in the gitignored settings.local.toml is ignored with a warning.
@@ -120,13 +194,11 @@ describe("WorkspaceService settings ops", () => {
       sources: Record<string, string>;
       warnings: string[];
     };
-    expect(r.effective.scripts.setup).toBe("pnpm install");
-    expect(r.effective.scripts.run_actions).toEqual([
-      { id: "dev", name: "Dev", command: "pnpm dev" },
-    ]);
-    expect(r.sources["scripts.setup"]).toBe("repo");
+    expect(r.effective.scripts.setup).toBe("stale");
+    expect(r.effective.scripts.run_actions).toEqual([]);
+    expect(r.sources["scripts.setup"]).toBe("repo-local");
     expect(r.warnings.some((w) => w.startsWith("repo-local: scripts:"))).toBe(
-      true,
+      false,
     );
   });
 
@@ -225,7 +297,7 @@ describe("WorkspaceService settings ops", () => {
     ).rejects.toMatchObject({ code: "SETTINGS_REDACTED_VALUE" });
   });
 
-  it("repo-local writes append the gitignore entry exactly once", async () => {
+  it("repo-local writes append the local Git exclusion exactly once", async () => {
     if (!fs.existsSync(path.join(dir, ".git"))) return; // git unavailable
     await svc.handle("settings.write", {
       layer: "repo-local",
@@ -237,10 +309,13 @@ describe("WorkspaceService settings ops", () => {
       repoRoot: dir,
       patch: { env: { LOCAL_ONLY: "1" } },
     });
-    const gitignore = fs.readFileSync(path.join(dir, ".gitignore"), "utf8");
+    const gitignore = fs.readFileSync(
+      path.join(dir, ".git", "info", "exclude"),
+      "utf8",
+    );
     const hits = gitignore
       .split("\n")
-      .filter((l) => l.trim() === ".zeros/settings.local.toml");
+      .filter((l) => l.trim() === "/.zeros/settings.local.toml");
     expect(hits).toHaveLength(1);
   });
 
@@ -286,18 +361,22 @@ describe("WorkspaceService settings ops", () => {
 
     expect(result.migratedRepos).toContain(dir);
     expect(result.migratedProviders).toEqual(["claude", "cursor"]);
-    expect(result.warnings.some((w) => w.includes('"extra"'))).toBe(true);
+    expect(result.warnings).toEqual([]);
 
     const repo = (await svc.handle("settings.read", {
       layer: "repo",
       repoRoot: dir,
     })) as {
-      doc: { git: Record<string, string>; scripts: Record<string, string> };
+      doc: { git: Record<string, string>; scripts: Record<string, unknown> };
     };
     expect(repo.doc.git).toEqual({
       base_branch: "develop",
       remote: "upstream",
     });
+    expect(repo.doc.scripts.run_actions).toMatchObject([
+      { name: "dev", command: "pnpm dev" },
+      { name: "extra", command: "pnpm storybook" },
+    ]);
     expect(repo.doc.scripts.setup).toBe("pnpm install && pnpm codegen");
     expect(repo.doc.scripts.run).toBe("pnpm dev");
 
@@ -468,7 +547,9 @@ describe("WorkspaceService settings ops", () => {
     expect(
       resolved.warnings.some(
         (w) =>
-          w.startsWith("repo:") && w.includes("env") && w.includes("ignored"),
+          w.startsWith("repo-local:") &&
+          w.includes("env") &&
+          w.includes("ignored"),
       ),
     ).toBe(true);
   });

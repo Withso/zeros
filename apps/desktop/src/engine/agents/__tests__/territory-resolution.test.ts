@@ -585,7 +585,7 @@ describe("code-agent territory resolution", () => {
 
     await rm(path.join(root, "Future"));
     await writeFile(
-      path.join(root, ".zeros", "settings.toml"),
+      path.join(root, ".zeros", "settings.local.toml"),
       '[design]\ndirectory = "../outside"\n',
     );
     await expect(
@@ -1166,7 +1166,7 @@ describe("code-agent territory resolution", () => {
           if (changed) return;
           changed = true;
           writeFileSync(
-            path.join(root, ".zeros", "settings.toml"),
+            path.join(root, ".zeros", "settings.local.toml"),
             '[design]\ndirectory = "Zeros Design"\n',
           );
         },

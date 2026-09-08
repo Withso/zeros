@@ -61,6 +61,7 @@ import net from "node:net";
 
 import { runDesignWorkspaceSmoke } from "./ui-smoke-design-workspace.mjs";
 import { runPersonalOrganizationSmoke } from "./ui-smoke-personal.mjs";
+import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -2407,6 +2408,7 @@ try {
   );
 
   await runPersonalOrganizationSmoke({ page, check });
+  await runCustomizeSmoke({ page, check });
 
   // Whole-run invariant.
   check(

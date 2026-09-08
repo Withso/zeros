@@ -170,8 +170,7 @@ export interface UseResolvedSettings {
 
 /** The effective settings tree (+ provenance) for the user scope, or for one
  *  repo when `repoRoot` is given. Pass `mainRepoRoot` to resolve a worktree's
- *  per-workspace view (repo-local from the main checkout, workspace-local from
- *  the worktree). */
+ *  repository view. Linked worktrees share the main checkout's personal file. */
 export function useResolvedSettings(
   repoRoot?: string,
   mainRepoRoot?: string,

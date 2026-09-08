@@ -163,6 +163,121 @@
         }
       }
     },
+    "preferences": {
+      "type": "object",
+      "properties": {
+        "appearance": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "system",
+                "light",
+                "dark",
+                "orka-black"
+              ]
+            },
+            "codeThemes": {
+              "default": {},
+              "type": "object",
+              "properties": {
+                "dark": {
+                  "type": "string"
+                },
+                "light": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        "experimental": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "internal": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "enabled_agents": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "maxItems": 128,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "ids"
+          ]
+        },
+        "terminal_agents": {
+          "maxItems": 128,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "binary": {
+                "type": "string"
+              },
+              "launchCommand": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "binary",
+              "launchCommand"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "default_terminal_agent": {
+          "type": "string"
+        },
+        "removed_terminal_agents": {
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "analytics_opt_out": {
+          "type": "boolean"
+        },
+        "analytics_notice_seen": {
+          "type": "boolean"
+        }
+      }
+    },
+    "preferences_version": {
+      "type": "number",
+      "const": 1
+    },
     "env": {
       "description": "Non-secret environment variables passed to agents.",
       "type": "object",

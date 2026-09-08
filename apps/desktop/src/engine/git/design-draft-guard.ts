@@ -354,6 +354,44 @@ export async function prepareDesignSafeIntegration(opts: {
   );
   if (!dirty) return target;
 
+  // Private settings are intentionally ignored and remain outside autostash.
+  // Their presence is not an uncommitted Design draft. A legacy branch can
+  // still track these names, though: Git may overwrite ignored files while
+  // materializing it, so reject that collision before any worktree rewrite.
+  const records = dirty.split("\0").filter(Boolean);
+  const privateSettings = records.filter(
+    (record) =>
+      record === "!! .zeros/settings.toml" ||
+      record === "!! .zeros/settings.local.toml",
+  );
+  let changedPaths: string[] | undefined;
+  if (privateSettings.length) {
+    changedPaths = await changedPathsForIntegration(
+      opts.path,
+      target,
+      opts.comparison ?? "merge-side",
+    );
+    const names = new Set(
+      privateSettings.map((record) => comparisonPathKey(record.slice(3))),
+    );
+    if (
+      changedPaths.some((candidate) => names.has(comparisonPathKey(candidate)))
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: `${opts.operation} would overwrite private workspace settings with a legacy tracked settings file.`,
+        remediation:
+          "Preserve those overrides outside the checkout before integrating this legacy branch, then restore them to the private settings.local.toml file.",
+        context: {
+          workspaceId: opts.workspaceId,
+          target,
+          settingsPaths: [...names],
+        },
+      });
+    }
+  }
+  if (records.length === privateSettings.length) return target;
+
   if (opts.rejectAnyDirtyDesign) {
     throw new GitError({
       code: "VALIDATION_FAILED",
@@ -368,7 +406,7 @@ export async function prepareDesignSafeIntegration(opts: {
     });
   }
 
-  const changedPaths = await changedPathsForIntegration(
+  changedPaths ??= await changedPathsForIntegration(
     opts.path,
     target,
     opts.comparison ?? "merge-side",

@@ -6092,6 +6092,37 @@ export class AgentGateway {
     });
   }
 
+  async readExtensionInventory(
+    agentId: string,
+    category: "apps" | "plugins",
+    cwd?: string,
+  ) {
+    return this.runProviderOneShot({
+      agentId,
+      cwd,
+      executionPrefix: "extension-inventory",
+      operation: ({
+        adapter,
+        cwd: resolvedCwd,
+        env,
+        cliBinary,
+        executionBoundary,
+      }) => {
+        const extensions = resolveAgentCapabilityPorts(adapter).extensions;
+        return extensions
+          ? extensions.list({
+              category,
+              scope: cwd ? "repo" : "user",
+              cwd: resolvedCwd,
+              env,
+              cliBinary,
+              executionBoundary,
+            })
+          : Promise.resolve(null);
+      },
+    });
+  }
+
   async readProviderQuota(agentId: string): Promise<AgentProviderQuota | null> {
     return this.runProviderOneShot({
       agentId,

@@ -472,10 +472,10 @@ describe("opSettingsWriteRaw (the raw 'Edit settings.toml' editor)", () => {
       remote: "upstream",
     });
     const onDisk = readFileSync(
-      path.join(dir, ".zeros", "settings.toml"),
+      path.join(dir, ".zeros", "settings.local.toml"),
       "utf8",
     );
-    expect(onDisk).toBe(text); // byte-for-byte
+    expect(onDisk).toBe(`settings_version = 2\n${text}`); // byte-for-byte
     expect(onDisk).toContain("# my note");
     expect(onDisk).toContain("# inline");
   });
@@ -485,7 +485,7 @@ describe("opSettingsWriteRaw (the raw 'Edit settings.toml' editor)", () => {
       /invalid TOML/i,
     );
     expect(() =>
-      readFileSync(path.join(dir, ".zeros", "settings.toml"), "utf8"),
+      readFileSync(path.join(dir, ".zeros", "settings.local.toml"), "utf8"),
     ).toThrow();
   });
 });
