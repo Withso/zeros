@@ -469,7 +469,7 @@ describe("repository layout contracts", () => {
     const generator = read("scripts/generate-third-party-licenses.mjs");
 
     for (const packageName of [
-      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.261",
+      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266",
       "@cursor/sdk-darwin-arm64@1.0.31",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
       // The staged Codex runtime is redistributed inside Contents/Resources,
