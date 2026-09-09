@@ -21,7 +21,7 @@ importers:
         specifier: 10.12.0
         version: 10.12.0
       hono:
-        specifier: ^4.13.5
+        specifier: ^4.13.7
         version: 4.13.7
       jose:
         specifier: ^6.0.0

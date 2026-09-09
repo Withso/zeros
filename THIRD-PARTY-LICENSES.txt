@@ -2257,7 +2257,7 @@ hastscript@9.0.1
   Source: https://github.com/syntax-tree/hastscript
   License documents: dd1081884a92
 
-hono@4.13.0
+hono@4.13.7
   License: MIT
   Surfaces: control plane, root pnpm workspace
   Author: Yusuke Wada <yusuke@kamawada.com> (https://github.com/yusukebe)
@@ -10665,8 +10665,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT a6ab98e5c77b
 SHA-256: a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
-Applies to: hono@4.13.0
-Source labels: hono@4.13.0 — LICENSE
+Applies to: hono@4.13.7
+Source labels: hono@4.13.7 — LICENSE
 ================================================================================
 
 MIT License
