@@ -16,13 +16,13 @@ importers:
         version: 0.190.1
       '@hono/node-server':
         specifier: ^2.1.0
-        version: 2.1.0(hono@4.13.0)
+        version: 2.1.0(hono@4.13.7)
       '@workos-inc/node':
         specifier: 10.12.0
         version: 10.12.0
       hono:
-        specifier: ^4.13.0
-        version: 4.13.0
+        specifier: ^4.13.7
+        version: 4.13.7
       jose:
         specifier: ^6.0.0
         version: 6.2.3
@@ -547,8 +547,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.13.0:
-    resolution: {integrity: sha512-jhunvfHWxd7J5EFfSgH4xsYJzSe/lfqbUCxiyyeaQasUsXeEHXtzVid+7EOGByc5JnFa23SSFL3Y2RV/z1T+eQ==}
+  hono@4.13.7:
+    resolution: {integrity: sha512-c8/gF9ac8Y78/agExVocyLevgR+JlpNB444Py0FSX8pJoPdYUfUzRcXtYEYGwt6l19qIlVZPN5Mfsw9jFShmQQ==}
     engines: {node: '>=16.9.0'}
 
   https-proxy-agent@5.0.1:
@@ -900,13 +900,13 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
-  '@hono/node-server@1.19.17(hono@4.13.0)':
+  '@hono/node-server@1.19.17(hono@4.13.7)':
     dependencies:
-      hono: 4.13.0
+      hono: 4.13.7
 
-  '@hono/node-server@2.1.0(hono@4.13.0)':
+  '@hono/node-server@2.1.0(hono@4.13.7)':
     dependencies:
-      hono: 4.13.0
+      hono: 4.13.7
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
@@ -1051,9 +1051,9 @@ snapshots:
 
   '@workos/emulate@0.9.0':
     dependencies:
-      '@hono/node-server': 1.19.17(hono@4.13.0)
+      '@hono/node-server': 1.19.17(hono@4.13.7)
       chalk: 5.6.2
-      hono: 4.13.0
+      hono: 4.13.7
       semver: 7.8.5
       yaml: 2.9.0
 
@@ -1205,7 +1205,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.13.0: {}
+  hono@4.13.7: {}
 
   https-proxy-agent@5.0.1:
     dependencies:
