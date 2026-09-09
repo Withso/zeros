@@ -466,12 +466,7 @@ export function hydrateModelsFromSettings(
   authoritative = false,
 ): void {
   if (!models || typeof models !== "object") return;
-  const m: Record<string, unknown> = {
-    ...(authoritative
-      ? { model_preferences: [], permission_preferences: [] }
-      : {}),
-    ...(models as Record<string, unknown>),
-  };
+  const m = models as Record<string, unknown>;
   suppressMirror = true;
   try {
     // Recover the default AGENT: prefer the explicit `default_agent` (lossless,
@@ -527,13 +522,12 @@ export function hydrateModelsFromSettings(
         setDefaultAgentId(explicitDefaultAgent);
       }
     } else if (
-      Array.isArray(m.model_preferences) &&
+      (authoritative || Array.isArray(m.model_preferences)) &&
       typeof m.default !== "string" &&
       getDefaultAgentId() !== null
     ) {
-      // The explicit exact-model array marks a current-format file. With no
-      // default identity in that file, clear a stale device-local choice; old
-      // files without the marker retain their additive migration behavior.
+      // A confirmed read or an explicit exact-model array makes an absent
+      // default authoritative. Additive legacy reads keep the cached choice.
       setDefaultAgentId(null);
     }
     // Authoritative like the bools: a file without the key means Haiku
@@ -554,7 +548,9 @@ export function hydrateModelsFromSettings(
       replaceModelPreferences(m.model_preferences);
       setSetting(DEFAULT_EFFORT_KEY, {});
       setSetting(DEFAULT_FAST_KEY, false);
-    } else if (!hasModelPreferenceStorage() && fam) {
+    } else if ((authoritative || !hasModelPreferenceStorage()) && fam) {
+      // A confirmed legacy file also replaces an already-populated cache.
+      // Defaulting its missing array to [] would skip these migration inputs.
       // Loss-minimizing migration: an old field described only its family's
       // selected model. Preserve each one there and leave every other model
       // High/Fast-off. EVERY family migrates here for the same reason the
@@ -580,8 +576,12 @@ export function hydrateModelsFromSettings(
         setSetting(DEFAULT_EFFORT_KEY, {});
         setSetting(DEFAULT_FAST_KEY, false);
       }
+    } else if (authoritative) {
+      replaceModelPreferences([]);
+      setSetting(DEFAULT_EFFORT_KEY, {});
+      setSetting(DEFAULT_FAST_KEY, false);
     }
-    if (Array.isArray(m.permission_preferences)) {
+    if (authoritative || Array.isArray(m.permission_preferences)) {
       replacePermissionPreferences(m.permission_preferences);
     }
     // Claude reliability knobs. ADDITIVE for the fallback (an absent

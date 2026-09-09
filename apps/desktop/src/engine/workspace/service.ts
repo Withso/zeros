@@ -237,6 +237,7 @@ import {
   renameDesignFrame,
   replaceDesignFrameFromHistory,
   restoreDesignFrame,
+  sameDesignFrameRestorePoint,
   type DesignFrameRestorePoint,
   type DesignLintViolation,
   type DesignWorkspaceSnapshot,
@@ -3378,7 +3379,7 @@ export class WorkspaceService {
           workspace.path,
           file,
         );
-        if (before.source !== after.source) {
+        if (!sameDesignFrameRestorePoint(before, after)) {
           this.recordDesignHistory(
             workspace.path,
             frameDesignHistoryEntry(before, after),

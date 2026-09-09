@@ -1187,6 +1187,56 @@ describe("design document", () => {
     ).rejects.toThrow("contains element children");
   });
 
+  it.each([
+    { kind: "frame" as const, w: 390, h: 844 },
+    { kind: "text" as const, w: 180, h: 32 },
+  ])(
+    "duplicates a $kind using its saved dimensions",
+    async ({ kind, w, h }) => {
+      const original = await createDesignFrame(root, {
+        title: "Original",
+        geometry: { w, h },
+        ...(kind === "text"
+          ? {
+              seed: {
+                kind,
+                nodeId: "original-text",
+                text: "Canvas text",
+                fixedSize: true,
+              },
+            }
+          : {}),
+      });
+
+      const copy = await duplicateDesignFrame(root, original.file);
+      expect(copy).toMatchObject({ kind, width: w, height: h });
+
+      await updateDesignFrameGeometry(root, original.file, {
+        x: original.x,
+        y: original.y,
+        w: w + 40,
+        h: h + 20,
+        z: original.z,
+      });
+      const resizedCopy = await duplicateDesignFrame(root, original.file);
+      expect(resizedCopy).toMatchObject({
+        kind,
+        width: w + 40,
+        height: h + 20,
+      });
+      expect(await listDesignFrames(root)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ file: copy.file, width: w, height: h }),
+          expect.objectContaining({
+            file: resizedCopy.file,
+            width: w + 40,
+            height: h + 20,
+          }),
+        ]),
+      );
+    },
+  );
+
   it("duplicates and deletes frames while keeping canvas state exact", async () => {
     await initializeDesignDocument(root);
     const original = await createDesignFrame(root, { title: "Receipt" });

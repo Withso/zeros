@@ -1315,8 +1315,9 @@ function readFrameMeta(
         .trim()
         .slice(0, 120) ||
       file.replace(/\.html$/i, "").replace(/[-_]+/g, " "),
-    width: numberValue("width", DEFAULT_FRAME_WIDTH),
-    height: numberValue("height", DEFAULT_FRAME_HEIGHT),
+    width: canvas?.frames[file]?.w ?? numberValue("width", DEFAULT_FRAME_WIDTH),
+    height:
+      canvas?.frames[file]?.h ?? numberValue("height", DEFAULT_FRAME_HEIGHT),
     kind:
       canvas?.frame_info[file]?.kind ??
       (kindMatch?.[1]?.toLowerCase() === "text" ? "text" : "frame"),
@@ -3129,7 +3130,7 @@ async function designFrameRestorePointUnlocked(
   };
 }
 
-function sameDesignFrameRestorePoint(
+export function sameDesignFrameRestorePoint(
   left: DesignFrameRestorePoint,
   right: DesignFrameRestorePoint,
 ): boolean {

@@ -630,6 +630,53 @@ describe("favorite models — catalog fallbacks + user stars", () => {
     });
   });
 
+  it.each([false, true])(
+    "hydrates authoritative legacy effort/Fast with an existing cache: %s",
+    (cached) => {
+      if (cached) {
+        setModelPreference("codex", "gpt-5.6-sol", { effort: "low" });
+        setModelPreference("codex", "gpt-5.6-terra", { fast: true });
+      }
+      const legacy = {
+        default: "gpt-5.6-sol",
+        default_agent: "codex",
+        default_fast_mode: true,
+        claude_code: { default_effort_level: "max" },
+        codex: { default_thinking_level: "max" },
+      };
+
+      hydrateModelsFromSettings(legacy, true);
+
+      expect(newChatBornDefaults("codex")).toMatchObject({
+        model: "gpt-5.6-sol",
+        effort: "max",
+        fast: true,
+      });
+      expect(newChatBornDefaults("claude")).toMatchObject({
+        effort: "max",
+        fast: false,
+      });
+      expect(resolveModelConfiguration("codex", "gpt-5.6-terra", null)).toEqual(
+        {
+          effort: "high",
+          fast: false,
+        },
+      );
+
+      hydrateModelsFromSettings(legacy, true);
+      expect(newChatBornDefaults("codex")).toMatchObject({
+        effort: "max",
+        fast: true,
+      });
+
+      hydrateModelsFromSettings({ ...legacy, model_preferences: [] }, true);
+      expect(newChatBornDefaults("codex")).toMatchObject({
+        effort: "high",
+        fast: false,
+      });
+    },
+  );
+
   it("moves local legacy values once, then clears their migration inputs", () => {
     setSetting("default-effort-by-family", { codex: "max" });
     setSetting("default-fast-mode", true);
