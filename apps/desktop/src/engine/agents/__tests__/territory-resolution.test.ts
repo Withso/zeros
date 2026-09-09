@@ -585,7 +585,7 @@ describe("code-agent territory resolution", () => {
 
     await rm(path.join(root, "Future"));
     await writeFile(
-      path.join(root, ".zeros", "settings.toml"),
+      path.join(root, ".zeros", "settings.local.toml"),
       '[design]\ndirectory = "../outside"\n',
     );
     await expect(
@@ -937,7 +937,7 @@ describe("code-agent territory resolution", () => {
   it("keeps local Code native when Design identity is damaged or reached through an alias", async () => {
     const root = await fixture();
     await writeFile(
-      path.join(root, ".zeros", "settings.toml"),
+      path.join(root, ".zeros", "settings.local.toml"),
       '[design]\ndirectory = "../unsafe"\n',
     );
     const alias = `${root}-alias`;
@@ -1026,10 +1026,31 @@ describe("code-agent territory resolution", () => {
     }
   });
 
+  it("keeps native Code available when the tracked Design registry is malformed", async () => {
+    const root = await fixture();
+    await writeFile(
+      path.join(root, ".zeros", "design-dir.toml"),
+      "invalid [ registry",
+    );
+    const admission = gateway({
+      ...testExecutionBoundary(),
+      backend: "none",
+    }) as unknown as TerritoryAdmission;
+    await expect(
+      admission.prepareCodeAgentTerritory(
+        { agentId: "claude" } as AgentAdapter,
+        root,
+        root,
+        root,
+        "newSession",
+      ),
+    ).resolves.toBeDefined();
+  });
+
   it("fails a local Design-agent admission closed for the same damaged identity", async () => {
     const root = await fixture();
     await writeFile(
-      path.join(root, ".zeros", "settings.toml"),
+      path.join(root, ".zeros", "settings.local.toml"),
       '[design]\ndirectory = "../unsafe"\n',
     );
     const workspace = {
@@ -1166,7 +1187,7 @@ describe("code-agent territory resolution", () => {
           if (changed) return;
           changed = true;
           writeFileSync(
-            path.join(root, ".zeros", "settings.toml"),
+            path.join(root, ".zeros", "settings.local.toml"),
             '[design]\ndirectory = "Zeros Design"\n',
           );
         },

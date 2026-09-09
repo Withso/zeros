@@ -852,6 +852,8 @@ export async function bridgeDesignCommit(
  *  pointer. `workspaceId` may be a workspace id or a known repo root — the
  *  repo settings Design tab passes the main checkout. */
 export interface DesignDirectoryListingWire {
+  /** Stable identities from this checkout's tracked registry. */
+  directoryIds?: Record<string, string>;
   /** Every folder recognized by a committed `.zeros-canvas.json` marker. */
   directories: string[];
   /** The resolved `[design] directory` pointer ("Zeros Design" when unset). */

@@ -10,6 +10,33 @@
 // ──────────────────────────────────────────────────────────
 
 import { asString, type RawServer } from "./mcp-server-model";
+import {
+  EXTENSION_CATEGORIES,
+  extensionProviders,
+  type ExtensionCategory,
+  type ExtensionProvider,
+} from "@zeros/protocol/agent-extensions";
+
+export interface CustomizeSelection {
+  category: ExtensionCategory;
+  provider: ExtensionProvider;
+}
+export function decodeCustomizeSelection(raw: unknown): CustomizeSelection {
+  const input =
+    raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const category = EXTENSION_CATEGORIES.includes(
+    input.category as ExtensionCategory,
+  )
+    ? (input.category as ExtensionCategory)
+    : "mcp";
+  const providers = extensionProviders(category);
+  return {
+    category,
+    provider: providers.includes(input.provider as ExtensionProvider)
+      ? (input.provider as ExtensionProvider)
+      : providers[0]!,
+  };
+}
 
 // ── Scope ────────────────────────────────────────────────
 
@@ -156,6 +183,6 @@ export function parseMcpJsonImport(text: string): ParsedJsonImport {
     error:
       servers.length || warnings.length
         ? null
-        : "No servers found — expected {\"mcpServers\": {…}} or a single {\"command\"/\"url\": …} object.",
+        : 'No servers found — expected {"mcpServers": {…}} or a single {"command"/"url": …} object.',
   };
 }

@@ -2451,7 +2451,7 @@ js-tokens@4.0.0
   Source: https://github.com/lydell/js-tokens
   License documents: 2213d91c6062
 
-js-yaml@4.3.1
+js-yaml@4.3.2
   License: MIT
   Surfaces: root pnpm workspace
   Author: Vladimir Zapparov <dervus.grim@gmail.com>
@@ -10485,8 +10485,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT a07bc24468b9
 SHA-256: a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550
-Applies to: js-yaml@4.3.1
-Source labels: js-yaml@4.3.1 — LICENSE
+Applies to: js-yaml@4.3.2
+Source labels: js-yaml@4.3.2 — LICENSE
 ================================================================================
 
 (The MIT License)

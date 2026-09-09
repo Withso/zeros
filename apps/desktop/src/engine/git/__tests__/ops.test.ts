@@ -794,6 +794,38 @@ describe("write ops", () => {
     expect(mainNew).toBe("main\n");
   });
 
+  it("refuses an integration that would overwrite private workspace settings with a legacy tracked file", async () => {
+    const ws = getWorkspace(workspaceId);
+    const privateFile = path.join(ws.path, ".zeros/settings.toml");
+    const before = await readFile(privateFile, "utf8");
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros/settings.toml"),
+      "# legacy tracked settings\n",
+    );
+    await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "add",
+      "-f",
+      ".zeros/settings.toml",
+    ]);
+    await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "commit",
+      "-qm",
+      "legacy settings",
+    ]);
+    await expect(
+      rebase({ workspaceId, ontoBranch: "main", autoStash: true }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringMatching(/private workspace settings/i),
+    });
+    expect(await readFile(privateFile, "utf8")).toBe(before);
+  });
+
   it("refuses rebase before it can overwrite an ignored live Design draft", async () => {
     const ws = getWorkspace(workspaceId);
     await writeFile(path.join(ws.path, ".gitignore"), "Zeros Design/\n");

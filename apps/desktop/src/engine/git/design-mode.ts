@@ -36,6 +36,15 @@
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
+import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
+import {
+  designDirectoryEntry,
+  designMetadataGitPaths,
+  DESIGN_DIRECTORY_REGISTRY_FILE,
+  prepareDesignDirectoryRename,
+  recoverDesignDirectoryRename,
+  validateDesignSettings,
+} from "../design/metadata";
 
 import {
   previewDesignDirectoryForEnter,
@@ -52,7 +61,7 @@ import {
   rememberRecognizedDesignDirectories,
   stickyRecognizedDesignDirectories,
 } from "../design/recognition-store";
-import { opSettingsWrite } from "../settings/ops";
+import { opSettingsPreviewWrite, opSettingsWrite } from "../settings/ops";
 import { GitError } from "./errors";
 import { runGit } from "./git-exec";
 import { withWorkspaceGitMutation } from "./mutation-lock";
@@ -117,6 +126,7 @@ export async function enterDesignMode<T = void>(
   workspace: Workspace,
   beforePublish?: () => Promise<T>,
 ): Promise<T | undefined> {
+  recoverDesignDirectoryRename(workspace.path);
   // Decide WHICH folder is the design folder before anything durable happens:
   // the `[design] directory` pointer, with recognition/adoption of committed
   // design folders (the copy-paste-between-repos case). A refusal here aborts
@@ -239,21 +249,10 @@ export async function reconcileDesignDirAfterExternalGit(workspace: {
   );
 }
 
-/** Rename the repo's design directory — folder and pointer in ONE commit.
- *
- *  Runs in the repo's MAIN checkout: the folder is committed content, so a
- *  rename is a git operation, not a settings edit. The `[design] directory`
- *  pointer is updated in the committed `.zeros/settings.toml` and committed
- *  TOGETHER with the `git mv` — split across two commits, a teammate can pull
- *  a pointer aimed at a folder that doesn't exist yet (or vice versa).
- *
- *  Refused while any live design-mode workspace exists for the repo: their
- *  open documents and zeros-design:// resources are all
- *  rooted at the old name, and rewriting them mid-session is not worth the
- *  complexity while the rename is one Archive/Exit away from being safe.
- *  Refused when the folder or committed settings file has uncommitted changes
- *  in the main checkout — an automatic commit would sweep them silently into
- *  the rename. */
+/** Rename committed Design content in the main checkout and update the
+ * personal repository pointer. Only the directory rename enters Git history;
+ * settings remain locally excluded. Refuse live Design workspaces and dirty
+ * Design content, and validate the personal file before moving anything. */
 export async function renameDesignDirectory(opts: {
   repoRoot: string;
   from: string;
@@ -278,6 +277,8 @@ async function renameDesignDirectoryAdmitted(opts: {
     });
   }
   if (from === to) return { committedPointer: false };
+  recoverDesignDirectoryRename(opts.repoRoot);
+  validateDesignSettings(opts.repoRoot, { design: { directory: to } });
   const liveDesign = listWorkspaces({ archived: false }).filter(
     (workspace) =>
       workspace.kind === "design" &&
@@ -291,7 +292,12 @@ async function renameDesignDirectoryAdmitted(opts: {
         "Archive them (or switch them to code mode), rename the folder, then restore.",
     });
   }
-  const settingsPath = ".zeros/settings.toml";
+  ensureLocalSettingsIgnored(opts.repoRoot);
+  opSettingsPreviewWrite(
+    "repo-local",
+    { design: { directory: to, directory_id: null } },
+    opts.repoRoot,
+  );
   const tracked = await runGit(opts.repoRoot, [
     "ls-files",
     "-z",
@@ -315,38 +321,50 @@ async function renameDesignDirectoryAdmitted(opts: {
     "--porcelain",
     "--",
     literalGitPathspec(from),
-    literalGitPathspec(settingsPath),
+    ...designMetadataGitPaths(opts.repoRoot, from).map(literalGitPathspec),
   ]);
   if (dirty.stdout.trim()) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message:
-        `"${from}" or ${settingsPath} has uncommitted changes in the ` +
-        "main checkout.",
+      message: `"${from}" has uncommitted changes in the ` + "main checkout.",
       remediation:
         "Commit or stash those changes, then rename the design folder.",
     });
   }
+  // Legacy documents migrate through the same Design API as ordinary entry.
+  // The stable ID is saved before the move, so recovery follows a renamed
+  // registry entry without requiring a shared/private path rewrite.
+  await ensureDesignDocumentInitialized(opts.repoRoot, from);
+  const entry = designDirectoryEntry(opts.repoRoot, from)!;
+  opSettingsWrite(
+    "repo-local",
+    { design: { directory_id: entry.id, directory: null } },
+    opts.repoRoot,
+  );
+  prepareDesignDirectoryRename(opts.repoRoot, from, to);
+  // Record legacy marker removal before git mv enumerates its source index.
+  await runGit(opts.repoRoot, [
+    "add",
+    "-A",
+    "-f",
+    "--",
+    literalGitPathspec(from),
+  ]);
   // A nested target ("apps/web/designs") needs its parent to exist before
   // `git mv` can move into it.
   const toParent = path.dirname(path.join(opts.repoRoot, ...to.split("/")));
   await mkdir(toParent, { recursive: true });
   await runGit(opts.repoRoot, ["mv", "--", from, to]);
-  // Point the committed team default at the new name. Best-effort staging:
-  // a repo that gitignores `.zeros/` keeps the pointer as a local file (git
-  // refuses to add an ignored path without -f, and force-committing a file
-  // the repo explicitly ignores is not our call to make).
-  opSettingsWrite("repo", { design: { directory: to } }, opts.repoRoot);
-  let committedPointer = true;
-  try {
-    await runGit(opts.repoRoot, [
-      "add",
-      "--",
-      literalGitPathspec(settingsPath),
-    ]);
-  } catch {
-    committedPointer = false;
-  }
+  recoverDesignDirectoryRename(opts.repoRoot);
+  primeDesignDirectoryName(opts.repoRoot, to);
+  await runGit(opts.repoRoot, [
+    "add",
+    "-A",
+    "-f",
+    "--",
+    literalGitPathspec(to),
+    ...designMetadataGitPaths(opts.repoRoot, to).map(literalGitPathspec),
+  ]);
   await runGit(opts.repoRoot, [
     "-c",
     "user.name=Zeros",
@@ -359,9 +377,13 @@ async function renameDesignDirectoryAdmitted(opts: {
     "--",
     literalGitPathspec(from),
     literalGitPathspec(to),
-    ...(committedPointer ? [literalGitPathspec(settingsPath)] : []),
+    literalGitPathspec(DESIGN_DIRECTORY_REGISTRY_FILE),
+    ...designMetadataGitPaths(opts.repoRoot, to)
+      .filter((file) => file !== DESIGN_DIRECTORY_REGISTRY_FILE)
+      .map(literalGitPathspec),
   ]);
-  return { committedPointer };
+  // Serialized compatibility field: settings are always personal now.
+  return { committedPointer: false };
 }
 
 /** Complete a crash-interrupted view flip. View transitions never alter the

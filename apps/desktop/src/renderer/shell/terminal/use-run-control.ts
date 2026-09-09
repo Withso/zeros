@@ -76,10 +76,10 @@ export function useRunControl(
   chatCwd: string | undefined,
 ): RunControl {
   const { workspace: activeWs } = useActiveWorkspace();
-  // Resolve run actions from the repo ROOT (so a Settings edit applies even
-  // though the run terminal spawns inside a worktree).
+  // Resolve from the checkout so private workspace overrides compose with
+  // live repository defaults, matching the engine command selection.
   const { resolved } = useResolvedSettings(
-    activeWs?.repoRoot || folderKey || undefined,
+    activeWs?.path || activeWs?.repoRoot || folderKey || undefined,
   );
   // Gated on a real chat folder — a chatless surface has no runnable workspace.
   const actions = useMemo(

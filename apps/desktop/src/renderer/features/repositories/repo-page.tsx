@@ -24,10 +24,10 @@
 //          `.zeros/settings.local.toml`.
 //
 //          Settings editing is personal-scope only — every write lands
-//          in .zeros/settings.local.toml (gitignored, this Mac). Values from
-//          the committed repo file / team / managed layers render read-only
-//          with their provenance tags. There is no UI that writes the shared
-//          (committed) file; teams that want shared settings hand-commit it.
+//          in the main checkout's .zeros/settings.local.toml (locally excluded
+//          from Git). Linked worktrees use that same owner. The retired shared
+//          repo file is migration input only; user defaults and any applicable
+//          managed/cloud policy retain their provenance tags.
 //
 // Reached from the Home rail's REPOS rows, the top bar's repo context menu
 // ("Repository Settings"), and the legacy `repo:<id>:<section>` settings
@@ -351,7 +351,7 @@ function RepoWorkspacesList({ project }: { project: Project }) {
 
 // ── The page ─────────────────────────────────────────────
 
-/** First-write contents of a repo's `.zeros/settings.toml` — comments only
+/** First-write contents of a repo's `.zeros/settings.local.toml` — comments only
  *  (parses as an empty document), stating the scripts-only contract so a
  *  hand-editor knows what the file is for. */
 const REPO_LOCAL_SETTINGS_SEED = `# Zeros repo settings — personal to this Mac (gitignored).

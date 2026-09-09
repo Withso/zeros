@@ -39,6 +39,8 @@ import { providerBindingForResume } from "@zeros/protocol/identities";
 import * as fsp from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
+import { personalRepoRoot } from "../../../settings/personal-repo";
+import { readClaudeConnectors } from "./extensions";
 import { homedir } from "node:os";
 
 import {
@@ -92,8 +94,14 @@ import {
   type TurnUsage,
 } from "../../types";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
+import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
+import {
+  extractUnavailableModelId,
+  isModelUnavailableError,
+  modelUnavailableAdvice,
+} from "../shared/model-availability";
 import { FirstTokenLatency } from "../shared/first-token-latency";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
@@ -784,6 +792,13 @@ const SDK_SESSION_FILE = "claude-sdk.json";
 export class ClaudeSdkAdapter implements AgentAdapter {
   readonly agentId = "claude";
   readonly capabilityPorts = {
+    extensions: {
+      list: async (opts) => {
+        if (opts.category !== "apps") return null;
+        const state = [...this.sessions.values()].reverse().find(session => session.query && (opts.scope === "user" || personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)));
+        return readClaudeConnectors(state?.query ?? null);
+      },
+    },
     browser: { nativeSession: true },
     configuration: {
       readProvenance: async (opts) =>
@@ -1884,6 +1899,30 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                 message: terminalError,
                 stage: "prompt",
                 agentId: this.agentId,
+              }),
+            );
+            continue;
+          }
+          if (
+            terminalError &&
+            !state.cancelRequested &&
+            isModelUnavailableError(terminalError)
+          ) {
+            // The API refused the model id (`not_found_error … model: <id>`):
+            // a retired or unentitled ANTHROPIC_MODEL. Terminal — a retry on
+            // the same pick fails identically, and the CLI's own retries have
+            // already run — but the user must learn WHICH pill to change. The
+            // toast drops `message`, so the fix travels as `advice`.
+            turn.reject(
+              new AgentFailureError({
+                kind: "protocol-error",
+                message: `Claude rejected the model: ${terminalError}`,
+                stage: "prompt",
+                agentId: this.agentId,
+                advice: modelUnavailableAdvice(
+                  "Claude",
+                  extractUnavailableModelId(terminalError),
+                ),
               }),
             );
             continue;
@@ -3783,6 +3822,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // final full message.
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
+      // Native MCP pass-through is OFF: Settings → Customize → MCP is the whole
+      // set an agent gets (adapters/shared/mcp-passthrough.ts). Without this,
+      // `settingSources` above would ALSO pull in ~/.claude.json, project
+      // `.mcp.json`, plugin and agent-frontmatter MCP — servers Zeros never
+      // shows and the user cannot manage from here.
+      //
+      // `strictMcpConfig` is the precise lever: it scopes only MCP discovery,
+      // so `settingSources` keeps doing its real job of loading CLAUDE.md and
+      // repo rules.
+      ...(nativeMcpPassthroughEnabled() ? {} : { strictMcpConfig: true }),
       extraArgs: claudeNativeBrowserExtraArgs(state.browserUse),
       ...(mcpServers ? { mcpServers } : {}),
       abortController: state.abort,

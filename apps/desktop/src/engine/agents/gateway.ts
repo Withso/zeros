@@ -1,3 +1,4 @@
+import { designMetadataGitPaths } from "../design/metadata";
 // ──────────────────────────────────────────────────────────
 // AgentGateway — orchestrator for per-agent adapters
 // ──────────────────────────────────────────────────────────
@@ -933,7 +934,8 @@ async function buildCodeAgentTerritory(opts: {
   });
   if (!pointer.valid) {
     throw new Error(
-      "The configured Design directory is not a safe repo-relative path.",
+      pointer.error ??
+        "The configured Design directory is not a safe repo-relative path.",
     );
   }
   // Engine memory of what previous admissions protected here. Both repository
@@ -1069,7 +1071,17 @@ async function buildCodeAgentTerritory(opts: {
       path.join(directory, DESIGN_CANVAS_FILE),
     ),
   ];
-  const deniedPaths = protectedDesignDirectories;
+  const deniedPaths = [
+    ...protectedDesignDirectories,
+    ...designMetadataGitPaths(workspaceRoot).map((file) =>
+      path.join(workspaceRoot, file),
+    ),
+  ];
+  designRecognitionPaths.push(
+    ...designMetadataGitPaths(workspaceRoot).map((file) =>
+      path.join(workspaceRoot, file),
+    ),
+  );
   return {
     agentRole: "code",
     workspaceRoot,
@@ -1250,6 +1262,16 @@ async function resolveNativeCodeContextTerritory(opts: {
   const protectedDesignDirectories = sortedNames.map((name) =>
     path.join(workspaceRoot, ...name.split("/")),
   );
+  let metadataPaths: string[] = [];
+  try {
+    metadataPaths = designMetadataGitPaths(workspaceRoot).map((file) =>
+      path.join(workspaceRoot, file),
+    );
+  } catch (error) {
+    diagnostics.push(
+      `Design metadata could not be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   return {
     diagnostics,
     territory: {
@@ -1258,6 +1280,7 @@ async function resolveNativeCodeContextTerritory(opts: {
       designDirectory: path.join(workspaceRoot, ...activeName.split("/")),
       protectedDesignDirectories,
       designRecognitionPaths: [
+        ...metadataPaths,
         path.dirname(repoSettingsPath(workspaceRoot)),
         ...(repoRoot !== workspaceRoot
           ? [path.dirname(repoLocalSettingsPath(repoRoot))]
@@ -1268,7 +1291,7 @@ async function resolveNativeCodeContextTerritory(opts: {
       ],
       writeCapabilities: {
         workspace: "write",
-        deniedPaths: protectedDesignDirectories,
+        deniedPaths: [...protectedDesignDirectories, ...metadataPaths],
       },
     },
   };
@@ -6088,6 +6111,37 @@ export class AgentGateway {
           territory,
           executionBoundary,
         });
+      },
+    });
+  }
+
+  async readExtensionInventory(
+    agentId: string,
+    category: "apps" | "plugins",
+    cwd?: string,
+  ) {
+    return this.runProviderOneShot({
+      agentId,
+      cwd,
+      executionPrefix: "extension-inventory",
+      operation: ({
+        adapter,
+        cwd: resolvedCwd,
+        env,
+        cliBinary,
+        executionBoundary,
+      }) => {
+        const extensions = resolveAgentCapabilityPorts(adapter).extensions;
+        return extensions
+          ? extensions.list({
+              category,
+              scope: cwd ? "repo" : "user",
+              cwd: resolvedCwd,
+              env,
+              cliBinary,
+              executionBoundary,
+            })
+          : Promise.resolve(null);
       },
     });
   }

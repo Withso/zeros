@@ -202,6 +202,16 @@ describe("cross-tool interop", () => {
       });
 
       expect(
+        await readFile(path.join(result.path, ".zeros/settings.toml"), "utf8"),
+      ).toContain("settings_version");
+      const ignored = await execFileAsync("git", [
+        "-C",
+        result.path,
+        "check-ignore",
+        ".zeros/settings.toml",
+      ]);
+      expect(ignored.stdout.trim()).toBe(".zeros/settings.toml");
+      expect(
         listWorkspaces().find(
           (workspace) => workspace.id === result.workspaceId,
         ),
@@ -225,7 +235,9 @@ describe("cross-tool interop", () => {
       expect(result.branch).toBe("cursor/adopt-me");
       // The seed lives in app-data now (not the worktree); listing detects us
       // via the registry below.
-      expect(existsSync(path.join(result.path, ".zeros"))).toBe(false);
+      expect(existsSync(path.join(result.path, ".zeros/settings.toml"))).toBe(
+        true,
+      );
       const seed = JSON.parse(
         await readFile(worktreeSeedPath(result.path), "utf8"),
       );
@@ -495,7 +507,9 @@ describe("cross-tool interop", () => {
       expect(result.branch).toBe("tokyo");
       // Seed is in app-data now (not the worktree); listing detects us via the
       // registry. Verify the seed exists there and no .zeros in the worktree.
-      expect(existsSync(path.join(result.path, ".zeros"))).toBe(false);
+      expect(existsSync(path.join(result.path, ".zeros/settings.toml"))).toBe(
+        true,
+      );
       const seed = JSON.parse(
         await readFile(worktreeSeedPath(result.path), "utf8"),
       );

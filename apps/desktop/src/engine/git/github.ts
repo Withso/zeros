@@ -26,6 +26,7 @@
 
 import type { Octokit as OctokitClass } from "@octokit/rest";
 import { createHash } from "node:crypto";
+import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
 import { GitError, isGitError, type GitErrorCode } from "./errors";
 import { getWorkspace } from "./worktree";
 import { advanceLifecycle, updateWorkspace } from "./state";
@@ -1165,7 +1166,9 @@ function githubRepositoryFor(
   workspaceId: string,
   repository?: { owner: string; repo: string },
 ): Promise<{ owner: string; repo: string }> {
-  return repository ? Promise.resolve(repository) : workspaceRemote(workspaceId);
+  return repository
+    ? Promise.resolve(repository)
+    : workspaceRemote(workspaceId);
 }
 
 // ── Repository access preflight ──────────────────────────
@@ -1585,6 +1588,10 @@ export async function initRepoInPlace(
   if (initialized) {
     await runGit(repoRoot, ["init", "-q", "-b", "main"]);
   }
+  // Personal files can predate Git initialization. Exclude them before the
+  // initial add/commit (and therefore before any later GitHub publication).
+  ensureLocalSettingsIgnored(repoRoot);
+  ensureLocalSettingsIgnored(repoRoot, ".zeros/skills/");
   await ensureGitIdentity(repoRoot);
   if (!(await refExists(repoRoot, "HEAD"))) {
     await runGit(repoRoot, ["add", "-A"]);
@@ -2252,11 +2259,14 @@ export async function getPrReviews(opts: {
 }
 
 /** Post a top-level comment on the PR conversation. */
-export async function addPrComment(opts: {
-  workspaceId: string;
-  prNumber: number;
-  body: string;
-}, repository?: { owner: string; repo: string }): Promise<{
+export async function addPrComment(
+  opts: {
+    workspaceId: string;
+    prNumber: number;
+    body: string;
+  },
+  repository?: { owner: string; repo: string },
+): Promise<{
   id: number;
   url: string;
 }> {

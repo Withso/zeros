@@ -575,6 +575,46 @@ describe("workspace process reaper", () => {
 });
 
 describe("actor-scoped Design identity lifecycle", () => {
+  it("scopes a hand-edited workspace settings file to that workspace", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-settings-scope-"));
+    const checkout = path.join(root, "worktree");
+    await mkdir(path.join(root, ".git", "worktrees", "one"), {
+      recursive: true,
+    });
+    await mkdir(checkout);
+    await writeFile(
+      path.join(checkout, ".git"),
+      `gitdir: ${path.join(root, ".git/worktrees/one")}\n`,
+    );
+    await writeFile(path.join(root, ".git/worktrees/one/commondir"), "../..\n");
+    const state = internals(new ZerosEngine({ root, port: 29_959 }));
+    const roots = vi
+      .spyOn(state.workspace, "settingsRepoRoots")
+      .mockReturnValue([root, checkout]);
+    const rows = vi.spyOn(gitState, "listWorkspaces").mockReturnValue([
+      { id: "one", path: checkout, repoRoot: root },
+      { id: "two", path: path.join(root, "sibling"), repoRoot: root },
+    ] as ReturnType<typeof gitState.listWorkspaces>);
+    try {
+      expect(
+        state
+          .settingsReconcileScope([path.join(checkout, ".zeros/settings.toml")])
+          ?.map((row) => row.id),
+      ).toEqual(["one"]);
+      expect(
+        state
+          .settingsReconcileScope([
+            path.join(root, ".zeros/settings.local.toml"),
+          ])
+          ?.map((row) => row.id),
+      ).toEqual(["one", "two", `repo-root:${root}`]);
+    } finally {
+      roots.mockRestore();
+      rows.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("retires only the affected Design agent while native Code, Setup, and Run stay live", async () => {
     const root = await mkdtemp(
       path.join(tmpdir(), "zeros-design-identity-local-"),

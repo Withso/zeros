@@ -12,7 +12,9 @@ const execFileAsync = promisify(execFile);
 async function initRepo(repoRoot: string, gitignore: string): Promise<void> {
   await mkdir(repoRoot, { recursive: true });
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repoRoot });
-  await execFileAsync("git", ["config", "user.email", "t@t"], { cwd: repoRoot });
+  await execFileAsync("git", ["config", "user.email", "t@t"], {
+    cwd: repoRoot,
+  });
   await execFileAsync("git", ["config", "user.name", "t"], { cwd: repoRoot });
   await writeFile(path.join(repoRoot, ".gitignore"), gitignore);
   await writeFile(path.join(repoRoot, "README.md"), "# init\n");
@@ -37,7 +39,22 @@ describe("resolveFilesToCopy", () => {
     await rm(workdir, { recursive: true, force: true });
   });
 
-  const write = (rel: string, body = "x") => writeFile(path.join(repoRoot, rel), body);
+  const write = (rel: string, body = "x") =>
+    writeFile(path.join(repoRoot, rel), body);
+
+  it("keeps personal settings and skills at their main-checkout owner even with broad copy patterns", async () => {
+    await initRepo(repoRoot, ".zeros/\n.env\n");
+    await mkdir(path.join(repoRoot, ".zeros/skills/review"), {
+      recursive: true,
+    });
+    await write(
+      ".zeros/settings.local.toml",
+      'settings_version=2\nfile_include_globs=["**"]\n',
+    );
+    await write(".zeros/skills/review/SKILL.md", "Review changes");
+    await write(".env", "LOCAL_VALUE=example");
+    expect((await resolveFilesToCopy(repoRoot)).paths).toEqual([".env"]);
+  });
 
   it("defaults to .env* — seeds gitignored .env files, not other ignored files", async () => {
     await initRepo(repoRoot, ".env*\n*.log\n");
@@ -90,12 +107,17 @@ describe("resolveFilesToCopy", () => {
     await write("nested/secrets/deep.key");
     await write(".worktreeinclude", "secrets/\n");
     const r = await resolveFilesToCopy(repoRoot);
-    expect(r.paths.sort()).toEqual(["nested/secrets/deep.key", "secrets/root.key"]);
+    expect(r.paths.sort()).toEqual([
+      "nested/secrets/deep.key",
+      "secrets/root.key",
+    ]);
   });
 
   it("anchored dir-with-slash pattern seeds nested contents", async () => {
     await initRepo(repoRoot, "config/certs/\n");
-    await mkdir(path.join(repoRoot, "config", "certs", "sub"), { recursive: true });
+    await mkdir(path.join(repoRoot, "config", "certs", "sub"), {
+      recursive: true,
+    });
     await write("config/certs/server.pem");
     await write("config/certs/sub/chain.pem");
     await write(".worktreeinclude", "config/certs\n");
@@ -109,8 +131,12 @@ describe("resolveFilesToCopy", () => {
   it("excludes a TRACKED file even if it matches the pattern (only gitignored seeded)", async () => {
     await initRepo(repoRoot, ".env*\n");
     await write(".env.example", "template");
-    await execFileAsync("git", ["add", "-f", ".env.example"], { cwd: repoRoot });
-    await execFileAsync("git", ["commit", "-q", "-m", "track example"], { cwd: repoRoot });
+    await execFileAsync("git", ["add", "-f", ".env.example"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "track example"], {
+      cwd: repoRoot,
+    });
     await write(".env", "real");
     const r = await resolveFilesToCopy(repoRoot);
     expect(r.paths).toEqual([".env"]); // .env.example is tracked → already in the worktree
@@ -152,9 +178,7 @@ describe("resolveFilesToCopy", () => {
     expect(r.source).toBe("default");
     expect(r.paths).toEqual([]);
     expect(r.warnings).toEqual([
-      expect.stringContaining(
-        "found 1 separate Git checkout while scanning",
-      ),
+      expect.stringContaining("found 1 separate Git checkout while scanning"),
     ]);
   });
 
@@ -266,7 +290,9 @@ describe("resolveFilesToCopy", () => {
     const r = await resolveFilesToCopy(repoRoot);
     expect(r.complete).toBe(true);
     expect(r.paths).toEqual([".env"]); // the VALID line still seeds
-    expect(r.warnings.some((w) => w.includes("outside the project"))).toBe(true);
+    expect(r.warnings.some((w) => w.includes("outside the project"))).toBe(
+      true,
+    );
   });
 
   it("an unreadable .worktreeinclude falls back instead of seeding nothing", async () => {
@@ -382,7 +408,9 @@ describe("resolveFilesToCopy", () => {
     const r = await resolveFilesToCopy(repoRoot);
     expect(r.complete).toBe(false);
     expect(r.paths).toEqual([]);
-    expect(r.warnings.some((w) => w.includes("retry in background"))).toBe(true);
+    expect(r.warnings.some((w) => w.includes("retry in background"))).toBe(
+      true,
+    );
   });
 
   it("timeoutMs: 0 runs unbounded and completes", async () => {

@@ -1,3 +1,15 @@
+import {
+  designMetadataGitPaths,
+  isDesignMetadataRepoPath,
+} from "../design/metadata";
+import {
+  scopeDesignRegistryCommit,
+  designRegistryAtGitRef,
+} from "../design/metadata-git";
+import {
+  DESIGN_DIRECTORY_REGISTRY_FILE,
+  designDocumentRelativePath,
+} from "../design/metadata";
 // Write-path git operations: commit, push, pull, rebase, stash,
 // change-target-branch. All shell out via git-exec.ts — system git
 // handles the gnarly edge cases (auth helpers, refspecs, line-ending
@@ -267,7 +279,13 @@ async function resetSnapshotPaths(
       cwd,
       expectedHead
         ? ["reset", "-q", expectedHead, "--", ...literals]
-        : ["update-index", "--force-remove", "--ignore-missing", "--", ...batch],
+        : [
+            "update-index",
+            "--force-remove",
+            "--ignore-missing",
+            "--",
+            ...batch,
+          ],
       { env: snapshot.env },
     );
   }
@@ -425,10 +443,15 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
         ...stickyDesignDirs,
       ]),
     ];
-    const explicitDesignPaths = (files ?? []).filter((candidate) =>
-      protectedDesignDirs.some((designDir) =>
-        repoPathOverlapsDesignRoot(candidate, designDir),
-      ),
+    const explicitDesignPaths = (files ?? []).filter(
+      (candidate) =>
+        isDesignMetadataRepoPath(candidate) ||
+        designMetadataGitPaths(ws.path).some((metadata) =>
+          repoPathOverlapsDesignRoot(candidate, metadata),
+        ) ||
+        protectedDesignDirs.some((designDir) =>
+          repoPathOverlapsDesignRoot(candidate, designDir),
+        ),
     );
     if (explicitDesignPaths.length > 0) {
       const blocked = [...new Set(explicitDesignPaths)];
@@ -446,10 +469,12 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     if (opts.amend && expectedHead) {
       const previousDesignPaths = (
         await changedPathsInCommit(ws.path, expectedHead)
-      ).filter((candidate) =>
-        protectedDesignDirs.some((designDir) =>
-          repoPathOverlapsDesignRoot(candidate, designDir),
-        ),
+      ).filter(
+        (candidate) =>
+          isDesignMetadataRepoPath(candidate) ||
+          protectedDesignDirs.some((designDir) =>
+            repoPathOverlapsDesignRoot(candidate, designDir),
+          ),
       );
       if (previousDesignPaths.length > 0) {
         throw new GitError({
@@ -482,11 +507,36 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
           "Resolve every conflict, then continue the active Git operation.",
       });
     }
+    if (authority === "design")
+      await scopeDesignRegistryCommit(
+        ws.path,
+        activeDesignDir,
+        expectedHead,
+        snapshot.env,
+      );
+    const metadataPaths =
+      authority === "design"
+        ? [
+            DESIGN_DIRECTORY_REGISTRY_FILE,
+            ...(
+              await Promise.all([
+                designRegistryAtGitRef(ws.path, expectedHead),
+                designRegistryAtGitRef(ws.path, ":", snapshot.env),
+              ])
+            ).flatMap((registry) =>
+              Object.entries(registry?.directories ?? {})
+                .filter(([, entry]) => entry.path === activeDesignDir)
+                .map(([id]) => designDocumentRelativePath(id)),
+            ),
+          ]
+        : [];
     const capturedStaged = await stagedPaths(ws.path, snapshot.env);
     const belongsToSelectedLane = (candidate: string): boolean =>
       authority === "design"
-        ? repoPathOverlapsDesignRoot(candidate, activeDesignDir)
-        : !protectedDesignDirs.some((designDir) =>
+        ? repoPathOverlapsDesignRoot(candidate, activeDesignDir) ||
+          metadataPaths.includes(candidate)
+        : !isDesignMetadataRepoPath(candidate) &&
+          !protectedDesignDirs.some((designDir) =>
             repoPathOverlapsDesignRoot(candidate, designDir),
           );
     const crossingRename = (await stagedRenames(ws.path, snapshot.env)).find(

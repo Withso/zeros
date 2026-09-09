@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://zeros.build/schemas/settings.repo.schema.json",
   "title": "Zeros repository settings",
-  "description": "Shared per-repository Zeros settings (<repo>/.zeros/settings.toml — commit this file). Also validates <repo>/.zeros/settings.local.toml (personal, gitignored).",
+  "description": "Personal repository settings (<repo>/.zeros/settings.local.toml). Excluded through Git's local info/exclude; inherited by linked local worktrees unless their private overrides replace a value. Never commit this file.",
   "type": "object",
   "properties": {
     "$schema": {
@@ -160,8 +160,160 @@
         "directory": {
           "type": "string",
           "description": "Repo-relative folder the design surface reads and writes (default \"Zeros Design\"). The folder is committed content; this key just selects which design folder is active."
+        },
+        "directory_id": {
+          "type": "string",
+          "pattern": "^design_[a-zA-Z0-9_-]{1,64}$",
+          "description": "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml."
         }
       }
+    },
+    "file_include_globs": {
+      "description": "Gitignored files matching these patterns are seeded into each new worktree (e.g. \".env*\"). Gitignore syntax, including \"!\" to exclude. Set here for every project, or in a repo's .zeros/settings.local.toml for one project; a repo-root .worktreeinclude file, if present, takes precedence over both.",
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Executable to spawn for the stdio server."
+                  },
+                  "args": {
+                    "description": "Arguments passed to the command.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "Environment variables for the server process (non-secret / refs).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "command"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Streamable-HTTP endpoint URL."
+                  },
+                  "headers": {
+                    "description": "HTTP headers sent on every request (e.g. Authorization; non-secret / refs). Applies to auth=\"none\" (injected directly) and auth=\"header\" (sent alongside the brokered secret); IGNORED for auth=\"oauth\" (the gateway manages the connection).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "auth": {
+                    "description": "Routes this server through the Zeros MCP gateway: \"oauth\" brokers OAuth 2.1 once and holds the token; \"header\" holds a static auth header (its VALUE lives in the engine vault, never here) and adds it when proxying. Default \"none\" = injected directly with the headers above.",
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "oauth",
+                      "header"
+                    ]
+                  },
+                  "header_name": {
+                    "description": "For auth=\"header\": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.",
+                    "type": "string"
+                  },
+                  "oauth_client_id": {
+                    "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
+                    "type": "string"
+                  },
+                  "disabled_tools": {
+                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "description": "MCP servers shared across every agent."
+        }
+      }
+    },
+    "workspaces": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Root folder where new worktrees are created."
+        }
+      }
+    },
+    "settings_version": {
+      "type": "number",
+      "const": 2
+    },
+    "settings_migration_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
     }
-  }
+  },
+  "additionalProperties": false
 }

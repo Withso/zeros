@@ -12,19 +12,31 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
-  repoSettingsSchema,
+  repoLocalSettingsSchema,
+  workspaceLocalSettingsSchema,
+  SCHEMA_URL_WORKSPACE,
   SCHEMA_URL_REPO,
   SCHEMA_URL_USER,
   userSettingsSchema,
 } from "../apps/desktop/src/engine/settings/schema";
+import { designDirectoryRegistrySchema } from "../apps/desktop/src/engine/design/metadata";
 
 // `import.meta.dir` is bun-only; derive the script dir portably so this runs
 // under tsx/node too.
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const OUT_DIR = path.join(HERE, "..", "apps", "marketing", "public", "schemas");
 
-function emit(fileName: string, schema: z.ZodType, id: string, title: string, description: string) {
-  const json = z.toJSONSchema(schema, { target: "draft-7", io: "input" }) as Record<string, unknown>;
+function emit(
+  fileName: string,
+  schema: z.ZodType,
+  id: string,
+  title: string,
+  description: string,
+) {
+  const json = z.toJSONSchema(schema, {
+    target: "draft-7",
+    io: "input",
+  }) as Record<string, unknown>;
   const out = {
     $schema: "http://json-schema.org/draft-07/schema#",
     $id: id,
@@ -41,10 +53,10 @@ function emit(fileName: string, schema: z.ZodType, id: string, title: string, de
 mkdirSync(OUT_DIR, { recursive: true });
 emit(
   "settings.repo.schema.json",
-  repoSettingsSchema,
+  repoLocalSettingsSchema,
   SCHEMA_URL_REPO,
   "Zeros repository settings",
-  "Shared per-repository Zeros settings (<repo>/.zeros/settings.toml — commit this file). Also validates <repo>/.zeros/settings.local.toml (personal, gitignored).",
+  "Personal repository settings (<repo>/.zeros/settings.local.toml). Excluded through Git's local info/exclude; inherited by linked local worktrees unless their private overrides replace a value. Never commit this file.",
 );
 emit(
   "settings.schema.json",
@@ -52,4 +64,20 @@ emit(
   SCHEMA_URL_USER,
   "Zeros user settings",
   "User-wide Zeros settings (~/.zeros/settings.toml). Includes user-only keys (models, workspaces, tool approvals) that repository settings may not set.",
+);
+
+emit(
+  "settings.workspace.schema.json",
+  workspaceLocalSettingsSchema,
+  SCHEMA_URL_WORKSPACE,
+  "Zeros workspace settings",
+  "Private overrides for this checkout (.zeros/settings.toml; settings.local.toml if the branch tracks the old shared filename). Unset values inherit repository and user defaults. Never commit this file.",
+);
+
+emit(
+  "design-dir.schema.json",
+  designDirectoryRegistrySchema,
+  "https://zeros.build/schemas/design-dir.schema.json",
+  "Zeros Design directory registry",
+  "Tracked .zeros/design-dir.toml: stable Design directory IDs and canonical repository-relative paths. Entries must be unique, non-overlapping, and use real, unlinked files and directories. Private selections belong in local settings; frame metadata lives under .zeros/design/<id>/document.json.",
 );

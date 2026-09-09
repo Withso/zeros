@@ -31,6 +31,7 @@
 
 import { readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { zerosSkillInstructions } from "../agents/zeros-skills";
 import { spawnEnvNameHazard, type SpawnEnvHazard } from "./env-names";
 import { opSettingsResolve } from "./ops";
 import type { SettingsLayerName } from "./schema";
@@ -177,8 +178,7 @@ export function resolveSpawnEnv(
   let effective: Record<string, unknown>;
   let sources: Record<string, SettingsLayerName>;
   try {
-    // mainRepoRoot lets a worktree agent inherit the main checkout's repo-local
-    // (machine-wide repo override) plus its own worktree workspace-local.
+    // Every linked worktree uses the main checkout's personal repo file.
     const resolved = opSettingsResolve(cwd, mainRepoRoot);
     effective = resolved.effective;
     sources = resolved.sources;
@@ -208,6 +208,18 @@ export function resolveSpawnEnv(
     promptsTable.general.trim()
   ) {
     out.ZEROS_PROMPTS_GENERAL = promptsTable.general;
+  }
+
+  try {
+    const skills = zerosSkillInstructions(mainRepoRoot ?? cwd);
+    if (skills)
+      out.ZEROS_PROMPTS_GENERAL = [out.ZEROS_PROMPTS_GENERAL, skills]
+        .filter(Boolean)
+        .join("\n\n");
+  } catch (error) {
+    warnings.push(
+      `Zeros skills could not be loaded: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 
   const table = effective.env;

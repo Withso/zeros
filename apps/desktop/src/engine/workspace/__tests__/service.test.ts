@@ -1,3 +1,7 @@
+import {
+  commitDesignMetadata,
+  designDocumentMetadataPath,
+} from "../../design/metadata";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -5,6 +9,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { runSessionId } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import { createDesignWebDocumentState } from "@zeros/design-web";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
 import {
   setStateRootForTesting,
@@ -16,6 +21,11 @@ import {
 import { insertWorkspace } from "../../git/state";
 import type { Workspace } from "../../git/types";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
+import {
+  commitDesignWebDocumentState,
+  createDesignFrame,
+  readDesignWebDocumentState,
+} from "../../design/document";
 import {
   DESIGN_CANVAS_FILE,
   designDirectoryNameFor,
@@ -727,6 +737,21 @@ describe("WorkspaceService", () => {
         target: { directory: string; exists: boolean } | null;
       };
       expect(initialized.target).toEqual({ directory, exists: true });
+      const settingsFile = path.join(created.path, ".zeros", "settings.toml");
+      const original = fs.readFileSync(settingsFile, "utf8");
+      try {
+        fs.writeFileSync(
+          settingsFile,
+          '[design]\ndirectory_id="design_missing"\n',
+        );
+        await expect(
+          svc.handle("design.listDirectories", {
+            workspaceId: created.workspaceId,
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      } finally {
+        fs.writeFileSync(settingsFile, original);
+      }
     } finally {
       await svc.handle("workspace.delete", {
         workspaceId: created.workspaceId,
@@ -792,9 +817,25 @@ describe("WorkspaceService", () => {
         path.join(design.path, alternateDirectory),
         { recursive: true },
       );
+      commitDesignMetadata(
+        design.path,
+        alternateDirectory,
+        fs.readFileSync(
+          designDocumentMetadataPath(design.path, originalDirectory),
+          "utf8",
+        ),
+      );
       execFileSync(
         "git",
-        ["add", "-f", "--", originalDirectory, alternateDirectory],
+        [
+          "add",
+          "-f",
+          "--",
+          originalDirectory,
+          alternateDirectory,
+          ".zeros/design-dir.toml",
+          ".zeros/design",
+        ],
         { cwd: design.path },
       );
       execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
@@ -953,6 +994,75 @@ describe("WorkspaceService", () => {
       expect(
         restoredFromEmptyCanvas.snapshot.frames.map((frame) => frame.file),
       ).toEqual([second.frame.file]);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("undoes metadata-only frame renames without recording unchanged names", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-metadata-rename-history",
+      kind: "design",
+    });
+    try {
+      const frame = await createDesignFrame(design.path, {
+        title: "Original frame",
+      });
+      const current = await readDesignWebDocumentState(design.path, frame.file);
+      const source = current.files[frame.file].replace(
+        /<title>.*?<\/title>/,
+        "",
+      );
+      await commitDesignWebDocumentState(
+        design.path,
+        frame.file,
+        current.revision,
+        createDesignWebDocumentState({
+          ...current,
+          files: { ...current.files, [frame.file]: source },
+        }),
+      );
+
+      const params = { workspaceId: design.workspaceId, frame: frame.file };
+      await svc.handle("design.frame.rename", {
+        ...params,
+        title: "Renamed frame",
+      });
+      await svc.handle("design.frame.rename", {
+        ...params,
+        title: "Renamed frame",
+      });
+      const undone = (await svc.handle("design.history.undo", params)) as {
+        snapshot: { frames: Array<{ file: string; title: string }> };
+      };
+      expect(undone.snapshot.frames).toEqual([
+        expect.objectContaining({ file: frame.file, title: "Original frame" }),
+      ]);
+      expect(
+        (await readDesignWebDocumentState(design.path, frame.file)).files[
+          frame.file
+        ],
+      ).toBe(source);
+
+      const redone = (await svc.handle("design.history.redo", params)) as {
+        snapshot: { frames: Array<{ file: string; title: string }> };
+      };
+      expect(redone.snapshot.frames).toEqual([
+        expect.objectContaining({ file: frame.file, title: "Renamed frame" }),
+      ]);
+      expect(
+        (await readDesignWebDocumentState(design.path, frame.file)).files[
+          frame.file
+        ],
+      ).toBe(source);
     } finally {
       await svc.handle("workspace.delete", {
         workspaceId: design.workspaceId,
@@ -1313,7 +1423,7 @@ describe("WorkspaceService", () => {
       ).resolves.toMatchObject({ ok: true, mode: "design" });
       expect(
         fs.existsSync(
-          path.join(created.path, "Product Design", ".zeros-canvas.json"),
+          designDocumentMetadataPath(created.path, "Product Design"),
         ),
       ).toBe(true);
       expect(
@@ -1671,9 +1781,31 @@ describe("WorkspaceService", () => {
       );
       const alternateDesign = path.join(created.path, "Alternate Design");
       fs.cpSync(currentDesign, alternateDesign, { recursive: true });
-      execFileSync("git", ["add", "-f", "--", "Alternate Design"], {
-        cwd: created.path,
-      });
+      commitDesignMetadata(
+        created.path,
+        "Alternate Design",
+        fs.readFileSync(
+          designDocumentMetadataPath(
+            created.path,
+            designDirectoryNameFor(created.path),
+          ),
+          "utf8",
+        ),
+      );
+      execFileSync(
+        "git",
+        [
+          "add",
+          "-f",
+          "--",
+          "Alternate Design",
+          ".zeros/design-dir.toml",
+          ".zeros/design",
+        ],
+        {
+          cwd: created.path,
+        },
+      );
       execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
         cwd: created.path,
       });

@@ -39,6 +39,10 @@ import {
 } from "../document";
 import { withDesignDocumentWrite } from "../document-write-lock";
 import {
+  designDocumentMetadataPath,
+  DESIGN_DIRECTORY_REGISTRY_FILE,
+} from "../metadata";
+import {
   resetDesignRuntimeAuditsForTests,
   setDesignRuntimeAudit,
 } from "../runtime-audits";
@@ -60,17 +64,17 @@ describe("design document", () => {
     expect(result.created).toEqual(
       expect.arrayContaining([
         `${DESIGN_DIRECTORY_NAME}/tokens.css`,
-        `${DESIGN_DIRECTORY_NAME}/.zeros-canvas.json`,
+        DESIGN_DIRECTORY_REGISTRY_FILE,
       ]),
     );
     const canvasSeed = JSON.parse(
       await readFile(
-        path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
+        designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
         "utf8",
       ),
     ) as Record<string, unknown>;
     expect(canvasSeed).toMatchObject({
-      version: 2,
+      version: 3,
       foundation: {
         schemaVersion: 1,
         parameters: [],
@@ -96,8 +100,8 @@ describe("design document", () => {
       path.join(root, DESIGN_DIRECTORY_NAME, created.file),
       "utf8",
     );
-    expect(source).toContain('name="zeros-frame"');
-    expect(source).toContain("width=640,height=360");
+    expect(source).not.toContain('name="zeros-frame"');
+    expect(source).not.toContain("width=640,height=360");
     expect(source).toContain('href="./tokens.css"');
     expect(source).not.toContain("<script");
     expect(source).toMatch(/<main\b[^>]*>\s*<\/main>/);
@@ -158,7 +162,7 @@ describe("design document", () => {
       height: 32,
       nodeCount: 1,
     });
-    expect(source).toContain("kind=text");
+    expect(source).not.toContain("zeros-frame");
     expect(source).toContain('data-oid="text-loose-1"');
     expect(source).toContain("Loose &lt;text&gt; &amp; source");
     expect(source).toMatch(/background:\s*transparent\s*!important/);
@@ -166,7 +170,7 @@ describe("design document", () => {
   });
 
   it("migrates version-1 canvas metadata forward without losing geometry", async () => {
-    await initializeDesignDocument(root);
+    await mkdir(path.join(root, DESIGN_DIRECTORY_NAME), { recursive: true });
     const directory = path.join(root, DESIGN_DIRECTORY_NAME);
     await writeFile(
       path.join(directory, "legacy.html"),
@@ -186,10 +190,13 @@ describe("design document", () => {
 
     await updateDesignFrameGeometry(root, "legacy.html", { x: 75 });
     const migrated = JSON.parse(
-      await readFile(path.join(directory, ".zeros-canvas.json"), "utf8"),
+      await readFile(
+        designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
+        "utf8",
+      ),
     ) as Record<string, unknown>;
     expect(migrated).toMatchObject({
-      version: 2,
+      version: 3,
       frames: {
         "legacy.html": { x: 75, y: 50, w: 800, h: 600, z: 2 },
       },
@@ -203,8 +210,12 @@ describe("design document", () => {
       await initializeDesignDocument(root);
       const target = path.join(
         root,
-        DESIGN_DIRECTORY_NAME,
-        ".zeros-canvas.json",
+        ...path
+          .relative(
+            root,
+            designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
+          )
+          .split(path.sep),
       );
       const unsupported = `${JSON.stringify({ version, frames: {} })}\n`;
       await writeFile(target, unsupported, "utf8");
@@ -829,7 +840,7 @@ describe("design document", () => {
       '<!doctype html><html><head><meta name="zeros-frame" content="width=800,height=600,title=Remote"></head><body><main>Remote</main></body></html>';
     await writeFile(path.join(directory, "remote.html"), source, "utf8");
     const canvasBefore = await readFile(
-      path.join(directory, ".zeros-canvas.json"),
+      designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
       "utf8",
     );
 
@@ -845,13 +856,16 @@ describe("design document", () => {
       source,
     );
     expect(
-      await readFile(path.join(directory, ".zeros-canvas.json"), "utf8"),
+      await readFile(
+        designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
+        "utf8",
+      ),
     ).toBe(canvasBefore);
   });
 
   it("fails closed without replacing malformed canvas metadata", async () => {
     await initializeDesignDocument(root);
-    const target = path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json");
+    const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
     const malformed = '{"version":2,"frames":';
     await writeFile(target, malformed, "utf8");
 
@@ -860,6 +874,37 @@ describe("design document", () => {
     );
     expect(await readFile(target, "utf8")).toBe(malformed);
   });
+
+  it("preserves extension metadata when updating a frame", async () => {
+    const frame = await createDesignFrame(root, { title: "Extensions" });
+    const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
+    const original = JSON.parse(await readFile(target, "utf8"));
+    original.extension = { revision: 7 };
+    original.frames[frame.file].extension = "geometry";
+    original.frame_info[frame.file].extension = "frame";
+    await writeFile(target, JSON.stringify(original));
+    await updateDesignFrameGeometry(root, frame.file, { x: 200 });
+    const saved = JSON.parse(await readFile(target, "utf8"));
+    expect(saved.extension).toEqual(original.extension);
+    expect(saved.frames[frame.file].extension).toBe("geometry");
+    expect(saved.frame_info[frame.file].extension).toBe("frame");
+  });
+
+  it.each([null, [], { x: "bad", y: 0, w: 800, h: 600, z: 0 }])(
+    "refuses malformed current frame geometry without rewriting it (%j)",
+    async (geometry) => {
+      const frame = await createDesignFrame(root);
+      const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
+      const original = JSON.parse(await readFile(target, "utf8"));
+      original.frames[frame.file] = geometry;
+      const source = JSON.stringify(original);
+      await writeFile(target, source);
+      await expect(
+        updateDesignFrameGeometry(root, frame.file, { x: 200 }),
+      ).rejects.toThrow(/geometry/i);
+      expect(await readFile(target, "utf8")).toBe(source);
+    },
+  );
 
   it("surgically updates inline styles and rejects stale or injected declarations", async () => {
     await initializeDesignDocument(root);
@@ -1141,6 +1186,56 @@ describe("design document", () => {
       }),
     ).rejects.toThrow("contains element children");
   });
+
+  it.each([
+    { kind: "frame" as const, w: 390, h: 844 },
+    { kind: "text" as const, w: 180, h: 32 },
+  ])(
+    "duplicates a $kind using its saved dimensions",
+    async ({ kind, w, h }) => {
+      const original = await createDesignFrame(root, {
+        title: "Original",
+        geometry: { w, h },
+        ...(kind === "text"
+          ? {
+              seed: {
+                kind,
+                nodeId: "original-text",
+                text: "Canvas text",
+                fixedSize: true,
+              },
+            }
+          : {}),
+      });
+
+      const copy = await duplicateDesignFrame(root, original.file);
+      expect(copy).toMatchObject({ kind, width: w, height: h });
+
+      await updateDesignFrameGeometry(root, original.file, {
+        x: original.x,
+        y: original.y,
+        w: w + 40,
+        h: h + 20,
+        z: original.z,
+      });
+      const resizedCopy = await duplicateDesignFrame(root, original.file);
+      expect(resizedCopy).toMatchObject({
+        kind,
+        width: w + 40,
+        height: h + 20,
+      });
+      expect(await listDesignFrames(root)).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ file: copy.file, width: w, height: h }),
+          expect.objectContaining({
+            file: resizedCopy.file,
+            width: w + 40,
+            height: h + 20,
+          }),
+        ]),
+      );
+    },
+  );
 
   it("duplicates and deletes frames while keeping canvas state exact", async () => {
     await initializeDesignDocument(root);

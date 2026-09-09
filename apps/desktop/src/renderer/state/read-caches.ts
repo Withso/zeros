@@ -26,6 +26,7 @@ import type {
 import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
 import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
+import type { bridgeDesignListDirectories } from "../platform/bridge/design-bridge";
 
 /** Local git reads (bridge round-trip, no network): branches move often, so
  *  revalidate after a short window — still instant within a browsing burst. */
@@ -66,6 +67,10 @@ export const designDirectoryTargetCache = new KeyedAsyncCache<{
   directory: string;
   exists: boolean;
 } | null>(64);
+/** Personal repository Design settings, including stable registry IDs. */
+export const designDirectoryListingCache = new KeyedAsyncCache<
+  Awaited<ReturnType<typeof bridgeDesignListDirectories>>
+>(32);
 /** Design folders change on Git timescales (a commit, a pull). The exact
  *  signals — a confirmed mode switch, external ref changes — patch or
  *  invalidate the key; this window only catches out-of-band edits. */
@@ -309,6 +314,7 @@ export function invalidateExternalGitRefCaches(
  * cache itself. */
 export function invalidateDesignDirectoryTargetReadCache(): void {
   designDirectoryTargetCache.invalidateAll();
+  designDirectoryListingCache.invalidateAll();
 }
 
 /** A NON-initial bridge (re)connection — engine restart, crash recovery, a
@@ -331,6 +337,7 @@ export function invalidateAllEngineReadCaches(): void {
   filesToCopyPreviewCache.invalidateAll();
   workingDirectoriesCache.invalidateAll();
   designDirectoryTargetCache.invalidateAll();
+  designDirectoryListingCache.invalidateAll();
 
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
   // device lands while this renderer is deaf to DB_CHANGED.

@@ -190,6 +190,26 @@ describe("classifyThreadFailure", () => {
     }
   });
 
+  it("returns protocol-error WITH model advice when codex rejects the model id", () => {
+    for (const wording of [
+      "unsupported model: gpt-4.9",
+      "The model `gpt-4.9` does not exist or you do not have access to it.",
+    ]) {
+      const err = classifyThreadFailure(new Error(wording), "prompt");
+      expect(err, wording).toBeInstanceOf(AgentFailureError);
+      const failure = (err as AgentFailureError).failure;
+      expect(failure).toMatchObject({
+        kind: "protocol-error",
+        stage: "prompt",
+        agentId: "codex",
+      });
+      // The toast suppresses `message`; the user must still learn which pill
+      // to change, so the advice names the rejected model.
+      expect(failure.advice).toContain('"gpt-4.9"');
+      expect(failure.advice).toMatch(/model menu/);
+    }
+  });
+
   it("returns the raw error untouched when no pattern matches", () => {
     const original = new Error("ECONNREFUSED 127.0.0.1:8080");
     const result = classifyThreadFailure(original, "prompt");

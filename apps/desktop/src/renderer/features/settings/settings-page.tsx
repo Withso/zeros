@@ -1579,6 +1579,11 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
             </SettingsList>
           </TabsContent>
           <TabsContent value="codex" className="mt-0">
+            <p className="text-muted-fg text-xs">
+              These controls save to Codex’s native configuration on this device
+              and also affect Codex outside Zeros. Memories remain in Codex’s
+              own storage.
+            </p>
             <SettingsList className={MODELS_SECTION_CLS}>
               <SettingsRow
                 label="Local memories"

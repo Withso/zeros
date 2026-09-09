@@ -4,16 +4,12 @@
 //
 // Two independent facts meet here:
 //
-//   1. THE POINTER — `[design] directory` in the settings layers (committed
-//      team default < per-machine repo-local < per-worktree pin). Absent
-//      means "Zeros Design".
-//   2. RECOGNITION — a design folder is repo content, recognizable by its
-//      `.zeros-canvas.json` marker in either HEAD or the current index
-//      (initializeDesignDocument writes it; create/enter force-add it even
-//      through a .gitignore). Taking both snapshots keeps both sides of a
-//      staged move protected. The canvas file deliberately contains no
-//      repo-specific identity, which is what makes design folders portable
-//      between repos once added to Git.
+//   1. THE POINTER — private settings select a stable directory_id, resolved
+//      against this checkout's tracked .zeros/design-dir.toml. Legacy paths
+//      remain readable. Without a selection, the pointer is "Zeros Design".
+//   2. RECOGNITION — registry entries in the working tree, index and HEAD,
+//      plus legacy .zeros-canvas.json markers on older branches. Keeping all
+//      snapshots protects both sides of an in-progress directory move.
 //
 // resolveDesignDirectoryForEnter() reconciles them when a workspace enters
 // design mode (or is created in it):
@@ -51,6 +47,16 @@ import { projectNameForRoot } from "../db/projects";
 import { GitError } from "../git/errors";
 import { runGit } from "../git/git-exec";
 import { opSettingsResolve } from "../settings/ops";
+import { designRegistryAtGitRef } from "./metadata-git";
+import { hasInvalidDesignSettings } from "./directory-path";
+import {
+  DESIGN_DIRECTORY_REGISTRY_FILE,
+  designDirectoryFromSettings,
+  legacyDesignDirectoryId,
+  readDesignDirectoryRegistry,
+  recoverDesignDirectoryRename,
+  validateDesignSettings,
+} from "./metadata";
 import {
   DEFAULT_DESIGN_DIRECTORY_NAME,
   designDirectoryNameFor,
@@ -127,6 +133,7 @@ export async function validateDesignDirectoryPointerTarget(
       message: "Design folder names must be repo-relative paths.",
     });
   }
+  validateDesignSettings(cwd, { design: { directory: name } });
   const target = path.join(cwd, ...name.split("/"));
   let targetReal: string;
   let rootReal: string;
@@ -162,8 +169,7 @@ export async function validateDesignDirectoryPointerTarget(
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: `The Design folder "${name}" is not a committed Design document.`,
-      remediation:
-        "Choose a folder containing a committed .zeros-canvas.json marker.",
+      remediation: "Choose a registered Design folder listed in this checkout.",
     });
   }
   return name;
@@ -171,9 +177,8 @@ export async function validateDesignDirectoryPointerTarget(
 
 /** Read the `[design] directory` pointer for a workspace (or a bare repo
  *  root), already sanitized, falling back to the default. `workspacePath`
- *  resolves the full layer stack (committed repo file at the WORKTREE's
- *  checkout of it, repo-local from the main checkout, the worktree's own
- *  pin); a bare repoRoot reads the repo layers only. */
+ *  resolves the full layer stack (user defaults, repo-local from the main checkout, and the worktree's own
+ *  private override); a bare repoRoot reads the repo layers only. */
 export async function resolveDesignDirectoryPointer(opts: {
   repoRoot: string;
   workspacePath?: string;
@@ -191,24 +196,47 @@ export async function resolveDesignDirectoryPointerState(opts: {
   directory: string;
   configured: boolean;
   valid: boolean;
+  error?: string;
 }> {
   let raw: unknown;
   let configured = false;
+  let valid = true;
+  let error: string | undefined;
   try {
     const resolved = opts.workspacePath
       ? opSettingsResolve(opts.workspacePath, opts.repoRoot)
       : opSettingsResolve(opts.repoRoot);
-    raw = (resolved.effective as { design?: { directory?: unknown } }).design
-      ?.directory;
-    configured = resolved.sources["design.directory"] !== undefined;
-  } catch {
-    raw = undefined;
+    const cwd = opts.workspacePath ?? opts.repoRoot;
+    const id = (
+      resolved.effective.design as { directory_id?: string } | undefined
+    )?.directory_id;
+    const legacy =
+      id?.startsWith("design_legacy_") &&
+      !readDesignDirectoryRegistry(cwd)?.directories[id]
+        ? (await discoverDesignDirectories(cwd)).find(
+            (directory) => legacyDesignDirectoryId(directory) === id,
+          )
+        : undefined;
+    raw = designDirectoryFromSettings(cwd, resolved.effective, legacy);
+    configured =
+      resolved.sources["design.directory"] !== undefined ||
+      resolved.sources["design.directory_id"] !== undefined;
+    valid = !hasInvalidDesignSettings(resolved.warnings);
+    configured ||= !valid;
+    if (typeof raw === "string")
+      await assertSafeProspectiveDesignDirectory(cwd, raw);
+    validateDesignSettings(cwd, resolved.effective, legacy);
+  } catch (cause) {
+    valid = false;
+    configured = true;
+    error = cause instanceof Error ? cause.message : String(cause);
   }
   const sanitized = sanitizeDesignDirectoryName(raw);
   return {
     directory: sanitized ?? DEFAULT_DESIGN_DIRECTORY_NAME,
     configured,
-    valid: !configured || sanitized !== null,
+    valid: valid && (!configured || sanitized !== null),
+    ...(error ? { error } : {}),
   };
 }
 
@@ -505,14 +533,25 @@ export async function discoverDesignDirectories(
     discoveryCacheHits += 1;
     for (const dir of cachedIndex.directories) found.add(dir);
   } else {
+    let readingRegistry = false;
     try {
       const { stdout } = await runGit(cwd, [
         "ls-files",
         "-z",
         "--",
         "*/.zeros-canvas.json",
+        DESIGN_DIRECTORY_REGISTRY_FILE,
       ]);
-      const directories = markerDirectories(stdout);
+      const directories = [...markerDirectories(stdout)];
+      if (stdout.split("\0").includes(DESIGN_DIRECTORY_REGISTRY_FILE)) {
+        readingRegistry = true;
+        const registry = await designRegistryAtGitRef(cwd, ":");
+        directories.push(
+          ...Object.values(registry?.directories ?? {}).map(
+            (entry) => entry.path,
+          ),
+        );
+      }
       for (const dir of directories) found.add(dir);
       // Stat-read-stat: cache this listing only if the index is byte-for-byte
       // the same identity it was before ls-files ran. If a concurrent Git write
@@ -528,7 +567,8 @@ export async function discoverDesignDirectories(
           });
         }
       }
-    } catch {
+    } catch (error) {
+      if (readingRegistry) throw error;
       // An unborn/non-Git checkout has no index recognition. Keep trying HEAD
       // so one transient command failure cannot erase otherwise committed
       // evidence. Failures are never cached.
@@ -564,13 +604,27 @@ export async function discoverDesignDirectories(
         ["ls-tree", "-r", "-z", "--name-only", headOid ?? "HEAD"],
         { maxBufferBytes: 64 * 1024 * 1024 },
       );
-      const directories = markerDirectories(stdout);
+      const directories = [...markerDirectories(stdout)];
+      if (stdout.split("\0").includes(DESIGN_DIRECTORY_REGISTRY_FILE)) {
+        const registry = await designRegistryAtGitRef(cwd, headOid ?? "HEAD");
+        directories.push(
+          ...Object.values(registry?.directories ?? {}).map(
+            (entry) => entry.path,
+          ),
+        );
+      }
       for (const dir of directories) found.add(dir);
       if (headOid) {
         discoveryCacheMisses += 1;
         rememberBounded(headTreeMarkerCache, headOid, directories);
       }
     }
+  }
+  for (const entry of Object.values(
+    readDesignDirectoryRegistry(cwd)?.directories ?? {},
+  )) {
+    validateDesignSettings(cwd, { design: { directory: entry.path } });
+    found.add(entry.path);
   }
   return [...found].sort((a, b) => a.localeCompare(b));
 }
@@ -604,6 +658,12 @@ export async function previewDesignDirectoryForEnter(
     repoRoot: workspace.repoRoot,
     workspacePath: workspace.path,
   });
+  if (!pointerState.valid)
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message:
+        "The Design directory settings or registry are invalid. Correct them before opening Design.",
+    });
   const pointer = pointerState.directory;
   let name = pointer;
   const pointerExists = existsSync(
@@ -739,6 +799,7 @@ export async function resolveDesignDirectoryForEnter(
   },
   opts: { strict?: boolean; additionalRecognized?: readonly string[] } = {},
 ): Promise<string> {
+  recoverDesignDirectoryRename(workspace.path);
   const name = await previewDesignDirectoryForEnter(workspace, opts);
   primeDesignDirectoryName(workspace.path, name);
   return name;

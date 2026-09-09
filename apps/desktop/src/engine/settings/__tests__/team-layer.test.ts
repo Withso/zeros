@@ -26,7 +26,7 @@ describe("team settings layer", () => {
         },
       },
       team: { git: { base_branch: "team", branch_prefix_type: "custom" } },
-      repo: { git: { branch_prefix_type: "github" } },
+      repoLocal: { git: { branch_prefix_type: "github" } },
     });
     const git = resolved.effective.git as Record<string, string>;
     expect(git.remote).toBe("user");

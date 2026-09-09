@@ -251,10 +251,15 @@ describe("Codex opaque provider bindings", () => {
       cwd: "/tmp/proj",
     });
 
+    // The resume path carries the same thread config a fresh start does: the
+    // browser gate, plus the native-MCP disables that make Customize the whole
+    // set (adapters/shared/mcp-passthrough.ts).
     expect(rt.resumeParams).toContainEqual(
       expect.objectContaining({
         threadId: "thread-source",
-        config: { "plugins.browser@openai-bundled.enabled": false },
+        config: expect.objectContaining({
+          "plugins.browser@openai-bundled.enabled": false,
+        }),
       }),
     );
     await adapter.dispose();

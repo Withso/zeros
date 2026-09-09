@@ -109,6 +109,49 @@ projection; it does not expose a generic Codex capability bridge:
   on live threads, and exposes confirmed global `memory/reset` only to the local
   desktop Settings surface. Provider work runs in the contained one-shot
   runtime with MCP disabled.
+
+  "MCP disabled" is a claim about MCP servers actually starting, and
+  `mcpServers: []` does not make it true — that argument only withholds Zeros'
+  own registry, while the user's native servers keep loading (Zeros never
+  relocates CODEX_HOME; see `shared/config-isolation.ts`). Codex starts MCP
+  servers per `thread/start`, so a one-shot that issues bare RPCs — the memory,
+  config, and quota reads, and `account/read` — starts none by construction. A
+  one-shot that DOES start a thread must disable them in `thread/start.config`;
+  `generateText` (chat titles) is the one such caller today.
+
+  Normal Codex sessions keep the account Apps bridge (`codex_apps`) and Zeros'
+  injected servers. Other native MCP servers remain explicitly scoped by the
+  adapter. Customize uses `app/list` for accessible account entries and
+  `app/installed` for effective enabled/callable state; plugin installation reads
+  include remote marketplaces through `plugin/installed`. These inventory RPCs
+  start no conversation. An accessible catalog entry is not proof of callable
+  tools, and native-only features may still require the Codex app.
+
+  A native server can arrive by either of two routes, so the NAMES have to be
+  collected from both — but the disable itself is one mechanism, applied to
+  `mcp_servers`:
+  - `mcp_servers.<name>` in the merged config, read from `config/read` on that
+    same runtime rather than from our own parse of `config.toml`.
+  - a server declared by an installed plugin, in the plugin's own `.mcp.json`
+    under `$CODEX_HOME/plugins/cache`. `cloudflare@openai-curated-remote`
+    contributes a `cloudflare-api` server that appears in NO config layer —
+    `config/read` omits it entirely. Anything added through the Codex/ChatGPT
+    desktop MCP-extensions sidebar arrives this way, which makes it the common
+    case rather than the exotic one. The cache is read from disk because the
+    app-server has no method that reports these before a thread exists.
+
+  Two verified constraints shape the emitted config, both counterintuitive:
+  - `plugins.<id>.enabled = false` does NOT stop a plugin's MCP servers.
+    Verified against an installed `cloudflare@openai-curated-remote`: codex
+    accepts the key and starts `cloudflare-api` regardless, because a
+    curated-remote plugin has no `config.plugins` entry for it to apply to.
+    Only disabling the SERVER by name takes effect.
+  - a disabled entry still needs a transport. Codex validates an entry's shape
+    before it reads `enabled`, and rejects the whole config with "invalid
+    transport in `mcp_servers.<name>`" — fatally as a `-c` flag, which kills
+    the child at boot — when neither `command` nor `url` is present. Disabled
+    entries therefore carry a placeholder `command` that is never executed.
+
 - The goal port maps exact live executions to `thread/goal/get`, `.set`, and
   `.clear`. A bare, attachment-free `/goal` is Zeros' explicit UI trigger;
   native goal updates remain provider-owned state and stale initial reads

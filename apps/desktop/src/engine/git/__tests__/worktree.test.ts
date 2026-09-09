@@ -1,8 +1,12 @@
+import {
+  designDocumentMetadataPath,
+  readDesignDirectoryRegistry,
+} from "../../design/metadata";
 // Workspace lifecycle integration coverage. Sets up a real temp repo with a remote, creates
 // workspaces, archives + restores, deletes — asserting both the
 // on-disk state and the DB.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
@@ -15,8 +19,11 @@ import {
   writeFile,
   readFile,
   stat,
+  symlink,
 } from "node:fs/promises";
 import { existsSync } from "node:fs";
+import * as setupHooks from "../setup-hooks";
+import { opSettingsWrite } from "../../settings/ops";
 import { worktreeSeedPath } from "../../db/paths";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -195,9 +202,7 @@ describe("worktree lifecycle (integration)", () => {
       existsSync(path.join(workspace.path, designDirectory, "tokens.css")),
     ).toBe(true);
     expect(
-      existsSync(
-        path.join(workspace.path, designDirectory, ".zeros-canvas.json"),
-      ),
+      existsSync(designDocumentMetadataPath(workspace.path, designDirectory)),
     ).toBe(true);
     // FULL checkout: the codebase is present and writable to code actors,
     // because
@@ -382,10 +387,10 @@ printf ran > '${sentinel}'
     ).toBe("/* custom */\n");
     expect(
       await readFile(
-        path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
+        designDocumentMetadataPath(created.path, "Zeros Design"),
         "utf8",
       ),
-    ).toBe("{}\n");
+    ).toContain('"version": 3');
     await deleteWorkspace({
       workspaceId: created.workspaceId,
       includeBranch: true,
@@ -453,9 +458,9 @@ printf ran > '${sentinel}'
     expect(existsSync(path.join(created.path, "Brand", "tokens.css"))).toBe(
       true,
     );
-    expect(
-      existsSync(path.join(created.path, "Brand", ".zeros-canvas.json")),
-    ).toBe(true);
+    expect(existsSync(designDocumentMetadataPath(created.path, "Brand"))).toBe(
+      true,
+    );
     expect(existsSync(path.join(created.path, "Zeros Design"))).toBe(false);
     const tracked = await execFileAsync("git", ["ls-files", "--", "Brand"], {
       cwd: created.path,
@@ -780,9 +785,7 @@ printf ran > '${sentinel}'
       await enterDesignMode(getWorkspace(created.workspaceId));
       expect(getWorkspace(created.workspaceId).kind).toBe("design");
       expect(
-        existsSync(
-          path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
-        ),
+        existsSync(designDocumentMetadataPath(created.path, "Zeros Design")),
       ).toBe(true);
     } finally {
       if (previousSettingsDir === undefined) {
@@ -869,14 +872,10 @@ printf ran > '${sentinel}'
       expect(getWorkspace(created.workspaceId).kind).toBe("design");
       expect(designDirectoryNameFor(created.path)).toBe("Product Design");
       expect(
-        existsSync(
-          path.join(created.path, "Product Design", ".zeros-canvas.json"),
-        ),
+        existsSync(designDocumentMetadataPath(created.path, "Product Design")),
       ).toBe(true);
       expect(
-        existsSync(
-          path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
-        ),
+        existsSync(designDocumentMetadataPath(created.path, "Zeros Design")),
       ).toBe(true);
     } finally {
       await deleteWorkspace({
@@ -889,12 +888,9 @@ printf ran > '${sentinel}'
   it("keeps uncommitted Design work live through Code view without a commit", async () => {
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
-    const canvas = path.join(
-      created.path,
-      designDirectory,
-      ".zeros-canvas.json",
-    );
-    const dirty = '{"dirty":true}\n';
+    const canvas = designDocumentMetadataPath(created.path, designDirectory);
+    const dirty =
+      '{"version":3,"frames":{},"frame_info":{},"foundation":{"schemaVersion":1,"parameters":[],"variants":[],"components":[]}}\n';
     const frame = path.join(created.path, designDirectory, "frame.html");
     await writeFile(canvas, dirty);
     await writeFile(frame, "<main>draft</main>\n");
@@ -948,7 +944,7 @@ printf ran > '${sentinel}'
     }
   });
 
-  it("renameDesignDirectory moves the folder and pointer in one commit, refusing live design workspaces", async () => {
+  it("renameDesignDirectory commits the folder and keeps its pointer personal, refusing live design workspaces", async () => {
     // Seed a committed design folder in the MAIN checkout.
     const designDir = path.join(repoRoot, "Zeros Design");
     await mkdir(designDir, { recursive: true });
@@ -983,7 +979,7 @@ printf ran > '${sentinel}'
       from: "Zeros Design",
       to: "Brand",
     });
-    expect(result.committedPointer).toBe(true);
+    expect(result.committedPointer).toBe(false);
     expect(existsSync(path.join(repoRoot, "Brand", "tokens.css"))).toBe(true);
     expect(existsSync(designDir)).toBe(false);
     // One commit carries the folder AND the committed pointer.
@@ -994,15 +990,27 @@ printf ran > '${sentinel}'
     );
     expect(show.stdout).toContain("Rename design directory to Brand");
     expect(show.stdout).toContain("Brand/tokens.css");
-    expect(show.stdout).toContain(".zeros/settings.toml");
+    expect(show.stdout).not.toContain(".zeros/settings");
     expect(
-      await readFile(path.join(repoRoot, ".zeros", "settings.toml"), "utf8"),
-    ).toContain('directory = "Brand"');
+      await readFile(
+        path.join(repoRoot, ".zeros", "settings.local.toml"),
+        "utf8",
+      ),
+    ).toContain('directory_id = "design_');
+    const registry = readDesignDirectoryRegistry(repoRoot)!;
+    expect(Object.values(registry.directories)).toEqual([{ path: "Brand" }]);
     // The main checkout is left clean — nothing half-staged.
     const dirty = await execFileAsync("git", ["status", "--porcelain"], {
       cwd: repoRoot,
     });
     expect(dirty.stdout).toBe("");
+    // A subsequent rename uses the same ID, including when the private file
+    // already selects that ID instead of the legacy directory path.
+    const id = Object.keys(registry.directories)[0]!;
+    await renameDesignDirectory({ repoRoot, from: "Brand", to: "Product" });
+    expect(readDesignDirectoryRegistry(repoRoot)?.directories).toEqual({
+      [id]: { path: "Product" },
+    });
   });
 
   it("serializes a Design-directory rename with repository Git mutations", async () => {
@@ -1049,7 +1057,7 @@ printf ran > '${sentinel}'
       await held;
       await renaming.catch(() => undefined);
     }
-    await expect(renaming).resolves.toMatchObject({ committedPointer: true });
+    await expect(renaming).resolves.toMatchObject({ committedPointer: false });
   });
 
   it("renames a Design folder whose literal name contains Git pathspec bytes", async () => {
@@ -1143,7 +1151,7 @@ printf ran > '${sentinel}'
   });
 
   it.each(["staged", "unstaged"] as const)(
-    "refuses a rename when the committed settings file has %s user edits",
+    "leaves %s legacy settings edits out of a Design rename commit",
     async (settingsState) => {
       const designDir = path.join(repoRoot, "Zeros Design");
       const settingsDir = path.join(repoRoot, ".zeros");
@@ -1196,18 +1204,21 @@ printf ran > '${sentinel}'
           from: "Zeros Design",
           to: "Brand",
         }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        message: expect.stringContaining(".zeros/settings.toml"),
-      });
+      ).resolves.toEqual({ committedPointer: false });
       expect(await readFile(settingsFile, "utf8")).toBe(pendingSettings);
-      expect(existsSync(designDir)).toBe(true);
-      expect(existsSync(path.join(repoRoot, "Brand"))).toBe(false);
+      expect(existsSync(designDir)).toBe(false);
+      expect(existsSync(path.join(repoRoot, "Brand"))).toBe(true);
+      const committed = await execFileAsync(
+        "git",
+        ["show", "HEAD:.zeros/settings.toml"],
+        { cwd: repoRoot },
+      );
+      expect(committed.stdout).not.toContain("PENDING");
       expect(
         (
           await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
         ).stdout.trim(),
-      ).toBe(headBefore);
+      ).not.toBe(headBefore);
     },
   );
 
@@ -1402,11 +1413,18 @@ printf ran > '${sentinel}'
         exactBaseCommit: baseCommit,
         provision: async ({ workspacePath, canonicalId: observed }) => {
           expect(observed).toBe(canonicalId);
-          expect(existsSync(path.join(workspacePath, "AFTER_EXPORT.txt"))).toBe(false);
-          await writeFile(path.join(workspacePath, "FROM_CLOUD.txt"), "cloud\n");
+          expect(existsSync(path.join(workspacePath, "AFTER_EXPORT.txt"))).toBe(
+            false,
+          );
+          await writeFile(
+            path.join(workspacePath, "FROM_CLOUD.txt"),
+            "cloud\n",
+          );
         },
         beforePublish: ({ workspaceId }) => {
-          expect(getWorkspaceLifecycle(workspaceId)?.phase).toBe("worktree-created");
+          expect(getWorkspaceLifecycle(workspaceId)?.phase).toBe(
+            "worktree-created",
+          );
           published += 1;
         },
       },
@@ -1414,9 +1432,9 @@ printf ran > '${sentinel}'
     const workspace = getWorkspace(created.workspaceId);
     expect(workspace.canonicalId).toBe(canonicalId);
     expect(workspace.baseBranch).toBe(baseCommit);
-    expect(await readFile(path.join(workspace.path, "FROM_CLOUD.txt"), "utf8")).toBe(
-      "cloud\n",
-    );
+    expect(
+      await readFile(path.join(workspace.path, "FROM_CLOUD.txt"), "utf8"),
+    ).toBe("cloud\n");
     expect(published).toBe(1);
     expect(getWorkspaceLifecycle(created.workspaceId)).toBeNull();
   });
@@ -1441,7 +1459,9 @@ printf ran > '${sentinel}'
       ),
     ).rejects.toThrow("portable record import failed");
     expect(existsSync(prepared.path)).toBe(false);
-    expect(listWorkspaces().some((entry) => entry.id === prepared.workspaceId)).toBe(false);
+    expect(
+      listWorkspaces().some((entry) => entry.id === prepared.workspaceId),
+    ).toBe(false);
     expect(getWorkspaceLifecycle(prepared.workspaceId)).toBeNull();
   });
 
@@ -2053,7 +2073,12 @@ printf ran > '${sentinel}'
     expect(ws.path).toBe(result.path);
 
     // Crash-recovery seed lives in app-data, NOT in the worktree (.zeros retired).
-    expect(existsSync(path.join(result.path, ".zeros"))).toBe(false);
+    expect(existsSync(path.join(result.path, ".zeros/settings.toml"))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(result.path, ".zeros/worktree.json"))).toBe(
+      false,
+    );
     const seed = JSON.parse(
       await readFile(worktreeSeedPath(result.path), "utf8"),
     );
@@ -2267,11 +2292,7 @@ printf ran > '${sentinel}'
   it("includes a live uncommitted Design draft in archive and restore", async () => {
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
-    const canvas = path.join(
-      created.path,
-      designDirectory,
-      ".zeros-canvas.json",
-    );
+    const canvas = designDocumentMetadataPath(created.path, designDirectory);
     const frame = path.join(created.path, designDirectory, "draft.html");
     await writeFile(canvas, '{"uncommitted":true}\n');
     await writeFile(frame, "<main>archive me</main>\n");
@@ -2866,6 +2887,150 @@ printf ran > '${sentinel}'
     expect(await readFile(workspaceOnly, "utf8")).toBe(
       "workspace-only=secret\n",
     );
+  });
+
+  it("runs the workspace archive script override", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(
+      path.join(created.path, ".zeros/settings.toml"),
+      '[scripts]\narchive="echo workspace cleanup"\n',
+    );
+    const hook = vi
+      .spyOn(setupHooks, "runInlineScript")
+      .mockResolvedValue(undefined);
+    try {
+      await archiveWorkspace({
+        workspaceId: created.workspaceId,
+        stashUncommitted: true,
+      });
+      expect(hook).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: "echo workspace cleanup",
+          worktreePath: created.path,
+        }),
+      );
+    } finally {
+      hook.mockRestore();
+    }
+  });
+
+  it("keeps a tracked legacy filename in archive snapshots while restoring the private fallback", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const legacy = path.join(created.path, ".zeros/settings.toml");
+    const sharedText = "# old shared file on this branch\n";
+    await writeFile(legacy, sharedText);
+    await execFileAsync("git", [
+      "-C",
+      created.path,
+      "add",
+      "-f",
+      ".zeros/settings.toml",
+    ]);
+    await execFileAsync("git", [
+      "-C",
+      created.path,
+      "-c",
+      "user.name=Test",
+      "-c",
+      "user.email=test@example.com",
+      "commit",
+      "-qm",
+      "legacy tracked settings",
+    ]);
+    const privatePath = opSettingsWrite(
+      "workspace-local",
+      { prompts: { general: "Workspace private override" } },
+      created.path,
+    ).path;
+    expect(privatePath).toBe(
+      path.join(created.path, ".zeros/settings.local.toml"),
+    );
+    const before = await readFile(privatePath, "utf8");
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const { stdout: files } = await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "ls-tree",
+      "-r",
+      "--name-only",
+      archiveSnapshotRef(created.workspaceId),
+    ]);
+    expect(files.split("\n")).toContain(".zeros/settings.toml");
+    expect(files.split("\n")).not.toContain(".zeros/settings.local.toml");
+    const restored = await restoreWorkspace(created.workspaceId);
+    expect(
+      await readFile(path.join(restored.path, ".zeros/settings.toml"), "utf8"),
+    ).toBe(sharedText);
+    expect(
+      await readFile(
+        path.join(restored.path, ".zeros/settings.local.toml"),
+        "utf8",
+      ),
+    ).toBe(before);
+  });
+
+  it("preserves private settings when an alias prevents Git from proving checkout ownership", async () => {
+    const actual = path.join(workdir, "actual-worktrees");
+    await mkdir(actual);
+    await mkdir(stateRoot, { recursive: true });
+    await symlink(actual, path.join(stateRoot, "worktrees"), "dir");
+    const created = await createWorkspace({ repoRoot });
+    const before = await readFile(
+      path.join(created.path, ".zeros/settings.toml"),
+      "utf8",
+    );
+    await expect(
+      archiveWorkspace({
+        workspaceId: created.workspaceId,
+        stashUncommitted: true,
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(
+      await readFile(path.join(created.path, ".zeros/settings.toml"), "utf8"),
+    ).toBe(before);
+  });
+
+  it("creates private workspace overrides and restores their exact bytes without committing them", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const file = path.join(created.path, ".zeros/settings.toml");
+    expect(await readFile(file, "utf8")).toContain("settings_version");
+    const contents =
+      '# private workspace preference\n[prompts]\ngeneral="Only this workspace"\n';
+    await writeFile(file, contents);
+    const { stdout: before } = await execFileAsync("git", [
+      "-C",
+      created.path,
+      "status",
+      "--porcelain",
+    ]);
+    expect(before).toBe("");
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const { stdout: snapshot } = await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "ls-tree",
+      "-r",
+      "--name-only",
+      archiveSnapshotRef(created.workspaceId),
+    ]);
+    expect(snapshot).not.toContain(".zeros/settings.toml");
+    const restored = await restoreWorkspace(created.workspaceId);
+    expect(
+      await readFile(path.join(restored.path, ".zeros/settings.toml"), "utf8"),
+    ).toBe(contents);
+    const { stdout: after } = await execFileAsync("git", [
+      "-C",
+      restored.path,
+      "status",
+      "--porcelain",
+    ]);
+    expect(after).toBe("");
   });
 
   it("scaffolds the context graph at create without dirtying git status", async () => {

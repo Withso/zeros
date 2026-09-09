@@ -51,7 +51,7 @@ describe("startSettingsWatcher", () => {
     await mkdir(path.join(repo, ".zeros"), { recursive: true });
     process.env.ZEROS_USER_SETTINGS_DIR = user;
 
-    const settings = path.join(repo, ".zeros", "settings.toml");
+    const settings = path.join(repo, ".zeros", "settings.local.toml");
     await writeFile(settings, "a = 1\n");
     const before = await stat(settings);
     const changes: string[][] = [];

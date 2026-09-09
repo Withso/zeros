@@ -11,6 +11,11 @@ import path from "node:path";
 
 import { GitError, isGitError } from "./errors";
 import {
+  designMetadataGitPaths,
+  readDesignDirectoryRegistry,
+} from "../design/metadata";
+import { recoverDesignStorageForArchive } from "../design/document";
+import {
   assertSafeGitRef,
   runGit as runGitCommand,
   type RunGitOptions,
@@ -83,6 +88,16 @@ import {
 } from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
+import {
+  initializeWorkspaceSettings,
+  personalWorkspaceRoot,
+  workspaceSettingsPath,
+} from "../settings/personal-repo";
+import {
+  backupWorkspaceSettings,
+  restoreWorkspaceSettings,
+  removeWorkspaceSettingsBackup,
+} from "../settings/workspace-settings-backup";
 import { isKnownRepoRoot, listKnownRepoRoots } from "../db/projects";
 import { deleteChat, getChat, rebindChatsFolder } from "../db/chats";
 import {
@@ -1700,6 +1715,7 @@ async function createWorkspaceInner(
       seedPaths,
       symlinkPaths: input.symlinkPaths,
     });
+    initializeWorkspaceSettings(workspacePath);
     // Durably record what we seeded, so archive force-adds these even if the
     // patterns that chose them are edited away before the workspace is
     // archived. Cross-tool safe: a path the hooks skipped (already present from
@@ -1911,6 +1927,7 @@ export async function reconcileInterruptedWorkspaceLifecycles(
               worktreePath: targetPath,
             });
           }
+          initializeWorkspaceSettings(targetPath);
           writeWorktreeSeed(row);
           finishWorkspaceLifecycle(row.id, {});
           await clearWorkspaceBranchOwnershipMarker(row.repoRoot, row.id);
@@ -2777,8 +2794,13 @@ async function archiveWorkspaceInner(
           "The workspace is unchanged and still live. Repair the repository's Git metadata, then retry.",
       });
     }
+    await recoverDesignStorageForArchive(ws.path);
     const archiveIncludePaths = [
       ...new Set([
+        ...designMetadataGitPaths(ws.path),
+        ...Object.values(
+          readDesignDirectoryRegistry(ws.path)?.directories ?? {},
+        ).map((entry) => entry.path),
         ...scans.flatMap((s) => [...s.paths, ...s.deferredPaths]),
         // Explicit create-time copy/symlink paths can be outside today's repo
         // settings. Keep them durable for the workspace's whole lifetime so a
@@ -2800,12 +2822,19 @@ async function archiveWorkspaceInner(
           : []),
       ]),
     ];
+    backupWorkspaceSettings(ws.id, ws.path);
     const archiveSnapshot = await snapshotWorkingTree(
       ws.path,
       archiveSnapshotRef(ws.id),
       {
         ...(archivedHead ? { parent: archivedHead } : {}),
         forceAddPaths: archiveIncludePaths,
+        excludePaths: [
+          path.relative(
+            personalWorkspaceRoot(ws.path),
+            workspaceSettingsPath(ws.path),
+          ),
+        ],
       },
     );
     // Snapshot capture is allowed to be absent for a genuinely clean tree
@@ -2875,12 +2904,12 @@ async function archiveWorkspaceInner(
     checkpointMs += Date.now() - checkpointStartedAt;
   }
 
-  // Run the repository's committed `scripts.archive` in the worktree while
+  // Run the workspace's effective `scripts.archive` in the worktree while
   // it's still intact (after the snapshot, before eviction/removal). Non-fatal:
   // a cleanup script must never block archiving — the user keeps the ability to
   // archive even if the script errors.
   if (journal.phase === "prepared") {
-    const archiveCommand = resolveRepoScript(ws.repoRoot, "archive");
+    const archiveCommand = resolveRepoScript(ws.path, "archive");
     if (!archiveCommand) {
       // The pre-hook checkpoint is already the exact final tree. Advancing it
       // atomically avoids a second whole-tree `git add -A` on the overwhelmingly
@@ -2954,12 +2983,28 @@ async function archiveWorkspaceInner(
           (entry): entry is string => typeof entry === "string",
         )
       : [];
+    if (existsSync(ws.path)) {
+      await recoverDesignStorageForArchive(ws.path);
+      archiveIncludePaths.push(
+        ...designMetadataGitPaths(ws.path),
+        ...Object.values(
+          readDesignDirectoryRegistry(ws.path)?.directories ?? {},
+        ).map((entry) => entry.path),
+      );
+    }
+    backupWorkspaceSettings(ws.id, ws.path);
     const sealedSnapshot = await snapshotWorkingTree(
       ws.path,
       archiveSnapshotRef(ws.id),
       {
         ...(finalHead ? { parent: finalHead } : {}),
         forceAddPaths: archiveIncludePaths,
+        excludePaths: [
+          path.relative(
+            personalWorkspaceRoot(ws.path),
+            workspaceSettingsPath(ws.path),
+          ),
+        ],
       },
     );
     // A hook may deliberately remove its own checkout. The pre-hook snapshot
@@ -3767,6 +3812,7 @@ async function restoreWorkspaceInner(
   }
 
   // 5. Persist the (possibly adapted) state and refresh the recovery seed.
+  restoreWorkspaceSettings(workspaceId, targetPath);
   const restoredAt = Date.now();
   // The restored checkout is FULL (a pre-mode archive loses its cone here by
   // design, becoming an ordinary full checkout) and nothing whole-tree locks
@@ -3893,6 +3939,7 @@ async function deleteWorkspaceInner(
     }
     await deleteArchiveSnapshotRef(repoRoot, ws.id);
     deleteWorkspaceRow(ws.id);
+    removeWorkspaceSettingsBackup(ws.id);
     removeWorktreeSeed(ws.path);
     return;
   }
@@ -3915,6 +3962,7 @@ async function deleteWorkspaceInner(
     }
     await deleteArchiveSnapshotRef(repoRoot, ws.id);
     deleteWorkspaceRow(ws.id);
+    removeWorkspaceSettingsBackup(ws.id);
     removeWorktreeSeed(ws.path);
     return;
   }
@@ -3978,6 +4026,7 @@ async function deleteWorkspaceInner(
   // gc-able — best-effort, and a no-op for a workspace that was never archived.
   await deleteArchiveSnapshotRef(repoRoot, opts.workspaceId);
   deleteWorkspaceRow(opts.workspaceId);
+  removeWorkspaceSettingsBackup(opts.workspaceId);
   stagedWorktree?.commit();
   removeWorktreeSeed(ws.path); // drop the app-data crash-recovery seed
 }

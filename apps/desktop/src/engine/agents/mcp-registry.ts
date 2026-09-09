@@ -11,12 +11,19 @@
 // Codex).
 
 import { stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import {
+  personalRepoRoot,
+  personalWorkspaceRoot,
+  workspaceSettingsPath,
+  assertRegularSettingsPath,
+} from "../settings/personal-repo";
 
 import { runFile } from "../git/git-exec";
 import {
   managedSettingsPath,
   readSettingsFile,
-  REPO_SETTINGS_DIRNAME,
   repoLocalSettingsPath,
   userSettingsPath,
 } from "../settings/files";
@@ -147,11 +154,11 @@ export function mcpServersFromSettings(
  *  from the repo or user file, and a repo-local server overrides a same-named
  *  user one (the more specific scope wins — matching the settings resolver).
  *  `repo-local` only contributes when the caller passes a repoRoot (a
- *  per-session resolve); the committed repo file and workspace-local never
- *  carry MCP (the clone-borne-file gate — see schema.ts
- *  REPO_UNSUPPORTED_BY_LAYER). */
+ *  per-session resolve). Workspace-local overrides use the same ignored and
+ *  untracked file gate. The retired committed settings file never contributes. */
 const MCP_LAYER_PRECEDENCE: readonly SettingsLayerName[] = [
   "managed",
+  "workspace-local",
   "repo-local",
   "user",
 ];
@@ -198,22 +205,11 @@ function readLayerDoc(filePath: string): unknown {
   return r.error ? undefined : r.doc;
 }
 
-const REPO_LOCAL_SETTINGS_RELPATH = `${REPO_SETTINGS_DIRNAME}/settings.local.toml`;
-
-/** Cached `git check-ignore` verdicts, keyed by repoRoot and valid only while
- *  the settings file's mtime is unchanged. This resolver runs on EVERY agent
- *  spawn (gateway resolveSessionMcp), and before this cache each spawn shelled
- *  a synchronous `git check-ignore` — a per-spawn subprocess on the engine's
- *  single thread. Staleness posture:
- *   - a stale TRUSTED verdict is safe: "trusted" proves the file was ignored
- *     and UNTRACKED, and an untracked file can't be introduced by a
- *     clone/pull — it only becomes tracked via the user's own deliberate
- *     `git add -f` (self-inflicted, and any rewrite of the file re-checks).
- *   - a stale UNTRUSTED verdict is only a UX lag (e.g. the user just fixed
- *     .gitignore without touching the settings file), so negatives expire
- *     after a short TTL and re-shell git on the next resolve. */
+/** Cache Git's personal-file verdict only while the file, index, and local
+ * ignore inputs are unchanged. Checks remain asynchronous; a forced add or
+ * ignore-file edit revokes a previous verdict before the next session. */
 interface RepoLocalTrustVerdict {
-  mtimeMs: number;
+  signature: string;
   trusted: boolean;
   checkedAt: number;
 }
@@ -223,20 +219,41 @@ const UNTRUSTED_VERDICT_TTL_MS = 30_000;
  *  bounds a pathological long-lived engine. Eviction is oldest-insert. */
 const TRUST_CACHE_MAX_ENTRIES = 256;
 
+async function personalTrustSignature(
+  root: string,
+  relative: string,
+): Promise<string | null> {
+  // Submodules and unusual external Git directories recheck asynchronously;
+  // only ordinary main checkouts have all verdict inputs at these paths.
+  if (!(await stat(path.join(root, ".git")).catch(() => null))?.isDirectory())
+    return null;
+  const signatures = await Promise.all(
+    [
+      relative,
+      ".git/index",
+      ".git/info/exclude",
+      ".gitignore",
+      ".zeros/.gitignore",
+    ].map(async (name) => {
+      const value = await stat(path.join(root, name)).catch(() => null);
+      return value
+        ? [value.dev, value.ino, value.mtimeMs, value.ctimeMs, value.size]
+        : null;
+    }),
+  );
+  return JSON.stringify(signatures);
+}
+
 /** Run `git check-ignore` off the event loop. Exit 0 = trusted; any failure
  *  (exit 1 "not ignored", exit 128, timeout, missing git) = fail closed. */
-async function gitConfirmsIgnoredUntracked(repoRoot: string): Promise<boolean> {
+async function gitConfirmsIgnoredUntracked(
+  repoRoot: string,
+  relative: string,
+): Promise<boolean> {
   try {
     await runFile(
       "git",
-      [
-        "-C",
-        repoRoot,
-        "check-ignore",
-        "--quiet",
-        "--",
-        REPO_LOCAL_SETTINGS_RELPATH,
-      ],
+      ["-C", repoRoot, "check-ignore", "--quiet", "--", relative],
       { timeoutMs: 2_000 },
     );
     return true;
@@ -255,39 +272,57 @@ async function gitConfirmsIgnoredUntracked(repoRoot: string): Promise<boolean> {
 async function readTrustedRepoLocalDoc(
   repoRoot: string,
   warnings: string[],
+  workspace = false,
 ): Promise<unknown> {
-  const filePath = repoLocalSettingsPath(repoRoot);
-  let fileStat;
+  const legacy = repoLocalSettingsPath(repoRoot);
+  let filePath = workspace ? workspaceSettingsPath(repoRoot) : legacy;
+  if (workspace && filePath !== legacy && existsSync(legacy)) {
+    if (existsSync(filePath)) {
+      warnings.push(
+        "mcp.servers: both workspace settings filenames exist; consolidate the private overrides first",
+      );
+      return undefined;
+    }
+    filePath = legacy; // compatibility until the settings reader renames it
+  }
+  const relative = path.relative(repoRoot, filePath);
   try {
-    fileStat = await stat(filePath);
+    assertRegularSettingsPath(
+      repoRoot,
+      relative as ".zeros/settings.toml" | ".zeros/settings.local.toml",
+    );
+    await stat(filePath);
   } catch {
     return undefined; // no repo-local file — the common case; no git needed
   }
 
-  const cached = repoLocalTrustCache.get(repoRoot);
+  const cached = repoLocalTrustCache.get(filePath);
+  const signature = await personalTrustSignature(repoRoot, relative);
   let trusted: boolean;
   if (
     cached &&
-    cached.mtimeMs === fileStat.mtimeMs &&
+    signature !== null &&
+    cached.signature === signature &&
     (cached.trusted || Date.now() - cached.checkedAt < UNTRUSTED_VERDICT_TTL_MS)
   ) {
     trusted = cached.trusted;
   } else {
-    trusted = await gitConfirmsIgnoredUntracked(repoRoot);
+    trusted = await gitConfirmsIgnoredUntracked(repoRoot, relative);
     if (repoLocalTrustCache.size >= TRUST_CACHE_MAX_ENTRIES) {
       const oldest = repoLocalTrustCache.keys().next().value;
       if (oldest !== undefined) repoLocalTrustCache.delete(oldest);
     }
-    repoLocalTrustCache.set(repoRoot, {
-      mtimeMs: fileStat.mtimeMs,
-      trusted,
-      checkedAt: Date.now(),
-    });
+    if (signature !== null)
+      repoLocalTrustCache.set(filePath, {
+        signature,
+        trusted,
+        checkedAt: Date.now(),
+      });
   }
 
   if (!trusted) {
     warnings.push(
-      `mcp.servers: ignored ${REPO_LOCAL_SETTINGS_RELPATH} because Git does not confirm it as an untracked, ignored personal settings file`,
+      `mcp.servers: ignored ${relative} because Git does not confirm it as an untracked, ignored personal settings file`,
     );
     return undefined;
   }
@@ -320,12 +355,20 @@ export async function resolveMcpServersForRepo(
   repoRoot: string,
 ): Promise<ResolvedMcpRegistry> {
   const warnings: string[] = [];
-  const repoLocal = await readTrustedRepoLocalDoc(repoRoot, warnings);
+  const main = personalRepoRoot(repoRoot);
+  const checkout = personalWorkspaceRoot(repoRoot);
+  const [repoLocal, workspaceLocal] = await Promise.all([
+    readTrustedRepoLocalDoc(main, warnings),
+    checkout !== main
+      ? readTrustedRepoLocalDoc(checkout, warnings, true)
+      : undefined,
+  ]);
   return composeMcpRegistry(
     {
       user: readLayerDoc(userSettingsPath()),
       managed: readLayerDoc(managedSettingsPath()),
       "repo-local": repoLocal,
+      "workspace-local": workspaceLocal,
     },
     warnings,
   );
@@ -336,10 +379,8 @@ export async function resolveMcpServersForRepo(
  *  ARRAY that replaces whole on merge — so we read each layer's OWN array and
  *  concatenate.
  *
- *  The COMMITTED repo file and workspace-local never contribute (the
- *  2026-07-17 slimming's clone-borne stdio RCE gate): only a repo-local file
- *  that Git confirms is ignored and untracked — written by the Customize tab's
- *  repo scope on this machine — may add per-repo servers. Gateway-managed
+ *  The retired committed file never contributes. Repository and workspace
+ *  files must be ignored and untracked before adding local servers. Gateway-managed
  *  (auth oauth/header) entries are USER/MANAGED-level only: the one global
  *  gateway boot-loads its backends without a repo context, so a repo-local
  *  gateway entry is skipped with a warning rather than silently never mounted.
@@ -363,7 +404,7 @@ function composeMcpRegistry(
     if (!Array.isArray(list)) continue;
     for (const entry of list) {
       const parsed = mcpServerSchema.safeParse(entry);
-      if (!parsed.success || parsed.data.enabled === false) continue;
+      if (!parsed.success) continue;
       const s = parsed.data;
       // Gateway-managed (auth:"oauth"|"header") servers are NOT injected
       // directly — the global gateway brokers auth + fronts them. Partition
@@ -377,10 +418,14 @@ function composeMcpRegistry(
         // repo-local gateway entry would never be mounted — skip it loudly,
         // WITHOUT reserving its name (a same-named user/managed entry still
         // resolves).
-        if (layer === "repo-local") {
+        if (layer === "repo-local" || layer === "workspace-local") {
           warnings.push(
             `mcp.servers: "${s.name}" uses gateway auth ("${s.auth}") — gateway servers are user-level only; move it to your user MCP servers`,
           );
+          continue;
+        }
+        if (s.enabled === false) {
+          seenNames.add(s.name);
           continue;
         }
         const target = `http:${s.url}`;
@@ -407,6 +452,11 @@ function composeMcpRegistry(
             : {}),
           source: layer,
         });
+        continue;
+      }
+      // A disabled entry shadows the same name in less specific layers.
+      if (s.enabled === false) {
+        seenNames.add(s.name);
         continue;
       }
       const reg = toRegistration(s);

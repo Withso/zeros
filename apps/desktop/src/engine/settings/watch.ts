@@ -11,11 +11,12 @@
 //     class of dependency that broke node-pty (see terminal-bun-nodepty);
 //   • macOS FSEvents phantom events caused the engine respawn loop — the
 //     metadata-signature real-change guard below is the same fix sidecar.ts uses;
-//   • the watch set is tiny (2 user files + 2 per repo), so a 1s stat poll
+//   • the watch set is tiny (2 user files + 1 per repo), so a 1s stat poll
 //     is microseconds of work.
 // ──────────────────────────────────────────────────────────
 
 import { statSync } from "node:fs";
+import { personalRepoRoot, personalWorkspaceRoot } from "./personal-repo";
 import {
   managedSettingsPath,
   repoLocalSettingsPath,
@@ -88,12 +89,19 @@ export function startSettingsWatcher(
     } catch {
       /* DB briefly unavailable — keep watching the user files */
     }
-    for (const root of roots) {
-      paths.push(repoSettingsPath(root), repoLocalSettingsPath(root));
+    for (const root of new Set(roots)) {
+      const main = personalRepoRoot(root);
+      const checkout = personalWorkspaceRoot(root);
+      paths.push(repoLocalSettingsPath(main));
+      if (checkout !== main)
+        paths.push(repoSettingsPath(checkout), repoLocalSettingsPath(checkout));
     }
 
     const changed: string[] = [];
-    for (const p of paths) {
+    const currentPaths = new Set(paths);
+    for (const old of known.keys())
+      if (!currentPaths.has(old)) known.delete(old);
+    for (const p of currentPaths) {
       const sig = signature(p);
       if (primed && known.has(p) && !sigEqual(known.get(p) ?? null, sig)) {
         changed.push(p);
