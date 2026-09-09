@@ -26,20 +26,20 @@ a vendor grants redistribution rights beyond its stated terms.
 
 TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 ----------------------------------------------------
-- @anthropic-ai/claude-agent-sdk@0.3.261: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @anthropic-ai/claude-agent-sdk@0.3.266: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.31: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
 PACKAGE INVENTORY (602 resolved package/version records)
 -----------------
 
-@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.261
+@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Author: Anthropic <support@anthropic.com>
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/claude-agent-sdk@0.3.261
+@anthropic-ai/claude-agent-sdk@0.3.266
   License: SEE LICENSE IN README.md
   Surfaces: root pnpm workspace
   Author: Anthropic <support@anthropic.com>
@@ -10035,8 +10035,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT 8ce94b9478bb
 SHA-256: 8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a
-Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.261, @anthropic-ai/claude-agent-sdk@0.3.261
-Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.261 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.261 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.261 — LICENSE.md
+Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266, @anthropic-ai/claude-agent-sdk@0.3.266
+Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.266 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.266 — LICENSE.md
 ================================================================================
 
 © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
