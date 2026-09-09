@@ -4,11 +4,9 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   renameSync,
   rmSync,
   rmdirSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -18,6 +16,7 @@ import type {
 } from "@zeros/protocol/agent-extensions";
 import { zerosSkillSchema } from "@zeros/protocol/agent-extensions";
 import { userSettingsDir } from "../settings/files";
+import { readBoundedUtf8FileSync } from "../files/bounded-read-sync";
 import {
   ensureLocalSettingsIgnored,
   personalRepoRoot,
@@ -40,8 +39,10 @@ export function readSkillFile(file: string): {
   revision: string;
 } | null {
   try {
-    if (statSync(file).size > 128 * 1024) return null;
-    const raw = readFileSync(file, "utf8").replace(/^\uFEFF/, "");
+    const raw = readBoundedUtf8FileSync(file, 128 * 1024).replace(
+      /^\uFEFF/,
+      "",
+    );
     const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(raw);
     const fields: Record<string, string> = {};
     const lines = match?.[1].split(/\r?\n/) ?? [];

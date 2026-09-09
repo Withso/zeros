@@ -161,6 +161,7 @@ export function readDesignStorageFile(
     fd = openSync(
       target,
       constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
     );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;

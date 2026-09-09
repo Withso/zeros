@@ -1,9 +1,13 @@
 import { execFileSync } from "node:child_process";
 import {
   appendFileSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   realpathSync,
@@ -11,6 +15,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import {
+  readBoundedUtf8DescriptorSync,
+  readBoundedUtf8FileSync,
+} from "../files/bounded-read-sync";
 import {
   applySettingsPatch,
   readSettingsFile,
@@ -65,8 +73,14 @@ export function personalRepoRoot(root: string): string {
   for (;;) {
     const dotGit = path.join(candidate, ".git");
     try {
-      if (statSync(dotGit).isDirectory()) return candidate;
-      const pointer = readFileSync(dotGit, "utf8").trim();
+      let pointer: string;
+      try {
+        pointer = readBoundedUtf8FileSync(dotGit, 64 * 1024).trim();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EISDIR")
+          return candidate;
+        throw error;
+      }
       if (pointer.startsWith("gitdir: ")) {
         const gitDir = path.resolve(candidate, pointer.slice(8));
         const commonFile = path.join(gitDir, "commondir");
@@ -217,12 +231,12 @@ export function ensureLocalSettingsIgnored(
     return;
   let exclude: string;
   try {
-    exclude = git(root, [
-      "rev-parse",
-      "--path-format=absolute",
-      "--git-path",
-      "info/exclude",
-    ]);
+    // Git's absolute path mode resolves the final symlink before O_NOFOLLOW
+    // can reject it. Resolve its lexical path against the checkout instead.
+    exclude = path.resolve(
+      root,
+      git(root, ["rev-parse", "--git-path", "info/exclude"]),
+    );
   } catch (error) {
     if (existsSync(path.join(root, ".git"))) throw error;
     return;
@@ -242,14 +256,30 @@ export function ensureLocalSettingsIgnored(
   };
   // Keep an explicit local rule even when another ignore source already
   // covers this path. Global ignore settings can change independently.
-  const text = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
-  const rule = `/${relative}`;
-  if (!text.split(/\r?\n/).includes(rule)) {
-    mkdirSync(path.dirname(exclude), { recursive: true });
-    appendFileSync(
-      exclude,
-      `${text && !text.endsWith("\n") ? "\n" : ""}\n# Zeros personal repository settings\n${rule}\n`,
-    );
+  mkdirSync(path.dirname(exclude), { recursive: true });
+  const fd = openSync(
+    exclude,
+    constants.O_RDWR |
+      constants.O_APPEND |
+      constants.O_CREAT |
+      constants.O_NOFOLLOW |
+      constants.O_NONBLOCK,
+    0o600,
+  );
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile() || info.nlink !== 1)
+      throw new Error("Git exclusions must use a regular file with one link.");
+    const text = readBoundedUtf8DescriptorSync(fd, 4 * 1024 * 1024);
+    const rule = `/${relative}`;
+    if (!text.split(/\r?\n/).includes(rule)) {
+      appendFileSync(
+        fd,
+        `${text && !text.endsWith("\n") ? "\n" : ""}\n# Zeros personal repository settings\n${rule}\n`,
+      );
+    }
+  } finally {
+    closeSync(fd);
   }
   if (!isIgnored()) {
     throw new Error(

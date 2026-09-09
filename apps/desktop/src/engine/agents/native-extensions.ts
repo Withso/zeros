@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -8,6 +8,7 @@ import type {
   ExtensionQuery,
 } from "@zeros/protocol/agent-extensions";
 import { listSkillDirectory, listZerosSkills } from "./zeros-skills";
+import { readBoundedUtf8FileSync } from "../files/bounded-read-sync";
 
 type Doc = Record<string, unknown>;
 const object = (value: unknown): Doc =>
@@ -42,14 +43,13 @@ export function nativeExtensionInventory(
             : path.join(home, ".cursor"));
   const root = repoRoot ? path.join(repoRoot, `.${provider}`) : nativeRoot;
   const read = (file: string): Doc => {
-    if (!existsSync(file)) return {};
     try {
-      if (statSync(file).size > 4 * 1024 * 1024) throw new Error("too large");
-      const text = readFileSync(file, "utf8");
+      const text = readBoundedUtf8FileSync(file, 4 * 1024 * 1024);
       return object(
         file.endsWith(".toml") ? parseToml(text) : JSON.parse(text),
       );
-    } catch {
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
       // A failed read cannot confirm removal. Let the exact-key cache retain
       // the last declarations until a complete inventory succeeds.
       result.partial = true;

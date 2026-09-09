@@ -148,6 +148,20 @@ describe("personal repository settings", () => {
     expect(existsSync(local())).toBe(false);
   });
 
+  it("refuses a symbolic Git exclusion file without changing its target", () => {
+    const outside = path.join(root, "outside-exclude");
+    writeFileSync(outside, "# Preserve this file\n");
+    const exclude = path.join(repo, ".git/info/exclude");
+    rmSync(exclude);
+    symlinkSync(outside, exclude);
+
+    expect(() =>
+      opSettingsWrite("repo-local", { scripts: { setup: "install" } }, repo),
+    ).toThrow();
+    expect(readFileSync(outside, "utf8")).toBe("# Preserve this file\n");
+    expect(existsSync(local())).toBe(false);
+  });
+
   it("keeps personal settings excluded after the user's external ignore list changes", () => {
     const externalIgnore = path.join(root, "global-ignore");
     writeFileSync(externalIgnore, ".zeros/settings.local.toml\n");
