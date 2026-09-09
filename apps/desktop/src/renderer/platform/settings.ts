@@ -6,11 +6,15 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import {
+  readPreferenceCache,
+  writePreferenceCache,
+} from "./personal-preferences";
 const PREFIX = "zeros-";
 
 export function getSetting<T>(key: string, fallback: T): T {
   try {
-    const raw = localStorage.getItem(PREFIX + key);
+    const raw = readPreferenceCache(PREFIX + key);
     if (raw === null) return fallback;
     try {
       return JSON.parse(raw) as T;
@@ -29,8 +33,7 @@ export function getSetting<T>(key: string, fallback: T): T {
  *  to tell. Existing callers may keep ignoring the result. */
 export function setSetting<T>(key: string, value: T): boolean {
   try {
-    localStorage.setItem(PREFIX + key, JSON.stringify(value));
-    return true;
+    return writePreferenceCache(PREFIX + key, JSON.stringify(value));
   } catch {
     // Ignore quota / privacy errors — settings are best-effort.
     return false;
@@ -39,7 +42,7 @@ export function setSetting<T>(key: string, value: T): boolean {
 
 export function removeSetting(key: string): void {
   try {
-    localStorage.removeItem(PREFIX + key);
+    writePreferenceCache(PREFIX + key, null);
   } catch {
     // Ignore.
   }

@@ -22,15 +22,70 @@ Human Design surface ───────────────────�
 Future Design agent (ZSR, disabled) ──────────┘
 ```
 
-The active Design directory comes from `[design] directory`; `Zeros Design/`
+The active Design directory comes from the private `[design] directory_id`
+selection and this checkout's tracked `.zeros/design-dir.toml` registry. Legacy
+`[design] directory` paths remain readable; `Zeros Design/`
 is the unconfigured pointer default. A repository's first Design use with no
 pointer and no recognized document creates a folder named after the
 repository (`<repo name> - Design/`, see `firstUseDesignDirectoryName`); a
 checkout that already carries `Zeros Design/` keeps using it, and a single
 recognized document is adopted instead of creating a second folder. The
-directory remains materialized and readable in both views. A committed
-`.zeros-canvas.json` marker recognizes a Design document, and protection covers
-every recognized Design root, not only the active pointer.
+directory remains materialized and readable in both views. Registry entries
+in the working tree, Git index and HEAD recognize documents; old branches can
+still use `.zeros-canvas.json` markers. Protection covers all recognized source
+roots and their exact metadata files.
+
+### Source, metadata and personal state
+
+```text
+<repo>/
+  Product - Design/                 HTML, CSS, tokens, components, assets
+  .zeros/
+    design-dir.toml                 tracked directory registry
+    design/<stable-id>/document.json tracked frame and Foundation metadata
+    settings.local.toml             private main-checkout settings
+```
+
+The registry is version 1, with entries such as:
+
+```toml
+version = 1
+
+[directories.design_example]
+path = "Product - Design"
+```
+
+Document metadata is version 3: `frames` holds geometry keyed by HTML filename,
+`frame_info` holds titles and frame/text kinds, and `foundation` retains the
+versioned Foundation manifest. Canvas viewport state, transaction journals and
+recovery records are local runtime state, outside the source directory and
+outside Git. Element editing IDs (`data-oid`, `data-zid`) remain in code.
+
+First Design use migrates legacy canvas metadata and `zeros-frame` HTML tags
+through the Design API. It preserves frame identity, geometry, titles, kinds,
+Foundation data and unrelated source bytes; the legacy canvas marker is removed
+only as part of a recoverable transaction. Unknown document extension fields
+survive edits; malformed geometry, unsupported versions, duplicate legacy/new
+metadata, unsafe paths, symlinks, hard links and conflicting recovery records
+pause writes without discarding the conflicting files. Read-only remote reads
+do not migrate. Legacy path-derived IDs let older branches migrate the same
+document independently; subsequent directory renames retain that ID.
+
+Personal settings select a document without sharing a user's preferences.
+Worktrees inherit unset settings from the main checkout while resolving the
+selected ID against their own checked-out registry. Directory renaming commits
+the source move and registry path update together; the private selection keeps
+the same ID. The Design source directory contains authored code and artifacts.
+
+Design Stage, Unstage and Commit include source plus the selected document's
+metadata. Registry staging and commits project only that directory's entry;
+other directories' staged/unstaged entries retain their own state. Code actions
+exclude these exact metadata paths. Design Stage force-adds them if an existing
+repository ignore rule hides `.zeros`; private settings remain excluded.
+Archives finish recoverable writes and capture ignored Design content as well
+as tracked metadata. Source, metadata and settings retain separate restore
+ownership. The repository's `.gitignore` permits only the tracked Design
+registry and document files under `.zeros`; runtime siblings remain ignored.
 
 Surfaces that can enter Design ask the engine first (`design.listDirectories`
 returns the entry `target` and whether it exists). The workspace mode toggle

@@ -11,7 +11,7 @@
 // Values live in engine-owned layer files — which, since the 2026-07-17
 // repo-file slimming, carry only scripts + the git/prompts tables these tabs
 // edit (+ repo-local's workspaces.path):
-//   <repo>/.zeros/settings.toml        — shared (committed): scripts, git, prompts
+//   <repo>/.zeros/settings.local.toml — personal and ignored: scripts, git, prompts
 //   <repo>/.zeros/settings.local.toml  — personal (gitignored): + machine paths
 // (Environment is Keychain-vault-backed, not file-backed — env-vault.ts.)
 // Each section reads BOTH the resolved tree (effective value + per-leaf
@@ -254,11 +254,8 @@ async function resetKey(
 // RepoDetail — floating section nav (no bg) + active section body
 // ──────────────────────────────────────────────────────────
 
-/** Which repo-scoped layer the config sections edit. "repo" = the committed
- *  `.zeros/settings.toml` (shared with the team); "repo-local" = the gitignored
- *  `.zeros/settings.local.toml` ("This Mac"); "workspace-local" = a single
- *  worktree's own `.zeros/settings.local.toml` ("This Workspace"). */
-export type EditableRepoLayer = "repo" | "repo-local" | "workspace-local";
+/** Repository forms all edit the main checkout's personal, ignored file. */
+export type EditableRepoLayer = "repo-local";
 
 /** A highlighted TOML editor: a transparent textarea (caret + input) overlaid
  *  on a Shiki-highlighted layer, with a line-number gutter. AUTO-HEIGHT — it
@@ -348,7 +345,7 @@ export function RawTomlEditor({
     setError(null);
     try {
       await writeRaw(draft);
-      toast.success("settings.toml saved");
+      toast.success(`${settingsFileName(read?.path)} saved`);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       toast.error("Couldn't save — check the TOML");
@@ -396,7 +393,7 @@ export function RawTomlEditor({
 }
 
 /** Renders the body of ONE repo settings section against the chosen layer
- *  ("repo" = Team/committed `.zeros/settings.toml`, "repo-local" = You/this-Mac
+ *  ("repo-local" = personal `.zeros/settings.local.toml`
  *  `.zeros/settings.local.toml`). The section nav, the You/Team toggle, and the
  *  "Edit settings.toml" raw toggle all live in the settings-page shell now — this
  *  is purely the active section's form. Paths manages its own scope and
@@ -441,16 +438,12 @@ export function RepoDetail({
       // view. Keep the three modules independent so each retains its own save
       // behavior while presenting one consolidated settings surface.
       //
-      // Scripts (setup / archive / run actions) are REPO settings: they always
-      // edit the committed `.zeros/settings.toml` — deliberately shared by
-      // every Zeros install (dev worktree instances, beta, stable) that opens
-      // the repo, like `.vscode/`. The gitignored settings.local.toml carries
-      // personal-only keys and is no longer read for scripts (schema.ts).
+      // Scripts use the same personal repository file as the other preferences.
       return (
         <div className="flex flex-col gap-9">
           <EnvironmentSection project={project} layer={layer} root={root} />
-          <ScriptsSection project={project} layer="repo" root={root} />
-          <RunActionsSection project={project} layer="repo" root={root} />
+          <ScriptsSection project={project} layer="repo-local" root={root} />
+          <RunActionsSection project={project} layer="repo-local" root={root} />
         </div>
       );
     case "git":
@@ -1023,7 +1016,7 @@ export function EnvironmentSection({
 }
 
 /** The User-scope Environment section (Settings → Environment) — the same editor
- *  as the per-repo layers, bound to the global user layer (~/.zeros/settings.toml)
+ *  as the per-repo layers, bound to the global user layer (~/.zeros/settings.local.toml)
  *  that every project inherits. A no-props Panel for the Settings page. */
 export function UserEnvironmentPanel() {
   return <EnvironmentSection layer="user" />;
@@ -1182,8 +1175,8 @@ function GitSection({
   const resolved = useResolvedSettings(root, mainRepoRoot);
   const repo = useSettingsLayer(layer, root);
   // Catalog always reads the MAIN checkout (a registered repo root — the
-  // engine clamps the op to known roots); `root` may be a worktree when this
-  // section edits the workspace-local layer, and refs are repo-wide anyway.
+  // engine clamps the op to known roots). Settings reached through a worktree
+  // use that same personal repository owner, and refs are repo-wide too.
   const {
     catalog,
     loading: catalogLoading,
@@ -1636,7 +1629,7 @@ function ScriptsSection({
 
 // ── Actions (per-repo agent instructions) ───────────────
 //
-// "General preferences" = the repo's `[prompts] general` in .zeros/settings.toml.
+// "General preferences" = the repo's `[prompts] general` in .zeros/settings.local.toml.
 // spawn-env emits it as ZEROS_PROMPTS_GENERAL → the gateway folds it into the
 // first-turn <system_instruction> (see system-instructions/). Review /
 // Create-PR / Fix-errors / Resolve-conflicts / Branch-rename prompts are

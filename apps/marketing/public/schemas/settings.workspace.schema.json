@@ -1,0 +1,303 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://zeros.build/schemas/settings.workspace.schema.json",
+  "title": "Zeros workspace settings",
+  "description": "Private overrides for this checkout (.zeros/settings.toml; settings.local.toml if the branch tracks the old shared filename). Unset values inherit repository and user defaults. Never commit this file.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "description": "JSON Schema URL for editor autocomplete.",
+      "type": "string"
+    },
+    "scripts": {
+      "type": "object",
+      "properties": {
+        "setup": {
+          "type": "string",
+          "description": "Runs when a workspace is created."
+        },
+        "run": {
+          "type": "string",
+          "description": "LEGACY single run command — superseded by run_actions (it migrates to one default action at read time when run_actions is absent; an explicit run_actions list, even empty, wins)."
+        },
+        "run_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Stable id — the session-id suffix + status key."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Label shown on the tab / menu / button."
+              },
+              "command": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Shell command, e.g. `pnpm dev`."
+              },
+              "icon": {
+                "description": "Lucide icon name (curated set; unknown falls back to play).",
+                "type": "string"
+              },
+              "platforms": {
+                "description": "OSes this action shows on. Absent/empty = all.",
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "mac",
+                    "linux",
+                    "win"
+                  ]
+                }
+              },
+              "one_shot": {
+                "description": "true → run to completion for a pass/fail verdict; false → long-lived (dev server). Absent = heuristic by command.",
+                "type": "boolean"
+              },
+              "run_on_create": {
+                "description": "Start automatically when a workspace is created.",
+                "type": "boolean"
+              },
+              "default": {
+                "description": "The header split-button face + primary shortcut.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "command"
+            ]
+          },
+          "description": "Named run actions — multiple concurrent run commands, each with an icon. Supersedes the single `run` string (which migrates to one default action at read time)."
+        },
+        "archive": {
+          "type": "string",
+          "description": "Runs before a workspace is archived."
+        },
+        "run_mode": {
+          "type": "string",
+          "enum": [
+            "concurrent",
+            "nonconcurrent"
+          ],
+          "description": "Whether run scripts of multiple workspaces may run at once."
+        },
+        "auto_run_after_setup": {
+          "type": "boolean",
+          "description": "Start the run script automatically after setup."
+        }
+      }
+    },
+    "git": {
+      "type": "object",
+      "properties": {
+        "remote": {
+          "type": "string",
+          "description": "Git remote new workspaces branch from."
+        },
+        "base_branch": {
+          "type": "string",
+          "description": "Branch new workspaces fork from."
+        },
+        "branch_prefix_type": {
+          "type": "string",
+          "enum": [
+            "zeros",
+            "github",
+            "custom",
+            "none"
+          ],
+          "description": "Which namespace a new workspace branch goes under: \"github\" = the connected GitHub login (the default), \"custom\" = the `branch_prefix` string, \"none\" = no prefix (the bare workspace name), \"zeros\" = the fixed `zeros/` namespace. The namespace is joined to the name with a single `/`."
+        },
+        "branch_prefix": {
+          "type": "string",
+          "description": "The namespace used when branch_prefix_type = \"custom\". Joined to the workspace name with a single `/`, so `acme` gives `acme/Cream`. A leading or trailing slash is optional and ignored."
+        },
+        "delete_branch_on_archive": {
+          "type": "boolean",
+          "description": "Delete the branch when archiving."
+        },
+        "archive_on_merge": {
+          "type": "boolean",
+          "description": "Archive a workspace automatically when its PR merges."
+        }
+      }
+    },
+    "prompts": {
+      "type": "object",
+      "properties": {
+        "general": {
+          "type": "string",
+          "description": "Appended to every agent session."
+        },
+        "code_review": {
+          "type": "string"
+        },
+        "create_pr": {
+          "type": "string"
+        },
+        "fix_errors": {
+          "type": "string"
+        },
+        "rename_branch": {
+          "type": "string"
+        },
+        "resolve_merge_conflicts": {
+          "type": "string"
+        }
+      }
+    },
+    "design": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Repo-relative folder the design surface reads and writes (default \"Zeros Design\"). The folder is committed content; this key just selects which design folder is active."
+        },
+        "directory_id": {
+          "type": "string",
+          "pattern": "^design_[a-zA-Z0-9_-]{1,64}$",
+          "description": "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml."
+        }
+      }
+    },
+    "mcp": {
+      "type": "object",
+      "properties": {
+        "servers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "stdio"
+                  },
+                  "command": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Executable to spawn for the stdio server."
+                  },
+                  "args": {
+                    "description": "Arguments passed to the command.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "env": {
+                    "description": "Environment variables for the server process (non-secret / refs).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "command"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "http"
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Streamable-HTTP endpoint URL."
+                  },
+                  "headers": {
+                    "description": "HTTP headers sent on every request (e.g. Authorization; non-secret / refs). Applies to auth=\"none\" (injected directly) and auth=\"header\" (sent alongside the brokered secret); IGNORED for auth=\"oauth\" (the gateway manages the connection).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "auth": {
+                    "description": "Routes this server through the Zeros MCP gateway: \"oauth\" brokers OAuth 2.1 once and holds the token; \"header\" holds a static auth header (its VALUE lives in the engine vault, never here) and adds it when proxying. Default \"none\" = injected directly with the headers above.",
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "oauth",
+                      "header"
+                    ]
+                  },
+                  "header_name": {
+                    "description": "For auth=\"header\": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.",
+                    "type": "string"
+                  },
+                  "oauth_client_id": {
+                    "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
+                    "type": "string"
+                  },
+                  "disabled_tools": {
+                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "url"
+                ]
+              }
+            ]
+          },
+          "description": "MCP servers shared across every agent."
+        }
+      }
+    },
+    "settings_version": {
+      "type": "number",
+      "const": 2
+    },
+    "settings_migration_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "additionalProperties": false
+}

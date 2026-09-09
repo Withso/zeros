@@ -444,6 +444,16 @@ export interface AgentSafetyCapabilityPort {
 }
 
 export interface AgentCapabilityPorts {
+  readonly extensions?: {
+    list(opts: {
+      category: "apps" | "plugins";
+      cwd: string;
+      scope?: "user" | "repo";
+      env?: Record<string, string>;
+      cliBinary?: string;
+      executionBoundary?: PreparedBoundary;
+    }): Promise<import("@zeros/protocol/agent-extensions").ExtensionInventory | null>;
+  };
   readonly conversation?: AgentConversationCapabilityPort;
   readonly browser?: AgentBrowserCapabilityPort;
   readonly backgroundWork?: AgentBackgroundWorkCapabilityPort;

@@ -507,6 +507,17 @@ async function lsFilesDetailed(
     if (!raw) continue;
     const normalized = raw.replace(/\/+$/, "");
     if (!normalized) continue;
+    // Workspace settings start with empty overrides and inherit live defaults;
+    // copying repository values would freeze that inheritance. Skills have one
+    // main-checkout owner. Apply the exclusion to copy and preview queries.
+    const personalPath = normalized.toLowerCase();
+    if (
+      personalPath === ".zeros/settings.local.toml" ||
+      personalPath === ".zeros/settings.toml" ||
+      personalPath === ".zeros/skills" ||
+      personalPath.startsWith(".zeros/skills/")
+    )
+      continue;
     if (raw.endsWith("/")) {
       opaqueDirectories.push(normalized);
       continue;

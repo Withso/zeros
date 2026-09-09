@@ -8,6 +8,8 @@ import {
   providerQuotaCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
   remoteBranchesCache,
+  designDirectoryListingCache,
+  invalidateDesignDirectoryTargetReadCache,
 } from "../read-caches";
 
 beforeEach(() => {
@@ -15,6 +17,46 @@ beforeEach(() => {
   remoteBranchesCache.clear();
   providerMemorySettingsCache.clear();
   providerQuotaCache.clear();
+  designDirectoryListingCache.clear();
+});
+
+it("keeps Design directory IDs isolated by checkout and retains confirmed rows after a failed refresh", async () => {
+  const first = {
+    directories: ["First"],
+    pointer: "First",
+    active: "First",
+    directoryIds: { First: "design_first" },
+  };
+  const second = {
+    directories: ["Second"],
+    pointer: "Second",
+    active: "Second",
+    directoryIds: { Second: "design_second" },
+  };
+  designDirectoryListingCache.setData("/first", first);
+  designDirectoryListingCache.setData("/second", second);
+  let finish!: (value: typeof first) => void;
+  const pending = designDirectoryListingCache.load(
+    "/first",
+    () =>
+      new Promise<typeof first>((resolve) => {
+        finish = resolve;
+      }),
+    { force: true },
+  );
+  await Promise.resolve();
+  expect(designDirectoryListingCache.getSnapshot("/second").data).toBe(second);
+  expect(designDirectoryListingCache.getSnapshot("/first").data).toBe(first);
+  invalidateDesignDirectoryTargetReadCache();
+  finish({ ...first, pointer: "stale" });
+  await pending;
+  expect(designDirectoryListingCache.getSnapshot("/first").data).toBe(first);
+  await expect(
+    designDirectoryListingCache.load("/first", async () => {
+      throw new Error("conflicted registry");
+    }),
+  ).rejects.toThrow();
+  expect(designDirectoryListingCache.getSnapshot("/first").data).toBe(first);
 });
 
 describe("external Git ref cache invalidation", () => {

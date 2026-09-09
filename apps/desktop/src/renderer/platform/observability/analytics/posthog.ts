@@ -33,6 +33,7 @@ import type { PostHog } from "posthog-js";
 import { scrubError } from "@zeros/protocol/scrub";
 import { isAnalyticsOptedOut, setAnalyticsOptedOut } from "./consent";
 import { isElectron, nativeInvoke } from "../../runtime";
+import { subscribePreferenceCache } from "../../personal-preferences";
 
 type RuntimeMode = "dev" | "prod";
 
@@ -258,6 +259,10 @@ export function reportError(
 /** Flip analytics on/off at runtime (from Settings → Privacy). */
 export async function setAnalyticsEnabled(enabled: boolean): Promise<void> {
   setAnalyticsOptedOut(!enabled);
+  await applyAnalyticsEnabled(enabled);
+}
+
+async function applyAnalyticsEnabled(enabled: boolean): Promise<void> {
   if (enabled) {
     if (ph) {
       try {
@@ -278,6 +283,10 @@ export async function setAnalyticsEnabled(enabled: boolean): Promise<void> {
     }
   }
 }
+
+subscribePreferenceCache("zeros-analytics:opt-out", () => {
+  void applyAnalyticsEnabled(!isAnalyticsOptedOut());
+});
 
 // ──────────────────────────────────────────────────────────
 // Feature flags (read side)

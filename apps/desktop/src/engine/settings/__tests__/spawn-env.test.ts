@@ -33,7 +33,9 @@ describe("parseDotenv", () => {
   });
 
   it("keeps a # inside a quoted value", () => {
-    expect(parseDotenv('URL="https://x/#frag"')).toEqual({ URL: "https://x/#frag" });
+    expect(parseDotenv('URL="https://x/#frag"')).toEqual({
+      URL: "https://x/#frag",
+    });
   });
 });
 
@@ -58,7 +60,11 @@ describe("resolveSpawnEnv", () => {
   };
   const writeRepoLocalToml = (body: string) => {
     mkdirSync(path.join(dir, ".zeros"), { recursive: true });
-    writeFileSync(path.join(dir, ".zeros", "settings.local.toml"), body, "utf8");
+    writeFileSync(
+      path.join(dir, ".zeros", "settings.local.toml"),
+      body,
+      "utf8",
+    );
   };
   const writeUserToml = (body: string) => {
     mkdirSync(userDir, { recursive: true });
@@ -78,7 +84,9 @@ describe("resolveSpawnEnv", () => {
 
   it("emits ZEROS_PROMPTS_GENERAL from the user layer too", () => {
     writeUserToml(`[prompts]\ngeneral = "Prefer small diffs."\n`);
-    expect(resolveSpawnEnv(dir).env.ZEROS_PROMPTS_GENERAL).toBe("Prefer small diffs.");
+    expect(resolveSpawnEnv(dir).env.ZEROS_PROMPTS_GENERAL).toBe(
+      "Prefer small diffs.",
+    );
   });
 
   it("omits ZEROS_PROMPTS_GENERAL when [prompts] general is unset", () => {
@@ -95,7 +103,7 @@ describe("resolveSpawnEnv", () => {
     const r = resolveSpawnEnv(dir);
     expect(r.env).toEqual({});
     expect(r.warnings).toEqual([]);
-    expect(opSettingsResolve(dir).warnings.some((w) => w.startsWith("repo: env:"))).toBe(true);
+    expect(opSettingsResolve(dir).effective.env).toBeUndefined();
   });
 
   it("honors the user-file [env] while a repo-file [env] is ignored", () => {
@@ -139,7 +147,9 @@ describe("resolveSpawnEnv", () => {
     const r = resolveSpawnEnv(dir);
     expect(r.env).toEqual({ SAFE: "ok" });
     expect(r.warnings.length).toBe(4);
-    expect(r.warnings.some((w) => w.includes("ZEROS_CURSOR_HOST_SCRIPT"))).toBe(true);
+    expect(r.warnings.some((w) => w.includes("ZEROS_CURSOR_HOST_SCRIPT"))).toBe(
+      true,
+    );
   });
 
   it("drops credential-redirect names from the cloud TEAM layer (untrusted for routing)", () => {
@@ -160,7 +170,10 @@ describe("resolveSpawnEnv", () => {
       },
     });
     const r = resolveSpawnEnv(dir);
-    expect(r.env).toEqual({ MY_APP_BASE_URL: "http://localhost:3000", SAFE: "ok" });
+    expect(r.env).toEqual({
+      MY_APP_BASE_URL: "http://localhost:3000",
+      SAFE: "ok",
+    });
     expect(r.warnings.length).toBe(3);
     expect(r.warnings.some((w) => w.includes("ANTHROPIC_BASE_URL"))).toBe(true);
   });
@@ -179,7 +192,9 @@ describe("resolveSpawnEnv", () => {
 
   it("HONORS credential-redirect names from the user layer", () => {
     writeUserToml(`[env]\nALL_PROXY = "socks5://localhost:1080"\n`);
-    expect(resolveSpawnEnv(dir).env).toEqual({ ALL_PROXY: "socks5://localhost:1080" });
+    expect(resolveSpawnEnv(dir).env).toEqual({
+      ALL_PROXY: "socks5://localhost:1080",
+    });
   });
 
   it("repo and repo-local [env] are BOTH ignored — neither can shadow the user file", () => {
@@ -194,7 +209,9 @@ describe("resolveSpawnEnv", () => {
   it("still drops code-injection and secret-shaped names even from the user layer", () => {
     // The user-layer relaxation is credential-redirect ONLY. RCE / secret names
     // are never accepted from any settings layer.
-    writeUserToml(`[env]\nNODE_OPTIONS = "--require /tmp/evil.js"\nMY_TOKEN = "sk-x"\nSAFE = "ok"\n`);
+    writeUserToml(
+      `[env]\nNODE_OPTIONS = "--require /tmp/evil.js"\nMY_TOKEN = "sk-x"\nSAFE = "ok"\n`,
+    );
     const r = resolveSpawnEnv(dir);
     expect(r.env).toEqual({ SAFE: "ok" });
     expect(r.warnings.length).toBe(2);
@@ -203,7 +220,9 @@ describe("resolveSpawnEnv", () => {
   it("drops secret-shaped names from the user env table and from env_files", () => {
     // env_files are declared in the USER file now, but still resolve relative
     // to the agent's cwd (the repo).
-    writeUserToml(`env_files = [".env.agent"]\n[env]\nMY_API_KEY = "sk-table"\nSAFE = "ok"\n`);
+    writeUserToml(
+      `env_files = [".env.agent"]\n[env]\nMY_API_KEY = "sk-table"\nSAFE = "ok"\n`,
+    );
     writeFileSync(
       path.join(dir, ".env.agent"),
       "GITHUB_TOKEN=ghp_fromfile\nPLAIN=fromfile\n",
@@ -216,7 +235,9 @@ describe("resolveSpawnEnv", () => {
   });
 
   it("rejects env_files that are absolute or traverse outside the repo", () => {
-    writeUserToml(`env_files = ["/etc/passwd", "../../secret.env", ".env.ok"]\n`);
+    writeUserToml(
+      `env_files = ["/etc/passwd", "../../secret.env", ".env.ok"]\n`,
+    );
     writeFileSync(path.join(dir, ".env.ok"), "OK=1\n", "utf8");
     const r = resolveSpawnEnv(dir);
     expect(r.env).toEqual({ OK: "1" });
@@ -225,7 +246,9 @@ describe("resolveSpawnEnv", () => {
   });
 
   it("merges env_files over the env table (file wins), relative to cwd", () => {
-    writeUserToml(`env_files = [".env.agent"]\n[env]\nA = "table"\nB = "table"\n`);
+    writeUserToml(
+      `env_files = [".env.agent"]\n[env]\nA = "table"\nB = "table"\n`,
+    );
     writeFileSync(path.join(dir, ".env.agent"), "A=file\nC=file\n", "utf8");
     const r = resolveSpawnEnv(dir);
     expect(r.env).toEqual({ A: "file", B: "table", C: "file" });
@@ -244,7 +267,7 @@ describe("resolveSpawnEnv", () => {
     const r = resolveSpawnEnv(dir);
     expect(r.env).toEqual({});
     expect(r.warnings).toEqual([]);
-    expect(opSettingsResolve(dir).warnings.some((w) => w.startsWith("repo: env_files:"))).toBe(true);
+    expect(opSettingsResolve(dir).effective.env_files).toBeUndefined();
   });
 });
 
@@ -266,14 +289,21 @@ describe("resolveSpawnEnv — workspace-local layering (orphan-bug fix)", () => 
   });
   const writeLocal = (root: string, body: string) => {
     mkdirSync(path.join(root, ".zeros"), { recursive: true });
-    writeFileSync(path.join(root, ".zeros", "settings.local.toml"), body, "utf8");
+    writeFileSync(
+      path.join(root, ".zeros", "settings.local.toml"),
+      body,
+      "utf8",
+    );
   };
 
   it("ignores [env] from BOTH the main checkout's repo-local and the worktree's workspace-local", () => {
     // The pre-slimming trust machinery (repo-local/workspace-local env, incl.
     // the credential-redirect allowance) is deleted: per-repo env is couriered
     // from the Keychain vault via the CALLER env, never read from these files.
-    writeLocal(mainDir, `[env]\nFROM_MAIN_LOCAL = "1"\nHTTPS_PROXY = "http://wt-proxy:8080"\n`);
+    writeLocal(
+      mainDir,
+      `[env]\nFROM_MAIN_LOCAL = "1"\nHTTPS_PROXY = "http://wt-proxy:8080"\n`,
+    );
     writeLocal(wtDir, `[env]\nFROM_WT_LOCAL = "1"\n`);
     const r = resolveSpawnEnv(wtDir, mainDir);
     expect(r.env).toEqual({});
@@ -291,10 +321,12 @@ describe("resolveSpawnEnv — workspace-local layering (orphan-bug fix)", () => 
     );
   });
 
-  it("the worktree's OWN workspace-local wins over the main checkout's repo-local", () => {
+  it("workspace instructions override the inherited repository instructions", () => {
     writeLocal(mainDir, `[prompts]\ngeneral = "from main"\n`);
     writeLocal(wtDir, `[prompts]\ngeneral = "from worktree"\n`);
-    expect(resolveSpawnEnv(wtDir, mainDir).env.ZEROS_PROMPTS_GENERAL).toBe("from worktree");
+    expect(resolveSpawnEnv(wtDir, mainDir).env.ZEROS_PROMPTS_GENERAL).toBe(
+      "from worktree",
+    );
   });
 
   it("without mainRepoRoot, only the cwd's own local applies (prior behavior)", () => {
@@ -331,7 +363,10 @@ describe("mergeSpawnEnv", () => {
       "utf8",
     );
     // Caller carries a per-session/secret value that must win.
-    const merged = mergeSpawnEnv(dir, { MY_FLAG: "from-caller", SECRET: "sk-1" });
+    const merged = mergeSpawnEnv(dir, {
+      MY_FLAG: "from-caller",
+      SECRET: "sk-1",
+    });
     expect(merged).toEqual({
       MY_FLAG: "from-caller", // caller wins
       KEEP: "from-settings",
@@ -344,7 +379,11 @@ describe("mergeSpawnEnv", () => {
     // CALLER env (deriveProviderEnv → opts.env). The settings-table NAME filter
     // must touch ONLY the settings-derived env, never the caller's — otherwise it
     // would break the very config the user configured.
-    writeFileSync(path.join(userDir, "settings.toml"), `[env]\nSAFE = "ok"\n`, "utf8");
+    writeFileSync(
+      path.join(userDir, "settings.toml"),
+      `[env]\nSAFE = "ok"\n`,
+      "utf8",
+    );
     const merged = mergeSpawnEnv(dir, {
       ANTHROPIC_BASE_URL: "https://gateway.example", // sanctioned (caller-supplied)
       ANTHROPIC_API_KEY: "sk-secret", // keychain credential

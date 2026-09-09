@@ -1,3 +1,10 @@
+import {
+  designDocumentRelativePath,
+  DESIGN_DIRECTORY_REGISTRY_FILE,
+  designMetadataGitPaths,
+  isDesignMetadataRepoPath,
+} from "../design/metadata";
+import { designRegistryAtGitRef } from "../design/metadata-git";
 import path from "node:path";
 
 import {
@@ -45,6 +52,7 @@ export async function semanticDesignDirectories(opts: {
       ...(pointer.configured ? [pointer.directory] : []),
       ...discovered,
       ...sticky,
+      ...designMetadataGitPaths(opts.path),
     ]),
   ].sort((left, right) => left.localeCompare(right));
 }
@@ -58,9 +66,11 @@ export async function designDirectoriesAtRef(
     ["ls-tree", "-r", "-z", "--name-only", ref],
     { readOnly: true },
   );
+  const registry = await designRegistryAtGitRef(cwd, ref);
   return [
-    ...new Set(
-      stdout.split("\0").flatMap((markerPath) => {
+    ...new Set([
+      ...Object.values(registry?.directories ?? {}).map((entry) => entry.path),
+      ...stdout.split("\0").flatMap((markerPath) => {
         if (
           !markerPath ||
           path.posix.basename(markerPath) !== DESIGN_CANVAS_FILE
@@ -72,7 +82,15 @@ export async function designDirectoriesAtRef(
         );
         return candidate ? [candidate] : [];
       }),
-    ),
+      ...(registry
+        ? [
+            DESIGN_DIRECTORY_REGISTRY_FILE,
+            ...Object.keys(registry.directories).map(
+              designDocumentRelativePath,
+            ),
+          ]
+        : []),
+    ]),
   ];
 }
 
@@ -247,6 +265,7 @@ async function independentlyChangedSingleCommitPaths(
 function isDesignIdentityPath(candidate: string): boolean {
   const normalized = candidate.replace(/\\/g, "/").replace(/^\.\//, "");
   return (
+    isDesignMetadataRepoPath(normalized) ||
     normalized === ".zeros/settings.toml" ||
     (/^\.zeros\/settings\.[^/]+\.toml$/.test(normalized) &&
       !normalized.includes("\0"))
@@ -354,6 +373,44 @@ export async function prepareDesignSafeIntegration(opts: {
   );
   if (!dirty) return target;
 
+  // Private settings are intentionally ignored and remain outside autostash.
+  // Their presence is not an uncommitted Design draft. A legacy branch can
+  // still track these names, though: Git may overwrite ignored files while
+  // materializing it, so reject that collision before any worktree rewrite.
+  const records = dirty.split("\0").filter(Boolean);
+  const privateSettings = records.filter(
+    (record) =>
+      record === "!! .zeros/settings.toml" ||
+      record === "!! .zeros/settings.local.toml",
+  );
+  let changedPaths: string[] | undefined;
+  if (privateSettings.length) {
+    changedPaths = await changedPathsForIntegration(
+      opts.path,
+      target,
+      opts.comparison ?? "merge-side",
+    );
+    const names = new Set(
+      privateSettings.map((record) => comparisonPathKey(record.slice(3))),
+    );
+    if (
+      changedPaths.some((candidate) => names.has(comparisonPathKey(candidate)))
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: `${opts.operation} would overwrite private workspace settings with a legacy tracked settings file.`,
+        remediation:
+          "Preserve those overrides outside the checkout before integrating this legacy branch, then restore them to the private settings.local.toml file.",
+        context: {
+          workspaceId: opts.workspaceId,
+          target,
+          settingsPaths: [...names],
+        },
+      });
+    }
+  }
+  if (records.length === privateSettings.length) return target;
+
   if (opts.rejectAnyDirtyDesign) {
     throw new GitError({
       code: "VALIDATION_FAILED",
@@ -368,7 +425,7 @@ export async function prepareDesignSafeIntegration(opts: {
     });
   }
 
-  const changedPaths = await changedPathsForIntegration(
+  changedPaths ??= await changedPathsForIntegration(
     opts.path,
     target,
     opts.comparison ?? "merge-side",

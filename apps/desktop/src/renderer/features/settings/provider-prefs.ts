@@ -15,7 +15,10 @@
 import { getSetting, setSetting } from "../../platform/settings";
 import { getSecret, SECRET_ACCOUNTS } from "../../platform/secrets";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { bridgeSettingsWrite } from "../../platform/bridge/workspace-bridge";
+import {
+  flushAgentPreferences,
+  queueAgentPreferenceChanges,
+} from "../../platform/agent-preferences";
 
 export type ProviderAuthMethod = "cli" | "apiKey";
 
@@ -33,6 +36,66 @@ export interface ProviderPrefs {
 }
 
 const KEY_PREFIX = "provider-prefs:";
+const listeners = new Set<() => void>();
+const hydrated = new Map<string, ProviderPrefs>();
+export function subscribeProviderPreferences(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+function providerTable(prefs: ProviderPrefs) {
+  return {
+    auth: prefs.authMethod === "apiKey" ? "api-key" : "cli",
+    executable_path: prefs.binaryPath?.trim() || null,
+    base_url: prefs.gatewayBaseUrl?.trim() || null,
+  };
+}
+function providerIds(): string[] {
+  const ids = new Set(["claude", "codex", "cursor", ...hydrated.keys()]);
+  try {
+    for (let index = 0; index < localStorage.length; index++) {
+      const key = localStorage.key(index);
+      if (key?.startsWith("zeros-" + KEY_PREFIX))
+        ids.add(key.slice(("zeros-" + KEY_PREFIX).length));
+    }
+  } catch {
+    /* browser cache unavailable */
+  }
+  return [...ids].filter(
+    (id) => !["__proto__", "prototype", "constructor"].includes(id),
+  );
+}
+export function legacyProviderPreferences(): Record<string, unknown> {
+  return Object.fromEntries(
+    providerIds()
+      .filter((id) => getSetting(KEY_PREFIX + id, null) !== null)
+      .map((id) => [id, providerTable(getProviderPrefs(id))]),
+  );
+}
+export function hydrateProviderPreferences(value: unknown): void {
+  const providers =
+    value && typeof value === "object"
+      ? (value as Record<string, Record<string, unknown>>)
+      : {};
+  for (const id of new Set([...providerIds(), ...Object.keys(providers)])) {
+    if (["__proto__", "prototype", "constructor"].includes(id)) continue;
+    const cfg = providers[id];
+    const prefs: ProviderPrefs = {
+      authMethod:
+        isApiKeyOnly(id) || cfg?.auth === "api-key" ? "apiKey" : "cli",
+      ...(typeof cfg?.executable_path === "string"
+        ? { binaryPath: cfg.executable_path }
+        : {}),
+      ...(typeof cfg?.base_url === "string"
+        ? { gatewayBaseUrl: cfg.base_url }
+        : {}),
+    };
+    hydrated.set(id, prefs);
+    setSetting(KEY_PREFIX + id, prefs);
+  }
+  for (const listener of listeners) listener();
+}
 
 export const DEFAULT_PREFS: ProviderPrefs = {
   authMethod: "cli",
@@ -59,7 +122,9 @@ export function getProviderPrefs(agentId: string): ProviderPrefs {
   const fallback: ProviderPrefs = isApiKeyOnly(agentId)
     ? { authMethod: "apiKey" }
     : { ...DEFAULT_PREFS };
-  const prefs = getSetting<ProviderPrefs>(KEY_PREFIX + agentId, fallback);
+  const prefs =
+    hydrated.get(agentId) ??
+    getSetting<ProviderPrefs>(KEY_PREFIX + agentId, fallback);
   // Coerce a stale persisted "cli" choice back to apiKey for API-key-only
   // agents — a leftover toggle from before they went key-only must not
   // withhold the env var the SDK needs at spawn (deriveProviderEnv only
@@ -71,31 +136,14 @@ export function getProviderPrefs(agentId: string): ProviderPrefs {
 }
 
 export function setProviderPrefs(agentId: string, prefs: ProviderPrefs): void {
+  const previous = getProviderPrefs(agentId);
+  hydrated.set(agentId, prefs);
   setSetting(KEY_PREFIX + agentId, prefs);
-  writeThroughToUserSettings(agentId, prefs);
-}
-
-/** Mirror provider choices into the engine-owned
- *  ~/.zeros/settings.toml ([providers.<agentId>]) so the user file is the
- *  durable record. localStorage stays the synchronous read cache. This is
- *  fire-and-forget — a
- *  missed mirror self-heals on the next save. */
-function writeThroughToUserSettings(
-  agentId: string,
-  prefs: ProviderPrefs,
-): void {
-  const bridge = getActiveBridge();
-  if (!bridge) return;
-  const table = {
-    auth: prefs.authMethod === "apiKey" ? "api-key" : "cli",
-    executable_path: prefs.binaryPath?.trim() || null,
-    base_url: prefs.gatewayBaseUrl?.trim() || null,
-  };
-  void bridgeSettingsWrite(bridge, "user", {
-    providers: { [agentId]: table },
-  }).catch(() => {
-    /* best-effort mirror */
-  });
+  queueAgentPreferenceChanges(
+    { providers: { [agentId]: providerTable(prefs) } },
+    { providers: { [agentId]: providerTable(previous) } },
+  );
+  for (const listener of listeners) listener();
 }
 
 // ──────────────────────────────────────────────────────────
@@ -176,6 +224,9 @@ export const PROVIDER_KEY_ENV_VARS: ReadonlyArray<{
 export async function deriveProviderEnv(
   agentId: string,
 ): Promise<Record<string, string>> {
+  // Resolve auth from an acknowledged local file before reading credentials.
+  if (getActiveBridge()?.executionIdentity?.kind === "local")
+    await flushAgentPreferences();
   const prefs = getProviderPrefs(agentId);
   const config = PROVIDER_ENV_CONFIG[agentId];
   if (!config) return {};
@@ -189,7 +240,11 @@ export async function deriveProviderEnv(
       /* keychain miss — leave unset; AuthModal will surface as fallback. */
     }
   }
-  if (config.gatewayBaseUrlVar && prefs.gatewayBaseUrl) {
+  if (
+    getActiveBridge()?.executionIdentity?.kind !== "local" &&
+    config.gatewayBaseUrlVar &&
+    prefs.gatewayBaseUrl
+  ) {
     env[config.gatewayBaseUrlVar] = prefs.gatewayBaseUrl;
   }
 
@@ -200,6 +255,9 @@ export async function deriveProviderEnv(
  *  undefined when the user hasn't customised it — caller falls back to
  *  the registry default (PATH lookup). */
 export function getProviderBinaryOverride(agentId: string): string | undefined {
+  // Local runtime configuration is read directly by the engine from TOML.
+  // A removed override must not be resurrected by an older renderer cache.
+  if (getActiveBridge()?.executionIdentity?.kind === "local") return undefined;
   const v = getProviderPrefs(agentId).binaryPath?.trim();
   return v ? v : undefined;
 }

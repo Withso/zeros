@@ -16,6 +16,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
+import {
+  personalRepoRoot,
+  personalWorkspaceRoot,
+} from "./settings/personal-repo";
 import { EngineCache } from "./cache";
 import { CSSResolver } from "./css-resolver";
 import { CSSFileWriter } from "./css-writer";
@@ -58,6 +62,10 @@ import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
 import { readDesignProtocolResource } from "./design/protocol-resource";
+import {
+  designMetadataGitPaths,
+  isDesignMetadataRepoPath,
+} from "./design/metadata";
 import { getWorkspaceDesignApi } from "./design/design-api";
 import { DesignAgentAdmissionManager } from "./design/design-agent-admission";
 import {
@@ -141,6 +149,7 @@ import {
   resolveCodeAgentTerritory,
   type NewAgentSessionOptions,
 } from "./agents/gateway";
+import { TurnPreambleLatency } from "./agents/turn-preamble-latency";
 import { ZsrExecutionBoundary } from "./agents/containment/zsr-boundary";
 import { HostExecutionBoundary } from "./agents/containment/host-boundary";
 import { RoutingExecutionBoundary } from "./agents/containment/routing-boundary";
@@ -542,6 +551,7 @@ function pathCanChangeDesignRecognition(candidate: unknown): boolean {
   const normalized = normalizeRecognitionMutationPath(candidate);
   if (!normalized) return false;
   return (
+    isDesignMetadataRepoPath(normalized) ||
     normalized === ".zeros/settings.toml" ||
     normalized === ".zeros/settings.local.toml" ||
     (normalized.includes("/") &&
@@ -1163,6 +1173,15 @@ export class ZerosEngine {
     this.workspace.setRepoTaskBoundaryFactory(repoTaskBoundaryFactory);
     // Let the mcp.gateway.* ops reach the (lazily-created) gateway instance.
     this.workspace.setGatewayAccessor(() => this.mcpGateway);
+    this.workspace.setNativeExtensionReader((query) => {
+      if (query.provider === "codex" && (query.category === "apps" || query.category === "plugins")) {
+        return this.agents.readExtensionInventory("codex", query.category, query.repoRoot);
+      }
+      if (query.provider === "claude" && query.category === "apps") {
+        return this.agents.readExtensionInventory("claude", "apps", query.repoRoot);
+      }
+      return Promise.resolve(null);
+    });
     this.workspace.setGatewayErrorAccessor(() => this.gatewayError);
     this.workspace.setGatewayHeaderSecretSetter((url, name, value) =>
       this.setMcpHeaderSecret(url, name, value),
@@ -3509,29 +3528,36 @@ export class ZerosEngine {
     } catch {
       return null;
     }
-    const rootBySettingsPath = new Map<string, string>();
+    const rootBySettingsPath = new Map<string, { root: string; workspace: boolean }>();
     for (const root of repoRoots) {
-      rootBySettingsPath.set(repoSettingsPath(root), root);
-      rootBySettingsPath.set(repoLocalSettingsPath(root), root);
+      const owner = personalRepoRoot(root);
+      const checkout = personalWorkspaceRoot(root);
+      rootBySettingsPath.set(repoLocalSettingsPath(owner), { root: owner, workspace: false });
+      if (checkout !== owner) {
+        rootBySettingsPath.set(repoLocalSettingsPath(checkout), { root: checkout, workspace: true });
+        rootBySettingsPath.set(repoSettingsPath(checkout), { root: checkout, workspace: true });
+      }
     }
-    const scopedRoots = new Set<string>();
+    const scopedRepos = new Set<string>();
+    const scopedWorkspaces = new Set<string>();
     for (const changed of changedPaths) {
-      const root = rootBySettingsPath.get(changed);
-      if (!root) return null;
-      scopedRoots.add(path.resolve(root));
+      const scope = rootBySettingsPath.get(path.resolve(changed));
+      if (!scope) return null;
+      (scope.workspace ? scopedWorkspaces : scopedRepos).add(scope.root);
     }
-    if (scopedRoots.size === 0) return null;
+    if (scopedRepos.size === 0 && scopedWorkspaces.size === 0) return null;
     const candidates: Array<{
       id: string;
       path: string;
       repoRoot: string;
       archivedAt?: number | null;
     }> = listWorkspaces({ archived: false }).filter((workspace) =>
-      scopedRoots.has(path.resolve(workspace.repoRoot)),
+      scopedRepos.has(personalRepoRoot(workspace.repoRoot)) ||
+      scopedWorkspaces.has(personalWorkspaceRoot(workspace.path)),
     );
-    // A registered repository without live workspace rows still owns Design
-    // territory; reconcile the root itself so its pointer change is honored.
-    for (const root of scopedRoots) {
+    // Main-checkout edits also affect its own territory, including repositories
+    // with no workspace rows. Workspace overrides affect only their checkout.
+    for (const root of scopedRepos) {
       candidates.push({
         id: `repo-root:${root}`,
         path: root,
@@ -4304,7 +4330,7 @@ export class ZerosEngine {
       const ws = getWorkspaceById(workspaceId);
       if (!ws?.path || !this.workspaceAllowsProcessStart(workspaceId)) return;
       const actions = filterRunActionsForPlatform(
-        resolveRunActions(ws.repoRoot),
+        resolveRunActions(ws.path),
         normalizeRunPlatform(process.platform),
       );
       for (const action of actions) {
@@ -5243,6 +5269,14 @@ export class ZerosEngine {
           }
           this.router.setOwner(msg.sessionId, client.id);
           const promptReceivedAt = Date.now();
+          // Everything from here to the `agents.prompt` handoff below is Zeros'
+          // own work, and FirstTokenLatency deliberately does not cover it.
+          // See turn-preamble-latency.ts.
+          const preamble = new TurnPreambleLatency(
+            msg.agentId,
+            undefined,
+            promptReceivedAt,
+          );
           const activePrompt: ActivePromptContext = {
             sessionId: msg.sessionId,
             agentId: msg.agentId,
@@ -5280,6 +5314,7 @@ export class ZerosEngine {
               msg.userMessageId,
               activePrompt.startedAt,
             );
+            preamble.mark("persist");
             // Mark the engine busy for the duration of the turn so the dev
             // HMR watcher defers respawning (a save mid-turn must not kill
             // the in-flight response). Cleared in finally — including on the
@@ -5290,6 +5325,9 @@ export class ZerosEngine {
               msg.userMessageId,
               activePrompt.startedAt,
             );
+            // The pre-turn worktree snapshot. Scales with the repo, not the
+            // prompt — the phase most likely to own a slow preamble.
+            preamble.mark("snapshot");
             // Publish the snapshot itself on the record so the settle watchdog
             // can recognise THIS turn's row by reference instead of re-deriving
             // a turn id that can disagree with beginTurn's (see turnSnapshot).
@@ -5369,6 +5407,9 @@ export class ZerosEngine {
             // Stop a second later" run to completion behind a STOPPED BY USER
             // pill, and left the engine holding a live turn that reappeared as
             // a running shimmer on the next reload.
+            preamble.mark("admit");
+            const preambleLine = preamble.report();
+            if (preambleLine) console.info(preambleLine);
             const response: PromptResponse = activePrompt.cancelledByUser
               ? { stopReason: "cancelled" }
               : await this.agents
@@ -8912,6 +8953,9 @@ export class ZerosEngine {
       protectedRoots = [
         ...new Set([
           activeDesignDirectory,
+          ...designMetadataGitPaths(workspaceRoot).map((file) =>
+            path.join(workspaceRoot, file),
+          ),
           ...(pointer.valid
             ? [path.join(workspaceRoot, ...pointer.directory.split("/"))]
             : []),

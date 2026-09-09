@@ -25,8 +25,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getSetting, setSetting } from "../../platform/settings";
-import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { bridgeSettingsWrite } from "../../platform/bridge/workspace-bridge";
+import { queueAgentPreferenceChanges } from "../../platform/agent-preferences";
 import {
   getDefaultAgentId,
   setDefaultAgentId,
@@ -353,12 +352,11 @@ export function newChatBornDefaults(agentId: string | null): {
 
 // ── settings.toml mirror — the user [models] table ─────
 //
-// settings.toml is the durable source of truth; the localStorage keys above are
-// the synchronous spawn-read cache. The setters write the cache AND mirror it
-// into the user `[models]` table (the [[project-settings-foundation]]
-// provider-prefs dual-write); boot sync (useModelsSettingsSync) copies the
-// resolved table back into the cache so a direct file edit or another device is
-// honored. Family === agent id (claude/codex/cursor), so the mapping is identity.
+// settings.toml is the durable source of truth. These synchronous browser
+// caches feed startup and composer defaults. Setters enqueue only edited leaves
+// in a durable outbox; the local engine acknowledges saves and file refreshes
+// replace the confirmed cache. Pending edits survive failures and reconnects.
+// Family === agent ID (claude/codex/cursor), so the mapping is identity.
 
 const EFFORT_SET = new Set<ChatEffort>([
   "low",
@@ -375,6 +373,12 @@ function isEffort(v: unknown): v is ChatEffort {
 /** While hydrating the cache FROM settings.toml, suppress the mirror so a
  *  hydration write never loops straight back into the file. */
 let suppressMirror = false;
+let lastProjectedModels: Record<string, unknown> | undefined;
+export function legacyModelPreferences(): Record<string, unknown> {
+  const legacy = hasModelDefaults() ? buildModelsTable() : {};
+  lastProjectedModels ??= buildModelsTable();
+  return legacy;
+}
 
 /** The user `[models]` table built from the cache. A null
  *  leaf deletes that key via applySettingsPatch, so the file mirrors the cache
@@ -446,19 +450,21 @@ function buildModelsTable(): Record<string, unknown> {
  *  while hydrating, or when there's no engine bridge (web offline / boot). */
 export function mirrorModelsToSettings(): void {
   if (suppressMirror) return;
-  const bridge = getActiveBridge();
-  if (!bridge) return;
-  void bridgeSettingsWrite(bridge, "user", {
-    models: buildModelsTable(),
-  }).catch(() => {
-    /* best-effort mirror */
-  });
+  const models = buildModelsTable();
+  queueAgentPreferenceChanges(
+    { models },
+    { models: lastProjectedModels ?? {} },
+  );
+  lastProjectedModels = models;
 }
 
 /** Copy a resolved `[models]` table into the synchronous cache. The exact-model
  * array is authoritative when present. Legacy family/global fields migrate only
  * to the selected default model; they never fan out to every model. */
-export function hydrateModelsFromSettings(models: unknown): void {
+export function hydrateModelsFromSettings(
+  models: unknown,
+  authoritative = false,
+): void {
   if (!models || typeof models !== "object") return;
   const m = models as Record<string, unknown>;
   suppressMirror = true;
@@ -516,13 +522,12 @@ export function hydrateModelsFromSettings(models: unknown): void {
         setDefaultAgentId(explicitDefaultAgent);
       }
     } else if (
-      Array.isArray(m.model_preferences) &&
+      (authoritative || Array.isArray(m.model_preferences)) &&
       typeof m.default !== "string" &&
       getDefaultAgentId() !== null
     ) {
-      // The explicit exact-model array marks a current-format file. With no
-      // default identity in that file, clear a stale device-local choice; old
-      // files without the marker retain their additive migration behavior.
+      // A confirmed read or an explicit exact-model array makes an absent
+      // default authoritative. Additive legacy reads keep the cached choice.
       setDefaultAgentId(null);
     }
     // Authoritative like the bools: a file without the key means Haiku
@@ -543,7 +548,9 @@ export function hydrateModelsFromSettings(models: unknown): void {
       replaceModelPreferences(m.model_preferences);
       setSetting(DEFAULT_EFFORT_KEY, {});
       setSetting(DEFAULT_FAST_KEY, false);
-    } else if (!hasModelPreferenceStorage() && fam) {
+    } else if ((authoritative || !hasModelPreferenceStorage()) && fam) {
+      // A confirmed legacy file also replaces an already-populated cache.
+      // Defaulting its missing array to [] would skip these migration inputs.
       // Loss-minimizing migration: an old field described only its family's
       // selected model. Preserve each one there and leave every other model
       // High/Fast-off. EVERY family migrates here for the same reason the
@@ -569,8 +576,12 @@ export function hydrateModelsFromSettings(models: unknown): void {
         setSetting(DEFAULT_EFFORT_KEY, {});
         setSetting(DEFAULT_FAST_KEY, false);
       }
+    } else if (authoritative) {
+      replaceModelPreferences([]);
+      setSetting(DEFAULT_EFFORT_KEY, {});
+      setSetting(DEFAULT_FAST_KEY, false);
     }
-    if (Array.isArray(m.permission_preferences)) {
+    if (authoritative || Array.isArray(m.permission_preferences)) {
       replacePermissionPreferences(m.permission_preferences);
     }
     // Claude reliability knobs. ADDITIVE for the fallback (an absent
@@ -581,12 +592,12 @@ export function hydrateModelsFromSettings(models: unknown): void {
     if (typeof cc?.fallback_model === "string" && cc.fallback_model) {
       const fb = cc.fallback_model === "none" ? null : cc.fallback_model;
       if (getClaudeFallbackModel() !== fb) setClaudeFallbackModel(fb);
-    }
+    } else if (authoritative) setClaudeFallbackModel(DEFAULT_CLAUDE_FALLBACK);
     if (typeof cc?.budget_cap_usd === "number" && cc.budget_cap_usd > 0) {
       if (getClaudeBudgetCapUsd() !== cc.budget_cap_usd) {
         setClaudeBudgetCapUsd(cc.budget_cap_usd);
       }
-    }
+    } else if (authoritative) setClaudeBudgetCapUsd(null);
     const idleTimeout = isClaudeIdleTimeoutMinutes(cc?.idle_timeout_minutes)
       ? cc.idle_timeout_minutes
       : DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES;
@@ -602,6 +613,7 @@ export function hydrateModelsFromSettings(models: unknown): void {
     }
   } finally {
     suppressMirror = false;
+    lastProjectedModels = buildModelsTable();
   }
 }
 

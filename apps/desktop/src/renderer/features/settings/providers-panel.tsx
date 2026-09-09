@@ -52,6 +52,7 @@ import { Switch } from "../../shared/ui/primitives/switch";
 import { toast } from "../../shared/ui/primitives/elements";
 import { openAgentConfig } from "../../platform/app";
 import { cn } from "@/renderer/shared/ui/cn";
+import { flushAgentPreferences } from "../../platform/agent-preferences";
 import { SettingsSection, SettingsField } from "./settings-ui";
 import { nativeInvoke } from "../../platform/runtime";
 import { getSetting, setSetting } from "../../platform/settings";
@@ -80,6 +81,7 @@ import {
   getProviderPrefs,
   isApiKeyOnly,
   setProviderPrefs,
+  subscribeProviderPreferences,
   type ProviderAuthMethod,
   type ProviderPrefs,
 } from "./provider-prefs";
@@ -584,6 +586,22 @@ function ProviderCard({
     prefs.binaryPath ?? "",
   );
   const [gatewayDraft, setGatewayDraft] = useState(prefs.gatewayBaseUrl ?? "");
+  useEffect(
+    () =>
+      subscribeProviderPreferences(() => {
+        const next = getProviderPrefs(agent.id);
+        setBinaryPathDraft((draft) =>
+          draft === (prefs.binaryPath ?? "") ? (next.binaryPath ?? "") : draft,
+        );
+        setGatewayDraft((draft) =>
+          draft === (prefs.gatewayBaseUrl ?? "")
+            ? (next.gatewayBaseUrl ?? "")
+            : draft,
+        );
+        setPrefsState(next);
+      }),
+    [agent.id, prefs],
+  );
 
   // Probe the keychain slot for PRESENCE only. The saved key is never
   // hydrated back into the input — that put the plaintext secret in the DOM
@@ -614,22 +632,20 @@ function ProviderCard({
 
   const writePrefs = useCallback(
     (patch: Partial<ProviderPrefs>) => {
-      const next: ProviderPrefs = { ...prefs, ...patch };
+      const next: ProviderPrefs = { ...getProviderPrefs(agent.id), ...patch };
       setProviderPrefs(agent.id, next);
       setPrefsState(next);
       return next;
     },
-    [agent.id, prefs],
+    [agent.id],
   );
 
   const handleAuthMethod = (method: ProviderAuthMethod) => {
     if (prefs.authMethod === method) return;
     writePrefs({ authMethod: method });
-    toast.success(
-      method === "apiKey"
-        ? `${agent.name} will use the ${vendor?.vendor ?? "provider"} API key.`
-        : `${agent.name} will use the CLI sign-in.`,
-    );
+    void flushAgentPreferences()
+      .then(() => toast.success("Provider settings saved"))
+      .catch(() => {});
   };
 
   const handleSaveApiKey = async () => {
@@ -699,17 +715,17 @@ function ProviderCard({
   const handleBinaryPathSave = () => {
     const trimmed = binaryPathDraft.trim();
     writePrefs({ binaryPath: trimmed || undefined });
-    toast.success(
-      trimmed
-        ? `Will spawn ${agent.name} from ${trimmed}`
-        : `${agent.name} will use the binary on your $PATH`,
-    );
+    void flushAgentPreferences()
+      .then(() => toast.success("Provider settings saved"))
+      .catch(() => {});
   };
 
   const handleGatewaySave = () => {
     const trimmed = gatewayDraft.trim();
     writePrefs({ gatewayBaseUrl: trimmed || undefined });
-    toast.success(trimmed ? "Gateway URL saved" : "Gateway URL cleared");
+    void flushAgentPreferences()
+      .then(() => toast.success("Provider settings saved"))
+      .catch(() => {});
   };
 
   const handleCopyInstall = async () => {

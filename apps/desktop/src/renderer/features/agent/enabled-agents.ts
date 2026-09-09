@@ -1,3 +1,8 @@
+import {
+  readPreferenceCache,
+  writePreferenceCache,
+  subscribePreferenceCache,
+} from "../../platform/personal-preferences";
 // ──────────────────────────────────────────────────────────
 // useEnabledAgents — universal (per-user, not per-project) state
 // ──────────────────────────────────────────────────────────
@@ -27,7 +32,7 @@ type PersistedShape = { ids: string[] } | null;
 
 function readPersisted(): PersistedShape {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readPreferenceCache(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as unknown;
     if (
@@ -49,7 +54,7 @@ function readPersisted(): PersistedShape {
 
 function writePersisted(ids: string[]): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ ids }));
+    writePreferenceCache(STORAGE_KEY, JSON.stringify({ ids }));
   } catch {
     /* storage quota / private mode — non-fatal */
   }
@@ -133,3 +138,8 @@ export function useEnabledAgents(): UseEnabledAgentsApi {
     hasExplicitChoice: persisted !== null,
   };
 }
+
+subscribePreferenceCache(STORAGE_KEY, () => {
+  current = readPersisted();
+  emit();
+});

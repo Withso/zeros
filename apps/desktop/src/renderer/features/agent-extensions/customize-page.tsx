@@ -4,27 +4,17 @@
 //
 // PAGE: CustomizePage
 // ROUTE: activePage === "customize" (Home rail row below Dashboard)
-// PURPOSE: One place to extend agents: MCP servers today, Skills / Plugins /
-//          Subagents later (add a CATEGORIES entry). The page has a SCOPE —
-//          "User" (the machine-wide layer every repo inherits) or one repo
-//          (its personal, gitignored `.zeros/settings.local.toml`) — chosen
-//          from the header dropdown, plus a category pill row. MCP left
-//          Settings for this page (2026-07-22); user-level servers still
-//          apply everywhere, and a repo scope shows ONLY that repo's own
-//          servers (inheritance is implicit, stated in a footnote — not
-//          repeated as rows).
-//
-//          "New MCP server" / editing opens an IN-PAGE form (breadcrumb back),
-//          not a dialog — see mcp-server-form.tsx.
-//
-// Scope is a durable selection persisted under `customize:active-scope`
-// ("user" | "repo:<projectId>"), validated against the live project list on
-// every render (a removed repo falls back to User). The list⇄form view and
-// the form draft are ephemeral by design — leaving the page mid-draft keeps
-// it (the page stays mounted in the Home deck), but switching scope resets
-// to the list so a draft can never land in the wrong scope.
+// PURPOSE: Personal MCP/Skills editing and read-only native inventories for
+// MCP, Skills, Plugins, and Apps. Scope and provider selections are durable;
+// form identity includes the scope so drafts cannot move between repositories.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import {
+  EXTENSION_CATEGORIES,
+  extensionProviders,
+  type ExtensionCategory,
+  type ExtensionProvider,
+} from "@zeros/protocol/agent-extensions";
 import { Check, ChevronDown, CircleUser } from "lucide-react";
 
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
@@ -45,25 +35,40 @@ import { useScrollMemoryRef } from "../../shell/scroll-memory";
 import { prefetchSettingsForRepo } from "../settings/use-settings";
 import {
   decodeCustomizeScope,
+  decodeCustomizeSelection,
   encodeCustomizeScope,
   type CustomizeScope,
 } from "./customize-model";
 import { CustomizeMcpSection } from "./customize-mcp";
 import { McpServerFormPage } from "./mcp-server-form";
+import { CustomizeExtensionsSection } from "./customize-extensions";
+import { prefetchExtensions } from "./extensions-cache";
 
 // ── Category model ───────────────────────────────────────
 //
-// One entry per capability family. Adding Skills / Plugins later is one line
-// here plus its section component — the header pills render from this array.
+// The provider row is constrained by the selected category.
 
-const CATEGORIES = [{ id: "mcp", label: "MCP" }] as const;
-type CategoryId = (typeof CATEGORIES)[number]["id"];
+const CATEGORY_LABELS = {
+  mcp: "MCP",
+  skills: "Skills",
+  plugins: "Plugins",
+  apps: "Apps",
+};
+const PROVIDER_LABELS = {
+  zeros: "Zeros",
+  claude: "Claude",
+  codex: "Codex",
+  cursor: "Cursor",
+};
+const SELECTION_SETTING_KEY = "customize:selection";
 
 const SCOPE_SETTING_KEY = "customize:active-scope";
 
 /** The list⇄form navigation inside the page. Ephemeral (never persisted):
  *  a draft form must not survive a reload pointing at a stale index. */
-type CustomizeView = { kind: "list" } | { kind: "form"; index: number | null };
+type CustomizeView =
+  | { kind: "list" }
+  | { kind: "form"; index: number | null; owner: string };
 
 /** The validated, render-ready scope: user, or a LIVE project. */
 export type ResolvedCustomizeScope =
@@ -213,23 +218,48 @@ export function CustomizePage({
     }
   }, [scopeRaw, projects.length, projectIds]);
 
-  const [category, setCategory] = useState<CategoryId>("mcp");
+  const [selection, setSelection] = useState(() =>
+    decodeCustomizeSelection(getSetting(SELECTION_SETTING_KEY, null)),
+  );
+  const { category, provider } = selection;
+  const select = (nextCategory: ExtensionCategory, nextProvider = provider) => {
+    const next = decodeCustomizeSelection({
+      category: nextCategory,
+      provider: nextProvider,
+    });
+    setSelection(next);
+    setSetting(SELECTION_SETTING_KEY, next);
+    setView({ kind: "list" });
+  };
   const [view, setView] = useState<CustomizeView>({ kind: "list" });
-
-  // Scope changes (including a selected repo disappearing) leave the form:
-  // a draft must never save into a different scope than it was opened in.
-  const prevScopeKey = useRef(scopeKey);
-  useEffect(() => {
-    if (prevScopeKey.current !== scopeKey) {
-      prevScopeKey.current = scopeKey;
-      setView({ kind: "list" });
-    }
-  }, [scopeKey]);
+  const owner = `${scopeKey}:${scope.kind === "repo" ? scope.project.repoRoot : ""}:${category}:${provider}`;
+  const activeView =
+    view.kind === "form" && view.owner === owner
+      ? view
+      : { kind: "list" as const };
+  const query = {
+    category,
+    provider,
+    ...(scope.kind === "repo" ? { repoRoot: scope.project.repoRoot } : {}),
+  };
+  const warm = (
+    nextCategory: ExtensionCategory,
+    nextProvider: ExtensionProvider,
+  ) => {
+    if (!surfaceActive) return;
+    prefetchExtensions({
+      ...query,
+      ...decodeCustomizeSelection({
+        category: nextCategory,
+        provider: nextProvider,
+      }),
+    });
+  };
 
   // Include the form's TARGET so each edited server gets its own instant-view
   // + scroll-memory identity (editing #5 must not restore #0's offset).
-  const viewKey = `${scopeKey}:${category}:${
-    view.kind === "form" ? `form:${view.index ?? "new"}` : "list"
+  const viewKey = `${owner}:${
+    activeView.kind === "form" ? `form:${activeView.index ?? "new"}` : "list"
   }`;
   useInstantViewSwitch(`customize:${viewKey}`, pageSurfaceRef);
   const pageScrollRef = useScrollMemoryRef(`customize:${viewKey}`);
@@ -241,11 +271,11 @@ export function CustomizePage({
     >
       <div ref={pageScrollRef} className="min-h-0 flex-1 overflow-y-auto">
         <div className="flex w-full max-w-5xl flex-col pt-10 pr-6 pb-16 pl-[clamp(1.5rem,5vw,6.25rem)]">
-          {view.kind === "form" ? (
+          {activeView.kind === "form" ? (
             <McpServerFormPage
-              key={`${scopeKey}:${view.index ?? "new"}`}
+              key={`${owner}:${activeView.index ?? "new"}`}
               scope={scope}
-              index={view.index}
+              index={activeView.index}
               onBack={() => setView({ kind: "list" })}
             />
           ) : (
@@ -256,8 +286,8 @@ export function CustomizePage({
                     Customize
                   </h1>
                   <p className="text-fg2 m-0 text-sm">
-                    Extend your agents. User servers apply to every repo; a
-                    repo&rsquo;s servers apply only there.
+                    Extend your agents with MCP servers, skills, plugins, and
+                    apps.
                   </p>
                 </div>
 
@@ -265,7 +295,10 @@ export function CustomizePage({
                   <ScopePicker
                     scope={scope}
                     projects={projects}
-                    onChange={setScope}
+                    onChange={(next) => {
+                      setView({ kind: "list" });
+                      setScope(next);
+                    }}
                   />
                   <div
                     className="bg-border1 h-5 w-px shrink-0"
@@ -273,32 +306,60 @@ export function CustomizePage({
                   />
                   <Tabs
                     value={category}
-                    onValueChange={(v) => setCategory(v as CategoryId)}
+                    onValueChange={(v) => select(v as ExtensionCategory)}
                   >
                     <TabsList className="h-8">
-                      {CATEGORIES.map((c) => (
+                      {EXTENSION_CATEGORIES.map((id) => (
                         <TabsTrigger
-                          key={c.id}
-                          value={c.id}
+                          key={id}
+                          value={id}
                           className="text-xs"
+                          onPointerEnter={() => warm(id, provider)}
+                          onFocus={() => warm(id, provider)}
                         >
-                          {c.label}
+                          {CATEGORY_LABELS[id]}
                         </TabsTrigger>
                       ))}
                     </TabsList>
                   </Tabs>
                 </div>
+                <Tabs
+                  value={provider}
+                  onValueChange={(value) =>
+                    select(category, value as ExtensionProvider)
+                  }
+                >
+                  <TabsList className="h-8" aria-label="Agent provider">
+                    {extensionProviders(category).map((id) => (
+                      <TabsTrigger
+                        key={id}
+                        value={id}
+                        className="text-xs"
+                        onPointerEnter={() => warm(category, id)}
+                        onFocus={() => warm(category, id)}
+                      >
+                        {PROVIDER_LABELS[id]}
+                      </TabsTrigger>
+                    ))}
+                  </TabsList>
+                </Tabs>
               </div>
 
               <div className="w-full pt-8">
-                {category === "mcp" && (
+                {category === "mcp" && provider === "zeros" ? (
                   <CustomizeMcpSection
                     key={scopeKey}
                     scope={scope}
                     surfaceActive={surfaceActive}
-                    onNew={() => setView({ kind: "form", index: null })}
-                    onEdit={(index) => setView({ kind: "form", index })}
+                    onNew={() => setView({ kind: "form", index: null, owner })}
+                    onEdit={(index) => setView({ kind: "form", index, owner })}
                     onSwitchToUser={() => setScope({ kind: "user" })}
+                  />
+                ) : (
+                  <CustomizeExtensionsSection
+                    key={owner}
+                    query={query}
+                    surfaceActive={surfaceActive}
                   />
                 )}
               </div>

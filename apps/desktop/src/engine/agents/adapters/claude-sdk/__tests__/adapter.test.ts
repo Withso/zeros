@@ -138,6 +138,7 @@ function makeScriptedQuery(
       argumentHint: string;
       aliases?: string[];
     }>;
+    mcpServerStatuses?: import("@anthropic-ai/claude-agent-sdk").McpServerStatus[];
     /** Model list query.supportedModels() resolves to (default []). */
     supportedModels?: unknown[];
     /** Per-call override; receives the 1-based call number (lets a test
@@ -262,6 +263,7 @@ function makeScriptedQuery(
     q.applyFlagSettings = async (s: Record<string, unknown>) => {
       control.flagSettings.push(s);
     };
+    q.mcpServerStatus = async () => opts?.mcpServerStatuses ?? [];
     q.supportedModels = supportedModels;
     q.supportedCommands = async () => opts?.commands ?? [];
     if (opts?.contextUsage) {
@@ -281,6 +283,74 @@ function makeScriptedQuery(
     inputsSeen,
   };
 }
+
+describe("Claude cloud connector inventory", () => {
+  it("does not launch a session just to browse account connectors", async () => {
+    const { queryFn, captured } = makeScriptedQuery([]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const result = await adapter.capabilityPorts.extensions.list({
+      category: "apps",
+      cwd: "/tmp",
+      scope: "user",
+    });
+    expect(captured).toEqual([]);
+    expect(result?.entries).toEqual([]);
+    expect(result?.note).toContain("session");
+  });
+
+  it("shows session-reported cloud connectors with auth state and no config secrets", async () => {
+    const { queryFn, captured } = makeScriptedQuery(
+      [[initMsg("cloud-session"), resultOk("cloud-session")]],
+      {
+        keepAliveAfterResult: true,
+        mcpServerStatuses: [
+          {
+            name: "Calendar",
+            status: "connected",
+            scope: "claudeai",
+            config: {
+              type: "claudeai-proxy",
+              id: "calendar",
+              url: "https://example.com/?token=SECRET",
+            },
+          },
+          { name: "Notes", status: "needs-auth", scope: "claudeai" },
+          { name: "Local", status: "connected", scope: "user" },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp/cloud-repo" });
+    try {
+      await adapter.prompt({
+        sessionId: session.executionId,
+        prompt: [{ type: "text", text: "Hi" }],
+      });
+      const result = await adapter.capabilityPorts.extensions.list({
+        category: "apps",
+        cwd: "/tmp",
+        scope: "user",
+      });
+      expect(
+        result?.entries.map((entry) => [entry.name, entry.status]),
+      ).toEqual([
+        ["Calendar", "available"],
+        ["Notes", "needs-auth"],
+      ]);
+      expect(JSON.stringify(result)).not.toContain("SECRET");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.strictMcpConfig).toBe(true);
+      const other = await adapter.capabilityPorts.extensions.list({
+        category: "apps",
+        cwd: "/tmp/other",
+        scope: "repo",
+      });
+      expect(other?.entries).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+});
 
 const initMsg = (sid: string): Msg => ({
   type: "system",
@@ -2828,6 +2898,9 @@ describe("ClaudeSdkAdapter", () => {
     expect(captured[0]?.allowDangerouslySkipPermissions).toBe(true);
     expect(captured[0]?.sandbox).toBeUndefined();
     expect(captured[0]?.settingSources).toEqual(["user", "project", "local"]);
+    // settingSources stays whole so CLAUDE.md and repo rules keep loading;
+    // strictMcpConfig is what scopes MCP to the Zeros registry.
+    expect(captured[0]?.strictMcpConfig).toBe(true);
     expect(settings.disableAllHooks).toBeUndefined();
     await adapter.dispose();
   });

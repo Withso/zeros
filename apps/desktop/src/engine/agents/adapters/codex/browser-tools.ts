@@ -13,7 +13,10 @@ import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import type { McpServerRegistration } from "../../types";
 import type { CodexUserInput } from "./app-server";
 
-const BROWSER_PLUGIN_ID = "browser@openai-bundled";
+/** The one plugin whose enablement `codexBrowserThreadConfig` owns. Exported
+ * so the native-MCP scoping can leave that key alone instead of contending
+ * with it inside one merged thread config. */
+export const BROWSER_PLUGIN_ID = "browser@openai-bundled";
 const MAX_BROWSER_CLIENT_BYTES = 16 * 1024 * 1024;
 
 /** The official macOS Browser helper applies its own Seatbelt profile. A

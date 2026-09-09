@@ -1,3 +1,8 @@
+import {
+  readPreferenceCache,
+  writePreferenceCache,
+  subscribePreferenceCache,
+} from "../../platform/personal-preferences";
 // ──────────────────────────────────────────────────────────
 // Internal features — database-backed staff-only feature flags
 // ──────────────────────────────────────────────────────────
@@ -95,7 +100,7 @@ type PersistedShape = Partial<Record<InternalFeature, boolean>>;
 
 function readPersisted(): PersistedShape {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readPreferenceCache(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === "object"
@@ -108,7 +113,7 @@ function readPersisted(): PersistedShape {
 
 function writePersisted(next: PersistedShape): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    writePreferenceCache(STORAGE_KEY, JSON.stringify(next));
   } catch {
     /* storage quota / private mode — non-fatal */
   }
@@ -193,3 +198,8 @@ export function useInternalFeatureActive(feature: InternalFeature): boolean {
   const [on] = useInternalFeature(feature);
   return internalUser && on;
 }
+
+subscribePreferenceCache(STORAGE_KEY, () => {
+  current = readPersisted();
+  emit();
+});
