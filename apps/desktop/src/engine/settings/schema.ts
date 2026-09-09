@@ -14,13 +14,17 @@
 //   <worktree>/.zeros/settings.toml     workspace-local (tracked-name fallback: settings.local.toml)
 //
 // Validation is per-leaf, not per-file: a bad value drops that one key with a
-// warning, never the whole document. Unknown keys are ALWAYS preserved so an
-// older Zeros never strips keys written by a newer one.
+// warning, never the whole document. Writers preserve unknown text on disk;
+// repository/workspace resolution exposes only supported, scope-appropriate keys.
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
 import { personalPreferencesSchema } from "@zeros/protocol/personal-preferences";
 import { GITHUB_AUTH_METHODS } from "@zeros/protocol/github-auth";
+import {
+  DESIGN_DIRECTORY_ID_PATTERN,
+  sanitizeDesignDirectoryName,
+} from "../design/directory-path";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
@@ -313,10 +317,20 @@ const designSchema = z
   .object({
     directory: z
       .string()
+      .refine(
+        (value) => sanitizeDesignDirectoryName(value) !== null,
+        "Expected a safe repo-relative Design directory",
+      )
       .describe(
         "Repo-relative folder the design surface reads and writes " +
           '(default "Zeros Design"). The folder is committed content; this ' +
           "key just selects which design folder is active.",
+      ),
+    directory_id: z
+      .string()
+      .regex(DESIGN_DIRECTORY_ID_PATTERN)
+      .describe(
+        "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml.",
       ),
   })
   .partial();
@@ -510,6 +524,7 @@ const browserSchema = z
 export const userSettingsSchema = repoSettingsSchema.extend({
   preferences: personalPreferencesSchema.optional(),
   preferences_version: z.literal(1).optional(),
+  agent_preferences_version: z.literal(1).optional(),
   env: z
     .record(z.string(), z.string())
     .optional()
@@ -538,24 +553,26 @@ export const repoLocalSettingsSchema = userSettingsSchema
   .omit({
     preferences: true,
     preferences_version: true,
+    agent_preferences_version: true,
     env: true,
     env_files: true,
     models: true,
     browser: true,
     tool_approvals_enabled: true,
     providers: true,
+    github: true,
   })
   .extend({
     settings_version: z.literal(2).optional(),
     settings_migration_notes: z.array(z.string()).optional(),
-  });
+  })
+  .strict();
 
 /** Per-checkout execution overrides; provisioning and account choices keep
  * their broader repository/user owners. */
 export const workspaceLocalSettingsSchema = repoLocalSettingsSchema.omit({
   file_include_globs: true,
   workspaces: true,
-  github: true,
 });
 
 /** Managed (admin policy) layer can set anything a user can. Stub in v1. */
@@ -584,6 +601,7 @@ export type SettingsLayerName =
 export const USER_ONLY_KEYS = [
   "preferences",
   "preferences_version",
+  "agent_preferences_version",
   "models",
   "workspaces",
   "browser",
@@ -597,15 +615,18 @@ const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
   "repo-local": [
     "preferences",
     "preferences_version",
+    "agent_preferences_version",
     "models",
     "browser",
     "tool_approvals_enabled",
     "providers",
+    "github",
   ],
   // Workspace overrides cannot change where other worktrees are created.
   "workspace-local": [
     "preferences",
     "preferences_version",
+    "agent_preferences_version",
     "models",
     "browser",
     "tool_approvals_enabled",
@@ -692,6 +713,7 @@ function sanitizeTable(
       // Nested per-model tables intentionally expose only validated fields;
       // their in-place TOML writer still preserves unknown keys on disk.
       if (preserveUnknown) out[k] = v;
+      else warnings.push(`${basePath}.${k}: unsupported key — ignored`);
       continue;
     }
     const r = field.safeParse(v);
@@ -850,6 +872,7 @@ function sanitizeModels(
 function sanitizeMcp(
   value: unknown,
   warnings: string[],
+  preserveUnknown = true,
 ): Record<string, unknown> | undefined {
   if (!isPlainObject(value)) {
     warnings.push(`mcp: expected a table — ignored`);
@@ -859,7 +882,8 @@ function sanitizeMcp(
   for (const [k, v] of Object.entries(value)) {
     if (DANGEROUS_KEYS.has(k)) continue;
     if (k !== "servers") {
-      out[k] = v; // unknown key under [mcp] → preserve verbatim
+      if (preserveUnknown) out[k] = v;
+      else warnings.push(`mcp.${k}: unsupported key — ignored`);
       continue;
     }
     if (!Array.isArray(v)) {
@@ -900,6 +924,7 @@ export function sanitizeLayer(
     return { doc: {}, warnings };
   }
   const userOnly = USER_ONLY_BY_LAYER[layer] ?? [];
+  const repositoryScoped = REPO_SCOPED_LAYERS.has(layer);
   const doc: RawSettingsDoc = {};
 
   for (const [key, value] of Object.entries(raw)) {
@@ -920,7 +945,7 @@ export function sanitizeLayer(
     // Version is migration metadata, never a runtime preference.
     if (key === "settings_version" || key === "settings_migration_notes")
       continue;
-    if (key === "preferences_version") {
+    if (key === "preferences_version" || key === "agent_preferences_version") {
       if (value === 1) doc[key] = 1;
       continue;
     }
@@ -994,7 +1019,7 @@ export function sanitizeLayer(
       continue;
     }
     if (key === "mcp") {
-      const mcp = sanitizeMcp(value, warnings);
+      const mcp = sanitizeMcp(value, warnings, !repositoryScoped);
       if (mcp) doc.mcp = mcp;
       continue;
     }
@@ -1019,7 +1044,13 @@ export function sanitizeLayer(
           Object.entries(value).filter(([nested]) => nested !== "isolation"),
         );
       }
-      const table = sanitizeTable(designSchema.shape, candidate, key, warnings);
+      const table = sanitizeTable(
+        designSchema.shape,
+        candidate,
+        key,
+        warnings,
+        !repositoryScoped,
+      );
       if (table && Object.keys(table).length > 0) doc[key] = table;
       continue;
     }
@@ -1029,24 +1060,19 @@ export function sanitizeLayer(
       // forward-compatible tables, do not project unknown browser switches
       // (for example a hand-written raw-CDP escape hatch) into effective
       // settings before that capability has an explicit schema and review.
-      if (key === "browser" && isPlainObject(value)) {
-        for (const nested of Object.keys(value)) {
-          if (!hasOwn(shape, nested)) {
-            warnings.push(`browser.${nested}: unsupported key — ignored`);
-          }
-        }
-      }
       const table = sanitizeTable(
         shape,
         value,
         key,
         warnings,
-        key !== "browser",
+        !repositoryScoped && key !== "browser",
       );
       if (table) doc[key] = table;
       continue;
     }
-    doc[key] = value; // unknown top-level key → preserve verbatim
+    if (repositoryScoped)
+      warnings.push(`${key}: unsupported key — ignored in ${layer} settings`);
+    else doc[key] = value;
   }
 
   return { doc, warnings };

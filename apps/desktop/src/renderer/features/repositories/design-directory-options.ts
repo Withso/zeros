@@ -1,4 +1,5 @@
 export interface DesignDirectoryListing {
+  directoryIds?: Record<string, string>;
   directories: string[];
   pointer: string;
   active: string;

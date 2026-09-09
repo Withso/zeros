@@ -8,6 +8,9 @@
 // disable would kill them. A title thread calls no tools and keeps nothing.
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { AgentAdapterContext } from "../../../types";
 
@@ -174,6 +177,46 @@ describe("CodexAppServerAdapter.generateText — native MCP stays out of a title
 });
 
 describe("CodexAppServerAdapter session threads — Customize is the whole set", () => {
+  it.each(["chat", "title"] as const)(
+    "preserves a disabled HTTP transport when a plugin claims its name on a %s thread",
+    async (kind) => {
+      const codexHome = mkdtempSync(path.join(os.tmpdir(), "zeros-codex-mcp-"));
+      const previousHome = process.env.CODEX_HOME;
+      const manifest = path.join(
+        codexHome,
+        "plugins/cache/market/notes/1.0.0/.mcp.json",
+      );
+      try {
+        mkdirSync(path.dirname(manifest), { recursive: true });
+        writeFileSync(
+          manifest,
+          JSON.stringify({ mcpServers: { notes: { command: "plugin-notes" } } }),
+        );
+        process.env.CODEX_HOME = codexHome;
+        const adapter = makeAdapter();
+        rt.mcpServers = {
+          notes: { enabled: false, url: "https://notes.example/mcp" },
+        };
+
+        if (kind === "chat") await adapter.newSession({ cwd: "/tmp/proj" });
+        else await generateTitle(adapter);
+
+        const servers = configOfThreadStart().mcp_servers as Record<
+          string,
+          Record<string, unknown>
+        >;
+        expect(servers.notes).toEqual({
+          enabled: false,
+          url: "https://notes.example/mcp",
+        });
+      } finally {
+        if (previousHome === undefined) delete process.env.CODEX_HOME;
+        else process.env.CODEX_HOME = previousHome;
+        rmSync(codexHome, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("preserves the native account app bridge without enabling unrelated native servers", async () => {
     const adapter = makeAdapter();
     rt.mcpServers = { directus: { command: "npx" }, codex_apps: { url: "https://example.com/bridge" } };

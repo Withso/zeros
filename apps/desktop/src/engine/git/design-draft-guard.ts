@@ -1,3 +1,10 @@
+import {
+  designDocumentRelativePath,
+  DESIGN_DIRECTORY_REGISTRY_FILE,
+  designMetadataGitPaths,
+  isDesignMetadataRepoPath,
+} from "../design/metadata";
+import { designRegistryAtGitRef } from "../design/metadata-git";
 import path from "node:path";
 
 import {
@@ -45,6 +52,7 @@ export async function semanticDesignDirectories(opts: {
       ...(pointer.configured ? [pointer.directory] : []),
       ...discovered,
       ...sticky,
+      ...designMetadataGitPaths(opts.path),
     ]),
   ].sort((left, right) => left.localeCompare(right));
 }
@@ -58,9 +66,11 @@ export async function designDirectoriesAtRef(
     ["ls-tree", "-r", "-z", "--name-only", ref],
     { readOnly: true },
   );
+  const registry = await designRegistryAtGitRef(cwd, ref);
   return [
-    ...new Set(
-      stdout.split("\0").flatMap((markerPath) => {
+    ...new Set([
+      ...Object.values(registry?.directories ?? {}).map((entry) => entry.path),
+      ...stdout.split("\0").flatMap((markerPath) => {
         if (
           !markerPath ||
           path.posix.basename(markerPath) !== DESIGN_CANVAS_FILE
@@ -72,7 +82,15 @@ export async function designDirectoriesAtRef(
         );
         return candidate ? [candidate] : [];
       }),
-    ),
+      ...(registry
+        ? [
+            DESIGN_DIRECTORY_REGISTRY_FILE,
+            ...Object.keys(registry.directories).map(
+              designDocumentRelativePath,
+            ),
+          ]
+        : []),
+    ]),
   ];
 }
 
@@ -247,6 +265,7 @@ async function independentlyChangedSingleCommitPaths(
 function isDesignIdentityPath(candidate: string): boolean {
   const normalized = candidate.replace(/\\/g, "/").replace(/^\.\//, "");
   return (
+    isDesignMetadataRepoPath(normalized) ||
     normalized === ".zeros/settings.toml" ||
     (/^\.zeros\/settings\.[^/]+\.toml$/.test(normalized) &&
       !normalized.includes("\0"))

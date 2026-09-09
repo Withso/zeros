@@ -25,6 +25,7 @@ const PROJECT_MUTATIONS = new Set([
 
 const SETTINGS_MUTATIONS = new Set([
   "settings.syncPreferences",
+  "settings.syncAgentPreferences",
   "skills.saveZeros",
   "skills.removeZeros",
   "settings.write",

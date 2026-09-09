@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { nativeExtensionInventory } from "../native-extensions";
+import { createExtensionResource } from "../../../renderer/features/agent-extensions/extensions-cache";
 
 describe("native extension declarations", () => {
   let home: string;
@@ -14,6 +15,90 @@ describe("native extension declarations", () => {
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(doc));
   };
+  it.each([
+    {
+      provider: "claude",
+      file: ".claude.json",
+      text: JSON.stringify({ mcpServers: { notes: { command: "node" } } }),
+    },
+    {
+      provider: "codex",
+      file: ".codex/config.toml",
+      text: '[mcp_servers.notes]\ncommand = "node"\n',
+    },
+    {
+      provider: "cursor",
+      file: ".cursor/mcp.json",
+      text: JSON.stringify({ mcpServers: { notes: { command: "node" } } }),
+    },
+  ] as const)(
+    "retains confirmed $provider MCP rows across a malformed refresh, then clears a confirmed deletion",
+    async ({ provider, file: relative, text }) => {
+      const file = path.join(home, relative);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, text);
+      const resource = createExtensionResource(async (query) =>
+        nativeExtensionInventory(query, { home, env: {} }),
+      );
+      const key = resource.key({ category: "mcp", provider });
+      const refresh = async () => {
+        resource.cache.invalidate(key);
+        await resource.cache.load(key, () => resource.fetch(key));
+        return resource.cache.getSnapshot(key).data!;
+      };
+      const first = await refresh();
+      expect(first.entries.map((entry) => entry.name)).toEqual(["notes"]);
+
+      writeFileSync(file, "[incomplete");
+      const failed = await refresh();
+      expect(failed.warnings).toEqual([`Could not read ${file}.`]);
+      expect(failed.entries).toMatchObject([
+        {
+          name: "notes",
+          statusDetail: expect.stringContaining("Last reported"),
+        },
+      ]);
+      expect(failed.partial).toBe(true);
+
+      const other = resource.key({
+        category: "mcp",
+        provider,
+        repoRoot: path.join(home, "repo"),
+      });
+      await resource.cache.load(other, () => resource.fetch(other));
+      expect(resource.cache.getSnapshot(other).data?.entries).toEqual([]);
+
+      writeFileSync(file, text);
+      const repaired = await refresh();
+      expect(repaired.entries).toEqual(first.entries);
+      expect(repaired.partial).not.toBe(true);
+      expect(repaired.warnings).toEqual([]);
+
+      rmSync(file);
+      const removed = await refresh();
+      expect(removed.entries).toEqual([]);
+      expect(removed.partial).not.toBe(true);
+    },
+  );
+
+  it.each(["unreadable", "oversized"])(
+    "marks a %s native config read as partial",
+    (failure) => {
+      const file = path.join(home, ".cursor/mcp.json");
+      if (failure === "unreadable") mkdirSync(file, { recursive: true });
+      else {
+        mkdirSync(path.dirname(file), { recursive: true });
+        writeFileSync(file, " ".repeat(4 * 1024 * 1024 + 1));
+      }
+      expect(
+        nativeExtensionInventory(
+          { category: "mcp", provider: "cursor" },
+          { home, env: {} },
+        ),
+      ).toMatchObject({ partial: true, warnings: [`Could not read ${file}.`] });
+    },
+  );
+
   it("does not flatten Claude project configs into user inventory or expose credentials", () => {
     const repoRoot = path.join(home, "repo");
     write(path.join(home, ".claude.json"), {

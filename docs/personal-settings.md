@@ -76,8 +76,10 @@ retried instead of marking migration complete.
 
 `[preferences]` in user TOML owns appearance, enabled agents, experimental and
 internal switches, terminal-agent definitions/defaults and analytics choices. Internal switches still require the existing
-staff gate. `[models]`, `[providers]`, browser policy, Git, workspace location,
-and MCP retain their existing typed TOML sections.
+staff gate. `[models]` and `[providers]` are also user-only TOML sections. Provider
+authentication method, executable override, and gateway URL belong here; API
+keys remain in the OS secret store. `[github]` account selection and browser
+policy are user-only. Repository and worktree schemas exclude account fields.
 
 Browser storage is a synchronous cache for app startup, with a durable outbox
 for unacknowledged preference edits. The first migration merges under existing
@@ -86,10 +88,43 @@ reimported. File edits hydrate subscribed stores. A response from an earlier
 save cannot overwrite a newer pending edit. Preference sync runs only against
 the local desktop engine; remote settings reads omit the personal table.
 
+Models and provider preferences use the same acknowledged-save ownership.
+`agent_preferences_version = 1` records their one-time browser import. Each
+outbox item addresses one TOML field; the engine merges that field into the
+latest file without replacing sibling controls or unknown text. Failed saves
+remain pending through reconnects and app restarts and retry with bounded
+backoff. External file edits and deletions replace confirmed caches, with newer
+pending edits overlaid until acknowledged. Before deriving local provider
+credentials, the renderer waits for this sync. Local executable and gateway
+configuration are read by the engine directly from TOML, so an older browser
+cache cannot override a manual file edit.
+
+Repository and worktree resolution use a supported-key allowlist. Unsupported
+top-level and nested fields remain in the original TOML for round-trip
+compatibility but are excluded from effective settings and produce warnings.
+Both raw and structured saves validate Design paths and stable IDs against the
+actual checkout, including prospective paths, spelling, links and overlaps.
+
+Codex memory switches in Settings explicitly identify their native ownership:
+they use Codex's `config/batchWrite` API and affect Codex outside Zeros. Memory
+content and reset operations remain in Codex's native storage, separate from
+Zeros user TOML.
+
 Chats, workspace records, navigation selections, drafts, panel layout, and
 caches retain their existing database/browser owners. Credentials remain in
 the OS secret store/provider authentication stores. They are not consolidated
 into TOML or copied from native configuration by inventory reads.
+
+## Tracked Design metadata
+
+The private settings rule applies to personal configuration, not authored
+Design state. `.zeros/design-dir.toml` records stable directory IDs and paths;
+`.zeros/design/<id>/document.json` records frame geometry, titles, kinds and the
+Foundation manifest. These files are versioned with Design source. Personal
+selection uses `[design] directory_id`; legacy `directory` remains readable.
+Each worktree resolves its ID against its own registry. A missing or conflicting
+mapping pauses Design edits instead of selecting another document. See
+[Design workspace](design-workspace.md) for migration and Git behavior.
 
 ## Customize
 

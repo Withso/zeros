@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // The design folder is COMMITTED repo content (recognizable by its committed
-// `.zeros-canvas.json` marker); the `[design] directory` key only points at
+// `.zeros/design-dir.toml` registry; legacy canvas markers remain readable); the `[design] directory` key only points at
 // which one is active. This section shows every recognized folder in the main
 // checkout — a repo can legitimately hold several after a copy-paste from
 // another repo or a monorepo migration — lets the user pick the active one
@@ -40,10 +40,12 @@ import {
 import { Button, Input } from "../../shared/ui";
 import { toast } from "../../shared/ui/primitives/elements";
 import { cn } from "../../shared/ui/cn";
+import { useCachedRead } from "../../state/use-cached-read";
 import {
-  deriveDesignDirectoryOptions,
-  type DesignDirectoryListing,
-} from "./design-directory-options";
+  designDirectoryListingCache,
+  DESIGN_DIRECTORY_TARGET_MAX_AGE_MS,
+} from "../../state/read-caches";
+import { deriveDesignDirectoryOptions } from "./design-directory-options";
 
 /** Read `design.directory` out of the resolved tree with its provenance. */
 function pickPointer(resolved: {
@@ -51,14 +53,13 @@ function pickPointer(resolved: {
   sources?: Record<string, unknown>;
 }): { value: string | null; source: SettingsSource | undefined } {
   const effective = resolved.effective as
-    | { design?: { directory?: unknown } }
+    | { design?: { directory?: unknown; directory_id?: unknown } }
     | undefined;
   const raw = effective?.design?.directory;
   return {
     value: typeof raw === "string" && raw.trim() ? raw.trim() : null,
-    source: resolved.sources?.["design.directory"] as
-      | SettingsSource
-      | undefined,
+    source: (resolved.sources?.["design.directory_id"] ??
+      resolved.sources?.["design.directory"]) as SettingsSource | undefined,
   };
 }
 
@@ -74,41 +75,41 @@ export function DesignSection({
   const bridge = useBridge();
   const bridgeStatus = useBridgeStatus();
   const resolved = useResolvedSettings(project.repoRoot);
-  // The pointer is the TEAM default, so it edits the COMMITTED repo layer —
-  // unlike Paths' workspaces.path, which is deliberately per-machine.
+  // Active selection is private; the separate directory registry is tracked.
   const repoLayer = useSettingsLayer("repo-local", project.repoRoot);
   const pointer = pickPointer({
     effective: resolved.resolved?.effective,
     sources: resolved.resolved?.sources,
   });
 
-  const [listing, setListing] = useState<DesignDirectoryListing | null>(null);
-  const [listingError, setListingError] = useState<string | null>(null);
+  const listingRead = useCachedRead(
+    designDirectoryListingCache,
+    project.repoRoot,
+    (root) => bridgeDesignListDirectories(bridge!, root),
+    {
+      maxAgeMs: DESIGN_DIRECTORY_TARGET_MAX_AGE_MS,
+      enabled: surfaceActive && !!bridge && bridgeStatus === "connected",
+    },
+  );
+  const listing = listingRead.data ?? null;
+  const listingError = listingRead.error?.message ?? null;
   const refreshListing = useCallback(() => {
-    if (!bridge || bridgeStatus !== "connected") return;
-    bridgeDesignListDirectories(bridge, project.repoRoot)
-      .then((result) => {
-        setListing(result);
-        setListingError(null);
-      })
-      .catch((err: unknown) => {
-        setListingError(
-          err instanceof Error
-            ? err.message
-            : "Couldn't scan for design folders",
-        );
-      });
-  }, [bridge, bridgeStatus, project.repoRoot]);
+    designDirectoryListingCache.invalidate(project.repoRoot);
+  }, [project.repoRoot]);
   useEffect(() => {
-    if (!surfaceActive) return;
-    refreshListing();
-  }, [surfaceActive, refreshListing]);
+    if (!surfaceActive || !bridge) return;
+    return bridge.on("DB_CHANGED", (message) => {
+      if ((message as { kinds?: string[] }).kinds?.includes("settings"))
+        refreshListing();
+    });
+  }, [surfaceActive, bridge, refreshListing]);
 
   // With no explicit pointer, the engine's entry preview is the honest answer:
   // the single committed folder it would adopt, or the first-use name it
   // would create — not the unconfigured pointer default.
   const directoryPresentation = deriveDesignDirectoryOptions({
-    pointer: pointer.value,
+    pointer:
+      pointer.value ?? (pointer.source ? (listing?.pointer ?? null) : null),
     listing,
   });
   const { activeName } = directoryPresentation;
@@ -117,6 +118,8 @@ export function DesignSection({
   const choose = async (name: string) => {
     if (
       saving ||
+      !listing ||
+      !!listingError ||
       !directoryPresentation.options.some(
         (option) => option.name === name && option.selectable,
       )
@@ -127,7 +130,11 @@ export function DesignSection({
       // Clicking an already-discovered row is the human confirmation the
       // engine requires before moving the privileged Design territory.
       await repoLayer.write(
-        { design: { directory: name } },
+        {
+          design: listing?.directoryIds?.[name]
+            ? { directory_id: listing.directoryIds[name], directory: null }
+            : { directory: name, directory_id: null },
+        },
         { confirmDesignDirectoryChange: true },
       );
       toast.success(`Design folder set to “${name}”`);
@@ -145,7 +152,7 @@ export function DesignSection({
   const [renaming, setRenaming] = useState(false);
   const handleRename = async () => {
     const to = renameDraft.trim();
-    if (!to || renaming || !bridge) return;
+    if (!to || renaming || !bridge || !listing || listingError) return;
     setRenaming(true);
     try {
       await bridgeDesignRenameDirectory(bridge, {
@@ -173,7 +180,7 @@ export function DesignSection({
     <div className="flex flex-col gap-8">
       <SettingsSection
         title="Design folder"
-        description="Where this repo's designs live. The folder is committed content — this choice is your personal choice (.zeros/settings.local.toml, ignored by Git), used by every local worktree of this repository."
+        description="Design source and metadata are tracked by Git. Your active folder choice is private in .zeros/settings.local.toml and inherited by local worktrees unless overridden."
       >
         <SettingsList>
           {directoryPresentation.options.map((option) => {
@@ -210,7 +217,7 @@ export function DesignSection({
                   <Button
                     variant="secondary"
                     size="sm"
-                    disabled={saving}
+                    disabled={saving || !listing || !!listingError}
                     onClick={() => void choose(name)}
                   >
                     Use this folder
@@ -227,7 +234,7 @@ export function DesignSection({
 
       <SettingsSection
         title="Rename"
-        description="Renames the active folder with git mv and updates the committed pointer in the same commit, in the repository's main checkout. Refused while design-mode workspaces are open on this repo."
+        description="Renames the active folder and commits its updated registry path in the main checkout. Its stable ID and your private selection stay the same. Close open Design workspaces before renaming."
       >
         <SettingsField
           htmlFor={`design-rename-${project.id}`}
@@ -254,7 +261,9 @@ export function DesignSection({
               variant="secondary"
               size="md"
               onClick={() => void handleRename()}
-              disabled={renaming || !renameDraft.trim()}
+              disabled={
+                renaming || !renameDraft.trim() || !listing || !!listingError
+              }
             >
               {renaming ? "Renaming…" : "Rename"}
             </Button>

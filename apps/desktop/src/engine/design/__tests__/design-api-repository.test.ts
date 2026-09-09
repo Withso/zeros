@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { designDocumentMetadataPath } from "../metadata";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
@@ -153,6 +154,125 @@ describe("filesystem Design API repository", () => {
         "utf8",
       ),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("retains a pending recovery when its source was edited afterwards", async () => {
+    const frame = await createDesignFrame(root, {
+      title: "Concurrent recovery",
+    });
+    const current = await readDesignWebDocumentState(root, frame.file);
+    const original = current.files[frame.file]!;
+    const nextSource = original.replace("</main>", "prepared</main>");
+    const { createDesignWebDocumentState } = await import("@zeros/design-web");
+    const next = createDesignWebDocumentState({
+      ...current,
+      files: { ...current.files, [frame.file]: nextSource },
+    });
+    const geometry = next.frames[frame.file]!;
+    const journal = path.join(
+      root,
+      DESIGN_DIRECTORY_NAME,
+      DESIGN_TRANSACTION_JOURNAL_FILE,
+    );
+    await writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        documentId: next.documentId,
+        entryFile: frame.file,
+        nextRevision: next.revision,
+        files: [{ file: frame.file, content: nextSource }],
+        foundation: next.manifest,
+        geometry: {
+          x: geometry.x,
+          y: geometry.y,
+          w: geometry.width,
+          h: geometry.height,
+          z: geometry.z,
+        },
+        before: { [frame.file]: original },
+      }),
+    );
+    const external = original.replace("</main>", "new external edit</main>");
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, frame.file),
+      external,
+    );
+    await expect(readDesignWebDocumentState(root, frame.file)).rejects.toThrow(
+      /Recovery is paused/,
+    );
+    expect(
+      await readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, frame.file),
+        "utf8",
+      ),
+    ).toBe(external);
+    expect(await readFile(journal, "utf8")).toContain("prepared");
+  });
+
+  it("finishes a legacy source journal before moving its metadata and stripping frame tags", async () => {
+    const frame = await createDesignFrame(root, { title: "Legacy recovery" });
+    const sourcePath = path.join(root, DESIGN_DIRECTORY_NAME, frame.file);
+    const metadata = await readFile(
+      designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
+      "utf8",
+    );
+    await rm(path.join(root, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
+      metadata,
+    );
+    const original = (await readFile(sourcePath, "utf8")).replace(
+      "</head>",
+      '<meta name="zeros-frame" content="title=Legacy recovery"></head>',
+    );
+    await writeFile(sourcePath, original);
+    const current = await readDesignWebDocumentState(root, frame.file);
+    const nextSource = original.replace(
+      "</main>",
+      "recovered legacy edit</main>",
+    );
+    const { createDesignWebDocumentState } = await import("@zeros/design-web");
+    const next = createDesignWebDocumentState({
+      ...current,
+      files: { ...current.files, [frame.file]: nextSource },
+    });
+    const geometry = next.frames[frame.file]!;
+    const journal = path.join(
+      root,
+      DESIGN_DIRECTORY_NAME,
+      DESIGN_TRANSACTION_JOURNAL_FILE,
+    );
+    await writeFile(
+      journal,
+      JSON.stringify({
+        version: 1,
+        documentId: next.documentId,
+        entryFile: frame.file,
+        nextRevision: next.revision,
+        files: [{ file: frame.file, content: nextSource }],
+        foundation: next.manifest,
+        geometry: {
+          x: geometry.x,
+          y: geometry.y,
+          w: geometry.width,
+          h: geometry.height,
+          z: geometry.z,
+        },
+      }),
+    );
+    await initializeDesignDocument(root);
+    expect(await readFile(sourcePath, "utf8")).toContain(
+      "recovered legacy edit",
+    );
+    expect(await readFile(sourcePath, "utf8")).not.toContain("zeros-frame");
+    await expect(readFile(journal)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME)).toContain(
+      `${path.sep}.zeros${path.sep}design${path.sep}`,
+    );
   });
 
   it("commits a transaction that changes more than 128 bounded source files", async () => {
@@ -356,7 +476,7 @@ describe("filesystem Design API repository", () => {
     );
     const canvas = JSON.parse(
       await readFile(
-        path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
+        designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
         "utf8",
       ),
     ) as { foundation?: { components?: Array<{ id?: string }> } };
@@ -511,9 +631,7 @@ describe("filesystem Design API repository", () => {
     await expect(readFile(orphan, "utf8")).rejects.toMatchObject({
       code: "ENOENT",
     });
-    const quarantined = await readdir(
-      designTransactionRecoveryDirectory(root),
-    );
+    const quarantined = await readdir(designTransactionRecoveryDirectory(root));
     expect(quarantined).toHaveLength(1);
   });
 });

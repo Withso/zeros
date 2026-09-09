@@ -1,3 +1,7 @@
+import {
+  designDocumentMetadataPath,
+  readDesignDirectoryRegistry,
+} from "../../design/metadata";
 // Workspace lifecycle integration coverage. Sets up a real temp repo with a remote, creates
 // workspaces, archives + restores, deletes — asserting both the
 // on-disk state and the DB.
@@ -198,9 +202,7 @@ describe("worktree lifecycle (integration)", () => {
       existsSync(path.join(workspace.path, designDirectory, "tokens.css")),
     ).toBe(true);
     expect(
-      existsSync(
-        path.join(workspace.path, designDirectory, ".zeros-canvas.json"),
-      ),
+      existsSync(designDocumentMetadataPath(workspace.path, designDirectory)),
     ).toBe(true);
     // FULL checkout: the codebase is present and writable to code actors,
     // because
@@ -385,10 +387,10 @@ printf ran > '${sentinel}'
     ).toBe("/* custom */\n");
     expect(
       await readFile(
-        path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
+        designDocumentMetadataPath(created.path, "Zeros Design"),
         "utf8",
       ),
-    ).toBe("{}\n");
+    ).toContain('"version": 3');
     await deleteWorkspace({
       workspaceId: created.workspaceId,
       includeBranch: true,
@@ -456,9 +458,9 @@ printf ran > '${sentinel}'
     expect(existsSync(path.join(created.path, "Brand", "tokens.css"))).toBe(
       true,
     );
-    expect(
-      existsSync(path.join(created.path, "Brand", ".zeros-canvas.json")),
-    ).toBe(true);
+    expect(existsSync(designDocumentMetadataPath(created.path, "Brand"))).toBe(
+      true,
+    );
     expect(existsSync(path.join(created.path, "Zeros Design"))).toBe(false);
     const tracked = await execFileAsync("git", ["ls-files", "--", "Brand"], {
       cwd: created.path,
@@ -783,9 +785,7 @@ printf ran > '${sentinel}'
       await enterDesignMode(getWorkspace(created.workspaceId));
       expect(getWorkspace(created.workspaceId).kind).toBe("design");
       expect(
-        existsSync(
-          path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
-        ),
+        existsSync(designDocumentMetadataPath(created.path, "Zeros Design")),
       ).toBe(true);
     } finally {
       if (previousSettingsDir === undefined) {
@@ -872,14 +872,10 @@ printf ran > '${sentinel}'
       expect(getWorkspace(created.workspaceId).kind).toBe("design");
       expect(designDirectoryNameFor(created.path)).toBe("Product Design");
       expect(
-        existsSync(
-          path.join(created.path, "Product Design", ".zeros-canvas.json"),
-        ),
+        existsSync(designDocumentMetadataPath(created.path, "Product Design")),
       ).toBe(true);
       expect(
-        existsSync(
-          path.join(created.path, "Zeros Design", ".zeros-canvas.json"),
-        ),
+        existsSync(designDocumentMetadataPath(created.path, "Zeros Design")),
       ).toBe(true);
     } finally {
       await deleteWorkspace({
@@ -892,12 +888,9 @@ printf ran > '${sentinel}'
   it("keeps uncommitted Design work live through Code view without a commit", async () => {
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
-    const canvas = path.join(
-      created.path,
-      designDirectory,
-      ".zeros-canvas.json",
-    );
-    const dirty = '{"dirty":true}\n';
+    const canvas = designDocumentMetadataPath(created.path, designDirectory);
+    const dirty =
+      '{"version":3,"frames":{},"frame_info":{},"foundation":{"schemaVersion":1,"parameters":[],"variants":[],"components":[]}}\n';
     const frame = path.join(created.path, designDirectory, "frame.html");
     await writeFile(canvas, dirty);
     await writeFile(frame, "<main>draft</main>\n");
@@ -1003,12 +996,21 @@ printf ran > '${sentinel}'
         path.join(repoRoot, ".zeros", "settings.local.toml"),
         "utf8",
       ),
-    ).toContain('directory = "Brand"');
+    ).toContain('directory_id = "design_');
+    const registry = readDesignDirectoryRegistry(repoRoot)!;
+    expect(Object.values(registry.directories)).toEqual([{ path: "Brand" }]);
     // The main checkout is left clean — nothing half-staged.
     const dirty = await execFileAsync("git", ["status", "--porcelain"], {
       cwd: repoRoot,
     });
     expect(dirty.stdout).toBe("");
+    // A subsequent rename uses the same ID, including when the private file
+    // already selects that ID instead of the legacy directory path.
+    const id = Object.keys(registry.directories)[0]!;
+    await renameDesignDirectory({ repoRoot, from: "Brand", to: "Product" });
+    expect(readDesignDirectoryRegistry(repoRoot)?.directories).toEqual({
+      [id]: { path: "Product" },
+    });
   });
 
   it("serializes a Design-directory rename with repository Git mutations", async () => {
@@ -2290,11 +2292,7 @@ printf ran > '${sentinel}'
   it("includes a live uncommitted Design draft in archive and restore", async () => {
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
-    const canvas = path.join(
-      created.path,
-      designDirectory,
-      ".zeros-canvas.json",
-    );
+    const canvas = designDocumentMetadataPath(created.path, designDirectory);
     const frame = path.join(created.path, designDirectory, "draft.html");
     await writeFile(canvas, '{"uncommitted":true}\n');
     await writeFile(frame, "<main>archive me</main>\n");

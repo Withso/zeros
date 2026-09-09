@@ -1,3 +1,7 @@
+import {
+  commitDesignMetadata,
+  designDocumentMetadataPath,
+} from "../../design/metadata";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -727,6 +731,21 @@ describe("WorkspaceService", () => {
         target: { directory: string; exists: boolean } | null;
       };
       expect(initialized.target).toEqual({ directory, exists: true });
+      const settingsFile = path.join(created.path, ".zeros", "settings.toml");
+      const original = fs.readFileSync(settingsFile, "utf8");
+      try {
+        fs.writeFileSync(
+          settingsFile,
+          '[design]\ndirectory_id="design_missing"\n',
+        );
+        await expect(
+          svc.handle("design.listDirectories", {
+            workspaceId: created.workspaceId,
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      } finally {
+        fs.writeFileSync(settingsFile, original);
+      }
     } finally {
       await svc.handle("workspace.delete", {
         workspaceId: created.workspaceId,
@@ -792,9 +811,25 @@ describe("WorkspaceService", () => {
         path.join(design.path, alternateDirectory),
         { recursive: true },
       );
+      commitDesignMetadata(
+        design.path,
+        alternateDirectory,
+        fs.readFileSync(
+          designDocumentMetadataPath(design.path, originalDirectory),
+          "utf8",
+        ),
+      );
       execFileSync(
         "git",
-        ["add", "-f", "--", originalDirectory, alternateDirectory],
+        [
+          "add",
+          "-f",
+          "--",
+          originalDirectory,
+          alternateDirectory,
+          ".zeros/design-dir.toml",
+          ".zeros/design",
+        ],
         { cwd: design.path },
       );
       execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
@@ -1313,7 +1348,7 @@ describe("WorkspaceService", () => {
       ).resolves.toMatchObject({ ok: true, mode: "design" });
       expect(
         fs.existsSync(
-          path.join(created.path, "Product Design", ".zeros-canvas.json"),
+          designDocumentMetadataPath(created.path, "Product Design"),
         ),
       ).toBe(true);
       expect(
@@ -1671,9 +1706,31 @@ describe("WorkspaceService", () => {
       );
       const alternateDesign = path.join(created.path, "Alternate Design");
       fs.cpSync(currentDesign, alternateDesign, { recursive: true });
-      execFileSync("git", ["add", "-f", "--", "Alternate Design"], {
-        cwd: created.path,
-      });
+      commitDesignMetadata(
+        created.path,
+        "Alternate Design",
+        fs.readFileSync(
+          designDocumentMetadataPath(
+            created.path,
+            designDirectoryNameFor(created.path),
+          ),
+          "utf8",
+        ),
+      );
+      execFileSync(
+        "git",
+        [
+          "add",
+          "-f",
+          "--",
+          "Alternate Design",
+          ".zeros/design-dir.toml",
+          ".zeros/design",
+        ],
+        {
+          cwd: created.path,
+        },
+      );
       execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
         cwd: created.path,
       });

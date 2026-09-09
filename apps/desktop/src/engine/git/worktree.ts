@@ -11,6 +11,11 @@ import path from "node:path";
 
 import { GitError, isGitError } from "./errors";
 import {
+  designMetadataGitPaths,
+  readDesignDirectoryRegistry,
+} from "../design/metadata";
+import { recoverDesignStorageForArchive } from "../design/document";
+import {
   assertSafeGitRef,
   runGit as runGitCommand,
   type RunGitOptions,
@@ -2789,8 +2794,13 @@ async function archiveWorkspaceInner(
           "The workspace is unchanged and still live. Repair the repository's Git metadata, then retry.",
       });
     }
+    await recoverDesignStorageForArchive(ws.path);
     const archiveIncludePaths = [
       ...new Set([
+        ...designMetadataGitPaths(ws.path),
+        ...Object.values(
+          readDesignDirectoryRegistry(ws.path)?.directories ?? {},
+        ).map((entry) => entry.path),
         ...scans.flatMap((s) => [...s.paths, ...s.deferredPaths]),
         // Explicit create-time copy/symlink paths can be outside today's repo
         // settings. Keep them durable for the workspace's whole lifetime so a
@@ -2973,6 +2983,15 @@ async function archiveWorkspaceInner(
           (entry): entry is string => typeof entry === "string",
         )
       : [];
+    if (existsSync(ws.path)) {
+      await recoverDesignStorageForArchive(ws.path);
+      archiveIncludePaths.push(
+        ...designMetadataGitPaths(ws.path),
+        ...Object.values(
+          readDesignDirectoryRegistry(ws.path)?.directories ?? {},
+        ).map((entry) => entry.path),
+      );
+    }
     backupWorkspaceSettings(ws.id, ws.path);
     const sealedSnapshot = await snapshotWorkingTree(
       ws.path,

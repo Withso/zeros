@@ -50,6 +50,9 @@ export function nativeExtensionInventory(
         file.endsWith(".toml") ? parseToml(text) : JSON.parse(text),
       );
     } catch {
+      // A failed read cannot confirm removal. Let the exact-key cache retain
+      // the last declarations until a complete inventory succeeds.
+      result.partial = true;
       result.warnings.push(`Could not read ${file}.`);
       return {};
     }

@@ -308,7 +308,7 @@ describe("resolveSettings — layer hygiene", () => {
 });
 
 describe("resolveSettings — forward compat + purity", () => {
-  it("preserves and merges unknown keys", () => {
+  it("preserves unknown user keys but excludes unsupported repository fields", () => {
     const r = resolveSettings({
       user: {
         future_feature: { knob: 1 },
@@ -316,12 +316,12 @@ describe("resolveSettings — forward compat + purity", () => {
       },
       repoLocal: { future_feature: { other: 2 } },
     });
-    expect(r.effective.future_feature).toEqual({ knob: 1, other: 2 });
+    expect(r.effective.future_feature).toEqual({ knob: 1 });
     expect(
       (r.effective.scripts as Record<string, unknown>).future_script_key,
     ).toBe("x");
     expect(r.sources["future_feature.knob"]).toBe("user");
-    expect(r.sources["future_feature.other"]).toBe("repo-local");
+    expect(r.sources["future_feature.other"]).toBeUndefined();
   });
 
   it("excludes $schema from the effective tree", () => {
@@ -335,10 +335,10 @@ describe("resolveSettings — forward compat + purity", () => {
   it("clears stale leaf provenance when a stronger layer replaces a table with a scalar (and vice versa)", () => {
     const r = resolveSettings({
       user: { future: { nested: "a" } },
-      repoLocal: { future: "flat" },
+      managed: { future: "flat" },
     });
     expect(r.effective.future).toBe("flat");
-    expect(r.sources["future"]).toBe("repo-local");
+    expect(r.sources["future"]).toBe("managed");
     expect(r.sources["future.nested"]).toBeUndefined();
   });
 

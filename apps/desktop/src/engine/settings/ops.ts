@@ -18,6 +18,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
+import { validateDesignSettings } from "../design/metadata";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { isSecretEnvName } from "./env-names";
@@ -35,6 +36,7 @@ import { resolveSettings, type ResolvedSettings } from "./resolve";
 import { getTeamDoc } from "./team-context";
 import {
   ensureLocalSettingsIgnored,
+  migrateWorkspaceSettings,
   personalRepoRoot,
   personalWorkspaceRoot,
   workspaceSettingsPath,
@@ -73,6 +75,7 @@ export type WritableLayer = (typeof WRITABLE_LAYERS)[number];
 export const REDACTED_SENTINEL = "<redacted>";
 
 export type SettingsOpErrorCode =
+  | "VALIDATION_FAILED"
   | "SETTINGS_BAD_PATCH"
   | "SETTINGS_BAD_TOML"
   | "SETTINGS_REPO_REQUIRED"
@@ -192,6 +195,19 @@ export function opSettingsResolve(
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
+function validateDesignSelection(
+  root: string | undefined,
+  doc: RawSettingsDoc,
+): void {
+  try {
+    validateDesignSettings(root, doc);
+  } catch (error) {
+    throw new SettingsOpError(
+      "VALIDATION_FAILED",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}
 
 /** True when any leaf of `value` is the redaction sentinel — a remote client
  *  echoing a masked read back as a write. */
@@ -247,10 +263,15 @@ function redactMcpTable(mcp: unknown): unknown {
 
 export function redactDocForRemote(doc: RawSettingsDoc): RawSettingsDoc {
   let out: RawSettingsDoc = doc;
-  if (doc.preferences !== undefined || doc.preferences_version !== undefined) {
+  if (
+    doc.preferences !== undefined ||
+    doc.preferences_version !== undefined ||
+    doc.agent_preferences_version !== undefined
+  ) {
     out = { ...out };
     delete out.preferences;
     delete out.preferences_version;
+    delete out.agent_preferences_version;
   }
   if (isPlainObject(doc.env))
     out = { ...out, env: redactEnvTable(doc.env) as RawSettingsDoc };
@@ -279,6 +300,7 @@ export function redactResolvedForRemote(
       Object.entries(resolved.sources).filter(
         ([key]) =>
           key !== "preferences_version" &&
+          key !== "agent_preferences_version" &&
           key !== "preferences" &&
           !key.startsWith("preferences."),
       ),
@@ -329,6 +351,12 @@ function prepareSettingsWrite(
     );
   }
   const doc = applySettingsPatch(current.doc, patch);
+  // Selection validation applies even when no workspace is open. Unknown
+  // settings text stays on disk, but a bad path cannot become authority.
+  validateDesignSelection(
+    repoRoot ? path.dirname(path.dirname(filePath)) : undefined,
+    doc,
+  );
   const { warnings } = sanitizeLayer(
     doc,
     layer === "repo" ? "repo-local" : layer,
@@ -462,21 +490,28 @@ export function opSettingsWriteRaw(
     );
   }
   const filePath = layerPath(layer, repoRoot);
+  validateDesignSelection(
+    repoRoot ? path.dirname(path.dirname(filePath)) : undefined,
+    doc,
+  );
   if (repoRoot && layer !== "user") {
-    ensureLocalSettingsIgnored(
-      path.dirname(path.dirname(filePath)),
-      `.zeros/${path.basename(filePath)}` as
-        | ".zeros/settings.local.toml"
-        | ".zeros/settings.toml",
-    );
-    const migrated = readLocalLayer(layer, repoRoot);
-    if (migrated.error) throw new Error(migrated.error);
     if (doc.settings_version !== PERSONAL_SETTINGS_VERSION) {
       if (doc.settings_version !== undefined)
         throw new Error("Unsupported settings_version in repository settings.");
       text = `settings_version = ${PERSONAL_SETTINGS_VERSION}\n${text}`;
       doc.settings_version = PERSONAL_SETTINGS_VERSION;
     }
+    // A raw document replaces the layer, including malformed contents. Keep
+    // filename migration and path/privacy checks, but do not parse or merge
+    // the old document. The version above also prevents legacy values from
+    // being imported on a later read; the legacy repository file stays intact.
+    if (layer === "workspace-local") migrateWorkspaceSettings(repoRoot);
+    ensureLocalSettingsIgnored(
+      path.dirname(path.dirname(filePath)),
+      `.zeros/${path.basename(filePath)}` as
+        | ".zeros/settings.local.toml"
+        | ".zeros/settings.toml",
+    );
   }
   writeSettingsFileRaw(filePath, text);
   const { warnings } = sanitizeLayer(
@@ -606,7 +641,11 @@ export function opSettingsMigrateLegacy(
   }
 
   const providerPatch: Record<string, Record<string, string>> = {};
-  for (const [agentId, prefs] of Object.entries(input.providers ?? {})) {
+  for (const [agentId, prefs] of Object.entries(
+    readSettingsFile(userSettingsPath()).doc.agent_preferences_version === 1
+      ? {}
+      : (input.providers ?? {}),
+  )) {
     if (!isPlainObject(prefs)) continue;
     const p: Record<string, string> = {};
     if (prefs.authMethod === "cli") p.auth = "cli";

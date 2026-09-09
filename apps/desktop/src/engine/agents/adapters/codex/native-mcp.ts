@@ -57,8 +57,8 @@ export interface NativeMcpSurface {
    *  (`command` ⇒ stdio, `url` ⇒ http) and rejects an entry carrying BOTH with
    *  "url is not supported for stdio in `mcp_servers.<name>`" — fatally, for
    *  the whole thread. So the disable fragment for one of these must repeat its
-   *  `url`, never add a `command`. Absent for names that come from plugins or
-   *  codex's internals, which have no config entry to collide with. */
+   *  `url`, never add a `command`. Includes disabled config entries, since a
+   *  plugin or internal server can declare the same name. */
   httpServerUrls?: Record<string, string>;
 }
 
@@ -112,10 +112,9 @@ export async function readNativeMcpSurface(
   };
 }
 
-/** `mcp_servers` keys codex would actually start, plus the `url` of every one
- *  that is a Streamable HTTP server (see NativeMcpSurface.httpServerUrls). An
- *  entry already marked `enabled = false` is skipped — codex never starts it,
- *  so naming it buys nothing. */
+/** Enabled `mcp_servers` names, plus every configured HTTP transport. Disabled
+ *  entries need no override on their own, but their URLs still constrain an
+ *  override when a plugin or internal server contributes the same name. */
 function enabledMcpServers(servers: unknown): {
   names: string[];
   httpUrls: Record<string, string>;
@@ -132,11 +131,11 @@ function enabledMcpServers(servers: unknown): {
       typeof cfg === "object" && cfg !== null && !Array.isArray(cfg)
         ? (cfg as { enabled?: unknown; url?: unknown })
         : undefined;
-    if (entry?.enabled === false) continue;
-    names.push(name);
     if (typeof entry?.url === "string" && entry.url.length > 0) {
       httpUrls[name] = entry.url;
     }
+    if (entry?.enabled === false) continue;
+    names.push(name);
   }
   return { names, httpUrls };
 }

@@ -62,6 +62,10 @@ import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
 import { readDesignProtocolResource } from "./design/protocol-resource";
+import {
+  designMetadataGitPaths,
+  isDesignMetadataRepoPath,
+} from "./design/metadata";
 import { getWorkspaceDesignApi } from "./design/design-api";
 import { DesignAgentAdmissionManager } from "./design/design-agent-admission";
 import {
@@ -547,6 +551,7 @@ function pathCanChangeDesignRecognition(candidate: unknown): boolean {
   const normalized = normalizeRecognitionMutationPath(candidate);
   if (!normalized) return false;
   return (
+    isDesignMetadataRepoPath(normalized) ||
     normalized === ".zeros/settings.toml" ||
     normalized === ".zeros/settings.local.toml" ||
     (normalized.includes("/") &&
@@ -8948,6 +8953,9 @@ export class ZerosEngine {
       protectedRoots = [
         ...new Set([
           activeDesignDirectory,
+          ...designMetadataGitPaths(workspaceRoot).map((file) =>
+            path.join(workspaceRoot, file),
+          ),
           ...(pointer.valid
             ? [path.join(workspaceRoot, ...pointer.directory.split("/"))]
             : []),

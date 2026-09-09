@@ -36,6 +36,7 @@ import {
 } from "./state/chat-reconciliation";
 import { hydrateAiApiKey } from "./shared/lib/openai";
 import { startPersonalPreferencesSync } from "./features/settings/personal-preferences-sync";
+import { startAgentPreferencesSync } from "./features/settings/agent-preferences-sync";
 import {
   BridgeProvider,
   useBridge,
@@ -63,7 +64,6 @@ import { ShortcutsPalette } from "./shell/shortcuts-palette";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
 import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
-import { ModelsSettingsSync } from "./features/agent/models-settings-sync";
 import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
 import { BrowserSessionController } from "./features/browser/browser-session-controller";
 import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-picture-in-picture";
@@ -749,6 +749,10 @@ function ReloadOnProjectChange() {
     () => (bridge ? startPersonalPreferencesSync(bridge) : undefined),
     [bridge],
   );
+  useEffect(
+    () => (bridge ? startAgentPreferencesSync(bridge) : undefined),
+    [bridge],
+  );
 
   // Settings foundation: import the legacy localStorage settings into the
   // engine-owned TOML files once, on APP BOOT — not only when the user opens
@@ -1397,7 +1401,6 @@ export function AppShellBody() {
           <PreWarmAgents />
           <ReloadOnProjectChange />
           <ChatsPersistence />
-          <ModelsSettingsSync />
           <BrowserConfirmationController />
           <ShellRouter />
         </AgentSessionsProvider>

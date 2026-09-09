@@ -1,3 +1,4 @@
+import { stageDesignRegistry } from "../design/metadata-git";
 // ──────────────────────────────────────────────────────────
 // WorkspaceService — the Remote Workspace API over the bridge
 // ──────────────────────────────────────────────────────────
@@ -29,6 +30,14 @@ import {
 } from "@zeros/protocol/agent-extensions";
 import { nativeExtensionInventory } from "../agents/native-extensions";
 import { syncPersonalPreferences } from "../settings/preferences";
+import { syncAgentPreferences } from "../settings/agent-preferences";
+import {
+  designDirectoryFromSettings,
+  designDocumentMetadataPath,
+  designMetadataGitPaths,
+  isDesignMetadataRepoPath,
+  readDesignDirectoryRegistry,
+} from "../design/metadata";
 import {
   effectiveZerosSkills,
   saveZerosSkill,
@@ -235,7 +244,6 @@ import {
 import {
   discoverDesignDirectories,
   previewDesignDirectoryForEnter,
-  resolveDesignDirectoryPointer,
   resolveDesignDirectoryPointerState,
   validateDesignDirectoryPointerTarget,
 } from "../design/directory";
@@ -243,7 +251,6 @@ import {
   DEFAULT_DESIGN_DIRECTORY_NAME,
   forgetDesignDirectoryName,
   primeDesignDirectoryName,
-  sanitizeDesignDirectoryName,
   withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
@@ -727,6 +734,12 @@ function makeDesignPathRecognizer(
   workspacePath: string,
   pointerName: string,
 ): (candidate: string) => boolean {
+  const registeredPaths = [
+    ...Object.values(
+      readDesignDirectoryRegistry(workspacePath)?.directories ?? {},
+    ).map((entry) => entry.path),
+    ...designMetadataGitPaths(workspacePath),
+  ];
   // One `git.stage` can carry thousands of paths that share a handful of
   // directories, so each directory is probed at most once per operation.
   const probed = new Map<string, boolean>();
@@ -797,6 +810,13 @@ function makeDesignPathRecognizer(
   return (candidate: string): boolean => {
     const normalized = normalizeRepoMutationPath(candidate);
     if (!normalized) return false;
+    if (
+      isDesignMetadataRepoPath(normalized) ||
+      registeredPaths.some((root) =>
+        repoMutationPathOverlapsDesignRoot(normalized, root),
+      )
+    )
+      return true;
     if (
       pointerName &&
       (normalized === pointerName || normalized.startsWith(`${pointerName}/`))
@@ -878,6 +898,8 @@ async function designRootsForWorkingDirectories(
   cwd: string,
 ): Promise<string[]> {
   const roots = new Set<string>();
+  roots.add(".zeros/design-dir.toml");
+  roots.add(".zeros/design");
   const pointer = designDirectoryNameFor(cwd);
   if (pointer) roots.add(pointer);
   try {
@@ -924,6 +946,10 @@ async function designPathsInCodeMutation(
   );
   const immediate = paths.filter(
     (candidate) =>
+      isDesignMetadataRepoPath(candidate) ||
+      designMetadataGitPaths(workspacePath).some((metadata) =>
+        repoMutationPathOverlapsDesignRoot(candidate, metadata),
+      ) ||
       isDesignPath(candidate) ||
       repoMutationPathOverlapsDesignRoot(candidate, activeDesignRoot),
   );
@@ -2170,13 +2196,7 @@ export class WorkspaceService {
     }
     const registered = designDirectoryNameFor(workspace.path);
     const hasLiveMarker = (directory: string) =>
-      fs.existsSync(
-        nodePath.join(
-          workspace.path,
-          ...directory.split("/"),
-          DESIGN_CANVAS_FILE,
-        ),
-      );
+      fs.existsSync(designDocumentMetadataPath(workspace.path, directory));
     const discovered = await discoverDesignDirectories(workspace.path);
     const designDirectory =
       pointer.configured && hasLiveMarker(pointer.directory)
@@ -3743,9 +3763,15 @@ export class WorkspaceService {
           const designDir = designDirectoryNameFor(workspace.path);
           await stagePaths({
             workspaceId,
-            paths: [designDir],
+            paths: [
+              designDir,
+              ...designMetadataGitPaths(workspace.path, designDir).filter(
+                (file) => file !== ".zeros/design-dir.toml",
+              ),
+            ],
             force: true,
           });
+          await stageDesignRegistry(workspace.path, designDir);
           return { ok: true };
         });
       }
@@ -3756,8 +3782,19 @@ export class WorkspaceService {
           await assertGitCheckpointReady(workspace.path);
           await unstagePaths({
             workspaceId,
-            paths: [designDirectoryNameFor(workspace.path)],
+            paths: [
+              designDirectoryNameFor(workspace.path),
+              ...designMetadataGitPaths(
+                workspace.path,
+                designDirectoryNameFor(workspace.path),
+              ).filter((file) => file !== ".zeros/design-dir.toml"),
+            ],
           });
+          await stageDesignRegistry(
+            workspace.path,
+            designDirectoryNameFor(workspace.path),
+            true,
+          );
           return { ok: true };
         });
       }
@@ -3835,15 +3872,23 @@ export class WorkspaceService {
         }
         const workspace = getWorkspaceById(target);
         const repoRoot = workspace?.repoRoot ?? cwd;
-        const [directories, pointer, sticky] = await Promise.all([
+        const [directories, pointerState, sticky] = await Promise.all([
           discoverDesignDirectories(cwd),
-          resolveDesignDirectoryPointer(
+          resolveDesignDirectoryPointerState(
             workspace
               ? { repoRoot, workspacePath: workspace.path }
               : { repoRoot },
           ),
           stickyRecognizedDesignDirectories(cwd),
         ]);
+        if (!pointerState.valid)
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              pointerState.error ??
+              "Correct the invalid local Design directory setting before choosing a folder.",
+          });
+        const pointer = pointerState.directory;
         let entryTarget: { directory: string; exists: boolean } | null = null;
         try {
           const directory = await previewDesignDirectoryForEnter(
@@ -3856,15 +3901,18 @@ export class WorkspaceService {
             // Design switch cannot race its sandbox boundary. That vnode is
             // not a Design document yet: only the canvas marker means the
             // requested "Create design directory" action has completed.
-            exists: fs.existsSync(
-              nodePath.join(cwd, ...directory.split("/"), DESIGN_CANVAS_FILE),
-            ),
+            exists: fs.existsSync(designDocumentMetadataPath(cwd, directory)),
           };
         } catch {
           entryTarget = null;
         }
         return {
           directories,
+          directoryIds: Object.fromEntries(
+            Object.entries(
+              readDesignDirectoryRegistry(cwd)?.directories ?? {},
+            ).map(([id, entry]) => [entry.path, id]),
+          ),
           pointer,
           active: designDirectoryNameFor(cwd),
           target: entryTarget,
@@ -4453,6 +4501,10 @@ export class WorkspaceService {
           params.changes ?? {},
         );
       }
+      case "settings.syncAgentPreferences": {
+        if (remote) throw new Error("Agent preferences belong to this device.");
+        return syncAgentPreferences(params.legacy ?? {}, params.changes ?? []);
+      }
       case "extensions.list":
       case "skills.listZeros":
       case "skills.saveZeros":
@@ -4552,7 +4604,10 @@ export class WorkspaceService {
           if (!design || typeof design !== "object" || Array.isArray(design)) {
             return false;
           }
-          return Object.prototype.hasOwnProperty.call(design, "directory");
+          return (
+            Object.prototype.hasOwnProperty.call(design, "directory") ||
+            Object.prototype.hasOwnProperty.call(design, "directory_id")
+          );
         })();
         const hasDesignIsolationPatch = (() => {
           const design = (patch as Record<string, unknown>).design;
@@ -4572,9 +4627,12 @@ export class WorkspaceService {
         // from becoming a remote settings oracle.
         if (
           remote &&
-          ["design", "preferences", "preferences_version"].some((key) =>
-            Object.prototype.hasOwnProperty.call(patch, key),
-          )
+          [
+            "design",
+            "preferences",
+            "preferences_version",
+            "agent_preferences_version",
+          ].some((key) => Object.prototype.hasOwnProperty.call(patch, key))
         ) {
           throw new GitError({
             code: "SETTINGS_REMOTE_KEY_DENIED",
@@ -4616,14 +4674,11 @@ export class WorkspaceService {
                   candidate.repoRoot,
                   preview,
                 );
-                const raw = (
-                  projected.effective as {
-                    design?: { directory?: unknown };
-                  }
-                ).design?.directory;
                 const next =
-                  sanitizeDesignDirectoryName(raw) ??
-                  DEFAULT_DESIGN_DIRECTORY_NAME;
+                  designDirectoryFromSettings(
+                    candidate.path,
+                    projected.effective,
+                  ) ?? DEFAULT_DESIGN_DIRECTORY_NAME;
                 return {
                   workspace: candidate,
                   before: designDirectoryNameFor(candidate.path),
@@ -4832,11 +4887,9 @@ export class WorkspaceService {
             candidate.repoRoot,
             { path: rawPath, doc: rawDocument },
           );
-          const raw = (
-            projected.effective as { design?: { directory?: unknown } }
-          ).design?.directory;
           const next =
-            sanitizeDesignDirectoryName(raw) ?? DEFAULT_DESIGN_DIRECTORY_NAME;
+            designDirectoryFromSettings(candidate.path, projected.effective) ??
+            DEFAULT_DESIGN_DIRECTORY_NAME;
           return next !== designDirectoryNameFor(candidate.path);
         });
         if (rawChangesTerritory) {

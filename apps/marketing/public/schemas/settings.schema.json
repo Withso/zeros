@@ -160,6 +160,11 @@
         "directory": {
           "type": "string",
           "description": "Repo-relative folder the design surface reads and writes (default \"Zeros Design\"). The folder is committed content; this key just selects which design folder is active."
+        },
+        "directory_id": {
+          "type": "string",
+          "pattern": "^design_[a-zA-Z0-9_-]{1,64}$",
+          "description": "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml."
         }
       }
     },
@@ -275,6 +280,10 @@
       }
     },
     "preferences_version": {
+      "type": "number",
+      "const": 1
+    },
+    "agent_preferences_version": {
       "type": "number",
       "const": 1
     },

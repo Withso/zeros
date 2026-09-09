@@ -48,6 +48,7 @@ import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
 
 import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
+import { isDesignMetadataRepoPath } from "../design/metadata";
 
 const POLL_INTERVAL_MS = 1_000;
 const WORKTREE_DEBOUNCE_MS = 75;
@@ -377,7 +378,7 @@ export function startGitWatcher(
     // and Zeros-owned metadata trees retain their established exclusions.
     ignored: [
       /(?:^|[\\/])\.git(?:[\\/]|$)/,
-      /(?:^|[\\/])\.zeros(?:[\\/]|$)/,
+      /(?:^|[\\/])\.zeros[\\/](?!(?:design-dir\.toml$|design(?:[\\/]|$)))[^\\/]+/,
       /(?:^|[\\/])node_modules(?:[\\/]|$)/,
       /\.zeros-tmp$/,
       (candidatePath: string) =>
@@ -502,7 +503,11 @@ export function startGitWatcher(
       // retaining the exact workspace/coarse identity.
       scheduleWorktreeChange(
         changed ?? entry.target,
-        basename(filePath) === DESIGN_CANVAS_FILE,
+        basename(filePath) === DESIGN_CANVAS_FILE ||
+          /(?:^|[\\/])\.zeros[\\/](?:design-dir\.toml|design[\\/])/.test(
+            filePath,
+          ) ||
+          isDesignMetadataRepoPath(filePath),
       );
     });
     native.on("error", (error) => {

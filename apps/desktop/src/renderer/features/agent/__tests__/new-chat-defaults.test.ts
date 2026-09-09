@@ -41,6 +41,7 @@ import {
 import {
   resolveModelConfiguration,
   setModelPreference,
+  MODEL_PREFERENCES_KEY,
 } from "../model-preferences";
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
 import { getSetting, setSetting } from "../../../platform/settings";
@@ -81,6 +82,16 @@ describe("hydrateModelsFromSettings — default agent round-trip", () => {
     });
     expect(getDefaultAgentId()).toBe("cursor");
     expect(getFavoriteModel("cursor")).toBe("claude-opus-4-8-thinking-high");
+  });
+
+  it("clears a deleted file default and per-model choices on authoritative refresh", () => {
+    setDefaultAgentId("codex");
+    setFavoriteModel("codex", "gpt-5.5");
+    rememberModelConfiguration("codex", "gpt-5.5", { effort: "high" });
+    hydrateModelsFromSettings({}, true);
+    expect(getDefaultAgentId()).toBeNull();
+    expect(getFavoriteSelection()).toBeNull();
+    expect(getSetting(MODEL_PREFERENCES_KEY, [])).toEqual([]);
   });
 
   it("does NOT misclassify a claude-branded Cursor model when only `default` is present", () => {

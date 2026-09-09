@@ -125,6 +125,19 @@ describe("native MCP scoping — the Zeros registry is the whole set", () => {
     ).resolves.toEqual({ serverNames: ["live", "codex_apps"] });
   });
 
+  it("retains the transport of disabled HTTP servers for plugin name collisions", async () => {
+    await expect(
+      readNativeMcpSurface(
+        runtime({ notes: { enabled: false, url: "https://notes.example/mcp" } }),
+        undefined,
+        noPlugins,
+      ),
+    ).resolves.toEqual({
+      serverNames: ["codex_apps"],
+      httpServerUrls: { notes: "https://notes.example/mcp" },
+    });
+  });
+
   it("still reports plugin servers when the config read fails", async () => {
     await expect(
       readNativeMcpSurface(runtime({}, true), undefined, noPlugins),

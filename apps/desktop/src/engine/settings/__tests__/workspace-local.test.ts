@@ -6,6 +6,8 @@ import {
   readFileSync,
   rmSync,
   writeFileSync,
+  symlinkSync,
+  linkSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -63,6 +65,69 @@ describe("personal workspace overrides", () => {
     expect(readFileSync(file(first), "utf8")).toBe(contents);
     expect(() => readFileSync(legacy)).toThrow();
     expect(git(first, "status", "--porcelain")).toBe("");
+  });
+
+  it("validates Design paths on structured and raw saves without changing prior settings", () => {
+    opSettingsWrite("repo-local", { design: { directory: "Design" } }, repo);
+    const before = readFileSync(file(repo), "utf8");
+    mkdirSync(path.join(root, "outside"));
+    symlinkSync(path.join(root, "outside"), path.join(repo, "linked"));
+    expect(() =>
+      opSettingsWrite(
+        "repo-local",
+        { design: { directory: "linked/design" } },
+        repo,
+      ),
+    ).toThrow();
+    expect(() =>
+      opSettingsWriteRaw(
+        "repo-local",
+        '[design]\ndirectory="../outside"\n',
+        repo,
+      ),
+    ).toThrow();
+    expect(() =>
+      opSettingsWriteRaw(
+        "repo-local",
+        '[design]\ndirectory_id="design_missing"\n',
+        repo,
+      ),
+    ).toThrow();
+    expect(readFileSync(file(repo), "utf8")).toBe(before);
+    writeFileSync(
+      path.join(root, "registry.toml"),
+      "version=1\n[directories]\n",
+    );
+    linkSync(
+      path.join(root, "registry.toml"),
+      path.join(repo, ".zeros/design-dir.toml"),
+    );
+    expect(() =>
+      opSettingsWrite("repo-local", { design: { directory: "Design" } }, repo),
+    ).toThrow();
+    expect(readFileSync(file(repo), "utf8")).toBe(before);
+  });
+
+  it("preserves unsupported and account fields on disk while excluding their effects", () => {
+    opSettingsWriteRaw(
+      "repo-local",
+      '# retain my notes\nfuture=true\n[git]\nremote="fork"\nfuture=true\n[github]\naccount="personal"\n',
+      repo,
+    );
+    opSettingsWrite("repo-local", { scripts: { setup: "install" } }, repo);
+    expect(readFileSync(file(repo), "utf8")).toContain("# retain my notes");
+    expect(opSettingsRead("repo-local", repo).doc).toMatchObject({
+      future: true,
+      github: { account: "personal" },
+    });
+    const effective = opSettingsResolve(repo).effective;
+    expect(effective).not.toHaveProperty("future");
+    expect(effective).not.toHaveProperty("github.account");
+    expect(effective).not.toHaveProperty("git.future");
+    expect(effective).toMatchObject({
+      git: { remote: "fork" },
+      scripts: { setup: "install" },
+    });
   });
 
   it("uses the local filename when a branch still tracks legacy shared settings.toml", () => {

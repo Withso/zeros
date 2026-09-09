@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { REPO_FILE_UNSUPPORTED_KEYS, sanitizeLayer } from "../schema";
+import {
+  REPO_FILE_UNSUPPORTED_KEYS,
+  repoLocalSettingsSchema,
+  sanitizeLayer,
+} from "../schema";
 
 describe("sanitizeLayer", () => {
   it("keeps a fully valid repo document intact", () => {
@@ -396,15 +400,72 @@ describe("sanitizeLayer", () => {
     expect(r.warnings).toHaveLength(3);
   });
 
-  it("preserves unknown keys at top level and inside known tables", () => {
+  it("preserves unknown user keys at top level and inside known tables", () => {
     const r = sanitizeLayer(
       { brand_new: true, scripts: { run: "x", new_knob: "y" } },
-      "repo",
+      "user",
     );
     expect(r.doc.brand_new).toBe(true);
     expect((r.doc.scripts as Record<string, unknown>).new_knob).toBe("y");
     expect(r.warnings).toEqual([]);
   });
+
+  it("excludes account and unsupported fields from every effective repository layer", () => {
+    expect(Object.hasOwn(repoLocalSettingsSchema.shape, "github")).toBe(false);
+    expect(
+      repoLocalSettingsSchema.safeParse({ github: { auth_method: "pat" } })
+        .success,
+    ).toBe(false);
+    for (const layer of ["repo", "repo-local", "workspace-local"] as const) {
+      const raw = {
+        github: { auth_method: "github-app" },
+        future: { enabled: true },
+        scripts: { run: "pnpm dev", future: true },
+        design: { directory: "Product - Design", future: true },
+        mcp: { servers: [], future: true },
+      };
+      const result = sanitizeLayer(raw, layer);
+      expect(result.doc).toEqual({
+        scripts: { run: "pnpm dev" },
+        design: { directory: "Product - Design" },
+        ...(layer === "repo" ? {} : { mcp: { servers: [] } }),
+      });
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("github"),
+          expect.stringContaining("future"),
+          expect.stringContaining("scripts.future"),
+          expect.stringContaining("design.future"),
+        ]),
+      );
+      expect(raw.future).toEqual({ enabled: true });
+      expect(raw.scripts.future).toBe(true);
+    }
+  });
+
+  it.each([
+    "../outside",
+    "/tmp/design",
+    ".zeros/design",
+    "src/.git/design",
+    ".ZEROS/design",
+    "a//b",
+    "a/../b",
+    "a/./b",
+    "a\u0000b",
+  ])(
+    "rejects unsafe Design directory %s while retaining valid siblings",
+    (directory) => {
+      const result = sanitizeLayer(
+        { design: { directory }, scripts: { run: "ok" } },
+        "repo-local",
+      );
+      expect(result.doc).toEqual({ scripts: { run: "ok" } });
+      expect(result.warnings).toEqual([
+        expect.stringContaining("design.directory"),
+      ]);
+    },
+  );
 
   it("keeps a valid [mcp] table (stdio + http) at the user layer, drops it from repo", () => {
     const doc = {

@@ -116,6 +116,26 @@ describe("WorkspaceService settings ops", () => {
     expect(r.sources["git.remote"]).toBe("default");
   });
 
+  it("lets the raw settings editor repair a malformed personal repository file", async () => {
+    const file = path.join(dir, ".zeros/settings.local.toml");
+    fs.mkdirSync(path.dirname(file));
+    fs.writeFileSync(file, 'settings_version = 2\n[git\nremote = "origin"\n');
+    const text = 'settings_version = 2\n# repaired\n[git]\nremote = "upstream"\n';
+
+    await expect(
+      svc.handle("settings.writeRaw", {
+        layer: "repo-local",
+        repoRoot: dir,
+        text,
+      }),
+    ).resolves.toMatchObject({ path: file });
+
+    expect(fs.readFileSync(file, "utf8")).toBe(text);
+    await expect(
+      svc.handle("settings.resolve", { repoRoot: dir }),
+    ).resolves.toMatchObject({ effective: { git: { remote: "upstream" } } });
+  });
+
   it("writes the user layer ($schema injected) and resolve shows user provenance", async () => {
     await svc.handle("settings.write", {
       layer: "user",

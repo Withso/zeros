@@ -109,6 +109,22 @@ function mergeLayer(
   sources: Record<string, SettingsLayerName>,
   basePath = "",
 ): void {
+  if (basePath === "design") {
+    // Path and stable ID are alternative representations of ONE selection.
+    if (
+      Object.hasOwn(doc, "directory") &&
+      !Object.hasOwn(doc, "directory_id")
+    ) {
+      delete target.directory_id;
+      clearSourcesUnder(sources, "design.directory_id");
+    } else if (
+      Object.hasOwn(doc, "directory_id") &&
+      !Object.hasOwn(doc, "directory")
+    ) {
+      delete target.directory;
+      clearSourcesUnder(sources, "design.directory");
+    }
+  }
   for (const [key, value] of Object.entries(doc)) {
     if (value === undefined) continue;
     if (DANGEROUS_KEYS.has(key)) continue; // prototype-pollution guard
