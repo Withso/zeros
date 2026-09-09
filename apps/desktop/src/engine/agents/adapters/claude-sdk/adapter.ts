@@ -803,14 +803,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     extensions: {
       list: async (opts) => {
         if (opts.category !== "apps") return null;
-        const state = [...this.sessions.values()]
-          .reverse()
-          .find(
-            (session) =>
-              session.query &&
-              (opts.scope === "user" ||
-                personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)),
-          );
+        const state = [...this.sessions.values()].reverse().find(session => session.query && (opts.scope === "user" || personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)));
         return readClaudeConnectors(state?.query ?? null);
       },
     },
