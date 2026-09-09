@@ -721,6 +721,10 @@ interface SdkSession {
   /** The in-flight turn's deferred, settled when the consumer sees `result`
    *  (or the query errors). Null when idle. */
   turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }> | null;
+  /** UUIDs placed on the user messages covered by `turn` (the original send
+   * and any mid-turn steers). Claude 0.3.265+ echoes these on reply/result
+   * frames, which distinguishes our queued send from an autonomous result. */
+  readonly turnMessageUuids: Set<string>;
   /** Resolves only after prompt() has run its turn teardown. Control requests
    * that require a truly idle persistent query wait on this seam rather than
    * relying on promise-reaction ordering around the result deferred. */
@@ -736,6 +740,10 @@ interface SdkSession {
   pendingPromptCalls: number;
   /** Locally queued turnless runs (currently /compact) awaiting a result. */
   turnlessRunsPending: number;
+  /** UUIDs for those turnless inputs. Kept beside the count so result
+   * correlation can ignore an earlier autonomous result while old producers
+   * with no correlation fields retain the count-based fallback. */
+  readonly turnlessMessageUuids: Set<string>;
   /** Provider-originated work running without a local prompt() deferred. */
   providerRunActive: boolean;
   /** Permission resolvers from canUseTool, keyed by permissionId. */
@@ -795,7 +803,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     extensions: {
       list: async (opts) => {
         if (opts.category !== "apps") return null;
-        const state = [...this.sessions.values()].reverse().find(session => session.query && (opts.scope === "user" || personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)));
+        const state = [...this.sessions.values()]
+          .reverse()
+          .find(
+            (session) =>
+              session.query &&
+              (opts.scope === "user" ||
+                personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)),
+          );
         return readClaudeConnectors(state?.query ?? null);
       },
     },
@@ -1238,12 +1253,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       firstToken: new FirstTokenLatency("claude-sdk"),
       sawFirstTurnOutput: false,
       turn: null,
+      turnMessageUuids: new Set(),
       turnIdle: null,
       scheduledWakeupStop: null,
       idleTeardownTimer: null,
       idleSince: null,
       pendingPromptCalls: 0,
       turnlessRunsPending: 0,
+      turnlessMessageUuids: new Set(),
       providerRunActive: false,
       pendingPermissions: new Map(),
       pendingQuestions: new Map(),
@@ -1466,6 +1483,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }>();
       const turnIdle = createDeferred<void>();
       state.turn = turn;
+      const userMessageUuid = randomUUID();
+      state.turnMessageUuids.clear();
+      state.turnMessageUuids.add(userMessageUuid);
       state.turnIdle = turnIdle;
       try {
         state.translator.beginTurn();
@@ -1476,6 +1496,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           type: "user",
           message: { role: "user", content: this.buildContent(opts.prompt) },
           parent_tool_use_id: null,
+          uuid: userMessageUuid,
         } as SDKUserMessage);
         const { stopReason, usage } = await turn.promise;
         // Prefer the session's configured model. Claude's perModel list is
@@ -1505,7 +1526,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // A turn that produced nothing (error, cancel) must not hand its
         // pending measurement to whichever turn runs next.
         state.firstToken.endTurn();
-        if (state.turn === turn) state.turn = null;
+        if (state.turn === turn) {
+          state.turn = null;
+          state.turnMessageUuids.clear();
+        }
         if (state.turnIdle === turnIdle) state.turnIdle = null;
         turnIdle.resolve();
       }
@@ -1563,6 +1587,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     }
     state.pendingRestart = false;
     state.turnlessRunsPending = 0;
+    state.turnlessMessageUuids.clear();
     state.providerRunActive = false;
     // A fresh query re-pays every once-per-process cost (CLI spawn, MCP and
     // hook wiring, prompt-cache write), so the first turn on it is cold again
@@ -1615,15 +1640,19 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     this.markSessionBusy(state);
     this.ensureQuery(state);
     state.translator.expectManualCompaction();
+    const userMessageUuid = randomUUID();
     state.turnlessRunsPending += 1;
+    state.turnlessMessageUuids.add(userMessageUuid);
     try {
       state.input.push({
         type: "user",
         message: { role: "user", content: "/compact" },
         parent_tool_use_id: null,
+        uuid: userMessageUuid,
       } as SDKUserMessage);
     } catch (error) {
       state.turnlessRunsPending = Math.max(0, state.turnlessRunsPending - 1);
+      state.turnlessMessageUuids.delete(userMessageUuid);
       this.refreshIdleTeardown(state);
       throw error;
     }
@@ -1715,11 +1744,19 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         agentId: this.agentId,
       });
     }
-    state.input.push({
-      type: "user",
-      message: { role: "user", content: this.buildContent(opts.prompt) },
-      parent_tool_use_id: null,
-    } as SDKUserMessage);
+    const userMessageUuid = randomUUID();
+    state.turnMessageUuids.add(userMessageUuid);
+    try {
+      state.input.push({
+        type: "user",
+        message: { role: "user", content: this.buildContent(opts.prompt) },
+        parent_tool_use_id: null,
+        uuid: userMessageUuid,
+      } as SDKUserMessage);
+    } catch (error) {
+      state.turnMessageUuids.delete(userMessageUuid);
+      throw error;
+    }
   }
 
   /** The long-lived loop that drains ONE persistent query across all of a
@@ -1744,6 +1781,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           subtype?: string;
           session_id?: string;
           skills?: unknown;
+          user_message_uuid?: unknown;
+          user_message_uuids?: unknown;
         };
 
         if (m.type === "system" && m.subtype === "init") {
@@ -1861,17 +1900,66 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           // channel call (zero model tokens) that must never delay or fail
           // the turn.
           void this.emitContextUsage(state);
+          const correlatedMessageUuids = new Set<string>();
+          if (
+            typeof m.user_message_uuid === "string" &&
+            m.user_message_uuid.length > 0
+          ) {
+            correlatedMessageUuids.add(m.user_message_uuid);
+          }
+          if (Array.isArray(m.user_message_uuids)) {
+            for (const uuid of m.user_message_uuids) {
+              if (typeof uuid === "string" && uuid.length > 0) {
+                correlatedMessageUuids.add(uuid);
+              }
+            }
+          }
+          const hasCorrelation = correlatedMessageUuids.size > 0;
           const turn = state.turn;
-          state.turn = null;
           state.providerRunActive = false;
-          if (!turn) {
+
+          // A correlated result can settle any /compact input it explicitly
+          // names. With no correlation fields, retain the pre-0.3.265 fallback:
+          // an otherwise-turnless result consumes the oldest pending count.
+          let matchedTurnless = 0;
+          if (hasCorrelation) {
+            for (const uuid of correlatedMessageUuids) {
+              if (state.turnlessMessageUuids.delete(uuid)) {
+                matchedTurnless += 1;
+              }
+            }
+          } else if (!turn && state.turnlessRunsPending > 0) {
+            const oldestUuid = state.turnlessMessageUuids.values().next().value;
+            if (typeof oldestUuid === "string") {
+              state.turnlessMessageUuids.delete(oldestUuid);
+            }
+            matchedTurnless = 1;
+          }
+          if (matchedTurnless > 0) {
             state.turnlessRunsPending = Math.max(
               0,
-              state.turnlessRunsPending - 1,
+              state.turnlessRunsPending - matchedTurnless,
             );
+          }
+
+          // 0.3.265+ can emit a result for a synthetic/autonomous turn while
+          // our user message is still queued. Only defer local settlement
+          // when the producer supplied positive correlation that names some
+          // other message; uncorrelated legacy/fatal results keep the historic
+          // next-result behavior. The frame itself was already translated and
+          // its usage refresh above still runs, so no provider output is gated.
+          const resultBelongsToTurn =
+            turn !== null &&
+            (!hasCorrelation ||
+              [...correlatedMessageUuids].some((uuid) =>
+                state.turnMessageUuids.has(uuid),
+              ));
+          if (!resultBelongsToTurn) {
             this.refreshIdleTeardown(state);
             continue;
           }
+          state.turn = null;
+          state.turnMessageUuids.clear();
           const terminalError = state.translator.terminalError;
           if (terminalError && looksLikeAuthPrompt(terminalError)) {
             // Not signed in — surface as auth-required (Sign-in chip), not
@@ -2005,6 +2093,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // doesn't hang forever.
       const turn = state.turn;
       state.turn = null;
+      state.turnMessageUuids.clear();
       if (turn) {
         if (state.cancelRequested || state.disposed) {
           turn.resolve({ stopReason: "cancelled" as StopReason });
@@ -2045,6 +2134,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.idleSince = null;
         state.providerRunActive = false;
         state.turnlessRunsPending = 0;
+        state.turnlessMessageUuids.clear();
         state.query = null;
         state.consumer = null;
       }

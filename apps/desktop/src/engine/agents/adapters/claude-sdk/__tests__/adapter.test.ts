@@ -284,6 +284,76 @@ function makeScriptedQuery(
   };
 }
 
+/** A single persistent query whose output can be advanced one SDK frame at a
+ * time. This models autonomous/synthetic work that starts while the query is
+ * idle, followed by a user send that the CLI leaves queued for the next turn. */
+function makePushableQuery() {
+  const inputsSeen: Msg[] = [];
+  const output: Msg[] = [];
+  const control = { closes: 0 };
+  let wakeOutput: (() => void) | null = null;
+  let open = true;
+
+  const wake = () => {
+    const release = wakeOutput;
+    wakeOutput = null;
+    release?.();
+  };
+  const stop = () => {
+    open = false;
+    wake();
+  };
+  const push = (...messages: Msg[]) => {
+    output.push(...messages);
+    wake();
+  };
+
+  const queryFn = (params: {
+    prompt?: AsyncIterable<Msg>;
+    options?: Record<string, unknown>;
+  }) => {
+    if (params.prompt) {
+      void (async () => {
+        for await (const message of params.prompt!) inputsSeen.push(message);
+      })();
+    }
+    const signal = (
+      params.options?.abortController as AbortController | undefined
+    )?.signal;
+    signal?.addEventListener("abort", stop, { once: true });
+
+    const query = (async function* () {
+      while (open) {
+        if (output.length === 0) {
+          await new Promise<void>((resolve) => {
+            wakeOutput = resolve;
+          });
+        }
+        if (!open) break;
+        while (output.length > 0) yield output.shift()!;
+      }
+    })() as unknown as Record<string, unknown>;
+    query.interrupt = async () => stop();
+    query.stopTask = async () => {};
+    query.setPermissionMode = async () => {};
+    query.setModel = async () => {};
+    query.applyFlagSettings = async () => {};
+    query.supportedModels = async () => [];
+    query.supportedCommands = async () => [];
+    query.close = () => {
+      control.closes += 1;
+      stop();
+    };
+    return query;
+  };
+
+  return { queryFn: queryFn as never, inputsSeen, push, control };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
 describe("Claude cloud connector inventory", () => {
   it("does not launch a session just to browse account connectors", async () => {
     const { queryFn, captured } = makeScriptedQuery([]);
@@ -719,6 +789,133 @@ describe("ClaudeSdkAdapter", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(compacting.control.closes).toBe(0);
       await compactAdapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the correlated user result after a synthetic turn settles first", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    // First establish the persistent query with a legacy result that has no
+    // correlation fields. Missing-correlation producers must keep working.
+    const firstTurn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("first")] as never,
+    });
+    await flushMicrotasks();
+    live.push(initMsg("sdk-correlated"), resultOk("sdk-correlated"));
+    await firstTurn;
+
+    // Claude Code can start a synthetic turn itself (for example a scheduled
+    // wake-up). A user send that arrives during it can remain queued, in which
+    // case 0.3.265+ reports the synthetic turn's UUID and queued_turn_count=1.
+    live.push({
+      ...assistantText("scheduled work"),
+      user_message_uuid: "synthetic-wakeup",
+      user_message_uuids: ["synthetic-wakeup"],
+    });
+    await flushMicrotasks();
+
+    let secondSettled = false;
+    const secondTurn = adapter
+      .prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("user follow-up")] as never,
+      })
+      .then((result) => {
+        secondSettled = true;
+        return result;
+      });
+    await flushMicrotasks();
+    live.push({
+      ...resultOk("sdk-correlated"),
+      user_message_uuid: "synthetic-wakeup",
+      user_message_uuids: ["synthetic-wakeup"],
+      queued_turn_count: 1,
+    });
+    await flushMicrotasks();
+
+    expect(secondSettled).toBe(false);
+    const secondMessageUuid = live.inputsSeen[1]?.uuid;
+    expect(secondMessageUuid).toEqual(expect.any(String));
+
+    live.push(
+      {
+        ...assistantText("user reply"),
+        user_message_uuid: secondMessageUuid,
+        user_message_uuids: [secondMessageUuid],
+      },
+      {
+        ...resultOk("sdk-correlated"),
+        user_message_uuid: secondMessageUuid,
+        user_message_uuids: [secondMessageUuid],
+        queued_turn_count: 0,
+      },
+    );
+    await expect(secondTurn).resolves.toMatchObject({
+      stopReason: "end_turn",
+    });
+    await adapter.dispose();
+  });
+
+  it("keeps a correlated /compact pending across an earlier synthetic result", async () => {
+    vi.useFakeTimers();
+    try {
+      const live = makePushableQuery();
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn: live.queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const firstTurn = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("first")] as never,
+      });
+      await flushMicrotasks();
+      live.push(
+        initMsg("sdk-compact-correlation"),
+        resultOk("sdk-compact-correlation"),
+      );
+      await firstTurn;
+
+      live.push({
+        ...assistantText("scheduled work"),
+        user_message_uuid: "synthetic-wakeup",
+        user_message_uuids: ["synthetic-wakeup"],
+      });
+      await flushMicrotasks();
+      await adapter.compactContext({ sessionId: session.sessionId });
+      await flushMicrotasks();
+      const compactMessageUuid = live.inputsSeen[1]?.uuid;
+
+      live.push({
+        ...resultOk("sdk-compact-correlation"),
+        user_message_uuid: "synthetic-wakeup",
+        user_message_uuids: ["synthetic-wakeup"],
+        queued_turn_count: 1,
+      });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.control.closes).toBe(0);
+      expect(compactMessageUuid).toEqual(expect.any(String));
+
+      live.push({
+        ...resultOk("sdk-compact-correlation"),
+        user_message_uuid: compactMessageUuid,
+        user_message_uuids: [compactMessageUuid],
+        queued_turn_count: 0,
+      });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(live.control.closes).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(live.control.closes).toBe(1);
+      await adapter.dispose();
     } finally {
       vi.useRealTimers();
     }
@@ -4129,6 +4326,64 @@ describe("ClaudeSdkAdapter.steer", () => {
     expect(steered.message?.content).toBe("also say APPLE at the end");
 
     await adapter.cancel({ sessionId: session.sessionId });
+    await adapter.dispose();
+  });
+
+  it("settles when the result's singular UUID names a mid-turn steer", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("start")] as never,
+    });
+    await flushMicrotasks();
+    await adapter.steer({
+      sessionId: session.sessionId,
+      prompt: [textBlock("add this")] as never,
+    });
+    await flushMicrotasks();
+
+    const originalUuid = live.inputsSeen[0]?.uuid;
+    const steerUuid = live.inputsSeen[1]?.uuid;
+    expect(originalUuid).toEqual(expect.any(String));
+    expect(steerUuid).toEqual(expect.any(String));
+    expect(steerUuid).not.toBe(originalUuid);
+
+    live.push(initMsg("sdk-steer-correlation"), {
+      ...resultOk("sdk-steer-correlation"),
+      user_message_uuid: steerUuid,
+    });
+    await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+    await adapter.dispose();
+  });
+
+  it("settles when the plural UUIDs include the active send", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("active user send")] as never,
+    });
+    await flushMicrotasks();
+    const activeUuid = live.inputsSeen[0]?.uuid;
+    expect(activeUuid).toEqual(expect.any(String));
+
+    live.push(initMsg("sdk-plural-correlation"), {
+      ...resultOk("sdk-plural-correlation"),
+      // A merged/folded result names the last consumed input singularly while
+      // retaining every consumed input in the plural correlation list.
+      user_message_uuid: "another-consumed-input",
+      user_message_uuids: [activeUuid, "another-consumed-input"],
+    });
+    await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
     await adapter.dispose();
   });
 
