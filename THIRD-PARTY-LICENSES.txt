@@ -3674,10 +3674,10 @@ simple-get@4.0.1
   Source: https://github.com/feross/simple-get
   License documents: d4c2065e2b93
 
-smol-toml@1.6.1
+smol-toml@1.7.1
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
-  Author: Cynthia <cyyynthia@borkenware.com>
+  Author: Cynthia Rey <cynthia@cynthia.dev>
   Source: https://github.com/squirrelchat/smol-toml
   License documents: fa5659948374
 
@@ -14751,8 +14751,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT fa5659948374
 SHA-256: fa5659948374d4f555594f47f6da073b40dc503e921aeeece30df4362b3051a5
-Applies to: smol-toml@1.6.1
-Source labels: smol-toml@1.6.1 — LICENSE
+Applies to: smol-toml@1.7.1
+Source labels: smol-toml@1.7.1 — LICENSE
 ================================================================================
 
 Copyright (c) Squirrel Chat et al., All rights reserved.

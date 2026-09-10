@@ -179,7 +179,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "shiki": "^4.0.2",
-    "smol-toml": "^1.6.1",
+    "smol-toml": "^1.7.1",
     "sonner": "^2.0.7",
     "tailwind-merge": "^3.0.0",
     "tinyglobby": "^0.2.17",
