@@ -227,6 +227,6 @@ d("security notification outbox", () => {
     expect(content.subject).toMatch(/sign-in identity/i);
     expect(content.html).not.toContain("<img");
     expect(content.html).not.toContain("onerror");
-    expect(content.html).toContain("hello@zeros.build");
+    expect(content.html).toContain("hi@zeros.build");
   });
 });

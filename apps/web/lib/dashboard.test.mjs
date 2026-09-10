@@ -224,7 +224,7 @@ test("mobile navigation exposes a controlled sidebar and dismissing scrim", () =
   assert.match(page, /aria-controls="dashboard-sidebar" aria-expanded="false"/);
   assert.match(page, /class="mobile-scrim"[^>]*data-action="close-mobile-nav"/);
   assert.match(page, /avatar avatar-large/);
-  assert.match(page, /Provider-managed/);
+  assert.match(page, /Sign-in profile/);
 });
 
 test("server-rendered organization identity uses safe raster logos only", () => {
@@ -286,7 +286,7 @@ test("reviewed account recovery is distinct from an organization outage", () => 
   });
   assert.match(page, /Account recovery required/);
   assert.match(page, /ZR-ABCD-2345/);
-  assert.match(page, /hello@zeros\.build/);
+  assert.match(page, /mailto:hi@zeros\.build/);
   assert.match(page, /Sign out/);
   assert.doesNotMatch(page, /Organization data is unavailable/);
   assert.doesNotMatch(page, /secret-token-must-not-render/);

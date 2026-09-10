@@ -168,7 +168,7 @@ export function accountAccessPage({ session, kind, signOutHref }) {
       summary:
         "A recent authentication is required before this identity can continue.",
       detail:
-        "Sign out, then complete Hosted AuthKit again. This fresh proof protects account recovery and other sensitive changes.",
+        "Sign out, then sign in to Zeros again. A fresh sign-in protects account recovery and other sensitive changes.",
     },
     account_unavailable: {
       title: "Account access unavailable",
@@ -201,7 +201,7 @@ export function accountAccessPage({ session, kind, signOutHref }) {
         <section class="section-stack">
           <div class="section-heading"><div><h1>${esc(content.title)}</h1><p>${esc(content.summary)}</p></div></div>
           <div class="notice notice-error"><strong>Access was stopped safely</strong><p>${esc(content.detail)}</p></div>
-          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a> <a class="button secondary" href="mailto:hello@zeros.build">Contact support</a></div>
+          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a> <a class="button secondary" href="mailto:hi@zeros.build">Contact support</a></div>
         </section>
       </div>
     </main>
@@ -240,10 +240,10 @@ export function accountRecoveryPage({ session, recoveryCode, signOutHref }) {
           <div class="section-heading"><div><h1>Account recovery required</h1><p>Your sign-in completed securely, but it cannot be linked automatically.</p></div></div>
           <div class="notice notice-error">
             <strong>We protected your existing Zeros account</strong>
-            <p>A previous WorkOS identity for this verified email was removed. Zeros never links a new identity by email alone, because that could let the wrong person take over the account.</p>
+            <p>A previous sign-in identity for this verified email was removed. Zeros never links a new identity by email alone, because that could let the wrong person take over the account.</p>
           </div>
           <div class="card">
-            <div class="card-title"><div><strong>What to do</strong><p>Email <a href="mailto:hello@zeros.build">hello@zeros.build</a>${safeRecoveryCode ? " and include the recovery code below" : " for a reviewed recovery"}. The code is a support locator, not a password, and expires after 24 hours.</p></div></div>
+            <div class="card-title"><div><strong>What to do</strong><p>Email <a href="mailto:hi@zeros.build">hi@zeros.build</a>${safeRecoveryCode ? " and include the recovery code below" : " for a reviewed recovery"}. The code is a support locator, not a password, and expires after 24 hours.</p></div></div>
             ${safeRecoveryCode ? `<div class="settings-row"><span class="settings-copy"><strong>Recovery code</strong><p>Share this only with Zeros support.</p></span><span class="settings-value"><code class="id-code">${esc(safeRecoveryCode)}</code></span></div>` : ""}
           </div>
           <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a></div>
@@ -297,9 +297,9 @@ export function accountDeletionPage({ session, deletion, signOutHref }) {
     <main class="main-content"><div class="content-column">
       <section class="section-stack">
         <div class="section-heading"><div><h1>Account deletion scheduled</h1><p>Cloud account access was stopped immediately. Local Personal workspaces remain on your devices.</p></div></div>
-        <div class="notice notice-error"><strong>Recovery is available for 30 days</strong><p>Restore this account before ${esc(purgeLabel)}. After that point, Zeros will delete the WorkOS identity and erase the retained cloud account data.</p></div>
+        <div class="notice notice-error"><strong>Recovery is available for 30 days</strong><p>Restore this account before ${esc(purgeLabel)}. After that point, Zeros will permanently delete your account and erase the retained cloud account data.</p></div>
         ${recoveryCode ? `<div class="card settings-card"><div class="settings-row"><span class="settings-copy"><strong>Recovery code</strong><p>This identifies the request; it is not authentication.</p></span><span class="settings-value"><code class="id-code">${esc(recoveryCode)}</code></span></div></div>` : ""}
-        <div class="card"><div class="card-title"><div><strong>Restore account</strong><p>A recent WorkOS authentication is required. Previously revoked sessions remain signed out.</p></div><button class="button primary" id="restore-account" type="button" ${requestId ? "" : "disabled"}>Restore account</button></div><div class="dialog-error" id="restore-account-error" role="alert"></div></div>
+        <div class="card"><div class="card-title"><div><strong>Restore account</strong><p>A recent sign-in is required. Previously revoked sessions remain signed out.</p></div><button class="button primary" id="restore-account" type="button" ${requestId ? "" : "disabled"}>Restore account</button></div><div class="dialog-error" id="restore-account-error" role="alert"></div></div>
         <a class="button secondary" href="${esc(signOutHref)}">Sign out</a>
       </section>
     </div></main>
@@ -358,7 +358,7 @@ function generalSection(org) {
       <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${esc(org.role)}</span></span></div>
     </div>
     <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${org.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${org.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${org.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
-    ${org.isPersonal ? '<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>' : org.role === "owner" ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes access immediately and keeps the organization recoverable for 30 days. WorkOS and retained cloud data are deleted only after the grace period.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
+    ${org.isPersonal ? '<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>' : org.role === "owner" ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes access immediately and keeps the organization recoverable for 30 days. The organization and retained cloud data are deleted only after the grace period.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
   </section>`;
 }
 
@@ -366,7 +366,7 @@ function profileSection(user) {
   const displayName = user.name || "Zeros user";
   return `<section class="section-stack"><div class="section-heading"><div><h1>Profile</h1><p>Your browser account and sign-in identity.</p></div></div>
     <div class="card"><div class="identity-row"><span class="avatar avatar-large">${esc(initials(displayName || user.email))}</span><div><strong>${esc(displayName)}</strong><p>${esc(user.email)}</p></div></div></div>
-    <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Name and avatar are currently provided by Hosted AuthKit. Profile editing will be available here later.</p></div><span class="badge">Provider-managed</span></div></div>
+    <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Your name and avatar come from your sign-in account. Profile editing will be available here later.</p></div><span class="badge">Sign-in profile</span></div></div>
     <div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete account</strong><p>Signs out every device immediately and keeps cloud account data recoverable for 30 days. Local Personal workspaces stay on each device.</p></div><button class="button danger" type="button" data-action="delete-account">Delete account</button></div></div>
   </section>`;
 }

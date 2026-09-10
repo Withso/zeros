@@ -119,7 +119,7 @@ export function PrivacyPage() {
       <h2>Contact</h2>
       <p>
         Questions, or a request to delete your account data:{' '}
-        <a href="mailto:hello@zeros.build">hello@zeros.build</a>.
+        <a href="mailto:hi@zeros.build">hi@zeros.build</a>.
       </p>
     </LegalLayout>
   )
