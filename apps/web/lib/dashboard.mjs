@@ -8,6 +8,8 @@ const ORGANIZATION_ID_RE =
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DASHBOARD_ASSET_REVISION = "2026-09-02.1";
+const BRAND_MARK =
+  '<span class="brand-mark" aria-hidden="true"><img src="/zeros-logo.svg" width="18" height="18" alt="" /></span>';
 
 function dashboardAsset(path) {
   return `${path}?v=${DASHBOARD_ASSET_REVISION}`;
@@ -193,7 +195,7 @@ export function accountAccessPage({ session, kind, signOutHref }) {
 <body class="dashboard-page">
   <div class="app-shell">
     <aside class="sidebar" aria-label="Zeros account">
-      <a class="brand" href="/" aria-label="Zeros home"><span class="brand-mark">Z</span><span>Zeros</span></a>
+      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
       <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
     </aside>
     <main class="main-content">
@@ -231,7 +233,7 @@ export function accountRecoveryPage({ session, recoveryCode, signOutHref }) {
 <body class="dashboard-page">
   <div class="app-shell">
     <aside class="sidebar" aria-label="Zeros account">
-      <a class="brand" href="/" aria-label="Zeros home"><span class="brand-mark">Z</span><span>Zeros</span></a>
+      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
       <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
     </aside>
     <main class="main-content">
@@ -291,7 +293,7 @@ export function accountDeletionPage({ session, deletion, signOutHref }) {
 <body class="dashboard-page">
   <div class="app-shell">
     <aside class="sidebar" aria-label="Zeros account">
-      <a class="brand" href="/" aria-label="Zeros home"><span class="brand-mark">Z</span><span>Zeros</span></a>
+      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
       <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
     </aside>
     <main class="main-content"><div class="content-column">
@@ -452,7 +454,7 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
 <body class="dashboard-page">
   <div class="app-shell">
     <aside class="sidebar" id="dashboard-sidebar" aria-label="Organization settings">
-      <a class="brand" href="/" aria-label="Zeros home"><span class="brand-mark">Z</span><span>Zeros</span></a>
+      <a class="brand" href="/" aria-label="Zeros home">${BRAND_MARK}<span>Zeros</span></a>
       <details class="org-switcher" id="org-switcher">
         <summary>${organizationAvatar(active)}<span class="summary-copy"><strong>${esc(organizationLabel(active))}</strong><small>${active?.isPersonal ? "Personal" : "Organization"}</small></span><span aria-hidden="true">⌄</span></summary>
         <div class="popover" role="listbox" aria-label="Organizations">
@@ -474,7 +476,7 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
     </aside>
     <button class="mobile-scrim" type="button" data-action="close-mobile-nav" aria-label="Close navigation"></button>
     <main class="main-content">
-      <header class="mobile-header"><span class="brand-mark">Z</span><strong>${esc(organizationLabel(active))}</strong><button type="button" data-action="toggle-mobile-nav" aria-label="Open navigation" aria-controls="dashboard-sidebar" aria-expanded="false"><span class="mobile-menu-glyph" aria-hidden="true"></span></button></header>
+      <header class="mobile-header">${BRAND_MARK}<strong>${esc(organizationLabel(active))}</strong><button type="button" data-action="toggle-mobile-nav" aria-label="Open navigation" aria-controls="dashboard-sidebar" aria-expanded="false"><span class="mobile-menu-glyph" aria-hidden="true"></span></button></header>
       <div class="content-column" id="dashboard-content">${initialSection(section, active, profileIdentity, loadError)}</div>
     </main>
   </div>
