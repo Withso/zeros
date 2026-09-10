@@ -286,7 +286,7 @@ test("reviewed account recovery is distinct from an organization outage", () => 
   });
   assert.match(page, /Account recovery required/);
   assert.match(page, /ZR-ABCD-2345/);
-  assert.match(page, /hello@zeros\.build/);
+  assert.match(page, /mailto:hi@zeros\.build/);
   assert.match(page, /Sign out/);
   assert.doesNotMatch(page, /Organization data is unavailable/);
   assert.doesNotMatch(page, /secret-token-must-not-render/);

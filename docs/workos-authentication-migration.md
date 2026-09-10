@@ -709,6 +709,13 @@ Resend idempotency key and persist the accepted provider message ID. Operators
 must monitor failures rather than treating an HTTP timeout as proof that a
 message was not accepted.
 
+The public support/contact mailbox is `hi@zeros.build`. Zeros-generated
+Resend messages set that address as `Reply-To` and link to it in recovery and
+security notices. `EMAIL_FROM` remains a sender on the verified sending
+domain; it does not determine the reply destination. Configure each WorkOS
+environment's Admin Portal support/reply address and access-blocked support
+address, plus Google's OAuth user support email, to the same public mailbox.
+
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.

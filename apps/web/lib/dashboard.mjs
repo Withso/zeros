@@ -201,7 +201,7 @@ export function accountAccessPage({ session, kind, signOutHref }) {
         <section class="section-stack">
           <div class="section-heading"><div><h1>${esc(content.title)}</h1><p>${esc(content.summary)}</p></div></div>
           <div class="notice notice-error"><strong>Access was stopped safely</strong><p>${esc(content.detail)}</p></div>
-          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a> <a class="button secondary" href="mailto:hello@zeros.build">Contact support</a></div>
+          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a> <a class="button secondary" href="mailto:hi@zeros.build">Contact support</a></div>
         </section>
       </div>
     </main>
@@ -243,7 +243,7 @@ export function accountRecoveryPage({ session, recoveryCode, signOutHref }) {
             <p>A previous WorkOS identity for this verified email was removed. Zeros never links a new identity by email alone, because that could let the wrong person take over the account.</p>
           </div>
           <div class="card">
-            <div class="card-title"><div><strong>What to do</strong><p>Email <a href="mailto:hello@zeros.build">hello@zeros.build</a>${safeRecoveryCode ? " and include the recovery code below" : " for a reviewed recovery"}. The code is a support locator, not a password, and expires after 24 hours.</p></div></div>
+            <div class="card-title"><div><strong>What to do</strong><p>Email <a href="mailto:hi@zeros.build">hi@zeros.build</a>${safeRecoveryCode ? " and include the recovery code below" : " for a reviewed recovery"}. The code is a support locator, not a password, and expires after 24 hours.</p></div></div>
             ${safeRecoveryCode ? `<div class="settings-row"><span class="settings-copy"><strong>Recovery code</strong><p>Share this only with Zeros support.</p></span><span class="settings-value"><code class="id-code">${esc(safeRecoveryCode)}</code></span></div>` : ""}
           </div>
           <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a></div>
