@@ -224,7 +224,7 @@ test("mobile navigation exposes a controlled sidebar and dismissing scrim", () =
   assert.match(page, /aria-controls="dashboard-sidebar" aria-expanded="false"/);
   assert.match(page, /class="mobile-scrim"[^>]*data-action="close-mobile-nav"/);
   assert.match(page, /avatar avatar-large/);
-  assert.match(page, /Provider-managed/);
+  assert.match(page, /Sign-in profile/);
 });
 
 test("server-rendered organization identity uses safe raster logos only", () => {
