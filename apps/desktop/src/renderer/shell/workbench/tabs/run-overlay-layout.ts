@@ -4,9 +4,9 @@
 //
 // The Run sub-tab stacks two things in one `position: relative` box: the run's
 // TerminalSessionView, and an overlay carrying the Stop / Rerun cluster. Every
-// child is `absolute inset-0` and NOTHING sets a z-index, so paint and
-// hit-testing fall back to DOM order — and the overlay wrapper is rendered
-// last, i.e. on top of the terminal.
+// child is `absolute inset-0`. The overlay uses a locally raised portal host
+// so it stays above a terminal that attaches after the Run starts. Only the
+// status controls receive pointer events; terminal input passes through.
 //
 // It was `pointer-events-auto` while active. That is an invisible, full-pane
 // hit target: wheel events never reached the xterm viewport (a run log could

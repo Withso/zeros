@@ -15,6 +15,12 @@ export interface QuickOpenBrowserResult extends RecentBrowserEntry {
   score: number;
 }
 
+export interface QuickOpenEnvironmentEntry {
+  terminalId: string;
+  title: string;
+  icon: string;
+}
+
 function folded(value: string): string {
   return value
     .normalize("NFKD")
@@ -118,6 +124,29 @@ export function searchRecentBrowsers(
         b.score - a.score ||
         b.visitedAt - a.visitedAt ||
         a.url.localeCompare(b.url),
+    )
+    .slice(0, limit);
+}
+
+/** Environment destinations use the same name matching as files and pages.
+ * Session ids identify results but never participate in user-facing search. */
+export function searchEnvironmentTerminals(
+  entries: QuickOpenEnvironmentEntry[],
+  query: string,
+  limit = 80,
+): Array<QuickOpenEnvironmentEntry & { score: number }> {
+  if (!query.trim() || limit <= 0) return [];
+  return entries
+    .map((entry) => ({
+      ...entry,
+      score: candidateScore(query, entry.title, entry.title),
+    }))
+    .filter((entry) => entry.score > 0)
+    .sort(
+      (a, b) =>
+        b.score - a.score ||
+        a.title.localeCompare(b.title) ||
+        a.terminalId.localeCompare(b.terminalId),
     )
     .slice(0, limit);
 }

@@ -137,6 +137,29 @@ describe("requestWorkspaceList", () => {
 });
 
 describe("context-graph transition queue budgets", () => {
+  it("preserves actionable scaffold and sharing failures from the engine", async () => {
+    const bridge = {
+      request: async (message: { op?: string }) => ({
+        type: "WORKSPACE_RESPONSE",
+        op: message.op,
+        result: {
+          ok: false,
+          created: false,
+          moved: false,
+          error: "context migration conflict",
+        },
+      }),
+    } as unknown as RuntimeClient;
+    expect(await bridgeContextGraphScaffold(bridge, "ws1")).toEqual({
+      ok: false,
+      created: false,
+      error: "context migration conflict",
+    });
+    expect(
+      await bridgeContextGraphSetShared(bridge, "ws1", "id", true),
+    ).toEqual({ ok: false, moved: false, error: "context migration conflict" });
+  });
+
   it.each([
     [
       "attachment.write",

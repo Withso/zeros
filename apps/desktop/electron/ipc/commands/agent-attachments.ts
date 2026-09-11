@@ -7,7 +7,7 @@
 // so this handler moves a base64-encoded attachment into the workspace's
 // context graph:
 //
-//   <cwd>/.context-graph/<scope>/attachments/<attachmentId>/<safeFilename>
+//   <cwd>/.context/<scope>/attachments/<attachmentId>/<safeFilename>
 //
 // One folder per attachment, exactly one file inside — the layout the Context
 // tab canvas renders and the share checkbox moves between `local/`
@@ -21,7 +21,7 @@
 //
 // Why store under the chat's cwd instead of a global temp dir?
 //   1. The agent's CLI runs with cwd = chatFolder. Saving here means
-//      `@.context-graph/...` works as a relative path.
+//      `@.context/...` works as a relative path.
 //   2. The user can browse the directory in Finder/VS Code — and the Context
 //      tab — and see what's actually being shipped.
 //   3. The graph belongs to the WORKSPACE (it survives chat deletion and is
@@ -96,7 +96,7 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
 
   // The renderer needs both the absolute path (for tool-call paths
   // like Read("/abs/path")) and the cwd-relative path (for @-mentions
-  // like @.context-graph/local/attachments/...). Ship both so the prompt
+  // like @.context/local/attachments/...). Ship both so the prompt
   // builder can pick whichever the active agent prefers.
   return {
     absolutePath: staged.absolutePath,
