@@ -139,7 +139,11 @@ describe(".context directory compatibility", () => {
           throw Object.assign(new Error("process stopped"), { code: "EIO" });
       });
       expect(await ensureContextGraph(root)).toMatchObject({ ok: false });
-      await expect(fs.lstat(source)).rejects.toMatchObject({ code: "ENOENT" });
+      // Observe absence in the directory: recovery intentionally changes the
+      // source before the later content assertion, so no stat result is reused.
+      expect(await fs.readdir(path.dirname(source))).not.toContain(
+        path.basename(source),
+      );
       expect(await read(".context/local/doc.md")).toBe("old version");
       vi.restoreAllMocks();
 
