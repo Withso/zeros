@@ -568,7 +568,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
   "attachment.write",
   // These are normally reads, but a window containing a legacy transcript
-  // image copies it into `.context-graph` before returning. Register the whole
+  // image copies it into `.context` before returning. Register the whole
   // operation so archive/delete cannot move the checkout mid-migration.
   "messages.window",
   "messages.windowOlder",
@@ -589,7 +589,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.unstage",
   "design.save",
   "design.commit",
-  // Create/move files under `.context-graph/` — archive's snapshot force-adds
+  // Create/move files under `.context/` — archive's snapshot force-adds
   // that tree, so a mid-flight scaffold or share-toggle must drain first.
   "context.graph.scaffold",
   "context.graph.setShared",

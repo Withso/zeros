@@ -96,7 +96,7 @@ async function resolveTarget(cwd: string, action: string) {
   return { bridge, workspaceId };
 }
 
-/** List the workspace's `.context-graph/` contents (both scopes merged).
+/** List the workspace's `.context/` contents (both scopes merged).
  *  Transport absence REJECTS (callers retain their confirmed snapshot);
  *  a remote client resolves to the empty non-existent graph. */
 export async function listContextGraph(
@@ -115,7 +115,7 @@ export async function listContextGraph(
 /** Idempotently create the graph skeleton. No-op without native graph access. */
 export async function scaffoldContextGraph(
   cwd: string,
-): Promise<{ ok: boolean; created: boolean }> {
+): Promise<{ ok: boolean; created: boolean; error?: string }> {
   if (!cwd || !isNativeRuntime()) return { ok: false, created: false };
   const { bridge, workspaceId } = await resolveTarget(
     cwd,
@@ -130,7 +130,7 @@ export async function setContextGraphShared(
   cwd: string,
   attachmentId: string,
   shared: boolean,
-): Promise<{ ok: boolean; moved: boolean }> {
+): Promise<{ ok: boolean; moved: boolean; error?: string }> {
   if (!cwd || !isNativeRuntime()) return { ok: false, moved: false };
   const { bridge, workspaceId } = await resolveTarget(
     cwd,

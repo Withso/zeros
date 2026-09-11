@@ -138,7 +138,7 @@ const commandTable: Record<string, CommandHandler> = {
   process_relaunch: notImpl("process_relaunch", 8),
 
   // ── Agent attachment staging and context graph ───────────────
-  // Moves base64 attachment bytes into the workspace's .context-graph.
+  // Moves base64 attachment bytes into the workspace's .context.
   // A file-write, not chat storage. Write-only: the graph is append-only
   // from the app (files leave it only via the user deleting them on disk).
   agent_attachment_write: notImpl("agent_attachment_write", 8),

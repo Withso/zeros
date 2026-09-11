@@ -46,7 +46,9 @@ const ONE = {
 
 beforeEach(() => {
   resetContextGraphCacheForTests();
-  scaffoldContextGraph.mockReset().mockResolvedValue({ ok: true, created: false });
+  scaffoldContextGraph
+    .mockReset()
+    .mockResolvedValue({ ok: true, created: false });
   listContextGraph.mockReset();
 });
 
@@ -63,6 +65,24 @@ describe("contextGraphKey", () => {
 });
 
 describe("loadContextGraph with force during an in-flight listing", () => {
+  it("keeps conflict listings visible, isolates the error by workspace and retries preparation", async () => {
+    scaffoldContextGraph.mockResolvedValueOnce({
+      ok: false,
+      created: false,
+      error: "context migration conflict",
+    });
+    listContextGraph.mockResolvedValue(ONE);
+    const a = await loadContextGraph("/a");
+    const b = await loadContextGraph("/b");
+    expect(a).toMatchObject({
+      items: ONE.items,
+      storageError: "context migration conflict",
+    });
+    expect(b).toEqual(ONE);
+    expect(await loadContextGraph("/a", { force: true })).toEqual(ONE);
+    expect(scaffoldContextGraph).toHaveBeenCalledTimes(3);
+  });
+
   it("re-fetches after the stale request settles and publishes the fresh result", async () => {
     // First listing hangs (the tab's activation read), started BEFORE the
     // attachment write landed on disk.

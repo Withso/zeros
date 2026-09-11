@@ -355,7 +355,7 @@ export interface AttachmentReadResult {
 export { isAgentAttachmentDiskPath } from "./attachment-file-reader";
 
 /** Persist a base64-encoded attachment into the workspace's context graph
- *  (`<cwd>/.context-graph/<scope>/attachments/<attachmentId>/<file>`) and
+ *  (`<cwd>/.context/<scope>/attachments/<attachmentId>/<file>`) and
  *  return both the absolute and cwd-relative paths. Every composer attachment
  *  lands here the moment it is staged — images so non-vision agents can
  *  reference them by path, text files / transcripts so the Context tab canvas

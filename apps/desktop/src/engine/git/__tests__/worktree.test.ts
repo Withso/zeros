@@ -27,6 +27,7 @@ import { opSettingsWrite } from "../../settings/ops";
 import { worktreeSeedPath } from "../../db/paths";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ensureContextGraph } from "../../files/context-graph";
 
 import {
   archiveWorkspace,
@@ -208,7 +209,7 @@ describe("worktree lifecycle (integration)", () => {
     // because
     // seeing the real app is the point of designing in-repo.
     expect(existsSync(path.join(workspace.path, "src", "code.ts"))).toBe(true);
-    expect(existsSync(path.join(workspace.path, ".context-graph"))).toBe(true);
+    expect(existsSync(path.join(workspace.path, ".context"))).toBe(true);
     expect(existsSync(path.join(workspace.path, "README.md"))).toBe(true);
     // Files-to-copy seeded the gitignored .env like any code create.
     expect(existsSync(path.join(workspace.path, ".env"))).toBe(true);
@@ -3036,18 +3037,18 @@ printf ran > '${sentinel}'
   it("scaffolds the context graph at create without dirtying git status", async () => {
     const created = await createWorkspace({ repoRoot });
     const ignore = await readFile(
-      path.join(created.path, ".context-graph", ".gitignore"),
+      path.join(created.path, ".context", ".gitignore"),
       "utf8",
     );
     expect(ignore).toContain("/local/");
     expect(
       existsSync(
-        path.join(created.path, ".context-graph", "local", "attachments"),
+        path.join(created.path, ".context", "local", "attachments"),
       ),
     ).toBe(true);
     expect(
       existsSync(
-        path.join(created.path, ".context-graph", "shared", "attachments"),
+        path.join(created.path, ".context", "shared", "attachments"),
       ),
     ).toBe(true);
     // The scaffold is self-ignoring: a fresh workspace still reads clean.
@@ -3061,29 +3062,107 @@ printf ran > '${sentinel}'
     expect(stdout.trim()).toBe("");
   });
 
-  it("round-trips private context-graph attachments through archive/restore", async () => {
+  it.each([".context", ".context-graph"])(
+    "round-trips private %s attachments without archiving unrelated scratch",
+    async (directory) => {
+      const created = await createWorkspace({ repoRoot });
+      // A composer attachment staged into the PRIVATE (gitignored) scope — the
+      // exact material `git add -A` alone would drop from the snapshot.
+      const attachmentDir = path.join(
+        created.path,
+        directory,
+        "local",
+        "attachments",
+        "att-test-1",
+      );
+      await mkdir(attachmentDir, { recursive: true });
+      if (directory === ".context-graph") {
+        await writeFile(
+          path.join(created.path, directory, ".gitignore"),
+          "/local/\n/.gitignore\n",
+        );
+      }
+      await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
+      await writeFile(
+        path.join(created.path, ".context", "scratch.txt"),
+        "unrelated scratch",
+      );
+
+      await archiveWorkspace({
+        workspaceId: created.workspaceId,
+        stashUncommitted: true,
+      });
+      const { stdout: snapshot } = await execFileAsync("git", [
+        "-C",
+        repoRoot,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        archiveSnapshotRef(created.workspaceId),
+      ]);
+      expect(snapshot).toContain(
+        `${directory}/local/attachments/att-test-1/notes.md`,
+      );
+      expect(snapshot).not.toContain(".context/scratch.txt");
+      await restoreWorkspace(created.workspaceId);
+
+      expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
+        "# keep me\n",
+      );
+    },
+  );
+
+  it("preserves migrated root documents through repeated archive/restore without including scratch", async () => {
     const created = await createWorkspace({ repoRoot });
-    // A composer attachment staged into the PRIVATE (gitignored) scope — the
-    // exact material `git add -A` alone would drop from the snapshot.
-    const attachmentDir = path.join(
-      created.path,
-      ".context-graph",
-      "local",
-      "attachments",
-      "att-test-1",
-    );
-    await mkdir(attachmentDir, { recursive: true });
-    await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
-
-    await archiveWorkspace({
-      workspaceId: created.workspaceId,
-      stashUncommitted: true,
+    await mkdir(path.join(created.path, ".context-graph", "docs"), {
+      recursive: true,
     });
-    await restoreWorkspace(created.workspaceId);
-
-    expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
-      "# keep me\n",
+    await writeFile(
+      path.join(created.path, ".context-graph", "overview.md"),
+      "root document",
     );
+    await writeFile(
+      path.join(created.path, ".context-graph", "docs", "plan.md"),
+      "plan",
+    );
+    await mkdir(path.join(created.path, ".context", "docs"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(created.path, ".context", "docs", "scratch.md"),
+      "private scratch",
+    );
+    expect(await ensureContextGraph(created.path)).toMatchObject({ ok: true });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await archiveWorkspace({
+        workspaceId: created.workspaceId,
+        stashUncommitted: true,
+      });
+      const { stdout: snapshot } = await execFileAsync("git", [
+        "-C",
+        repoRoot,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        archiveSnapshotRef(created.workspaceId),
+      ]);
+      expect(snapshot).toContain(".context/overview.md");
+      expect(snapshot).toContain(".context/docs/plan.md");
+      expect(snapshot).not.toContain("scratch.md");
+      await restoreWorkspace(created.workspaceId);
+      expect(
+        await readFile(
+          path.join(created.path, ".context", "overview.md"),
+          "utf8",
+        ),
+      ).toBe("root document");
+      expect(
+        await readFile(
+          path.join(created.path, ".context", "docs", "plan.md"),
+          "utf8",
+        ),
+      ).toBe("plan");
+    }
   });
 
   it("preserves pre-context-graph attachments until transcript migration", async () => {

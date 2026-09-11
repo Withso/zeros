@@ -52,6 +52,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
+import { clearTerminalTabIndicators } from "./terminal-tab-indicators";
+import { runPreviewCache } from "./run-preview-cache";
 
 import { isRunSessionId } from "@zeros/protocol/run-actions";
 
@@ -452,6 +454,7 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
     if (id) {
       const existing = get().sessions.find((sess) => sess.id === id);
       if (existing) {
+        if (!activate) return existing;
         set((s) => {
           // Reuse focuses the terminal's sub-tab.
           const activeTerminalTabByFolder = setTerminalSelection(
@@ -702,6 +705,8 @@ export function clearTerminalFolders(
     projectId
       ? folderIsOwnedByProject(folder, projectId, projects, removedRoots)
       : removedRoots.some((root) => folderIsWithinRoot(folder, root));
+  clearTerminalTabIndicators(folderWasRemoved);
+  runPreviewCache.clearFolders(folderWasRemoved);
   const current = useTerminalStore.getState();
   const removedSessions = current.sessions.filter((session) =>
     folderWasRemoved(session.folder),
