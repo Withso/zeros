@@ -65,6 +65,14 @@ describe("marketing homepage layout", () => {
       "utf8",
     );
     expect(cycle).toMatch(/'builders', 'developers', 'designers'/);
+    expect(cycle).toMatch(/text: to/);
+    expect(cycle).toMatch(/el\.textContent = ROLES\[i\]/);
+    expect(cycle).toMatch(
+      /<span className="hero-role-sizer" aria-hidden>\s*developers\s*<\/span>/,
+    );
+    expect(cycle).toMatch(
+      /<span ref=\{textRef\} className="hero-role-word" aria-hidden>\s*\{role\}\s*<\/span>/,
+    );
     expect(cycle).toMatch(/playScramble/);
     expect(cycle).toMatch(/prefers-reduced-motion/);
     expect(cycle).not.toMatch(/HammerMark/);
@@ -99,7 +107,7 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/margin: 0 12px 0 0/);
     expect(css).toMatch(/font-family: "Doto"/);
     expect(css).toMatch(/font-weight: 800/);
-    expect(css).toMatch(/margin-left: 0\.2em/);
+    expect(css).toMatch(/margin-left: 15px/);
     expect(css).toMatch(/color: hsl\(0 0% 80%\)/);
     expect(css).not.toMatch(/#ffffff/i);
     expect(css).not.toMatch(/#fff\b/i);

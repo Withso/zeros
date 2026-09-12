@@ -93,7 +93,7 @@ function Hero() {
             Human-agent interaction
           </span>
           <span className="mt-[0.08em] block whitespace-nowrap" aria-hidden>
-            for <HeroRoleCycle />
+            for<HeroRoleCycle />
           </span>
         </h1>
         <p className="mt-3.5 max-w-[42ch] text-left text-[15px] leading-relaxed text-fg2 sm:mt-4 sm:text-[17px]">
