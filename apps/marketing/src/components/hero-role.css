@@ -9,7 +9,7 @@
   position: relative;
   display: inline-block;
   vertical-align: baseline;
-  margin-left: 0.2em;
+  margin-left: 15px;
   font-family: "Doto", "Geist", ui-sans-serif, system-ui, sans-serif;
   font-weight: 800;
   font-style: normal;
@@ -61,9 +61,9 @@
   vertical-align: baseline;
 }
 
-/* Designers pass only: one shared ground on the headline baseline.
-   Fill the sizer (not a shorter top-pinned band) so the row does not
-   sit high during scramble and drop when `designers` settles. */
+/* Keep revealed letters on the same baseline as the settled word.
+   The inherited text strut sets the baseline; decorative glyphs must
+   not increase its ascent while they share the row with real letters. */
 .hero-role-word.scramble-developers.is-scrambling {
   display: flex;
   flex-wrap: nowrap;
@@ -85,6 +85,12 @@
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-text,
 .hero-role-word.scramble-developers.is-scrambling .hero-role-revealed {
   flex: 0 0 auto;
+}
+
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol,
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-icon {
+  /* Exclude tall icons and smaller scramble type from baseline sizing. */
+  align-self: center;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol {
