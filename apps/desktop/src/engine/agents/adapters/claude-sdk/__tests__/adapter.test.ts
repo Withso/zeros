@@ -12,13 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
-import {
-  assertClaudeManagedPolicyCompatible,
-  ClaudeSdkAdapter,
-  claudeAbsoluteEditDenyRule,
-  claudeContainedProcessEnv,
-  probeClaudeSandboxRuntime,
-} from "../adapter";
+import { ClaudeSdkAdapter } from "../adapter";
 import {
   AgentFailureError,
   type AgentAdapterContext,
@@ -60,150 +54,6 @@ function codeTerritory(
     },
   };
 }
-
-describe("Claude literal Design path rules", () => {
-  it("emits an exact absolute rule for an ordinary path", () => {
-    expect(claudeAbsoluteEditDenyRule("/tmp/Zeros Design")).toBe(
-      "Edit(//tmp/Zeros Design/**)",
-    );
-  });
-
-  it("fails closed when Claude cannot represent a literal path", () => {
-    for (const character of [
-      "\0",
-      "\r",
-      "\n",
-      "*",
-      "?",
-      "[",
-      "]",
-      "(",
-      ")",
-      "\\",
-    ]) {
-      expect(() =>
-        claudeAbsoluteEditDenyRule(`/tmp/literal${character}path`),
-      ).toThrow(/cannot safely encode this workspace path/i);
-    }
-  });
-});
-
-describe("Claude managed-policy qualification", () => {
-  function resolved(settings: Record<string, unknown>) {
-    return {
-      effective: settings,
-      provenance: {},
-      sources: [{ source: "managed", settings }],
-    } as never;
-  }
-
-  it("accepts absent and narrowing administrator policy", () => {
-    expect(() =>
-      assertClaudeManagedPolicyCompatible(resolved({})),
-    ).not.toThrow();
-    expect(() =>
-      assertClaudeManagedPolicyCompatible(
-        resolved({
-          sandbox: {
-            filesystem: { denyWrite: ["/private"] },
-            network: { deniedDomains: ["internal.invalid"] },
-          },
-          permissions: { deny: ["Bash(rm *)"] },
-        }),
-      ),
-    ).not.toThrow();
-  });
-
-  it.each([
-    ["filesystem isolation", { sandbox: { filesystem: { disabled: true } } }],
-    ["write roots", { sandbox: { filesystem: { allowWrite: ["/tmp"] } } }],
-    ["excluded commands", { sandbox: { excludedCommands: ["git"] } }],
-    ["unsandboxed commands", { sandbox: { allowUnsandboxedCommands: true } }],
-    ["Apple Events", { sandbox: { allowAppleEvents: true } }],
-    ["Unix sockets", { sandbox: { network: { allowAllUnixSockets: true } } }],
-    [
-      "working directories",
-      { permissions: { additionalDirectories: ["/tmp"] } },
-    ],
-    ["managed-only rules", { allowManagedPermissionRulesOnly: true }],
-    ["process wrapper", { processWrapper: "/managed/wrapper" }],
-    [
-      "hooks",
-      {
-        hooks: {
-          PreToolUse: [
-            {
-              hooks: [{ type: "command", command: "/managed/hook" }],
-            },
-          ],
-        },
-      },
-    ],
-    ["plugins", { enabledPlugins: { "managed@company": true } }],
-    ["guard override", { disableAllHooks: false }],
-    ["plan writes", { plansDirectory: "/tmp/plans" }],
-    ["dynamic policy", { policyHelper: { path: "/managed/helper" } }],
-  ] as const)(
-    "rejects managed %s that widens authority",
-    (_label, settings) => {
-      expect(() =>
-        assertClaudeManagedPolicyCompatible(resolved(settings)),
-      ).toThrow(/incompatible with administrator-managed Claude settings/i);
-    },
-  );
-
-  it("removes the ambient pre-sandbox process wrapper without mutating input", () => {
-    const ambientEnv = {
-      CLAUDE_CODE_PROCESS_WRAPPER: "/ambient/wrapper --flag",
-      CLAUDE_CODE_MANAGED_SETTINGS_PATH: "/ambient/managed.json",
-      CLAUDE_CODE_PLUGIN_CACHE_DIR: "/ambient/plugins",
-      CLAUDE_CODE_SANDBOXED: "1",
-      CLAUDE_TMPDIR: "/ambient/tmp",
-      NODE_OPTIONS: "--require=/ambient/preload.js",
-      GIT_CONFIG_COUNT: "1",
-      PATH: "/trusted/bin",
-      SAFE: "visible",
-    };
-    const overrides = {
-      PATH: "/repo/bin",
-      NODE_OPTIONS: "--require=/repo/preload.js",
-      SAFE_OVERRIDE: "visible",
-    };
-    expect(claudeContainedProcessEnv(ambientEnv, overrides)).toMatchObject({
-      PATH: "/trusted/bin",
-      SAFE: "visible",
-      SAFE_OVERRIDE: "visible",
-    });
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides)
-        .CLAUDE_CODE_PROCESS_WRAPPER,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides)
-        .CLAUDE_CODE_MANAGED_SETTINGS_PATH,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides)
-        .CLAUDE_CODE_PLUGIN_CACHE_DIR,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).CLAUDE_CODE_SANDBOXED,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).CLAUDE_TMPDIR,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).NODE_OPTIONS,
-    ).toBeUndefined();
-    expect(
-      claudeContainedProcessEnv(ambientEnv, overrides).GIT_CONFIG_COUNT,
-    ).toBeUndefined();
-    expect(ambientEnv.CLAUDE_CODE_PROCESS_WRAPPER).toBe(
-      "/ambient/wrapper --flag",
-    );
-    expect(overrides.PATH).toBe("/repo/bin");
-  });
-});
 
 interface PermCapture {
   id: string;
@@ -288,6 +138,7 @@ function makeScriptedQuery(
       argumentHint: string;
       aliases?: string[];
     }>;
+    mcpServerStatuses?: import("@anthropic-ai/claude-agent-sdk").McpServerStatus[];
     /** Model list query.supportedModels() resolves to (default []). */
     supportedModels?: unknown[];
     /** Per-call override; receives the 1-based call number (lets a test
@@ -412,6 +263,7 @@ function makeScriptedQuery(
     q.applyFlagSettings = async (s: Record<string, unknown>) => {
       control.flagSettings.push(s);
     };
+    q.mcpServerStatus = async () => opts?.mcpServerStatuses ?? [];
     q.supportedModels = supportedModels;
     q.supportedCommands = async () => opts?.commands ?? [];
     if (opts?.contextUsage) {
@@ -431,6 +283,144 @@ function makeScriptedQuery(
     inputsSeen,
   };
 }
+
+/** A single persistent query whose output can be advanced one SDK frame at a
+ * time. This models autonomous/synthetic work that starts while the query is
+ * idle, followed by a user send that the CLI leaves queued for the next turn. */
+function makePushableQuery() {
+  const inputsSeen: Msg[] = [];
+  const output: Msg[] = [];
+  const control = { closes: 0 };
+  let wakeOutput: (() => void) | null = null;
+  let open = true;
+
+  const wake = () => {
+    const release = wakeOutput;
+    wakeOutput = null;
+    release?.();
+  };
+  const stop = () => {
+    open = false;
+    wake();
+  };
+  const push = (...messages: Msg[]) => {
+    output.push(...messages);
+    wake();
+  };
+
+  const queryFn = (params: {
+    prompt?: AsyncIterable<Msg>;
+    options?: Record<string, unknown>;
+  }) => {
+    if (params.prompt) {
+      void (async () => {
+        for await (const message of params.prompt!) inputsSeen.push(message);
+      })();
+    }
+    const signal = (
+      params.options?.abortController as AbortController | undefined
+    )?.signal;
+    signal?.addEventListener("abort", stop, { once: true });
+
+    const query = (async function* () {
+      while (open) {
+        if (output.length === 0) {
+          await new Promise<void>((resolve) => {
+            wakeOutput = resolve;
+          });
+        }
+        if (!open) break;
+        while (output.length > 0) yield output.shift()!;
+      }
+    })() as unknown as Record<string, unknown>;
+    query.interrupt = async () => stop();
+    query.stopTask = async () => {};
+    query.setPermissionMode = async () => {};
+    query.setModel = async () => {};
+    query.applyFlagSettings = async () => {};
+    query.supportedModels = async () => [];
+    query.supportedCommands = async () => [];
+    query.close = () => {
+      control.closes += 1;
+      stop();
+    };
+    return query;
+  };
+
+  return { queryFn: queryFn as never, inputsSeen, push, control };
+}
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
+describe("Claude cloud connector inventory", () => {
+  it("does not launch a session just to browse account connectors", async () => {
+    const { queryFn, captured } = makeScriptedQuery([]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const result = await adapter.capabilityPorts.extensions.list({
+      category: "apps",
+      cwd: "/tmp",
+      scope: "user",
+    });
+    expect(captured).toEqual([]);
+    expect(result?.entries).toEqual([]);
+    expect(result?.note).toContain("session");
+  });
+
+  it("shows session-reported cloud connectors with auth state and no config secrets", async () => {
+    const { queryFn, captured } = makeScriptedQuery(
+      [[initMsg("cloud-session"), resultOk("cloud-session")]],
+      {
+        keepAliveAfterResult: true,
+        mcpServerStatuses: [
+          {
+            name: "Calendar",
+            status: "connected",
+            scope: "claudeai",
+            config: {
+              type: "claudeai-proxy",
+              id: "calendar",
+              url: "https://example.com/?token=SECRET",
+            },
+          },
+          { name: "Notes", status: "needs-auth", scope: "claudeai" },
+          { name: "Local", status: "connected", scope: "user" },
+        ],
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp/cloud-repo" });
+    try {
+      await adapter.prompt({
+        sessionId: session.executionId,
+        prompt: [{ type: "text", text: "Hi" }],
+      });
+      const result = await adapter.capabilityPorts.extensions.list({
+        category: "apps",
+        cwd: "/tmp",
+        scope: "user",
+      });
+      expect(
+        result?.entries.map((entry) => [entry.name, entry.status]),
+      ).toEqual([
+        ["Calendar", "available"],
+        ["Notes", "needs-auth"],
+      ]);
+      expect(JSON.stringify(result)).not.toContain("SECRET");
+      expect(captured).toHaveLength(1);
+      expect(captured[0]?.strictMcpConfig).toBe(true);
+      const other = await adapter.capabilityPorts.extensions.list({
+        category: "apps",
+        cwd: "/tmp/other",
+        scope: "repo",
+      });
+      expect(other?.entries).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+});
 
 const initMsg = (sid: string): Msg => ({
   type: "system",
@@ -799,6 +789,133 @@ describe("ClaudeSdkAdapter", () => {
       await vi.advanceTimersByTimeAsync(5_000);
       expect(compacting.control.closes).toBe(0);
       await compactAdapter.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("waits for the correlated user result after a synthetic turn settles first", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    // First establish the persistent query with a legacy result that has no
+    // correlation fields. Missing-correlation producers must keep working.
+    const firstTurn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("first")] as never,
+    });
+    await flushMicrotasks();
+    live.push(initMsg("sdk-correlated"), resultOk("sdk-correlated"));
+    await firstTurn;
+
+    // Claude Code can start a synthetic turn itself (for example a scheduled
+    // wake-up). A user send that arrives during it can remain queued, in which
+    // case 0.3.265+ reports the synthetic turn's UUID and queued_turn_count=1.
+    live.push({
+      ...assistantText("scheduled work"),
+      user_message_uuid: "synthetic-wakeup",
+      user_message_uuids: ["synthetic-wakeup"],
+    });
+    await flushMicrotasks();
+
+    let secondSettled = false;
+    const secondTurn = adapter
+      .prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("user follow-up")] as never,
+      })
+      .then((result) => {
+        secondSettled = true;
+        return result;
+      });
+    await flushMicrotasks();
+    live.push({
+      ...resultOk("sdk-correlated"),
+      user_message_uuid: "synthetic-wakeup",
+      user_message_uuids: ["synthetic-wakeup"],
+      queued_turn_count: 1,
+    });
+    await flushMicrotasks();
+
+    expect(secondSettled).toBe(false);
+    const secondMessageUuid = live.inputsSeen[1]?.uuid;
+    expect(secondMessageUuid).toEqual(expect.any(String));
+
+    live.push(
+      {
+        ...assistantText("user reply"),
+        user_message_uuid: secondMessageUuid,
+        user_message_uuids: [secondMessageUuid],
+      },
+      {
+        ...resultOk("sdk-correlated"),
+        user_message_uuid: secondMessageUuid,
+        user_message_uuids: [secondMessageUuid],
+        queued_turn_count: 0,
+      },
+    );
+    await expect(secondTurn).resolves.toMatchObject({
+      stopReason: "end_turn",
+    });
+    await adapter.dispose();
+  });
+
+  it("keeps a correlated /compact pending across an earlier synthetic result", async () => {
+    vi.useFakeTimers();
+    try {
+      const live = makePushableQuery();
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+        queryFn: live.queryFn,
+        idleTimeoutMs: 1_000,
+      });
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const firstTurn = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("first")] as never,
+      });
+      await flushMicrotasks();
+      live.push(
+        initMsg("sdk-compact-correlation"),
+        resultOk("sdk-compact-correlation"),
+      );
+      await firstTurn;
+
+      live.push({
+        ...assistantText("scheduled work"),
+        user_message_uuid: "synthetic-wakeup",
+        user_message_uuids: ["synthetic-wakeup"],
+      });
+      await flushMicrotasks();
+      await adapter.compactContext({ sessionId: session.sessionId });
+      await flushMicrotasks();
+      const compactMessageUuid = live.inputsSeen[1]?.uuid;
+
+      live.push({
+        ...resultOk("sdk-compact-correlation"),
+        user_message_uuid: "synthetic-wakeup",
+        user_message_uuids: ["synthetic-wakeup"],
+        queued_turn_count: 1,
+      });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.control.closes).toBe(0);
+      expect(compactMessageUuid).toEqual(expect.any(String));
+
+      live.push({
+        ...resultOk("sdk-compact-correlation"),
+        user_message_uuid: compactMessageUuid,
+        user_message_uuids: [compactMessageUuid],
+        queued_turn_count: 0,
+      });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(999);
+      expect(live.control.closes).toBe(0);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(live.control.closes).toBe(1);
+      await adapter.dispose();
     } finally {
       vi.useRealTimers();
     }
@@ -2678,219 +2795,6 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
-  it("proves the host sandbox before admitting an immutable filesystem territory", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const settingsResolver = vi.fn().mockResolvedValue({
-      effective: {},
-      provenance: {},
-      sources: [],
-    });
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
-      sandboxProbe,
-      settingsResolver,
-    });
-    const territory = codeTerritory();
-
-    await adapter.prepareFilesystemTerritory(territory);
-
-    expect(settingsResolver).toHaveBeenCalledWith({
-      cwd: territory.workspaceRoot,
-      settingSources: [],
-    });
-    expect(sandboxProbe).toHaveBeenCalledOnce();
-    expect(sandboxProbe).toHaveBeenCalledWith(process.platform);
-    await adapter.dispose();
-  });
-
-  it("refuses managed Claude settings that weaken the qualified sandbox", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
-      sandboxProbe,
-      settingsResolver: vi.fn().mockResolvedValue({
-        effective: { sandbox: { filesystem: { disabled: true } } },
-        provenance: {},
-        sources: [
-          {
-            source: "managed",
-            settings: { sandbox: { filesystem: { disabled: true } } },
-          },
-        ],
-      }),
-    });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory()),
-    ).rejects.toThrow(/disabled filesystem isolation/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses admission when the host sandbox probe cannot establish containment", async () => {
-    const sandboxProbe = vi
-      .fn()
-      .mockRejectedValue(new Error("namespace creation denied"));
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { sandboxProbe });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory()),
-    ).rejects.toThrow("namespace creation denied");
-    await adapter.dispose();
-  });
-
-  it("refuses a pinned Claude runtime below the built-in Write path-rule floor", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
-      sandboxProbe,
-      runtimeVersionProbe: vi.fn().mockResolvedValue("2.1.227"),
-    });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory()),
-    ).rejects.toThrow(/requires Claude Code >= 2\.1\.228/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses an unqualified custom Claude executable for a Design-bearing session", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { sandboxProbe });
-
-    await expect(
-      adapter.prepareFilesystemTerritory(codeTerritory(), {
-        cliBinary: process.execPath,
-      }),
-    ).rejects.toThrow(/runtime pinned and shipped with this Zeros build/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  it("refuses admission when the Design path cannot be encoded literally", async () => {
-    const sandboxProbe = vi.fn().mockResolvedValue(undefined);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { sandboxProbe });
-    const territory = codeTerritory("/tmp/zeros-contained");
-    const unsafeDesign = path.join(territory.workspaceRoot, "Design [draft]");
-    const unsafeTerritory: AgentFilesystemTerritory = {
-      ...territory,
-      designDirectory: unsafeDesign,
-      protectedDesignDirectories: [unsafeDesign],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write",
-        deniedPaths: [
-          unsafeDesign,
-          path.join(territory.workspaceRoot, ".zeros"),
-          path.join(territory.workspaceRoot, ".git"),
-        ],
-      },
-    };
-
-    await expect(
-      adapter.prepareFilesystemTerritory(unsafeTerritory),
-    ).rejects.toThrow(/cannot safely encode this workspace path/i);
-    expect(sandboxProbe).not.toHaveBeenCalled();
-    await adapter.dispose();
-  });
-
-  const containmentRuntimeRequired =
-    process.env.ZEROS_REQUIRE_CONTAINMENT_RUNTIME === "1";
-  (containmentRuntimeRequired ? it : it.skip)(
-    "starts Claude's real OS sandbox primitive on a qualified release host",
-    async () => {
-      await expect(probeClaudeSandboxRuntime()).resolves.toBeUndefined();
-    },
-  );
-
-  it.each([
-    ["default", "default"],
-    ["auto", "auto"],
-    ["bypass", "acceptEdits"],
-  ] as const)(
-    "keeps a Design-bearing code session contained in the %s posture",
-    async (requestedMode, expectedSdkMode) => {
-      const emitted: SessionNotification[] = [];
-      const { queryFn, captured } = makeScriptedQuery([
-        [initMsg("sdk-1"), resultOk("sdk-1")],
-      ]);
-      const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
-      const territory = codeTerritory();
-      const { session } = await adapter.newSession({
-        cwd: territory.workspaceRoot,
-        territory,
-      });
-      const modes = session.modes as unknown as {
-        availableModes: Array<{ id: string }>;
-      };
-      expect(modes.availableModes.map((mode) => mode.id)).not.toContain(
-        "bypass",
-      );
-
-      // The control path is also clamped: a stale renderer, persisted chat, or
-      // forged protocol request cannot restore native bypass behind the UI.
-      await adapter.setMode({
-        sessionId: session.sessionId,
-        modeId: requestedMode,
-      });
-      await adapter.prompt({
-        sessionId: session.sessionId,
-        prompt: [textBlock("hi")] as never,
-      });
-
-      const options = captured[0];
-      expect(options.permissionMode).toBe(expectedSdkMode);
-      expect(options.allowDangerouslySkipPermissions).toBeUndefined();
-      expect(options.canUseTool).toBeDefined();
-      expect(options.settingSources).toEqual([]);
-      expect(options.strictMcpConfig).toBe(true);
-      expect(options.mcpServers).toEqual({});
-      expect(options.plugins).toEqual([]);
-      expect(options.sandbox).toMatchObject({
-        enabled: true,
-        failIfUnavailable: true,
-        autoAllowBashIfSandboxed: false,
-        allowUnsandboxedCommands: false,
-        filesystem: {
-          allowWrite: [territory.workspaceRoot],
-          denyWrite: territory.writeCapabilities.deniedPaths,
-        },
-        network: {
-          allowedDomains: ["*"],
-          deniedDomains: ["localhost", "127.0.0.1", "::1"],
-          strictAllowlist: true,
-          allowAllUnixSockets: false,
-          allowLocalBinding: false,
-        },
-      });
-      expect(options.spawnClaudeCodeProcess).toBeTypeOf("function");
-      const settings = options.settings as {
-        disableAllHooks?: boolean;
-        permissions?: { deny?: string[] };
-      };
-      expect(settings.disableAllHooks).toBe(true);
-      expect(settings.permissions?.deny).toEqual(
-        expect.arrayContaining([
-          "Edit(//tmp/zeros-contained/Zeros Design/**)",
-          "Edit(//tmp/zeros-contained/.zeros/**)",
-          "Edit(//tmp/zeros-contained/.git/**)",
-          "Agent",
-          "Workflows",
-          "Artifact",
-          "mcp__*",
-        ]),
-      );
-      if (requestedMode === "bypass") {
-        const update = emitted
-          .filter(
-            (event) => event.update.sessionUpdate === "current_mode_update",
-          )
-          .pop();
-        expect(
-          (update?.update as { currentModeId?: string }).currentModeId,
-        ).toBe("accept-edits");
-      }
-      await adapter.dispose();
-    },
-  );
-
   it("switching to Full Access on a live (flagless) query rebuilds it WITH the flag", async () => {
     // keepAliveAfterResult → the born-default query stays alive after turn 1, so
     // setMode hits a LIVE query built without the creation-only flag.
@@ -3151,6 +3055,83 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("keeps native Code capabilities without installing provider containment", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const additionalRoot = "/tmp/linked-project";
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/zeros-contained",
+      env: {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify([additionalRoot]),
+      },
+      territory: codeTerritory(),
+      // The host boundary owns process lifecycle only. It is deliberately not
+      // a Code filesystem sandbox.
+      executionBoundary: { status: { backend: "none" } } as never,
+    });
+    await adapter.setMode({
+      sessionId: session.sessionId,
+      modeId: "bypass",
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+
+    const settings = captured[0]?.settings as {
+      disableAllHooks?: boolean;
+      permissions?: {
+        additionalDirectories?: string[];
+        deny?: string[];
+      };
+    };
+    expect(settings.permissions?.additionalDirectories).toEqual([
+      additionalRoot,
+    ]);
+    expect(settings.permissions?.deny).toEqual([]);
+    expect(captured[0]?.permissionMode).toBe("bypassPermissions");
+    expect(captured[0]?.allowDangerouslySkipPermissions).toBe(true);
+    expect(captured[0]?.sandbox).toBeUndefined();
+    expect(captured[0]?.settingSources).toEqual(["user", "project", "local"]);
+    // settingSources stays whole so CLAUDE.md and repo rules keep loading;
+    // strictMcpConfig is what scopes MCP to the Zeros registry.
+    expect(captured[0]?.strictMcpConfig).toBe(true);
+    expect(settings.disableAllHooks).toBeUndefined();
+    await adapter.dispose();
+  });
+
+  it("does not reject an outer-boundary session when optional Edit denies cannot encode its host paths", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const workspaceRoot = "/tmp/zeros (contained)";
+    const contextRoot = "/tmp/zeros (data)/isolation-context/design/abc123";
+    const { session } = await adapter.newSession({
+      cwd: workspaceRoot,
+      env: {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify([contextRoot]),
+        ZEROS_ISOLATION_CONTEXT_DIRS: JSON.stringify([contextRoot]),
+      },
+      territory: codeTerritory(workspaceRoot),
+      executionBoundary: { status: { backend: "none" } } as never,
+    });
+
+    await expect(
+      adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("hi")] as never,
+      }),
+    ).resolves.toBeDefined();
+    expect(
+      (captured[0]?.settings as { permissions?: { deny?: string[] } })
+        .permissions?.deny,
+    ).toEqual([]);
+    await adapter.dispose();
+  });
+
   it("passes Claude auto-memory as an explicit live-mutable SDK setting", async () => {
     const { queryFn, captured, control } = makeScriptedQuery([
       [initMsg("sdk-1")],
@@ -3182,48 +3163,6 @@ describe("ClaudeSdkAdapter", () => {
         }
       ).autoMemoryEnabled,
     ).toBe(true);
-    await adapter.dispose();
-  });
-
-  it("force-disables auto memory in the provider-native Design fallback", async () => {
-    const { queryFn, captured } = makeScriptedQuery([
-      [initMsg("sdk-1"), resultOk("sdk-1")],
-    ]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/zeros-contained",
-      env: { ZEROS_CLAUDE_AUTO_MEMORY: "1" },
-      territory: codeTerritory(),
-    });
-    await adapter.prompt({
-      sessionId: session.sessionId,
-      prompt: [textBlock("hi")] as never,
-    });
-    expect(
-      (captured[0]?.settings as { autoMemoryEnabled?: boolean })
-        .autoMemoryEnabled,
-    ).toBe(false);
-    await adapter.dispose();
-  });
-
-  it("keeps additional directories out of a Design-contained session", async () => {
-    const { queryFn, captured } = makeScriptedQuery([
-      [initMsg("sdk-1"), resultOk("sdk-1")],
-    ]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/zeros-contained",
-      env: { ZEROS_ADDITIONAL_DIRS: '["/work/api"]' },
-      territory: codeTerritory(),
-    });
-    await adapter.prompt({
-      sessionId: session.sessionId,
-      prompt: [textBlock("hi")] as never,
-    });
-    const settings = captured[0]?.settings as {
-      permissions?: { additionalDirectories?: string[] };
-    };
-    expect(settings.permissions?.additionalDirectories).toEqual([]);
     await adapter.dispose();
   });
 
@@ -4387,6 +4326,64 @@ describe("ClaudeSdkAdapter.steer", () => {
     expect(steered.message?.content).toBe("also say APPLE at the end");
 
     await adapter.cancel({ sessionId: session.sessionId });
+    await adapter.dispose();
+  });
+
+  it("settles when the result's singular UUID names a mid-turn steer", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("start")] as never,
+    });
+    await flushMicrotasks();
+    await adapter.steer({
+      sessionId: session.sessionId,
+      prompt: [textBlock("add this")] as never,
+    });
+    await flushMicrotasks();
+
+    const originalUuid = live.inputsSeen[0]?.uuid;
+    const steerUuid = live.inputsSeen[1]?.uuid;
+    expect(originalUuid).toEqual(expect.any(String));
+    expect(steerUuid).toEqual(expect.any(String));
+    expect(steerUuid).not.toBe(originalUuid);
+
+    live.push(initMsg("sdk-steer-correlation"), {
+      ...resultOk("sdk-steer-correlation"),
+      user_message_uuid: steerUuid,
+    });
+    await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+    await adapter.dispose();
+  });
+
+  it("settles when the plural UUIDs include the active send", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("active user send")] as never,
+    });
+    await flushMicrotasks();
+    const activeUuid = live.inputsSeen[0]?.uuid;
+    expect(activeUuid).toEqual(expect.any(String));
+
+    live.push(initMsg("sdk-plural-correlation"), {
+      ...resultOk("sdk-plural-correlation"),
+      // A merged/folded result names the last consumed input singularly while
+      // retaining every consumed input in the plural correlation list.
+      user_message_uuid: "another-consumed-input",
+      user_message_uuids: [activeUuid, "another-consumed-input"],
+    });
+    await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
     await adapter.dispose();
   });
 

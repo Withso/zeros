@@ -4,6 +4,12 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { withSystemTx, type Tx } from "./db.js";
+import { HttpError } from "./authz.js";
+import {
+  resolveWorkOSProviderLockKeys,
+  withWorkOSProviderLocks,
+  workOSProviderErasureFenceStatus,
+} from "./workos-provider-locks.js";
 
 const EventIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
 const MAX_WEBHOOK_BYTES = 64 * 1024;
@@ -113,14 +119,27 @@ export async function applyWorkOSIdentityEventInTransaction(
   if (event.eventType === "user.deleted") {
     const transitioned = await tx.query<{ auth_revision: string | number }>(
       `UPDATE users
-       SET auth_status = 'identity_disabled',
+       SET auth_status = CASE
+             WHEN auth_status = 'active'
+               THEN 'identity_disabled'::account_auth_status
+             ELSE auth_status
+           END,
            auth_disabled_at = COALESCE(auth_disabled_at, $2::timestamptz),
            auth_revoked_at = now(),
-           auth_status_changed_at = now(),
+           auth_status_changed_at = CASE
+             WHEN auth_status = 'active' THEN now()
+             ELSE auth_status_changed_at
+           END,
            auth_revision = auth_revision + 1
-       WHERE id = $1 AND deleted_at IS NULL AND auth_status = 'active'
+       WHERE id = $1
+         AND auth_status IN ('active', 'deletion_pending')
+         AND EXISTS (
+           SELECT 1 FROM user_identities current_identity
+           WHERE current_identity.id = $3
+             AND current_identity.status = 'active'
+         )
        RETURNING auth_revision`,
-      [account.user_id, event.createdAt],
+      [account.user_id, event.createdAt, account.identity_id],
     );
     await tx.query(
       `UPDATE user_identities
@@ -153,17 +172,21 @@ export async function applyWorkOSIdentityEventInTransaction(
       [account.user_id],
     );
 
-    // A recovered identity starts without collaborative access. Removing the
-    // tenant membership here also cascades child-team memberships, so an
-    // out-of-order membership webhook cannot leave an authorization remnant.
+    // An ordinary provider deletion revokes every collaborative membership.
+    // During an already-scheduled account deletion, however, the account is
+    // globally denied and its Zeros-managed membership snapshot must remain
+    // recoverable for the grace period. SCIM remains provider-authoritative and
+    // is still removed, so a later account restore cannot resurrect directory-
+    // revoked access.
     const removed = await tx.query<{
       org_id: string;
       authorization_revision: string | number;
     }>(
       `WITH removed AS (
-         DELETE FROM organization_members om
-         USING organizations o
-         WHERE om.org_id = o.id AND om.user_id = $1 AND NOT o.is_personal
+       DELETE FROM organization_members om
+       USING organizations o
+       WHERE om.org_id = o.id AND om.user_id = $1 AND NOT o.is_personal
+         AND (NOT $2::boolean OR om.membership_source = 'scim')
          RETURNING om.org_id
        ), bumped AS (
          UPDATE organizations o
@@ -172,7 +195,7 @@ export async function applyWorkOSIdentityEventInTransaction(
          RETURNING o.id AS org_id, o.authorization_revision
        )
        SELECT org_id, authorization_revision FROM bumped`,
-      [account.user_id],
+      [account.user_id, account.auth_status === "deletion_pending"],
     );
     await tx.query(
       `UPDATE workos_membership_projections
@@ -308,8 +331,26 @@ export async function applyWorkOSIdentityEvent(
   input: WorkOSIdentityEvent,
 ): Promise<{ status: WorkOSIdentityEventStatus }> {
   const event = WorkOSIdentityEventSchema.parse(input);
-  return withSystemTx(pool, (tx) =>
-    applyWorkOSIdentityEventInTransaction(tx, event),
+  const lockKeys = await resolveWorkOSProviderLockKeys(pool, {
+    userIds: [event.user.id],
+  });
+  return withWorkOSProviderLocks(pool, lockKeys, () =>
+    withSystemTx(pool, async (tx) => {
+      const fenceStatus = await workOSProviderErasureFenceStatus(tx, [
+        { kind: "user", id: event.user.id },
+      ]);
+      if (fenceStatus === "not_ready") {
+        throw new HttpError(
+          503,
+          "workos_provider_erasure_reconciliation_pending",
+          "WorkOS event ingestion is temporarily unavailable.",
+        );
+      }
+      if (fenceStatus === "fenced") {
+        return { status: "ignored_deleted" as const };
+      }
+      return applyWorkOSIdentityEventInTransaction(tx, event);
+    }),
   );
 }
 
@@ -450,9 +491,20 @@ export function createWorkOSIdentityEventRoutes(
     }
     const event = lifecycleEvent(raw);
     if (!event) return json({ error: "invalid_event" }, 400);
-    const result = await (
-      options.apply ?? ((input) => applyWorkOSIdentityEvent(pool, input))
-    )(event);
+    let result: { status: WorkOSIdentityEventStatus };
+    try {
+      result = await (
+        options.apply ?? ((input) => applyWorkOSIdentityEvent(pool, input))
+      )(event);
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        error.code === "workos_provider_erasure_reconciliation_pending"
+      ) {
+        return json({ error: error.code }, 503);
+      }
+      throw error;
+    }
     return json({ accepted: true, status: result.status }, 202);
   });
   return app;

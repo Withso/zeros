@@ -33,6 +33,7 @@ vi.mock("node:os", async (importActual) => {
 import {
   CURSOR_STATE_RECOVERY_HOLD_FILE,
   ensureSessionDir,
+  HOST_PROCESS_RECOVERY_HOLD_FILE,
   ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
   removeSessionDir,
   SHADOW_GIT_RECOVERY_HOLD_FILE,
@@ -230,6 +231,26 @@ describe("sweepDeadSessions", () => {
     await removeSessionDir("closing");
 
     expect(await readdir(sessionsRoot())).toEqual(["closing"]);
+  });
+
+  it("preserves malformed native-host recovery evidence for the authoritative recovery pass", async () => {
+    await seedSession("host-recovery", DEAD_PID);
+    const generation = path.join(
+      sessionsRoot(),
+      "host-recovery",
+      "boundary",
+      "host-generation",
+    );
+    await mkdir(generation, { recursive: true });
+    await writeFile(
+      path.join(generation, HOST_PROCESS_RECOVERY_HOLD_FILE),
+      "malformed",
+      { mode: 0o600 },
+    );
+
+    await removeSessionDir("host-recovery");
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual(["host-recovery"]);
   });
 
   it("preserves explicit and swept sessions carrying a legacy Git recovery hold", async () => {

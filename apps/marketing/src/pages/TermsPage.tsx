@@ -62,7 +62,7 @@ export function TermsPage() {
 
       <h2>Contact</h2>
       <p>
-        <a href="mailto:hello@zeros.build">hello@zeros.build</a>.
+        <a href="mailto:hi@zeros.build">hi@zeros.build</a>.
       </p>
     </LegalLayout>
   )

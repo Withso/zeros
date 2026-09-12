@@ -2,9 +2,10 @@
 // pristine-agent-switch.ts — when an agent swap may skip the spawn
 // ──────────────────────────────────────────────────────────
 //
-// Every session spawn costs a real ZSR boundary admission (policy, private
-// Git, provider HOME, live canary). That is worth paying while the user is
-// typing into a chat they mean to use. It is pure waste when they are only
+// Every session spawn still costs provider startup and an owned execution
+// boundary (native Code is cheap; Design ZSR may attest its policy).
+// That is worth paying while the user is typing into a chat they mean to use.
+// It is pure waste when they are only
 // stepping through the agent picker on a chat that has never been used: the
 // pristine in-place switch (agent-chat's switchAgentModel) closes the live
 // session and restamps agentId, so every hop paid one admission plus the
@@ -13,7 +14,7 @@
 // The rule this module owns:
 //
 //   - The FIRST agent a chat binds always spawns. It warms while the user
-//     types and it is what paints the Design-boundary pill.
+//     types and establishes the chat's live provider state.
 //   - A switch AWAY from that agent, on a thread still untouched, defers.
 //   - The deferral is STICKY. Switching back to the original agent, or
 //     leaving and re-entering the tab, must not silently re-arm the eager

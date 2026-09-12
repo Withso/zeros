@@ -23,6 +23,7 @@ import {
   bridgeWorkspaceCreateFromBranch,
   bridgeWorkspaceCreateFromBranchStatus,
   bridgeWorkspaceDelete,
+  bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceLifecycleStatus,
   bridgeWorkspaceRestore,
   bridgeWorkspaceSetMode,
@@ -47,6 +48,27 @@ function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
 }
 
 describe("requestWorkspaceList", () => {
+  it("sends explicit null when detaching a legacy Personal owner", async () => {
+    let captured: unknown;
+    const bridge = {
+      request: async (message: unknown) => {
+        captured = message;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          op: "workspace.reassignLocalOrganization",
+          result: { changes: 1, repoSlugs: ["example"] },
+        };
+      },
+    } as unknown as RuntimeClient;
+    await bridgeWorkspaceReassignLocalOrganization(bridge, {
+      fromOrganizationId: "personal_old",
+      toOrganizationId: null,
+    });
+    expect(captured).toMatchObject({
+      op: "workspace.reassignLocalOrganization",
+      params: { fromOrganizationId: "personal_old", toOrganizationId: null },
+    });
+  });
   it("sends a workspace.list WORKSPACE_REQUEST and returns the workspaces", async () => {
     const seen: { op?: string; type?: string } = {};
     const workspaces = [
@@ -68,7 +90,7 @@ describe("requestWorkspaceList", () => {
     expect(out).toEqual(workspaces);
   });
 
-  it("keeps design rows out of the coding-agent workspace resolver", async () => {
+  it("keeps the same workspace resolvable by Code agents in either visible mode", async () => {
     const code = {
       id: "code",
       kind: "code" as const,
@@ -86,7 +108,7 @@ describe("requestWorkspaceList", () => {
         result: { workspaces: [code, design] },
       }),
     );
-    expect(out).toEqual([code]);
+    expect(out).toEqual([code, design]);
   });
 
   it("returns [] when the result carries no workspaces array", async () => {
@@ -115,6 +137,29 @@ describe("requestWorkspaceList", () => {
 });
 
 describe("context-graph transition queue budgets", () => {
+  it("preserves actionable scaffold and sharing failures from the engine", async () => {
+    const bridge = {
+      request: async (message: { op?: string }) => ({
+        type: "WORKSPACE_RESPONSE",
+        op: message.op,
+        result: {
+          ok: false,
+          created: false,
+          moved: false,
+          error: "context migration conflict",
+        },
+      }),
+    } as unknown as RuntimeClient;
+    expect(await bridgeContextGraphScaffold(bridge, "ws1")).toEqual({
+      ok: false,
+      created: false,
+      error: "context migration conflict",
+    });
+    expect(
+      await bridgeContextGraphSetShared(bridge, "ws1", "id", true),
+    ).toEqual({ ok: false, moved: false, error: "context migration conflict" });
+  });
+
   it.each([
     [
       "attachment.write",

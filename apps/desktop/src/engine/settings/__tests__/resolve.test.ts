@@ -15,12 +15,34 @@ describe("resolveSettings — precedence", () => {
       show_agent_cursor: true,
       navigation_approval: "always-ask",
     });
+    expect(r.effective.design).toBeUndefined();
     expect(r.sources["git.remote"]).toBe("default");
     expect(r.sources["scripts.run_mode"]).toBe("default");
     expect(r.warnings).toEqual([]);
   });
 
-  it("user overrides defaults; repo overrides user; managed overrides all — repo-local scripts never win", () => {
+  it("does not expose the retired Design isolation setting as policy", () => {
+    const r = resolveSettings({
+      user: { design: { isolation: { mode: "sparse" } } },
+      team: { design: { isolation: { mode: "sandbox" } } },
+      repo: { design: { isolation: { mode: "sandbox" } } },
+      repoLocal: {
+        design: { isolation: { mode: "sandbox+hardening" } },
+      },
+      workspaceLocal: { design: { isolation: { mode: "sandbox" } } },
+      managed: {
+        design: { isolation: { mode: "sandbox+hardening" } },
+      },
+    });
+
+    expect(r.effective.design).toBeUndefined();
+    expect(r.sources["design.isolation.mode"]).toBeUndefined();
+    expect(
+      r.warnings.filter((warning) => warning.includes("design.isolation")),
+    ).toHaveLength(5);
+  });
+
+  it("user overrides defaults; repo-local overrides user; managed overrides all", () => {
     const r = resolveSettings({
       user: { git: { remote: "upstream" }, scripts: { run: "pnpm dev" } },
       repo: {
@@ -38,15 +60,15 @@ describe("resolveSettings — precedence", () => {
     });
     expect(r.effective.scripts).toEqual({
       run_mode: "concurrent",
-      run: "pnpm dev:repo",
+      run: "pnpm electron:dev",
     });
     expect(r.sources["git.remote"]).toBe("user");
     expect(r.sources["git.base_branch"]).toBe("managed");
-    expect(r.sources["scripts.run"]).toBe("repo");
+    expect(r.sources["scripts.run"]).toBe("repo-local");
     expect(r.sources["scripts.run_mode"]).toBe("default");
   });
 
-  it("workspace-local overrides repo-local for non-script keys, still under managed", () => {
+  it("workspace-local overrides repository defaults below managed policy", () => {
     // Probed with git (which personal layers still carry) — env left the repo
     // files in the 2026-07-17 slimming, and scripts became repo-layer-only.
     const r = resolveSettings({
@@ -64,11 +86,11 @@ describe("resolveSettings — precedence", () => {
     });
     expect(r.effective.scripts).toEqual({
       run_mode: "concurrent",
-      setup: "pnpm install",
+      archive: "pnpm clean",
     });
     expect(r.sources["git.remote"]).toBe("workspace-local");
-    expect(r.sources["scripts.setup"]).toBe("repo");
-    expect(r.sources["scripts.archive"]).toBeUndefined();
+    expect(r.sources["scripts.setup"]).toBeUndefined();
+    expect(r.sources["scripts.archive"]).toBe("repo-local");
     expect(r.sources["git.base_branch"]).toBe("managed");
   });
 
@@ -96,58 +118,51 @@ describe("resolveSettings — precedence", () => {
     expect(r.sources["env_files"]).toBe("managed");
   });
 
-  it("scripts.setup / archive / run_actions resolve from the COMMITTED repo layer only", () => {
-    // Scripts are the committed repo file's reason to exist — shared by every
-    // Zeros install that opens the repo, like .vscode/. run_actions is an
-    // array → replaces whole, never element-merges. Personal-file scripts are
-    // ignored (see the layer-hygiene suite).
+  it("scripts and run actions resolve from personal repository settings", () => {
     const r = resolveSettings({
-      user: { scripts: { setup: "user-setup" } },
-      repo: {
+      user: { scripts: { setup: "user-setup", archive: "user-clean" } },
+      repoLocal: {
         scripts: {
           setup: "pnpm install",
-          archive: "pnpm clean",
           run_actions: [{ id: "dev", name: "Dev", command: "pnpm dev" }],
         },
       },
-      repoLocal: { scripts: { archive: "pnpm clean --local" } },
     });
     expect(r.effective.scripts).toEqual({
       run_mode: "concurrent",
       setup: "pnpm install",
-      archive: "pnpm clean",
+      archive: "user-clean",
       run_actions: [{ id: "dev", name: "Dev", command: "pnpm dev" }],
     });
-    expect(r.sources["scripts.setup"]).toBe("repo");
-    expect(r.sources["scripts.archive"]).toBe("repo");
-    expect(r.sources["scripts.run_actions"]).toBe("repo");
-    expect(r.warnings.some((w) => w.startsWith("repo-local: scripts:"))).toBe(
-      true,
-    );
+    expect(r.sources["scripts.setup"]).toBe("repo-local");
+    expect(r.sources["scripts.archive"]).toBe("user");
+    expect(r.sources["scripts.run_actions"]).toBe("repo-local");
+    expect(r.warnings).toEqual([]);
   });
 });
 
 describe("resolveSettings — layer hygiene", () => {
-  it("drops user-only keys from repo layers with a warning, keeps them from user/repo-local", () => {
+  it("keeps provider/model policy user-only while accepting personal repository preferences", () => {
     const r = resolveSettings({
       user: { models: { default: "fable-5" }, tool_approvals_enabled: true },
-      repo: {
-        models: { default: "evil-model" },
+      repoLocal: {
+        models: { default: "other" },
         tool_approvals_enabled: false,
-        workspaces: { path: "/evil" },
+        workspaces: { path: "/tmp/x" },
       },
-      repoLocal: { workspaces: { path: "/tmp/x" } }, // machine override — allowed here
     });
     expect(r.effective.models).toEqual({ default: "fable-5" });
     expect(r.effective.tool_approvals_enabled).toBe(true);
     expect(r.effective.workspaces).toEqual({ path: "/tmp/x" });
-    expect(r.sources["models.default"]).toBe("user");
     expect(r.sources["workspaces.path"]).toBe("repo-local");
-    expect(r.warnings.some((w) => w.startsWith("repo: models"))).toBe(true);
+    expect(r.warnings.some((w) => w.startsWith("repo-local: models"))).toBe(
+      true,
+    );
     expect(
-      r.warnings.some((w) => w.startsWith("repo: tool_approvals_enabled")),
+      r.warnings.some((w) =>
+        w.startsWith("repo-local: tool_approvals_enabled"),
+      ),
     ).toBe(true);
-    expect(r.warnings.some((w) => w.startsWith("repo: workspaces"))).toBe(true);
   });
 
   it("keeps external Claude Chrome opt-in while honoring legacy disablement", () => {
@@ -166,7 +181,7 @@ describe("resolveSettings — layer hygiene", () => {
       user: {
         browser: { enabled: false, codex_enabled: true },
       },
-      repo: { browser: { enabled: true, provider: "isolated" } },
+      repoLocal: { browser: { enabled: true, provider: "isolated" } },
     });
     expect(disabled.effective.browser).toEqual({
       enabled: false,
@@ -182,7 +197,9 @@ describe("resolveSettings — layer hygiene", () => {
     expect(disabled.sources["browser.claude_enabled"]).toBe("user");
     expect(disabled.sources["browser.provider"]).toBe("default");
     expect(
-      disabled.warnings.some((warning) => warning.startsWith("repo: browser")),
+      disabled.warnings.some((warning) =>
+        warning.startsWith("repo-local: browser"),
+      ),
     ).toBe(true);
   });
 
@@ -203,7 +220,9 @@ describe("resolveSettings — layer hygiene", () => {
     // env moved to the user layer (repo files no longer carry it) — the
     // per-leaf hygiene under test is unchanged.
     const r = resolveSettings({
-      repo: { scripts: { run: "pnpm dev", run_mode: "sometimes", setup: 42 } },
+      repoLocal: {
+        scripts: { run: "pnpm dev", run_mode: "sometimes", setup: 42 },
+      },
       user: { env: { GOOD: "yes", BAD: 7 } },
     });
     expect(r.effective.scripts).toEqual({
@@ -216,85 +235,49 @@ describe("resolveSettings — layer hygiene", () => {
     expect(r.warnings.some((w) => w.includes("env.BAD"))).toBe(true);
   });
 
-  it("ignores env / env_files / mcp / file_include_globs from repo-scoped layers with a warning (2026-07-17 slimming)", () => {
-    // Repo files can no longer contribute these keys — a hostile committed
-    // file can't plant env vars or MCP servers, and provenance for env keys
-    // can only ever be user/team/managed.
+  it("ignores repository env and retired shared/worktree settings", () => {
     const r = resolveSettings({
       user: { env: { A: "user-a" } },
-      repo: {
-        env: { A: "repo-a", PLANTED: "x" },
-        env_files: [".env.evil"],
-        mcp: {
-          servers: [
-            { name: "evil", transport: "http", url: "https://evil/mcp" },
-          ],
-        },
-        file_include_globs: ["**/*"],
-      },
-      repoLocal: { env: { B: "local-b" } },
-      workspaceLocal: { env: { C: "wt-c" } },
+      repo: { env: { A: "repo" }, mcp: { servers: [] } },
+      repoLocal: { env: { B: "local" }, env_files: [".env"] },
+      workspaceLocal: { env: { C: "worktree" } },
     });
     expect(r.effective.env).toEqual({ A: "user-a" });
     expect(r.effective.env_files).toBeUndefined();
     expect(r.effective.mcp).toBeUndefined();
-    expect(r.effective.file_include_globs).toBeUndefined();
     expect(r.sources["env.A"]).toBe("user");
-    expect(r.sources["env.B"]).toBeUndefined();
-    expect(r.sources["env.C"]).toBeUndefined();
-    expect(r.warnings.some((w) => w.startsWith("repo: env:"))).toBe(true);
-    expect(r.warnings.some((w) => w.startsWith("repo: env_files:"))).toBe(true);
-    expect(r.warnings.some((w) => w.startsWith("repo: mcp:"))).toBe(true);
-    expect(
-      r.warnings.some((w) => w.startsWith("repo: file_include_globs:")),
-    ).toBe(true);
     expect(r.warnings.some((w) => w.startsWith("repo-local: env:"))).toBe(true);
-    expect(r.warnings.some((w) => w.startsWith("workspace-local: env:"))).toBe(
+    expect(r.warnings.some((w) => w.startsWith("repo-local: env_files:"))).toBe(
       true,
     );
   });
 
-  it("ignores [scripts] from the personal files with a warning — repo settings live in the committed settings.toml", () => {
-    // The 2026-07-17 decision: setup / archive / run actions are REPO
-    // settings, edited into and read from `.zeros/settings.toml` only, so the
-    // same repo behaves identically in every Zeros install that opens it. A
-    // stale [scripts] in a gitignored settings.local.toml (written by older
-    // builds) must not shadow the committed file — repo-local outranks repo
-    // in the merge, so without this drop a UI edit would silently not apply.
+  it("personal script overrides replace arrays and clearing them falls back to user defaults", () => {
+    const user = {
+      scripts: {
+        setup: "default",
+        run_actions: [{ id: "a", name: "A", command: "x" }],
+      },
+    };
     const r = resolveSettings({
-      repo: {
-        scripts: {
-          setup: "pnpm install",
-          run_actions: [{ id: "a", name: "A", command: "x" }],
-        },
-      },
-      repoLocal: {
-        scripts: {
-          setup: "stale",
-          run_actions: [{ id: "old", name: "Old", command: "y" }],
-        },
-        workspaces: { path: "/tmp/x" }, // personal keys still resolve
-      },
-      workspaceLocal: { scripts: { archive: "stale-wt" } },
+      user,
+      repoLocal: { scripts: { setup: "personal", run_actions: [] } },
     });
     expect(r.effective.scripts).toEqual({
       run_mode: "concurrent",
-      setup: "pnpm install",
-      run_actions: [{ id: "a", name: "A", command: "x" }],
+      setup: "personal",
+      run_actions: [],
     });
-    expect(r.effective.workspaces).toEqual({ path: "/tmp/x" });
-    expect(r.sources["scripts.setup"]).toBe("repo");
-    expect(r.warnings.some((w) => w.startsWith("repo-local: scripts:"))).toBe(
-      true,
-    );
+    expect(r.sources["scripts.setup"]).toBe("repo-local");
+    expect(r.warnings).toEqual([]);
     expect(
-      r.warnings.some((w) => w.startsWith("workspace-local: scripts:")),
-    ).toBe(true);
+      resolveSettings({ user, repoLocal: {} }).effective.scripts,
+    ).toMatchObject(user.scripts);
   });
 
   it("drops a section that is not a table, keeps the rest of the document", () => {
     const r = resolveSettings({
-      repo: { scripts: "pnpm dev", git: { base_branch: "dev" } },
+      repoLocal: { scripts: "pnpm dev", git: { base_branch: "dev" } },
     });
     expect(r.effective.scripts).toEqual({ run_mode: "concurrent" }); // default survives
     expect((r.effective.git as Record<string, unknown>).base_branch).toBe(
@@ -325,20 +308,20 @@ describe("resolveSettings — layer hygiene", () => {
 });
 
 describe("resolveSettings — forward compat + purity", () => {
-  it("preserves and merges unknown keys", () => {
+  it("preserves unknown user keys but excludes unsupported repository fields", () => {
     const r = resolveSettings({
       user: {
         future_feature: { knob: 1 },
         scripts: { future_script_key: "x" },
       },
-      repo: { future_feature: { other: 2 } },
+      repoLocal: { future_feature: { other: 2 } },
     });
-    expect(r.effective.future_feature).toEqual({ knob: 1, other: 2 });
+    expect(r.effective.future_feature).toEqual({ knob: 1 });
     expect(
       (r.effective.scripts as Record<string, unknown>).future_script_key,
     ).toBe("x");
     expect(r.sources["future_feature.knob"]).toBe("user");
-    expect(r.sources["future_feature.other"]).toBe("repo");
+    expect(r.sources["future_feature.other"]).toBeUndefined();
   });
 
   it("excludes $schema from the effective tree", () => {
@@ -352,10 +335,10 @@ describe("resolveSettings — forward compat + purity", () => {
   it("clears stale leaf provenance when a stronger layer replaces a table with a scalar (and vice versa)", () => {
     const r = resolveSettings({
       user: { future: { nested: "a" } },
-      repo: { future: "flat" },
+      managed: { future: "flat" },
     });
     expect(r.effective.future).toBe("flat");
-    expect(r.sources["future"]).toBe("repo");
+    expect(r.sources["future"]).toBe("managed");
     expect(r.sources["future.nested"]).toBeUndefined();
   });
 

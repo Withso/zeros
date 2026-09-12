@@ -17,6 +17,7 @@ import {
   withDesignDocumentWrite,
   withDesignWorkspaceMutation,
 } from "../document-write-lock";
+import { withWorkspaceGitMutation } from "../../git/mutation-lock";
 
 describe("withDesignDocumentWrite", () => {
   beforeEach(() => {
@@ -69,5 +70,42 @@ describe("withDesignDocumentWrite", () => {
     release();
     await Promise.all([first, second]);
     expect(pointerMutation).toHaveBeenCalledTimes(1);
+  });
+
+  it("shares one worktree mutation lane with Git instead of taking an opposite-order lock", async () => {
+    let releaseDesign!: () => void;
+    const designBlocked = new Promise<void>((resolve) => {
+      releaseDesign = resolve;
+    });
+    let designEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      designEntered = resolve;
+    });
+    const design = withDesignWorkspaceMutation(
+      "/workspace/shared-design-git-lane",
+      async () => {
+        designEntered();
+        await designBlocked;
+      },
+    );
+    await entered;
+
+    const gitMutation = vi.fn(async () => undefined);
+    const git = withWorkspaceGitMutation(
+      "/workspace/shared-design-git-lane",
+      gitMutation,
+    );
+    const state = await Promise.race([
+      git.then(() => "ran" as const),
+      new Promise<"blocked">((resolve) =>
+        setTimeout(() => resolve("blocked"), 25),
+      ),
+    ]);
+    expect(state).toBe("blocked");
+    expect(gitMutation).not.toHaveBeenCalled();
+
+    releaseDesign();
+    await Promise.all([design, git]);
+    expect(gitMutation).toHaveBeenCalledTimes(1);
   });
 });

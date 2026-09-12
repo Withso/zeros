@@ -1,7 +1,14 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import {
+  createHash,
+  generateKeyPairSync,
+  randomUUID,
+  sign,
+} from "node:crypto";
 
 const AUDIENCE = "zeros-cloud-validation";
 const ISSUER = "https://validation.zeros.invalid";
+const CLIENT_ID = "client_zsr_cloud_qualification";
+const EMAIL = "zsr-cloud-qualification@zeros.invalid";
 
 function base64urlJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
@@ -11,15 +18,19 @@ export interface CloudValidationIdentity {
   readonly ownerSubject: string;
   readonly accessToken: string;
   readonly publicKey: string;
+  readonly keyId: string;
   readonly audience: string;
   readonly issuer: string;
+  readonly clientId: string;
   readonly expiresAt: number;
 }
 
 /** Mint a run-local qualification identity. The private KeyObject exists only
  * for this synchronous call and is never returned, serialized, written, or
- * projected into the worker. This proves asymmetric engine binding without
- * pretending to be the production control-plane tenant grant. */
+ * projected into the worker. The claims intentionally satisfy the exact
+ * `zeros-access-v1` profile used for WorkOS access tokens, while the invalid
+ * issuer and dedicated client id ensure this credential cannot be confused
+ * with a hosted environment token. */
 export function createCloudValidationIdentity(options: {
   ownerSubject: string;
   nowMs?: number;
@@ -39,11 +50,18 @@ export function createCloudValidationIdentity(options: {
   const { publicKey, privateKey } = generateKeyPairSync("rsa", {
     modulusLength: 2048,
   });
-  const issuedAt = nowMs / 1000;
+  const publicKeyDer = publicKey.export({ type: "spki", format: "der" });
+  const keyId = createHash("sha256").update(publicKeyDer).digest("base64url");
+  const issuedAt = Math.floor(nowMs / 1000);
   const expiresAt = issuedAt + options.ttlSeconds;
-  const header = base64urlJson({ alg: "RS256", typ: "JWT" });
+  const header = base64urlJson({ alg: "RS256", typ: "JWT", kid: keyId });
   const payload = base64urlJson({
     sub: options.ownerSubject,
+    sid: `zsr_session_${randomUUID()}`,
+    jti: `zsr_token_${randomUUID()}`,
+    client_id: CLIENT_ID,
+    "https://zeros.build/email": EMAIL,
+    "https://zeros.build/email_verified": true,
     aud: AUDIENCE,
     iss: ISSUER,
     iat: issuedAt,
@@ -60,8 +78,10 @@ export function createCloudValidationIdentity(options: {
     ownerSubject: options.ownerSubject,
     accessToken: `${signingInput}.${signature}`,
     publicKey: publicKey.export({ type: "spki", format: "pem" }).toString(),
+    keyId,
     audience: AUDIENCE,
     issuer: ISSUER,
+    clientId: CLIENT_ID,
     expiresAt: expiresAt * 1000,
   };
 }

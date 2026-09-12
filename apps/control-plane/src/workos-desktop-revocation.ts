@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import type pg from "pg";
 
+import { withSystemTx } from "./db.js";
 import type { WorkOSDesktopProvider } from "./workos-provider.js";
 
 const PAGE_SIZE = 100;
@@ -136,8 +138,41 @@ function json(value: unknown, status = 200): Response {
   });
 }
 
+export async function enqueueSessionsRevokedNotification(
+  pool: pg.Pool,
+  providerSubject: string,
+): Promise<boolean> {
+  if (!requiredIdentifier(providerSubject)) return false;
+  return withSystemTx(pool, async (tx) => {
+    const inserted = await tx.query(
+      `INSERT INTO security_notification_outbox (
+         user_id, destination_email, template, payload
+       )
+       SELECT u.id, u.email, 'sessions_revoked',
+              jsonb_build_object('reason', 'user_requested_global_signout')
+       FROM user_identities ui
+       JOIN users u ON u.id = ui.user_id
+       WHERE ui.provider = 'workos'
+         AND ui.provider_sub = $1
+         AND ui.status = 'active'
+         AND u.deleted_at IS NULL
+       RETURNING id`,
+      [providerSubject],
+    );
+    return (inserted.rowCount ?? 0) === 1;
+  });
+}
+
+export type WorkOSDesktopRevocationRoutesOptions = {
+  onAllSessionsRevoked?: (input: {
+    providerSubject: string;
+    revoked: number;
+  }) => Promise<void>;
+};
+
 export function createWorkOSDesktopRevocationRoutes(
   provider: WorkOSDesktopProvider,
+  options: WorkOSDesktopRevocationRoutesOptions = {},
 ): Hono {
   const app = new Hono();
   app.post("/auth/desktop-revoke", async (c) => {
@@ -155,14 +190,28 @@ export function createWorkOSDesktopRevocationRoutes(
       return json({ error: "unauthorized" }, 401);
     }
     try {
-      return json(
-        await revokeWorkOSDesktopSessions({
-          scope,
-          subject: claims.subject,
-          sessionId: claims.sessionId,
-          provider,
-        }),
-      );
+      const result = await revokeWorkOSDesktopSessions({
+        scope,
+        subject: claims.subject,
+        sessionId: claims.sessionId,
+        provider,
+      });
+      if (scope === "all" && options.onAllSessionsRevoked) {
+        // Revocation is the security boundary. A notification-database outage
+        // must never turn successful provider revocation into a failed logout.
+        // The durable outbox takes over once this bounded enqueue succeeds.
+        await options
+          .onAllSessionsRevoked({
+            providerSubject: claims.subject,
+            revoked: result.revoked,
+          })
+          .catch(() => {
+            console.error(
+              "[auth] sessions-revoked notification enqueue failed",
+            );
+          });
+      }
+      return json(result);
     } catch {
       return json({ error: "unavailable" }, 503);
     }

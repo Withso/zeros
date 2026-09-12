@@ -10,10 +10,8 @@ import {
   createDecipheriv,
   createHash,
   createHmac,
-  createPrivateKey,
   hkdfSync,
   randomBytes,
-  sign,
   timingSafeEqual,
 } from "node:crypto";
 import { Hono } from "hono";
@@ -23,7 +21,10 @@ import type pg from "pg";
 import type { GithubBackendConfig } from "./config.js";
 import { withSystemTx, withUserTx, type Tx } from "./db.js";
 import { HttpError } from "./authz.js";
+import { createGithubAppJwt } from "./github-app-jwt.js";
 import { rateLimit } from "./ratelimit.js";
+
+export { createGithubAppJwt };
 
 const API_VERSION = "2026-03-10";
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
@@ -213,58 +214,6 @@ function sha256(value: string): Buffer {
 
 function base64url(value: Buffer): string {
   return value.toString("base64url");
-}
-
-/** GitHub requires RS256, an iat backdated for clock drift, and an exp no more
- * than ten minutes ahead. The public client id is the recommended issuer. */
-export function createGithubAppJwt(
-  config: GithubBackendConfig,
-  nowMs: number = Date.now(),
-): string {
-  if (
-    !config.privateKey ||
-    !Number.isSafeInteger(nowMs) ||
-    nowMs <= 0
-  ) {
-    throw new HttpError(
-      503,
-      "github_cloud_not_configured",
-      "Cloud GitHub access is not configured on this Zeros control plane.",
-    );
-  }
-  let key;
-  try {
-    key = createPrivateKey(config.privateKey);
-  } catch {
-    throw new HttpError(
-      503,
-      "github_cloud_not_configured",
-      "Cloud GitHub access is not configured on this Zeros control plane.",
-    );
-  }
-  if (key.asymmetricKeyType !== "rsa") {
-    throw new HttpError(
-      503,
-      "github_cloud_not_configured",
-      "Cloud GitHub access is not configured on this Zeros control plane.",
-    );
-  }
-  const header = Buffer.from(
-    JSON.stringify({ alg: "RS256", typ: "JWT" }),
-  ).toString("base64url");
-  const nowSeconds = Math.floor(nowMs / 1_000);
-  const payload = Buffer.from(
-    JSON.stringify({
-      iat: nowSeconds - 60,
-      exp: nowSeconds + 9 * 60,
-      iss: config.clientId,
-    }),
-  ).toString("base64url");
-  const unsigned = `${header}.${payload}`;
-  const signature = sign("RSA-SHA256", Buffer.from(unsigned), key).toString(
-    "base64url",
-  );
-  return `${unsigned}.${signature}`;
 }
 
 function pkceChallenge(verifier: string): string {
@@ -1050,14 +999,10 @@ async function revokeGithubInstallationToken(
   config: GithubBackendConfig,
   token: string,
 ): Promise<void> {
-  await fetchWithTimeout(
-    fetchImpl,
-    `${config.apiBaseUrl}/installation/token`,
-    {
-      method: "DELETE",
-      headers: githubHeaders(token),
-    },
-  ).catch(() => undefined);
+  await fetchWithTimeout(fetchImpl, `${config.apiBaseUrl}/installation/token`, {
+    method: "DELETE",
+    headers: githubHeaders(token),
+  }).catch(() => undefined);
 }
 
 async function mintGithubInstallationToken(
@@ -1821,10 +1766,7 @@ export function createGithubRoutes(
     async (c) => {
       const user = c.get("user");
       const installationId = Number(c.req.param("id"));
-      if (
-        !Number.isSafeInteger(installationId) ||
-        installationId < 1
-      ) {
+      if (!Number.isSafeInteger(installationId) || installationId < 1) {
         throw new HttpError(
           422,
           "invalid_input",
@@ -1858,11 +1800,7 @@ export function createGithubRoutes(
           assertCloudInstallationAccess(tx, access),
         );
       } catch (error) {
-        await revokeGithubInstallationToken(
-          fetchImpl,
-          config,
-          minted.token,
-        );
+        await revokeGithubInstallationToken(fetchImpl, config, minted.token);
         throw error;
       }
       try {

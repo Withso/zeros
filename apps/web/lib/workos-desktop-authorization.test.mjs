@@ -8,6 +8,7 @@ import {
 } from "./workos-desktop-authorization.mjs";
 
 const STATE = `zeros-alpha.${"s".repeat(43)}`;
+const DEV_STATE = `zeros-dev.${"d".repeat(43)}`;
 const CHALLENGE = "c".repeat(43);
 const ENV = {
   AUTH_PROVIDER: "workos",
@@ -116,4 +117,59 @@ test("hosted desktop routes reject a callback intended for another release chann
   );
 
   assert.equal(response.status, 400);
+});
+
+test("Alpha alone permits the local Dev scheme through the WorkOS desktop boundary", async () => {
+  const calls = [];
+  const start = await renderWorkOSDesktopAuthorizationPage(
+    new Request(
+      `https://app-alpha.zeros.build/auth/desktop?state=${DEV_STATE}&code_challenge=${CHALLENGE}`,
+    ),
+    ENV,
+    {
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        return new Response(null, {
+          status: 303,
+          headers: {
+            location: "https://api.workos.com/user_management/authorize",
+          },
+        });
+      },
+    },
+  );
+  const callback = renderWorkOSDesktopCallback(
+    new Request(
+      `https://app-alpha.zeros.build/auth/desktop/callback?code=authorization-code&state=${DEV_STATE}`,
+    ),
+    ENV,
+  );
+  const callbackBody = await callback.text();
+
+  assert.equal(start.status, 303);
+  assert.equal(
+    calls[0].url,
+    `https://api-alpha.zeros.build/auth/desktop/start?state=${DEV_STATE}&code_challenge=${CHALLENGE}`,
+  );
+  assert.equal(callback.status, 200);
+  assert.match(callbackBody, /zeros-dev/);
+});
+
+test("Beta and Production reject the local Dev scheme", async () => {
+  for (const [deployment, origin, api] of [
+    ["beta", "https://app-beta.zeros.build", "https://api-beta.zeros.build"],
+    ["production", "https://app.zeros.build", "https://api.zeros.build"],
+  ]) {
+    const response = await renderWorkOSDesktopAuthorizationPage(
+      new Request(
+        `${origin}/auth/desktop?state=${DEV_STATE}&code_challenge=${CHALLENGE}`,
+      ),
+      {
+        AUTH_PROVIDER: "workos",
+        CONTROL_PLANE_URL: api,
+        ZEROS_DEPLOY_ENV: deployment,
+      },
+    );
+    assert.equal(response.status, 400);
+  }
 });

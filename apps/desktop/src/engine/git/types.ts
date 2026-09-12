@@ -77,6 +77,9 @@ export type DetectedTool =
 
 export interface Workspace {
   id: string;
+  /** Immutable global UUID used by cloud fork/sync protocols. `id` remains the
+   * human-readable local compatibility alias and is never rewritten. */
+  canonicalId?: string;
   /** Explicit presentation state. Absent only on legacy wire objects and
    * recovery seeds. It never participates in mutation authorization. */
   viewMode?: WorkspaceViewMode;
@@ -85,7 +88,7 @@ export interface Workspace {
    * Absent means "code" for pre-design rows. */
   kind?: WorkspaceMode;
   /** Organization that semantically owns this workspace. NULL identifies a
-   * pre-v31 local workspace and is interpreted as Personal until claimed. */
+   * device-local Personal workspace, including pre-v31 local workspaces. */
   organizationId?: string | null;
   /** Execution location. Desktop creation currently emits only `local`;
    * `cloud` is reserved for the organization-only provisioner. */

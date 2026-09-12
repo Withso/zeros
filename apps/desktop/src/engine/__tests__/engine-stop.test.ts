@@ -31,6 +31,13 @@ describe("ZerosEngine.stop", () => {
           throw new Error("agent boundary proof failed");
         },
       },
+      designAgentAdmissions: {
+        stopAll: async () => {
+          calls.push("design-admissions");
+          throw new Error("design admission stop failed");
+        },
+      },
+      designAgentRunByExecution: new Map(),
       vaultPersistTimer: null,
       mcpGateway: {
         stop: async () => {
@@ -43,9 +50,7 @@ describe("ZerosEngine.stop", () => {
       watcher: { stop: async () => calls.push("watcher") },
       settingsWatcher: { stop: () => calls.push("settings") },
       gitWatcher: { stop: async () => calls.push("git-watcher") },
-      transports: [
-        { stop: async () => calls.push("transport") },
-      ],
+      transports: [{ stop: async () => calls.push("transport") }],
       removePortFile: () => calls.push("port-file"),
       clearBusy: () => calls.push("busy"),
     };
@@ -58,11 +63,13 @@ describe("ZerosEngine.stop", () => {
     expect((error as AggregateError).errors).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ message: "agent boundary proof failed" }),
+        expect.objectContaining({ message: "design admission stop failed" }),
         expect.objectContaining({ message: "mcp stop failed" }),
       ]),
     );
     expect(calls).toEqual([
       "agents",
+      "design-admissions",
       "mcp",
       "pty",
       "terminals",

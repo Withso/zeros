@@ -372,12 +372,11 @@ export function effectiveFavoriteModel(
   const family = agentFamily(agentId ?? null);
   if (!family) return null;
   const selected = getFavoriteModel(agentId);
-  if (
-    selected &&
-    modelsForAgent(family, null).some((model) => model.value === selected)
-  ) {
-    return selected;
-  }
+  // Visibility and durable identity are different questions. An
+  // account-qualified (`liveRequired`) row is deliberately absent from the cold
+  // picker, but an exact saved value or alias still names a curated model. Keep
+  // that raw value so discovery cannot silently rewrite the user's favorite.
+  if (selected && curatedModelForValue(family, selected)) return selected;
   return defaultFavoriteModelFor(family);
 }
 
@@ -425,12 +424,40 @@ export function normalizeModelSlug(family: string, id: string): string {
   return s;
 }
 
+/** Match a persisted/provider value against every curated entry, including an
+ * account-qualified row that is currently hidden from the picker. */
+function curatedModelForValue(family: string, id: string): ModelOption | null {
+  const curated = CURATED_FAMILIES[family] ?? [];
+  const exact = curated.find((model) => model.value === id);
+  if (exact) return exact;
+  const normalized = normalizeModelSlug(family, id);
+  return (
+    curated.find(
+      (model) => normalizeModelSlug(family, model.value) === normalized,
+    ) ?? null
+  );
+}
+
+/** Preserve a hidden account-qualified model as a display/configuration
+ * identity without putting it back in the selectable model list. The requested
+ * value stays verbatim so a saved legacy alias is not migrated as a side
+ * effect of rendering it. */
+function hiddenCompatibilityModel(
+  family: string,
+  id: string,
+): ModelOption | null {
+  const curated = curatedModelForValue(family, id);
+  return curated?.liveRequired
+    ? { ...curated, value: id, selectable: false }
+    : null;
+}
+
 /** Agents that honour a discrete reasoning-effort level.
  *  - Claude: the Agent SDK `effort` option (low|medium|high|xhigh|max) +
  *    the `ultracode` setting.
  *  - Codex: reads ZEROS_THINKING_EFFORT → `turn/start.effort`.
- *  - Cursor: an advertised effort ladder swaps to a concrete catalog-backed
- *    reasoning model variant; models without such a ladder hide the toggle. */
+ *  - Cursor: an advertised effort ladder maps to native model parameters (or
+ *    a legacy catalog-backed suffix); models without a ladder hide the toggle. */
 export function agentSupportsEffort(
   agentId: string | null,
   model: string | null = null,
@@ -478,10 +505,10 @@ export const EFFORT_LABELS: Record<ChatEffort, string> = {
 };
 
 /** Per-family effort-label overrides. Each agent brands its
- *  reasoning tiers differently: Codex reads "Light … Extra High … Max …
+ *  reasoning tiers differently: Codex reads "Low … Extra High … Max …
  *  Ultra". "Max" sits between "Extra High" and "Ultra", so max keeps its
  *  default label and the internal ultracode
- *  level carries "Ultra"), Claude "Low … Extra … Max … Ultracode". Only
+ *  level carries "Ultra"), Claude "Low … Extra High … Max … Ultracode". Only
  *  the levels that DIFFER from {@link EFFORT_LABELS} are listed; unlisted
  *  levels fall back to the default. Cursor (Grok low/medium/high) uses the
  *  defaults, so it needs no entry. */
@@ -489,8 +516,8 @@ const EFFORT_LABELS_BY_FAMILY: Record<
   string,
   Partial<Record<ChatEffort, string>>
 > = {
-  claude: { xhigh: "Extra", max: "Max", ultracode: "Ultracode" },
-  codex: { low: "Light", xhigh: "Extra High", ultracode: "Ultra" },
+  claude: { ultracode: "Ultracode" },
+  codex: { ultracode: "Ultra" },
 };
 
 /** The display label for an effort level in the given agent's vocabulary. Used
@@ -996,8 +1023,10 @@ function extractMetaModels(
 
 /** Resolve the {@link ModelOption} for a picked model value against the (curated,
  *  capability-overlaid) list, preferring an exact match then an alias-normalized
- *  one. A null/unset `model` resolves to the agent's global default (the star,
- *  falling back to the catalog head) — the single definition of "what a null
+ *  one. A hidden account-qualified compatibility value can still resolve for
+ *  labels/configuration, but is returned with `selectable: false` and never
+ *  joins the picker list. A null/unset `model` resolves to the agent's global
+ *  default (the star, falling back to the catalog head) — the single definition of "what a null
  *  ChatThread.model means", shared by the capability gates, the spawn env, and
  *  the composer pill's label. Returns null only when the agent has no models. */
 export function resolveModelOption(
@@ -1017,15 +1046,28 @@ export function resolveModelOption(
   // different Fast capability than the one on screen.
   if (!model) {
     const favorite = effectiveFavoriteModel(agentId);
-    const starred = favorite
-      ? list.find((m) => m.value === favorite)
-      : undefined;
-    return starred ?? list[0] ?? null;
+    if (favorite) {
+      const exact = list.find((candidate) => candidate.value === favorite);
+      const normalized = normalizeModelSlug(family, favorite);
+      const starred =
+        exact ??
+        list.find(
+          (candidate) =>
+            normalizeModelSlug(family, candidate.value) === normalized,
+        );
+      if (starred) return starred;
+      const compatibility = hiddenCompatibilityModel(family, favorite);
+      if (compatibility) return compatibility;
+    }
+    return list[0] ?? null;
   }
   const exact = list.find((m) => m.value === model);
   if (exact) return exact;
   const norm = normalizeModelSlug(family, model);
-  return list.find((m) => normalizeModelSlug(family, m.value) === norm) ?? null;
+  return (
+    list.find((m) => normalizeModelSlug(family, m.value) === norm) ??
+    hiddenCompatibilityModel(family, model)
+  );
 }
 
 // ── Public API ────────────────────────────────────────────
@@ -1103,7 +1145,9 @@ export function displayNameForModelValue(
   const owner = agentId ?? id;
   const family = agentFamily(owner);
   const norm = normalizeModelSlug(family, id);
-  const hit = modelsForAgent(owner, null).find(
+  // Labels are compatibility data too: a liveRequired row may be absent from
+  // today's picker while old transcripts/settings still carry its id or alias.
+  const hit = (CURATED_FAMILIES[family] ?? []).find(
     (m) =>
       m.value === id ||
       normalizeModelSlug(family, m.value) === norm ||
@@ -1128,8 +1172,8 @@ export const EFFORT_ENV_VAR = "ZEROS_THINKING_EFFORT";
 
 /** Env var carrying the composer's Fast-mode toggle ("1" when on). Zeros
  *  convention. Read by the Claude SDK adapter (→ `fastMode` setting) and the
- *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to choose
- *  a live-catalog fast model variant. */
+ *  Codex app-server adapter (→ `service_tier: "fast"`), or by Cursor to set a
+ *  native model parameter / legacy live-catalog fast variant. */
 export const FAST_MODE_ENV_VAR = "ZEROS_FAST_MODE";
 
 /** Env var carrying the composer's local permission posture

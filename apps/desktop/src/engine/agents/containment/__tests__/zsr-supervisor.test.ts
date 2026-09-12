@@ -78,7 +78,9 @@ describe("ZSR host-parity supervisor", () => {
     // is the generated profile, not the monitor, and the supervisor never
     // reads the violation store — so production spawns must not pay for it.
     expect(source).toContain("const enableViolationMonitor =");
-    expect(source).not.toContain("SandboxManager.initialize(parsedConfig.data, undefined, true)");
+    expect(source).not.toContain(
+      "SandboxManager.initialize(parsedConfig.data, undefined, true)",
+    );
     expect(source).toContain("ZEROS_ZSR_RIPGREP_PATH");
     expect(source).toContain("ripgrep:");
     expect(source).not.toContain("allowAppleEvents: true");
@@ -157,6 +159,34 @@ describe("ZSR host-parity supervisor", () => {
     expect(command.slice(latePrivateDeny)).toContain(
       `(subpath "${privatePolicy}")`,
     );
+  });
+
+  it("keeps grouped macOS denies after a writable-island carve-out", () => {
+    const writableIsland = "/Users/example/project";
+    const deniedPaths = ["alpha", "beta", "gamma", "delta", "epsilon"].map(
+      (name) => `${writableIsland}/worktrees/${name}/config.worktree`,
+    );
+    const command = wrapCommandWithSandboxMacOS({
+      command: "true",
+      hostParity: true,
+      needsNetworkRestriction: false,
+      readConfig: { denyOnly: [], allowWithinDeny: ["/"] },
+      writeConfig: {
+        allowOnly: ["/"],
+        denyWithinAllow: deniedPaths,
+        allowWithinDeny: [writableIsland],
+      },
+      disableMandatoryWriteProtection: true,
+    });
+
+    const carveOut = command.indexOf(
+      `(allow file-write* file-write-unlink file-write-create\n  (subpath "${writableIsland}")`,
+    );
+    const groupedDeny =
+      "worktrees/(alpha|beta|gamma|delta|epsilon)/(config\\\\.worktree)";
+
+    expect(carveOut).toBeGreaterThan(-1);
+    expect(command.lastIndexOf(groupedDeny)).toBeGreaterThan(carveOut);
   });
 });
 
@@ -302,7 +332,7 @@ describe("ZSR supervisor launch contract", () => {
   });
 
   it.runIf(process.platform === "linux")(
-    "still rejects a container launcher outside immutable private tools",
+    "rejects cloud container authority from a desktop boundary",
     async () => {
       const result = await rejectCommand({
         containerWorker: {
@@ -310,13 +340,19 @@ describe("ZSR supervisor launch contract", () => {
           runtime: "podman",
           node: process.execPath,
           engine: process.execPath,
-          launcher: path.join(privateRoot, "attacker.mjs"),
+          launcher: path.join(
+            privateRoot,
+            "tools",
+            "cloud-container-worker.mjs",
+          ),
           state: path.join(privateRoot, "container"),
           socket: path.join(privateRoot, "container", "podman.sock"),
         },
       });
       expect(result.status).toBe(125);
-      expect(result.stderr).toContain("outside private tools");
+      expect(result.stderr).toContain(
+        "invalid cloud container-worker descriptor",
+      );
     },
   );
 });

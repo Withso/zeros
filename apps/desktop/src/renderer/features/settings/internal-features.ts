@@ -1,16 +1,23 @@
+import {
+  readPreferenceCache,
+  writePreferenceCache,
+  subscribePreferenceCache,
+} from "../../platform/personal-preferences";
 // ──────────────────────────────────────────────────────────
 // Internal features — database-backed staff-only feature flags
 // ──────────────────────────────────────────────────────────
 //
 // NOT experimental features. Experimental (experimental-features.ts) is
 // visible to every user as an opt-in; Internal is invisible to everyone
-// except accounts whose database row carries the exact `developer` role. These
+// except accounts whose database row carries a `developer` or `platform_owner`
+// role. These
 // features may never ship to users — they exist for maintainers to debug/dogfood the app
 // (Settings → Internal, gated in settings-page.tsx `availableSections`).
 //
-// Who counts as internal comes from the DATABASE: `users.staff_role =
-// 'developer'`. The orthogonal `support_admin` role authorizes reviewed account
-// recovery only and must not expose engineering surfaces.
+// Who counts as internal comes from the DATABASE: `users.staff_role IN
+// ('developer', 'platform_owner')`. The deprecated `support_admin` role is
+// retained only for serialized compatibility and must not expose engineering
+// surfaces.
 // surfaced on `GET /v1/me` and cached by the team store. It used to be a
 // build-time email allowlist (`VITE_INTERNAL_USER_EMAILS`), which was wrong
 // in three ways: Vite inlines VITE_* into the renderer bundle, so the
@@ -64,7 +71,8 @@ import { getTeamStoreState, useTeams } from "../team/team-store";
  *  first fetch still in flight — because "not yet known" must behave as
  *  "not internal", never the reverse. */
 export function isInternalUser(): boolean {
-  return getTeamStoreState().me?.user.staffRole === "developer";
+  const role = getTeamStoreState().me?.user.staffRole;
+  return role === "developer" || role === "platform_owner";
 }
 
 /** Hook: is the signed-in user staff? Gates the Internal settings tab and
@@ -73,7 +81,10 @@ export function isInternalUser(): boolean {
  *  `useTeams` is single-flight, so calling it here costs no extra request. */
 export function useIsInternalUser(): boolean {
   const { me } = useTeams();
-  return me?.user.staffRole === "developer";
+  return (
+    me?.user.staffRole === "developer" ||
+    me?.user.staffRole === "platform_owner"
+  );
 }
 
 // ── The flags ───────────────────────────────────────────
@@ -89,7 +100,7 @@ type PersistedShape = Partial<Record<InternalFeature, boolean>>;
 
 function readPersisted(): PersistedShape {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readPreferenceCache(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
     return parsed && typeof parsed === "object"
@@ -102,7 +113,7 @@ function readPersisted(): PersistedShape {
 
 function writePersisted(next: PersistedShape): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    writePreferenceCache(STORAGE_KEY, JSON.stringify(next));
   } catch {
     /* storage quota / private mode — non-fatal */
   }
@@ -187,3 +198,8 @@ export function useInternalFeatureActive(feature: InternalFeature): boolean {
   const [on] = useInternalFeature(feature);
   return internalUser && on;
 }
+
+subscribePreferenceCache(STORAGE_KEY, () => {
+  current = readPersisted();
+  emit();
+});

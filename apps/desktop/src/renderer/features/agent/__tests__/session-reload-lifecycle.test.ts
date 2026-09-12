@@ -17,6 +17,7 @@ import {
   clearPrebindGoalSnapshotsForChat,
   composerShowsStopControl,
   detachAdmissionFlight,
+  executionActorForRecovery,
   loadedSessionStatus,
   markPrebindGoalSnapshot,
   markPrebindDirty,
@@ -60,6 +61,32 @@ const turnState = (
       ...extras,
     },
   }) as SessionNotification;
+
+describe("executionActorForRecovery", () => {
+  it("retains a Design actor and exact document across every session rebuild", () => {
+    expect(
+      executionActorForRecovery({
+        agentRole: "design",
+        designDocumentId: "frame:checkout.html",
+      }),
+    ).toEqual({
+      agentRole: "design",
+      designDocumentId: "frame:checkout.html",
+    });
+  });
+
+  it("lets an explicit admission replace stale actor fields", () => {
+    expect(
+      executionActorForRecovery(
+        {
+          agentRole: "design",
+          designDocumentId: "frame:old.html",
+        },
+        { agentRole: "code" },
+      ),
+    ).toEqual({ agentRole: "code" });
+  });
+});
 
 describe("queuedPromptPresentation", () => {
   it("presents the first admission-waiting send as an active turn", () => {

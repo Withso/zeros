@@ -17,6 +17,7 @@ import path from "node:path";
 import { BrowserWindow, dialog } from "electron";
 import { currentRoot } from "../../sidecar";
 import type { CommandHandler } from "../router";
+import { electronAtomicTemporaryPath } from "./atomic-file-write";
 
 interface CssFilePayload {
   path: string;
@@ -91,11 +92,19 @@ export const writeCssFile: CommandHandler = (args) => {
     throw new Error(`refusing to write outside project root: ${target}`);
   }
 
-  const ext = path.extname(target).replace(/^\./, "") || "css";
-  const tmp = target.replace(/\.[^.]+$/, "") + `.${ext}.zeros-tmp`;
+  // Design recovery owns the `.zeros-tmp` suffix. This command runs in the
+  // Electron process, outside the engine's mutation lane, so use a distinct
+  // unique namespace that recovery can never mistake for an orphaned Design
+  // transaction while preserving same-directory atomic rename semantics.
+  const tmp = electronAtomicTemporaryPath(target);
   try {
     fs.writeFileSync(tmp, content);
   } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Preserve the original write failure.
+    }
     throw new Error(
       `write tmp: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -103,6 +112,11 @@ export const writeCssFile: CommandHandler = (args) => {
   try {
     fs.renameSync(tmp, target);
   } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // Preserve the original rename failure.
+    }
     throw new Error(
       `rename: ${err instanceof Error ? err.message : String(err)}`,
     );

@@ -24,6 +24,10 @@ const PROJECT_MUTATIONS = new Set([
 ]);
 
 const SETTINGS_MUTATIONS = new Set([
+  "settings.syncPreferences",
+  "settings.syncAgentPreferences",
+  "skills.saveZeros",
+  "skills.removeZeros",
   "settings.write",
   "settings.writeRaw",
   "settings.migrateLegacy",
@@ -63,6 +67,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.token.update",
   "design.stage",
   "design.save",
+  "design.commit",
   "git.initInPlace",
   "detach.start",
   "detach.stop",

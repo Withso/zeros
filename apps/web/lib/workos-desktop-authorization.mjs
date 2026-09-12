@@ -5,9 +5,13 @@ import { SCHEMES } from "./schemes.mjs";
 const TOKEN_PART = /^[A-Za-z0-9_-]{43}$/;
 const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const DEPLOYMENT_SCHEMES = {
-  alpha: "zeros-alpha",
-  beta: "zeros-beta",
-  production: "zeros",
+  // Local source builds deliberately authenticate against disposable Alpha
+  // data. Alpha is the ONLY hosted boundary allowed to return to zeros-dev://;
+  // Beta and Production remain exact-channel so an installed release can never
+  // lose its callback to a development bundle.
+  alpha: new Set(["zeros-alpha", "zeros-dev"]),
+  beta: new Set(["zeros-beta"]),
+  production: new Set(["zeros"]),
 };
 
 function noStorePage(body, status, scriptNonce = null) {
@@ -35,8 +39,8 @@ function desktopState(raw, env) {
   const scheme = raw.slice(0, separator);
   const nonce = raw.slice(separator + 1);
   if (!SCHEMES.has(scheme) || !TOKEN_PART.test(nonce)) return null;
-  const expected = DEPLOYMENT_SCHEMES[(env.ZEROS_DEPLOY_ENV || "").trim()];
-  if (expected && expected !== scheme) return null;
+  const allowed = DEPLOYMENT_SCHEMES[(env.ZEROS_DEPLOY_ENV || "").trim()];
+  if (allowed && !allowed.has(scheme)) return null;
   return { value: raw, scheme };
 }
 

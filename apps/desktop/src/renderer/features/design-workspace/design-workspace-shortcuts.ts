@@ -1,4 +1,4 @@
-export type DesignWorkspaceShortcut = "stage" | "undo" | "redo";
+export type DesignWorkspaceShortcut = "save" | "undo" | "redo";
 
 export interface DesignWorkspaceShortcutEvent {
   key: string;
@@ -19,8 +19,8 @@ type DesignWorkspaceShortcutActions = Record<
 >;
 
 /** Resolve only the document-editing chords owned by an active Design surface.
- * A focused text field keeps its native undo stack, while staging remains global
- * so Command/Ctrl+S can first blur and publish that field's current draft. */
+ * A focused text field keeps its native undo stack, while saving remains global
+ * so Command/Ctrl+S can first blur and validate that field's current draft. */
 export function resolveDesignWorkspaceShortcut(
   event: DesignWorkspaceShortcutEvent,
   editableTarget: boolean,
@@ -29,7 +29,7 @@ export function resolveDesignWorkspaceShortcut(
     return null;
   }
   const key = event.key.toLowerCase();
-  if (key === "s") return event.shiftKey ? null : "stage";
+  if (key === "s") return event.shiftKey ? null : "save";
   if (key !== "z" || editableTarget) return null;
   return event.shiftKey ? "redo" : "undo";
 }

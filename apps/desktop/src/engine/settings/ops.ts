@@ -17,7 +17,8 @@
 // client from accidentally persisting the mask over a real value.
 // ──────────────────────────────────────────────────────────
 
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { validateDesignSettings } from "../design/metadata";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { isSecretEnvName } from "./env-names";
@@ -26,7 +27,6 @@ import {
   managedSettingsPath,
   readSettingsFile,
   repoLocalSettingsPath,
-  repoSettingsPath,
   updateSettingsFile,
   writeSettingsFileRaw,
   userSettingsPath,
@@ -35,8 +35,20 @@ import {
 import { resolveSettings, type ResolvedSettings } from "./resolve";
 import { getTeamDoc } from "./team-context";
 import {
+  ensureLocalSettingsIgnored,
+  migrateWorkspaceSettings,
+  personalRepoRoot,
+  personalWorkspaceRoot,
+  workspaceSettingsPath,
+  readPersonalRepoSettings,
+  readPersonalWorkspaceSettings,
+  PERSONAL_SETTINGS_VERSION,
+} from "./personal-repo";
+export { ensureLocalSettingsIgnored } from "./personal-repo";
+import {
   sanitizeLayer,
   SCHEMA_URL_REPO,
+  SCHEMA_URL_WORKSPACE,
   SCHEMA_URL_USER,
   type RawSettingsDoc,
 } from "./schema";
@@ -63,6 +75,7 @@ export type WritableLayer = (typeof WRITABLE_LAYERS)[number];
 export const REDACTED_SENTINEL = "<redacted>";
 
 export type SettingsOpErrorCode =
+  | "VALIDATION_FAILED"
   | "SETTINGS_BAD_PATCH"
   | "SETTINGS_BAD_TOML"
   | "SETTINGS_REPO_REQUIRED"
@@ -91,12 +104,9 @@ function layerPath(layer: ReadableLayer, repoRoot?: string): string {
           `settings layer '${layer}' requires a repoRoot`,
         );
       }
-      // repo-local and workspace-local are the SAME filename
-      // (`.zeros/settings.local.toml`) — the caller passes the right checkout:
-      // the main repo root for repo-local, the worktree path for workspace-local.
-      return layer === "repo"
-        ? repoSettingsPath(repoRoot)
-        : repoLocalSettingsPath(repoRoot);
+      return layer === "workspace-local"
+        ? workspaceSettingsPath(repoRoot)
+        : repoLocalSettingsPath(personalRepoRoot(repoRoot));
     }
   }
 }
@@ -111,7 +121,21 @@ export function opSettingsRead(
   repoRoot?: string,
 ): SettingsReadOpResult {
   const filePath = layerPath(layer, repoRoot);
-  return { layer, path: filePath, ...readSettingsFile(filePath) };
+  const read =
+    repoRoot && layer !== "user" && layer !== "managed"
+      ? readLocalLayer(layer, repoRoot)
+      : readSettingsFile(filePath);
+  return { layer, path: filePath, ...read };
+}
+
+function readLocalLayer(
+  layer: ReadableLayer,
+  root: string,
+  persist = true,
+): ReadSettingsResult {
+  return layer === "workspace-local"
+    ? readPersonalWorkspaceSettings(root, persist)
+    : readPersonalRepoSettings(root, persist);
 }
 
 export function opSettingsResolve(
@@ -120,42 +144,43 @@ export function opSettingsResolve(
 ): ResolvedSettings {
   const user = readSettingsFile(userSettingsPath());
   const managed = readSettingsFile(managedSettingsPath());
-  // `repoRoot` is the checkout being resolved (a worktree at agent spawn, the
-  // main checkout in the settings UI). The committed `repo` layer comes from it
-  // (per-branch). `mainRepoRoot` is the repo's MAIN checkout: repo-local is read
-  // from there, so a worktree agent inherits the machine-wide repo override the
-  // UI edits (the orphan-bug fix). workspace-local is the worktree's OWN file,
-  // read only when it's a distinct checkout (else it's the same file as
-  // repo-local). A single-arg call (UI / plain-folder chat) keeps the prior
-  // behavior: repo-local from `repoRoot`, no workspace-local.
-  const repo = repoRoot
-    ? readSettingsFile(repoSettingsPath(repoRoot))
-    : undefined;
   const repoLocalRoot = mainRepoRoot ?? repoRoot;
   const repoLocal = repoLocalRoot
-    ? readSettingsFile(repoLocalSettingsPath(repoLocalRoot))
+    ? readPersonalRepoSettings(repoLocalRoot)
     : undefined;
-  const isDistinctWorktree =
-    !!repoRoot &&
-    !!mainRepoRoot &&
-    path.resolve(mainRepoRoot) !== path.resolve(repoRoot);
-  const workspaceLocal = isDistinctWorktree
-    ? readSettingsFile(repoLocalSettingsPath(repoRoot))
-    : undefined;
-
+  const workspaceLocal =
+    repoRoot &&
+    repoLocalRoot &&
+    personalWorkspaceRoot(repoRoot) !== personalRepoRoot(repoLocalRoot)
+      ? readPersonalWorkspaceSettings(repoRoot)
+      : undefined;
   const resolved = resolveSettings({
     user: user.error ? null : user.doc,
     team: getTeamDoc(),
     managed: managed.error ? null : managed.doc,
-    repo: repo?.error ? null : repo?.doc,
     repoLocal: repoLocal?.error ? null : repoLocal?.doc,
     workspaceLocal: workspaceLocal?.error ? null : workspaceLocal?.doc,
   });
+  if (
+    repoRoot &&
+    workspaceLocal &&
+    workspaceSettingsPath(repoRoot) ===
+      repoLocalSettingsPath(personalWorkspaceRoot(repoRoot))
+  ) {
+    resolved.warnings.push(
+      "This branch tracks .zeros/settings.toml. Private workspace overrides use .zeros/settings.local.toml until that legacy tracked file is removed.",
+    );
+  }
+  if (Array.isArray(repoLocal?.doc.settings_migration_notes))
+    resolved.warnings.push(
+      ...repoLocal.doc.settings_migration_notes.filter(
+        (note): note is string => typeof note === "string",
+      ),
+    );
   // A malformed layer is skipped, not fatal — surface it so the UI can say so.
   for (const [name, r] of [
     ["user", user],
     ["managed", managed],
-    ["repo", repo],
     ["repo-local", repoLocal],
     ["workspace-local", workspaceLocal],
   ] as const) {
@@ -169,6 +194,19 @@ export function opSettingsResolve(
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+function validateDesignSelection(
+  root: string | undefined,
+  doc: RawSettingsDoc,
+): void {
+  try {
+    validateDesignSettings(root, doc);
+  } catch (error) {
+    throw new SettingsOpError(
+      "VALIDATION_FAILED",
+      error instanceof Error ? error.message : String(error),
+    );
+  }
 }
 
 /** True when any leaf of `value` is the redaction sentinel — a remote client
@@ -225,6 +263,16 @@ function redactMcpTable(mcp: unknown): unknown {
 
 export function redactDocForRemote(doc: RawSettingsDoc): RawSettingsDoc {
   let out: RawSettingsDoc = doc;
+  if (
+    doc.preferences !== undefined ||
+    doc.preferences_version !== undefined ||
+    doc.agent_preferences_version !== undefined
+  ) {
+    out = { ...out };
+    delete out.preferences;
+    delete out.preferences_version;
+    delete out.agent_preferences_version;
+  }
   if (isPlainObject(doc.env))
     out = { ...out, env: redactEnvTable(doc.env) as RawSettingsDoc };
   if (doc.mcp !== undefined)
@@ -245,7 +293,19 @@ export function secretEnvNamesInPatch(patch: unknown): string[] {
 export function redactResolvedForRemote(
   resolved: ResolvedSettings,
 ): ResolvedSettings {
-  return { ...resolved, effective: redactDocForRemote(resolved.effective) };
+  return {
+    ...resolved,
+    effective: redactDocForRemote(resolved.effective),
+    sources: Object.fromEntries(
+      Object.entries(resolved.sources).filter(
+        ([key]) =>
+          key !== "preferences_version" &&
+          key !== "agent_preferences_version" &&
+          key !== "preferences" &&
+          !key.startsWith("preferences."),
+      ),
+    ),
+  };
 }
 
 export interface SettingsWriteOpResult {
@@ -281,14 +341,26 @@ function prepareSettingsWrite(
     );
   }
   const filePath = layerPath(layer, repoRoot);
-  const current = readSettingsFile(filePath);
+  const current =
+    repoRoot && layer !== "user"
+      ? readLocalLayer(layer, repoRoot, false)
+      : readSettingsFile(filePath);
   if (current.error) {
     throw new Error(
       `refusing to overwrite malformed settings file ${filePath}: ${current.error}`,
     );
   }
   const doc = applySettingsPatch(current.doc, patch);
-  const { warnings } = sanitizeLayer(doc, layer);
+  // Selection validation applies even when no workspace is open. Unknown
+  // settings text stays on disk, but a bad path cannot become authority.
+  validateDesignSelection(
+    repoRoot ? path.dirname(path.dirname(filePath)) : undefined,
+    doc,
+  );
+  const { warnings } = sanitizeLayer(
+    doc,
+    layer === "repo" ? "repo-local" : layer,
+  );
   return { layer, path: filePath, doc, warnings };
 }
 
@@ -305,8 +377,8 @@ export function opSettingsPreviewWrite(
 
 /** Resolve a checkout exactly as opSettingsResolve would, replacing one layer
  * by a preview document when that layer's physical file matches `override`.
- * This keeps validation aligned with real layer precedence, including a
- * worktree's committed repo file and its distinct workspace-local file. */
+ * Worktrees resolve to the main checkout's personal file, just as real reads
+ * and writes do. Previewing never persists a migration. */
 export function opSettingsResolveWithOverride(
   repoRoot: string | undefined,
   mainRepoRoot: string | undefined,
@@ -319,30 +391,31 @@ export function opSettingsResolveWithOverride(
       : readSettingsFile(filePath);
   const user = read(userSettingsPath());
   const managed = read(managedSettingsPath());
-  const repo = repoRoot ? read(repoSettingsPath(repoRoot)) : undefined;
   const repoLocalRoot = mainRepoRoot ?? repoRoot;
   const repoLocal = repoLocalRoot
-    ? read(repoLocalSettingsPath(repoLocalRoot))
+    ? path.resolve(repoLocalSettingsPath(personalRepoRoot(repoLocalRoot))) ===
+      overridePath
+      ? { doc: override.doc, exists: true }
+      : readPersonalRepoSettings(repoLocalRoot, false)
     : undefined;
-  const isDistinctWorktree =
-    !!repoRoot &&
-    !!mainRepoRoot &&
-    path.resolve(mainRepoRoot) !== path.resolve(repoRoot);
-  const workspaceLocal = isDistinctWorktree
-    ? read(repoLocalSettingsPath(repoRoot))
-    : undefined;
+  const workspaceLocal =
+    repoRoot &&
+    repoLocalRoot &&
+    personalWorkspaceRoot(repoRoot) !== personalRepoRoot(repoLocalRoot)
+      ? path.resolve(workspaceSettingsPath(repoRoot)) === overridePath
+        ? { doc: override.doc, exists: true }
+        : readPersonalWorkspaceSettings(repoRoot, false)
+      : undefined;
   const resolved = resolveSettings({
     user: user.error ? null : user.doc,
     team: getTeamDoc(),
     managed: managed.error ? null : managed.doc,
-    repo: repo?.error ? null : repo?.doc,
     repoLocal: repoLocal?.error ? null : repoLocal?.doc,
     workspaceLocal: workspaceLocal?.error ? null : workspaceLocal?.doc,
   });
   for (const [name, result] of [
     ["user", user],
     ["managed", managed],
-    ["repo", repo],
     ["repo-local", repoLocal],
     ["workspace-local", workspaceLocal],
   ] as const) {
@@ -365,17 +438,30 @@ export function opSettingsWrite(
   const schemaUrl =
     layer === "user"
       ? SCHEMA_URL_USER
-      : layer === "repo"
-        ? SCHEMA_URL_REPO
-        : null;
+      : layer === "workspace-local" &&
+          repoRoot &&
+          personalWorkspaceRoot(repoRoot) !== personalRepoRoot(repoRoot)
+        ? SCHEMA_URL_WORKSPACE
+        : SCHEMA_URL_REPO;
+  if (repoRoot && layer !== "user") {
+    ensureLocalSettingsIgnored(
+      path.dirname(path.dirname(filePath)),
+      `.zeros/${path.basename(filePath)}` as
+        | ".zeros/settings.local.toml"
+        | ".zeros/settings.toml",
+    );
+    const migrated = readLocalLayer(layer, repoRoot);
+    if (migrated.error) throw new Error(migrated.error);
+    patch = { ...patch, settings_version: PERSONAL_SETTINGS_VERSION };
+  }
   // Re-run the format-preserving read/patch/write at the commit point. The
   // preview above is validation only; updateSettingsFile remains the atomic
   // source of truth and refuses a concurrently malformed file.
   const doc = updateSettingsFile(filePath, patch, { schemaUrl });
-  if ((layer === "repo-local" || layer === "workspace-local") && repoRoot) {
-    ensureLocalSettingsIgnored(repoRoot);
-  }
-  const { warnings } = sanitizeLayer(doc, layer);
+  const { warnings } = sanitizeLayer(
+    doc,
+    layer === "repo" ? "repo-local" : layer,
+  );
   return { layer, path: filePath, doc, warnings };
 }
 
@@ -404,45 +490,35 @@ export function opSettingsWriteRaw(
     );
   }
   const filePath = layerPath(layer, repoRoot);
-  writeSettingsFileRaw(filePath, text);
-  if ((layer === "repo-local" || layer === "workspace-local") && repoRoot) {
-    ensureLocalSettingsIgnored(repoRoot);
-  }
-  const { warnings } = sanitizeLayer(doc, layer);
-  return { layer, path: filePath, doc, warnings };
-}
-
-/** Keep `.zeros/settings.local.toml` out of git: append it to the repo's
- *  `.gitignore` unless an exact-line entry already covers it. Best-effort —
- *  a failure never blocks the settings write itself. */
-export function ensureLocalSettingsIgnored(repoRoot: string): void {
-  const IGNORE_LINE = ".zeros/settings.local.toml";
-  const gitignore = path.join(repoRoot, ".gitignore");
-  try {
-    if (!existsSync(path.join(repoRoot, ".git"))) return; // not a git repo
-    let text = "";
-    try {
-      text = readFileSync(gitignore, "utf8");
-    } catch {
-      /* no .gitignore yet — create below */
+  validateDesignSelection(
+    repoRoot ? path.dirname(path.dirname(filePath)) : undefined,
+    doc,
+  );
+  if (repoRoot && layer !== "user") {
+    if (doc.settings_version !== PERSONAL_SETTINGS_VERSION) {
+      if (doc.settings_version !== undefined)
+        throw new Error("Unsupported settings_version in repository settings.");
+      text = `settings_version = ${PERSONAL_SETTINGS_VERSION}\n${text}`;
+      doc.settings_version = PERSONAL_SETTINGS_VERSION;
     }
-    const lines = text.split("\n").map((l) => l.trim());
-    if (
-      lines.includes(IGNORE_LINE) ||
-      lines.includes(`/${IGNORE_LINE}`) ||
-      lines.includes(".zeros/")
-    ) {
-      return;
-    }
-    const lead = text.length === 0 || text.endsWith("\n") ? "" : "\n";
-    appendFileSync(
-      gitignore,
-      `${lead}\n# Zeros personal settings (machine-specific — never commit)\n${IGNORE_LINE}\n`,
-      "utf8",
+    // A raw document replaces the layer, including malformed contents. Keep
+    // filename migration and path/privacy checks, but do not parse or merge
+    // the old document. The version above also prevents legacy values from
+    // being imported on a later read; the legacy repository file stays intact.
+    if (layer === "workspace-local") migrateWorkspaceSettings(repoRoot);
+    ensureLocalSettingsIgnored(
+      path.dirname(path.dirname(filePath)),
+      `.zeros/${path.basename(filePath)}` as
+        | ".zeros/settings.local.toml"
+        | ".zeros/settings.toml",
     );
-  } catch {
-    /* best-effort */
   }
+  writeSettingsFileRaw(filePath, text);
+  const { warnings } = sanitizeLayer(
+    doc,
+    layer === "repo" ? "repo-local" : layer,
+  );
+  return { layer, path: filePath, doc, warnings };
 }
 
 // ── one-time legacy migration (localStorage → TOML) ────────
@@ -497,7 +573,7 @@ export function opSettingsMigrateLegacy(
       continue;
     }
 
-    // Shared (committed) layer: branching + scripts.
+    // Personal repository settings: branching + scripts.
     const shared: RawSettingsDoc = {};
     const git: Record<string, string> = {};
     if (typeof legacy.remoteOrigin === "string" && legacy.remoteOrigin.trim())
@@ -506,7 +582,7 @@ export function opSettingsMigrateLegacy(
       git.base_branch = legacy.baseBranch.trim();
     if (Object.keys(git).length > 0) shared.git = git;
 
-    const scripts: Record<string, string> = {};
+    const scripts: Record<string, unknown> = {};
     const legacyScripts = Array.isArray(legacy.scripts) ? legacy.scripts : [];
     const setupCmds = legacyScripts
       .filter(
@@ -521,15 +597,32 @@ export function opSettingsMigrateLegacy(
     );
     if (runCandidates.length > 0)
       scripts.run = (runCandidates[0].command as string).trim();
-    for (const extra of runCandidates.slice(1)) {
-      warnings.push(
-        `${repoRoot}: legacy script "${extra.name || extra.command}" has no TOML home (setup/run/archive) — re-add manually`,
-      );
+    if (runCandidates.length) {
+      const actions = runCandidates.map((candidate, index) => ({
+        id: `legacy-run-${index + 1}`,
+        name:
+          typeof candidate.name === "string" && candidate.name.trim()
+            ? candidate.name.trim()
+            : `Run ${index + 1}`,
+        command: (candidate.command as string).trim(),
+      }));
+      const current = opSettingsRead("repo-local", repoRoot);
+      if (current.error) throw new Error(current.error);
+      const previous = isPlainObject(current.doc.scripts)
+        ? current.doc.scripts.run
+        : undefined;
+      if (
+        typeof previous === "string" &&
+        previous.trim() &&
+        !actions.some((action) => action.command === previous.trim())
+      )
+        actions.unshift({ id: "run", name: "Run", command: previous.trim() });
+      scripts.run_actions = actions;
     }
     if (Object.keys(scripts).length > 0) shared.scripts = scripts;
 
     if (Object.keys(shared).length > 0) {
-      writeMergeUnder("repo", shared, repoRoot);
+      writeMergeUnder("repo-local", shared, repoRoot);
       migratedRepos.push(repoRoot);
     }
 
@@ -548,7 +641,11 @@ export function opSettingsMigrateLegacy(
   }
 
   const providerPatch: Record<string, Record<string, string>> = {};
-  for (const [agentId, prefs] of Object.entries(input.providers ?? {})) {
+  for (const [agentId, prefs] of Object.entries(
+    readSettingsFile(userSettingsPath()).doc.agent_preferences_version === 1
+      ? {}
+      : (input.providers ?? {}),
+  )) {
     if (!isPlainObject(prefs)) continue;
     const p: Record<string, string> = {};
     if (prefs.authMethod === "cli") p.auth = "cli";
@@ -578,7 +675,7 @@ function writeMergeUnder(
   repoRoot?: string,
 ): void {
   const current = opSettingsRead(layer, repoRoot);
-  if (current.error) return; // never risk a malformed file during migration
+  if (current.error) throw new Error(current.error); // retry; never mark a failed migration complete
   const pruned = dropExisting(patch, current.doc);
   if (Object.keys(pruned).length === 0) return;
   opSettingsWrite(layer, pruned, repoRoot);

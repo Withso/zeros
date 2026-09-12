@@ -2,8 +2,8 @@
 // useRunControl — the repo's run ACTIONS (multi-run)
 // ──────────────────────────────────────────────────────────
 //
-// Shared by terminal panel's terminal panel (its per-action Run tabs) and the
-// terminal panel header split-button. Resolves the repo's `[[scripts.run_actions]]`
+// Shared by per-action terminal views, sidebar controls, and the native Run
+// shortcut. Resolves the repo's `[[scripts.run_actions]]`
 // (with the legacy single `scripts.run` migrated to one default "run" action
 // at read time — see @zeros/protocol/run-actions), filters them to this OS, and
 // owns start/stop/focus per action.
@@ -14,7 +14,7 @@
 // and this hook then ATTACHES a terminal-store session to the deterministic
 // per-(folder, action) id (`runSessionId`) so TerminalSessionView reattaches
 // to the live engine PTY. A repeat start of a live action just refocuses it.
-// The header button additionally expands/reveals the terminal panel.
+// Starting reveals the action in its current tab or bottom-panel placement.
 
 import { useCallback, useMemo } from "react";
 import {
@@ -31,6 +31,8 @@ import { useResolvedSettings } from "../../features/settings/use-settings";
 import { workspaceStartRun, workspaceStopRun } from "../../platform/git";
 import { toast } from "../../shared/ui/primitives/elements";
 import { useTerminalStore } from "./terminal-store";
+import { openWorkbenchTerminal } from "../workbench/open-terminal";
+import { recordWorkspaceActivity } from "../../state/workspace-store";
 
 /** This renderer's platform in the run-actions vocabulary (mac/linux/win),
  *  or null when undetectable (then no action is filtered out). */
@@ -52,7 +54,7 @@ export function readRunActions(
 export interface RunControl {
   /** Platform-eligible actions, normalized (exactly one isDefault). Empty =
    *  the repo defines no run actions → the Run sub-tab shows its "Add run
-   *  script" state (and the header control hides). */
+   *  script" state. */
   actions: RunAction[];
   /** True once `actions` reflects RESOLVED settings on a runnable surface —
    *  false while settings are still loading (or there's no chat/workspace),
@@ -60,7 +62,7 @@ export interface RunControl {
    *  add-script empty state AND the stale-session cleanup so neither fires
    *  off a not-yet-loaded snapshot. */
   actionsReady: boolean;
-  /** The split-button face / ⌘R action (null when `actions` is empty). */
+  /** The ⌘R action (null when `actions` is empty). */
   defaultAction: RunAction | null;
   /** The deterministic session id for one action's run terminal. */
   runIdFor(actionId: string): string;
@@ -76,10 +78,10 @@ export function useRunControl(
   chatCwd: string | undefined,
 ): RunControl {
   const { workspace: activeWs } = useActiveWorkspace();
-  // Resolve run actions from the repo ROOT (so a Settings edit applies even
-  // though the run terminal spawns inside a worktree).
+  // Resolve from the checkout so private workspace overrides compose with
+  // live repository defaults, matching the engine command selection.
   const { resolved } = useResolvedSettings(
-    activeWs?.repoRoot || folderKey || undefined,
+    activeWs?.path || activeWs?.repoRoot || folderKey || undefined,
   );
   // Gated on a real chat folder — a chatless surface has no runnable workspace.
   const actions = useMemo(
@@ -119,6 +121,13 @@ export function useRunControl(
         : defaultAction;
       if (!action || !folderKey || !workspaceId) return;
       const sessionId = runSessionId(folderKey, action.id);
+      // Publish navigation at click time. The engine response only attaches
+      // its exact session, so a later tab/workspace selection always wins.
+      openWorkbenchTerminal(folderKey, {
+        terminalId: sessionId,
+        title: action.name,
+      });
+      recordWorkspaceActivity(folderKey);
       void (async () => {
         try {
           const res = await workspaceStartRun({
@@ -151,7 +160,7 @@ export function useRunControl(
             null,
             undefined,
             sessionId,
-            true,
+            false,
             action.name,
           );
         } catch (err) {

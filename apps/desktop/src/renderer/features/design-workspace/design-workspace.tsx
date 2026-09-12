@@ -24,6 +24,7 @@ import {
   Download,
   FileCode2,
   Frame,
+  GitBranch,
   MousePointer2,
   Palette,
   Type,
@@ -66,6 +67,8 @@ import {
   applyDesignHistoryCached,
   applyDesignTransactionCached,
   renameDesignFrameAndRefresh,
+  commitDesigns,
+  saveDesigns,
   stageDesigns,
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
@@ -9720,6 +9723,9 @@ function DesignInspector({
   );
   const zoomPercentage = Math.round(zoom * 100);
   const [frameAction, setFrameAction] = useState<"export" | null>(null);
+  const [designGitAction, setDesignGitAction] = useState<
+    "stage" | "commit" | null
+  >(null);
   const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
   const [cssMode, setCssMode] = useState(false);
   const [provenance, setProvenance] = useState<InspectorProvenanceState | null>(
@@ -9898,39 +9904,76 @@ function DesignInspector({
     [frame, workspaceId],
   );
 
-  const stageDesignChanges = useCallback(() => {
+  const saveDesignChanges = useCallback(() => {
     if (!workspaceId) return;
-    // Do not suppress a repeated Command-S while an earlier stage is running.
+    // Do not suppress a repeated Command-S while an earlier save is running.
     // Each request enters the same workspace mutation lane as focused-draft
-    // publication, so the newest edit always receives a later index checkpoint.
+    // publication, so the newest edit is always validated after publication.
+    void saveDesigns(workspaceId)
+      .then(() => {
+        toast.success("Design draft saved", {
+          description: "Changes remain unstaged and uncommitted.",
+          id: `design-save:${workspaceId}`,
+        });
+      })
+      .catch((saveError: unknown) => {
+        toast.error("Couldn't save design draft", {
+          description: errorMessage(saveError),
+          id: `design-save:${workspaceId}`,
+        });
+      });
+  }, [workspaceId]);
+
+  const stageDesignChanges = useCallback(() => {
+    if (!workspaceId || designGitAction) return;
+    setDesignGitAction("stage");
     void stageDesigns(workspaceId)
       .then(() => {
         toast.success("Design changes staged", {
-          description: "No Git commit was created.",
+          description: "No commit was created.",
           id: `design-stage:${workspaceId}`,
         });
       })
       .catch((stageError: unknown) => {
-        toast.error("Couldn't stage design changes", {
+        toast.error("Couldn't stage Design changes", {
           description: errorMessage(stageError),
           id: `design-stage:${workspaceId}`,
         });
-      });
-  }, [workspaceId]);
+      })
+      .finally(() => setDesignGitAction(null));
+  }, [designGitAction, workspaceId]);
+
+  const commitDesignChanges = useCallback(() => {
+    if (!workspaceId || designGitAction) return;
+    setDesignGitAction("commit");
+    void commitDesigns(workspaceId)
+      .then(() => {
+        toast.success("Staged Design changes committed", {
+          id: `design-commit:${workspaceId}`,
+        });
+      })
+      .catch((commitError: unknown) => {
+        toast.error("Couldn't commit staged Design changes", {
+          description: errorMessage(commitError),
+          id: `design-commit:${workspaceId}`,
+        });
+      })
+      .finally(() => setDesignGitAction(null));
+  }, [designGitAction, workspaceId]);
 
   useEffect(() => {
     if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const editableTarget = isEditableHotkeyTarget(event.target);
       dispatchDesignWorkspaceShortcut(event, editableTarget, {
-        stage: () => {
+        save: () => {
           // Inspector and inline-text fields publish drafts on blur. React
           // dispatches that blur synchronously, registering its mutation before
-          // stageDesigns joins the same ordered workspace lane.
+          // saveDesigns joins the same ordered workspace lane.
           if (editableTarget && event.target instanceof HTMLElement) {
             event.target.blur();
           }
-          stageDesignChanges();
+          saveDesignChanges();
         },
         undo: () => runHistory("undo"),
         redo: () => runHistory("redo"),
@@ -9939,7 +9982,7 @@ function DesignInspector({
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [active, runHistory, stageDesignChanges]);
+  }, [active, runHistory, saveDesignChanges]);
 
   const exportPng = async () => {
     if (!workspaceId || !folder || !frame || frameAction) return;
@@ -10353,42 +10396,73 @@ function DesignInspector({
         <span className="bg-bg2 text-fg1 flex h-7 items-center rounded-md px-2.5 text-xs font-medium">
           Style
         </span>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-7 min-w-14 px-2 font-mono text-xs tabular-nums"
-              disabled={!active || !workspaceId}
-              aria-label={`Canvas zoom ${zoomPercentage}%`}
-            >
-              {zoomPercentage}%
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-48">
-            <DropdownMenuItem
-              disabled={zoom >= DESIGN_MAX_ZOOM}
-              aria-label="Zoom in"
-              onSelect={() => zoomActionsRef.current?.zoomIn()}
-            >
-              <span>Zoom in</span>
-              <DropdownMenuShortcut className="tracking-normal">
-                +
-              </DropdownMenuShortcut>
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              disabled={zoom <= DESIGN_MIN_ZOOM}
-              aria-label="Zoom out"
-              onSelect={() => zoomActionsRef.current?.zoomOut()}
-            >
-              <span>Zoom out</span>
-              <DropdownMenuShortcut className="tracking-normal">
-                −
-              </DropdownMenuShortcut>
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <div className="flex items-center gap-1">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={!active || !workspaceId || designGitAction !== null}
+                aria-label="Design Git actions"
+              >
+                <GitBranch />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem
+                disabled={designGitAction !== null}
+                aria-label="Stage Design changes"
+                onSelect={stageDesignChanges}
+              >
+                Stage Design changes
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={designGitAction !== null}
+                aria-label="Commit staged Design changes"
+                onSelect={commitDesignChanges}
+              >
+                Commit staged Design changes
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 min-w-14 px-2 font-mono text-xs tabular-nums"
+                disabled={!active || !workspaceId}
+                aria-label={`Canvas zoom ${zoomPercentage}%`}
+              >
+                {zoomPercentage}%
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-48">
+              <DropdownMenuItem
+                disabled={zoom >= DESIGN_MAX_ZOOM}
+                aria-label="Zoom in"
+                onSelect={() => zoomActionsRef.current?.zoomIn()}
+              >
+                <span>Zoom in</span>
+                <DropdownMenuShortcut className="tracking-normal">
+                  +
+                </DropdownMenuShortcut>
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={zoom <= DESIGN_MIN_ZOOM}
+                aria-label="Zoom out"
+                onSelect={() => zoomActionsRef.current?.zoomOut()}
+              >
+                <span>Zoom out</span>
+                <DropdownMenuShortcut className="tracking-normal">
+                  −
+                </DropdownMenuShortcut>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
       {cssMode && styleContext && elementDetails ? (
         <div

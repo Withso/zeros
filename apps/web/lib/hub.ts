@@ -31,6 +31,7 @@ import { appOrigin } from "./hosts";
 import { SCHEMES } from "./schemes.mjs";
 import {
   accountAccessPage,
+  accountDeletionPage,
   accountRecoveryPage,
   dashboardPage,
   dashboardReturnUrl,
@@ -148,6 +149,35 @@ async function dashboard(
           recoveryCode: resolution.recoveryCode,
           signOutHref: signOutUrl(env),
         });
+      }
+      if (resolution?.kind === "account_unavailable") {
+        const deletionResponse = await proxyControlPlane(
+          new Request(new URL("/api/v1/account/deletion", request.url), {
+            headers,
+          }),
+          env,
+          verified,
+        );
+        const deletionBody: unknown = await deletionResponse
+          .json()
+          .catch(() => null);
+        const deletion =
+          deletionBody &&
+          typeof deletionBody === "object" &&
+          "deletion" in deletionBody
+            ? (deletionBody as { deletion?: Record<string, unknown> }).deletion
+            : null;
+        if (
+          deletionResponse.ok &&
+          deletion &&
+          deletion.state === "scheduled"
+        ) {
+          return accountDeletionPage({
+            session: user,
+            deletion,
+            signOutHref: signOutUrl(env),
+          });
+        }
       }
       if (resolution) {
         return accountAccessPage({

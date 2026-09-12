@@ -77,6 +77,40 @@ describe("organization workspace capabilities", () => {
     });
   });
 
+  it("never stamps Personal workspaces with a signed-in account's organization", () => {
+    for (const id of ["personal_account_a", "personal_account_b"]) {
+      expect(
+        localWorkspaceOwner(organization({ id, isPersonal: true })),
+      ).toEqual({
+        organizationId: null,
+        placement: "local",
+      });
+    }
+  });
+
+  it("never treats the device Personal selection as a cloud organization id", () => {
+    expect(localWorkspaceOwner(null, "local-personal")).toEqual({
+      organizationId: null,
+      placement: "local",
+    });
+  });
+
+  it("never exposes cloud rows in Personal, even with malformed legacy ownership", () => {
+    const personal = organization({ id: "personal_1", isPersonal: true });
+    const rows = [
+      { id: "local", organizationId: null, placement: "local" as const },
+      { id: "cloud-null", organizationId: null, placement: "cloud" as const },
+      {
+        id: "cloud-personal",
+        organizationId: personal.id,
+        placement: "cloud" as const,
+      },
+    ];
+    expect(
+      filterRowsForOrganization(rows, personal).map((row) => row.id),
+    ).toEqual(["local"]);
+  });
+
   it("treats legacy unowned rows as Personal and accepts explicit Personal ownership", () => {
     const personal = organization({
       id: "personal_1",

@@ -30,12 +30,15 @@
 // ──────────────────────────────────────────────────────────
 
 import {
+  forwardRef,
   useCallback,
   useEffect,
+  useImperativeHandle,
   useLayoutEffect,
   useReducer,
   useRef,
   useState,
+  type ForwardedRef,
   type ReactNode,
 } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
@@ -95,6 +98,11 @@ function resolveToken(token: string): string | undefined {
   }
 }
 
+export interface SetupViewHandle {
+  /** Reuse the view's runner, output reset, busy guard, and error handling. */
+  run(): Promise<void>;
+}
+
 /** Terminal panel's Setup view. Both a real worktree AND the trunk /
  *  "main" render the same engine-backed runner — the trunk (which has no
  *  engine workspace row) passes its repoRoot so the engine runs setup in the
@@ -102,13 +110,14 @@ function resolveToken(token: string): string | undefined {
  *  `visible` = the user is actually LOOKING at this view (Terminal pane
  *  active + Setup sub-tab selected); it gates the outcome badge's 15s
  *  auto-dismiss countdown. */
-export function SetupView({
-  workspace,
-  visible,
-}: {
-  workspace: Workspace | null;
-  visible: boolean;
-}) {
+export const SetupView = forwardRef<
+  SetupViewHandle,
+  {
+    workspace: Workspace | null;
+    visible: boolean;
+    onBusyChange(workspaceId: string, busy: boolean): void;
+  }
+>(function SetupView({ workspace, visible, onBusyChange }, ref) {
   const openScripts = useOpenScriptsSettings();
   if (!workspace) return <SetupLoading />;
   return (
@@ -124,13 +133,14 @@ export function SetupView({
       }
       visible={visible}
       onAddSetupScript={openScripts}
+      controlRef={ref}
+      onBusyChange={onBusyChange}
     />
   );
-}
+});
 
-/** Open the active repo's settings (default: Scripts, where `scripts.setup`
- *  is configured; the run control passes "run-actions", which lands on the
- *  Scripts view too — run actions live inside it). Repo settings live on the
+/** Open the active repo's settings (default: the legacy "scripts" section,
+ *  mapped to Environment alongside "run-actions"). Repo settings live on the
  *  repository page — this lands on the requested section's
  *  view in the page toggle. When the repo can't be resolved to a project,
  *  fall back to global Settings. */
@@ -160,6 +170,8 @@ function WorkspaceSetup({
   repoRoot,
   visible,
   onAddSetupScript,
+  controlRef,
+  onBusyChange,
 }: {
   workspaceId: string;
   /** Set ONLY for the trunk / "main" (no engine row) — lets the setup ops
@@ -169,6 +181,8 @@ function WorkspaceSetup({
   visible: boolean;
   /** Open Settings → Scripts (shown when the repo has no setup command). */
   onAddSetupScript: () => void;
+  controlRef: ForwardedRef<SetupViewHandle>;
+  onBusyChange(workspaceId: string, busy: boolean): void;
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const visibleRef = useRef(visible);
@@ -186,6 +200,15 @@ function WorkspaceSetup({
   const writtenRef = useRef(0);
   const [info, setInfo] = useState<WorkspaceSetupInfo | null>(null);
   const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const updateBusy = useCallback(
+    (next: boolean) => {
+      busyRef.current = next;
+      setBusy(next);
+      onBusyChange(workspaceId, next);
+    },
+    [onBusyChange, workspaceId],
+  );
   const bridge = useBridge();
 
   // Pull the buffer + state and delta-append any new bytes into the xterm. A
@@ -383,8 +406,8 @@ function WorkspaceSetup({
   }, [themeId]);
 
   const run = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
+    if (busyRef.current) return;
+    updateBusy(true);
     try {
       const res = await workspaceRerunSetup({ workspaceId, repoRoot });
       if (!res.hasCommand) {
@@ -400,13 +423,15 @@ function WorkspaceSetup({
         `Couldn't run setup: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
-      setBusy(false);
+      updateBusy(false);
     }
-  }, [busy, refetch, workspaceId, repoRoot]);
+  }, [refetch, workspaceId, repoRoot, updateBusy]);
+
+  useImperativeHandle(controlRef, () => ({ run }), [run]);
 
   const stop = useCallback(async () => {
-    if (busy) return;
-    setBusy(true);
+    if (busyRef.current) return;
+    updateBusy(true);
     try {
       await workspaceStopSetup({ workspaceId, repoRoot });
       await refetch(true);
@@ -415,9 +440,9 @@ function WorkspaceSetup({
         `Couldn't stop setup: ${err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
-      setBusy(false);
+      updateBusy(false);
     }
-  }, [busy, refetch, workspaceId, repoRoot]);
+  }, [refetch, workspaceId, repoRoot, updateBusy]);
 
   const state = info?.state ?? null;
   const hasLog = !!info && info.log.length > 0;

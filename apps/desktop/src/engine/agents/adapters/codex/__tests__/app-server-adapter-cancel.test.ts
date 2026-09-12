@@ -410,6 +410,84 @@ describe("prompt holds open while collab subagent turns still run", () => {
     expect(settled).toBe(true);
   });
 
+  it("does not resurrect a completed parent for late subagent completion activity", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+
+    const turn = pendingTurn("turn-1");
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
+    await tick();
+
+    rt.fire("turn/started", { threadId: "sub-1", turn: { id: "sub-turn-1" } });
+    turn.settleCompleted();
+
+    let settled = false;
+    void prompt.then(() => {
+      settled = true;
+    });
+
+    rt.fire("turn/completed", {
+      threadId: "sub-1",
+      turn: { id: "sub-turn-1", status: "completed" },
+    });
+
+    // Codex 0.153.4 can emit this lifecycle-only pair on the ORIGINAL
+    // parent turn after that turn's turn/completed. It does not wake the
+    // parent or promise another turn/completed notification.
+    const activity = {
+      type: "subAgentActivity",
+      id: "activity-1",
+      kind: "completed",
+      agentThreadId: "sub-1",
+      agentPath: "root/sub-1",
+    };
+    rt.fire("item/started", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: activity,
+      startedAtMs: 0,
+    });
+    rt.fire("item/completed", {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: activity,
+    });
+
+    // The lifecycle row remains visible and settles normally.
+    const updates = emit.onSessionUpdate.mock.calls.map(
+      (call) => call[1].update,
+    );
+    const lifecycleStart = updates.find(
+      (update) =>
+        update.sessionUpdate === "tool_call" &&
+        update.nativeToolCallId === "activity-1",
+    );
+    expect(lifecycleStart).toMatchObject({
+      title: "subAgentActivity",
+      kind: "other",
+      status: "in_progress",
+    });
+    expect(updates).toContainEqual(
+      expect.objectContaining({
+        sessionUpdate: "tool_call_update",
+        toolCallId:
+          lifecycleStart?.sessionUpdate === "tool_call"
+            ? lifecycleStart.toolCallId
+            : undefined,
+        status: "completed",
+      }),
+    );
+
+    // Only the normal grace remains. The lifecycle marker must not re-add
+    // the already-completed parent turn and wedge the collaboration drain.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(settled).toBe(true);
+    expect((await prompt).stopReason).toBe("end_turn");
+  });
+
   it("Stop during the drain wait settles promptly as cancelled", async () => {
     const { adapter } = makeAdapter();
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });

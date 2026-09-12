@@ -1256,6 +1256,50 @@ describe("CodexAppServerTranslator", () => {
       expect((done!.update as { status: string }).status).toBe("failed");
     });
 
+    it("labels the added coordination tools and does not mark an interruption completed", () => {
+      const cases = [
+        ["sendMessage", "Messaging agent 019f2e0c"],
+        ["followupTask", "Following up with agent 019f2e0c"],
+        ["interruptAgent", "Interrupting agent 019f2e0c"],
+        ["listAgents", "Listing agents"],
+      ] as const;
+
+      for (const [index, [tool, title]] of cases.entries()) {
+        const id = `collab-new-${index}`;
+        env.t.handle("item/started", {
+          item: {
+            type: "collabAgentToolCall",
+            id,
+            tool,
+            status: "inProgress",
+            receiverThreadIds:
+              tool === "listAgents"
+                ? []
+                : ["019f2e0c-f63c-7183-ae41-41ab54638eaa"],
+          },
+        });
+        const started = env.out.emitted.at(-1)!.update as {
+          title: string;
+        };
+        expect(started.title).toBe(title);
+
+        env.t.handle("item/completed", {
+          item: {
+            type: "collabAgentToolCall",
+            id,
+            tool,
+            status: tool === "interruptAgent" ? "interrupted" : "completed",
+          },
+        });
+        const completed = env.out.emitted.at(-1)!.update as {
+          status: string;
+        };
+        expect(completed.status).toBe(
+          tool === "interruptAgent" ? "failed" : "completed",
+        );
+      }
+    });
+
     it("thread/status/changed is a known no-op (no unknown-notification log)", () => {
       env.t.handle("thread/status/changed", {
         threadId: "t1",
@@ -1309,6 +1353,21 @@ describe("CodexAppServerTranslator", () => {
         },
       });
       expect(env.t.rateLimitFailure).toBe("Server overloaded");
+      expect(env.t.authQuotaFailure).toBeNull();
+    });
+
+    it("classifies the new rateLimitExceeded code as provider throttling", () => {
+      env.t.handle("error", {
+        threadId: "t1",
+        turnId: "u1",
+        willRetry: false,
+        error: {
+          codexErrorInfo: "rateLimitExceeded",
+          message: "Too many requests",
+        },
+      });
+
+      expect(env.t.rateLimitFailure).toBe("Rate limit exceeded");
       expect(env.t.authQuotaFailure).toBeNull();
     });
 
@@ -1777,6 +1836,31 @@ describe("CodexAppServerTranslator", () => {
       serialized = JSON.stringify(env.out.emitted.at(-1));
       expect(serialized).toContain('"retried":true');
       expect(serialized).not.toContain("opaque-retry");
+    });
+
+    it("recognizes a Guardian write-stdin review without leaking its payload", () => {
+      env.t.handle("item/autoApprovalReview/completed", {
+        reviewId: "review-stdin",
+        review: {
+          status: "approved",
+          riskLevel: "low",
+          rationale: "Terminal input reviewed",
+        },
+        action: {
+          type: "writeStdin",
+          approvalId: "private-approval-id",
+          processId: "private-process-id",
+          stdin: "super-secret-input",
+          cwd: "/private/repo",
+        },
+      });
+
+      const serialized = JSON.stringify(env.out.emitted);
+      expect(serialized).toContain('"actionType":"writeStdin"');
+      expect(serialized).not.toContain("super-secret-input");
+      expect(serialized).not.toContain("private-approval-id");
+      expect(serialized).not.toContain("private-process-id");
+      expect(serialized).not.toContain("/private/repo");
     });
 
     it("reduces environment and import events to bounded product summaries", () => {

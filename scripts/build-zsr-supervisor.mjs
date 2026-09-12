@@ -14,30 +14,6 @@ const entry = path.join(
   "apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
 );
 const output = path.join(root, "binaries/zsr-supervisor.mjs");
-const containerWorkerEntry = path.join(
-  root,
-  "apps/desktop/src/engine/agents/containment/zsr-container-worker.mjs",
-);
-const containerWorkerOutput = path.join(
-  root,
-  "binaries/zsr-container-worker.mjs",
-);
-const orbStackHostEntry = path.join(
-  root,
-  "apps/desktop/src/engine/agents/containment/zsr-orbstack-container-host.mjs",
-);
-const orbStackHostOutput = path.join(
-  root,
-  "binaries/zsr-orbstack-container-host.mjs",
-);
-const orbStackCloudInitEntry = path.join(
-  root,
-  "apps/desktop/src/engine/agents/containment/zsr-orbstack-cloud-init.yaml",
-);
-const orbStackCloudInitOutput = path.join(
-  root,
-  "binaries/zsr-orbstack-cloud-init.yaml",
-);
 const macosProcessDomainEntry = path.join(
   root,
   "apps/desktop/src/engine/agents/containment/zsr-macos-process-domain.c",
@@ -72,10 +48,6 @@ await build({
   },
 });
 await chmod(output, 0o755);
-await copyFile(containerWorkerEntry, containerWorkerOutput);
-await chmod(containerWorkerOutput, 0o755);
-await copyFile(orbStackHostEntry, orbStackHostOutput);
-await chmod(orbStackHostOutput, 0o755);
 // Everything staged here is packaged into the .app via extraResources with
 // modes preserved, and every packaged file MUST keep owner-write (0o7xx/0o6xx):
 // Squirrel.Mac's ShipIt strips the quarantine xattr from each file of a
@@ -90,11 +62,6 @@ await rm(ripgrepTemporaryOutput, { force: true });
 await copyFile(rgPath, ripgrepTemporaryOutput);
 await chmod(ripgrepTemporaryOutput, 0o755);
 await rename(ripgrepTemporaryOutput, ripgrepOutput);
-const cloudInitTemporaryOutput = `${orbStackCloudInitOutput}.tmp-${process.pid}`;
-await rm(cloudInitTemporaryOutput, { force: true });
-await copyFile(orbStackCloudInitEntry, cloudInitTemporaryOutput);
-await chmod(cloudInitTemporaryOutput, 0o644);
-await rename(cloudInitTemporaryOutput, orbStackCloudInitOutput);
 if (process.platform === "darwin") {
   const architecture =
     process.arch === "arm64"
@@ -173,7 +140,7 @@ if (process.platform === "darwin") {
   await rename(gitDispatchTemporaryOutput, gitDispatchOutput);
 }
 console.log(
-  `[build-zsr-supervisor] wrote ${output}, ${containerWorkerOutput}, ${orbStackHostOutput}, ${orbStackCloudInitOutput}, ${ripgrepOutput}${
+  `[build-zsr-supervisor] wrote ${output}, ${ripgrepOutput}${
     process.platform === "darwin"
       ? `, ${macosProcessDomainOutput}, and ${gitDispatchOutput}`
       : ""

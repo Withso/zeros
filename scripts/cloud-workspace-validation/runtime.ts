@@ -14,6 +14,7 @@ import {
   collectCloudAccountBindingEnv,
   healthUrl,
   imageContractSha256,
+  isAllowedDaytonaPreviewHost,
   NODE_BASE_IMAGE,
   repositoryUrlSha256,
   saveRuntimeAttestation,
@@ -330,8 +331,7 @@ function validateSignedPreview(
     url.pathname !== "/" ||
     url.hash ||
     url.search ||
-    (url.hostname !== expectedHostPrefix &&
-      !url.hostname.startsWith(`${expectedHostPrefix}.`))
+    !isAllowedDaytonaPreviewHost(url.hostname, expectedHostPrefix)
   ) {
     throw new Error("provider returned an unsafe signed preview link");
   }

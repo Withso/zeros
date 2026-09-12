@@ -8,6 +8,7 @@ import {
   applyWorkOSIdentityEvent,
   type WorkOSIdentityEvent,
 } from "./workos-events.js";
+import { workOSProviderSubjectHash } from "./workos-provider-locks.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -104,8 +105,12 @@ d("WorkOS user lifecycle events", () => {
       `SELECT id, email FROM users WHERE id = ANY($1::uuid[]) ORDER BY id`,
       [[first.id, second.id]],
     );
-    expect(owners.rows.find((row) => row.id === first.id)?.email).toBe(firstEmail);
-    expect(owners.rows.find((row) => row.id === second.id)?.email).toBe(occupiedEmail);
+    expect(owners.rows.find((row) => row.id === first.id)?.email).toBe(
+      firstEmail,
+    );
+    expect(owners.rows.find((row) => row.id === second.id)?.email).toBe(
+      occupiedEmail,
+    );
   });
 
   it("soft-deletes authentication only and rejects later tokens for that subject", async () => {
@@ -132,7 +137,10 @@ d("WorkOS user lifecycle events", () => {
     );
 
     expect(
-      await applyWorkOSIdentityEvent(pool, event("user.deleted", subject, email)),
+      await applyWorkOSIdentityEvent(
+        pool,
+        event("user.deleted", subject, email),
+      ),
     ).toEqual({ status: "applied" });
     await expect(
       ensureUser(pool, {
@@ -207,5 +215,117 @@ d("WorkOS user lifecycle events", () => {
     ).toEqual({ status: "unlinked" });
     const after = await pool.query(`SELECT count(*)::int AS count FROM users`);
     expect(after.rows[0]?.count).toBe(before.rows[0]?.count);
+  });
+
+  it("acknowledges an erased subject without rebuilding the identity event ledger", async () => {
+    const subject = `user_erased_${randomUUID().replaceAll("-", "")}`;
+    const email = `erased-${randomUUID()}@example.com`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: subject,
+      email,
+      displayName: "Erased Identity",
+    });
+    const request = await pool.query<{ id: string }>(
+      `INSERT INTO deletion_requests (
+         public_code, target_kind, target_id, target_user_id, state,
+         purge_started_at, next_attempt_at
+       ) VALUES ('ZD-STND-ALON', 'account', $1, $1,
+                 'provider_deleting', now(), now())
+       RETURNING id`,
+      [user.id],
+    );
+    await pool.query(
+      `INSERT INTO deletion_request_events (
+         deletion_request_id, action, metadata
+       ) VALUES ($1, 'purge.provider_erasure_fenced', $2::jsonb)`,
+      [
+        request.rows[0]!.id,
+        JSON.stringify({
+          provider: "workos",
+          workosSubjectHashes: [
+            workOSProviderSubjectHash({ kind: "user", id: subject }),
+          ],
+        }),
+      ],
+    );
+    await pool.query(
+      `DELETE FROM user_identities
+       WHERE provider = 'workos' AND provider_sub = $1`,
+      [subject],
+    );
+    const delayed = event("user.updated", subject, email);
+
+    await expect(applyWorkOSIdentityEvent(pool, delayed)).resolves.toEqual({
+      status: "ignored_deleted",
+    });
+    await expect(
+      pool.query(`SELECT 1 FROM identity_provider_events WHERE event_id = $1`, [
+        delayed.eventId,
+      ]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  it("returns retryable failures for unknown auth and events until historical purge evidence is reconciled", async () => {
+    const requestId = randomUUID();
+    const subject = `user_pending_${randomUUID().replaceAll("-", "")}`;
+    const email = `pending-${randomUUID()}@example.com`;
+    const delayed = event("user.updated", subject, email);
+    await pool.query(
+      `INSERT INTO deletion_requests (
+         id, public_code, target_kind, target_id, state, requested_at,
+         purge_after, purge_started_at, purged_at
+       ) VALUES ($1, 'ZD-RTRY-PEND', 'account', $1, 'purged',
+                 '2025-01-01T00:00:00Z', '2025-01-31T00:00:00Z',
+                 '2025-01-31T00:00:00Z', '2025-01-31T00:01:00Z')`,
+      [requestId],
+    );
+
+    await expect(
+      ensureUser(pool, {
+        provider: "workos",
+        providerSubject: subject,
+        email,
+        displayName: "Pending Reconciliation",
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "authentication_temporarily_unavailable",
+    });
+    await expect(applyWorkOSIdentityEvent(pool, delayed)).rejects.toMatchObject(
+      {
+        status: 503,
+        code: "workos_provider_erasure_reconciliation_pending",
+      },
+    );
+    await expect(
+      pool.query(`SELECT 1 FROM identity_provider_events WHERE event_id = $1`, [
+        delayed.eventId,
+      ]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+    await expect(
+      pool.query(
+        `SELECT 1 FROM user_identities
+         WHERE provider = 'workos' AND provider_sub = $1`,
+        [subject],
+      ),
+    ).resolves.toMatchObject({ rowCount: 0 });
+
+    await pool.query(
+      `INSERT INTO workos_provider_erasure_reconciliations (
+         deletion_request_id, disposition, evidence_source,
+         evidence_reference
+       ) VALUES ($1, 'no_workos_subject', 'operator_reconciliation',
+                 'test:provider-audit-confirmed-local-only')`,
+      [requestId],
+    );
+    await expect(
+      ensureUser(pool, {
+        provider: "workos",
+        providerSubject: subject,
+        email,
+        displayName: "Reconciled Signup",
+      }),
+    ).resolves.toMatchObject({ identity: { subject } });
   });
 });

@@ -19,20 +19,17 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type {
-  AgentBrowserUse,
-  AgentFilesystemTerritory,
-} from "../../../types";
+import type { AgentBrowserUse } from "../../../types";
 
 import {
   buildThreadStartParams,
+  codexAdditionalWritableRoots,
   codexTurnAuthority,
   codexEffortFromThreadSettings,
   fileChangePaths,
   mapCodexAdvertisedEffort,
   mapCodexEffortFromEnv,
   modePolicyFor,
-  territoryApprovalMustBeDenied,
   type CodexModeId,
 } from "../app-server-adapter";
 
@@ -132,51 +129,14 @@ describe("buildThreadStartParams", () => {
   });
 
   it.each(MODES)(
-    "keeps the immutable territory profile in the %s permission posture",
+    "keeps the native %s permission posture when Design is recognized",
     (mode) => {
       const workspaceRoot = path.resolve("/tmp/zeros-contained");
-      const designDirectory = path.join(workspaceRoot, "Zeros Design");
-      const territory: AgentFilesystemTerritory = {
-        agentRole: "code",
-        workspaceRoot,
-        designDirectory,
-        protectedDesignDirectories: [designDirectory],
-        designRecognitionPaths: [],
-        writeCapabilities: {
-          workspace: "write",
-          deniedPaths: [
-            designDirectory,
-            path.join(workspaceRoot, ".zeros"),
-            path.join(workspaceRoot, ".git"),
-          ],
-        },
-      };
+      const params = buildThreadStartParams(workspaceRoot, undefined, mode);
 
-      const params = buildThreadStartParams(
-        workspaceRoot,
-        undefined,
-        mode,
-        undefined,
-        territory,
-      );
-
-      expect(params).not.toHaveProperty("sandbox");
-      expect(params.permissions).toBe("zeros_code_territory");
-      expect(params.runtimeWorkspaceRoots).toEqual([workspaceRoot]);
-      expect(params.config).toMatchObject({
-        permissions: {
-          zeros_code_territory: {
-            workspace_roots: { [workspaceRoot]: true },
-            filesystem: {
-              ":minimal": "read",
-              ":workspace_roots": "write",
-              [designDirectory]: "read",
-              [path.join(workspaceRoot, ".zeros")]: "read",
-              [path.join(workspaceRoot, ".git")]: "read",
-            },
-          },
-        },
-      });
+      expect(params.sandbox).toBe(modePolicyFor(mode).sandboxMode);
+      expect(params).not.toHaveProperty("permissions");
+      expect(params).not.toHaveProperty("runtimeWorkspaceRoots");
     },
   );
 
@@ -199,8 +159,6 @@ describe("buildThreadStartParams", () => {
       undefined,
       "ask",
       undefined,
-      undefined,
-      undefined,
       browserUse,
     );
 
@@ -211,57 +169,45 @@ describe("buildThreadStartParams", () => {
   });
 });
 
-describe("uniform ZSR turn authority", () => {
+describe("uniform execution-boundary turn authority", () => {
   const workspaceRoot = path.resolve("/tmp/zeros-contained-turn");
-  const designDirectory = path.join(workspaceRoot, "Zeros Design");
-  const territory: AgentFilesystemTerritory = {
-    agentRole: "code",
-    workspaceRoot,
-    designDirectory,
-    protectedDesignDirectories: [designDirectory],
-    designRecognitionPaths: [],
-    writeCapabilities: {
-      workspace: "write",
-      deniedPaths: [designDirectory],
-    },
-  };
 
   it.each(MODES)(
-    "keeps the normal %s per-turn sandbox inside the outer ZSR boundary",
+    "keeps the normal %s per-turn sandbox on every native Code path",
     (mode) => {
       const sandboxPolicy = modePolicyFor(mode).sandboxPolicy;
 
-      expect(
-        codexTurnAuthority(territory, {} as never, sandboxPolicy),
-      ).toEqual({ sandboxPolicy });
-      expect(
-        codexTurnAuthority(territory, undefined, sandboxPolicy),
-      ).toEqual({
-        permissions: "zeros_code_territory",
-        runtimeWorkspaceRoots: [workspaceRoot],
-      });
+      expect(codexTurnAuthority(sandboxPolicy)).toEqual({ sandboxPolicy });
     },
   );
 
-  it("does not suppress ordinary approvals that remain kernel-bounded by ZSR", () => {
-    const session = {
-      territory,
-      executionBoundary: {} as never,
-      fileEditPathsByItemId: new Map(),
-    };
+  it("ignores the retired isolation-context courier when resolving /add-dir roots", () => {
+    const contextRoot = path.resolve("/tmp/zeros-context/design/abc");
+    const writableRoot = path.resolve("/tmp/zeros-linked-api");
+    const roots = codexAdditionalWritableRoots(
+      {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify([
+          writableRoot,
+          contextRoot,
+          "relative",
+        ]),
+        ZEROS_ISOLATION_CONTEXT_DIRS: JSON.stringify([contextRoot]),
+      },
+      workspaceRoot,
+    );
 
+    expect(roots).toEqual([writableRoot, contextRoot]);
     expect(
-      territoryApprovalMustBeDenied(session, {
-        method: "execCommandApproval",
-        params: { command: "pnpm test" },
-      } as never),
-    ).toBe(false);
+      codexTurnAuthority(modePolicyFor("auto-edit").sandboxPolicy, roots),
+    ).toMatchObject({
+      sandboxPolicy: {
+        type: "workspaceWrite",
+        writableRoots: [writableRoot, contextRoot],
+      },
+    });
     expect(
-      territoryApprovalMustBeDenied(session, {
-        method: "item/fileChange/requestApproval",
-        params: { grantRoot: designDirectory },
-      } as never),
-    ).toBe(true);
+      codexTurnAuthority(modePolicyFor("read-only").sandboxPolicy, roots),
+    ).toEqual({ sandboxPolicy: modePolicyFor("read-only").sandboxPolicy });
   });
 });
 

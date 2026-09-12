@@ -11,6 +11,11 @@ import path from "node:path";
 
 import { GitError, isGitError } from "./errors";
 import {
+  designMetadataGitPaths,
+  readDesignDirectoryRegistry,
+} from "../design/metadata";
+import { recoverDesignStorageForArchive } from "../design/document";
+import {
   assertSafeGitRef,
   runGit as runGitCommand,
   type RunGitOptions,
@@ -33,6 +38,7 @@ import {
   clearWorkspaceLifecycle,
   deleteWorkspaceRow,
   finishWorkspaceLifecycle,
+  getWorkspaceByCanonicalId,
   getWorkspaceById,
   getWorkspaceByBranch,
   listWorkspaceBranches,
@@ -58,10 +64,11 @@ import {
   WORKSPACE_OWNERSHIP_META_KEY,
 } from "./state";
 import {
-  ensureDesignDocumentCommitted,
+  ensureDesignDocumentInitialized,
   fenceWorkspaceDesignDirectoryIfPresent,
 } from "./design-mode";
 import { resolveDesignDirectoryForEnter } from "../design/directory";
+import { rememberRecognizedDesignDirectories } from "../design/recognition-store";
 import {
   unfenceDesignDirectory,
   unlockLegacyDesignWorkspaceLock,
@@ -75,12 +82,21 @@ import {
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
 import {
-  CONTEXT_GRAPH_DIR,
-  contextGraphHasContent,
+  contextGraphArchivePaths,
   ensureContextGraph,
 } from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
+import {
+  initializeWorkspaceSettings,
+  personalWorkspaceRoot,
+  workspaceSettingsPath,
+} from "../settings/personal-repo";
+import {
+  backupWorkspaceSettings,
+  restoreWorkspaceSettings,
+  removeWorkspaceSettingsBackup,
+} from "../settings/workspace-settings-backup";
 import { isKnownRepoRoot, listKnownRepoRoots } from "../db/projects";
 import { deleteChat, getChat, rebindChatsFolder } from "../db/chats";
 import {
@@ -318,7 +334,22 @@ async function currentBranchName(repoRoot: string): Promise<string> {
  *  plain branch name, NEVER "origin/main"). */
 async function resolveWorktreeBase(
   input: CreateWorkspaceInput,
+  internal?: InternalCreateWorkspaceOptions,
 ): Promise<{ baseRef: string; baseBranch: string }> {
+  if (internal?.exactBaseCommit) {
+    const commit = internal.exactBaseCommit.toLowerCase();
+    if (
+      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit) ||
+      !(await refExists(input.repoRoot, `${commit}^{commit}`))
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "Cloud workspace copy Git base is unavailable locally",
+      });
+    }
+    // A mutable branch could advance between export and materialization.
+    return { baseRef: commit, baseBranch: commit };
+  }
   // Explicit caller base wins (relay contract / future picker) — verbatim, no fetch.
   if (input.baseBranch) {
     return { baseRef: input.baseBranch, baseBranch: input.baseBranch };
@@ -563,6 +594,24 @@ export interface CreateWorkspaceInput extends CreateWorkspaceOptions {
   optimisticChatId?: string;
 }
 
+export type InternalWorkspaceProvisionContext = {
+  workspaceId: string;
+  canonicalId: string;
+  repoRoot: string;
+  workspacePath: string;
+  baseCommit: string | null;
+};
+
+/** Engine-internal extension used by crash-safe cloud→local copies. It is a
+ * second function argument, so WorkspaceService's JSON operation cannot
+ * forward a callback or select a canonical identity/base commit. */
+export type InternalCreateWorkspaceOptions = {
+  canonicalId: string;
+  exactBaseCommit?: string;
+  provision?: (context: InternalWorkspaceProvisionContext) => Promise<void>;
+  beforePublish?: (context: InternalWorkspaceProvisionContext) => void;
+};
+
 /** The shape a prepared/generated workspace id must match — the exact output
  *  of generateWorkspaceId. Anything else is rejected before it can reach a
  *  path join. */
@@ -612,6 +661,23 @@ function isPreparedBranch(branch: string): boolean {
   if (!head.endsWith("/")) return false;
   const namespace = head.slice(0, -1);
   return normalizeBranchPrefix(namespace) === namespace;
+}
+
+/** Validate the complete opaque reservation returned by
+ * prepareWorkspaceCreate before a crash-resumed coordinator trusts it. The
+ * branch and slug are later used in Git ref/path operations, so persisted
+ * state receives the same shape gate as a live renderer request. */
+export function isPreparedWorkspaceCreateIdentity(input: {
+  workspaceId: string;
+  branch: string;
+  repoSlug: string;
+}): boolean {
+  return (
+    WORKSPACE_ID_RE.test(input.workspaceId) &&
+    /^[a-z0-9][a-z0-9-]*$/.test(input.repoSlug) &&
+    !input.repoSlug.includes("..") &&
+    isPreparedBranch(input.branch)
+  );
 }
 
 /** Filesystem-safe, human-readable directory component. Git branch names may
@@ -1281,6 +1347,7 @@ export async function prepareWorkspaceCreate(input: {
 
 export function createWorkspace(
   input: CreateWorkspaceInput,
+  internal?: InternalCreateWorkspaceOptions,
 ): Promise<CreatedWorkspace> {
   // Prepared creates have a stable renderer-announced id. Register the flight
   // before the first async repo/fetch read so timeout recovery can prove that a
@@ -1288,13 +1355,14 @@ export function createWorkspace(
   // same operation instead of racing on the announced branch/path.
   return input.preparedId
     ? withWorkspaceLifecycleFlight(input.preparedId, "create", () =>
-        createWorkspaceInner(input),
+        createWorkspaceInner(input, internal),
       )
-    : createWorkspaceInner(input);
+    : createWorkspaceInner(input, internal);
 }
 
 async function createWorkspaceInner(
   input: CreateWorkspaceInput,
+  internal?: InternalCreateWorkspaceOptions,
 ): Promise<CreatedWorkspace> {
   if (!(await isRepo(input.repoRoot))) {
     throw new GitError({
@@ -1307,6 +1375,25 @@ async function createWorkspaceInner(
       code: "VALIDATION_FAILED",
       message:
         "createWorkspace: preparedId and preparedBranch must be supplied together",
+    });
+  }
+  const canonicalId = internal?.canonicalId.toLowerCase() ?? null;
+  if (
+    canonicalId !== null &&
+    (canonicalId !== internal!.canonicalId ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        canonicalId,
+      ))
+  ) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Cloud workspace copy identity is invalid",
+    });
+  }
+  if (canonicalId && getWorkspaceByCanonicalId(canonicalId)) {
+    throw new GitError({
+      code: "WORKSPACE_ALREADY_EXISTS",
+      message: "Cloud workspace copy identity already exists on this device",
     });
   }
   // prepareWorkspaceCreate already rejects an unborn HEAD, so a prepared create
@@ -1356,7 +1443,7 @@ async function createWorkspaceInner(
   // Resolve where the new worktree forks from. `baseRef` is the start point
   // (e.g. "origin/main" when a remote exists); `baseBranch` is the plain branch
   // name we persist + export. See resolveWorktreeBase.
-  const { baseRef, baseBranch } = await resolveWorktreeBase(input);
+  const { baseRef, baseBranch } = await resolveWorktreeBase(input, internal);
   const tBase = Date.now();
   // baseRef is a bare positional to `git worktree add`. A value starting
   // with "-" would be parsed as a flag (option injection); a NUL is rejected too.
@@ -1457,6 +1544,12 @@ async function createWorkspaceInner(
       message: `Workspace ${workspaceId} was created concurrently. Create again for a fresh name.`,
     });
   }
+  if (canonicalId && getWorkspaceByCanonicalId(canonicalId)) {
+    throw new GitError({
+      code: "WORKSPACE_ALREADY_EXISTS",
+      message: "Cloud workspace copy identity was created concurrently",
+    });
+  }
   if (getWorkspaceByBranch(repoSlug, branch)) {
     throw new GitError({
       code: "WORKSPACE_ALREADY_EXISTS",
@@ -1475,6 +1568,7 @@ async function createWorkspaceInner(
   const now = Date.now();
   const workspace: Workspace = {
     id: workspaceId,
+    ...(canonicalId ? { canonicalId } : {}),
     kind,
     organizationId,
     placement,
@@ -1620,13 +1714,26 @@ async function createWorkspaceInner(
       seedPaths,
       symlinkPaths: input.symlinkPaths,
     });
+    initializeWorkspaceSettings(workspacePath);
     // Durably record what we seeded, so archive force-adds these even if the
     // patterns that chose them are edited away before the workspace is
     // archived. Cross-tool safe: a path the hooks skipped (already present from
     // the branch checkout, or a vanished source) is simply one more entry for
     // `git add -f`, which no-ops when the file isn't there.
     addProvisionPaths(workspaceId, seedPaths);
-    // Every workspace gets a `.context-graph/` skeleton (Context tab canvas +
+    const provisionContext: InternalWorkspaceProvisionContext | null = internal
+      ? {
+          workspaceId,
+          canonicalId: canonicalId!,
+          repoRoot: input.repoRoot,
+          workspacePath,
+          baseCommit: internal.exactBaseCommit ?? null,
+        }
+      : null;
+    if (internal?.provision) {
+      await internal.provision(provisionContext!);
+    }
+    // Every workspace gets a `.context/` skeleton (Context tab canvas +
     // composer-attachment store). Best-effort and quiet: the scaffold is
     // self-gitignoring, and a failure here must never roll back the worktree —
     // the attachment IPC and the Context tab both re-scaffold lazily.
@@ -1641,7 +1748,8 @@ async function createWorkspaceInner(
       // Design-at-birth: the identical checkout opens on the design surface.
       // Resolve WHICH folder is the design folder (the `[design] directory`
       // pointer + committed-marker recognition, non-strict so create always
-      // succeeds), ensure + commit the portable design document, then publish
+      // succeeds), initialize the portable design document as uncommitted
+      // work, then publish
       // its semantic identity for Zeros' actor-scoped authority. Nothing is
       // made read-only on the shared checkout: terminals, dev servers, and
       // other applications continue to see an ordinary worktree.
@@ -1649,7 +1757,12 @@ async function createWorkspaceInner(
         { path: workspacePath, repoRoot: input.repoRoot },
         { strict: false },
       );
-      await ensureDesignDocumentCommitted(workspacePath, designDir);
+      await ensureDesignDocumentInitialized(workspacePath, designDir);
+      // The first-use "<repo> - Design" folder is intentionally uncommitted,
+      // so Git cannot rediscover it during archive/restore or engine restart.
+      // Persist the same sticky identity mode-entry uses until the user commits
+      // the marker (at which point repository evidence becomes authoritative).
+      await rememberRecognizedDesignDirectories(workspacePath, [designDir]);
     } else {
       // Code-mode creates resolve the same identity when the base branch
       // already carries a design folder. Provider admission—not a shared ACL—
@@ -1659,7 +1772,16 @@ async function createWorkspaceInner(
         repoRoot: input.repoRoot,
       });
     }
-    updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
+    if (internal?.beforePublish) {
+      // Keep recovery below work-applied until the portable record import and
+      // journal removal commit atomically. A crash before this transaction
+      // rolls the hidden checkout back instead of exposing a file-only copy.
+      finishWorkspaceLifecycle(workspaceId, {}, () =>
+        internal.beforePublish!(provisionContext!),
+      );
+    } else {
+      updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
+    }
   } catch (err) {
     if (existsSync(workspacePath)) {
       // Remove ACLs that may remain from an older build before rollback.
@@ -1717,7 +1839,7 @@ async function createWorkspaceInner(
   // Publish the row only after checkout + required synchronous provisioning
   // completed. The row and create journal transition atomically in SQLite.
   writeWorktreeSeed(workspace);
-  finishWorkspaceLifecycle(workspaceId, {});
+  if (!internal?.beforePublish) finishWorkspaceLifecycle(workspaceId, {});
   await clearWorkspaceBranchOwnershipMarker(input.repoRoot, workspaceId);
 
   const tEnd = Date.now();
@@ -1804,6 +1926,7 @@ export async function reconcileInterruptedWorkspaceLifecycles(
               worktreePath: targetPath,
             });
           }
+          initializeWorkspaceSettings(targetPath);
           writeWorktreeSeed(row);
           finishWorkspaceLifecycle(row.id, {});
           await clearWorkspaceBranchOwnershipMarker(row.repoRoot, row.id);
@@ -2670,19 +2793,24 @@ async function archiveWorkspaceInner(
           "The workspace is unchanged and still live. Repair the repository's Git metadata, then retry.",
       });
     }
+    await recoverDesignStorageForArchive(ws.path);
     const archiveIncludePaths = [
       ...new Set([
+        ...designMetadataGitPaths(ws.path),
+        ...Object.values(
+          readDesignDirectoryRegistry(ws.path)?.directories ?? {},
+        ).map((entry) => entry.path),
         ...scans.flatMap((s) => [...s.paths, ...s.deferredPaths]),
         // Explicit create-time copy/symlink paths can be outside today's repo
         // settings. Keep them durable for the workspace's whole lifetime so a
         // later archive never drops an ignored provisioned file.
         ...readProvisionPaths(ws.id),
         // The context graph survives archive — a workspace's attachments and
-        // shared docs are part of its durable record: force-add the whole
-        // tree, since `local/` is gitignored and `add -A` alone would drop it.
+        // shared docs are part of its durable record: force-add the owned
+        // scopes, since `local/` is gitignored and `add -A` alone drops it.
         // Only when it holds real content, so an empty skeleton doesn't make
         // the missing-snapshot check below stricter for clean workspaces.
-        ...((await contextGraphHasContent(ws.path)) ? [CONTEXT_GRAPH_DIR] : []),
+        ...(await contextGraphArchivePaths(ws.path)),
         // Disk-backed transcript images briefly lived under `.context/` before
         // the context graph landed. A transcript window lazily copies them into
         // the graph, but an unopened chat must survive archive until that read.
@@ -2693,12 +2821,19 @@ async function archiveWorkspaceInner(
           : []),
       ]),
     ];
+    backupWorkspaceSettings(ws.id, ws.path);
     const archiveSnapshot = await snapshotWorkingTree(
       ws.path,
       archiveSnapshotRef(ws.id),
       {
         ...(archivedHead ? { parent: archivedHead } : {}),
         forceAddPaths: archiveIncludePaths,
+        excludePaths: [
+          path.relative(
+            personalWorkspaceRoot(ws.path),
+            workspaceSettingsPath(ws.path),
+          ),
+        ],
       },
     );
     // Snapshot capture is allowed to be absent for a genuinely clean tree
@@ -2768,12 +2903,12 @@ async function archiveWorkspaceInner(
     checkpointMs += Date.now() - checkpointStartedAt;
   }
 
-  // Run the repository's committed `scripts.archive` in the worktree while
+  // Run the workspace's effective `scripts.archive` in the worktree while
   // it's still intact (after the snapshot, before eviction/removal). Non-fatal:
   // a cleanup script must never block archiving — the user keeps the ability to
   // archive even if the script errors.
   if (journal.phase === "prepared") {
-    const archiveCommand = resolveRepoScript(ws.repoRoot, "archive");
+    const archiveCommand = resolveRepoScript(ws.path, "archive");
     if (!archiveCommand) {
       // The pre-hook checkpoint is already the exact final tree. Advancing it
       // atomically avoids a second whole-tree `git add -A` on the overwhelmingly
@@ -2847,12 +2982,28 @@ async function archiveWorkspaceInner(
           (entry): entry is string => typeof entry === "string",
         )
       : [];
+    if (existsSync(ws.path)) {
+      await recoverDesignStorageForArchive(ws.path);
+      archiveIncludePaths.push(
+        ...designMetadataGitPaths(ws.path),
+        ...Object.values(
+          readDesignDirectoryRegistry(ws.path)?.directories ?? {},
+        ).map((entry) => entry.path),
+      );
+    }
+    backupWorkspaceSettings(ws.id, ws.path);
     const sealedSnapshot = await snapshotWorkingTree(
       ws.path,
       archiveSnapshotRef(ws.id),
       {
         ...(finalHead ? { parent: finalHead } : {}),
         forceAddPaths: archiveIncludePaths,
+        excludePaths: [
+          path.relative(
+            personalWorkspaceRoot(ws.path),
+            workspaceSettingsPath(ws.path),
+          ),
+        ],
       },
     );
     // A hook may deliberately remove its own checkout. The pre-hook snapshot
@@ -3660,6 +3811,7 @@ async function restoreWorkspaceInner(
   }
 
   // 5. Persist the (possibly adapted) state and refresh the recovery seed.
+  restoreWorkspaceSettings(workspaceId, targetPath);
   const restoredAt = Date.now();
   // The restored checkout is FULL (a pre-mode archive loses its cone here by
   // design, becoming an ordinary full checkout) and nothing whole-tree locks
@@ -3786,6 +3938,7 @@ async function deleteWorkspaceInner(
     }
     await deleteArchiveSnapshotRef(repoRoot, ws.id);
     deleteWorkspaceRow(ws.id);
+    removeWorkspaceSettingsBackup(ws.id);
     removeWorktreeSeed(ws.path);
     return;
   }
@@ -3808,6 +3961,7 @@ async function deleteWorkspaceInner(
     }
     await deleteArchiveSnapshotRef(repoRoot, ws.id);
     deleteWorkspaceRow(ws.id);
+    removeWorkspaceSettingsBackup(ws.id);
     removeWorktreeSeed(ws.path);
     return;
   }
@@ -3871,6 +4025,7 @@ async function deleteWorkspaceInner(
   // gc-able — best-effort, and a no-op for a workspace that was never archived.
   await deleteArchiveSnapshotRef(repoRoot, opts.workspaceId);
   deleteWorkspaceRow(opts.workspaceId);
+  removeWorkspaceSettingsBackup(opts.workspaceId);
   stagedWorktree?.commit();
   removeWorktreeSeed(ws.path); // drop the app-data crash-recovery seed
 }

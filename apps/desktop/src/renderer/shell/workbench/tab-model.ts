@@ -9,7 +9,8 @@ import {
   Globe,
   File as FileIcon,
   GitPullRequestArrow,
-  Shapes,
+  Book,
+  Terminal,
   type LucideIcon,
 } from "lucide-react";
 
@@ -18,6 +19,7 @@ export type WorkbenchTabType =
   | "review"
   | "context"
   | "browser"
+  | "terminal"
   | "files";
 export type ReviewSubtab =
   | "changes"
@@ -97,6 +99,11 @@ export interface WorkbenchTab {
    * viewer. Owned by the individual tab so A → B → A restores independently.
    * Blank tabs are always visible/tree-only; direct path tabs start collapsed. */
   fileTreeVisible?: boolean;
+  /** Terminal destination: a plain PTY id, a runSessionId, "setup", or "run:add".
+   * UI identity only; PTY lifecycle remains in terminal-store. */
+  terminalId?: string;
+  terminalPlacement?: "tab" | "panel";
+  terminalSidebarVisible?: boolean;
   url?: string;
   previewSource?: BrowserPreviewSource;
   /** Durable Zeros conversation that owns an agent-controlled browser tab.
@@ -252,6 +259,21 @@ export function createEmptyFilesTab(): WorkbenchTab {
   };
 }
 
+/** Each terminal has its own workbench identity, distinct from its PTY id. */
+export function createTerminalWorkbenchTab(
+  terminalId: string,
+  title: string,
+): WorkbenchTab {
+  return {
+    id: nextId("terminal"),
+    type: "terminal",
+    title,
+    terminalId,
+    terminalPlacement: "tab",
+    terminalSidebarVisible: true,
+  };
+}
+
 /** The blank "Open file" state the FIXED Files home reverts to when its file
  *  closes. Keeps the tab identity (same id, so the strip pill and per-tab
  *  scroll memory survive) while clearing every per-file field — including the
@@ -308,8 +330,8 @@ export type WorkbenchOpenPlan =
 /** Keep expensive File surfaces lazy unless they are active or own an unsaved
  * draft. Browsers preserve iframe state; the pinned home views preserve
  * their resolved lists, PR state, and canvas viewport + decoded images. The
- * terminal panel is mounted separately below workbench. Clean, inactive File tabs
- * remain the only lazy surface. */
+ * shared terminal deck owns its retained views across both placements. Clean,
+ * inactive File tabs remain the only lazy surface. */
 export function shouldMountWorkbenchTab(
   tab: WorkbenchTab,
   activeId: string | null,
@@ -423,7 +445,7 @@ export function workbenchTabIconPath(tab: WorkbenchTab): string | null {
 }
 
 /** Build THE Context tab — the pinned canvas over the workspace's
- *  `.context-graph/` (composer attachments + shared docs, auto-laid-out,
+ *  `.context/` (composer attachments + shared docs, auto-laid-out,
  *  pan/zoom only). One per worktree, can't be closed. */
 export function createContextTab(): WorkbenchTab {
   return {
@@ -434,6 +456,7 @@ export function createContextTab(): WorkbenchTab {
 }
 
 export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
+  terminal: { label: "Terminal", icon: Terminal },
   changes: {
     label: "Changes",
     icon: DiffIcon,
@@ -444,7 +467,7 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
   },
   context: {
     label: "Context",
-    icon: Shapes,
+    icon: Book,
   },
   browser: {
     label: "Browser",
@@ -473,17 +496,11 @@ const LEGACY_KEY_ACTIVE = "column3-active-tab-id";
 /** Legacy / relocated tab types dropped from the workbench's persisted state. "pr" is
  *  the OLD synthetic active-PR tab (later a secondary source view, both gone) —
  *  the PR surface is the pinned "review" home tab now, a DIFFERENT type so a
- *  stale persisted "pr" entry still drops cleanly. "terminal" migrated into
- *  the always-present terminal panel. */
-const REMOVED_TAB_TYPES = new Set([
-  "design",
-  "git",
-  "env",
-  "todo",
-  "pr",
-  "terminal",
-]);
+ *  stale persisted "pr" entry still drops cleanly. Old generic Terminal tabs
+ *  without a session identity are dropped during normalization below. */
+const REMOVED_TAB_TYPES = new Set(["design", "git", "env", "todo", "pr"]);
 const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
+  "terminal",
   "changes",
   "review",
   "context",
@@ -570,7 +587,8 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
  *     extra File tabs stay closable (legacy pins are stripped);
  *   • every persisted Browser tab survives and is closable (legacy pins are
  *     stripped), enabling the multi-browser policy;
- *   • persisted Terminal tabs are removed (the terminal panel owns that surface);
+ *   • Terminal tabs with a valid destination keep their placement; the retired
+ *     generic Terminal tabs without a session identity are removed;
  *   • order is [fixed Files home, Changes, Review, Context, ...other closable
  *     tabs].
  *  Result never becomes empty because the home tabs remain. */
@@ -649,9 +667,44 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         viewerMode: undefined,
       }
     : { ...createContextTab(), pinned: true };
-  const closable = tabs
-    .filter((t) => t.type === "files" || t.type === "browser")
+  const seenTerminalIds = new Set<string>();
+  const closable: WorkbenchTab[] = tabs
+    .filter((t) => {
+      if (t.type !== "terminal")
+        return t.type === "files" || t.type === "browser";
+      const id = t.terminalId;
+      // The retired generic Terminal tab had no session identity. Its PTYs
+      // still restore from the established terminal-store persistence key.
+      if (
+        typeof id !== "string" ||
+        !id.trim() ||
+        id.length > 256 ||
+        Array.from(id).some(
+          (char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127,
+        ) ||
+        seenTerminalIds.has(id)
+      )
+        return false;
+      seenTerminalIds.add(id);
+      return true;
+    })
     .map((tab) => {
+      if (tab.type === "terminal") {
+        return {
+          id: tab.id,
+          type: tab.type,
+          title: tab.title.trim().slice(0, 512) || "Terminal",
+          terminalId: tab.terminalId,
+          terminalPlacement:
+            tab.terminalPlacement === "panel"
+              ? ("panel" as const)
+              : ("tab" as const),
+          terminalSidebarVisible:
+            typeof tab.terminalSidebarVisible === "boolean"
+              ? tab.terminalSidebarVisible
+              : true,
+        };
+      }
       if (tab.type === "files") {
         const filePath =
           typeof tab.filePath === "string"
@@ -740,16 +793,29 @@ export interface WorkbenchScopeState {
   tabs: WorkbenchTab[];
   activeId: string | null;
   recentBrowsers: RecentBrowserEntry[];
+  /** Independent bottom-panel selection; docking publishes it with placement. */
+  activeTerminalPanelId?: string | null;
+  /** One-time discovery migration from the former always-visible bottom panel.
+   * Closing the seeded Setup tab is respected on subsequent reloads. */
+  terminalTabsInitialized?: boolean;
 }
 
 /** Per-worktree tab state, keyed by the worktree's folder path. */
 export type WorkbenchScopeMap = Record<string, WorkbenchScopeState>;
 
 /** The default slice for a fresh worktree: the fixed blank Files home first,
- *  then pinned Changes and Review. Terminal panel owns Setup / Run / Terminal. */
+ *  then pinned Changes/Review/Context and a closable Setup terminal tab. */
 export function defaultTabs(): WorkbenchScopeState {
-  const tabs = normalizeWorkbenchTabs([createEmptyFilesTab()]);
-  return { tabs, activeId: defaultActiveId(tabs), recentBrowsers: [] };
+  const tabs = normalizeWorkbenchTabs([
+    createEmptyFilesTab(),
+    createTerminalWorkbenchTab("setup", "Setup"),
+  ]);
+  return {
+    tabs,
+    activeId: defaultActiveId(tabs),
+    recentBrowsers: [],
+    terminalTabsInitialized: true,
+  };
 }
 
 /** A fresh row lands on its first File tab; a migrated slice with no File tab
@@ -847,17 +913,40 @@ export function migrateScopes(parsed: WorkbenchScopeMap): WorkbenchScopeMap {
   )) {
     if (!slice || !Array.isArray(slice.tabs)) continue;
     const tabs = normalizeWorkbenchTabs(slice.tabs);
+    if (
+      slice.terminalTabsInitialized !== true &&
+      !tabs.some((tab) => tab.type === "terminal")
+    ) {
+      tabs.push(createTerminalWorkbenchTab("setup", "Setup"));
+    }
     // A persisted activeId that no longer names a tab (including the removed
-    // legacy workbench PR tab or relocated Terminal) falls back to the first File,
+    // legacy workbench PR tab or a docked terminal) falls back to the first File,
     // then Changes.
     const activeId =
-      slice.activeId && tabs.some((t) => t.id === slice.activeId)
+      slice.activeId &&
+      tabs.some(
+        (t) => t.id === slice.activeId && t.terminalPlacement !== "panel",
+      )
         ? slice.activeId
         : defaultActiveId(tabs);
     out[scope] = {
       tabs,
       activeId,
       recentBrowsers: normalizeRecentBrowsers(slice.recentBrowsers),
+      terminalTabsInitialized: true,
+      ...(tabs.some((t) => t.terminalPlacement === "panel") ||
+      slice.activeTerminalPanelId !== undefined
+        ? {
+            activeTerminalPanelId:
+              tabs.find(
+                (t) =>
+                  t.terminalPlacement === "panel" &&
+                  t.id === slice.activeTerminalPanelId,
+              )?.id ??
+              tabs.find((t) => t.terminalPlacement === "panel")?.id ??
+              null,
+          }
+        : {}),
     };
   }
   return out;

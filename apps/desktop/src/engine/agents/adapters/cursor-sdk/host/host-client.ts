@@ -18,8 +18,9 @@
 // adapter's logic (model resolution, classify, translator, retry) is unchanged:
 // only the transport for the raw SDK calls moved out of process.
 //
-// Production sessions use one host per prepared ZSR boundary, so SDK tools,
-// local MCP, plugins and shell descendants are causally contained. A shared
+// Production sessions use one host per prepared execution boundary, so SDK
+// tools, local MCP, plugins and shell descendants share its process lifecycle
+// and any selected kernel policy. A shared
 // host remains only for non-session probes and legacy direct-adapter tests.
 //
 // Runtime resolution reuses the PTY host's (set by apps/desktop/electron/sidecar.ts; both
@@ -621,10 +622,9 @@ export class CursorHostClient {
       Cursor: {
         models: {
           list: (opts) =>
-            this.request<CursorModelListItem[]>(
-              "models.list",
-              { opts: opts ?? {} },
-            ),
+            this.request<CursorModelListItem[]>("models.list", {
+              opts: opts ?? {},
+            }),
         },
       },
       localStore: {
@@ -771,11 +771,11 @@ export function spawnSubprocessTransport(
     : preserveAmbientConfigRoots({
         ...(process.env as Record<string, string>),
       });
-  if (options) {
+  if (options && options.executionBoundary.status.backend !== "none") {
     // Cursor's SDK uses global fetch plus Node's HTTP/1 transport during
-    // Agent.create. Node does not consult HTTP(S)_PROXY by default, so a
-    // contained host otherwise attempts a direct socket that the kernel fence
-    // correctly denies before SRT can authenticate and inspect the request.
+    // Agent.create. A contained host must route the configured proxy before a
+    // kernel fence sees the socket. Native Code inherits the user's setting
+    // verbatim instead of Zeros changing process-wide Node transport behavior.
     // Electron 43 embeds Node 24, whose built-in proxy support covers fetch,
     // http.request and https.request when enabled at process startup.
     env.NODE_USE_ENV_PROXY = "1";

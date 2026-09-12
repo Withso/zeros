@@ -8,6 +8,7 @@ import {
   deleteSecret,
   getSecret,
   replaceSecretIfUnchanged,
+  SecretStoreReadError,
   secretsFilePath,
   setSecret,
 } from "../../secret-store";
@@ -23,6 +24,10 @@ import {
 import type { WorkOSDesktopSession } from "../../workos-desktop-client";
 import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
+import { channel } from "../../../src/engine/runtime";
+import { desktopAuthConfig } from "../../workos-desktop-config";
+import { devWorkOSConfigurationIssue } from "../../dev-workos-auth-policy";
+import { controlPlaneBaseUrl } from "../../workos-desktop-account";
 
 const TOKENS_KEY = "auth-session:tokens";
 const REFRESH_SKEW_MS = 60_000;
@@ -85,8 +90,35 @@ function decodeJwtExp(token: string): number | null {
   }
 }
 
+/** Enable the one-time Dev migration only after the full Alpha contract passes. */
+function devUsesWorkOS(): boolean {
+  if (channel() !== "dev") return false;
+  try {
+    return devWorkOSConfigurationIssue({
+      auth: desktopAuthConfig(),
+      appOrigin: appBaseUrl(),
+      controlPlaneOrigin: controlPlaneBaseUrl(),
+    }) === null;
+  } catch {
+    return false;
+  }
+}
+
+/** Read shared credentials, retiring only a matching legacy Dev snapshot and
+ * preserving a WorkOS session concurrently installed by another worktree. */
 function readTokenSnapshot(): StoredTokenSnapshot | null {
-  return parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
+  const snapshot = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
+  if (snapshot?.tokens.provider !== "auth0" || !devUsesWorkOS()) return snapshot;
+  // Retire only Dev's old login after the new Alpha contract is complete.
+  // CAS preserves a WorkOS sign-in concurrently installed by another worktree.
+  if (replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, null)) {
+    console.info(
+      "[auth] Legacy Dev session retired; sign in once with WorkOS for all Dev instances",
+    );
+    notifySessionChanged();
+  }
+  const latest = parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
+  return latest?.tokens.provider === "workos" ? latest : null;
 }
 
 function readTokens(): StoredTokens | null {
@@ -105,6 +137,7 @@ export function persistSession(input: {
   email: string;
   name: string | null;
 }): void {
+  if (devUsesWorkOS()) throw new Error("Zeros Dev now requires WorkOS sign-in");
   if (!input.accessToken || !input.refreshToken || !input.sub || !input.email) {
     throw new Error("persistSession: missing required field");
   }
@@ -319,8 +352,9 @@ function toMainSession(value: StoredTokens): MainAuthSession {
   };
 }
 
-export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
-  const tokens = readTokens();
+async function getValidSessionFromTokens(
+  tokens: StoredTokens | null,
+): Promise<MainAuthSession | null> {
   if (!tokens) return null;
   if (tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
     return toMainSession(tokens);
@@ -337,6 +371,10 @@ export async function getValidSessionForMain(): Promise<MainAuthSession | null> 
   }
   const latest = readTokens() ?? tokens;
   return latest.expiresAt - Date.now() > 0 ? toMainSession(latest) : null;
+}
+
+export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
+  return getValidSessionFromTokens(readTokens());
 }
 
 export async function getValidAccessTokenForMain(): Promise<string | null> {
@@ -383,11 +421,28 @@ export function clearWorkOSSessionAfterServerRevocation(expected: {
   return removed;
 }
 
-export const authGetAccessToken: CommandHandler = async () => ({
-  access_token: await getValidAccessTokenForMain(),
-});
+export const authGetAccessToken: CommandHandler = async () => {
+  let tokens: StoredTokens | null;
+  try {
+    tokens = readTokens();
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) return { access_token: null };
+    throw error;
+  }
+  return {
+    access_token:
+      (await getValidSessionFromTokens(tokens))?.accessToken ?? null,
+  };
+};
 
-export const authGetSessionUser: CommandHandler = () => getSessionUserForMain();
+export const authGetSessionUser: CommandHandler = () => {
+  try {
+    return getSessionUserForMain();
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) return null;
+    throw error;
+  }
+};
 
 function sameAccount(left: StoredTokens, right: StoredTokens): boolean {
   return (left.accountId || left.sub) === (right.accountId || right.sub);

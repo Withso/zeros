@@ -10,6 +10,11 @@ import {
   consumeCloudWorkspaceGrant,
   issueCloudWorkspaceGrant,
 } from "./grants.js";
+import {
+  seedCanonicalCloudWorkspaceAuthority,
+  seedCanonicalCloudWorkspacePrerequisites,
+  seedCanonicalWorkspaceSettingsVersion,
+} from "./test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -65,25 +70,43 @@ d("cloud workspace endpoint grants", () => {
          VALUES ($1, $2, $3, 'maintainer')`,
         [teamId, orgId, owner.id],
       );
+      const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+        organizationId: orgId,
+        ownerUserId: owner.id,
+      });
       const id = randomUUID();
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
-           repository_revision, status, desired_state
+           repository_revision, repository_id, owner_user_id,
+           assignee_user_id, status, desired_state
          ) VALUES ($1, $2, $3, $4, 'Grant Workspace', 'github.com',
-                   'withso', 'zeros', 'main', 'ready', 'running')`,
-        [id, orgId, teamId, owner.id],
+                   'withso', 'zeros', 'main', $5, $4, $4,
+                   'ready', 'running')`,
+        [id, orgId, teamId, owner.id, canonical.repositoryId],
       );
+      await seedCanonicalCloudWorkspaceAuthority(tx, {
+        workspaceId: id,
+        organizationId: orgId,
+        ownerUserId: owner.id,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [id, orgId, "a".repeat(40), owner.id],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [id, orgId, "a".repeat(40), owner.id, canonical.providerConnectionId],
       );
+      await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId: id,
+        organizationId: orgId,
+        generation: 1,
+        createdBy: owner.id,
+        effectiveDocument: { schemaVersion: 1, values: {} },
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider,
@@ -104,7 +127,7 @@ d("cloud workspace endpoint grants", () => {
         generation: 1,
         organizationId,
         accountUserId: ownerId,
-        purpose: "engine-connect",
+        purpose: "repository-read",
         audience,
         ttlSeconds: 60,
         issuedBy: ownerId,
@@ -135,7 +158,7 @@ d("cloud workspace endpoint grants", () => {
           generation: 1,
           organizationId,
           accountUserId: ownerId,
-          purpose: "engine-connect",
+          purpose: "repository-read",
           audience,
           ttlSeconds: 60,
           issuedBy: ownerId,
@@ -161,7 +184,7 @@ d("cloud workspace endpoint grants", () => {
         generation: 1,
         organizationId,
         accountUserId: ownerId,
-        purpose: "engine-connect",
+        purpose: "repository-read",
         audience: "https://other.example.test/",
       }),
     );
@@ -175,7 +198,7 @@ d("cloud workspace endpoint grants", () => {
           generation: 1,
           organizationId,
           accountUserId: ownerId,
-          purpose: "engine-connect",
+          purpose: "repository-read",
           audience,
         }),
       );
@@ -213,7 +236,7 @@ d("cloud workspace endpoint grants", () => {
           generation: 1,
           organizationId,
           accountUserId: ownerId,
-          purpose: "engine-connect",
+          purpose: "repository-read",
           audience,
         }),
       ),
@@ -237,7 +260,7 @@ d("cloud workspace endpoint grants", () => {
           generation: 1,
           organizationId,
           accountUserId: ownerId,
-          purpose: "engine-connect",
+          purpose: "repository-read",
           audience,
         }),
       ),
@@ -268,7 +291,7 @@ d("cloud workspace endpoint grants", () => {
           generation: 1,
           organizationId,
           accountUserId: ownerId,
-          purpose: "engine-connect",
+          purpose: "repository-read",
           audience,
         }),
       ),
@@ -287,7 +310,7 @@ d("cloud workspace endpoint grants", () => {
           generation: 1,
           organizationId,
           accountUserId: ownerId,
-          purpose: "engine-connect",
+          purpose: "repository-read",
           audience,
         }),
       ),

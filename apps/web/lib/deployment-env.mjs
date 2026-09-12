@@ -1,14 +1,17 @@
 const CHANNELS = {
   alpha: {
     appOrigin: "https://app-alpha.zeros.build",
+    opsOrigin: "https://ops-alpha.zeros.build",
     controlPlaneOrigin: "https://api-alpha.zeros.build",
   },
   beta: {
     appOrigin: "https://app-beta.zeros.build",
+    opsOrigin: null,
     controlPlaneOrigin: "https://api-beta.zeros.build",
   },
   production: {
     appOrigin: "https://app.zeros.build",
+    opsOrigin: "https://ops.zeros.build",
     controlPlaneOrigin: "https://api.zeros.build",
   },
 };
@@ -92,8 +95,24 @@ export function deploymentEnvironmentErrors(env) {
     }
   }
 
-  if (normalizedHttpsOrigin(env.APP_ORIGIN || "") !== expected.appOrigin) {
-    errors.push(`APP_ORIGIN must be ${expected.appOrigin} for ${channel}`);
+  // Omission means the ordinary app. An explicitly configured value is an
+  // environment identity contract, so whitespace/case drift must fail closed.
+  const surface = env.ZEROS_SURFACE === undefined ? "app" : env.ZEROS_SURFACE;
+  if (surface !== "app" && surface !== "ops") {
+    errors.push("ZEROS_SURFACE must be app or ops");
+  }
+  if (surface === "ops" && expected.opsOrigin === null) {
+    errors.push("The Ops surface is intentionally not deployed to Beta");
+  }
+  const expectedAppOrigin =
+    surface === "ops" ? expected.opsOrigin : expected.appOrigin;
+  if (
+    expectedAppOrigin &&
+    normalizedHttpsOrigin(env.APP_ORIGIN || "") !== expectedAppOrigin
+  ) {
+    errors.push(
+      `APP_ORIGIN must be ${expectedAppOrigin} for ${channel} ${surface}`,
+    );
   }
   if (
     normalizedHttpsOrigin(env.CONTROL_PLANE_URL || "") !==
@@ -101,6 +120,15 @@ export function deploymentEnvironmentErrors(env) {
   ) {
     errors.push(
       `CONTROL_PLANE_URL must be ${expected.controlPlaneOrigin} for ${channel}`,
+    );
+  }
+  const browserPrefix = (env.WORKOS_BROWSER_ROUTE_PREFIX || "").trim();
+  if (surface === "ops" && browserPrefix !== "/ops") {
+    errors.push("WORKOS_BROWSER_ROUTE_PREFIX must be /ops for the Ops surface");
+  }
+  if (surface !== "ops" && browserPrefix !== "") {
+    errors.push(
+      "WORKOS_BROWSER_ROUTE_PREFIX must be empty for the app surface",
     );
   }
   if (

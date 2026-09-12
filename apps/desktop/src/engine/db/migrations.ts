@@ -916,6 +916,365 @@ CREATE TABLE janitor_state (
 );
 `;
 
+/** v35 — device-private receive-only cloud replica projection. Absolute paths,
+ * local divergence, and apply journals belong to this Mac and deliberately do
+ * not participate in the engine's cross-device delta-sync tables. Credentials
+ * and Ed25519 private keys remain in the OS secret store, never SQLite. */
+const MIGRATION_35_CLOUD_REPLICA_LOCAL_STATE = `
+CREATE TABLE cloud_device_registrations (
+  account_user_id TEXT PRIMARY KEY,
+  device_id TEXT NOT NULL UNIQUE,
+  key_version INTEGER NOT NULL CHECK (key_version > 0),
+  public_key TEXT NOT NULL CHECK (length(public_key) = 43),
+  key_fingerprint TEXT NOT NULL CHECK (length(key_fingerprint) = 64),
+  registered_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE cloud_replica_local_state (
+  replica_id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL,
+  organization_id TEXT NOT NULL,
+  account_user_id TEXT NOT NULL,
+  device_id TEXT NOT NULL,
+  root_path TEXT NOT NULL UNIQUE,
+  desired_state TEXT NOT NULL CHECK (
+    desired_state IN ('active', 'paused', 'removed')
+  ),
+  observed_state TEXT NOT NULL CHECK (
+    observed_state IN (
+      'bootstrapping', 'pending', 'syncing', 'in_sync', 'diverged', 'paused',
+      'detached', 'failed', 'removed'
+    )
+  ),
+  checkpoint_id TEXT,
+  manifest_revision INTEGER CHECK (
+    manifest_revision IS NULL OR manifest_revision >= 0
+  ),
+  event_cursor INTEGER NOT NULL DEFAULT 0 CHECK (event_cursor >= 0),
+  workspace_authority_epoch INTEGER NOT NULL CHECK (
+    workspace_authority_epoch > 0
+  ),
+  grant_epoch INTEGER NOT NULL CHECK (grant_epoch > 0),
+  ignore_policy_json TEXT NOT NULL CHECK (json_valid(ignore_policy_json)),
+  ignore_policy_sha256 TEXT NOT NULL CHECK (length(ignore_policy_sha256) = 64),
+  client_manifest_sha256 TEXT CHECK (
+    client_manifest_sha256 IS NULL OR length(client_manifest_sha256) = 64
+  ),
+  last_error_code TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  removed_at INTEGER,
+  FOREIGN KEY (account_user_id)
+    REFERENCES cloud_device_registrations(account_user_id) ON DELETE RESTRICT,
+  CHECK (
+    (desired_state = 'removed' AND removed_at IS NOT NULL)
+    OR (desired_state <> 'removed' AND removed_at IS NULL)
+  )
+);
+CREATE INDEX idx_cloud_replica_workspace
+  ON cloud_replica_local_state(workspace_id, updated_at DESC);
+
+CREATE TABLE cloud_replica_entries (
+  replica_id TEXT NOT NULL,
+  normalized_path TEXT NOT NULL,
+  portable_path_key TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 0),
+  entry_type TEXT NOT NULL CHECK (entry_type IN ('file', 'symlink')),
+  mode INTEGER NOT NULL CHECK (mode IN (33188, 33261, 40960)),
+  content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+  size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+  PRIMARY KEY (replica_id, normalized_path),
+  UNIQUE (replica_id, portable_path_key),
+  FOREIGN KEY (replica_id) REFERENCES cloud_replica_local_state(replica_id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE cloud_replica_apply_journal (
+  replica_id TEXT NOT NULL,
+  normalized_path TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+  from_revision INTEGER NOT NULL CHECK (from_revision >= 0),
+  to_revision INTEGER NOT NULL CHECK (to_revision >= from_revision),
+  stage_path TEXT,
+  expected_previous_sha256 TEXT,
+  next_content_sha256 TEXT,
+  state TEXT NOT NULL CHECK (
+    state IN ('staged', 'committing', 'applied', 'failed')
+  ),
+  error_code TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (replica_id, normalized_path),
+  FOREIGN KEY (replica_id) REFERENCES cloud_replica_local_state(replica_id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE cloud_replica_divergences (
+  replica_id TEXT NOT NULL,
+  normalized_path TEXT NOT NULL,
+  detected_at INTEGER NOT NULL,
+  expected_sha256 TEXT,
+  observed_sha256 TEXT,
+  cloud_sha256 TEXT,
+  resolution TEXT CHECK (
+    resolution IS NULL OR
+    resolution IN ('replace_from_cloud', 'saved_as_copy', 'removed_local')
+  ),
+  resolved_at INTEGER,
+  PRIMARY KEY (replica_id, normalized_path, detected_at),
+  FOREIGN KEY (replica_id) REFERENCES cloud_replica_local_state(replica_id)
+    ON DELETE CASCADE,
+  CHECK ((resolution IS NULL) = (resolved_at IS NULL))
+);
+CREATE INDEX idx_cloud_replica_divergences_open
+  ON cloud_replica_divergences(replica_id, detected_at)
+  WHERE resolution IS NULL;
+`;
+
+/** v36 — engine-private durable-record convergence marker. The cloud server
+ * stores transcript data; this row only proves which exact local SQLite head
+ * was last compared with which remote revision. It is never renderer state and
+ * never leaves the engine except as the resulting durable record mutations. */
+const MIGRATION_36_CLOUD_RECORD_SYNC_STATE = `
+CREATE TABLE cloud_record_sync_state (
+  workspace_id TEXT PRIMARY KEY,
+  remote_revision INTEGER NOT NULL CHECK (remote_revision >= 0),
+  local_head_revision INTEGER NOT NULL CHECK (local_head_revision >= 0),
+  manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64),
+  updated_at INTEGER NOT NULL
+);
+`;
+
+/** v37 — immutable global identities for repositories and workspaces. The
+ * existing path-derived `repos.id` and human-readable `workspaces.id` values
+ * are serialized compatibility aliases and deliberately remain primary keys.
+ * Cloud fork/import protocols use these UUIDs so a copy never reuses or
+ * transfers the source workspace identity.
+ *
+ * SQLite cannot add a non-constant UUID default with ALTER TABLE. Existing
+ * rows are backfilled in-place, while AFTER INSERT triggers cover legacy/direct
+ * writers that do not yet supply the new column. Explicit writers are still
+ * expected to provide a UUID; the validation and immutability triggers make the
+ * database the final authority either way. */
+const MIGRATION_37_GLOBAL_REPOSITORY_WORKSPACE_IDS = `
+ALTER TABLE repos ADD COLUMN canonical_id TEXT;
+ALTER TABLE workspaces ADD COLUMN canonical_id TEXT;
+
+UPDATE repos
+SET canonical_id = lower(
+  hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
+  substr(hex(randomblob(2)), 2, 3) || '-' ||
+  substr('89ab', (random() & 3) + 1, 1) ||
+  substr(hex(randomblob(2)), 2, 3) || '-' || hex(randomblob(6))
+)
+WHERE canonical_id IS NULL;
+
+UPDATE workspaces
+SET canonical_id = lower(
+  hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
+  substr(hex(randomblob(2)), 2, 3) || '-' ||
+  substr('89ab', (random() & 3) + 1, 1) ||
+  substr(hex(randomblob(2)), 2, 3) || '-' || hex(randomblob(6))
+)
+WHERE canonical_id IS NULL;
+
+CREATE UNIQUE INDEX repos_canonical_id_unique ON repos(canonical_id);
+CREATE UNIQUE INDEX workspaces_canonical_id_unique ON workspaces(canonical_id);
+
+CREATE TRIGGER repos_canonical_id_validate_insert
+BEFORE INSERT ON repos
+WHEN NEW.canonical_id IS NOT NULL AND (
+  length(NEW.canonical_id) <> 36 OR
+  NEW.canonical_id <> lower(NEW.canonical_id) OR
+  substr(NEW.canonical_id, 9, 1) <> '-' OR
+  substr(NEW.canonical_id, 14, 1) <> '-' OR
+  substr(NEW.canonical_id, 19, 1) <> '-' OR
+  substr(NEW.canonical_id, 24, 1) <> '-' OR
+  replace(NEW.canonical_id, '-', '') GLOB '*[^0-9a-f]*'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'repos.canonical_id must be a lowercase UUID');
+END;
+
+CREATE TRIGGER repos_canonical_id_validate_update
+BEFORE UPDATE OF canonical_id ON repos
+WHEN NEW.canonical_id IS NULL OR
+  length(NEW.canonical_id) <> 36 OR
+  NEW.canonical_id <> lower(NEW.canonical_id) OR
+  substr(NEW.canonical_id, 9, 1) <> '-' OR
+  substr(NEW.canonical_id, 14, 1) <> '-' OR
+  substr(NEW.canonical_id, 19, 1) <> '-' OR
+  substr(NEW.canonical_id, 24, 1) <> '-' OR
+  replace(NEW.canonical_id, '-', '') GLOB '*[^0-9a-f]*'
+BEGIN
+  SELECT RAISE(ABORT, 'repos.canonical_id must be a lowercase UUID');
+END;
+
+CREATE TRIGGER repos_canonical_id_fill_insert
+AFTER INSERT ON repos
+WHEN NEW.canonical_id IS NULL
+BEGIN
+  UPDATE repos
+  SET canonical_id = lower(
+    hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
+    substr(hex(randomblob(2)), 2, 3) || '-' ||
+    substr('89ab', (random() & 3) + 1, 1) ||
+    substr(hex(randomblob(2)), 2, 3) || '-' || hex(randomblob(6))
+  )
+  WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER repos_canonical_id_immutable
+BEFORE UPDATE OF canonical_id ON repos
+WHEN OLD.canonical_id IS NOT NULL AND NEW.canonical_id IS NOT OLD.canonical_id
+BEGIN
+  SELECT RAISE(ABORT, 'repos.canonical_id is immutable');
+END;
+
+CREATE TRIGGER workspaces_canonical_id_validate_insert
+BEFORE INSERT ON workspaces
+WHEN NEW.canonical_id IS NOT NULL AND (
+  length(NEW.canonical_id) <> 36 OR
+  NEW.canonical_id <> lower(NEW.canonical_id) OR
+  substr(NEW.canonical_id, 9, 1) <> '-' OR
+  substr(NEW.canonical_id, 14, 1) <> '-' OR
+  substr(NEW.canonical_id, 19, 1) <> '-' OR
+  substr(NEW.canonical_id, 24, 1) <> '-' OR
+  replace(NEW.canonical_id, '-', '') GLOB '*[^0-9a-f]*'
+)
+BEGIN
+  SELECT RAISE(ABORT, 'workspaces.canonical_id must be a lowercase UUID');
+END;
+
+CREATE TRIGGER workspaces_canonical_id_validate_update
+BEFORE UPDATE OF canonical_id ON workspaces
+WHEN NEW.canonical_id IS NULL OR
+  length(NEW.canonical_id) <> 36 OR
+  NEW.canonical_id <> lower(NEW.canonical_id) OR
+  substr(NEW.canonical_id, 9, 1) <> '-' OR
+  substr(NEW.canonical_id, 14, 1) <> '-' OR
+  substr(NEW.canonical_id, 19, 1) <> '-' OR
+  substr(NEW.canonical_id, 24, 1) <> '-' OR
+  replace(NEW.canonical_id, '-', '') GLOB '*[^0-9a-f]*'
+BEGIN
+  SELECT RAISE(ABORT, 'workspaces.canonical_id must be a lowercase UUID');
+END;
+
+CREATE TRIGGER workspaces_canonical_id_fill_insert
+AFTER INSERT ON workspaces
+WHEN NEW.canonical_id IS NULL
+BEGIN
+  UPDATE workspaces
+  SET canonical_id = lower(
+    hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' ||
+    substr(hex(randomblob(2)), 2, 3) || '-' ||
+    substr('89ab', (random() & 3) + 1, 1) ||
+    substr(hex(randomblob(2)), 2, 3) || '-' || hex(randomblob(6))
+  )
+  WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER workspaces_canonical_id_immutable
+BEFORE UPDATE OF canonical_id ON workspaces
+WHEN OLD.canonical_id IS NOT NULL AND NEW.canonical_id IS NOT OLD.canonical_id
+BEGIN
+  SELECT RAISE(ABORT, 'workspaces.canonical_id is immutable');
+END;
+`;
+
+/** v38 — device-private, restart-safe local↔cloud copy jobs. The control plane
+ * owns cloud fork intents; this journal owns only the Mac-side snapshot,
+ * download, and local materialization progress. WorkOS access tokens, export
+ * grants, device private keys, and provider credentials are never persisted.
+ */
+const MIGRATION_38_CLOUD_WORKSPACE_FORK_JOBS = `
+CREATE TABLE cloud_workspace_fork_jobs (
+  job_id TEXT PRIMARY KEY,
+  operation TEXT NOT NULL CHECK (
+    operation IN ('local_to_cloud', 'cloud_to_local')
+  ),
+  account_user_id TEXT NOT NULL,
+  organization_id TEXT NOT NULL,
+  source_workspace_id TEXT NOT NULL,
+  target_workspace_id TEXT NOT NULL,
+  source_workspace_alias TEXT,
+  target_workspace_alias TEXT,
+  repo_root TEXT NOT NULL,
+  request_json TEXT NOT NULL CHECK (json_valid(request_json)),
+  state TEXT NOT NULL CHECK (state IN (
+    'prepared', 'snapshotting', 'creating_remote', 'uploading', 'finalizing',
+    'requesting_export', 'waiting_export', 'downloading', 'materializing',
+    'succeeded', 'failed', 'cancelled'
+  )),
+  remote_fork_intent_id TEXT,
+  remote_lifecycle_intent_id TEXT,
+  checkpoint_request_id TEXT,
+  checkpoint_id TEXT,
+  source_snapshot_sha256 TEXT CHECK (
+    source_snapshot_sha256 IS NULL OR length(source_snapshot_sha256) = 64
+  ),
+  source_revision INTEGER CHECK (
+    source_revision IS NULL OR source_revision >= 0
+  ),
+  manifest_json TEXT CHECK (
+    manifest_json IS NULL OR json_valid(manifest_json)
+  ),
+  attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+  next_attempt_at INTEGER NOT NULL,
+  last_error_code TEXT,
+  last_error_message TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  completed_at INTEGER,
+  UNIQUE (operation, organization_id, source_workspace_id, target_workspace_id),
+  CHECK (source_workspace_id <> target_workspace_id),
+  CHECK ((state IN ('succeeded', 'cancelled')) = (completed_at IS NOT NULL))
+);
+CREATE INDEX idx_cloud_workspace_fork_jobs_resume
+  ON cloud_workspace_fork_jobs(state, next_attempt_at, updated_at)
+  WHERE state NOT IN ('succeeded', 'cancelled');
+
+CREATE TABLE cloud_workspace_fork_job_entries (
+  job_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  normalized_path TEXT NOT NULL,
+  portable_path_key TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+  entry_type TEXT CHECK (entry_type IS NULL OR entry_type IN ('file', 'symlink')),
+  mode INTEGER CHECK (mode IS NULL OR mode IN (33188, 33261, 40960)),
+  content_sha256 TEXT CHECK (
+    content_sha256 IS NULL OR length(content_sha256) = 64
+  ),
+  size_bytes INTEGER CHECK (size_bytes IS NULL OR size_bytes >= 0),
+  stage_name TEXT,
+  remote_blob_id TEXT,
+  PRIMARY KEY (job_id, ordinal),
+  UNIQUE (job_id, normalized_path),
+  UNIQUE (job_id, portable_path_key),
+  FOREIGN KEY (job_id) REFERENCES cloud_workspace_fork_jobs(job_id)
+    ON DELETE CASCADE,
+  CHECK (
+    (operation = 'delete' AND entry_type IS NULL AND mode IS NULL
+      AND content_sha256 IS NULL AND size_bytes IS NULL
+      AND stage_name IS NULL AND remote_blob_id IS NULL)
+    OR
+    (operation = 'upsert' AND entry_type IS NOT NULL AND mode IS NOT NULL
+      AND content_sha256 IS NOT NULL AND size_bytes IS NOT NULL
+      AND stage_name IS NOT NULL)
+  )
+);
+
+CREATE TABLE cloud_workspace_fork_job_records (
+  job_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  record_json TEXT NOT NULL CHECK (json_valid(record_json)),
+  PRIMARY KEY (job_id, ordinal),
+  FOREIGN KEY (job_id) REFERENCES cloud_workspace_fork_jobs(job_id)
+    ON DELETE CASCADE
+);
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -1084,6 +1443,26 @@ export const MIGRATIONS: Migration[] = [
     version: 34,
     name: "boot janitor cursors",
     up: MIGRATION_34_JANITOR_STATE,
+  },
+  {
+    version: 35,
+    name: "device-private receive-only cloud replica state",
+    up: MIGRATION_35_CLOUD_REPLICA_LOCAL_STATE,
+  },
+  {
+    version: 36,
+    name: "cloud durable-record convergence state",
+    up: MIGRATION_36_CLOUD_RECORD_SYNC_STATE,
+  },
+  {
+    version: 37,
+    name: "immutable repository and workspace global identities",
+    up: MIGRATION_37_GLOBAL_REPOSITORY_WORKSPACE_IDS,
+  },
+  {
+    version: 38,
+    name: "restart-safe local and cloud workspace copy jobs",
+    up: MIGRATION_38_CLOUD_WORKSPACE_FORK_JOBS,
   },
 ];
 

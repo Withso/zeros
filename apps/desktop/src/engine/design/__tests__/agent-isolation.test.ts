@@ -8,8 +8,7 @@ const read = (path: string) => readFileSync(resolve(root, path), "utf8");
 
 describe("design workspace agent isolation", () => {
   it("keeps design credentials and MCP registration out of coding-agent adapters", () => {
-    const codingHarness = [
-      "apps/desktop/src/engine/agents/gateway.ts",
+    const providerAdapters = [
       "apps/desktop/src/engine/agents/adapters/claude-sdk/adapter.ts",
       "apps/desktop/src/engine/agents/adapters/codex/app-server-adapter.ts",
       "apps/desktop/src/engine/agents/adapters/codex/app-server.ts",
@@ -17,13 +16,19 @@ describe("design workspace agent isolation", () => {
     ]
       .map(read)
       .join("\n");
+    const codingHarness = [
+      read("apps/desktop/src/engine/agents/gateway.ts"),
+      providerAdapters,
+    ].join("\n");
 
-    expect(codingHarness).not.toContain("zeros-design");
+    // The gateway owns actor-scoped Design admission; provider adapters must
+    // remain generic and must never learn the Design MCP's identity.
+    expect(providerAdapters).not.toContain("zeros-design");
     expect(codingHarness).not.toContain("ZEROS_DESIGN_MCP_TOKEN");
     expect(codingHarness).not.toContain("ZEROS_CHAT_MODE");
   });
 
-  it("keeps the retired design MCP absent and protects design files territorially", () => {
+  it("keeps the retired ambient MCP absent and enforces actor-scoped authority", () => {
     expect(
       existsSync(resolve(root, "apps/desktop/src/engine/design/mcp-server.ts")),
     ).toBe(false);
@@ -34,13 +39,16 @@ describe("design workspace agent isolation", () => {
     expect(engine).toContain("assertAgentWorkspaceProcessStartAllowed");
     // Concurrent duality: agents and terminals run in every workspace
     // regardless of view mode — the retired workspace-level bans must not
-    // creep back in. Code-agent containment is provider/OS enforced; the
-    // actor-scoped provider boundary and serialized Git rewrite wrapper remain.
+    // creep back in. Native Code execution has no filesystem reshaping or
+    // rewrite wrapper; Design-agent authority is enforced by ZSR and the
+    // capability-scoped Design API instead.
     expect(engine).not.toContain("assertAgentWorkspaceNotDesign");
     expect(engine).not.toContain("isDesignWorkspaceProcessTarget");
     expect(engine).not.toContain("removeDesignAdditionalDirectories");
-    expect(engine).toContain("DESIGN_DIR_REWRITE_OPS");
-    expect(engine).toContain("withDesignDirectoryWritable");
+    expect(engine).not.toContain("DESIGN_DIR_REWRITE_OPS");
+    expect(engine).not.toContain("withDesignDirectoryWritable");
+    // Git-ref changes still refresh semantic Design identity. This performs no
+    // checkout, sparse-shape mutation, ACL transition, or file reconciliation.
     expect(engine).toContain("reconcileDesignDirAfterExternalGit");
     const workspaceLock = read(
       "apps/desktop/src/engine/design/workspace-lock.ts",
@@ -93,6 +101,9 @@ describe("design workspace agent isolation", () => {
       "change.gitRefsChanged || change.worktreeChanged",
     );
     expect(engine).toContain("change.designRecognitionChanged");
+    expect(engine).toMatch(
+      /\.\.\.\(change\.designRecognitionChanged\s*\?\s*\{\s*designRecognitionChanged:\s*true\s*\}/,
+    );
     const service = read("apps/desktop/src/engine/workspace/service.ts");
     expect(service).toContain("assertNoDesignPathWrites");
   });
@@ -163,7 +174,8 @@ describe("design workspace agent isolation", () => {
       /designWorkspaceCreationAvailable\s*=\s*\n?\s*nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron/,
     );
     expect(createPage).toContain('kind: "design"');
-    expect(createPage).toContain("Create design workspace");
+    expect(createPage).toContain("data-dispatcher-mode-switcher");
+    expect(createPage).toContain("WorkspaceModeToggleView");
 
     const settings = read(
       "apps/desktop/src/renderer/features/settings/settings-page.tsx",

@@ -35,7 +35,11 @@ afterEach(() => {
 
 function writeRepo(body: string) {
   mkdirSync(path.join(repoRoot, ".zeros"), { recursive: true });
-  writeFileSync(path.join(repoRoot, ".zeros", "settings.toml"), body, "utf8");
+  writeFileSync(
+    path.join(repoRoot, ".zeros", "settings.local.toml"),
+    body,
+    "utf8",
+  );
 }
 
 describe("branch prefix type resolution", () => {
@@ -75,7 +79,9 @@ describe("branch prefix type resolution", () => {
   it("passes the other explicit choices through", () => {
     writeRepo('[git]\nbranch_prefix_type = "none"\n');
     expect(resolveRepoGit(repoRoot).branchPrefixType).toBe("none");
-    writeRepo('[git]\nbranch_prefix_type = "custom"\nbranch_prefix = "acme/"\n');
+    writeRepo(
+      '[git]\nbranch_prefix_type = "custom"\nbranch_prefix = "acme/"\n',
+    );
     const config = resolveRepoGit(repoRoot);
     expect(config.branchPrefixType).toBe("custom");
     // Normalized on the way out, so the caller never joins a second slash.
@@ -85,6 +91,8 @@ describe("branch prefix type resolution", () => {
   it("keeps the default for a repoRoot it cannot resolve", () => {
     // A settings problem must never block workspace creation — it degrades to
     // the same answer an empty tree gives.
-    expect(resolveRepoGit("").branchPrefixType).toBe(DEFAULT_BRANCH_PREFIX_TYPE);
+    expect(resolveRepoGit("").branchPrefixType).toBe(
+      DEFAULT_BRANCH_PREFIX_TYPE,
+    );
   });
 });

@@ -43,6 +43,34 @@ export ZEROS_ZSR_SUPERVISOR_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/c
 export ZEROS_ZSR_BWRAP_PATH="/usr/bin/bwrap"
 export ZEROS_ZSR_SETPRIV_PATH="/usr/bin/setpriv"
 
+SETUP_BOOT="${ZEROS_CLOUD_SETUP_BOOT:-}"
+if [[ -n "$SETUP_BOOT" && "$SETUP_BOOT" != "1" ]]; then
+  echo "[start-engine] FATAL: cloud setup boot marker is invalid" >&2
+  exit 1
+fi
+if [[ "$SETUP_BOOT" == "1" ]]; then
+  if [[ -z "${ZEROS_CLOUD_RUNTIME_B64:-}" ]]; then
+    echo "[start-engine] FATAL: cloud runtime registration is missing" >&2
+    exit 1
+  fi
+  if [[ ! -S /run/zeros/cloud-worker-supervisor.sock || -L /run/zeros/cloud-worker-supervisor.sock || "$(stat -c '%u:%a' /run/zeros/cloud-worker-supervisor.sock)" != "0:600" ]]; then
+    echo "[start-engine] FATAL: cloud worker supervisor is unavailable" >&2
+    exit 1
+  fi
+  if [[ ! -d /var/lib/zeros/user-settings || -L /var/lib/zeros/user-settings || "$(stat -c '%u:%g:%a' /var/lib/zeros/user-settings)" != "0:$WORKER_GID:750" ]]; then
+    echo "[start-engine] FATAL: managed cloud settings directory is unsafe" >&2
+    exit 1
+  fi
+  if [[ ! -f /var/lib/zeros/user-settings/settings.managed.toml || -L /var/lib/zeros/user-settings/settings.managed.toml || "$(stat -c '%u:%g:%a:%h' /var/lib/zeros/user-settings/settings.managed.toml)" != "0:$WORKER_GID:640:1" ]]; then
+    echo "[start-engine] FATAL: managed cloud settings are unsafe" >&2
+    exit 1
+  fi
+  export ZEROS_USER_SETTINGS_DIR="/var/lib/zeros/user-settings"
+elif [[ -n "${ZEROS_CLOUD_RUNTIME_B64:-}" ]]; then
+  echo "[start-engine] FATAL: cloud runtime registration requires setup boot" >&2
+  exit 1
+fi
+
 if [[ -z "${ZEROS_CLOUD_PORT:-}" ]]; then
   echo "[start-engine] FATAL: ZEROS_CLOUD_PORT is not set" >&2
   exit 1
@@ -93,7 +121,7 @@ if [[ ! -d /run/zeros || -L /run/zeros || "$(stat -c '%u:%a' /run/zeros)" != "0:
   echo "[start-engine] FATAL: root-only runtime directory is unavailable" >&2
   exit 1
 fi
-if [[ ! -f /run/zeros/cloud-preview-links.json || -L /run/zeros/cloud-preview-links.json || "$(stat -c '%u:%a:%h' /run/zeros/cloud-preview-links.json)" != "0:600:1" ]]; then
+if [[ "$SETUP_BOOT" != "1" && ( ! -f /run/zeros/cloud-preview-links.json || -L /run/zeros/cloud-preview-links.json || "$(stat -c '%u:%a:%h' /run/zeros/cloud-preview-links.json)" != "0:600:1" ) ]]; then
   echo "[start-engine] FATAL: root-owned cloud preview ingress is unavailable" >&2
   exit 1
 fi
@@ -139,7 +167,8 @@ fi
 echo "[start-engine] runtime=$RUNTIME cloud_port=$ZEROS_CLOUD_PORT data_dir=${ZEROS_DATA_DIR:-<default>} workspace=$REPO_DIR engine=$ENGINE_DIR"
 echo "[start-engine] backend=cloud-worker token_gate=on worker=$WORKER_UID:$WORKER_GID log=$LOG"
 
-# `serve` binds LocalTransport (127.0.0.1, harmless) AND — because ZEROS_CLOUD_PORT
-# is set — CloudTransport on 0.0.0.0:$ZEROS_CLOUD_PORT. tee so logs are both live
-# (the session stream) and durable (for the test client to fetch on failure).
-exec node "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR" 2>&1 | tee -a "$LOG"
+# `serve` binds LocalTransport (127.0.0.1, harmless) AND — because
+# ZEROS_CLOUD_PORT is set — CloudTransport on 0.0.0.0:$ZEROS_CLOUD_PORT. Keep
+# Node as the direct supervised process. A tee sibling would retain the one-use
+# registration material in its inherited environment for the engine lifetime.
+exec node "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR" >>"$LOG" 2>&1

@@ -6,9 +6,11 @@ desktop application, browser dashboard, and future cloud-workspace service.
 ## Product hierarchy
 
 ```text
+Device / desktop app profile
+└── Personal
+    └── Local repositories, workspaces, and conversations
+
 Account
-├── Personal (permanent; one per account)
-│   └── Default team (persisted implementation detail)
 └── Organization (zero or more)
     └── Default team (exactly one live team for now)
         └── Members
@@ -18,7 +20,8 @@ An organization is the tenant, billing, invitation, policy, and workspace
 ownership boundary. A team is a child grouping inside one organization. Team
 IDs must never be accepted where an organization ID is required.
 
-Personal is a Zeros-only product root and never creates a WorkOS Organization.
+Personal is device-local and never creates a WorkOS Organization. It is not a
+cloud tenant and is not owned by the signed-in Zeros account.
 Every collaborative Zeros Organization creates exactly one WorkOS
 Organization, correlated by the Zeros UUID in WorkOS `external_id`. WorkOS
 organization membership provides the coarse identity lifecycle; Zeros child
@@ -32,24 +35,42 @@ identity migration.
 
 ## Personal
 
-Every authenticated account owns one live Personal organization. Signup and
-every subsequent authenticated request idempotently ensure all four records
-exist: Personal, its owner membership, its default team, and the corresponding
-team maintainer membership. This repairs interrupted imports without making
-page rendering a provisioning side effect.
+The existing **Personal** entry represents the local collection within the
+current OS user and desktop app profile. Signing into account A, then account
+B, does not change that collection's owner or hide its workspaces. It is not a
+second entry or a new workspace mode, and its visible name remains `Personal`.
+Different machines, OS users, or isolated app profiles do not automatically
+share this local data.
 
 Personal has these invariants:
 
-- its visible name comes from the identity provider when available and falls
-  back to `Personal`;
+- its visible name is always `Personal`, independent of the account profile;
 - it cannot be renamed or deleted through the product;
 - it cannot invite other members or persist organization settings remotely;
 - it is always local-workspace-only; and
-- its owner cannot leave or be removed.
+- account switching, provider-user deletion, and logout never delete its local
+  files or transfer them to a new cloud account.
 
-The child default team keeps the relational model uniform, but Personal is not
-a collaborative organization and does not expose Members, Teams, or Billing UI.
-Personal workspace configuration stays on the device.
+Personal does not expose Members, Teams, or Billing UI. Its workspace
+configuration stays on the device. The local selection is `local-personal`;
+the persisted workspace owner is `organization_id = NULL, placement = 'local'`.
+The selection key is not a server organization ID and must never be sent to
+cloud provisioning, organization management, or the engine's remote-settings
+context. Account management opens the profile page without an organization ID.
+
+This ownership change does not bypass the existing mandatory desktop sign-in
+gate. WorkOS identities, account recovery, organization memberships, cloud
+authorization, and account-specific credentials remain separate concerns.
+
+### Released-client compatibility
+
+Older desktop clients and the browser dashboard still consume the server's
+per-account Personal metadata. The control plane continues to ensure that
+compatibility organization, its owner membership, default team, and maintainer
+membership. These rows are **not** the owner of the new desktop's local Personal
+collection. They are not deleted by this desktop migration; retiring them
+requires a separate versioned server/dashboard rollout. They never create a
+WorkOS Organization.
 
 ## Plans and billing ownership
 
@@ -89,6 +110,27 @@ tenant run?”.
 A user-created organization can own local workspaces and is eligible to own
 cloud workspaces. Eligibility metadata is not an entitlement: provisioning
 must still enforce the current plan, quota, repository access, and actor role.
+
+### Initial-launch creation gate
+
+Organization creation is not generally available during the local-only launch.
+Only accounts with the standing Zeros staff role `platform_owner` or
+`developer` may create an organization for internal dogfooding. A staff role
+does not create an organization automatically, and ordinary signed-in accounts
+continue to see only their device-local Personal collection.
+
+The control plane is the authorization boundary. `GET /v1/me` publishes the
+server-derived `capabilities.createOrganization` boolean for client rendering,
+and both `POST /v1/organizations` and the released-client alias
+`POST /v1/teams` enforce the same role check. Unauthorized creation returns the
+non-disclosing `not_found` response. The browser and desktop hide the creation
+surface when the capability is absent or false, including after a role is
+revoked and the account snapshot is refreshed.
+
+PostHog flags may later stage the UI rollout, but they are neither an identity
+source nor an authorization control. Any future rollout flag is an additional
+presentation/eligibility condition; the server must still authorize the current
+account, role, plan, and resource on every mutation.
 
 Organization roles are `owner`, `admin`, and `member`:
 
@@ -130,29 +172,49 @@ all sessions while preserving product data for reviewed recovery.
 
 Desktop workspace rows carry two additive fields:
 
-- `organization_id`: the tenant root that owns the workspace; and
+- `organization_id`: a collaborative tenant root, or null for device Personal;
+  and
 - `placement`: `local` or `cloud`.
 
 The SQLite constraint rejects a cloud placement without an organization ID.
-Existing rows migrate as `organization_id = NULL, placement = 'local'`; a null
-owner is the compatibility representation of legacy Personal data. On an
+Existing pre-hierarchy rows already use `organization_id = NULL, placement =
+'local'`; the same representation is canonical for new Personal workspaces. On an
 account's first hierarchy-aware organization snapshot, the desktop normalizes a
 persisted promoted-Team selection to Personal so those legacy rows remain
 visible. After hierarchy ownership has been confirmed, the selected owner may
 be restored from account history during a cold refresh. Every local creation
-path, including adopted worktrees and branch/PR workspaces, snapshots that
-owner at intent time and persists its ID. Changing the switcher while an
+path, including adopted worktrees and branch/PR workspaces, snapshots its
+placement at intent time: Personal persists null; Pro/Business organization
+contexts retain their exact organization ID. Changing the switcher while an
 asynchronous create is preparing cannot retarget that operation. Home,
 Dashboard, repository, tab, pending-create, and archive collections are
-filtered by the selected owner. Legacy null-owned rows appear only in Personal;
+filtered by the selected owner. Null-owned local rows appear only in Personal;
 organization-owned rows match their exact organization ID.
 After a confirmed leave or deletion, local rows from the retired organization
-are reassigned to that account's Personal tenant. Bounded per-account
+are detached into device Personal (null ownership). Bounded per-account
 membership tombstones make the repair idempotent and catch a workspace create
 that finishes just after the membership change. Cloud rows are never adopted
 locally; their cleanup remains a server-side provisioning concern.
-Existing crash-recovery seeds are rewritten with the same Personal owner, so a
+Existing crash-recovery seeds are rewritten with null ownership, so a
 later database rebuild cannot resurrect the departed organization identity.
+
+The account-owned Personal upgrade uses only explicitly known Personal IDs:
+the existing bounded account membership history and authenticated server
+snapshots. A bounded `organization:personal-ids-v1` alias registry retains up
+to 256 known IDs independently of the account-history MRU. It keeps cached
+local rows visible before the engine is reachable. New aliases publish a new
+Personal scope snapshot so memoized lists update immediately; unchanged aliases
+retain their references during ordinary account/profile revalidation.
+
+On local bridge connection, the idempotent `workspace.reassignLocalOrganization`
+operation detaches known legacy Personal IDs with an explicit null target.
+This requires no WorkOS or control-plane request. It updates only local SQLite
+ownership and existing recovery seeds, never repository files or cloud rows.
+Bridge failures leave the source data and migration evidence available for
+retry. Unknown organization IDs are never guessed to be Personal based on
+email, ID spelling, or another account's missing memberships. Historical IDs
+whose classification was already lost require explicit recovery evidence; do
+not broadly adopt every unmatched local organization into Personal.
 
 Cloud provisioning is not implemented by this hierarchy change. When it ships,
 the create path must reject Personal before dispatch and re-authorize the
@@ -231,10 +293,12 @@ snapshots during revalidation and disables controls the actor cannot use.
 
 ## API and serialized compatibility
 
-`GET /v1/me` returns `organizations` in Personal-first order. During the mixed
-version window it also returns the same array as `teams`. New management routes
-live under `/v1/organizations`; `/v1/teams` remains an organization-resource
-alias for released flat-Team desktop clients.
+`GET /v1/me` returns `organizations` in Personal-first order and current
+server-derived account capabilities. Capability fields are fail-closed when an
+older client does not recognize them or an older server omits them. During the
+mixed version window the endpoint also returns the same organization array as
+`teams`. New management routes live under `/v1/organizations`; `/v1/teams`
+remains an organization-resource alias for released flat-Team desktop clients.
 
 Migration `0009_organization_team_hierarchy.sql` promotes every old flat Team
 ID to an organization ID without changing it. Invitations, settings, billing,
@@ -244,9 +308,19 @@ default-team ID.
 
 The desktop keys `team:active-id` and `team:has-teams`, the engine's `teamId`
 settings-context field, and legacy Team-named client exports remain serialized
-or source-compatibility contracts. Their tenant-root values now represent
-organization IDs. Rename or remove them only with an explicit migration and
-mixed-version tests.
+or source-compatibility contracts. Active selection may now also hold
+`local-personal`; the engine's remote-settings context must instead receive
+null for Personal. The local ownership-repair operation accepts explicit null
+as an additive target while continuing to accept older string targets. Missing
+or malformed targets and remote callers are rejected. Rename or remove these
+contracts only with an explicit migration and mixed-version tests.
+
+Personal regression checks include the adjacent organization/engine/bridge
+Vitest suites and `node scripts/ui-smoke-personal.mjs`. The latter also runs
+inside `pnpm test:ui-smoke` and drives the real switcher and memoized local list
+against synthetic accounts: cold/offline Personal, account switching, cloud
+isolation, null ownership on creation, account-management links, logout, and
+reload. It is not a live WorkOS authentication test.
 
 ## Enabling multiple teams later
 

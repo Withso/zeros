@@ -7,9 +7,8 @@ import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../design/directory", async (importOriginal) => {
-  const actual = await importOriginal<
-    typeof import("../../design/directory")
-  >();
+  const actual =
+    await importOriginal<typeof import("../../design/directory")>();
   return {
     ...actual,
     discoverDesignDirectories: vi.fn(async () => {
@@ -25,10 +24,11 @@ import {
   getWorkspace,
   setStateRootForTesting,
 } from "..";
+import { designDirectoryNameFor } from "../../design/directory-registry";
 
 const execFileAsync = promisify(execFile);
 
-describe("Design-save commit fast path", () => {
+describe("explicit Design commit fast path", () => {
   let root: string;
   let repoRoot: string;
   let stateRoot: string;
@@ -42,7 +42,12 @@ describe("Design-save commit fast path", () => {
     await execFileAsync("git", ["init", "-q", "-b", "main"], {
       cwd: repoRoot,
     });
-    await execFileAsync("git", ["init", "-q", "--bare", path.join(root, "remote.git")]);
+    await execFileAsync("git", [
+      "init",
+      "-q",
+      "--bare",
+      path.join(root, "remote.git"),
+    ]);
     await execFileAsync(
       "git",
       ["remote", "add", "origin", path.join(root, "remote.git")],
@@ -70,25 +75,25 @@ describe("Design-save commit fast path", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("does not scan every recognized Design root before saving the active one", async () => {
+  it("commits only an already-staged active Design index without repository-wide discovery", async () => {
     const created = await createWorkspace({ repoRoot });
     const workspace = getWorkspace(created.workspaceId);
-    const design = path.join(workspace.path, "Zeros Design");
+    const designName = designDirectoryNameFor(workspace.path);
+    const design = path.join(workspace.path, designName);
     await mkdir(design, { recursive: true });
     await Promise.all([
       writeFile(path.join(design, ".zeros-canvas.json"), "{}\n"),
       writeFile(path.join(design, "frame.html"), "<main>frame</main>\n"),
     ]);
-    await execFileAsync("git", ["add", "--", "Zeros Design"], {
+    await execFileAsync("git", ["add", "--", designName], {
       cwd: workspace.path,
     });
 
     await expect(
       commit({
         workspaceId: created.workspaceId,
-        message: "Save designs",
-        files: ["Zeros Design"],
-        authority: "design-save",
+        message: "Commit designs",
+        authority: "design",
       }),
     ).resolves.toMatchObject({ sha: expect.stringMatching(/^[0-9a-f]{40}$/) });
   });

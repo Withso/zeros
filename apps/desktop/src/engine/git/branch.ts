@@ -16,6 +16,8 @@ import { GitError } from "./errors";
 import { branchDisplayName, isValidBranchName } from "./naming";
 import { updateWorkspace } from "./state";
 import type { Branch } from "./types";
+import { refExists } from "./default-branch";
+import { prepareDesignSafeIntegration } from "./design-draft-guard";
 
 // isomorphic-git fs handle. Same recipe as diff.ts — pass the main
 // repo's .git directly so the shared ref store resolves cleanly.
@@ -233,9 +235,38 @@ export async function checkoutBranch(
   // Guard the branch name against flag injection (`git checkout` reads the
   // ref as a bare positional; "--" would mark it a pathspec, not a branch).
   assertSafeGitRef(opts.branchName, "checkout.branchName");
-  const args = ["checkout"];
-  if (opts.createIfMissing) args.push("-B");
-  args.push(opts.branchName);
+  const localBranchExists = await refExists(
+    ws.path,
+    `refs/heads/${opts.branchName}`,
+  );
+  let expectedTarget: string | null = null;
+  if (localBranchExists || !opts.createIfMissing) {
+    expectedTarget = await prepareDesignSafeIntegration({
+      workspaceId: opts.workspaceId,
+      path: ws.path,
+      repoRoot: ws.repoRoot,
+      target: opts.branchName,
+      operation: "Checkout",
+      comparison: "tree-transition",
+    });
+    const { stdout } = await runGit(
+      ws.path,
+      ["rev-parse", "--verify", `${opts.branchName}^{commit}`],
+      { readOnly: true },
+    );
+    if (stdout.trim() !== expectedTarget) {
+      throw new GitError({
+        code: "GIT_COMMAND_FAILED",
+        message: `Branch ${opts.branchName} changed while checkout was being prepared.`,
+        remediation: "Review the latest branch tip and retry checkout.",
+      });
+    }
+  }
+  const args = localBranchExists
+    ? ["checkout", opts.branchName]
+    : opts.createIfMissing
+      ? ["checkout", "-b", opts.branchName]
+      : ["checkout", opts.branchName];
   await runGit(ws.path, args, {
     mapErrorCode: (stderr) => {
       if (/already used by worktree|is already checked out/i.test(stderr)) {
@@ -247,7 +278,20 @@ export async function checkoutBranch(
       return "GIT_COMMAND_FAILED";
     },
   });
-  updateWorkspace(opts.workspaceId, { branch: opts.branchName });
+  const { stdout: checkedOut } = await runGit(
+    ws.path,
+    ["rev-parse", "--abbrev-ref", "HEAD"],
+    { readOnly: true },
+  );
+  const branch = checkedOut.trim();
+  if (!branch || branch === "HEAD") {
+    throw new GitError({
+      code: "GIT_COMMAND_FAILED",
+      message: "Checkout did not leave the workspace on a local branch.",
+      remediation: "Check out a local branch and retry.",
+    });
+  }
+  updateWorkspace(opts.workspaceId, { branch });
 }
 
 export interface CreateBranchFromOptions {
@@ -351,6 +395,14 @@ export async function continueOnNewBranch(
         "Reconnect to the remote, fetch the target branch, and retry.",
     });
   }
+  const startCommit = await prepareDesignSafeIntegration({
+    workspaceId: opts.workspaceId,
+    path: ws.path,
+    repoRoot: ws.repoRoot,
+    target: startRef,
+    operation: "Continue on a new branch",
+    comparison: "tree-transition",
+  });
 
   // Allocated against the repo's used-set, not generated blind. Until
   // 2026-07-29 this called generateBranchName() and leaned entirely on the
@@ -363,7 +415,7 @@ export async function continueOnNewBranch(
   // than silently move someone else's ref. Git carries compatible index/
   // worktree changes across the switch and aborts before switching if target
   // changes would overwrite them.
-  await runGit(ws.path, ["checkout", "-b", branch, startRef]);
+  await runGit(ws.path, ["checkout", "-b", branch, startCommit]);
   updateWorkspace(opts.workspaceId, {
     branch,
     prNumber: null,

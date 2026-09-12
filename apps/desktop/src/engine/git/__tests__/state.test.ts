@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -28,6 +29,7 @@ function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
   const id = overrides.id ?? "ws_aaa111-foo";
   return {
     id,
+    canonicalId: overrides.canonicalId ?? randomUUID(),
     repoSlug: "test-repo",
     repoRoot: "/tmp/test-repo",
     // Derived from the id, not a constant: (repo_slug, lower(branch)) is
@@ -138,6 +140,57 @@ describe("state", () => {
       await readFile(worktreeSeedPath(workspacePath), "utf8"),
     ) as Workspace;
     expect(recovered.organizationId).toBe("personal_1");
+  });
+
+  it("detaches account-owned Personal metadata without changing files or cloud ownership", async () => {
+    const workspacePath = path.join(
+      stateRoot,
+      "worktrees",
+      "test-repo",
+      "personal",
+    );
+    await mkdir(workspacePath, { recursive: true });
+    const local = sampleWorkspace({
+      id: "ws_personal",
+      path: workspacePath,
+      organizationId: "personal_deleted_account",
+    });
+    const cloud = sampleWorkspace({
+      id: "ws_cloud",
+      organizationId: "personal_deleted_account",
+      placement: "cloud",
+    });
+    const organizationLocal = sampleWorkspace({
+      id: "ws_org",
+      organizationId: "org_business",
+    });
+    insertWorkspace(local);
+    insertWorkspace(cloud);
+    insertWorkspace(organizationLocal);
+    writeWorktreeSeed(local);
+
+    expect(
+      reassignLocalWorkspaceOrganization("personal_deleted_account", null),
+    ).toEqual({
+      changes: 1,
+      repoSlugs: ["test-repo"],
+    });
+    expect(getWorkspaceById(local.id)).toEqual({
+      ...local,
+      organizationId: null,
+    });
+    expect(getWorkspaceById(cloud.id)).toEqual(cloud);
+    expect(getWorkspaceById(organizationLocal.id)).toEqual(organizationLocal);
+    const seed = JSON.parse(
+      await readFile(worktreeSeedPath(workspacePath), "utf8"),
+    );
+    expect(seed.organizationId).toBeNull();
+    expect(
+      reassignLocalWorkspaceOrganization("personal_deleted_account", null),
+    ).toEqual({
+      changes: 0,
+      repoSlugs: [],
+    });
   });
 
   // Workspace names are allocated colours with no random tail (2026-07-29),

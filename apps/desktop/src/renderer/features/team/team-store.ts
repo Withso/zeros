@@ -3,8 +3,9 @@
 // staff-feature gate, compatibility administration components, and engine
 // settings courier.
 //
-// Every authenticated account now has a permanent Personal organization. A
-// zero-organization response remains a tolerated mixed-version/error state.
+// Personal is device-local and available independently of this account cache.
+// Server Personal rows survive only as a released-client compatibility contract.
+// A zero-organization response remains a tolerated mixed-version/error state.
 // The persisted `team:*` keys are compatibility contracts from the flat-Team
 // era; their values now identify tenant-root organizations.
 //
@@ -34,9 +35,16 @@ import { requestTeamResync } from "./team-sync";
 import {
   hasOrganizationOwnershipHistory,
   hasRecordedOrganizationOwnership,
+  getKnownPersonalOrganizationIds,
   recordOrganizationHierarchySeen,
   reconcileOrganizationWorkspaceOwnership,
+  rememberPersonalOrganizationOwnership,
 } from "./organization-membership-history";
+import {
+  desktopOrganizationChoices,
+  PERSONAL_ORGANIZATION,
+  PERSONAL_ORGANIZATION_ID,
+} from "./personal-organization";
 
 export type TeamStoreStatus = "idle" | "loading" | "ready" | "error";
 
@@ -53,6 +61,23 @@ let inflight: Promise<Me | null> | null = null;
 // PREVIOUS account discards its result instead of re-emitting account A's
 // organizations after the store was cleared for account B.
 let generation = 0;
+let personalOwnershipIds: readonly string[] | null = null;
+let personalSnapshot = PERSONAL_ORGANIZATION;
+
+function devicePersonalSnapshot(): TeamSummary {
+  const ids = getKnownPersonalOrganizationIds();
+  if (ids !== personalOwnershipIds) {
+    personalOwnershipIds = ids;
+    personalSnapshot =
+      ids.length === 0
+        ? PERSONAL_ORGANIZATION
+        : {
+            ...PERSONAL_ORGANIZATION,
+            legacyPersonalOrganizationIds: ids,
+          };
+  }
+  return personalSnapshot;
+}
 
 /** Capture when starting work that may outlive the current signed-in account.
  * `clearTeamStore` advances this token before Account B can mount. */
@@ -85,14 +110,30 @@ export function getTeamStoreState(): TeamStoreState {
   return state;
 }
 
-export function getActiveOrganizationSnapshot(): TeamSummary | null {
-  const organizations = state.me?.organizations ?? state.me?.teams ?? [];
-  const activeId = getActiveTeamId();
-  return (
-    organizations.find((organization) => organization.id === activeId) ??
-    organizations[0] ??
-    null
+function activeOrganization(
+  me: Me | null,
+  activeId: string | null,
+): TeamSummary | null {
+  if (
+    activeId === null ||
+    activeId === PERSONAL_ORGANIZATION_ID ||
+    getKnownPersonalOrganizationIds().includes(activeId)
+  )
+    return devicePersonalSnapshot();
+  const selected = desktopOrganizationChoices(me).find(
+    (organization) => organization.id === activeId,
   );
+  if (selected) return selected;
+  // Keep a confirmed collaborative create intent during a cold/empty rollout
+  // snapshot. Never turn it into Personal merely because a request is pending.
+  const hasServerSnapshot = (me?.organizations ?? me?.teams ?? []).length > 0;
+  return !hasServerSnapshot && hasRecordedOrganizationOwnership(activeId)
+    ? null
+    : devicePersonalSnapshot();
+}
+
+export function getActiveOrganizationSnapshot(): TeamSummary | null {
+  return activeOrganization(state.me, getActiveTeamId());
 }
 
 /** Exact owner for a local create intent. A confirmed membership-history
@@ -100,7 +141,7 @@ export function getActiveOrganizationSnapshot(): TeamSummary | null {
  * unproven flat-Team-era id deliberately falls back to legacy Personal. */
 export function getActiveOrganizationIdSnapshot(): string | null {
   const active = getActiveOrganizationSnapshot();
-  if (active) return active.id;
+  if (active) return active.isPersonal ? null : active.id;
   const persisted = getActiveTeamId();
   return hasRecordedOrganizationOwnership(persisted) ? persisted : null;
 }
@@ -114,6 +155,7 @@ export function acceptOrganizationSnapshot(
   expectedGeneration: number = generation,
 ): boolean {
   if (expectedGeneration !== generation) return false;
+  rememberPersonalOrganizationOwnership(me);
   const current = getActiveTeamId();
   const organizations = me.organizations ?? me.teams;
   const personal = organizations.find(
@@ -124,18 +166,24 @@ export function acceptOrganizationSnapshot(
   // selection would make the entire existing workspace collection disappear.
   const firstHierarchySnapshot =
     personal != null && !hasOrganizationOwnershipHistory(me.user.id);
-  const selected =
-    (firstHierarchySnapshot ? personal : undefined) ??
-    organizations.find((organization) => organization.id === current) ??
-    organizations[0] ??
-    null;
+  const selected = firstHierarchySnapshot
+    ? devicePersonalSnapshot()
+    : organizations.length === 0 &&
+        current !== null &&
+        current !== PERSONAL_ORGANIZATION_ID &&
+        !getKnownPersonalOrganizationIds().includes(current)
+      ? null
+      : activeOrganization(me, current);
   // An authoritative empty response is a tolerated mixed-version/provisioning
   // state, not evidence that the durable owner was deleted. Keep the selection
   // so later creates and a recovered snapshot retain their semantic owner.
   if (selected) {
     setActiveOrganizationSelection(selected.id, selected.isPersonal);
   }
-  if (firstHierarchySnapshot && personal && getActiveTeamId() === personal.id) {
+  if (
+    firstHierarchySnapshot &&
+    getActiveTeamId() === PERSONAL_ORGANIZATION_ID
+  ) {
     recordOrganizationHierarchySeen(me.user.id);
   }
   setSetting(HAS_TEAMS_KEY, organizations.length > 0);
@@ -167,7 +215,10 @@ export function refreshTeams(): Promise<Me | null> {
       if (organizations.length === 0) {
         requestTeamResync();
       }
-      void reconcileOrganizationWorkspaceOwnership(me).catch((error) => {
+      void reconcileOrganizationWorkspaceOwnership(
+        me,
+        () => gen === generation,
+      ).catch((error) => {
         console.warn(
           "[organization] local workspace ownership repair deferred:",
           error instanceof Error ? error.message : error,
@@ -233,9 +284,16 @@ export function useTeams(): TeamStoreState & {
   return { ...snapshot, reload: refreshTeams };
 }
 
-/** Organization-first name for new surfaces; `useTeams` remains a source
- * compatibility export while released settings code is retired. */
-export const useOrganizations = useTeams;
+/** The desktop list substitutes device Personal for the compatibility server
+ * row. Keep `me` unchanged: staff authorization must still require a real
+ * account response, never the presence of the local Personal entry. */
+export function useOrganizations() {
+  const snapshot = useTeams();
+  return {
+    ...snapshot,
+    organizations: desktopOrganizationChoices(snapshot.me),
+  };
+}
 
 /** The active organization resolved against the cached list (selection falls
  *  back to Personal/first while a stale id reconciles). Re-renders on both
@@ -243,13 +301,7 @@ export const useOrganizations = useTeams;
 export function useActiveTeam(): TeamSummary | null {
   const { me } = useTeams();
   const activeId = useSyncExternalStore(subscribeActiveTeam, getActiveTeamId);
-  const organizations = me?.organizations ?? me?.teams ?? [];
-  if (organizations.length === 0) return null;
-  return (
-    organizations.find((organization) => organization.id === activeId) ??
-    organizations[0] ??
-    null
-  );
+  return activeOrganization(me, activeId);
 }
 
 export const useActiveOrganization = useActiveTeam;

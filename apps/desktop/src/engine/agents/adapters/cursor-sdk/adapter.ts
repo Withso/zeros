@@ -17,9 +17,18 @@ import { isAbsolute } from "node:path";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
+import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
+import { materializeMcpServerRegistrations } from "../../mcp-registration";
+import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
+import {
+  extractUnavailableModelId,
+  isModelUnavailableError,
+  modelUnavailableAdvice,
+  parseAvailableModelsFromError,
+} from "../shared/model-availability";
 import type {
   AgentAdapter,
   AgentAdapterContext,
@@ -55,9 +64,10 @@ import { configurationProvenanceFor } from "../../provider-diagnostics";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
- *  EXPLICIT, concrete model — the cloud auto-select ids ("auto" / "default")
- *  are rejected with "Local SDK agents require an explicit `model`". So when
- *  no concrete model is selected we substitute a real one.
+ *  EXPLICIT model selection. An absent selection therefore falls back to a
+ *  concrete model. Cursor SDK 1.0.31's live catalog exposes the real Auto
+ *  router as canonical id `default` with alias `auto`; both are valid explicit
+ *  selections and must pass through rather than silently becoming Composer.
  *
  *  IMPORTANT: the substitute MUST be a model the user's Cursor account
  *  actually offers, or `Agent.create/resume/send` throw "Cannot use this
@@ -70,8 +80,7 @@ const AGENT_ID = "cursor";
  *  a persisted chat or the bundled catalog — falls back instead of throwing.
  *  Overridable per-chat via the CURSOR_MODEL env the model pill writes. */
 const DEFAULT_MODEL = "composer-2.5";
-/** Non-concrete ids the local SDK can't run — mapped to DEFAULT_MODEL. */
-const AUTO_SELECT_IDS = new Set(["", "auto", "default"]);
+const CURSOR_AUTO_IDS = new Set(["auto", "default"]);
 /** Preferred concrete fallbacks, in order, when the resolved model isn't in
  *  the account's live catalog. Native Composer models need no external auth. */
 const FALLBACK_MODEL_PREFERENCE = [
@@ -155,10 +164,12 @@ const TLS_CERT_RX =
 const NETWORK_ERR_RX =
   /\b(?:ECONNREFUSED|ECONNRESET|ENOTFOUND|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE)\b|socket\s+hang\s*up|getaddrinfo|network\s+(?:error|timeout|unreachable)/i;
 
-/** Resolve a concrete Cursor model id, never an auto-select placeholder. */
+/** Resolve an explicit Cursor model id, defaulting only an absent pick. */
 export function resolveCursorModelId(envModel: string | undefined): string {
   const m = envModel?.trim();
-  if (!m || AUTO_SELECT_IDS.has(m.toLowerCase())) return DEFAULT_MODEL;
+  if (!m) return DEFAULT_MODEL;
+  const normalized = m.toLowerCase();
+  if (CURSOR_AUTO_IDS.has(normalized)) return normalized;
   return m;
 }
 
@@ -175,16 +186,16 @@ export function resolveValidModelId(
     if (available.has(pref)) return pref;
   }
   // Last resort: any concrete Composer model the account offers, else the
-  // first listed model. Never returns an auto-select placeholder.
+  // first listed model, including Auto when the account offers it.
   const composer = [...available].find((id) => /^composer/i.test(id));
   return composer ?? [...available][0] ?? modelId;
 }
 
-/** Cursor bakes reasoning depth + speed into the MODEL ID itself (e.g.
- *  `<base>-thinking-high`, `<base>-fast`) — @cursor/sdk exposes no separate
- *  reasoning/effort field on `Agent.create`, unlike Claude (fastMode) or Codex
- *  (service_tier). So the composer's Effort/Fast pills for a Cursor model can
- *  only take effect by SWAPPING to a concrete variant id the account offers.
+/** Compatibility mapper for older Cursor catalogs that bake reasoning depth +
+ *  speed into the MODEL ID itself (e.g. `<base>-thinking-high`, `<base>-fast`).
+ *  Current parameterized models use `cursorModelSelection` below; this legacy
+ *  path still lets saved/base ids resolve when an account advertises only
+ *  suffixed variants.
  *
  *  This maps (base id, effort, fast) → a variant id, and is BEST-EFFORT: we try
  *  the id shapes VERIFIED against `cursor-agent models` (2026-07-10, CLI
@@ -207,7 +218,10 @@ export function applyCursorReasoning(
   // Only ever swap to an id the account demonstrably offers.
   if (!available) return base;
   const eff = (effort ?? "").trim().toLowerCase();
-  const level = eff === "low" || eff === "medium" || eff === "high" ? eff : "";
+  const level =
+    eff === "low" || eff === "medium" || eff === "high" || eff === "xhigh"
+      ? eff
+      : "";
   // Retarget a level-suffixed base when the user explicitly picked
   // a DIFFERENT level. A persisted pre-v6 pick (grok-4.5-xhigh) must honour
   // the effort pill instead of silently ignoring it (the old "already encodes
@@ -417,14 +431,92 @@ export interface CursorModelListItem {
   variants?: CursorModelVariant[];
 }
 
+type CuratedCursorModel = {
+  value: string;
+  effortLevels?: string[];
+  supportsFast?: boolean;
+};
+
+const CURSOR_EFFORT_PARAMETER_RX = /effort|reason|thinking/i;
+const CURSOR_FAST_PARAMETER_RX = /speed|fast/i;
+
+/** Parameter names verified against @cursor/sdk 1.0.31's models.list wire.
+ * The capability values stay owned by catalogs/models-v1.json, so the cold
+ * path cannot grow a second model menu or drift from renderer validation. */
+const CURSOR_CURATED_PARAMETER_WIRES: Readonly<
+  Record<string, { effort?: string; fast?: string }>
+> = {
+  "grok-4.6": { effort: "effort", fast: "fast" },
+};
+
+/** Build the native parameter record used only while asynchronous provider
+ * discovery is absent. Once a live record exists—even one with explicit empty
+ * values—it wins in full and this fallback is not consulted. */
+function curatedCursorModelWire(id: string): CursorModelListItem | undefined {
+  const wire = CURSOR_CURATED_PARAMETER_WIRES[id];
+  if (!wire) return undefined;
+  const curated = (
+    modelCatalogJson.families.cursor as CuratedCursorModel[]
+  ).find((candidate) => candidate.value === id);
+  if (!curated) return undefined;
+  const parameters: CursorModelParameter[] = [];
+  if (wire.effort && Array.isArray(curated.effortLevels)) {
+    parameters.push({
+      id: wire.effort,
+      values: curated.effortLevels.map((value) => ({ value })),
+    });
+  }
+  if (wire.fast && typeof curated.supportsFast === "boolean") {
+    parameters.push({
+      id: wire.fast,
+      values: [
+        { value: "false" },
+        ...(curated.supportsFast ? [{ value: "true" }] : []),
+      ],
+    });
+  }
+  return { id, parameters };
+}
+
+/** Merge only capabilities a live record did not answer. Parameter presence is
+ * authoritative even when its values are empty/false-only; absence is unknown
+ * and inherits the verified curated wire so asynchronous partial discovery
+ * cannot discard a selection the renderer still exposes. */
+function cursorModelWireWithCuratedFallback(
+  id: string,
+  live: CursorModelListItem | undefined,
+): CursorModelListItem | undefined {
+  const fallback = curatedCursorModelWire(id);
+  if (!live || !fallback) return live ?? fallback;
+  const liveParameters = live.parameters ?? [];
+  const missingParameters = (fallback.parameters ?? []).filter((candidate) => {
+    if (CURSOR_EFFORT_PARAMETER_RX.test(candidate.id)) {
+      return !liveParameters.some((parameter) =>
+        CURSOR_EFFORT_PARAMETER_RX.test(parameter.id),
+      );
+    }
+    if (CURSOR_FAST_PARAMETER_RX.test(candidate.id)) {
+      return !liveParameters.some((parameter) =>
+        CURSOR_FAST_PARAMETER_RX.test(parameter.id),
+      );
+    }
+    return !liveParameters.some((parameter) => parameter.id === candidate.id);
+  });
+  if (missingParameters.length === 0) return live;
+  return { ...live, parameters: [...liveParameters, ...missingParameters] };
+}
+
 /** Parse ZEROS_ADDITIONAL_DIRS (the `/add-dir` JSON array of absolute paths)
  *  into a de-duplicated string[]. Tolerant by design — an unset or malformed
  *  value yields [], never throws into session creation. Mirrors the Claude
  *  adapter's parseAdditionalDirs; kept local because the two adapters do not
  *  import each other. Relative entries are dropped: `local.dirs` must be
- *  absolute for the SDK to resolve project settings, and ZSR authority is
- *  granted over absolute canonical roots. */
-function parseCursorAdditionalDirs(raw: string | undefined): string[] {
+ *  absolute for the SDK to resolve project settings, and the selected native
+ *  or kernel boundary admits only engine-validated canonical roots. */
+export function parseCursorAdditionalDirs(
+  raw: string | undefined,
+  pathApi: Pick<typeof import("node:path"), "isAbsolute"> = { isAbsolute },
+): string[] {
   const value = raw?.trim();
   if (!value) return [];
   try {
@@ -435,7 +527,7 @@ function parseCursorAdditionalDirs(raw: string | undefined): string[] {
     for (const entry of parsed) {
       if (typeof entry !== "string") continue;
       const dir = entry.trim();
-      if (!dir || !dir.startsWith("/") || seen.has(dir)) continue;
+      if (!dir || !pathApi.isAbsolute(dir) || seen.has(dir)) continue;
       seen.add(dir);
       out.push(dir);
     }
@@ -639,8 +731,10 @@ export function cursorAdvertisedModel(
       },
     ];
   });
-  const effortLevels = parameters
-    .filter((parameter) => /effort|reason|thinking/i.test(parameter.id))
+  const effortParameters = parameters.filter((parameter) =>
+    CURSOR_EFFORT_PARAMETER_RX.test(parameter.id),
+  );
+  const effortLevels = effortParameters
     .flatMap((parameter) => parameter.values.map((value) => value.value))
     .filter((value, index, values) => {
       const normalized = value.toLowerCase();
@@ -652,16 +746,30 @@ export function cursorAdvertisedModel(
       );
     });
   const hasSpeedMetadata = parameters.some((parameter) =>
-    /speed|fast/i.test(parameter.id),
+    CURSOR_FAST_PARAMETER_RX.test(parameter.id),
   );
   const supportsFast =
     parameters.some((parameter) =>
-      parameter.values.some((value) => /fast/i.test(value.value)),
+      parameter.values.some((value) => {
+        const normalized = value.value.trim().toLowerCase();
+        return (
+          /fast/i.test(normalized) ||
+          (CURSOR_FAST_PARAMETER_RX.test(parameter.id) &&
+            ["true", "on", "1"].includes(normalized))
+        );
+      }),
     ) ||
     variants.some(
       (variant) =>
         /fast/i.test(variant.label) ||
-        variant.parameters.some((parameter) => /fast/i.test(parameter.value)),
+        variant.parameters.some((parameter) => {
+          const normalized = parameter.value.trim().toLowerCase();
+          return (
+            /fast/i.test(normalized) ||
+            (CURSOR_FAST_PARAMETER_RX.test(parameter.id) &&
+              ["true", "on", "1"].includes(normalized))
+          );
+        }),
     );
   return {
     value: id,
@@ -687,10 +795,116 @@ export function cursorAdvertisedModel(
         ? item.selectable
         : typeof item.supportsLocal === "boolean"
           ? item.supportsLocal
-          : !AUTO_SELECT_IDS.has(id.toLowerCase()),
-    ...(effortLevels.length > 0 ? { effortLevels } : {}),
+          : true,
+    ...(effortParameters.length > 0 ? { effortLevels } : {}),
     ...(supportsFast || hasSpeedMetadata ? { supportsFast } : {}),
   };
+}
+
+type CursorModelSelection = {
+  id: string;
+  params?: Array<{ id: string; value: string }>;
+};
+
+function cursorParameterValue(
+  parameter: CursorModelParameter,
+  candidates: string[],
+): string | undefined {
+  const byNormalized = new Map(
+    (parameter.values ?? []).map((value) => [
+      value.value.trim().toLowerCase(),
+      value.value,
+    ]),
+  );
+  for (const candidate of candidates) {
+    const value = byNormalized.get(candidate);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function setCursorModelParameter(
+  params: Array<{ id: string; value: string }>,
+  id: string,
+  value: string,
+): void {
+  const existing = params.findIndex((parameter) => parameter.id === id);
+  const next = { id, value };
+  if (existing >= 0) params[existing] = next;
+  else params.push(next);
+}
+
+/** Map Zeros' durable effort/Fast settings onto @cursor/sdk's native
+ * `ModelSelection.params` wire. SDK 1.0.31 advertises Grok 4.6 as one model id
+ * with `effort` + `fast` parameters rather than suffixed ids; starting from the
+ * advertised default variant preserves unrelated provider choices while the
+ * explicit composer controls override only their matching parameters.
+ *
+ * Auto's current live record omits a Fast definition. Cursor's SDK accepts and
+ * forwards model params without filtering them, and every Fast-capable record
+ * uses the same `{ id: "fast", value: "true" }` wire, so an enabled Auto Fast
+ * toggle uses that provider-native parameter while the capability is unknown.
+ * An explicit live speed parameter—even empty/false-only—is authoritative, and
+ * no effort parameter is ever synthesized for Auto. */
+export function cursorModelSelection(
+  id: string,
+  model: CursorModelListItem | undefined,
+  effort: string | undefined,
+  fast: boolean,
+): CursorModelSelection {
+  const defaultVariant = model?.variants?.find(
+    (variant) => variant.isDefault === true,
+  );
+  const params = (defaultVariant?.params ?? []).flatMap((parameter) =>
+    parameter &&
+    typeof parameter.id === "string" &&
+    typeof parameter.value === "string"
+      ? [{ id: parameter.id, value: parameter.value }]
+      : [],
+  );
+
+  const normalizedEffort = effort?.trim().toLowerCase();
+  if (normalizedEffort) {
+    const effortCandidates =
+      normalizedEffort === "xhigh"
+        ? ["xhigh", "extra-high"]
+        : [normalizedEffort];
+    for (const parameter of model?.parameters ?? []) {
+      if (!CURSOR_EFFORT_PARAMETER_RX.test(parameter.id)) continue;
+      const value = cursorParameterValue(parameter, effortCandidates);
+      if (value === undefined) continue;
+      setCursorModelParameter(params, parameter.id, value);
+      break;
+    }
+  }
+
+  const hasFastCapabilityAnswer = (model?.parameters ?? []).some((parameter) =>
+    CURSOR_FAST_PARAMETER_RX.test(parameter.id),
+  );
+  let mappedFast = false;
+  for (const parameter of model?.parameters ?? []) {
+    if (!CURSOR_FAST_PARAMETER_RX.test(parameter.id)) continue;
+    const value = cursorParameterValue(
+      parameter,
+      fast
+        ? ["true", "fast", "on"]
+        : ["false", "balanced", "standard", "normal", "off"],
+    );
+    if (value === undefined) continue;
+    setCursorModelParameter(params, parameter.id, value);
+    mappedFast = true;
+    break;
+  }
+  if (
+    fast &&
+    !mappedFast &&
+    !hasFastCapabilityAnswer &&
+    CURSOR_AUTO_IDS.has(id.toLowerCase())
+  ) {
+    setCursorModelParameter(params, "fast", "true");
+  }
+
+  return { id, ...(params.length > 0 ? { params } : {}) };
 }
 
 /** What we hand @cursor/sdk's `mcpServers` — structurally a Cursor
@@ -856,7 +1070,7 @@ interface Session {
   modeId: CursorSdkModeId;
   agent: SdkAgent;
   /** Per-session SDK transport. Production always points at a dedicated
-   * Cursor host below this session's prepared ZSR boundary. */
+   * Cursor host below this session's prepared execution boundary. */
   sdk: CursorSdkModule;
   disposeRuntime?: () => Promise<void>;
   /** The HOME this session's Cursor host actually runs with, and where the SDK
@@ -1054,25 +1268,23 @@ export class CursorSdkAdapter implements AgentAdapter {
   private modelSelection(
     modelId: string,
     state: CursorModelState = this.modelState,
-  ): {
-    id: string;
-    params?: Array<{ id: string; value: string }>;
-  } {
+    env?: Record<string, string>,
+  ): CursorModelSelection {
     const id = state.discoveredModelAliases.get(modelId) ?? modelId;
-    const model = state.discoveredModels.get(id);
-    const defaultVariant = model?.variants?.find(
-      (variant) => variant.isDefault === true,
-    );
-    const params = defaultVariant?.params?.filter(
-      (parameter) =>
-        parameter &&
-        typeof parameter.id === "string" &&
-        typeof parameter.value === "string",
-    );
-    return {
+    // Live presence is authoritative, including explicit empty parameters.
+    // The curated wire fills only cold/rejected or field-level unknowns,
+    // keeping the user's Grok effort/Fast choice on create/resume/send without
+    // a network wait while explicit live empty/false answers still win.
+    const model = cursorModelWireWithCuratedFallback(
       id,
-      ...(params && params.length > 0 ? { params } : {}),
-    };
+      state.discoveredModels.get(id),
+    );
+    return cursorModelSelection(
+      id,
+      model,
+      env?.ZEROS_THINKING_EFFORT,
+      env?.ZEROS_FAST_MODE === "1",
+    );
   }
 
   /** Start catalog discovery without putting it on the session critical path.
@@ -1183,22 +1395,29 @@ export class CursorSdkAdapter implements AgentAdapter {
     autoReview: boolean = autoReviewFor(CURSOR_DEFAULT_MODE),
   ): void {
     if (!sdk.platform?.prewarm) return;
-    const sessionMcp = this.mcpServers(opts.mcpServers);
-    void sdk.platform
-      .prewarm({
-        apiKey,
-        cwd: opts.cwd,
-        local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      })
-      .catch((error: unknown) => {
-        this.ctx.emit.onAgentStderr(
-          AGENT_ID,
-          `[cursor-sdk] workspace prewarm skipped: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    const reportSkipped = (error: unknown) => {
+      this.ctx.emit.onAgentStderr(
+        AGENT_ID,
+        `[cursor-sdk] workspace prewarm skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    };
+    try {
+      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      void Promise.resolve(
+        sdk.platform.prewarm({
+          apiKey,
+          cwd: opts.cwd,
+          local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
+          ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+        }),
+      ).catch(reportSkipped);
+    } catch (error) {
+      // Both option materialization and an SDK implementation may throw before
+      // returning a promise. Prewarm is best-effort in either case.
+      reportSkipped(error);
+    }
   }
 
   /** Build the executor a mode change is going to need, at the moment the mode
@@ -1263,12 +1482,12 @@ export class CursorSdkAdapter implements AgentAdapter {
   }
 
   /** Resolve CURSOR_MODEL → a concrete id, then validate it against the
-   *  account's live catalog (falling back to a known-good model). Applies the
-   *  composer's Effort/Fast pills BEST-EFFORT by swapping to a reasoning variant
-   *  id the account offers (see {@link applyCursorReasoning}) — a no-op when the
-   *  variant isn't discoverable, so it can't break the spawn. If the resolved id
-   *  was already rejected by the local backend this session (deniedModels), swap
-   *  to a confirmed-good retry model so we don't re-send a model we know can't run. */
+   *  account's live catalog (falling back to a known-good model). Current
+   *  parameterized effort/Fast settings are attached later by modelSelection;
+   *  this resolver also supports legacy suffixed variants via
+   *  {@link applyCursorReasoning}. If the resolved id was already rejected by
+   *  the local backend this session (deniedModels), swap to a confirmed-good
+   *  retry model so we don't re-send a model we know can't run. */
   private resolveModel(
     envModel: string | undefined,
     env?: Record<string, string>,
@@ -1281,20 +1500,19 @@ export class CursorSdkAdapter implements AgentAdapter {
     const effort = env?.ZEROS_THINKING_EFFORT;
     const fast = env?.ZEROS_FAST_MODE === "1";
     const requested = envModel?.trim();
-    // Current Cursor SDKs expose `default`/`auto` as catalog metadata but do
-    // not accept it through Agent.create, hence resolveCursorModelId's safe
-    // Composer fallback. If a future runtime explicitly marks Router locally
-    // selectable, discovery includes the exact id/alias in this set and that
-    // provider capability takes precedence over the legacy fallback.
+    // Cursor SDK 1.0.31 exposes Auto as canonical `default` plus alias `auto`.
+    // Discovery canonicalizes the alias, while a cold selection stays intact
+    // for the SDK's own model-list validator to canonicalize. Only an absent
+    // selection takes the concrete Composer fallback.
     const liveRequested =
       requested && state.discoveredModelIds?.has(requested)
         ? (state.discoveredModelAliases.get(requested) ?? requested)
         : undefined;
     const base = liveRequested ?? resolveCursorModelId(envModel);
-    // Apply the reasoning swap before catalog validation. The curated Grok
-    // base is the level-free `grok-4.5`, which is NOT a live id itself:
-    // validating it first would fall back to Composer before the effort
-    // suffix could ever apply. applyCursorReasoning only ever returns ids
+    // Apply the legacy reasoning-id swap before catalog validation. Some
+    // accounts advertise a saved/base model (notably Grok 4.5) only through
+    // suffixed variants; validating the base first would fall back to Composer
+    // before the effort suffix could ever apply. applyCursorReasoning only returns ids
     // verified against the live catalog, so a successful swap needs no
     // re-validation; an unswapped base still goes through resolveValidModelId
     // (whose Composer fallback then gets its own best-effort reasoning pass,
@@ -1331,6 +1549,79 @@ export class CursorSdkAdapter implements AgentAdapter {
         return m;
     }
     return null;
+  }
+
+  /** Fold a "Cannot use this model: <id>. Available models: …" rejection from
+   *  `Agent.create`/`Agent.resume` back into the account's model state so the
+   *  next resolve lands on a model that exists. Returns true when the error WAS
+   *  a model rejection (caller re-resolves and retries once), false for any
+   *  other failure (caller rethrows untouched).
+   *
+   *  Why this exists: catalog discovery is deliberately detached from the
+   *  session critical path (see startModelDiscoveryForSession), so the FIRST
+   *  session in a process resolves against no catalog and passes the user's pick
+   *  through untouched. A pick that Cursor has since retired — a persisted chat
+   *  on `grok-4.5` after the account moved to `grok-4.6`, observed 2026-09 — then
+   *  throws on every reopen, and resolveModel never learns why. The rejection
+   *  itself carries the live list, so it is the catalog we were missing. */
+  private absorbModelRejection(
+    state: CursorModelState,
+    rejectedModelId: string,
+    message: string,
+  ): boolean {
+    if (!isModelUnavailableError(message)) return false;
+    state.deniedModels.add(rejectedModelId);
+    const named = extractUnavailableModelId(message);
+    if (named) state.deniedModels.add(named);
+    const listed = parseAvailableModelsFromError(message);
+    if (listed.length > 0) {
+      // The provider's own list is authoritative — it just refused what the
+      // cached catalog (or the absence of one) let through.
+      state.discoveredModelIds = new Set(listed);
+    }
+    return true;
+  }
+
+  /** Run one `Agent.create`/`Agent.resume` with the resolved model, retrying
+   *  ONCE on a model rejection with a model the account offers. Anything other
+   *  than a model rejection — auth, network, a missing agent — propagates
+   *  unchanged so the existing classifiers keep owning it. */
+  private async withModelRecovery<T>(
+    opts: {
+      state: CursorModelState;
+      envModel: string | undefined;
+      env: Record<string, string> | undefined;
+      modelId: string;
+      stage: "newSession" | "loadSession";
+    },
+    attempt: (modelId: string) => Promise<T>,
+  ): Promise<{ result: T; modelId: string }> {
+    try {
+      return { result: await attempt(opts.modelId), modelId: opts.modelId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (!this.absorbModelRejection(opts.state, opts.modelId, message)) {
+        throw err;
+      }
+      const retryModelId = this.resolveModel(
+        opts.envModel,
+        opts.env,
+        opts.state,
+      );
+      if (
+        retryModelId === opts.modelId ||
+        opts.state.deniedModels.has(retryModelId)
+      ) {
+        throw err;
+      }
+      this.ctx.emit.onAgentStderr(
+        AGENT_ID,
+        `[cursor-sdk] ${opts.stage}: model "${opts.modelId}" is not offered ` +
+          `on this account (${message.slice(0, 160)}); retrying with ` +
+          `${retryModelId}.`,
+      );
+      return { result: await attempt(retryModelId), modelId: retryModelId };
+    }
   }
 
   /** Lazily open (and cache) the on-disk local agent store for a cwd. The store
@@ -1406,33 +1697,48 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       runtime.sdk,
     );
-    const modelId = this.resolveModel(
+    let modelId = this.resolveModel(
       opts.env?.CURSOR_MODEL,
       opts.env,
       modelState,
     );
     const sdk = runtime.sdk;
-    const sessionMcp = this.mcpServers(opts.mcpServers);
     let agent: SdkAgent;
     try {
-      agent = await sdk.Agent.create({
-        apiKey,
-        model: this.modelSelection(modelId, modelState),
-        // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
-        // executor roots shell commands at `local.cwd ?? process.cwd()`; the
-        // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
-        // host-client.ts), so an un-threaded cwd must never silently fall back
-        // there and run `git` inside the engine's own repo. Top-level `cwd` is
-        // belt-and-suspenders against SDK version drift.
-        cwd: opts.cwd,
-        local: this.buildLocalOpts(
-          opts.cwd,
-          opts.env,
-          autoReviewFor(CURSOR_DEFAULT_MODE),
-        ),
-        mode: sdkModeFor(CURSOR_DEFAULT_MODE),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      });
+      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      // Discovery above is detached, so a retired pick can reach the SDK here;
+      // withModelRecovery turns its "Cannot use this model" into one retry on
+      // a model the account lists instead of a failed chat.
+      const created = await this.withModelRecovery(
+        {
+          state: modelState,
+          envModel: opts.env?.CURSOR_MODEL,
+          env: opts.env,
+          modelId,
+          stage: "newSession",
+        },
+        (id) =>
+          sdk.Agent.create({
+            apiKey,
+            model: this.modelSelection(id, modelState, opts.env),
+            // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
+            // executor roots shell commands at `local.cwd ?? process.cwd()`; the
+            // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
+            // host-client.ts), so an un-threaded cwd must never silently fall back
+            // there and run `git` inside the engine's own repo. Top-level `cwd` is
+            // belt-and-suspenders against SDK version drift.
+            cwd: opts.cwd,
+            local: this.buildLocalOpts(
+              opts.cwd,
+              opts.env,
+              autoReviewFor(CURSOR_DEFAULT_MODE),
+            ),
+            mode: sdkModeFor(CURSOR_DEFAULT_MODE),
+            ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+          }),
+      );
+      agent = created.result;
+      modelId = created.modelId;
     } catch (err) {
       await this.finalizeRejectedSessionRuntime(runtime);
       throw this.classify(err, "newSession");
@@ -1507,7 +1813,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       runtime.sdk,
     );
-    const modelId = this.resolveModel(
+    let modelId = this.resolveModel(
       opts.env?.CURSOR_MODEL,
       opts.env,
       modelState,
@@ -1518,36 +1824,52 @@ export class CursorSdkAdapter implements AgentAdapter {
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
     // first created with, so a server the user ADDED after the chat opened never
     // appeared until they started a brand-new chat.
-    const sessionMcp = this.mcpServers(opts.mcpServers);
+    let sessionMcp: Record<string, CursorMcpConfig> | null = null;
     let agent: SdkAgent;
     // True when resume failed and we seeded a FRESH agent below — the gateway
     // re-injects the first-turn <system_instruction> (the fresh agent has no
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
-      agent = await sdk.Agent.resume(providerResumeId, {
-        apiKey,
-        // Bind the resolved model on resume too. `Agent.resume` reconstructs
-        // the agent from Cursor's local SQLite store, which may hold NO
-        // persisted model (a cross-worktree id, a rotated cache, or a
-        // pre-SDK cursor-agent CLI id). Without an explicit model the
-        // resumed agent's internal `_model` is undefined and the next
-        // `send()` throws "Local SDK agents require an explicit `model`" —
-        // the exact error users hit on every reopened chat. `resume` takes a
-        // Partial<AgentOptions>, which accepts `model`.
-        model: this.modelSelection(modelId, modelState),
-        // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
-        // and resuming a chat in a different worktree MUST retarget it (else
-        // shells run wherever the agent was first created, or fall back to the
-        // host's process.cwd()). See resolveHostCwd in host-client.ts.
-        cwd: opts.cwd,
-        local: this.buildLocalOpts(
-          opts.cwd,
-          opts.env,
-          autoReviewFor(CURSOR_DEFAULT_MODE),
-        ),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      });
+      sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      // A reopened chat carries the model it was created on; if Cursor has
+      // retired it since, `Agent.resume` throws "Cannot use this model" on
+      // every reopen. withModelRecovery retries once on a listed model.
+      const resumed = await this.withModelRecovery(
+        {
+          state: modelState,
+          envModel: opts.env?.CURSOR_MODEL,
+          env: opts.env,
+          modelId,
+          stage: "loadSession",
+        },
+        (id) =>
+          sdk.Agent.resume(providerResumeId, {
+            apiKey,
+            // Bind the resolved model on resume too. `Agent.resume` reconstructs
+            // the agent from Cursor's local SQLite store, which may hold NO
+            // persisted model (a cross-worktree id, a rotated cache, or a
+            // pre-SDK cursor-agent CLI id). Without an explicit model the
+            // resumed agent's internal `_model` is undefined and the next
+            // `send()` throws "Local SDK agents require an explicit `model`" —
+            // the exact error users hit on every reopened chat. `resume` takes a
+            // Partial<AgentOptions>, which accepts `model`.
+            model: this.modelSelection(id, modelState, opts.env),
+            // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
+            // and resuming a chat in a different worktree MUST retarget it (else
+            // shells run wherever the agent was first created, or fall back to the
+            // host's process.cwd()). See resolveHostCwd in host-client.ts.
+            cwd: opts.cwd,
+            local: this.buildLocalOpts(
+              opts.cwd,
+              opts.env,
+              autoReviewFor(CURSOR_DEFAULT_MODE),
+            ),
+            ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+          }),
+      );
+      agent = resumed.result;
+      modelId = resumed.modelId;
     } catch (err) {
       const failure = this.classify(err, "loadSession");
       // The stored agentId is gone from Cursor's local agent store — the
@@ -1575,20 +1897,32 @@ export class CursorSdkAdapter implements AgentAdapter {
         }); starting a fresh agent in ${opts.cwd}.`,
       );
       try {
-        agent = await sdk.Agent.create({
-          apiKey,
-          model: this.modelSelection(modelId, modelState),
-          // Same cwd pinning as the primary create — the fresh fallback agent
-          // must also root at the worktree, never the host's process.cwd().
-          cwd: opts.cwd,
-          local: this.buildLocalOpts(
-            opts.cwd,
-            opts.env,
-            autoReviewFor(CURSOR_DEFAULT_MODE),
-          ),
-          mode: sdkModeFor(CURSOR_DEFAULT_MODE),
-          ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-        });
+        const created = await this.withModelRecovery(
+          {
+            state: modelState,
+            envModel: opts.env?.CURSOR_MODEL,
+            env: opts.env,
+            modelId,
+            stage: "loadSession",
+          },
+          (id) =>
+            sdk.Agent.create({
+              apiKey,
+              model: this.modelSelection(id, modelState, opts.env),
+              // Same cwd pinning as the primary create — the fresh fallback agent
+              // must also root at the worktree, never the host's process.cwd().
+              cwd: opts.cwd,
+              local: this.buildLocalOpts(
+                opts.cwd,
+                opts.env,
+                autoReviewFor(CURSOR_DEFAULT_MODE),
+              ),
+              mode: sdkModeFor(CURSOR_DEFAULT_MODE),
+              ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+            }),
+        );
+        agent = created.result;
+        modelId = created.modelId;
         resumedFresh = true;
       } catch (createErr) {
         await this.finalizeRejectedSessionRuntime(runtime);
@@ -1797,7 +2131,7 @@ export class CursorSdkAdapter implements AgentAdapter {
           // Auto & Full access both run as sdk "agent"; they differ only by the
           // (create-time) autoReview already baked in via ensureAutoReview().
           mode: sdkModeFor(session.modeId),
-          model: this.modelSelection(modelId, session.modelState),
+          model: this.modelSelection(modelId, session.modelState, session.env),
           local: { force: true },
           // The engine-owned turn id survives renderer reconnect/resend. Hash
           // it before crossing the harness boundary so provider logs never
@@ -2067,10 +2401,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     session.modelId = this.resolveModel(model, session.env, session.modelState);
   }
 
-  /** Apply the renderer's complete composer snapshot. Effort and Fast are
-   * represented by concrete Cursor model variants, resolved immediately and
-   * sent on the next run. Keys encoded by omission must be removed first so
-   * toggling Fast off cannot leave a stale variant selected. */
+  /** Apply the renderer's complete composer snapshot. Effort and Fast become
+   * native model parameters for current models, with legacy suffixed variants
+   * resolved when advertised, and are sent on the next run. Keys encoded by
+   * omission must be removed first so toggling Fast off cannot leave stale
+   * model settings selected. */
   async updateConfig(opts: {
     sessionId: string;
     env: Record<string, string>;
@@ -2102,10 +2437,14 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (want === session.appliedAutoReview) return;
     try {
       const sdk = session.sdk;
-      const sessionMcp = this.mcpServers(session.mcpServers);
+      const sessionMcp = this.mcpServers(session.mcpServers, session.env);
       session.agent = await sdk.Agent.resume(session.agent.agentId, {
         apiKey: session.apiKey,
-        model: this.modelSelection(session.modelId, session.modelState),
+        model: this.modelSelection(
+          session.modelId,
+          session.modelState,
+          session.env,
+        ),
         cwd: session.cwd,
         local: this.buildLocalOpts(session.cwd, session.env, want),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -2248,7 +2587,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       agent = await sdk.Agent.create({
         apiKey,
-        model: this.modelSelection(modelId, modelState),
+        model: this.modelSelection(modelId, modelState, opts.env),
         cwd,
         local: this.buildLocalOpts(cwd, opts.env),
         mode: "plan",
@@ -2257,7 +2596,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         { text: `${opts.systemPrompt}\n\n${opts.prompt}` },
         {
           mode: "plan",
-          model: this.modelSelection(modelId, modelState),
+          model: this.modelSelection(modelId, modelState, opts.env),
           local: { force: true },
         },
       );
@@ -2315,7 +2654,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // scoping) while `dirs` widens which folders project rules, skills, and
     // request-context metadata are loaded from. Before 1.0.28 there was no way
     // to express it, so an added directory was silently invisible to Cursor even
-    // though ZSR had already granted the session write authority over it.
+    // though the selected boundary had already granted the session authority.
     const additionalDirs = parseCursorAdditionalDirs(
       env?.ZEROS_ADDITIONAL_DIRS,
     ).filter((dir) => dir !== cwd);
@@ -2323,15 +2662,34 @@ export class CursorSdkAdapter implements AgentAdapter {
       cwd,
       ...(additionalDirs.length > 0 ? { dirs: [cwd, ...additionalDirs] } : {}),
       ...(autoReview ? { autoReview: true } : {}),
-      // Load the user's EXISTING Cursor settings layers from disk — their
-      // ~/.cursor/mcp.json + project .cursor/mcp.json MCP servers, repo rules,
-      // team/MDM/plugin layers. Without this the @cursor/sdk loads ONLY the
-      // servers we pass inline ("Without local.settingSources, only inline
-      // servers are loaded" — cursor.com/docs/sdk/typescript), so anything the
-      // user already configured in Cursor would silently NOT apply inside
-      // Zeros. Mirrors the Claude adapter's settingSources:["user","project",
-      // "local"]. Zeros' own injected mcpServers still win on name collision.
-      settingSources: ["user", "project", "team", "mdm", "plugins"],
+      // Ambient Cursor settings layers to load from disk. These carry repo
+      // rules and org policy — and, unavoidably, MCP servers.
+      //
+      // Native MCP pass-through is OFF (adapters/shared/mcp-passthrough.ts),
+      // but Cursor is the one provider with no MCP-only lever: `@cursor/sdk`
+      // exposes `settingSources` and nothing finer, so every layer is
+      // all-or-nothing across MCP AND rules. Dropping them all would enforce
+      // the policy exactly ("Without local.settingSources, only inline servers
+      // are loaded" — cursor.com/docs/sdk/typescript) and take repo rules and
+      // org policy down with it — a worse regression than the one being fixed,
+      // and one nobody asked for.
+      //
+      // So the layers are split by what they are FOR:
+      //   • dropped — `user` (~/.cursor/mcp.json) and `plugins`, the personal
+      //     "installed it once, now it is in every Zeros chat" sources that
+      //     motivated this policy. Their non-MCP content is personal
+      //     preference Zeros already owns.
+      //   • kept — `project` (repo rules, AGENTS.md) and `team`/`mdm` (org
+      //     policy an admin deliberately administers).
+      //
+      // Known residue: a repo's own committed `.cursor/mcp.json`, and a
+      // team/MDM-administered server, still reach Cursor. Both are declared by
+      // someone who meant to declare them for this repo or org, and both are
+      // already offered by the MCP import scan. Closing them needs an
+      // MCP-scoped option from `@cursor/sdk` that does not exist yet.
+      settingSources: nativeMcpPassthroughEnabled()
+        ? ["user", "project", "team", "mdm", "plugins"]
+        : ["project", "team", "mdm"],
     };
     if (env?.CURSOR_SANDBOX === "1") {
       local.sandboxOptions = { enabled: true };
@@ -2344,8 +2702,12 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  RCE-gated); undefined → the global ctx.mcpServers. */
   private mcpServers(
     override?: McpServerRegistration[],
+    env: Readonly<Record<string, string | undefined>> = {},
   ): Record<string, CursorMcpConfig> | null {
-    const list = override ?? this.ctx.mcpServers;
+    const list = materializeMcpServerRegistrations(
+      override ?? this.ctx.mcpServers,
+      env,
+    );
     if (list.length === 0) return null;
     return Object.fromEntries(
       list.map((s) => [
@@ -2463,6 +2825,23 @@ export function classifyCursorSdkError(
       stage,
       agentId: AGENT_ID,
       advice: "Cursor is rate-limiting requests. Try again shortly.",
+    });
+  }
+  // The SDK refused the model id itself ("Cannot use this model: <id>.
+  // Available models: …"). create/resume already retried once on a listed
+  // model (withModelRecovery); reaching here means even that was refused, or
+  // the rejection came mid-turn. Terminal, but the user must learn WHICH pill
+  // to change — the toast drops `message`, so the fix travels as `advice`.
+  if (isModelUnavailableError(message)) {
+    return new AgentFailureError({
+      kind: "protocol-error",
+      message: `cursor-sdk ${stage} failed: ${message}`,
+      stage,
+      agentId: AGENT_ID,
+      advice: modelUnavailableAdvice(
+        "Cursor",
+        extractUnavailableModelId(message),
+      ),
     });
   }
   const isAuth =

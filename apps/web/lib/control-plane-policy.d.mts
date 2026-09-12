@@ -2,6 +2,10 @@ export declare function allowedControlPlaneRoute(
   method: string,
   pathname: string,
 ): boolean;
+export declare function allowedOpsControlPlaneRoute(
+  method: string,
+  pathname: string,
+): boolean;
 export declare function acceptedControlPlaneResponseType(
   pathname: string,
   contentType: string,

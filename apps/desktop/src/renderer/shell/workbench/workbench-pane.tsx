@@ -1,23 +1,19 @@
 // ──────────────────────────────────────────────────────────
-// Workbench — two stacked tab rows
+// Workbench — primary tabs and optional docked terminals
 // ──────────────────────────────────────────────────────────
-//
-// The workbench is a vertical split. Legacy secondary source views now live in
-// its primary tab strip; the lower panel is dedicated to terminal workflows:
-//
-//   Workbench: [Open file] [Changes] [Review] [...File/Browser tabs] [+]
-//   Terminal panel: [Setup] [Run action(s)] [Terminal(s)] [+]       [Run] [collapse]
-//
-// Every worktree carries pinned Changes + Review homes and starts with one
-// closable blank File tab. File and Browser tabs are multi-instance and
-// removable. The terminal surface is resizable and collapsible; its Run button
-// starts the selected action without changing the active workbench tab.
-//
-// Multi-mount rule: Browsers, Changes, Review, the terminal surface, and a
-// bounded set of recent Files stay mounted. Any unsaved File remains mounted
-// regardless of recency so switching workbench tabs cannot destroy its draft.
+// Files, Browser, and Terminal share the primary strip. Setup is seeded there
+// for discovery; each terminal owns its own tab. A terminal can move into the
+// resizable bottom panel independently. TerminalPanel owns one bounded xterm
+// deck across both placements, while this component supplies its main host.
+// Browsers and recent Files remain retained; dirty editors are never evicted.
 
-import React, { useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   useWorkbenchTabs,
   useActiveWorkbenchTabId,
@@ -37,7 +33,7 @@ import { WorkbenchToggleButton } from "./toggle-button";
 import { useTerminalStore } from "../terminal/terminal-store";
 import { useWorkbenchFolder } from "./use-workbench-folder";
 import { TerminalPanel } from "./tabs/terminal-tab";
-import { TerminalPanelResizer } from "../terminal/terminal-panel-resizer";
+import { visibleWorkbenchTabs } from "./terminal-tabs";
 import { useTerminalPanelLayoutStore } from "../terminal/terminal-panel-layout";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import {
@@ -183,10 +179,13 @@ const RetainedBrowserView = React.memo(function RetainedBrowserView({
   );
 });
 
-// Header: h-10 spans the window's 0..40px title strip so its content centers
-// at y=20 — the traffic lights' midline — matching repository panel/conversation
-// pane. It stays borderless: second-row chrome owns any separator it needs
-// (Files' viewer toolbar or a created PR's framed status row).
+// Header: h-10 is the shared chrome-band height, so its content centers at y=20
+// — the same midline as the conversation column's chat strip (h-10 too, since
+// 2026-09-01) and the global TopBar above both. That parity is load-bearing: the
+// workbench expand control lives in THIS row while the panel is open and in the
+// chat strip's trailing slot while it is collapsed, and it must not shift as
+// ownership changes hands. It stays borderless: second-row chrome owns any
+// separator it needs (Files' viewer toolbar or a created PR's framed status row).
 const WORKBENCH_HEADER_CLS = "flex h-10 shrink-0 items-center gap-1 pr-2";
 
 // Workbench fills the height terminal panel leaves. The seam resizer enforces a usable
@@ -249,7 +248,9 @@ export function WorkbenchPane({
   surfaceActive = true,
   collapsed = false,
 }: WorkbenchPaneProps) {
-  const tabs = useWorkbenchTabs();
+  const allTabs = useWorkbenchTabs();
+  const tabs = useMemo(() => visibleWorkbenchTabs(allTabs), [allTabs]);
+  const [terminalHost, setTerminalHost] = useState<HTMLDivElement | null>(null);
   const storedActiveId = useActiveWorkbenchTabId();
   const dirtyEditorIds = useWorkbenchDirtyEditorIds();
   // The Changes tab's PR status row and the Review tab share one condition:
@@ -265,7 +266,7 @@ export function WorkbenchPane({
   const prNumber = activeWorkspace?.prNumber ?? null;
 
   // Re-validate the stored active id against the tab list: a stale id (including
-  // the relocated workbench Terminal tab) falls back to the first File tab, then
+  // a removed tab) falls back to the first File tab, then
   // Changes, rather than a dead pane.
   const activeId = tabs.some((t) => t.id === storedActiveId)
     ? storedActiveId
@@ -396,11 +397,11 @@ export function WorkbenchPane({
     }
   }, [workspaceId, prNumber, dispatch]);
 
-  // ── New-workspace defaults: Open file + Setup ────────────────────────────
+  // ── New-workspace defaults: Open file + Setup in primary tabs ────────────────────────────
   // A newly-created workspace may reuse stale persisted UI state if its path was
   // used before, so defaults are asserted once after BOTH its createdAt and cwd
   // arrive: workbench is reset to Open file / Changes / Review with Open file active;
-  // terminal panel = Setup, expanded. The terminal panel height is a single global preference
+  // Setup has its own primary tab; no terminal is docked. The terminal panel height is a single global preference
   // shared across workspaces and repos (like the column widths), so it is
   // deliberately NOT reset here.
   useEffect(() => {
@@ -436,6 +437,7 @@ export function WorkbenchPane({
   const mountedTabs = tabs.filter(
     (tab) =>
       tab.type !== "browser" &&
+      tab.type !== "terminal" &&
       (retainedWorkbenchSet.has(tab.id) ||
         shouldMountWorkbenchTab(tab, activeId, dirtyEditorIds)),
   );
@@ -469,7 +471,7 @@ export function WorkbenchPane({
           </>
         ) : (
           <>
-            {/* ── Workbench: File / Changes / Review + added File/Browser tabs. ── */}
+            {/* Primary File / Changes / Review / Context / Browser / Terminal tabs. */}
             <div className={WORKBENCH_CONTENT_CLS}>
               <div
                 ref={headerRef}
@@ -500,7 +502,8 @@ export function WorkbenchPane({
                 {/* Pinned sources and active/dirty File surfaces stay mounted;
                   only the active tab is visible. */}
                 {mountedTabs.map((tab) => {
-                  const isActive = surfaceActive && tab.id === activeId;
+                  const isActive =
+                    surfaceActive && !collapsed && tab.id === activeId;
                   return (
                     <div
                       key={tab.id}
@@ -526,17 +529,38 @@ export function WorkbenchPane({
                     </div>
                   );
                 })}
+                <div
+                  ref={setTerminalHost}
+                  {...(activeWorkbenchTab?.type !== "terminal" ||
+                  !surfaceActive ||
+                  collapsed
+                    ? { inert: "" }
+                    : {})}
+                  aria-hidden={
+                    activeWorkbenchTab?.type !== "terminal" ||
+                    !surfaceActive ||
+                    collapsed
+                  }
+                  className={
+                    activeWorkbenchTab?.type === "terminal" &&
+                    surfaceActive &&
+                    !collapsed
+                      ? "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
+                      : "pointer-events-none invisible absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden"
+                  }
+                />
                 <RetainedBrowserDeck
                   activeId={activeId}
-                  surfaceActive={surfaceActive}
+                  surfaceActive={surfaceActive && !collapsed}
                 />
               </div>
             </div>
-            <TerminalPanelResizer containerRef={workbenchRef} />
             <TerminalPanel
               folderKey={folderKey}
               chatCwd={chatCwd}
-              surfaceActive={surfaceActive}
+              surfaceActive={surfaceActive && !collapsed}
+              workbenchHost={terminalHost}
+              containerRef={workbenchRef}
             />
           </>
         )}

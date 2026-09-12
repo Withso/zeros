@@ -514,10 +514,10 @@ async function writeDesignWatchIsolationArtifacts(
   return artifacts;
 }
 
-/** Prepare the complete watcher-isolation contract inside one immutable ZSR
- * generation. The JSON manifest is the exact-path integration point for custom
- * runtimes; the ignore file is consumed automatically by Watchexec; and the
- * preload filters Node watcher APIs. */
+/** Prepare the complete watcher-isolation contract inside one immutable
+ * execution generation. The JSON manifest is the exact-path integration point
+ * for custom runtimes; the ignore file is consumed automatically by Watchexec;
+ * and the preload filters Node watcher APIs. */
 export async function prepareDesignWatchIsolation(
   toolsRoot: string,
   protectedRoots: readonly string[],
@@ -546,9 +546,10 @@ export async function prepareNodeDesignWatchGuard(
 }
 
 /** Prepare content-addressed watcher artifacts for human terminals. Terminals
- * remain outside ZSR and keep their normal write authority. Content addressing
- * makes preparation one-time per exact root/owner set while allowing concurrent
- * starts to share all three immutable files. */
+ * remain outside agent execution boundaries and keep their normal write
+ * authority. Content addressing makes preparation one-time per exact
+ * root/owner set while allowing concurrent starts to share all three immutable
+ * files. */
 export async function prepareReusableDesignWatchIsolation(
   guardsRoot: string,
   protectedRoots: readonly string[],
@@ -611,7 +612,7 @@ function pathsWithRequiredFile(
   return entries.join(path.delimiter);
 }
 
-/** Environment patch shared by ZSR repository processes and managed human
+/** Environment patch shared by bounded repository processes and managed human
  * terminals. Existing user options are retained; engine-owned manifest names
  * always point at the immutable artifact set selected for this execution. */
 export function designWatchIsolationEnvironment(

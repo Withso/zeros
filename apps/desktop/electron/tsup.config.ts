@@ -36,11 +36,31 @@ export default defineConfig({
   // process.env.ZEROS_CHANNEL so the spawned engine inherits the same value.
   define: {
     __ZEROS_CHANNEL_BAKED__: JSON.stringify(process.env.ZEROS_CHANNEL || ""),
+    // Independent desktop release capability. The exact boolean is compiled
+    // into main.cjs; main then pins the engine child's inherited environment.
+    // A packaged app cannot be enabled later with a launch-time env override.
+    __ZEROS_CLOUD_WORKSPACES_ENABLED_BAKED__: JSON.stringify(
+      process.env.ZEROS_CLOUD_WORKSPACES_ENABLED === "true",
+    ),
     // Main-process GitHub App OAuth cannot read Vite's renderer-only
     // import.meta.env at runtime. Bake the same public control-plane origin into
     // main.cjs; an explicit ZEROS_CONTROL_PLANE_URL still overrides it in dev.
     __ZEROS_CONTROL_PLANE_URL_BAKED__: JSON.stringify(
       process.env.VITE_CONTROL_PLANE_URL || "",
+    ),
+    // Preview capabilities may be injected only into the deployment's exact
+    // wildcard suffix. Bake the same public DNS boundary that fronts the
+    // control-plane preview proxy; comma separation supports staged domains.
+    __ZEROS_CLOUD_PREVIEW_HOST_SUFFIXES_BAKED__: JSON.stringify(
+      process.env.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES ||
+        process.env.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN ||
+        "",
+    ),
+    // SSH gateway host keys are public verification material, not credentials.
+    // Bake the release-approved known_hosts document so packaged clients never
+    // have to trust an unauthenticated key observed on their first connection.
+    __ZEROS_CLOUD_SSH_KNOWN_HOSTS_B64_BAKED__: JSON.stringify(
+      process.env.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 || "",
     ),
     // Auth redemption/refresh happens in Electron main, not the renderer. Bake
     // the same channel-specific web origin there or Alpha/Beta silently fall

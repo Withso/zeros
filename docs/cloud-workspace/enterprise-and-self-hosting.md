@@ -34,7 +34,12 @@ support, and security-response procedures are tested for it.
 - configurable identity issuer and JWKS;
 - configurable durable-record and object-storage endpoints;
 - provider-neutral execution lifecycle interface;
+- user/Organization-owned provider connections behind encrypted references;
 - tenant-scoped encryption and audit context;
+- versioned repository/environment/settings snapshots with the same resolver in
+  hosted and customer-managed deployments;
+- separate PostgreSQL metadata and S3-compatible encrypted blob/checkpoint
+  interfaces;
 - portable export and deletion;
 - no renderer dependency on operator credentials or internal deployment URLs;
 - externally documentable health, migration, backup, and upgrade commands; and

@@ -49,6 +49,8 @@ export interface PtyHostSpawnSpec {
    *  PWD) — computed engine-side by shell-setup and passed through verbatim. */
   env: Record<string, string>;
   name?: string;
+  /** Wrapper argv slot that pty-host.cjs replaces with its own PID. */
+  immediateParentPidArgIndex?: number;
 }
 
 interface SessionEntry {
@@ -407,6 +409,9 @@ class PtyHost {
       id,
       shell: spec.shell,
       args: spec.args,
+      ...(spec.immediateParentPidArgIndex === undefined
+        ? {}
+        : { immediateParentPidArgIndex: spec.immediateParentPidArgIndex }),
       cwd: spec.cwd,
       cols: spec.cols,
       rows: spec.rows,

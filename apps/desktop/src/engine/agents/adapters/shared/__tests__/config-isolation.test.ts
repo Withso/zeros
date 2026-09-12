@@ -98,8 +98,9 @@ describe("stripEngineAuthorityEnv", () => {
     expect(out.SAFE).toBe("visible");
   });
 
-  it("drops future ZSR internals and Conductor authority by name pattern", () => {
+  it("drops future boundary internals and Conductor authority by name pattern", () => {
     const out = stripEngineAuthorityEnv({
+      ZEROS_HOST_SUPERVISOR_FUTURE_PATH: "/private/native-helper",
       ZEROS_ZSR_FUTURE_HELPER_PATH: "/private/helper",
       CONDUCTOR_WORKSPACE_TOKEN: "secret",
       CONDUCTOR_INTERNAL_CREDENTIAL: "secret",

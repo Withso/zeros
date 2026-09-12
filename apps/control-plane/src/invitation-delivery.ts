@@ -22,7 +22,7 @@ export type InvitationEmailInput = {
  * WorkOS sends the branded native invitation in the normal AuthKit path. The
  * custom WorkOS invitation URL enters Zeros' bounded landing page, whose
  * server-side acceptance still enforces exact local correlation and recipient
- * identity. ZeptoMail remains only for the Auth0 rollback path here.
+ * identity. Resend remains only for the Auth0 rollback path here.
  */
 export async function deliverInvitationEmail(
   input: InvitationEmailInput,

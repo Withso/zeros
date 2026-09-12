@@ -15,7 +15,7 @@
 // the repository-navigation components consume it unchanged.
 // ──────────────────────────────────────────────────────────
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
@@ -26,6 +26,9 @@ import { zerosDotDirName } from "./paths";
  *  repos.remote_url column; addedAt to repos.added_at. */
 export interface EngineProject {
   id: string;
+  /** Immutable cross-placement UUID. `id` remains the path-derived local
+   * compatibility alias. */
+  canonicalId: string;
   name: string;
   repoRoot: string;
   repoSlug: string;
@@ -71,6 +74,7 @@ function deriveName(repoRoot: string): string {
 
 interface RepoRow {
   id: string;
+  canonical_id: string;
   name: string | null;
   remote_url: string | null;
   root_path: string | null;
@@ -82,6 +86,7 @@ function toProject(r: RepoRow): EngineProject {
   const repoRoot = r.root_path ?? "";
   return {
     id: r.id,
+    canonicalId: r.canonical_id,
     name: r.name ?? deriveName(repoRoot),
     repoRoot,
     repoSlug: r.repo_slug ?? "",
@@ -98,8 +103,9 @@ export function ensureReposFromWorkspaces(workspaces: WorkspaceSeed[]): void {
   const seen = new Set<string>();
   const exists = db.prepare("SELECT 1 FROM repos WHERE root_path = ?");
   const insert = db.prepare(
-    `INSERT INTO repos (id, name, repo_slug, root_path, added_at)
-     VALUES (@id, @name, @repo_slug, @root_path, @added_at)`,
+    `INSERT INTO repos
+       (id, canonical_id, name, repo_slug, root_path, added_at)
+     VALUES (@id, @canonical_id, @name, @repo_slug, @root_path, @added_at)`,
   );
   const now = Date.now();
   const tx = db.transaction((rows: WorkspaceSeed[]) => {
@@ -110,6 +116,7 @@ export function ensureReposFromWorkspaces(workspaces: WorkspaceSeed[]): void {
       if (exists.get(root)) continue;
       insert.run({
         id: projectIdForRoot(root),
+        canonical_id: randomUUID(),
         name: deriveName(root),
         repo_slug: w.repoSlug || "",
         root_path: root,
@@ -127,7 +134,7 @@ export function listProjects(seedWorkspaces: WorkspaceSeed[]): EngineProject[] {
   const db = openZerosDb();
   const rows = db
     .prepare(
-      "SELECT id, name, remote_url, root_path, repo_slug, added_at FROM repos WHERE hidden = 0 ORDER BY added_at ASC, name ASC",
+      "SELECT id, canonical_id, name, remote_url, root_path, repo_slug, added_at FROM repos WHERE hidden = 0 ORDER BY added_at ASC, name ASC",
     )
     .all() as RepoRow[];
   return rows.map(toProject);
@@ -157,8 +164,9 @@ export function upsertRepoByRoot(p: ProjectInput): void {
   const root = canonicalRepoRoot(p.repoRoot);
   openZerosDb()
     .prepare(
-      `INSERT INTO repos (id, name, repo_slug, remote_url, root_path, added_at)
-       VALUES (@id, @name, @repo_slug, @remote_url, @root_path, @added_at)
+      `INSERT INTO repos
+         (id, canonical_id, name, repo_slug, remote_url, root_path, added_at)
+       VALUES (@id, @canonical_id, @name, @repo_slug, @remote_url, @root_path, @added_at)
        ON CONFLICT(root_path) DO UPDATE SET
          name       = excluded.name,
          repo_slug  = COALESCE(NULLIF(excluded.repo_slug, ''), repos.repo_slug),
@@ -168,6 +176,7 @@ export function upsertRepoByRoot(p: ProjectInput): void {
     )
     .run({
       id: projectIdForRoot(root),
+      canonical_id: randomUUID(),
       name: p.name || deriveName(root),
       repo_slug: p.repoSlug ?? "",
       remote_url: p.originUrl ?? null,
@@ -218,6 +227,19 @@ export function isKnownRepoRoot(repoRoot: string): boolean {
       .prepare("SELECT 1 FROM repos WHERE root_path = ? AND hidden = 0")
       .get(root) != null
   );
+}
+
+/** The user-visible project name of an open (non-hidden) repo, or null when
+ *  the root isn't registered. Read-only — never seeds a row — so callers that
+ *  only need a display name (first-use Design folder naming) cannot create
+ *  project state as a side effect. */
+export function projectNameForRoot(repoRoot: string): string | null {
+  if (!repoRoot) return null;
+  const row = openZerosDb()
+    .prepare("SELECT name FROM repos WHERE root_path = ? AND hidden = 0")
+    .get(canonicalRepoRoot(repoRoot)) as { name: string | null } | undefined;
+  const name = row?.name?.trim();
+  return name ? name : null;
 }
 
 /** Rename a repo by root. */

@@ -90,7 +90,7 @@ describe("useOpenWorkspace", () => {
     expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
   });
 
-  it("opens an in-flight Code-to-Design request without reviving coding chat", () => {
+  it("keeps coding chat mounted while a Code-to-Design request is in flight", () => {
     pendingWorkspaceMode.mockReturnValue("design");
     selectChatToRestoreForFolder.mockReturnValue("stale-code-chat");
 
@@ -106,11 +106,13 @@ describe("useOpenWorkspace", () => {
       type: "OPEN_WORKSPACE",
       folder: "/workspaces/zeros/switching-design",
       repoRoot: "/repo",
-      chatId: null,
+      chatId: "stale-code-chat",
       validationPending: undefined,
+      workspaceListFilter: undefined,
     });
-    expect(selectChatToRestoreForFolder).not.toHaveBeenCalled();
-    expect(hydrateChat).not.toHaveBeenCalled();
+    expect(selectChatToRestoreForFolder).toHaveBeenCalledOnce();
+    expect(hydrateChat).toHaveBeenCalledWith("stale-code-chat");
+    expect(prepareChatView).toHaveBeenCalledWith("stale-code-chat");
     expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
   });
 

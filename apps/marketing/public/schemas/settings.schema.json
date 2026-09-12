@@ -160,8 +160,132 @@
         "directory": {
           "type": "string",
           "description": "Repo-relative folder the design surface reads and writes (default \"Zeros Design\"). The folder is committed content; this key just selects which design folder is active."
+        },
+        "directory_id": {
+          "type": "string",
+          "pattern": "^design_[a-zA-Z0-9_-]{1,64}$",
+          "description": "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml."
         }
       }
+    },
+    "preferences": {
+      "type": "object",
+      "properties": {
+        "appearance": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "system",
+                "light",
+                "dark",
+                "orka-black"
+              ]
+            },
+            "codeThemes": {
+              "default": {},
+              "type": "object",
+              "properties": {
+                "dark": {
+                  "type": "string"
+                },
+                "light": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "required": [
+            "mode"
+          ]
+        },
+        "experimental": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "internal": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "type": "boolean"
+          }
+        },
+        "enabled_agents": {
+          "type": "object",
+          "properties": {
+            "ids": {
+              "maxItems": 128,
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "ids"
+          ]
+        },
+        "terminal_agents": {
+          "maxItems": 128,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "binary": {
+                "type": "string"
+              },
+              "launchCommand": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "binary",
+              "launchCommand"
+            ],
+            "additionalProperties": {}
+          }
+        },
+        "default_terminal_agent": {
+          "type": "string"
+        },
+        "removed_terminal_agents": {
+          "maxItems": 256,
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "analytics_opt_out": {
+          "type": "boolean"
+        },
+        "analytics_notice_seen": {
+          "type": "boolean"
+        }
+      }
+    },
+    "preferences_version": {
+      "type": "number",
+      "const": 1
+    },
+    "agent_preferences_version": {
+      "type": "number",
+      "const": 1
     },
     "env": {
       "description": "Non-secret environment variables passed to agents.",
@@ -494,6 +618,10 @@
                 }
               ],
               "description": "How long an idle Claude session stays warm (30 minutes to 5 hours)."
+            },
+            "auto_memory_enabled": {
+              "type": "boolean",
+              "description": "Allow Claude Code to maintain its native repository memory."
             }
           },
           "description": "Claude-specific model defaults."

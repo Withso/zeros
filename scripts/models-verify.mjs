@@ -18,8 +18,9 @@
 //      checkModelIdsKnownToCli for why a version number can't express it.
 //
 //   --live (best-effort, opt-in): shells the agents that expose a model-list
-//      command (`cursor-agent models`) and warns on curated ids the live
-//      account doesn't list. Agents without a simple list command
+//      command (`cursor-agent models`) and warns on required curated ids the
+//      live account doesn't list. Explicit `liveRequired` compatibility rows
+//      are account-qualified and may be absent. Agents without a simple list command
 //      (claude / codex) are noted — use `pnpm models:list` / the app.
 //
 // Exits non-zero on any STRUCTURAL/CONSISTENCY error (so it can gate CI).
@@ -39,6 +40,7 @@ import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { resolveClaudeCliSource } from "./stage-claude-cli.mjs";
+import { qualifiesAgainst } from "./cursor-curated-ids.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, "..");
@@ -388,7 +390,10 @@ function liveCheck(catalog) {
       if (!live.length) return;
       const liveSet = new Set(live);
       for (const m of catalog.families[family] ?? []) {
-        if (!liveSet.has(m.value)) {
+        const qualified = family === "cursor"
+          ? qualifiesAgainst(m, liveSet)
+          : liveSet.has(m.value) || m.liveRequired === true;
+        if (!qualified) {
           warnings.push(`[${family}] curated "${m.value}" not in live \`${bin} ${args.join(" ")}\` output`);
         }
       }

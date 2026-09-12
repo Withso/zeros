@@ -55,12 +55,11 @@ const CODEX_STAGED = [
 const ZSR_STAGED = [
   "binaries/zsr-supervisor.mjs",
   "binaries/zsr-rg",
-  "binaries/zsr-container-worker.mjs",
-  "binaries/zsr-orbstack-container-host.mjs",
-  "binaries/zsr-orbstack-cloud-init.yaml",
   "binaries/zsr-macos-process-domain",
   "binaries/zsr-git-dispatch",
 ];
+const HOST_PROCESS_SUPERVISOR =
+  "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
 const LEGAL_RESOURCES = [
   "LICENSE",
   "THIRD-PARTY-NOTICES.md",
@@ -275,24 +274,28 @@ if (!/ZEROS_ZSR_GIT_DISPATCH_BINARY/.test(sidecarSource)) {
     "the Electron sidecar must pass the packaged macOS Git dispatcher to the engine",
   );
 }
-if (!/ZEROS_ZSR_CONTAINER_WORKER_SCRIPT/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged container-worker launcher to the engine",
-  );
-}
 if (!/ZEROS_ZSR_RIPGREP_PATH/.test(sidecarSource)) {
   errs.push(
     "the Electron sidecar must pass the packaged ZSR ripgrep binary to the engine",
   );
 }
+if (!froms.includes(HOST_PROCESS_SUPERVISOR)) {
+  errs.push(
+    `electron-builder.yml has no extraResources \`from: ${HOST_PROCESS_SUPERVISOR}\` — packaged native agents would have no crash-recoverable process owner`,
+  );
+}
+if (!/ZEROS_HOST_SUPERVISOR_SCRIPT/.test(sidecarSource)) {
+  errs.push(
+    "the Electron sidecar must pass the packaged native host process supervisor to the engine",
+  );
+}
 if (
-  !/ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT/.test(sidecarSource) ||
-  !/ZEROS_ZSR_ORBSTACK_CLOUD_INIT/.test(sidecarSource) ||
-  !/zsr-orbstack-container-host\.mjs/.test(zsrBuildSource) ||
-  !/zsr-orbstack-cloud-init\.yaml/.test(zsrBuildSource)
+  /ORBSTACK|zsr-container-worker/i.test(
+    `${yml}\n${sidecarSource}\n${zsrBuildSource}`,
+  )
 ) {
   errs.push(
-    "the packaged macOS container backend must stage and pass its immutable OrbStack host and cloud-init assets",
+    "retired local VM/container-worker assets must not be built, staged, or exported",
   );
 }
 // The npm copy of the ~250 MiB platform package must stay OUT of the asar: it is

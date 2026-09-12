@@ -169,6 +169,19 @@ describe("Cursor executor prewarm across a mode change", () => {
     expect(warmed.apiKey).toBe("key_test");
   });
 
+  it("drops the personal Cursor settings layers that carry native MCP", async () => {
+    await startSession();
+    // Native MCP pass-through is off, and Cursor exposes no MCP-only lever —
+    // only settingSources, which is all-or-nothing across MCP AND rules. So
+    // `user` + `plugins` (the personal "installed it once, now it is
+    // everywhere" sources) go, while `project` keeps repo rules and
+    // `team`/`mdm` keep administered org policy.
+    expect(
+      (localOf(prewarmSpy.mock.calls[0]) as { settingSources?: unknown })
+        .settingSources,
+    ).toEqual(["project", "team", "mdm"]);
+  });
+
   it("does not queue a second build while the first is still in flight", async () => {
     const { adapter, sessionId } = await startSession();
     prewarmSpy.mockClear();

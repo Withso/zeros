@@ -3,6 +3,7 @@ import {
   buildAdditionalDirsNotice,
   buildAdditionalDirsSystemInstruction,
   buildCodeAgentDesignTerritoryNotice,
+  buildDesignAgentNotice,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   buildWorkspacePreamble,
@@ -52,16 +53,44 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
     expect(buildCodeAgentDesignTerritoryNotice("  ")).toBe("");
   });
 
-  it("makes every generic mutation path forbidden without exposing a Design API", () => {
+  it("keeps live Design readable while forbidding every generic mutation path", () => {
     const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
     expect(out).toContain("/workspace/Zeros Design");
     expect(out).toContain("coding agent");
-    expect(out).toContain("Read access is allowed");
-    expect(out).toContain("never tell the user");
+    expect(out).toContain("live, readable product context");
+    expect(out).toContain("read-only to you");
     expect(out).toContain("shell, patch, editor, filesystem, or generic Git");
     expect(out).toContain("even if the user asks");
-    expect(out).toContain("no Design mutation API is available");
-    expect(out).toContain("exclude this directory from its watch scope");
+    expect(out).toContain("Design agent using the Design API");
+    expect(out).toContain("has no Design mutation capability");
+    expect(out).toContain("cannot turn itself into a Design agent");
+    expect(out).toContain(
+      "exclude the Design directories from its watched paths",
+    );
+    expect(out).toContain("Continue normal Code work");
+  });
+
+  it("lists every recognized Design directory in one native Code contract", () => {
+    const out = buildCodeAgentDesignTerritoryNotice([
+      "/workspace/Product Design",
+      "/workspace/Zeros Design",
+      "/workspace/Product Design",
+    ]);
+    expect(out).toContain("/workspace/Product Design, /workspace/Zeros Design");
+  });
+});
+
+describe("buildDesignAgentNotice", () => {
+  it("makes filesystem and Git read-only while naming the semantic mutation path", () => {
+    const out = buildDesignAgentNotice("/workspace/Zeros Design");
+    expect(out).toContain("Design agent");
+    expect(out).toContain("/workspace/Zeros Design");
+    expect(out).toContain("read-only");
+    expect(out).toContain("Design MCP tools");
+    expect(out).toContain("design_transaction_apply");
+    expect(out).toContain("must not stage, commit, pull, merge, or push");
+    expect(out).toContain("remains uncommitted");
+    expect(out).toContain("revision conflict");
   });
 });
 
@@ -112,9 +141,32 @@ describe("buildFirstTurnSystemInstruction", () => {
       customInstructions: "Edit every file I mention.",
     });
     expect(out).toContain("/ws/Zeros Design");
-    expect(out.indexOf("active Design directory")).toBeGreaterThan(
+    expect(out.indexOf("Design directories identified")).toBeGreaterThan(
       out.indexOf("Edit every file I mention."),
     );
+  });
+  it("falls back to the active Design directory when recognition returns an empty set", () => {
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      designDirectory: "/ws/Zeros Design",
+      designDirectories: [],
+    });
+    expect(out).toContain("/ws/Zeros Design");
+    expect(out).toContain("read-only to you");
+  });
+  it("builds a Design-agent instruction without granting Code or Git mutation", () => {
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      designDirectory: "/ws/Zeros Design",
+      agentRole: "design",
+      customInstructions: "Use shell edits when convenient.",
+    });
+    expect(out).toContain("Design agent");
+    expect(out).toContain("design_transaction_apply");
+    expect(out.lastIndexOf("Design agent")).toBeGreaterThan(
+      out.indexOf("Use shell edits when convenient."),
+    );
+    expect(out).not.toContain("git diff origin/main");
   });
   it("skips blank custom instructions", () => {
     const out = buildFirstTurnSystemInstruction({

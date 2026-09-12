@@ -45,8 +45,8 @@ export interface CodexBinarySource {
   readonly path: string;
   /** Where this resolution came from — useful for diagnostics + log lines. */
   readonly source: "bundled" | "override" | "fallback";
-  /** Native target directory that Codex must be able to re-execute inside its
-   * own provider sandbox. Kept read-only by the territory profile. */
+  /** Native target directory that Codex may re-execute. Design-agent ZSR
+   * admission includes it in the executable's read projection. */
   readonly sandboxRuntimeRoot?: string;
 }
 
@@ -164,10 +164,10 @@ export async function resolveExecutableFromPath(
  *    silently running an unrelated global version would violate the pin.
  *  - If `@openai/codex` is installed in node_modules, use its `.bin/codex` wrapper.
  *  - Otherwise, resolve the global CLI to one physical absolute path from the
- *    login-shell PATH before ZSR admission.
+ *    login-shell PATH before session admission.
  *
- *  A missing global fallback throws here because ZSR cannot safely defer PATH
- *  selection until after its immutable filesystem policy is issued. */
+ *  A missing global fallback throws here because a contained Design session
+ *  cannot safely defer PATH selection until after its policy is installed. */
 export async function resolveCodexBinary(
   opts: {
     override?: string;

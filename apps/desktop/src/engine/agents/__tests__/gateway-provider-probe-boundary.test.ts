@@ -19,6 +19,60 @@ afterEach(async () => {
 });
 
 describe("AgentGateway provider command probes", () => {
+  it("keeps native provider probes free of Design territory policy", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-native-"));
+    temporaryDirectories.push(root);
+    const requests: BoundaryRequest[] = [];
+    const contained = testExecutionBoundary({
+      onPrepare: (request) => requests.push(request),
+    });
+    const gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: { ...contained, backend: "none" },
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const internal = gateway as unknown as {
+      runProviderProbeCommand(
+        providerId: string,
+        binary: string,
+        args: string[],
+        options: { timeoutMs: number },
+      ): Promise<{ exitCode: number | null; stdout: string }>;
+    };
+
+    await expect(
+      internal.runProviderProbeCommand(
+        "codex",
+        process.execPath,
+        ["-e", "process.stdout.write('native probe\\n')"],
+        { timeoutMs: 2_000 },
+      ),
+    ).resolves.toEqual({ exitCode: 0, stdout: "native probe\n" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      actor: "agent-code",
+      backendHint: "none",
+    });
+    expect(requests[0]).not.toHaveProperty("territory");
+    expect(requests[0]).not.toHaveProperty("protectedCodeDirectories");
+    expect(requests[0]).not.toHaveProperty("protectedWorkspaceDirectories");
+    expect(requests[0]).not.toHaveProperty("gitIntegrationRoots");
+    await expect(
+      import("node:fs/promises").then(({ access }) =>
+        access(path.join(requests[0]!.cwd, "Zeros Design")),
+      ),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    await gateway.dispose();
+  });
+
   it("runs provider-owned probe bytes under a fresh agent-code boundary", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-root-"));
     temporaryDirectories.push(root);

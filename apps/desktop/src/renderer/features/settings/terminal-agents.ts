@@ -1,3 +1,4 @@
+import { subscribePreferenceCache } from "../../platform/personal-preferences";
 // ──────────────────────────────────────────────────────────
 // Terminal Agents — catalog, prefs, and runtime resolver
 // ──────────────────────────────────────────────────────────
@@ -548,3 +549,6 @@ export function ensureFallbackTerminalAgent(): TerminalAgent | null {
   }
   return resolveTerminalAgent(FALLBACK_TERMINAL_AGENT_ID);
 }
+
+for (const key of [CATALOG_KEY, DEFAULT_ID_KEY, REMOVED_KEY])
+  subscribePreferenceCache(`zeros-${key}`, notify);

@@ -125,7 +125,7 @@ export interface UseComposerEditorOpts {
   /** False while a retained chat is hidden, so reconstructed image pills do
    *  not acquire and pin full-resolution disk blobs. Defaults true. */
   attachmentImagesActive?: boolean;
-  /** Default true: attachments stage into `<cwd>/.context-graph/` the moment
+  /** Default true: attachments stage into `<cwd>/.context/` the moment
    *  they're added, and unstage when their chip is removed (the Context tab's
    *  attach-time sync). Set false on surfaces whose cwd is NOT the workspace
    *  the attachments belong to — the dispatcher composes against the primary
@@ -306,7 +306,7 @@ export function useComposerEditor(
   // ── context-graph attach-time sync ──
   //
   // The doc's attachment-id set, diffed on every USER edit: an id appearing
-  // stages its file into `.context-graph/` right away, so the Context tab
+  // stages its file into `.context/` right away, so the Context tab
   // shows it while the prompt is still being typed. Diffing the doc — rather
   // than instrumenting insertFiles/paste/drop directly — is what makes every
   // attach gesture agree: paste, drop, pick, transcript pill, undo and redo

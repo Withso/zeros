@@ -35,7 +35,7 @@ export {
   enterDesignMode,
   exitDesignMode,
   reconcileDesignModeTransition,
-  ensureDesignDocumentCommitted,
+  ensureDesignDocumentInitialized,
   renameDesignDirectory,
 } from "./design-mode";
 
@@ -111,6 +111,8 @@ export {
 } from "./worktree";
 export type {
   CreateWorkspaceInput,
+  InternalCreateWorkspaceOptions,
+  InternalWorkspaceProvisionContext,
   ListWorkspacesOptions,
   PreparedWorkspaceCreate,
   WorkspaceLifecycleStatus,
@@ -121,6 +123,7 @@ export type {
 
 export {
   abortOperation,
+  assertGitCheckpointReady,
   changeTargetBranch,
   cherryPick,
   commit,

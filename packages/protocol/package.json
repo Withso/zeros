@@ -9,6 +9,8 @@
     ".": "./src/index.ts",
     "./messages": "./src/messages.ts",
     "./model-context": "./src/model-context.ts",
+    "./agent-extensions": "./src/agent-extensions.ts",
+    "./personal-preferences": "./src/personal-preferences.ts",
     "./agent-events": "./src/agent-events.ts",
     "./builtin-commands": "./src/builtin-commands.ts",
     "./agent-messages": "./src/agent-messages.ts",

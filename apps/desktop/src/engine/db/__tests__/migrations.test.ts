@@ -276,8 +276,8 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
          VALUES ('draft-chat', '/repo', 'codex', 'Draft chat', 'legacy-thread')`,
       ).run();
 
-      // Internal checkpoint builds used these migration numbers for
-      // autonomous-foundation drafts. A later build could legitimately add
+      // Internal checkpoint builds used these migration numbers for early
+      // Design-agent foundation drafts. A later build could legitimately add
       // the final v31/v32 workspace columns while v28-v30 remained recorded,
       // leaving the database at head without provider_binding/provider_metadata.
       db.exec(`
@@ -770,6 +770,71 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       // Oldest keeps the name; both losers get DISTINCT renames.
       expect(branches).toContain("zeros/Cream");
       expect(new Set(branches).size).toBe(3);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("migration 37 backfills immutable UUIDs without rewriting compatibility ids", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 36);
+      db.prepare(
+        `INSERT INTO repos (id, name, root_path)
+         VALUES ('proj_legacy', 'Legacy', '/tmp/legacy')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workspaces
+           (id, repo_slug, repo_root, branch, base_branch, path, status, created_at)
+         VALUES
+           ('ws_legacy-readable', 'legacy', '/tmp/legacy', 'zeros/Legacy',
+            'main', '/tmp/legacy-worktree', 'in-progress', 1)`,
+      ).run();
+
+      runMigrations(db);
+
+      const repository = db
+        .prepare("SELECT id, canonical_id FROM repos WHERE id = 'proj_legacy'")
+        .get() as { id: string; canonical_id: string };
+      const workspace = db
+        .prepare(
+          "SELECT id, canonical_id FROM workspaces WHERE id = 'ws_legacy-readable'",
+        )
+        .get() as { id: string; canonical_id: string };
+      expect(repository.id).toBe("proj_legacy");
+      expect(workspace.id).toBe("ws_legacy-readable");
+      expect(repository.canonical_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(workspace.canonical_id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(workspace.canonical_id).not.toBe(repository.canonical_id);
+
+      // Legacy/direct writers remain compatible and are filled by the DB.
+      db.prepare(
+        `INSERT INTO repos (id, name, root_path)
+         VALUES ('proj_later', 'Later', '/tmp/later')`,
+      ).run();
+      const later = db
+        .prepare("SELECT canonical_id FROM repos WHERE id = 'proj_later'")
+        .get() as { canonical_id: string };
+      expect(later.canonical_id).toMatch(/^[0-9a-f-]{36}$/);
+
+      expect(() =>
+        db
+          .prepare(
+            "UPDATE workspaces SET canonical_id = ? WHERE id = 'ws_legacy-readable'",
+          )
+          .run("00000000-0000-4000-8000-000000000000"),
+      ).toThrow(/immutable/i);
+      expect(() =>
+        db
+          .prepare(
+            "INSERT INTO repos (id, canonical_id) VALUES ('bad', 'NOT-A-UUID')",
+          )
+          .run(),
+      ).toThrow(/lowercase UUID/i);
     } finally {
       db.close();
     }

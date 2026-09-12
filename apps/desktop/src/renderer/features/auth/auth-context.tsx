@@ -94,6 +94,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   return <AuthProviderInner>{children}</AuthProviderInner>;
 }
 
+/** Reconcile main-owned session updates and expose sign-in state, including
+ * actionable Dev setup errors, without moving credential storage into React. */
 function AuthProviderInner({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>("loading");
   const [session, setSession] = useState<AuthSessionInfo | null>(null);
@@ -350,9 +352,16 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       // retains state + verifier in Electron main, outside renderer JS. Auth0
       // mode returns a compatibility marker and continues below.
       const selected = await nativeInvoke<{
-        mode?: "auth0" | "workos";
+        mode?: "auth0" | "workos" | "unconfigured";
         expiresAt?: number;
       }>("auth_start_signin");
+      if (selected?.mode === "unconfigured") {
+        return {
+          ok: false,
+          error:
+            "Zeros Dev could not load its sign-in settings. Check your connection and restart the Dev launcher to try again.",
+        };
+      }
       if (selected?.mode === "workos") {
         return {
           ok: true,

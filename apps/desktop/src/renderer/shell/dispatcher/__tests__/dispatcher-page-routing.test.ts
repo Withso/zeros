@@ -19,6 +19,21 @@ describe("Create Workspace page routing", () => {
     expect(dispatcher).not.toContain("DialogContent");
   });
 
+  it("places the Code/Design toggle above and outside the composer card", () => {
+    const dispatcher = source(
+      "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
+    );
+    const toggle = dispatcher.indexOf("<WorkspaceModeToggleView");
+    const card = dispatcher.indexOf("<section");
+    const composer = dispatcher.indexOf("<DispatcherComposer");
+
+    expect(toggle).toBeGreaterThanOrEqual(0);
+    expect(card).toBeGreaterThan(toggle);
+    expect(composer).toBeGreaterThan(card);
+    expect(dispatcher).toContain('data-dispatcher-mode-switcher=""');
+    expect(dispatcher).toContain("self-end");
+  });
+
   it("routes the shared launcher into Create and mounts it beside HomeSidebar", () => {
     const provider = source(
       "apps/desktop/src/renderer/shell/add-project-provider.tsx",

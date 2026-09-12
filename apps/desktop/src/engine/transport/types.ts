@@ -5,8 +5,9 @@
 // The engine no longer talks to a concrete WebSocket server. It talks to
 // one or more Transports, each surfacing connected peers as
 // TransportClients. LocalTransport is the loopback `ws` server (unchanged
-// behavior). CloudTransport is the only non-local transport and reaches an
-// in-sandbox engine over a preview-URL WSS. The old relay transport is gone.
+// behavior). CloudTransport is the only non-local transport and is reached
+// through an Electron-owned SSH loopback tunnel. The old relay transport is
+// gone.
 // ──────────────────────────────────────────────────────────
 
 import type { EngineMessage } from "../types";
@@ -17,6 +18,10 @@ export interface TransportClient {
   /** Where this client connected from. The local desktop is trusted; cloud
    *  clients are remote peers and go through remote account/workspace gates. */
   readonly kind: "local" | "cloud";
+  /** Server-asserted account/execution identity for a cloud admission. Local
+   * clients and image qualification probes intentionally omit it. */
+  readonly accountUserId?: string | null;
+  readonly authorityEpoch?: number | null;
   /** Send an engine message to this client (serialized + encrypted as needed). */
   send(msg: EngineMessage): void;
   close(code?: number, reason?: string): void;

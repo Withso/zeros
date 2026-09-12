@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { REPO_FILE_UNSUPPORTED_KEYS, sanitizeLayer } from "../schema";
+import {
+  REPO_FILE_UNSUPPORTED_KEYS,
+  repoLocalSettingsSchema,
+  sanitizeLayer,
+} from "../schema";
 
 describe("sanitizeLayer", () => {
   it("keeps a fully valid repo document intact", () => {
@@ -20,17 +24,9 @@ describe("sanitizeLayer", () => {
     expect(r.warnings).toEqual([]);
   });
 
-  it("drops unsupported keys from repo-scoped layers with a warning, keeping git/prompts (+ scripts committed-only, mcp repo-local-only)", () => {
-    // 2026-07-17 repo-file slimming: repo-scoped files carry scripts config
-    // (+ git / prompts); env vars live in the Keychain vault. Each stale key is
-    // IGNORED with a warning — never silently. Scripts are additionally
-    // COMMITTED-file-only: the personal local files drop them too, so a stale
-    // [scripts] can't shadow the repo's settings.toml. 2026-07-22: `mcp`
-    // returned to the REPO-LOCAL layer only (the Customize tab's per-repo
-    // servers) — the committed file and workspace-local still drop it (the
-    // clone-borne-file gate). 2026-07-29: `file_include_globs` returned on the
-    // same terms — "Files to copy" is per-project, and repo-local is the
-    // personal, gitignored file the settings pane already writes.
+  it("keeps personal scripts and MCP overrides while rejecting unsupported local keys", () => {
+    // Workspace overrides can change execution settings. Repository provisioning
+    // (files to copy) stays with the main checkout, and env stays in the vault.
     const doc = {
       scripts: { setup: "pnpm install" },
       git: { base_branch: "main" },
@@ -42,36 +38,34 @@ describe("sanitizeLayer", () => {
     };
     for (const layer of ["repo", "repo-local", "workspace-local"] as const) {
       const r = sanitizeLayer(doc, layer);
-      const scriptsKept = layer === "repo";
+      const mcpKept = layer !== "repo";
       const repoLocalOnly = layer === "repo-local";
       expect(r.doc).toEqual({
-        ...(scriptsKept ? { scripts: { setup: "pnpm install" } } : {}),
+        scripts: { setup: "pnpm install" },
         git: { base_branch: "main" },
         prompts: { general: "be brief" },
-        ...(repoLocalOnly
+        ...(mcpKept
           ? {
               mcp: {
                 servers: [{ name: "ctx", transport: "stdio", command: "npx" }],
               },
-              file_include_globs: [".env*"],
             }
           : {}),
+        ...(repoLocalOnly ? { file_include_globs: [".env*"] } : {}),
       });
       expect(r.warnings).toHaveLength(
         REPO_FILE_UNSUPPORTED_KEYS.length -
-          (repoLocalOnly ? 2 : 0) +
-          (scriptsKept ? 0 : 1),
+          (mcpKept ? 1 : 0) -
+          (repoLocalOnly ? 1 : 0),
       );
       for (const key of REPO_FILE_UNSUPPORTED_KEYS) {
-        if (repoLocalOnly && (key === "mcp" || key === "file_include_globs"))
+        if (
+          (mcpKept && key === "mcp") ||
+          (repoLocalOnly && key === "file_include_globs")
+        )
           continue;
         expect(
           r.warnings.some((w) => w.startsWith(`${key}:`) && w.includes(layer)),
-        ).toBe(true);
-      }
-      if (!scriptsKept) {
-        expect(
-          r.warnings.some((w) => w.startsWith("scripts:") && w.includes(layer)),
         ).toBe(true);
       }
     }
@@ -89,6 +83,27 @@ describe("sanitizeLayer", () => {
     const r = sanitizeLayer(doc, "user");
     expect(r.doc).toEqual(doc);
     expect(r.warnings).toEqual([]);
+  });
+
+  it("drops the retired Design isolation switch from every settings layer", () => {
+    const policy = {
+      design: { isolation: { mode: "sandbox+hardening" } },
+    };
+
+    for (const layer of [
+      "user",
+      "team",
+      "repo",
+      "repo-local",
+      "workspace-local",
+      "managed",
+    ] as const) {
+      const result = sanitizeLayer(policy, layer);
+      expect(result.doc).toEqual({});
+      expect(result.warnings).toEqual([
+        expect.stringContaining("design.isolation"),
+      ]);
+    }
   });
 
   it("non-table document → empty doc with warning", () => {
@@ -385,15 +400,72 @@ describe("sanitizeLayer", () => {
     expect(r.warnings).toHaveLength(3);
   });
 
-  it("preserves unknown keys at top level and inside known tables", () => {
+  it("preserves unknown user keys at top level and inside known tables", () => {
     const r = sanitizeLayer(
       { brand_new: true, scripts: { run: "x", new_knob: "y" } },
-      "repo",
+      "user",
     );
     expect(r.doc.brand_new).toBe(true);
     expect((r.doc.scripts as Record<string, unknown>).new_knob).toBe("y");
     expect(r.warnings).toEqual([]);
   });
+
+  it("excludes account and unsupported fields from every effective repository layer", () => {
+    expect(Object.hasOwn(repoLocalSettingsSchema.shape, "github")).toBe(false);
+    expect(
+      repoLocalSettingsSchema.safeParse({ github: { auth_method: "pat" } })
+        .success,
+    ).toBe(false);
+    for (const layer of ["repo", "repo-local", "workspace-local"] as const) {
+      const raw = {
+        github: { auth_method: "github-app" },
+        future: { enabled: true },
+        scripts: { run: "pnpm dev", future: true },
+        design: { directory: "Product - Design", future: true },
+        mcp: { servers: [], future: true },
+      };
+      const result = sanitizeLayer(raw, layer);
+      expect(result.doc).toEqual({
+        scripts: { run: "pnpm dev" },
+        design: { directory: "Product - Design" },
+        ...(layer === "repo" ? {} : { mcp: { servers: [] } }),
+      });
+      expect(result.warnings).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("github"),
+          expect.stringContaining("future"),
+          expect.stringContaining("scripts.future"),
+          expect.stringContaining("design.future"),
+        ]),
+      );
+      expect(raw.future).toEqual({ enabled: true });
+      expect(raw.scripts.future).toBe(true);
+    }
+  });
+
+  it.each([
+    "../outside",
+    "/tmp/design",
+    ".zeros/design",
+    "src/.git/design",
+    ".ZEROS/design",
+    "a//b",
+    "a/../b",
+    "a/./b",
+    "a\u0000b",
+  ])(
+    "rejects unsafe Design directory %s while retaining valid siblings",
+    (directory) => {
+      const result = sanitizeLayer(
+        { design: { directory }, scripts: { run: "ok" } },
+        "repo-local",
+      );
+      expect(result.doc).toEqual({ scripts: { run: "ok" } });
+      expect(result.warnings).toEqual([
+        expect.stringContaining("design.directory"),
+      ]);
+    },
+  );
 
   it("keeps a valid [mcp] table (stdio + http) at the user layer, drops it from repo", () => {
     const doc = {

@@ -160,7 +160,8 @@ vi.mock("../browser-tools", async (importOriginal) => {
   return {
     ...actual,
     codexNativeBrowserUnavailableReason: vi.fn(
-      () => browserCapability.reason,
+      ({ contained }: { contained: boolean }) =>
+        contained ? browserCapability.reason : null,
     ),
     resolveCodexNativeBrowserRuntime: browserRuntime.resolve,
     mergeCodexNativeBrowserMcp: vi.fn(
@@ -250,10 +251,15 @@ describe("Codex opaque provider bindings", () => {
       cwd: "/tmp/proj",
     });
 
+    // The resume path carries the same thread config a fresh start does: the
+    // browser gate, plus the native-MCP disables that make Customize the whole
+    // set (adapters/shared/mcp-passthrough.ts).
     expect(rt.resumeParams).toContainEqual(
       expect.objectContaining({
         threadId: "thread-source",
-        config: { "plugins.browser@openai-bundled.enabled": false },
+        config: expect.objectContaining({
+          "plugins.browser@openai-bundled.enabled": false,
+        }),
       }),
     );
     await adapter.dispose();
@@ -309,6 +315,34 @@ describe("Codex opaque provider bindings", () => {
       "codex",
       expect.stringMatching(/cannot safely run inside the macOS containment/i),
     );
+
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  it("keeps Browser enabled behind the native lifecycle boundary", async () => {
+    browserCapability.reason =
+      "Official Browser cannot safely run inside the macOS containment boundary";
+    const { adapter } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-native-host",
+      cwd: "/tmp/proj",
+      executionBoundary: {
+        status: { backend: "none", state: "ready" },
+      } as never,
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_native_host",
+      },
+    });
+
+    expect(browserRuntime.resolve).toHaveBeenCalledOnce();
+    expect(rt.startParams.at(-1)).toMatchObject({
+      config: { "plugins.browser@openai-bundled.enabled": true },
+    });
+    expect(browserHost.register).toHaveBeenCalledWith({
+      browserSessionId: "browser_native_host",
+      nativeSessionId: "thread-source",
+    });
 
     await adapter.disposeSession(started.session.sessionId);
   });

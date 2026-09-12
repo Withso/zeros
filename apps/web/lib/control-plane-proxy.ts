@@ -8,6 +8,7 @@ import {
 import {
   acceptedControlPlaneResponseType,
   allowedControlPlaneRoute,
+  allowedOpsControlPlaneRoute,
   cancelUnusedResponseBody,
   jsonContentTypeOrCancel,
   readBoundedBody,
@@ -56,7 +57,11 @@ export async function proxyControlPlane(
 ): Promise<Response> {
   const requestUrl = new URL(request.url);
   const pathname = requestUrl.pathname.replace(/^\/api(?=\/)/, "");
-  if (!allowedControlPlaneRoute(request.method, pathname)) {
+  const routeAllowed =
+    env.ZEROS_SURFACE === "ops"
+      ? allowedOpsControlPlaneRoute(request.method, pathname)
+      : allowedControlPlaneRoute(request.method, pathname);
+  if (!routeAllowed) {
     return jsonError(404, "not_found", "Not found");
   }
   if (!validMutationOrigin(request)) {

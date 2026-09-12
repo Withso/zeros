@@ -1,0 +1,6 @@
+# The pinned/local actionlint runner catalogs predate this standard
+# GitHub-hosted Intel label. GitHub documents `macos-15-intel` as a standard
+# hosted runner; declaring only this label keeps linting strict elsewhere.
+self-hosted-runner:
+  labels:
+    - macos-15-intel

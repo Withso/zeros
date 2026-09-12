@@ -2,6 +2,13 @@ const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA
 
 export function allowedControlPlaneRoute(method, pathname) {
   if (method === "GET" && pathname === "/v1/me") return true;
+  if (pathname === "/v1/account/deletion") {
+    return method === "GET" || method === "POST";
+  }
+  if (method === "POST" && pathname === "/v1/account/deletion/restore") {
+    return true;
+  }
+  if (method === "GET" && pathname === "/v1/deletions") return true;
   if (
     method === "GET" &&
     (pathname === "/v1/auth/snapshot" || pathname === "/v1/auth/events")
@@ -12,6 +19,8 @@ export function allowedControlPlaneRoute(method, pathname) {
   if (method === "POST" && pathname === "/v1/organizations") return true;
   const root = new RegExp(`^/v1/organizations/${UUID}$`);
   if (root.test(pathname)) return ["GET", "PATCH", "DELETE"].includes(method);
+  const restore = new RegExp(`^/v1/organizations/${UUID}/restore$`);
+  if (restore.test(pathname)) return method === "POST";
   const members = new RegExp(`^/v1/organizations/${UUID}/members$`);
   if (members.test(pathname)) return method === "GET";
   const member = new RegExp(`^/v1/organizations/${UUID}/members/${UUID}$`);
@@ -24,6 +33,16 @@ export function allowedControlPlaneRoute(method, pathname) {
   if (teams.test(pathname)) return method === "GET" || method === "POST";
   const billing = new RegExp(`^/v1/organizations/${UUID}/billing$`);
   return billing.test(pathname) && method === "GET";
+}
+
+export function allowedOpsControlPlaneRoute(method, pathname) {
+  if (method === "GET" && pathname === "/v1/ops/session") return true;
+  const deletion =
+    /^\/v1\/ops\/deletions\/ZD-[A-Z2-9]{4}-[A-Z2-9]{4}\/(lookup|grants|restore|force-purge)$/;
+  if (method === "POST" && deletion.test(pathname)) return true;
+  const identityRecovery =
+    /^\/v1\/internal\/account-recoveries\/ZR-[A-Z2-9]{4}-[A-Z2-9]{4}\/approve$/;
+  return method === "POST" && identityRecovery.test(pathname);
 }
 
 /** The dashboard proxy is deliberately content-type strict. An SSE body is

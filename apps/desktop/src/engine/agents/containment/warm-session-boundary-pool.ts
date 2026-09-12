@@ -231,7 +231,7 @@ export class WarmSessionBoundaryPool {
     const timer = setTimeout(() => {
       if (this.entries.get(entry.key) !== entry) return;
       this.entries.delete(entry.key);
-      void this.retireEntry(entry);
+      void this.retireEntry(entry).catch(() => undefined);
     }, this.options.idleMs ?? warmSessionBoundaryIdleMs());
     timer.unref?.();
     entry.idleTimer = timer;

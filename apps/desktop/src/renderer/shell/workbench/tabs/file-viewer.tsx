@@ -54,6 +54,7 @@ import { useInstantViewSwitch } from "@/renderer/shared/ui/use-instant-view-swit
 import { useWorkspaceDispatch } from "@/renderer/state/workspace-store";
 import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import type { ViewerMode } from "../tab-model";
+import { WORKBENCH_TITLE_CHIP_CLS, WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
 import { triggerGitRefresh } from "../../use-git-refresh-key";
 import {
   currentFileHash,
@@ -175,7 +176,7 @@ function PathBreadcrumbs({ path }: { path: string }) {
     path.length > file.length ? path.slice(0, -(file.length + 1)) : "";
   return (
     <Tooltip label={path}>
-      <div className="border-border1 flex min-w-0 items-center gap-1.5 rounded-sm border px-2 py-1">
+      <div className={WORKBENCH_TITLE_CHIP_CLS}>
         <FileTypeIcon name={path} size={13} />
         <div className="flex min-w-0 items-center text-xs">
           {dir && (
@@ -558,17 +559,11 @@ export function FileViewer({
             data-testid="file-path-actions"
             className="flex min-w-0 items-center gap-1"
           >
-            {path ? (
-              <PathBreadcrumbs path={path} />
-            ) : (
-              <span className="text-fg2 truncate text-xs font-medium">
-                No file open
-              </span>
-            )}
+            {path && <PathBreadcrumbs path={path} />}
             {canCopy && (
               <CodeBlockCopyButton
                 text={result!.content ?? ""}
-                className="size-6 shrink-0"
+                className={WORKBENCH_TITLE_ACTION_CLS}
               />
             )}
           </div>
@@ -748,8 +743,8 @@ export function FileViewer({
             <div className="flex h-full min-h-0 flex-col">
               {designReadOnly && (
                 <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
-                  Design files are edited in Design Mode and committed with
-                  “Save designs”.
+                  Design files are edited in Design view, then staged and
+                  committed with the dedicated Design actions.
                 </div>
               )}
               <div className="min-h-0 flex-1">

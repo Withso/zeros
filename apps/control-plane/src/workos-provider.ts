@@ -41,6 +41,7 @@ export interface WorkOSBrowserProvider {
     state: string;
     codeChallenge: string;
     redirectUri: string;
+    maxAge?: number;
   }): string;
   exchange(options: {
     code: string;
@@ -62,7 +63,7 @@ export interface WorkOSDesktopProvider {
     subject: string,
     options: { limit: number; after?: string },
   ): Promise<{
-    data: Array<{ id: string; status: string }>;
+    data: Array<{ id: string; status: string; createdAt: string }>;
     listMetadata: { after: string | null };
   }>;
   revokeSession(sessionId: string): Promise<void>;
@@ -162,7 +163,15 @@ export interface WorkOSManagementProvider {
     email: string;
   }): Promise<WorkOSInvitationRecord[]>;
   revokeInvitation(invitationId: string): Promise<WorkOSInvitationRecord>;
+  listSessions(
+    subject: string,
+    options: { limit: number; after?: string },
+  ): Promise<{
+    data: Array<{ id: string; status: string; createdAt: string }>;
+    listMetadata: { after: string | null };
+  }>;
   revokeSession(sessionId: string): Promise<void>;
+  deleteUser(userId: string): Promise<void>;
 }
 
 type WorkOSAuthConfig = Extract<AuthBackendConfig, { provider: "workos" }>;
@@ -190,11 +199,18 @@ export class RailwayWorkOSProvider
     private readonly backend: WorkOSBackendConfig,
     client?: WorkOS,
   ) {
+    // Keep every SDK request on the validated environment's issuer host,
+    // including production custom domains. JWT validation still uses the full
+    // exact issuer string; this URL comes from configuration, never a token.
+    const apiUrl = new URL(auth.issuer);
     this.client =
       client ??
       new WorkOS({
         apiKey: backend.apiKey,
         clientId: auth.webClientId,
+        apiHostname: apiUrl.hostname,
+        https: apiUrl.protocol === "https:",
+        ...(apiUrl.port ? { port: Number(apiUrl.port) } : {}),
         timeout: 8_000,
         maxRetries: 2,
       });
@@ -207,6 +223,7 @@ export class RailwayWorkOSProvider
     state: string;
     codeChallenge: string;
     redirectUri: string;
+    maxAge?: number;
   }): string {
     return this.client.userManagement.getAuthorizationUrl({
       provider: "authkit",
@@ -214,6 +231,7 @@ export class RailwayWorkOSProvider
       codeChallenge: options.codeChallenge,
       codeChallengeMethod: "S256",
       redirectUri: options.redirectUri,
+      ...(options.maxAge !== undefined ? { maxAge: options.maxAge } : {}),
     });
   }
 
@@ -375,7 +393,7 @@ export class RailwayWorkOSProvider
     subject: string,
     options: { limit: number; after?: string },
   ): Promise<{
-    data: Array<{ id: string; status: string }>;
+    data: Array<{ id: string; status: string; createdAt: string }>;
     listMetadata: { after: string | null };
   }> {
     const page = await this.client.userManagement.listSessions(
@@ -386,6 +404,7 @@ export class RailwayWorkOSProvider
       data: page.data.map((session) => ({
         id: session.id,
         status: session.status,
+        createdAt: session.createdAt,
       })),
       listMetadata: { after: page.listMetadata.after ?? null },
     };
@@ -393,6 +412,10 @@ export class RailwayWorkOSProvider
 
   async revokeSession(sessionId: string): Promise<void> {
     await this.client.userManagement.revokeSession({ sessionId });
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    await this.client.userManagement.deleteUser(userId);
   }
 
   private managementEvent(event: Event): WorkOSManagementEvent {

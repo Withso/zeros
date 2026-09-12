@@ -34,6 +34,7 @@ The top-level layout is intentional:
 | `apps/web/`             | Cloudflare Pages hub, auth handoff, and edge functions                                                    |
 | `apps/marketing/`       | Public marketing site source assembled into the web deployment                                            |
 | `packages/protocol/`    | Shared transport schemas, messages, validation, and redaction                                             |
+| `packages/zeros-logo-particles/` | Shared Zeros logo particle field (canvas). Desktop and marketing import it later; not wired yet |
 | `catalogs/`             | Versioned provider/model catalog data and schemas                                                         |
 | `scripts/`              | Repository-wide build, release, audit, and maintenance automation                                         |
 | `styles/`               | Design tokens, cross-boundary CSS, and design reference artifacts                                         |

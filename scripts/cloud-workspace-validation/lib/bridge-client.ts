@@ -53,8 +53,9 @@ export interface BridgeClientOpts {
 export class BridgeClient {
   private ws: WebSocket | null = null;
   private readonly pending = new Map<string, PendingRequest>();
-  private readonly ptyData: Array<(sessionId: string, data: string) => void> =
-    [];
+  private readonly ptyData = new Set<
+    (sessionId: string, data: string) => void
+  >();
   private readonly ptyExit: Array<
     (sessionId: string, code: number | null) => void
   > = [];
@@ -315,8 +316,9 @@ export class BridgeClient {
     });
   }
 
-  onPtyData(cb: (sessionId: string, data: string) => void): void {
-    this.ptyData.push(cb);
+  onPtyData(cb: (sessionId: string, data: string) => void): () => void {
+    this.ptyData.add(cb);
+    return () => this.ptyData.delete(cb);
   }
   onPtyExit(cb: (sessionId: string, code: number | null) => void): void {
     this.ptyExit.push(cb);

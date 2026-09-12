@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en" data-Zeros-root data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <title>Zeros — Logo mark · data volume</title>
+  <style>
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: local("JetBrains Mono Thin"),
+           local("JetBrainsMono-Thin"),
+           local("JetBrains Mono ExtraLight"),
+           local("JetBrains Mono");
+      font-weight: 100;
+      font-style: normal;
+    }
+
+    :root {
+      color-scheme: dark;
+      --bg1: hsl(0 0% 7%);
+      --bg1-hover: hsl(0 0% 12%);
+      --bg2: hsl(0 0% 13%);
+      --bg2-hover: hsl(0 0% 15%);
+      --bg3: hsl(0 0% 9%);
+      --fg1: hsl(0 0% 94%);
+      --fg2: hsl(0 0% 72%);
+      --fg3: hsl(0 0% 44%);
+      --muted-fg: hsl(0 0% 44%);
+      --border2: hsl(0 0% 18%);
+      --border3: hsl(0 0% 24%);
+      --border4: hsl(0 0% 30%);
+      --highlighted-bright: hsl(0 0% 65%);
+      --inverted-bg: hsl(0 0% 92%);
+      --inverted-fg: hsl(0 0% 5%);
+      --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system,
+        BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      height: 100%;
+      min-height: 100%;
+      background: var(--bg1);
+      color: var(--fg2);
+      font-family: var(--font-sans);
+    }
+
+    body {
+      min-height: 100dvh;
+      display: grid;
+      grid-template-rows: auto minmax(1080px, 1fr) auto;
+    }
+
+    header, footer {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 16px 24px;
+      flex-wrap: wrap;
+    }
+
+    header { border-bottom: 1px solid var(--border2); }
+
+    footer {
+      border-top: 1px solid var(--border2);
+      color: var(--muted-fg);
+      font-size: 12px;
+    }
+
+    h1 {
+      margin: 0;
+      color: var(--fg1);
+      font-size: 14px;
+      font-weight: 500;
+    }
+
+    .lede {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: var(--fg3);
+    }
+
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .chip {
+      appearance: none;
+      border: 1px solid var(--border3);
+      background: var(--bg1);
+      color: var(--fg1);
+      font: inherit;
+      font-size: 12px;
+      font-weight: 500;
+      padding: 6px 10px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .chip:hover { background: var(--bg1-hover); }
+
+    .chip[aria-pressed="true"] {
+      background: var(--bg1-hover);
+      border-color: var(--border4);
+    }
+
+    .stage {
+      position: relative;
+      display: grid;
+      place-items: center;
+      min-height: 1080px;
+      overflow: auto;
+      background: var(--stage-bg, var(--bg1));
+    }
+
+    .stage[data-bg="void"] { --stage-bg: #000; }
+
+    .stage[data-bg="checker"] {
+      --stage-bg: hsl(0 0% 12%);
+      background-image:
+        linear-gradient(45deg, hsl(0 0% 16%) 25%, transparent 25%),
+        linear-gradient(-45deg, hsl(0 0% 16%) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, hsl(0 0% 16%) 75%),
+        linear-gradient(-45deg, transparent 75%, hsl(0 0% 16%) 75%);
+      background-size: 24px 24px;
+      background-position: 0 0, 0 12px, 12px -12px, -12px 0;
+    }
+
+    .stage[data-bg="paper"] { --stage-bg: hsl(40 18% 92%); }
+
+    .stage[data-bg="magenta"] { --stage-bg: hsl(312 92% 52%); }
+
+    .mark {
+      position: relative;
+      width: 1080px;
+      height: 1080px;
+      min-width: 1080px;
+      min-height: 1080px;
+      aspect-ratio: 1;
+    }
+
+    .mark canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      display: block;
+      background: transparent;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Zeros mark</h1>
+      <p class="lede">Live canvas field — volume of thin rim-lit glyphs, 10s loop</p>
+    </div>
+    <div class="controls">
+      <div class="chips" role="group" aria-label="Stage background">
+        <button class="chip" type="button" data-bg="void" aria-pressed="true">Void</button>
+        <button class="chip" type="button" data-bg="checker" aria-pressed="false">Checker</button>
+        <button class="chip" type="button" data-bg="paper" aria-pressed="false">Paper</button>
+        <button class="chip" type="button" data-bg="magenta" aria-pressed="false">Magenta</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="stage" data-bg="void">
+    <div class="mark" aria-label="Zeros logo formed by a swirling number field">
+      <canvas id="live" width="1080" height="1080"></canvas>
+    </div>
+  </main>
+
+  <footer>
+    <span>Canvas · official SVG occupancy · 10s loop</span>
+    <span>Volume field — gaps between glyphs, no logo stroke</span>
+  </footer>
+
+  <script src="field-model.js"></script>
+  <script src="field.js"></script>
+  <script>
+    const stage = document.querySelector(".stage");
+    const bgChips = [...document.querySelectorAll(".chips [data-bg]")];
+
+    bgChips.forEach((chip) => {
+      chip.addEventListener("click", () => {
+        stage.dataset.bg = chip.dataset.bg;
+        bgChips.forEach((c) => c.setAttribute("aria-pressed", String(c === chip)));
+      });
+    });
+
+    if (window.ZerosLogoField) {
+      window.ZerosLogoField.init();
+      const params = new URLSearchParams(location.search);
+      const bg = params.get("bg");
+      if (bg) {
+        stage.dataset.bg = bg;
+        bgChips.forEach((c) => c.setAttribute("aria-pressed", String(c.dataset.bg === bg)));
+      }
+      window.ZerosLogoField.start();
+    }
+  </script>
+</body>
+</html>

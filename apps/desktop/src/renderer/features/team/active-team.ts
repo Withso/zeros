@@ -1,11 +1,12 @@
 // ──────────────────────────────────────────────────────────
 // Active-organization selection. The persisted `team:active-id` name is a
 // serialized compatibility contract from the flat-Team era; its value now
-// identifies a tenant-root organization, never a child team.
+// identifies a collaborative tenant root or the local-personal selection key,
+// never a child team. The local selection key is never sent as a server owner.
 //
 // Persisted in native settings so the choice survives reloads; a
 // subscribe channel lets team-sync re-courier the moment the selection
-// changes. `null` means "use Personal/first organization when available."
+// changes. `null` means device Personal, without waiting for a server response.
 // ──────────────────────────────────────────────────────────
 
 import { getSettingMigrated, setSetting } from "../../platform/settings";

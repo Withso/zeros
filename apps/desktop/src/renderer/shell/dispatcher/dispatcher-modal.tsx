@@ -5,27 +5,34 @@
 // The global "+" destination opens this inside the Home shell. It unifies the
 // new-workspace / open-project / clone flows behind one surface:
 //
-//   ┌ project pill ▾ · + folder menu ···· Create from… ▾ ┐  (top bar)
-//   │  What do you want to work on?                       │  (composer)
-//   │  model · fast · effort · plan          📎  Create ↵ │  (toolbar)
-//   └────────────────────────────────────────────────────┘
+//                                                   ┌ ‹/› ✎ ┐  (mode)
+//   ┌ project pill ▾ · + folder menu ··· Create from… ▾ ┐     (top bar)
+//   │  What do you want to work on?                     │     (composer)
+//   │  model · fast · effort · plan        📎  Create ↵ │     (toolbar)
+//   └──────────────────────────────────────────────────┘
 //
-// "Create" creates a git worktree in the selected project (optionally off a
-// chosen PR/branch base) and lands a fresh chat bound to the picked agent +
-// model. With a typed prompt it seeds that chat's composer and one-shot
-// auto-sends the first turn (REQUEST_AUTO_SEND → AgentChat). Empty composer →
-// just the workspace + a ready chat (the user's "create with the agent chat
-// model" rule).
+// The Code/Design toggle above the card's right edge (the same control every
+// workspace's chat strip carries) picks which MODE the new workspace opens in:
+//
+//   Code   → "Create" creates a git worktree in the selected project
+//            (optionally off a chosen PR/branch base) and lands a fresh chat
+//            bound to the picked agent + model. With a typed prompt it seeds
+//            that chat's composer and one-shot auto-sends the first turn
+//            (REQUEST_AUTO_SEND → AgentChat). Empty composer → just the
+//            workspace + a ready chat (the user's "create with the agent chat
+//            model" rule).
+//   Design → the composer yields to a summary of what Design entry will do to
+//            this repository — open its design folder, or CREATE one named
+//            "<repo> - Design" on first use (engine design/directory.ts) —
+//            and "Create" runs the shared direct-create flow with
+//            kind: "design" (no agent prompt; Design has none).
+//
+// The toggle appears only where the Design surface can run (native desktop),
+// so a web/remote shell keeps exactly the Code-only page it had.
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import {
-  ChevronDown,
-  FolderOpen,
-  FolderPlus,
-  PenTool,
-  Sparkles,
-} from "lucide-react";
+import { ChevronDown, FolderOpen, FolderPlus, Sparkles } from "lucide-react";
 
 import { GithubIcon } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -87,6 +94,14 @@ import { localWorkspaceOwner } from "../../features/team/organization-capabiliti
 import { useNativeRuntime } from "../../platform/runtime";
 import { createWorkspaceForProject } from "../create-workspace";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
+import {
+  WorkspaceModeToggleView,
+  type WorkspaceMode,
+} from "../../shared/ui/workspace-mode-header";
+import {
+  designDirectoryTargetKeyForRepo,
+  useDesignDirectoryTarget,
+} from "../../state/design-directory-target";
 
 interface DispatcherPageProps {
   /** Retained Home surfaces stay mounted. Gate effects and selection resets to
@@ -140,6 +155,13 @@ export function DispatcherPage({
   const [base, setBase] = useState<DispatcherBase | null>(null);
   const [busy, setBusy] = useState(false);
   const [designBusy, setDesignBusy] = useState(false);
+  // Which mode the NEXT workspace opens in. Renderer-local intent, kept across
+  // project switches (a designer creating several design workspaces should not
+  // re-pick Design each time); it collapses to Code wherever Design cannot run.
+  const [requestedMode, setRequestedMode] = useState<WorkspaceMode>("code");
+  const mode: WorkspaceMode = designWorkspaceCreationAvailable
+    ? requestedMode
+    : "code";
   const wasActiveRef = useRef(false);
   const lastInitialProjectIdRef = useRef<string | null | undefined>(undefined);
 
@@ -190,15 +212,30 @@ export function DispatcherPage({
     [projects, selectedProjectId],
   );
 
+  // What Design entry would do to the selected repository's main checkout
+  // (open its design folder, or create "<repo> - Design"). Warmed while the
+  // page is active so flipping the toggle answers from the cache; a hidden
+  // Create page reads nothing.
+  const designTarget = useDesignDirectoryTarget(
+    active && designWorkspaceCreationAvailable && selectedProject
+      ? designDirectoryTargetKeyForRepo(selectedProject.repoRoot)
+      : null,
+  );
+
   const handleCreateDesign = async () => {
     const project = selectedProject;
-    if (!project || designBusy || !designWorkspaceCreationAvailable) return;
+    if (!project || busy || designBusy || !designWorkspaceCreationAvailable) {
+      return;
+    }
     setDesignBusy(true);
     try {
       await createWorkspaceForProject({
         project,
         dispatch,
         kind: "design",
+        // "Create from…" applies to both modes: a design workspace forked off
+        // a PR reviews that PR's design folder.
+        ...(base?.branch ? { baseBranch: base.branch } : {}),
       });
     } finally {
       setDesignBusy(false);
@@ -432,142 +469,146 @@ export function DispatcherPage({
       aria-labelledby="create-workspace-title"
       aria-describedby="create-workspace-description"
     >
-      <section className="border-border1 bg-bg2 w-full max-w-[640px] overflow-visible rounded-lg border shadow-[var(--shadow-xl)]">
-        <h1 id="create-workspace-title" className="sr-only">
-          Create a workspace
-        </h1>
-        <p id="create-workspace-description" className="sr-only">
-          Pick a repository and describe a task, or create a design workspace.
-        </p>
+      <div className="flex w-full max-w-[640px] flex-col gap-2">
+        {/* Workspace mode is page-level intent, not composer content. Keep it
+            outside the card and align it with the card's right edge. */}
+        {designWorkspaceCreationAvailable && (
+          <div data-dispatcher-mode-switcher="" className="flex self-end">
+            <WorkspaceModeToggleView
+              mode={mode}
+              disabled={busy || designBusy}
+              switching={false}
+              onModeChange={setRequestedMode}
+            />
+          </div>
+        )}
 
-        {/* Top bar — project pill · + folder menu · Create from…. One
+        <section className="border-border1 bg-bg2 w-full overflow-visible rounded-lg border shadow-[var(--shadow-xl)]">
+          <h1 id="create-workspace-title" className="sr-only">
+            Create a workspace
+          </h1>
+          <p id="create-workspace-description" className="sr-only">
+            Pick a repository and describe a task, or create a design workspace.
+          </p>
+
+          {/* Top bar — project pill · + folder menu · Create from…. One
             continuous surface with the composer below: same card background,
             no separator line. */}
-        <div className="flex items-center gap-1.5 px-4 pt-3 pb-1">
-          {/* Project selector */}
-          <DropdownMenu>
-            <Tooltip label="Choose project">
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="text-fg1 hover:bg-bg2-hover inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-sm font-medium transition-colors"
-                >
-                  <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                    {selectedProject ? (
+          <div className="flex items-center gap-1.5 px-4 pt-3 pb-1">
+            {/* Project selector */}
+            <DropdownMenu>
+              <Tooltip label="Choose project">
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="text-fg1 hover:bg-bg2-hover inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-sm font-medium transition-colors"
+                  >
+                    <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
+                      {selectedProject ? (
+                        <RepositoryIcon
+                          project={selectedProject}
+                          className="size-full rounded-sm"
+                        />
+                      ) : (
+                        "·"
+                      )}
+                    </span>
+                    <span className="max-w-[180px] truncate">
+                      {selectedProject?.name ?? "Select a project"}
+                    </span>
+                    <ChevronDown size={12} className="text-fg2 opacity-70" />
+                  </button>
+                </DropdownMenuTrigger>
+              </Tooltip>
+              <DropdownMenuContent
+                align="start"
+                sideOffset={4}
+                className="min-w-[220px]"
+              >
+                {projects.length === 0 && (
+                  <DropdownMenuItem disabled>No projects yet</DropdownMenuItem>
+                )}
+                {projects.map((p) => (
+                  <DropdownMenuItem
+                    key={p.id}
+                    data-selected={p.id === selectedProjectId || undefined}
+                    onSelect={() => setSelectedProjectId(p.id)}
+                  >
+                    <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
                       <RepositoryIcon
-                        project={selectedProject}
+                        project={p}
                         className="size-full rounded-sm"
                       />
-                    ) : (
-                      "·"
-                    )}
-                  </span>
-                  <span className="max-w-[180px] truncate">
-                    {selectedProject?.name ?? "Select a project"}
-                  </span>
-                  <ChevronDown size={12} className="text-fg2 opacity-70" />
-                </button>
-              </DropdownMenuTrigger>
-            </Tooltip>
-            <DropdownMenuContent
-              align="start"
-              sideOffset={4}
-              className="min-w-[220px]"
-            >
-              {projects.length === 0 && (
-                <DropdownMenuItem disabled>No projects yet</DropdownMenuItem>
-              )}
-              {projects.map((p) => (
-                <DropdownMenuItem
-                  key={p.id}
-                  data-selected={p.id === selectedProjectId || undefined}
-                  onSelect={() => setSelectedProjectId(p.id)}
-                >
-                  <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                    <RepositoryIcon
-                      project={p}
-                      className="size-full rounded-sm"
-                    />
-                  </span>
-                  <span className="truncate">{p.name}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+                    </span>
+                    <span className="truncate">{p.name}</span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
 
-          {/* Add a project (open / clone / quick start) */}
-          <DropdownMenu>
-            <Tooltip label="Add a project">
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex size-7 items-center justify-center rounded-sm transition-colors"
-                  aria-label="Add a project"
-                >
-                  <FolderPlus size={15} strokeWidth={1.5} />
-                </button>
-              </DropdownMenuTrigger>
-            </Tooltip>
-            <DropdownMenuContent
-              align="start"
-              sideOffset={4}
-              className="min-w-[200px]"
-            >
-              <DropdownMenuItem onSelect={() => onOpenProject()}>
-                <FolderOpen className="text-fg2" strokeWidth={1.5} />
-                <span>Open project</span>
-              </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => onOpenGithubProject()}>
-                <GithubIcon className="text-fg2" strokeWidth={1.5} />
-                <span>Open GitHub project</span>
-              </DropdownMenuItem>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => onQuickStart()}>
-                <Sparkles className="text-fg2" strokeWidth={1.5} />
-                <span>Quick start</span>
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <div className="flex-1" />
-
-          {/* Design workspaces do not have an agent prompt. Preserve their
-              Internal-only direct-create route on the full-page surface that
-              replaced the old per-repository trailing plus. */}
-          {designWorkspaceCreationAvailable && (
-            <Tooltip label="Create design workspace">
-              <button
-                type="button"
-                className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex h-7 items-center gap-1.5 rounded-sm px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
-                aria-label="Create design workspace"
-                disabled={!selectedProject || busy || designBusy}
-                onClick={() => void handleCreateDesign()}
+            {/* Add a project (open / clone / quick start) */}
+            <DropdownMenu>
+              <Tooltip label="Add a project">
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex size-7 items-center justify-center rounded-sm transition-colors"
+                    aria-label="Add a project"
+                  >
+                    <FolderPlus size={15} strokeWidth={1.5} />
+                  </button>
+                </DropdownMenuTrigger>
+              </Tooltip>
+              <DropdownMenuContent
+                align="start"
+                sideOffset={4}
+                className="min-w-[200px]"
               >
-                <PenTool size={14} strokeWidth={1.5} />
-                <span>Design</span>
-              </button>
-            </Tooltip>
-          )}
+                <DropdownMenuItem onSelect={() => onOpenProject()}>
+                  <FolderOpen className="text-fg2" strokeWidth={1.5} />
+                  <span>Open project</span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => onOpenGithubProject()}>
+                  <GithubIcon className="text-fg2" strokeWidth={1.5} />
+                  <span>Open GitHub project</span>
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem onSelect={() => onQuickStart()}>
+                  <Sparkles className="text-fg2" strokeWidth={1.5} />
+                  <span>Quick start</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
 
-          {/* Create from… — pick a PR/branch base (right-aligned, matching
+            <div className="flex-1" />
+
+            {/* Create from… — pick a PR/branch base (right-aligned, matching
               the shared design). Cloud toggle is intentionally omitted. */}
-          <CreateFromSource
-            project={selectedProject}
-            value={base}
-            onChange={setBase}
-          />
-        </div>
+            <CreateFromSource
+              project={selectedProject}
+              value={base}
+              onChange={setBase}
+            />
+          </div>
 
-        {/* Composer — flush, full-width (no card, no outer padding); its own
+          {/* Composer — flush, full-width (no card, no outer padding); its own
             px-4 inset aligns the text + pills with the top row. */}
-        <DispatcherComposer
-          agents={agents}
-          cwd={selectedProject?.repoRoot ?? null}
-          originUrl={selectedProject?.originUrl ?? null}
-          onCreate={handleCreate}
-          busy={busy || designBusy}
-        />
-      </section>
+          <DispatcherComposer
+            agents={agents}
+            cwd={selectedProject?.repoRoot ?? null}
+            originUrl={selectedProject?.originUrl ?? null}
+            onCreate={handleCreate}
+            busy={busy || designBusy}
+            mode={mode}
+            design={{
+              projectName: selectedProject?.name ?? null,
+              target: designTarget.data,
+              loading: designTarget.loading,
+              onCreate: () => void handleCreateDesign(),
+            }}
+          />
+        </section>
+      </div>
     </main>
   );
 }

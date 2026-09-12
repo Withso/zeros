@@ -48,7 +48,12 @@
 
 import crypto from "node:crypto";
 import type { CommandHandler } from "../router";
-import { deleteSecret, getSecret, setSecret } from "../../secret-store";
+import {
+  deleteSecret,
+  getSecret,
+  SecretStoreReadError,
+  setSecret,
+} from "../../secret-store";
 import { persistSession } from "./auth-session";
 import { appBaseUrl } from "../../app-base-url";
 
@@ -106,7 +111,15 @@ export const authBeginHandoff: CommandHandler = (args) => {
  *  worktree instance can recognise + complete a sign-in a sibling instance began.
  *  See the header note on the shared zeros-dev:// scheme. */
 export const authPeekHandoff: CommandHandler = () => {
-  const raw = getSecret(PENDING_KEY);
+  let raw: string | null;
+  try {
+    raw = getSecret(PENDING_KEY);
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) {
+      return { nonce: null, expiresAt: null };
+    }
+    throw error;
+  }
   if (!raw) return { nonce: null, expiresAt: null };
   try {
     const p = JSON.parse(raw) as { nonce?: unknown; expiresAt?: unknown };
@@ -127,7 +140,15 @@ export const authRedeemHandoff: CommandHandler = async (args) => {
   const ticket = typeof args.ticket === "string" ? args.ticket : "";
   if (!ticket) return { error: "missing_ticket" };
 
-  const rawPending = getSecret(PENDING_KEY);
+  let rawPending: string | null;
+  try {
+    rawPending = getSecret(PENDING_KEY);
+  } catch (error) {
+    if (error instanceof SecretStoreReadError) {
+      return { error: "no_pending_handoff" };
+    }
+    throw error;
+  }
   // Single-use: clear the verifier regardless of what happens next.
   deleteSecret(PENDING_KEY);
   if (!rawPending) return { error: "no_pending_handoff" };

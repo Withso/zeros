@@ -1,10 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { rename, unlink, writeFile } from "node:fs/promises";
-import path from "node:path";
 
 import { BrowserWindow, dialog, type SaveDialogOptions } from "electron";
 
 import type { CommandHandler } from "../router";
+import { electronAtomicTemporaryPath } from "./atomic-file-write";
 
 const MAX_PNG_BYTES = 12 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
@@ -52,6 +51,12 @@ export function designPngSaveDialogOptions(
   };
 }
 
+/** Keep an export selected inside Design territory out of the engine-owned
+ * transaction recovery namespace while retaining an atomic same-dir rename. */
+export function designPngTemporaryPath(target: string): string {
+  return electronAtomicTemporaryPath(target);
+}
+
 export const designExportPng: CommandHandler = async (args, event) => {
   const data = typeof args.data === "string" ? args.data : "";
   const suggestedName = designPngSuggestedName(
@@ -67,10 +72,7 @@ export const designExportPng: CommandHandler = async (args, event) => {
   const target = result.filePath.toLowerCase().endsWith(".png")
     ? result.filePath
     : `${result.filePath}.png`;
-  const temporary = path.join(
-    path.dirname(target),
-    `.${path.basename(target)}.${process.pid}.${randomUUID()}.zeros-tmp`,
-  );
+  const temporary = designPngTemporaryPath(target);
   try {
     await writeFile(temporary, png, { flag: "wx" });
     await rename(temporary, target);

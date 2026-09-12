@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type { AgentFilesystemTerritory } from "../../types";
 import {
   boundaryParityRestrictions,
+  hasKernelExecutionBoundary,
   newTerritoryGeneration,
   readyBoundaryStatus,
   unavailableBoundaryStatus,
@@ -16,10 +17,7 @@ const territory: AgentFilesystemTerritory = {
   designRecognitionPaths: [],
   writeCapabilities: {
     workspace: "write",
-    deniedPaths: [
-      "/private/work/repo/Zeros Design",
-      "/private/work/repo/.git",
-    ],
+    deniedPaths: ["/private/work/repo/Zeros Design", "/private/work/repo/.git"],
   },
 };
 
@@ -63,20 +61,41 @@ describe("execution boundary status contract", () => {
     });
   });
 
+  it("distinguishes host process supervision from a kernel execution boundary", () => {
+    expect(
+      hasKernelExecutionBoundary({
+        status: { backend: "none", state: "not-required" },
+      }),
+    ).toBe(false);
+    expect(
+      hasKernelExecutionBoundary({
+        status: { backend: "none", state: "ready" },
+      }),
+    ).toBe(false);
+    expect(
+      hasKernelExecutionBoundary({
+        status: { backend: "zeros-srt", state: "ready" },
+      }),
+    ).toBe(true);
+    expect(
+      hasKernelExecutionBoundary({
+        status: { backend: "cloud-worker", state: "ready" },
+      }),
+    ).toBe(true);
+    expect(hasKernelExecutionBoundary(undefined)).toBe(false);
+  });
+
   it("reports an expected container CLI as restricted without a private worker", () => {
     expect(
       boundaryParityRestrictions({ containerWorkflowExpected: true }),
     ).toEqual(["container-workflows-unavailable"]);
     expect(
-      boundaryParityRestrictions({
-        containerWorkflowExpected: true,
-        containerWorker: {
-          runtime: "podman",
-          backend: "embedded-linux",
-          executable: "/usr/bin/podman",
-        },
-      }),
+      boundaryParityRestrictions(
+        { containerWorkflowExpected: true },
+        { containerWorkflowAvailable: true },
+      ),
     ).toEqual([]);
+    expect(boundaryParityRestrictions({})).toEqual([]);
   });
 
   it("carries only actionable remediation for an unavailable boundary", () => {

@@ -6,13 +6,10 @@
 // take the same route on mount: hydrate the transcript from disk, then ask the
 // engine to load its session. After a renderer-only reload that is free — the
 // engine still owns each execution and re-adopts it without admitting anything.
-// After an ENGINE restart (a dev reload, an update, a crash) there is nothing to
-// adopt, so each of those loads minted a fresh execution: a full historical ZSR
-// private-world admission per pane, all at once, in front of whatever the user
-// actually wanted to do. That is most of the
-// boot burst measured on 2026-08-17 — 14 admissions squeezed through a 2-slot
-// gate, ~98 s of queue wait, and the worst line spending 30.8 s queued for 1.06 s
-// of work.
+// After an ENGINE restart (a dev reload, an update, or a crash) there is nothing
+// to adopt. Eagerly loading every surfaced pane would therefore create a fresh
+// provider execution for each one at once, putting an avoidable startup burst
+// in front of the chat the user actually wants.
 //
 // The rule this module owns:
 //

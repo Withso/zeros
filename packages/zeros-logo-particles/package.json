@@ -1,0 +1,15 @@
+{
+  "name": "@zeros/logo-particles",
+  "version": "0.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Shared Zeros logo particle field for the Mac app and marketing site. Canvas occupancy and poses; not wired to either app yet.",
+  "type": "commonjs",
+  "exports": {
+    "./field-model": "./field-model.js",
+    "./field": "./field.js"
+  },
+  "scripts": {
+    "test": "node --test field-model.test.cjs"
+  }
+}

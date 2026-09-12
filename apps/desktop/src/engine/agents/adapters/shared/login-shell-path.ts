@@ -55,8 +55,8 @@ export interface LoginShellPathRunner {
   ): Promise<{ readonly stdout: string }>;
 }
 
-/** The engine installs a ZSR-backed runner before warming the probe. This is
- * process-global because PATH discovery itself is process-global. */
+/** The engine installs an execution-boundary-backed runner before warming the
+ * probe. This is process-global because PATH discovery itself is process-global. */
 export function configureLoginShellPathRunner(
   runner: LoginShellPathRunner,
 ): void {

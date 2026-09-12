@@ -2,11 +2,18 @@ import { workspaceReassignLocalOrganization } from "../../platform/git";
 import { isExpectedElectron, isNativeRuntime } from "../../platform/runtime";
 import { getSetting, setSetting } from "../../platform/settings";
 import type { Me } from "./control-plane";
+import { PERSONAL_ORGANIZATION_ID } from "./personal-organization";
 
 const HISTORY_KEY = "organization:membership-history-v1";
 const HIERARCHY_SEEN_KEY = "organization:hierarchy-seen-v1";
+const PERSONAL_IDS_KEY = "organization:personal-ids-v1";
 const MAX_ACCOUNTS = 8;
 const MAX_ORGANIZATIONS = 200;
+// Personal aliases outlive the small account MRU, including deletion/recreation.
+// Only explicitly identified old Personal IDs are eligible for local repair.
+const MAX_PERSONAL_IDS = 256;
+let personalIdsFingerprint = "";
+let personalIdsSnapshot: string[] = [];
 
 export type OrganizationMembershipSnapshot = {
   userId: string;
@@ -67,6 +74,75 @@ function readHistory(): OrganizationMembershipHistory {
       )
       .slice(0, MAX_ACCOUNTS),
   };
+}
+
+/** Bounded local migration metadata, not an authorization or membership cache.
+ * Never infer Personal ownership from an email, missing membership, ID prefix,
+ * or a cloud row. The old per-account history provides the upgrade evidence. */
+export function getKnownPersonalOrganizationIds(): readonly string[] {
+  const raw = getSetting<{ version?: unknown; ids?: unknown } | null>(
+    PERSONAL_IDS_KEY,
+    null,
+  );
+  const stored =
+    raw?.version === 1 && Array.isArray(raw.ids)
+      ? raw.ids.slice(0, MAX_PERSONAL_IDS).filter(validId)
+      : [];
+  const historical = readHistory()
+    .accounts.map((account) => account.personalId)
+    .filter(validId);
+  const fingerprint = JSON.stringify([stored, historical]);
+  if (fingerprint !== personalIdsFingerprint) {
+    personalIdsFingerprint = fingerprint;
+    const ids = [...new Set([...stored, ...historical])]
+      .filter((id) => id !== PERSONAL_ORGANIZATION_ID)
+      .slice(-MAX_PERSONAL_IDS);
+    if (!samePersonalIds(ids, personalIdsSnapshot)) personalIdsSnapshot = ids;
+  }
+  return personalIdsSnapshot;
+}
+
+function samePersonalIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index]);
+}
+
+/** Learn aliases before publishing the new UI snapshot. This keeps old local
+ * rows visible while the asynchronous engine repair retries or is offline. */
+export function rememberPersonalOrganizationOwnership(me: Me): void {
+  const previous = getKnownPersonalOrganizationIds();
+  const organizations = me.organizations ?? me.teams;
+  const collaborativeIds = new Set(
+    organizations
+      .filter((organization) => !organization.isPersonal)
+      .map((organization) => organization.id),
+  );
+  const ids = [
+    ...new Set([
+      ...previous,
+      ...organizations
+        .filter((organization) => organization.isPersonal)
+        .map((organization) => organization.id),
+    ]),
+  ]
+    .filter(
+      (id) =>
+        validId(id) &&
+        id !== PERSONAL_ORGANIZATION_ID &&
+        !collaborativeIds.has(id),
+    )
+    .slice(-MAX_PERSONAL_IDS);
+  // Persist history-derived aliases before its account MRU can evict them.
+  // Failed storage writes retain this session's known aliases; no local files
+  // or source records are removed.
+  if (!samePersonalIds(ids, previous)) personalIdsSnapshot = ids;
+  if (setSetting(PERSONAL_IDS_KEY, { version: 1, ids })) {
+    personalIdsFingerprint = JSON.stringify([
+      ids,
+      readHistory()
+        .accounts.map((account) => account.personalId)
+        .filter(validId),
+    ]);
+  }
 }
 
 function readHierarchySeenUserIds(): string[] {
@@ -133,9 +209,8 @@ function currentSnapshot(me: Me): OrganizationMembershipSnapshot | null {
   if (!validId(me.user.id) || !validIds(organizationIds)) return null;
   return {
     userId: me.user.id,
-    // Preserve flat-Team ids before Personal arrives. Removals become durable
-    // tombstones but are not applied until a hierarchy-aware response supplies
-    // the destination Personal id. Promoted Team→Organization ids stay stable.
+    // Preserve the server Personal ID only as legacy migration evidence.
+    // Device Personal itself has no account or server organization ID.
     personalId: personal?.id ?? null,
     organizationIds,
     retiredOrganizationIds: [],
@@ -168,7 +243,28 @@ export function organizationMembershipTransition(
 
 let reconciliationChain: Promise<void> = Promise.resolve();
 
-async function reconcile(me: Me): Promise<void> {
+async function detachKnownPersonalWorkspaceOwners(): Promise<void> {
+  if (!isNativeRuntime()) return;
+  for (const fromOrganizationId of getKnownPersonalOrganizationIds()) {
+    await workspaceReassignLocalOrganization({
+      fromOrganizationId,
+      toOrganizationId: null,
+    });
+  }
+}
+
+/** Can run on local bridge connection without any login or network access. */
+export function reconcilePersonalWorkspaceOwnership(): Promise<void> {
+  const task = reconciliationChain.then(detachKnownPersonalWorkspaceOwners);
+  reconciliationChain = task.catch(() => undefined);
+  return task;
+}
+
+async function reconcile(me: Me, isCurrent: () => boolean): Promise<void> {
+  if (!isCurrent()) return;
+  rememberPersonalOrganizationOwnership(me);
+  await detachKnownPersonalWorkspaceOwners();
+  if (!isCurrent()) return;
   const current = currentSnapshot(me);
   if (!current) return;
   const history = readHistory();
@@ -190,34 +286,31 @@ async function reconcile(me: Me): Promise<void> {
     });
   };
 
-  // A pre-0009 server can prove which flat tenant ids disappeared but cannot
-  // name Personal yet. Keep the tombstones and apply them after rollout.
-  if (!current.personalId) {
-    persist();
-    return;
-  }
-
   // Electron can briefly report no bridge while preload recovers. Do not
   // advance the durable membership snapshot until the local engine can perform
   // any required transfer; team-sync retries on bridge connection.
   if (!isNativeRuntime() && isExpectedElectron()) return;
   if (isNativeRuntime()) {
     for (const fromOrganizationId of transition.retiredOrganizationIds) {
+      if (!isCurrent()) return;
       await workspaceReassignLocalOrganization({
         fromOrganizationId,
-        toOrganizationId: current.personalId,
+        toOrganizationId: null,
       });
     }
   }
 
-  persist();
+  if (isCurrent()) persist();
 }
 
 /** Serialize reconciliations across refresh/account switches. A failed bridge
  * call deliberately leaves the previous durable snapshot in place so a later
  * refresh retries the idempotent transfer. */
-export function reconcileOrganizationWorkspaceOwnership(me: Me): Promise<void> {
-  const task = reconciliationChain.then(() => reconcile(me));
+export function reconcileOrganizationWorkspaceOwnership(
+  me: Me,
+  isCurrent: () => boolean = () => true,
+): Promise<void> {
+  const task = reconciliationChain.then(() => reconcile(me, isCurrent));
   reconciliationChain = task.catch(() => undefined);
   return task;
 }

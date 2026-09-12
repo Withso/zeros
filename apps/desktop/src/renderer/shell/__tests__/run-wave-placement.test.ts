@@ -8,15 +8,13 @@ function source(relativePath: string): string {
 }
 
 describe("live Run wave placement", () => {
-  it("leads each running action tab in the terminal with fg2", () => {
+  it("keeps action waves in primary tabs, bottom tabs, and the sidebar", () => {
     const terminalTab = source("apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx");
-
+    const primary = source("apps/desktop/src/renderer/shell/workbench/tab-strip.tsx");
+    const sidebar = source("apps/desktop/src/renderer/shell/terminal/terminal-workbench-layout.tsx");
+    expect(primary).toContain("<RunWave");
+    expect(sidebar).toContain("<RunWave");
     expect(terminalTab).toContain("<RunWave");
-    expect(terminalTab).toContain("text-fg2");
-    expect(terminalTab).toContain('<RunWave size={12} className="text-fg2');
-    expect(terminalTab).toMatch(
-      /leading=\{[\s\S]*state === "running"[\s\S]*<RunWave/,
-    );
   });
 
   it("marks every running workspace blue-primary, selected or not", () => {
@@ -82,17 +80,4 @@ describe("live Run wave placement", () => {
     );
   });
 
-  it("keeps the running Stop face static", () => {
-    const runControl = source("apps/desktop/src/renderer/shell/terminal/run-control.tsx");
-    const start = runControl.indexOf("const face = defaultRunning ? (");
-    const end = runControl.indexOf("\n  ) : (", start);
-    const runningFace = runControl.slice(start, end);
-
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    expect(runningFace).toContain("<Square");
-    expect(runningFace).toContain("<span>Stop</span>");
-    expect(runningFace).not.toContain("RunHorseShimmer");
-    expect(runningFace).not.toContain("RunWave");
-  });
 });

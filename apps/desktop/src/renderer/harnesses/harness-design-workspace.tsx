@@ -1036,6 +1036,15 @@ async function main() {
         };
       }
       if (message.op === "design.save") {
+        designShortcutOperations.push("save:start");
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        designShortcutOperations.push("save:end");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { ok: true },
+        };
+      }
+      if (message.op === "design.commit") {
         designShortcutOperations.push("commit");
         return {
           type: "WORKSPACE_RESPONSE",

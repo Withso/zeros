@@ -12,6 +12,7 @@ import {
 import { WorkOSCommandProcessor } from "./workos-command-outbox.js";
 import type { WorkOSManagementProvider } from "./workos-provider.js";
 import { WorkOSEventsReconciler } from "./workos-sync-events.js";
+import { DeletionLifecycleProcessor } from "./deletion-lifecycle.js";
 
 type SyncLogger = Pick<Console, "info" | "warn" | "error">;
 
@@ -24,6 +25,13 @@ export type WorkOSSyncRuntimeOptions = {
   /** Webhooks are immediate; Events API is the ordered repair path. */
   eventIntervalMs?: number;
   notificationIntervalMs?: number;
+  deletionIntervalMs?: number;
+  /**
+   * Keep false while the schema needed by the deletion lifecycle is behind a
+   * controlled migration boundary. The other WorkOS repair loops remain safe
+   * and continue running in that state.
+   */
+  deletionLifecycleEnabled?: boolean;
   logger?: SyncLogger;
 };
 
@@ -54,13 +62,14 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     options.pool,
     async (delivery) => {
       try {
-        await sendEmailStrict(
+        const receipt = await sendEmailStrict(
           options.email,
           delivery.destinationEmail,
           delivery.subject,
           delivery.html,
-          { clientReference: delivery.clientReference },
+          { idempotencyKey: delivery.idempotencyKey },
         );
+        return { providerMessageId: receipt.messageId };
       } catch (error) {
         if (error instanceof EmailDeliveryError) {
           throw new SecurityNotificationDeliveryError(
@@ -73,9 +82,14 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     },
     { logger },
   );
+  const deletions =
+    options.deletionLifecycleEnabled === false
+      ? null
+      : new DeletionLifecycleProcessor(options.pool, { logger });
   const commandLoop: Loop = { timer: null, active: null };
   const eventLoop: Loop = { timer: null, active: null };
   const notificationLoop: Loop = { timer: null, active: null };
+  const deletionLoop: Loop = { timer: null, active: null };
   let stopped = false;
 
   const schedule = (
@@ -118,8 +132,19 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     notificationLoop,
     options.notificationIntervalMs ?? 5_000,
     "security notifications",
-    () => notifications.tick(20),
+    // Resend rate-limits at the team boundary across every API key. Keep this
+    // worker's burst deliberately small; durable retries absorb shared-team
+    // contention without delaying authentication requests.
+    () => notifications.tick(4),
   );
+  if (deletions) {
+    schedule(
+      deletionLoop,
+      options.deletionIntervalMs ?? 15_000,
+      "deletion lifecycle",
+      () => deletions.tick(10),
+    );
+  }
 
   return {
     async stop(): Promise<void> {
@@ -128,13 +153,16 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
       if (commandLoop.timer) clearTimeout(commandLoop.timer);
       if (eventLoop.timer) clearTimeout(eventLoop.timer);
       if (notificationLoop.timer) clearTimeout(notificationLoop.timer);
+      if (deletionLoop.timer) clearTimeout(deletionLoop.timer);
       commandLoop.timer = null;
       eventLoop.timer = null;
       notificationLoop.timer = null;
+      deletionLoop.timer = null;
       await Promise.all([
         commandLoop.active,
         eventLoop.active,
         notificationLoop.active,
+        deletionLoop.active,
       ]);
     },
   };

@@ -26,7 +26,7 @@ const sidebarSource = readFileSync(
 );
 
 describe("design workspace inspector toolbar", () => {
-  it("keeps stage, undo, and redo keyboard-only while retaining PNG export", () => {
+  it("keeps save, undo, and redo keyboard-only while exposing explicit Design Git actions", () => {
     const inspector = source.match(
       /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
     )?.[0];
@@ -37,8 +37,12 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).not.toContain('aria-label="Undo design edit"');
     expect(inspector).not.toContain('aria-label="Redo design edit"');
     expect(source).not.toMatch(/\bSave,|\bUndo2,|\bRedo2,/);
+    expect(source).toContain("saveDesigns(");
     expect(source).toContain("stageDesigns(");
-    expect(source).not.toContain("saveDesigns(");
+    expect(source).toContain("commitDesigns(");
+    expect(inspector).toContain('aria-label="Design Git actions"');
+    expect(inspector).toContain('aria-label="Stage Design changes"');
+    expect(inspector).toContain('aria-label="Commit staged Design changes"');
   });
 
   it("deletes frames and elements immediately without confirmation or success toasts", () => {

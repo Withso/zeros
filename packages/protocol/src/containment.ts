@@ -63,9 +63,9 @@ export interface ExecutionBoundaryStatus {
    * admission. Counts and stable categories only: endpoints, socket paths,
    * environment values, and broker identities never cross the bridge. */
   services?: ExecutionBoundaryServicesStatus;
-  /** Status of the private ChangeSet and its validated promotion into the
-   * canonical repository. Ref names, object ids, paths, and error text remain
-   * engine-local. */
+  /** Legacy private-ChangeSet status retained for v1 wire compatibility.
+   * Current native Code and API-only Design paths do not publish a ChangeSet;
+   * ref names, object ids, paths, and error text remain engine-local. */
   git?: ExecutionBoundaryGitStatus;
   /** Last authority-changing lifecycle transition for this exact execution. */
   lifecycle?: ExecutionBoundaryLifecycleStatus;

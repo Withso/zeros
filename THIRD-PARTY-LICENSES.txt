@@ -26,27 +26,27 @@ a vendor grants redistribution rights beyond its stated terms.
 
 TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 ----------------------------------------------------
-- @anthropic-ai/claude-agent-sdk@0.3.238: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
-- @cursor/sdk@1.0.28: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @anthropic-ai/claude-agent-sdk@0.3.266: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
+- @cursor/sdk@1.0.31: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (601 resolved package/version records)
+PACKAGE INVENTORY (602 resolved package/version records)
 -----------------
 
-@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238
+@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Author: Anthropic <support@anthropic.com>
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/claude-agent-sdk@0.3.238
+@anthropic-ai/claude-agent-sdk@0.3.266
   License: SEE LICENSE IN README.md
   Surfaces: root pnpm workspace
   Author: Anthropic <support@anthropic.com>
   Source: https://github.com/anthropics/claude-agent-sdk-typescript
   License documents: 8ce94b9478bb
 
-@anthropic-ai/sandbox-runtime@0.0.73
+@anthropic-ai/sandbox-runtime@0.0.75
   License: Apache-2.0
   Surfaces: root pnpm workspace
   Author: Anthropic PBC
@@ -308,19 +308,26 @@ PACKAGE INVENTORY (601 resolved package/version records)
   Source: https://github.com/connectrpc/connect-es
   License documents: d17f227e4df5
 
-@cursor/sdk-darwin-arm64@1.0.28
+@cursor/sdk-darwin-arm64@1.0.31
   License: SEE LICENSE IN LICENSE.md
   Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/cursor/cursor
   License documents: 8d17330e28e3
 
-@cursor/sdk@1.0.28
+@cursor/sdk@1.0.31
   License: SEE LICENSE IN LICENSE.md
   Surfaces: root pnpm workspace
   Source: https://github.com/cursor/cursor
   License documents: 8d17330e28e3
 
 @daytona/api-client@0.190.1
+  License: Apache-2.0
+  Surfaces: control plane
+  Author: OpenAPI-Generator Contributors
+  Source: https://github.com/daytonaio/daytona
+  License documents: d17f227e4df5
+
+@daytona/toolbox-api-client@0.190.1
   License: Apache-2.0
   Surfaces: control plane
   Author: OpenAPI-Generator Contributors
@@ -626,13 +633,13 @@ PACKAGE INVENTORY (601 resolved package/version records)
   Source: https://github.com/octokit/types.ts
   License documents: 8cd41c03a45e
 
-@openai/codex@0.149.0
+@openai/codex@0.153.4
   License: Apache-2.0
   Surfaces: root pnpm workspace
   Source: https://github.com/openai/codex
   License documents: 9d71575ecfd9, d17f227e4df5
 
-@openai/codex@0.149.0-darwin-arm64
+@openai/codex@0.153.4-darwin-arm64
   License: Apache-2.0
   Surfaces: desktop packaged runtime (macOS arm64)
   Source: https://github.com/openai/codex
@@ -1177,67 +1184,67 @@ PACKAGE INVENTORY (601 resolved package/version records)
   Source: https://github.com/statsig-io/js-client-monorepo
   License documents: 27cc00620b2a
 
-@tiptap/core@3.26.0
+@tiptap/core@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-bubble-menu@3.26.0
+@tiptap/extension-bubble-menu@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-document@3.26.0
+@tiptap/extension-document@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-floating-menu@3.26.0
+@tiptap/extension-floating-menu@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-mention@3.26.0
+@tiptap/extension-mention@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-paragraph@3.26.0
+@tiptap/extension-paragraph@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-text@3.26.0
+@tiptap/extension-text@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extensions@3.26.0
+@tiptap/extensions@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/pm@3.26.0
+@tiptap/pm@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/react@3.26.0
+@tiptap/react@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/suggestion@3.26.0
+@tiptap/suggestion@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
@@ -2029,7 +2036,7 @@ fast-sha256@1.3.0
   Source: https://github.com/dchest/fast-sha256-js
   License documents: 88d9b4eb6057
 
-fast-uri@3.1.5
+fast-uri@3.1.6
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Author: Vincent Le Goff <vince.legoff@gmail.com> (https://github.com/zekth)
@@ -2043,7 +2050,7 @@ fdir@6.5.0
   Source: https://github.com/thecodrr/fdir
   License documents: 9a39f2aadab1
 
-fflate@0.4.8
+fflate@0.4.9
   License: MIT
   Surfaces: root pnpm workspace
   Author: Arjun Barrett
@@ -2250,7 +2257,7 @@ hastscript@9.0.1
   Source: https://github.com/syntax-tree/hastscript
   License documents: dd1081884a92
 
-hono@4.13.0
+hono@4.13.7
   License: MIT
   Surfaces: control plane, root pnpm workspace
   Author: Yusuke Wada <yusuke@kamawada.com> (https://github.com/yusukebe)
@@ -2444,7 +2451,7 @@ js-tokens@4.0.0
   Source: https://github.com/lydell/js-tokens
   License documents: 2213d91c6062
 
-js-yaml@4.3.1
+js-yaml@4.3.2
   License: MIT
   Surfaces: root pnpm workspace
   Author: Vladimir Zapparov <dervus.grim@gmail.com>
@@ -3294,7 +3301,7 @@ prosemirror-keymap@1.2.3
   Source: https://github.com/prosemirror/prosemirror-keymap
   License documents: ef0b452ced63
 
-prosemirror-model@1.25.7
+prosemirror-model@1.25.11
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://code.haverbeke.berlin/prosemirror/prosemirror-model
@@ -3324,7 +3331,7 @@ prosemirror-transform@1.12.0
   Source: https://github.com/prosemirror/prosemirror-transform
   License documents: ef0b452ced63
 
-prosemirror-view@1.41.8
+prosemirror-view@1.42.3
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://code.haverbeke.berlin/prosemirror/prosemirror-view
@@ -3351,7 +3358,7 @@ qrcode.react@4.2.0
   Source: https://github.com/zpao/qrcode.react
   License documents: 908a4454d01d
 
-qs@6.15.2
+qs@6.16.0
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Source: https://github.com/ljharb/qs
@@ -3639,7 +3646,7 @@ side-channel-weakmap@1.0.2
   Source: https://github.com/ljharb/side-channel-weakmap
   License documents: cfc3f455254c
 
-side-channel@1.1.0
+side-channel@1.1.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
@@ -3667,10 +3674,10 @@ simple-get@4.0.1
   Source: https://github.com/feross/simple-get
   License documents: d4c2065e2b93
 
-smol-toml@1.6.1
+smol-toml@1.7.1
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
-  Author: Cynthia <cyyynthia@borkenware.com>
+  Author: Cynthia Rey <cynthia@cynthia.dev>
   Source: https://github.com/squirrelchat/smol-toml
   License documents: fa5659948374
 
@@ -4619,8 +4626,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 09edb7d11197
 SHA-256: 09edb7d111972cbb9e4c633627d8f7ced76c5a0b88941238def940d930d2d336
-Applies to: fflate@0.4.8
-Source labels: fflate@0.4.8 — LICENSE
+Applies to: fflate@0.4.9
+Source labels: fflate@0.4.9 — LICENSE
 ================================================================================
 
 MIT License
@@ -5289,8 +5296,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 1210bc93eb85
 SHA-256: 1210bc93eb85dd786c33192d5bcb7153a93922fa99fbc1512af6a7199cb41080
-Applies to: @anthropic-ai/sandbox-runtime@0.0.73
-Source labels: @anthropic-ai/sandbox-runtime@0.0.73 — LICENSE
+Applies to: @anthropic-ai/sandbox-runtime@0.0.75
+Source labels: @anthropic-ai/sandbox-runtime@0.0.75 — LICENSE
 ================================================================================
 
                                  Apache License
@@ -10028,8 +10035,8 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 ================================================================================
 DOCUMENT 8ce94b9478bb
 SHA-256: 8ce94b9478bb9868f9641f818e06cd722fbe55d4c22e2d2ed11971b20146173a
-Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238, @anthropic-ai/claude-agent-sdk@0.3.238
-Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.238 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.238 — LICENSE.md
+Applies to: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266, @anthropic-ai/claude-agent-sdk@0.3.266
+Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266 — terms supplied by @anthropic-ai/claude-agent-sdk@0.3.266 — LICENSE.md; @anthropic-ai/claude-agent-sdk@0.3.266 — LICENSE.md
 ================================================================================
 
 © Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements outlined here: https://code.claude.com/docs/en/legal-and-compliance.
@@ -10037,8 +10044,8 @@ Source labels: @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238 — terms sup
 ================================================================================
 DOCUMENT 8d17330e28e3
 SHA-256: 8d17330e28e36f8fef39ccc6facd4b7ddc2855313b679b394f0547dde44408c4
-Applies to: @cursor/sdk-darwin-arm64@1.0.28, @cursor/sdk@1.0.28
-Source labels: @cursor/sdk-darwin-arm64@1.0.28 — terms supplied by @cursor/sdk@1.0.28 — LICENSE.md; @cursor/sdk@1.0.28 — LICENSE.md
+Applies to: @cursor/sdk-darwin-arm64@1.0.31, @cursor/sdk@1.0.31
+Source labels: @cursor/sdk-darwin-arm64@1.0.31 — terms supplied by @cursor/sdk@1.0.31 — LICENSE.md; @cursor/sdk@1.0.31 — LICENSE.md
 ================================================================================
 
 # Cursor SDK License
@@ -10320,8 +10327,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 9d71575ecfd9
 SHA-256: 9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915
-Applies to: @openai/codex@0.149.0, @openai/codex@0.149.0-darwin-arm64
-Source labels: @openai/codex@0.149.0 generated protocol — NOTICE; @openai/codex@0.149.0-darwin-arm64 staged native runtime — NOTICE
+Applies to: @openai/codex@0.153.4, @openai/codex@0.153.4-darwin-arm64
+Source labels: @openai/codex@0.153.4 generated protocol — NOTICE; @openai/codex@0.153.4-darwin-arm64 staged native runtime — NOTICE
 ================================================================================
 
 OpenAI Codex
@@ -10478,8 +10485,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT a07bc24468b9
 SHA-256: a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550
-Applies to: js-yaml@4.3.1
-Source labels: js-yaml@4.3.1 — LICENSE
+Applies to: js-yaml@4.3.2
+Source labels: js-yaml@4.3.2 — LICENSE
 ================================================================================
 
 (The MIT License)
@@ -10658,8 +10665,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT a6ab98e5c77b
 SHA-256: a6ab98e5c77b9070c443eaff2ff81034a6f8cc05a7524d5098eb0f24defa0115
-Applies to: hono@4.13.0
-Source labels: hono@4.13.0 — LICENSE
+Applies to: hono@4.13.7
+Source labels: hono@4.13.7 — LICENSE
 ================================================================================
 
 MIT License
@@ -12162,8 +12169,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT c96e5ecb55ac
 SHA-256: c96e5ecb55ac593157ad1d21d1f44a611187f494a0f04c235a1ae692c88d6ba9
-Applies to: @tiptap/core@3.26.0, @tiptap/extension-bubble-menu@3.26.0, @tiptap/extension-document@3.26.0, @tiptap/extension-floating-menu@3.26.0, @tiptap/extension-mention@3.26.0, @tiptap/extension-paragraph@3.26.0, @tiptap/extension-text@3.26.0, @tiptap/extensions@3.26.0, @tiptap/pm@3.26.0, @tiptap/react@3.26.0, @tiptap/suggestion@3.26.0
-Source labels: @tiptap/core@3.26.0 — LICENSE.md; @tiptap/extension-bubble-menu@3.26.0 — LICENSE.md; @tiptap/extension-document@3.26.0 — LICENSE.md; @tiptap/extension-floating-menu@3.26.0 — LICENSE.md; @tiptap/extension-mention@3.26.0 — LICENSE.md; @tiptap/extension-paragraph@3.26.0 — LICENSE.md; @tiptap/extension-text@3.26.0 — LICENSE.md; @tiptap/extensions@3.26.0 — LICENSE.md; @tiptap/pm@3.26.0 — LICENSE; @tiptap/react@3.26.0 — LICENSE.md; @tiptap/suggestion@3.26.0 — LICENSE.md
+Applies to: @tiptap/core@3.31.2, @tiptap/extension-bubble-menu@3.31.2, @tiptap/extension-document@3.31.2, @tiptap/extension-floating-menu@3.31.2, @tiptap/extension-mention@3.31.2, @tiptap/extension-paragraph@3.31.2, @tiptap/extension-text@3.31.2, @tiptap/extensions@3.31.2, @tiptap/pm@3.31.2, @tiptap/react@3.31.2, @tiptap/suggestion@3.31.2
+Source labels: @tiptap/core@3.31.2 — LICENSE.md; @tiptap/extension-bubble-menu@3.31.2 — LICENSE.md; @tiptap/extension-document@3.31.2 — LICENSE.md; @tiptap/extension-floating-menu@3.31.2 — LICENSE.md; @tiptap/extension-mention@3.31.2 — LICENSE.md; @tiptap/extension-paragraph@3.31.2 — LICENSE.md; @tiptap/extension-text@3.31.2 — LICENSE.md; @tiptap/extensions@3.31.2 — LICENSE.md; @tiptap/pm@3.31.2 — LICENSE; @tiptap/react@3.31.2 — LICENSE.md; @tiptap/suggestion@3.31.2 — LICENSE.md
 ================================================================================
 
 MIT License
@@ -12478,8 +12485,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT cfc3f455254c
 SHA-256: cfc3f455254c0af0655cc3ff46a41ed644b67599f6043346169d285bf2b3cf3b
-Applies to: side-channel-weakmap@1.0.2, side-channel@1.1.0
-Source labels: side-channel-weakmap@1.0.2 — LICENSE; side-channel@1.1.0 — LICENSE
+Applies to: side-channel-weakmap@1.0.2, side-channel@1.1.1
+Source labels: side-channel-weakmap@1.0.2 — LICENSE; side-channel@1.1.1 — LICENSE
 ================================================================================
 
 MIT License
@@ -12777,8 +12784,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.190.1, @openai/codex@0.149.0, @openai/codex@0.149.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.149.0 generated protocol — LICENSE; @openai/codex@0.149.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.190.1, @daytona/toolbox-api-client@0.190.1, @openai/codex@0.153.4, @openai/codex@0.153.4-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.153.4 generated protocol — LICENSE; @openai/codex@0.153.4-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License
@@ -13704,8 +13711,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT df7464922225
 SHA-256: df7464922225c9b286167fa692d305e5ba98bf71613525d4d031649a344a3f3f
-Applies to: fast-uri@3.1.5
-Source labels: fast-uri@3.1.5 — LICENSE
+Applies to: fast-uri@3.1.6
+Source labels: fast-uri@3.1.6 — LICENSE
 ================================================================================
 
 Copyright (c) 2011-2021, Gary Court until https://github.com/garycourt/uri-js/commit/a1acf730b4bba3f1097c9f52e7d9d3aba8cdcaae
@@ -13993,8 +14000,8 @@ Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
 ================================================================================
 DOCUMENT e7dc37bf662d
 SHA-256: e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1
-Applies to: qs@6.15.2
-Source labels: qs@6.15.2 — LICENSE.md
+Applies to: qs@6.16.0
+Source labels: qs@6.16.0 — LICENSE.md
 ================================================================================
 
 BSD 3-Clause License
@@ -14390,8 +14397,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT ef0b452ced63
 SHA-256: ef0b452ced6304db2ce78ca66de1fc7b97bab05bc1750c95df359ed3fe1d65c8
-Applies to: prosemirror-commands@1.7.1, prosemirror-dropcursor@1.8.2, prosemirror-gapcursor@1.4.1, prosemirror-history@1.5.0, prosemirror-inputrules@1.5.1, prosemirror-keymap@1.2.3, prosemirror-model@1.25.7, prosemirror-schema-list@1.5.1, prosemirror-state@1.4.4, prosemirror-transform@1.12.0, prosemirror-view@1.41.8
-Source labels: prosemirror-commands@1.7.1 — LICENSE; prosemirror-dropcursor@1.8.2 — LICENSE; prosemirror-gapcursor@1.4.1 — LICENSE; prosemirror-history@1.5.0 — LICENSE; prosemirror-inputrules@1.5.1 — LICENSE; prosemirror-keymap@1.2.3 — LICENSE; prosemirror-model@1.25.7 — LICENSE; prosemirror-schema-list@1.5.1 — LICENSE; prosemirror-state@1.4.4 — LICENSE; prosemirror-transform@1.12.0 — LICENSE; prosemirror-view@1.41.8 — LICENSE
+Applies to: prosemirror-commands@1.7.1, prosemirror-dropcursor@1.8.2, prosemirror-gapcursor@1.4.1, prosemirror-history@1.5.0, prosemirror-inputrules@1.5.1, prosemirror-keymap@1.2.3, prosemirror-model@1.25.11, prosemirror-schema-list@1.5.1, prosemirror-state@1.4.4, prosemirror-transform@1.12.0, prosemirror-view@1.42.3
+Source labels: prosemirror-commands@1.7.1 — LICENSE; prosemirror-dropcursor@1.8.2 — LICENSE; prosemirror-gapcursor@1.4.1 — LICENSE; prosemirror-history@1.5.0 — LICENSE; prosemirror-inputrules@1.5.1 — LICENSE; prosemirror-keymap@1.2.3 — LICENSE; prosemirror-model@1.25.11 — LICENSE; prosemirror-schema-list@1.5.1 — LICENSE; prosemirror-state@1.4.4 — LICENSE; prosemirror-transform@1.12.0 — LICENSE; prosemirror-view@1.42.3 — LICENSE
 ================================================================================
 
 Copyright (C) 2015-2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others
@@ -14744,8 +14751,8 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT fa5659948374
 SHA-256: fa5659948374d4f555594f47f6da073b40dc503e921aeeece30df4362b3051a5
-Applies to: smol-toml@1.6.1
-Source labels: smol-toml@1.6.1 — LICENSE
+Applies to: smol-toml@1.7.1
+Source labels: smol-toml@1.7.1 — LICENSE
 ================================================================================
 
 Copyright (c) Squirrel Chat et al., All rights reserved.

@@ -42,6 +42,11 @@ describe("parseInviteToken", () => {
     expect(parseInviteToken(`  ${TOKEN}  `)).toBe(TOKEN);
   });
 
+  it("accepts a bare WorkOS invitation token", () => {
+    const workosToken = "W".repeat(25);
+    expect(parseInviteToken(workosToken)).toBe(workosToken);
+  });
+
   it("rejects invite links from foreign https hosts (L3 host pinning)", () => {
     expect(parseInviteToken(`https://evil.example/invite?token=${TOKEN}`)).toBeNull();
     expect(parseInviteToken(`https://app.zeros.build.evil.com/invite?token=${TOKEN}`)).toBeNull();

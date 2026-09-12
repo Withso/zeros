@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, generateKeyPairSync } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -18,6 +18,110 @@ function jwtFor(subject: string): string {
 }
 
 describe("qualified cloud GitHub credential coordinator", () => {
+  it("uses the production GitHub App broker for a single private-repository qualification scope", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString();
+    const now = 1_800_000_000_000;
+    const fetchImpl = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (
+        String(input) ===
+        "https://api.github.com/app/installations/987654/access_tokens"
+      ) {
+        expect(init).toMatchObject({ method: "POST", redirect: "error" });
+        expect(JSON.parse(String(init?.body))).toEqual({
+          repositories: ["private-fixture"],
+          permissions: { contents: "read" },
+        });
+        return Response.json(
+          {
+            token: "ghs_private_repository_working_copy",
+            expires_at: new Date(now + 60 * 60_000).toISOString(),
+          },
+          { status: 201 },
+        );
+      }
+      expect(String(input)).toBe(
+        "https://api.github.com/repos/withso/private-fixture",
+      );
+      expect(init).toMatchObject({ method: "GET", redirect: "error" });
+      expect(init?.headers).toMatchObject({
+        authorization: "Bearer ghs_private_repository_working_copy",
+      });
+      return Response.json({
+        full_name: "withso/private-fixture",
+        private: true,
+      });
+    });
+
+    await expect(
+      resolveQualifiedCloudGithubCredential(
+        {
+          ZEROS_CLOUD_OWNER_SUB: "workos|qualification-owner",
+          ZEROS_CLOUD_GITHUB_APP_ID: "12345",
+          ZEROS_CLOUD_GITHUB_APP_PRIVATE_KEY: pem,
+          ZEROS_CLOUD_GITHUB_INSTALLATION_ID: "987654",
+          ZEROS_CLOUD_GITHUB_REPOSITORY: "withso/private-fixture",
+        },
+        { fetch: fetchImpl as typeof fetch, now: () => now },
+      ),
+    ).resolves.toEqual({
+      method: "github-app",
+      accessToken: "ghs_private_repository_working_copy",
+      expiresAtMs: now + 60 * 60_000,
+      gitHost: "github.com",
+      gitHttpUsername: "x-access-token",
+      variantKey: "github.com",
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a public repository masquerading as the private fixture", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey
+      .export({ type: "pkcs8", format: "pem" })
+      .toString();
+    const now = 1_800_000_000_000;
+    const fetchImpl = vi.fn(async (input: string | URL) =>
+      String(input).includes("/access_tokens")
+        ? Response.json(
+            {
+              token: "ghs_public_repository_working_copy",
+              expires_at: new Date(now + 60 * 60_000).toISOString(),
+            },
+            { status: 201 },
+          )
+        : Response.json({
+            full_name: "withso/private-fixture",
+            private: false,
+          }),
+    );
+
+    await expect(
+      resolveQualifiedCloudGithubCredential(
+        {
+          ZEROS_CLOUD_OWNER_SUB: "workos|qualification-owner",
+          ZEROS_CLOUD_GITHUB_APP_ID: "12345",
+          ZEROS_CLOUD_GITHUB_APP_PRIVATE_KEY: pem,
+          ZEROS_CLOUD_GITHUB_INSTALLATION_ID: "987654",
+          ZEROS_CLOUD_GITHUB_REPOSITORY: "withso/private-fixture",
+        },
+        { fetch: fetchImpl as typeof fetch, now: () => now },
+      ),
+    ).rejects.toThrow(/private repository/i);
+  });
+
+  it("rejects partial direct GitHub App qualification authority", async () => {
+    await expect(
+      resolveQualifiedCloudGithubCredential({
+        ZEROS_CLOUD_OWNER_SUB: "workos|qualification-owner",
+        ZEROS_CLOUD_GITHUB_APP_ID: "12345",
+        ZEROS_CLOUD_GITHUB_INSTALLATION_ID: "987654",
+      }),
+    ).rejects.toThrow(/incomplete/i);
+  });
+
   it("mints for the exact owner and repository without exposing bearers in the URL or body", async () => {
     const owner = "auth0|owner";
     const accountToken = jwtFor(owner);

@@ -35,7 +35,7 @@ interface MigratedImage {
 
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
 const CONTEXT_GRAPH_PATH =
-  /^\.context-graph\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/[a-zA-Z0-9._-]+$/;
+  /^\.context(?:-graph)?\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/[a-zA-Z0-9._-]+$/;
 const LEGACY_DISK_PATH =
   /^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/;
 

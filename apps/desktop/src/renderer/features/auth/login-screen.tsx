@@ -3,9 +3,10 @@
 // ──────────────────────────────────────────────────────────
 //
 // Rendered by <AuthGate> when signed out. Electron main owns WorkOS PKCE, binds
-// an ephemeral loopback callback, and stores the resulting rotating token pair;
-// this renderer only waits for a metadata-only completion event. The legacy
-// Auth0 web-ticket/deep-link flow remains selectable until Phase 5.
+// the hosted exact-channel callback to the pending request, and stores the
+// resulting rotating token pair; this renderer only waits for a metadata-only
+// completion event. Packaged channels retain the explicit Auth0 rollback path,
+// while Dev fails closed when its Alpha WorkOS profile is incomplete.
 //
 // On click the button switches to "Opening browser…" (animated dots) and stays
 // there for the whole browser round-trip, with a Cancel affordance beneath it.
@@ -22,9 +23,12 @@ import { Button } from "@/renderer/shared/ui";
 import { useAuth } from "./use-auth";
 import { isElectron, nativeInvoke } from "../../platform/runtime";
 import {
+  desktopSignInDeadlineReached,
   desktopSignInExpiryLabel,
   desktopSignInSecondsRemaining,
 } from "./desktop-sign-in-expiry";
+import { workOSSignInFailureMessage } from "./auth-errors";
+import { CHANNEL } from "../../config/release-channel";
 
 const PRIVACY_URL = "https://zeros.build/privacy";
 const TERMS_URL = "https://zeros.build/terms";
@@ -35,6 +39,8 @@ function openExternal(url: string): void {
   else globalThis.open?.(url, "_blank", "noopener,noreferrer");
 }
 
+/** Present channel-appropriate onboarding and the main-owned sign-in attempt's
+ * waiting, cancellation, and recovery states. */
 export function LoginScreen() {
   const {
     startBrowserSignIn,
@@ -45,7 +51,7 @@ export function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Desktop sign-in in flight: the system browser is open and we're waiting for
-  // either the main-owned loopback callback or legacy deep link to flip the gate.
+  // either the main-owned WorkOS callback or legacy deep link to flip the gate.
   const [waiting, setWaiting] = useState(false);
   const [signInExpiresAt, setSignInExpiresAt] = useState<number | null>(null);
   const [countdownNow, setCountdownNow] = useState(() => Date.now());
@@ -70,6 +76,25 @@ export function LoginScreen() {
     const timer = globalThis.setInterval(update, 1_000);
     return () => globalThis.clearInterval(timer);
   }, [signInExpiresAt, waiting]);
+
+  // Main owns the authoritative WorkOS deadline. This renderer-side deadline
+  // is the UX safety net: even a retired/mismatched provider path that never
+  // emits a completion event must release the disabled button at the same
+  // boundary instead of remaining at “expiring now” forever.
+  useEffect(() => {
+    if (
+      !waiting ||
+      oauthError ||
+      signInExpiresAt === null ||
+      !desktopSignInDeadlineReached(signInExpiresAt, countdownNow)
+    ) {
+      return;
+    }
+    cancelPendingOAuth();
+    setWaiting(false);
+    setSignInExpiresAt(null);
+    setError(workOSSignInFailureMessage("expired", null));
+  }, [cancelPendingOAuth, countdownNow, oauthError, signInExpiresAt, waiting]);
 
   const expiryLabel =
     waiting && signInExpiresAt !== null
@@ -113,7 +138,11 @@ export function LoginScreen() {
       <div className="flex flex-1 items-center justify-center px-6">
         <div className="flex w-full max-w-[340px] flex-col items-start gap-6">
           <ZerosLogo />
-          <p className="text-fg2 text-sm">Sign in or sign up to continue</p>
+          <p className="text-fg2 text-sm">
+            {CHANNEL === "dev"
+              ? "Sign in once to continue across your Zeros Dev instances"
+              : "Sign in or sign up to continue"}
+          </p>
           <div className="flex flex-col items-start gap-3">
             <Button
               variant="primary"

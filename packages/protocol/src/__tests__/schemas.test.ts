@@ -16,11 +16,13 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
       type: "DB_CHANGED",
       kinds: ["workspaces", "setup"],
       workspaceIds: ["workspace-a", "workspace-b"],
+      designRecognitionChanged: true,
     });
     expect(m.type).toBe("DB_CHANGED");
     if (m.type === "DB_CHANGED") {
       expect(m.kinds).toEqual(["workspaces", "setup"]);
       expect(m.workspaceIds).toEqual(["workspace-a", "workspace-b"]);
+      expect(m.designRecognitionChanged).toBe(true);
     }
   });
 
@@ -520,6 +522,39 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         env: { GOOD: null },
       }),
     ).toThrow(/env/);
+  });
+
+  it("binds Design session admission to an explicit workspace document", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_NEW_SESSION",
+        agentId: "codex",
+        agentRole: "design",
+        workspaceId: "workspace-1",
+        designDocumentId: "frame:index.html",
+      }),
+    ).toMatchObject({ agentRole: "design" });
+    for (const malformed of [
+      { agentRole: "design", workspaceId: "workspace-1" },
+      { agentRole: "design", designDocumentId: "frame:index.html" },
+      {
+        agentRole: "code",
+        workspaceId: "workspace-1",
+        designDocumentId: "frame:index.html",
+      },
+      { agentRole: "unknown", workspaceId: "workspace-1" },
+    ]) {
+      expect(() =>
+        parseBridgeMessage({
+          ...b,
+          type: "AGENT_NEW_SESSION",
+          agentId: "codex",
+          ...malformed,
+        }),
+      ).toThrow();
+    }
   });
 
   it("lists the live boundary status and port message types", () => {

@@ -3,11 +3,11 @@
 // ──────────────────────────────────────────────────────────
 //
 // Engine-owned one-shots — chat-title generation, provider auth/version probes,
-// save-time key validation, `listSessions` — are real provider code and so must
-// run inside a real ZSR boundary. Each one used to prepare its OWN boundary and
-// then prove it torn down: a fresh policy, live canary, and proven teardown for
-// work nobody is watching. In the 2026-08-17 boot log roughly a third of all
-// admissions were exactly this.
+// save-time key validation, `listSessions` — are real provider code and inherit
+// the same routed execution contract as sessions. Each one used to prepare its
+// OWN boundary and then prove it torn down: cheap for native execution, but a
+// full policy/canary/teardown cycle for a sandboxed actor or cloud worker. In
+// the 2026-08-17 boot log roughly a third of all admissions were exactly this.
 //
 // This pool keeps ONE such boundary alive per identical request and hands it to
 // each one-shot in turn.

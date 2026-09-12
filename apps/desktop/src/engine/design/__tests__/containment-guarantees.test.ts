@@ -123,12 +123,14 @@ describe("Zeros-scoped design-directory containment guarantees", () => {
   });
 
   it("documents that enforcement belongs to Zeros-launched actors", () => {
-    const designMode = readFileSync(
-      path.join(repositoryRoot, "docs", "design-mode.md"),
+    const designWorkspace = readFileSync(
+      path.join(repositoryRoot, "docs", "design-workspace.md"),
       "utf8",
     );
-    expect(designMode).toContain("Zeros-launched code agent");
-    expect(designMode).toContain("external editor or coding platform");
-    expect(designMode).toContain("does not install persistent filesystem ACLs");
+    expect(designWorkspace).toContain("Code agent");
+    expect(designWorkspace).toContain("External terminal/editor");
+    expect(designWorkspace).toMatch(
+      /do not change the\s+native permissions of the Code process or external same-user tools/,
+    );
   });
 });

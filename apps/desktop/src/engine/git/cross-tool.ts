@@ -21,6 +21,7 @@
 //   3. User-level marker files are checked independently for integrations
 //      that do not write state inside the worktree.
 
+import { initializeWorkspaceSettings } from "../settings/personal-repo";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -734,6 +735,7 @@ async function createWorkspaceFromBranchInner(
       });
     }
 
+    initializeWorkspaceSettings(workspacePath);
     updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
     // Crash-recovery seed → app-data (not the worktree's working tree).
     writeWorktreeSeed(ws);

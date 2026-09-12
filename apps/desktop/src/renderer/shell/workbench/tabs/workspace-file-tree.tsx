@@ -50,6 +50,11 @@ import {
 } from "./tree-paths";
 import { useScrollMemory } from "../../scroll-memory";
 import { planIgnoredPathDelta, useIgnoredEntries } from "./ignored-entries";
+import {
+  designSectionDirectories,
+  filterDesignListing,
+  type DesignListingFilter,
+} from "./design-files-section";
 
 /** Horizontal inset of every tree row AND of the search row (the library uses
  *  one `--trees-padding-inline` for both). Shared with the search-row overlay
@@ -128,6 +133,15 @@ const SEARCH_ROW_INPUT_MARGIN = 1;
 const SEARCH_ROW_ACCESSORY_SIZE = 24;
 /** Gap between the input's right border and the accessory beside it. */
 const SEARCH_ROW_ACCESSORY_GAP = 4;
+
+/** Breathing room above the first row. Applied to the light-DOM root, NOT to
+ *  the shadow scroll container — see the note in TREE_SHADOW_CSS. */
+const TREE_CONTENT_PAD_TOP = 8;
+/** Breathing room below the last row, at the end of the list. Same trick as
+ *  the top: root padding OUTSIDE the scroll box, so the scroller is simply that
+ *  much shorter and the library's scroll maximum is untouched. */
+const TREE_CONTENT_PAD_BOTTOM = 10;
+
 const TREE_SHADOW_CSS = `
   /* The lib's base layer sets \`color-scheme: light dark\` on :host, which
      makes its light-dark() colors (file-type icon palette, git-status tints)
@@ -216,6 +230,15 @@ const TREE_SHADOW_CSS = `
   :host([data-search-accessory='true']) [data-file-tree-search-container] {
     padding-inline-end: ${TREE_PADDING_INLINE + SEARCH_ROW_ACCESSORY_GAP + SEARCH_ROW_ACCESSORY_SIZE}px;
   }
+  /* NO padding on the scroll container, in either direction. @pierre/trees
+     derives its own scroll maximum from itemCount × itemHeight and writes
+     scrollTop back to it, so padding here adds range the library immediately
+     takes away: measured, the browser allowed 1008 while the library snapped
+     every attempt back to 1000, and the last 8px of the list fought the user (a
+     tween aiming at the browser's maximum fought it every frame, which is what
+     made the end of the list feel broken). The top gap lives on the light-DOM
+     root instead, OUTSIDE this scroll box — same pixels, no scroll cost. */
+
   /* Indent guides are structure, not a hover affordance. The library ships
      them hidden (opacity 0) and fades them in only under :host(:hover) — so
      the tree's nesting vanished whenever the pointer left the column. Pin the
@@ -227,6 +250,16 @@ const TREE_SHADOW_CSS = `
 `;
 
 const EMPTY_FILE_PATHS: string[] = [];
+
+/** One side of the code / design split (design-files-section.ts), or the whole
+ *  listing when this tree isn't part of a split. */
+function splitListing(
+  paths: readonly string[],
+  filter: DesignListingFilter | undefined,
+): readonly string[] {
+  if (!filter) return paths;
+  return filterDesignListing(paths, filter, designSectionDirectories(paths));
+}
 
 /** Basename of a POSIX repo-relative path. Exported so callers labelling a
  *  tab from a tree path don't re-implement it. */
@@ -299,6 +332,18 @@ interface WorkspaceFileTreeProps {
   /** Owner-keyed scroll memory for the library's Shadow-DOM virtual scroller.
    * Omit for launcher trees whose short-lived position is not navigation. */
   scrollMemoryKey?: string;
+  /** Which side of the code / design split this tree shows (see
+   *  design-files-section.ts). The Files tab stacks two trees: its code tree
+   *  hides the workspace's committed design document, and its "Design files"
+   *  section shows nothing else. Omitted → everything, unfiltered (the search
+   *  launcher, where a filter reorders the list anyway). Inert on a workspace
+   *  with no design document: the code tree is then byte-for-byte the full
+   *  listing, and the design tree is empty. Captured once at mount. */
+  designFilter?: DesignListingFilter;
+  /** Breathing room above the first row. Defaults to the column gap a tree at
+   *  the top of a sidebar wants; a tree under a section header of its own
+   *  (the "Design files" pane) needs less. */
+  paddingTop?: number;
   /** Extra classes for the root (sizing). Theme vars + bg already live here. */
   className?: string;
 }
@@ -328,6 +373,8 @@ export const WorkspaceFileTree = React.forwardRef<
     deselectAfterOpen,
     reloadKey,
     scrollMemoryKey,
+    designFilter,
+    paddingTop = TREE_CONTENT_PAD_TOP,
     className,
   },
   ref,
@@ -335,10 +382,18 @@ export const WorkspaceFileTree = React.forwardRef<
   // Seed the model from the shared snapshot in the very first render. The old
   // `[]` seed guaranteed a visible empty-tree paint followed by row-by-row
   // reconstruction in an effect whenever a File surface remounted.
+  // Captured once, like every model option: which side of the design split
+  // this tree shows is static per surface.
+  const designFilterRef = useRef(designFilter);
   const initialPathsRef = useRef(
-    reconcileTreePathList(
-      cwd ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS) : EMPTY_FILE_PATHS,
-    ),
+    (() => {
+      const warm = cwd
+        ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS)
+        : EMPTY_FILE_PATHS;
+      // Split the SEED too, so the design document is on the right side of the
+      // split in the very first paint instead of one listing later.
+      return reconcileTreePathList(splitListing(warm, designFilterRef.current));
+    })(),
   );
   const [pathsSnapshot, setPathsSnapshot] = useState<{
     cwd: string | undefined;
@@ -357,7 +412,10 @@ export const WorkspaceFileTree = React.forwardRef<
     [cwd, pathsSnapshot],
   );
   const trackedPaths = useMemo(
-    () => reconcileTreePathList(rawTrackedPaths),
+    () =>
+      reconcileTreePathList(
+        splitListing(rawTrackedPaths, designFilterRef.current),
+      ),
     [rawTrackedPaths],
   );
 
@@ -415,12 +473,25 @@ export const WorkspaceFileTree = React.forwardRef<
   // when it's opened. Feeds the model directly for the incremental adds and
   // the ignored colouring; we merge its paths into `paths` below so a reset
   // (a git refresh) rebuilds the tree WITH them.
-  const { paths: ignoredPaths, expandedDirs } = useIgnoredEntries(
+  // Split the same way as the tracked listing: gitignored entries inside the
+  // design document belong to its tree, not the code tree. The directories come
+  // from the TRACKED listing (the marker is committed), so an ignored root that
+  // merely shares a design folder's name prefix stays where it is.
+  const { paths: rawIgnoredPaths, expandedDirs } = useIgnoredEntries(
     cwd,
     reloadKey,
     model,
     active,
   );
+  const ignoredPaths = useMemo(() => {
+    const filter = designFilterRef.current;
+    if (!filter || rawIgnoredPaths.length === 0) return rawIgnoredPaths;
+    return filterDesignListing(
+      rawIgnoredPaths,
+      filter,
+      designSectionDirectories(rawTrackedPaths),
+    );
+  }, [rawIgnoredPaths, rawTrackedPaths]);
   // The two lists come from different git queries against a worktree that is
   // being written to, so they can disagree — and EVERY form of disagreement is a
   // throw from the tree store, inside a layout effect, which unwinds to the ROOT
@@ -763,7 +834,14 @@ export const WorkspaceFileTree = React.forwardRef<
         "bg-bg1 relative h-full min-h-0 overflow-hidden",
         className,
       )}
-      style={TREE_THEME_VARS}
+      // The top and bottom gaps are padding HERE rather than on the scroll
+      // container inside the shadow root: the library owns that box's scroll
+      // maximum and undoes any padding in it (see TREE_SHADOW_CSS).
+      style={{
+        ...TREE_THEME_VARS,
+        paddingTop,
+        paddingBottom: TREE_CONTENT_PAD_BOTTOM,
+      }}
     >
       {hasSearchAccessory && (
         // Dropped into the gutter the shadow CSS reserves past the input's

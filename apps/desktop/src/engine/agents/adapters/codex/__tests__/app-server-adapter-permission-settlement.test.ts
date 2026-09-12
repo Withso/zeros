@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   AgentAdapterContext,
+  AgentFilesystemTerritory,
   ContentBlock,
   RequestPermissionResponse,
 } from "../../../types";
@@ -272,6 +273,35 @@ describe("codex permission settlement receipts", () => {
     expect(emit.onPermissionRequest.mock.calls[0]?.[2]).toMatchObject({
       toolCall: expect.objectContaining({ kind: expect.any(String) }),
     });
+  });
+
+  it("shows Design-path approvals instead of silently declining them", async () => {
+    const { adapter, emit } = makeAdapter();
+    const designDirectory = "/tmp/proj/Zeros Design";
+    const territory: AgentFilesystemTerritory = {
+      agentRole: "code",
+      workspaceRoot: "/tmp/proj",
+      designDirectory,
+      protectedDesignDirectories: [designDirectory],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [designDirectory],
+      },
+    };
+    await adapter.newSession({ cwd: "/tmp/proj", territory });
+
+    raiseApproval(
+      "permission-design",
+      "item/fileChange/requestApproval",
+      { itemId: "item-design", grantRoot: designDirectory },
+    );
+
+    expect(rt.respondCalls).toEqual([]);
+    expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);
+    expect(emit.onPermissionRequest.mock.calls[0]?.[1]).toBe(
+      "permission-design",
+    );
   });
 
   it("settles every parked approval when the Codex runtime exits", async () => {

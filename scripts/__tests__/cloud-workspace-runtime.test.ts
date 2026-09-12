@@ -44,7 +44,7 @@ const snapshot: CloudSnapshotAttestation = {
 
 const state: CloudValidationState = {
   sandboxId: "sandbox-id",
-  previewUrl: "https://preview.example.test",
+  previewUrl: "https://39393-sandbox-id.proxy.daytona.work",
   previewToken: "preview-token",
   cloudToken: "cloud-transport-token-1234",
   region: "test",
@@ -164,7 +164,7 @@ describe("cloud workspace runtime admission", () => {
         sandboxId: "sandbox-id",
         port,
         token: `signed-preview-token-${port}`,
-        url: `https://${port}-signed-preview-token-${port}.preview.example/`,
+        url: `https://${port}-signed-preview-token-${port}.proxy.daytona.work/`,
         expiresInSeconds,
       }),
       expireSignedPreviewUrl: async (port: number, token: string) => {
@@ -211,11 +211,11 @@ describe("cloud workspace runtime admission", () => {
     expect(document.links).toEqual([
       {
         port: 41_000,
-        signedUrl: "https://41000-signed-preview-token-41000.preview.example/",
+        signedUrl: "https://41000-signed-preview-token-41000.proxy.daytona.work/",
       },
       {
         port: 41_001,
-        signedUrl: "https://41001-signed-preview-token-41001.preview.example/",
+        signedUrl: "https://41001-signed-preview-token-41001.proxy.daytona.work/",
       },
     ]);
 
@@ -237,7 +237,7 @@ describe("cloud workspace runtime admission", () => {
           sandboxId: "sandbox-id",
           port,
           token: `engine-signed-token-${mint}`,
-          url: `https://${port}-engine-signed-token-${mint}.preview.example/`,
+          url: `https://${port}-engine-signed-token-${mint}.proxy.daytona.work/`,
         };
       },
       expireSignedPreviewUrl: async (port: number, token: string) => {
@@ -281,7 +281,7 @@ describe("cloud workspace runtime admission", () => {
       "persist:ready",
     ]);
     expect(rotated.previewUrl).toBe(
-      "https://39393-engine-signed-token-2.preview.example/",
+      "https://39393-engine-signed-token-2.proxy.daytona.work/",
     );
     expect(rotated.previewToken).toBe("engine-signed-token-2");
     expect(rotated.engineIngress?.retiring).toEqual([
@@ -298,7 +298,7 @@ describe("cloud workspace runtime admission", () => {
     const target = cloudRuntimeTargetFromValidationState(rotated, now + 2_000);
     expect(target).toEqual({
       kind: "cloud",
-      url: "wss://39393-engine-signed-token-2.preview.example/ws",
+      url: "wss://39393-engine-signed-token-2.proxy.daytona.work/ws",
       cloudToken: "cloud-transport-token-1234",
       expiresAt: now + 61_000,
     });
@@ -436,7 +436,7 @@ describe("cloud workspace runtime admission", () => {
         sandboxId: "sandbox-id",
         port,
         token: `signed-preview-token-${port}`,
-        url: `https://${port}-signed-preview-token-${port}.preview.example/`,
+        url: `https://${port}-signed-preview-token-${port}.proxy.daytona.work/`,
       }),
       expireSignedPreviewUrl: async (port: number, token: string) => {
         expired.push({ port, token });
@@ -468,7 +468,7 @@ describe("cloud workspace runtime admission", () => {
           sandboxId: "sandbox-id",
           port,
           token: `replacement-token-${port}`,
-          url: `https://${port}-replacement-token-${port}.preview.example/`,
+          url: `https://${port}-replacement-token-${port}.proxy.daytona.work/`,
         };
       },
       expireSignedPreviewUrl: async (port: number) => {
@@ -550,7 +550,7 @@ describe("cloud workspace runtime admission", () => {
           sandboxId: "sandbox-id",
           port,
           token: `journal-replacement-token-${port}`,
-          url: `https://${port}-journal-replacement-token-${port}.preview.example/`,
+          url: `https://${port}-journal-replacement-token-${port}.proxy.daytona.work/`,
         };
       },
       expireSignedPreviewUrl: async () => events.push("revoke"),
@@ -611,7 +611,7 @@ describe("cloud workspace runtime admission", () => {
           sandboxId: "sandbox-id",
           port,
           token: `recovered-replacement-token-${port}`,
-          url: `https://${port}-recovered-replacement-token-${port}.preview.example/`,
+          url: `https://${port}-recovered-replacement-token-${port}.proxy.daytona.work/`,
         };
       },
       expireSignedPreviewUrl: async (_port: number, token: string) => {

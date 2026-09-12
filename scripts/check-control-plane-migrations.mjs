@@ -9,12 +9,10 @@
 // and audit row.
 //
 // The specific failure this prevents: `runMigrations` (apps/control-plane/src/migrate.ts)
-// records applied files by FILENAME ONLY — no checksum, no content hash. It
-// skips any name already in `schema_migrations`. So editing an
-// already-released migration NEVER re-runs on a database that has it, and the
-// file silently stops describing the schema that is actually deployed. A
-// fresh database built from the repo then diverges from production, and the
-// divergence is invisible until something breaks on one and not the other.
+// records applied files by filename plus a durable content checksum. The
+// forward-only comparison still catches edits before deploy; the runtime
+// checksum catches a mismatched artifact or database afterward. A fresh
+// database built from edited history would otherwise diverge from production.
 // Renaming a released file is worse: it re-runs from scratch against a live
 // database and fails on the first CREATE TABLE.
 //
@@ -31,7 +29,9 @@
 //      means two PRs picked the same number (lexical sort then applies them
 //      in an arbitrary-but-stable order that neither author intended); a gap
 //      usually means a migration was deleted.
-//   3. Forward-only vs origin/main — every migration on main is present and
+//   3. Migration SQL contains no top-level transaction-control statement. The
+//      runner owns BEGIN/COMMIT so DDL and its ledger row stay atomic.
+//   4. Forward-only vs origin/main — every migration on main is present and
 //      BYTE-IDENTICAL on HEAD; new files must use a sequence above main's max.
 //
 // Byte-identical is deliberate, including comments: the guard cannot tell a
@@ -59,6 +59,122 @@ const NAME_RE = /^([0-9]{4})_[a-z0-9_]+\.sql$/;
 const seq = (f) => Number(f.slice(0, 4));
 
 const errs = [];
+
+function maskQuotedSql(sql) {
+  const masked = sql.split("");
+  let state = "normal";
+  let blockDepth = 0;
+  let dollarTag = "";
+  const blank = (start, length) => {
+    for (let offset = 0; offset < length; offset += 1) {
+      if (masked[start + offset] !== "\n" && masked[start + offset] !== "\r") {
+        masked[start + offset] = " ";
+      }
+    }
+  };
+
+  for (let index = 0; index < sql.length; index += 1) {
+    const pair = sql.slice(index, index + 2);
+    const character = sql[index];
+    if (state === "line-comment") {
+      if (character === "\n") state = "normal";
+      else blank(index, 1);
+      continue;
+    }
+    if (state === "block-comment") {
+      if (pair === "/*") {
+        blank(index, 2);
+        blockDepth += 1;
+        index += 1;
+      } else if (pair === "*/") {
+        blank(index, 2);
+        blockDepth -= 1;
+        index += 1;
+        if (blockDepth === 0) state = "normal";
+      } else {
+        blank(index, 1);
+      }
+      continue;
+    }
+    if (state === "dollar-quote") {
+      if (sql.startsWith(dollarTag, index)) {
+        blank(index, dollarTag.length);
+        index += dollarTag.length - 1;
+        state = "normal";
+      } else {
+        blank(index, 1);
+      }
+      continue;
+    }
+    if (
+      state === "single-quote" ||
+      state === "escape-string" ||
+      state === "double-quote"
+    ) {
+      const delimiter = state === "double-quote" ? '"' : "'";
+      blank(index, 1);
+      if (character === delimiter && sql[index + 1] === delimiter) {
+        blank(index + 1, 1);
+        index += 1;
+      } else if (
+        state === "escape-string" &&
+        character === "\\" &&
+        index + 1 < sql.length
+      ) {
+        blank(index + 1, 1);
+        index += 1;
+      } else if (character === delimiter) {
+        state = "normal";
+      }
+      continue;
+    }
+    if (pair === "--") {
+      blank(index, 2);
+      index += 1;
+      state = "line-comment";
+    } else if (pair === "/*") {
+      blank(index, 2);
+      index += 1;
+      blockDepth = 1;
+      state = "block-comment";
+    } else if (character === "'" || character === '"') {
+      blank(index, 1);
+      const escapePrefix =
+        character === "'" &&
+        /[eE]/u.test(sql[index - 1] ?? "") &&
+        !/[A-Za-z0-9_$]/u.test(sql[index - 2] ?? "");
+      state =
+        character === '"'
+          ? "double-quote"
+          : escapePrefix
+            ? "escape-string"
+            : "single-quote";
+    } else if (character === "$") {
+      const tag = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/.exec(sql.slice(index));
+      if (tag) {
+        dollarTag = tag[0];
+        blank(index, dollarTag.length);
+        index += dollarTag.length - 1;
+        state = "dollar-quote";
+      }
+    }
+  }
+  return masked.join("");
+}
+
+function topLevelTransactionControl(sql) {
+  const masked = maskQuotedSql(sql);
+  const statement =
+    /(?:^|;)(\s*)(ABORT|BEGIN|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE(?:\s+SAVEPOINT)?|START\s+TRANSACTION|PREPARE\s+TRANSACTION|SET\s+TRANSACTION|SET\s+SESSION\s+CHARACTERISTICS\s+AS\s+TRANSACTION)\b/giu;
+  const match = statement.exec(masked);
+  if (!match) return null;
+  const prefixLength = match[0].startsWith(";") ? 1 : 0;
+  const keywordIndex = match.index + prefixLength + match[1].length;
+  return {
+    keyword: match[2].replace(/\s+/gu, " ").toUpperCase(),
+    line: masked.slice(0, keywordIndex).split("\n").length,
+  };
+}
 
 // Every .sql in the directory — NOT just the well-named ones, so check 1 can
 // actually see a file migrate.ts would ignore.
@@ -92,7 +208,20 @@ for (let i = 0; i < named.length; i++) {
   }
 }
 
-// 3. Forward-only vs origin/main.
+// 3. Transaction ownership. Quoted function bodies and comments are masked so
+// PL/pgSQL BEGIN/END blocks remain valid while script-level control is refused.
+for (const f of named) {
+  const control = topLevelTransactionControl(
+    readFileSync(`${DIR}/${f}`, "utf8"),
+  );
+  if (control) {
+    errs.push(
+      `${f} contains top-level transaction control ${control.keyword} at line ${control.line} — migrate.ts owns the transaction and ledger commit`,
+    );
+  }
+}
+
+// 4. Forward-only vs origin/main.
 function gitShow(ref) {
   return execFileSync("git", ["show", ref], {
     encoding: "utf8",
@@ -146,7 +275,7 @@ if (mainFiles) {
         readFileSync(`${DIR}/${f}`, "utf8")
       ) {
         errs.push(
-          `migration ${f} was EDITED vs origin/main — schema_migrations records by FILENAME, so this never re-runs on a database that already applied it; the file stops describing deployed reality. Add a new migration instead.`,
+          `migration ${f} was EDITED vs origin/main — an applied filename and checksum are immutable, so this file no longer describes deployed reality. Add a new migration instead.`,
         );
       }
     } catch {
@@ -173,5 +302,5 @@ if (errs.length > 0) {
   process.exit(1);
 }
 console.log(
-  `✓ check:control-plane-migrations — ${named.length} migration(s), naming + sequence${mainFiles ? ` + forward-only vs origin/main:${mainBaseline.dir}` : ""} OK`,
+  `✓ check:control-plane-migrations — ${named.length} migration(s), naming + sequence + transaction ownership${mainFiles ? ` + forward-only vs origin/main:${mainBaseline.dir}` : ""} OK`,
 );

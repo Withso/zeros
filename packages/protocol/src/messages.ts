@@ -250,6 +250,10 @@ export interface DbChangedMessage extends BaseMessage {
    * branch create/delete/advance). Consumers can refresh branch catalogs
    * without doing that extra work for an ordinary source-file save. */
   gitRefsChanged?: boolean;
+  /** True when a Design recognition marker was created, changed, or removed.
+   * Consumers can refresh Design-directory targets without treating an
+   * ordinary worktree edit as a repository-wide semantic change. */
+  designRecognitionChanged?: boolean;
   /** For a "messages" change: the chat ids whose transcripts changed, so a
    *  client reconciles ONLY those chats (re-windows them) instead of every open
    *  one. Omitted for list-only changes (chats/projects); clients pull those
@@ -378,6 +382,14 @@ export interface AgentListAgentsMessage extends BaseMessage {
 export interface AgentNewSessionMessage extends BaseMessage {
   type: "AGENT_NEW_SESSION";
   agentId: string;
+  /** Immutable execution actor. Omitted/"code" preserves the native Code
+   * session path. "design" asks the trusted engine to mint a scoped Design API
+   * capability and admit the provider through ZSR. Workspace view changes do
+   * not alter this value for a running session. */
+  agentRole?: "code" | "design";
+  /** Required only for a Design actor. The engine resolves and snapshots this
+   * document's current draft revision; callers never supply capability data. */
+  designDocumentId?: string;
   /** The renderer chat this session belongs to. Lets the engine persist the
    *  transcript by chatId as it streams, so
    *  forks of the same chat aggregate under one transcript. */

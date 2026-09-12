@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -305,6 +305,38 @@ describe("branch ops", () => {
     expect(getWorkspace(workspaceId).branch).toBe("fresh-branch");
   });
 
+  it("checkout createIfMissing never resets an existing branch", async () => {
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["branch", "existing-target", "main"], {
+      cwd: repoRoot,
+    });
+    const targetBefore = (
+      await execFileAsync("git", ["rev-parse", "existing-target"], {
+        cwd: repoRoot,
+      })
+    ).stdout.trim();
+    await writeFile(path.join(ws.path, "workspace-only.txt"), "new head\n");
+    await execFileAsync("git", ["add", "workspace-only.txt"], {
+      cwd: ws.path,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "workspace head"], {
+      cwd: ws.path,
+    });
+
+    await checkoutBranch({
+      workspaceId,
+      branchName: "existing-target",
+      createIfMissing: true,
+    });
+
+    const targetAfter = (
+      await execFileAsync("git", ["rev-parse", "existing-target"], {
+        cwd: ws.path,
+      })
+    ).stdout.trim();
+    expect(targetAfter).toBe(targetBefore);
+  });
+
   it("checkout of a non-existent branch without createIfMissing fails", async () => {
     await expect(
       checkoutBranch({
@@ -313,6 +345,86 @@ describe("branch ops", () => {
         createIfMissing: false,
       }),
     ).rejects.toThrow();
+  });
+
+  it("refuses checkout before it can overwrite an ignored live Design draft", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, ".gitignore"), "Zeros Design/\n");
+    await execFileAsync("git", ["add", ".gitignore"], { cwd: ws.path });
+    await execFileAsync("git", ["commit", "-q", "-m", "ignore design"], {
+      cwd: ws.path,
+    });
+    await mkdir(path.join(ws.path, "Zeros Design"), { recursive: true });
+    const draft = path.join(ws.path, "Zeros Design", "draft.html");
+    await writeFile(draft, "<main>local ignored draft</main>\n");
+
+    await execFileAsync("git", ["checkout", "-q", "-b", "design-target"], {
+      cwd: repoRoot,
+    });
+    await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+    await Promise.all([
+      writeFile(
+        path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      ),
+      writeFile(
+        path.join(repoRoot, "Zeros Design", "draft.html"),
+        "<main>target design</main>\n",
+      ),
+    ]);
+    await execFileAsync("git", ["add", "Zeros Design"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-q", "-m", "target design"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["checkout", "-q", "main"], { cwd: repoRoot });
+
+    await expect(
+      checkoutBranch({ workspaceId, branchName: "design-target" }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(readFile(draft, "utf8")).resolves.toBe(
+      "<main>local ignored draft</main>\n",
+    );
+    expect(getWorkspace(workspaceId).branch).toBe(ws.branch);
+  });
+
+  it("refuses checkout before it can overwrite an ignored live Design pointer", async () => {
+    const ws = getWorkspace(workspaceId);
+    await mkdir(path.join(ws.path, ".zeros"), { recursive: true });
+    await writeFile(path.join(ws.path, ".gitignore"), ".zeros/settings.toml\n");
+    await execFileAsync("git", ["add", ".gitignore"], { cwd: ws.path });
+    await execFileAsync("git", ["commit", "-q", "-m", "ignore pointer"], {
+      cwd: ws.path,
+    });
+
+    await execFileAsync(
+      "git",
+      ["checkout", "-q", "-b", "pointer-target", ws.branch],
+      { cwd: repoRoot },
+    );
+    await mkdir(path.join(repoRoot, ".zeros"), { recursive: true });
+    await writeFile(
+      path.join(repoRoot, ".zeros", "settings.toml"),
+      '[design]\ndirectory = "Target Design"\n',
+    );
+    await execFileAsync("git", ["add", "-f", ".zeros/settings.toml"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "target pointer"], {
+      cwd: repoRoot,
+    });
+    await execFileAsync("git", ["checkout", "-q", "main"], {
+      cwd: repoRoot,
+    });
+
+    const pointer = path.join(ws.path, ".zeros", "settings.toml");
+    const local = '[design]\ndirectory = "Local Draft"\n';
+    await writeFile(pointer, local);
+
+    await expect(
+      checkoutBranch({ workspaceId, branchName: "pointer-target" }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(readFile(pointer, "utf8")).resolves.toBe(local);
+    expect(getWorkspace(workspaceId).branch).toBe(ws.branch);
   });
 
   it("continueOnNewBranch: fresh generated branch, PR fields cleared, worktree kept", async () => {

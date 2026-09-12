@@ -23,6 +23,7 @@ const {
   disposeSpy,
   listSpy,
   modelsListSpy,
+  prewarmSpy,
   resumeSpy,
 } = vi.hoisted(() => ({
     createRuntimeSpy: vi.fn(),
@@ -30,6 +31,7 @@ const {
     disposeSpy: vi.fn(),
     listSpy: vi.fn(),
     modelsListSpy: vi.fn(),
+    prewarmSpy: vi.fn(),
     resumeSpy: vi.fn(),
   }));
 
@@ -41,6 +43,7 @@ vi.mock("../host/host-client", () => {
       list: listSpy,
     },
     Cursor: { models: { list: modelsListSpy } },
+    platform: { prewarm: prewarmSpy },
   };
   return {
     createCursorHostRuntime: createRuntimeSpy,
@@ -114,6 +117,7 @@ beforeEach(async () => {
   disposeSpy.mockReset().mockResolvedValue(undefined);
   listSpy.mockReset().mockResolvedValue({ items: [] });
   modelsListSpy.mockReset().mockResolvedValue([]);
+  prewarmSpy.mockReset().mockResolvedValue({ prewarmed: true });
   createRuntimeSpy.mockReset().mockImplementation(() => ({
     module: {
       Agent: {
@@ -122,6 +126,7 @@ beforeEach(async () => {
         list: listSpy,
       },
       Cursor: { models: { list: modelsListSpy } },
+      platform: { prewarm: prewarmSpy },
     },
     dispose: disposeSpy,
   }));
@@ -232,6 +237,30 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     expect(await recoveryMarkerExists()).toBe(false);
   });
 
+  it("stops the dedicated host when new-session MCP credentials cannot be materialized", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    await expect(
+      adapter.newSession({
+        cwd: root,
+        env: { CURSOR_API_KEY: "key" },
+        executionBoundary: boundary(),
+        mcpServers: [
+          {
+            name: "secured",
+            transport: "http",
+            url: "https://mcp.example.test/mcp",
+            headersFromEnv: { Authorization: "MISSING_MCP_TOKEN" },
+          },
+        ],
+      }),
+    ).rejects.toThrow(/required session credential/i);
+
+    expect(prewarmSpy).not.toHaveBeenCalled();
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
+    expect(await recoveryMarkerExists()).toBe(false);
+  });
+
   it("stops the dedicated host when resume admission fails", async () => {
     resumeSpy.mockRejectedValueOnce(new Error("Invalid User API Key"));
     const adapter = new CursorSdkAdapter(makeCtx());
@@ -245,6 +274,31 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
       }),
     ).rejects.toThrow("Invalid User API Key");
 
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
+    expect(await recoveryMarkerExists()).toBe(false);
+  });
+
+  it("stops the dedicated host when resume MCP credentials cannot be materialized", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    await expect(
+      adapter.loadSession({
+        sessionId: "prior-agent-id",
+        cwd: root,
+        env: { CURSOR_API_KEY: "key" },
+        executionBoundary: boundary(),
+        mcpServers: [
+          {
+            name: "secured",
+            transport: "http",
+            url: "https://mcp.example.test/mcp",
+            headersFromEnv: { Authorization: "MISSING_MCP_TOKEN" },
+          },
+        ],
+      }),
+    ).rejects.toThrow(/required session credential/i);
+
+    expect(prewarmSpy).not.toHaveBeenCalled();
     expect(disposeSpy).toHaveBeenCalledTimes(1);
     expect(await recoveryMarkerExists()).toBe(false);
   });

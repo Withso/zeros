@@ -234,12 +234,10 @@ export async function requestWorkspaceList(
   const result = (await workspaceOp(bridge, "workspace.list")) as
     | { workspaces?: Workspace[] }
     | undefined;
-  // This helper exists for the coding-agent cwd → workspace-id resolver. A
-  // Design workspace must never become an additional-directory or agent cwd,
-  // because the public Design surface does not grant code-agent authority.
-  return (result?.workspaces ?? []).filter(
-    (workspace) => workspace.kind !== "design",
-  );
+  // `kind` is the visible surface, not a different checkout species. Code
+  // agents remain attached to the same native workspace while Design is
+  // visible, so cwd/add-directory resolution must retain both modes.
+  return result?.workspaces ?? [];
 }
 
 /** Like requestWorkspaceList but forwards the desktop's `{status, repoSlug}`
@@ -900,7 +898,7 @@ export async function bridgeAttachmentWrite(
 // The renderer façade (platform/context-graph.ts) short-circuits remote clients
 // before a round-trip is spent.
 
-/** Everything in the workspace's `.context-graph/`, both scopes merged. */
+/** Everything in the workspace's `.context/`, both scopes merged. */
 export async function bridgeContextGraphList(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -915,18 +913,22 @@ export async function bridgeContextGraphList(
   };
 }
 
-/** Idempotently create the `.context-graph/` skeleton for a workspace. */
+/** Idempotently create the `.context/` skeleton for a workspace. */
 export async function bridgeContextGraphScaffold(
   bridge: RuntimeClient,
   workspaceId: string,
-): Promise<{ ok: boolean; created: boolean }> {
+): Promise<{ ok: boolean; created: boolean; error?: string }> {
   const r = (await workspaceOp(
     bridge,
     "context.graph.scaffold",
     { workspaceId },
     CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
-  )) as { ok?: boolean; created?: boolean } | undefined;
-  return { ok: r?.ok === true, created: r?.created === true };
+  )) as { ok?: boolean; created?: boolean; error?: string } | undefined;
+  return {
+    ok: r?.ok === true,
+    created: r?.created === true,
+    ...(typeof r?.error === "string" ? { error: r.error } : {}),
+  };
 }
 
 /** Move one attachment folder between the private and shared scopes. */
@@ -935,7 +937,7 @@ export async function bridgeContextGraphSetShared(
   workspaceId: string,
   attachmentId: string,
   shared: boolean,
-): Promise<{ ok: boolean; moved: boolean }> {
+): Promise<{ ok: boolean; moved: boolean; error?: string }> {
   const r = (await workspaceOp(
     bridge,
     "context.graph.setShared",
@@ -945,8 +947,12 @@ export async function bridgeContextGraphSetShared(
       shared,
     },
     CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
-  )) as { ok?: boolean; moved?: boolean } | undefined;
-  return { ok: r?.ok === true, moved: r?.moved === true };
+  )) as { ok?: boolean; moved?: boolean; error?: string } | undefined;
+  return {
+    ok: r?.ok === true,
+    moved: r?.moved === true,
+    ...(typeof r?.error === "string" ? { error: r.error } : {}),
+  };
 }
 
 // ── Git (read) ──────────────────────────────────────────────
@@ -1831,7 +1837,7 @@ export async function bridgeWorkspaceSetStatus(
 
 export async function bridgeWorkspaceReassignLocalOrganization(
   bridge: RuntimeClient,
-  args: { fromOrganizationId: string; toOrganizationId: string },
+  args: { fromOrganizationId: string; toOrganizationId: string | null },
 ): Promise<{ changes: number; repoSlugs: string[] }> {
   return (await workspaceOp(
     bridge,

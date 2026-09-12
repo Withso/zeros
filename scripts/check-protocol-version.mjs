@@ -16,7 +16,10 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
-import { protocolSourceSignature } from "./protocol-source-signature.mjs";
+import {
+  exportedIntegerConstant,
+  protocolSourceSignature,
+} from "./protocol-source-signature.mjs";
 
 const SCHEMA_FILES = [
   "packages/protocol/src/messages.ts",
@@ -25,6 +28,8 @@ const SCHEMA_FILES = [
   "packages/protocol/src/schemas.ts",
 ];
 const VERSION_FILE = "packages/protocol/src/version.ts";
+const CLOUD_SETUP_PROTOCOL_FILE =
+  "apps/control-plane/src/cloud-workspaces/engine-protocol-version.ts";
 const LEGACY_PACKAGE_DIR = "packages/core/";
 const PACKAGE_DIR = "packages/protocol/";
 
@@ -76,12 +81,48 @@ function protocolVersion(ref) {
         encoding: "utf8",
       })
     : readFileSync(VERSION_FILE, "utf8");
-  return (src.match(/PROTOCOL_VERSION\s*=\s*(\d+)/) || [])[1] ?? null;
+  return exportedIntegerConstant(src, "PROTOCOL_VERSION");
+}
+
+function minimumProtocolVersion(ref) {
+  const src = ref
+    ? execFileSync("git", ["show", `${ref}:${pathAtRef(ref, VERSION_FILE)}`], {
+        encoding: "utf8",
+      })
+    : readFileSync(VERSION_FILE, "utf8");
+  return exportedIntegerConstant(src, "MIN_SUPPORTED_PROTOCOL");
+}
+
+function deployedCloudSetupVersion(name) {
+  const source = readFileSync(CLOUD_SETUP_PROTOCOL_FILE, "utf8");
+  return exportedIntegerConstant(source, name);
+}
+
+// apps/control-plane is installed as an independent deployment boundary, so it
+// cannot import this workspace package at runtime. Its single setup/image
+// compatibility literal is therefore checked here against the source of truth
+// on every protocol check, before an image can be qualified.
+const expectedCurrent = protocolVersion(null);
+const expectedMinimum = minimumProtocolVersion(null);
+const deployedCurrent = deployedCloudSetupVersion(
+  "CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION",
+);
+const deployedMinimum = deployedCloudSetupVersion(
+  "MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION",
+);
+if (
+  expectedCurrent !== deployedCurrent ||
+  expectedMinimum !== deployedMinimum
+) {
+  console.error(
+    `✗ check:protocol — cloud setup protocol range ${String(deployedMinimum)}–${String(deployedCurrent)} does not match shared range ${String(expectedMinimum)}–${String(expectedCurrent)}. Update ${CLOUD_SETUP_PROTOCOL_FILE} together with ${VERSION_FILE}.`,
+  );
+  process.exit(1);
 }
 
 if (!mainAvailable()) {
   console.log(
-    "ℹ check:protocol — origin/main unavailable; skipped (advisory).",
+    "ℹ check:protocol — cloud setup range aligned; origin/main unavailable for the advisory wire-diff check.",
   );
   process.exit(0);
 }

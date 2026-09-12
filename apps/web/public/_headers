@@ -12,3 +12,29 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Cross-Origin-Opener-Policy: same-origin
+
+# Dashboard and Ops assets intentionally use stable filenames. This is the
+# static-route fallback. `_routes.json` deliberately invokes Pages Functions
+# for these paths, where lib/hosts.ts applies the authoritative runtime policy
+# because Cloudflare does not apply `_headers` to Functions responses.
+# Revisioned URLs also evict responses cached before the runtime policy shipped.
+/account-deletion.js
+  Cache-Control: no-cache
+
+/dashboard.js
+  Cache-Control: no-cache
+
+/dashboard.css
+  Cache-Control: no-cache
+
+/dashboard-tokens.css
+  Cache-Control: no-cache
+
+/ops.js
+  Cache-Control: no-cache
+
+/ops.css
+  Cache-Control: no-cache
+
+/zeros-deployment.json
+  Cache-Control: no-store

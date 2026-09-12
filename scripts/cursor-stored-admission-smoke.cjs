@@ -1,11 +1,11 @@
 #!/usr/bin/env electron
 "use strict";
 
-// No-model Cursor admission using the exact encrypted credential Zeros Dev
+// No-model native Cursor admission using the exact encrypted credential Zeros Dev
 // uses. A plain Node process cannot decrypt Electron safeStorage, which made
 // prior standalone smokes prove only key presence or a caller-exported key.
 // This main-process harness keeps the plaintext in memory, passes it directly
-// to the ordinary ZSR admission child, and never prints or writes it.
+// to the ordinary live-agent smoke child, and never prints or writes it.
 
 const { app, safeStorage } = require("electron");
 const { spawn } = require("node:child_process");
@@ -165,7 +165,7 @@ app
         throw new Error("the saved Cursor API key could not be decrypted");
       }
       console.log(
-        "── Zeros Dev stored Cursor credential · no-model ZSR admission ──",
+        "── Zeros Dev stored Cursor credential · no-model native admission ──",
       );
       exitCode = await runAdmission(apiKey, secretsFile);
     } catch (error) {

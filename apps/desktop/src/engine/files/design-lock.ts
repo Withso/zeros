@@ -8,11 +8,12 @@
 // Production code no longer installs these ACLs. The exact helpers remain so
 // startup can remove guards left behind by those builds.
 //
-// Why this is not the promised agent boundary
+// Why this is not an agent boundary
 // ───────────────────────────────────────
 // Same-user ACLs affect every app running as the user and can also be removed
-// by that user. Agent containment therefore lives in each provider's immutable
-// process sandbox; these constants exist solely to identify old metadata.
+// by that user. Native Code uses a behavioral contract plus Zeros-owned path
+// guards; a future autonomous Design agent uses ZSR and the Design API. These
+// constants exist solely to identify old metadata.
 //
 // What historical builds locked
 // ────────────────
@@ -141,8 +142,8 @@ export async function lockableFiles(
   // disagree about which files are really on disk. The gate matters because the
   // bit has a second, unrelated user: `git update-index --skip-worktree <file>`
   // pins a locally-modified tracked config, and that file IS on disk. Treating
-  // it as absent would quietly leave it writable while design mode claims the
-  // codebase is read-only.
+  // it as absent would have omitted it from the historical whole-tree ACL
+  // cleanup.
   const absent = new Set(deleted.split("\0").filter(Boolean));
   if (sparse) {
     const { stdout: tagged } = await runGit(cwd, ["ls-files", "-v", "-z"]);
@@ -416,8 +417,8 @@ export async function unfenceDesignDirFiles(
 ): Promise<DesignLockResult> {
   if (!designLockSupported()) return { changed: 0, failed: [] };
   const { directories, files } = await designDirFenceEntries(cwd, designDir);
-  // Release leaves before parents. This keeps containment in place for as long
-  // as possible during the engine's serialized mutation hand-off.
+  // Release leaves before parents, mirroring the hierarchy used by historical
+  // builds and minimizing the partially cleaned subtree if removal fails.
   const fileResult = await removeAclAce(cwd, files);
   const directoryResult = await removeAclAce(
     cwd,

@@ -16,7 +16,7 @@ const COLUMNS: { title: string; links: FooterLink[] }[] = [
     title: 'Resources',
     links: [
       { label: 'GitHub', href: GITHUB_URL, external: true },
-      { label: 'Send feedback', href: 'mailto:hello@zeros.build' },
+      { label: 'Send feedback', href: 'mailto:hi@zeros.build' },
     ],
   },
   {

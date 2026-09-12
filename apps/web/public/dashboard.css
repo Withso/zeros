@@ -1,4 +1,4 @@
-@import url("/dashboard-tokens.css");
+@import url("/dashboard-tokens.css?v=2026-09-02.1");
 
 * { box-sizing: border-box; }
 html, body { min-height: 100%; }

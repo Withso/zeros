@@ -73,8 +73,7 @@ const path = require("node:path");
 /** Process start, so every later measurement can be stated relative to boot. */
 const hostStartedAt = Date.now();
 
-const cursorTransportDebug =
-  process.env.ZEROS_CURSOR_TRANSPORT_DEBUG === "1";
+const cursorTransportDebug = process.env.ZEROS_CURSOR_TRANSPORT_DEBUG === "1";
 function debugCursorTransport(message) {
   if (!cursorTransportDebug) return;
   try {
@@ -140,7 +139,11 @@ function installEnvironmentProxyTransports() {
   if (proxyUrl.protocol !== "http:" && proxyUrl.protocol !== "https:") return;
 
   const normalizedHostname = (hostname) =>
-    hostname.replace(/^\[/, "").replace(/\]$/, "").replace(/\.$/, "").toLowerCase();
+    hostname
+      .replace(/^\[/, "")
+      .replace(/\]$/, "")
+      .replace(/\.$/, "")
+      .toLowerCase();
   const shouldBypassProxy = (hostname, port) => {
     const targetHost = normalizedHostname(hostname);
     const noProxy = process.env.NO_PROXY || process.env.no_proxy || "";
@@ -206,7 +209,9 @@ function installEnvironmentProxyTransports() {
       if (total < SLOW_OP_MS && !cursorTransportDebug) return;
       const dial = dialedAt === null ? null : dialedAt - phaseStartedAt;
       const connect =
-        dialedAt === null || tunnelledAt === null ? null : tunnelledAt - dialedAt;
+        dialedAt === null || tunnelledAt === null
+          ? null
+          : tunnelledAt - dialedAt;
       const tls = tunnelledAt === null ? null : Date.now() - tunnelledAt;
       const ms = (value) => (value === null ? "n/a" : `${value}ms`);
       process.stderr.write(
@@ -229,7 +234,9 @@ function installEnvironmentProxyTransports() {
       debugCursorTransport(
         `${authority} bridge failed (${error?.code || error?.message || "unknown"})`,
       );
-      reportTunnelPhases(`failed (${error?.code || error?.message || "unknown"})`);
+      reportTunnelPhases(
+        `failed (${error?.code || error?.message || "unknown"})`,
+      );
       outbound.destroy(error);
       inbound.destroy(error);
       bridge.destroy(error);
@@ -301,10 +308,7 @@ function installEnvironmentProxyTransports() {
               },
               onProxyConnected,
             )
-          : net.connect(
-              { host: proxyHost, port: proxyPort },
-              onProxyConnected,
-            );
+          : net.connect({ host: proxyHost, port: proxyPort }, onProxyConnected);
       proxySocket.on("error", fail);
       const timeout = Number(socketOptions?.timeout) || 30_000;
       proxySocket.setTimeout(timeout, () => {
@@ -319,7 +323,9 @@ function installEnvironmentProxyTransports() {
       const onProxyData = (chunk) => {
         response = Buffer.concat([response, chunk]);
         if (response.length > 64 * 1024) {
-          const error = new Error("proxy CONNECT response headers are too large");
+          const error = new Error(
+            "proxy CONNECT response headers are too large",
+          );
           error.code = "ERR_PROXY_TUNNEL";
           fail(error);
           return;
@@ -464,68 +470,6 @@ function installEnvironmentProxyTransports() {
       );
     }
     return session;
-  };
-}
-
-/**
- * Cursor's ripwalk already excludes descendants of `.git`, which covers the
- * contents of an ordinary Git directory. It does not cover the `.git` entry itself. That
- * distinction matters for linked worktrees (where `.git` is a file) and under
- * ZSR (where the canonical entry is kernel-denied): ripgrep reports EPERM and
- * the SDK's ignore-map initialization aborts before it can scan normal files.
- *
- * Intercept only the exact, absolute ripgrep executable selected by Cursor and
- * only in a contained per-session host. The two negative globs are inserted
- * before ripgrep's `--` search-path separator, preserving every SDK argument,
- * VCS-ignore behavior, and user-visible workspace file. Git commands continue
- * through the separate shadow-Git capability; this never weakens that fence.
- */
-function installContainedRipgrepBoundary() {
-  const ripgrepPath = process.env.CURSOR_RIPGREP_PATH;
-  if (
-    !process.env.ZEROS_CURSOR_STATE_ROOT ||
-    !ripgrepPath ||
-    !path.isAbsolute(ripgrepPath)
-  ) {
-    return;
-  }
-
-  const childProcess = require("node:child_process");
-  const directSpawn = childProcess.spawn;
-  const sameExecutable = (command) => {
-    if (typeof command !== "string") return false;
-    if (process.platform === "win32") {
-      return path.resolve(command).toLowerCase() === path.resolve(ripgrepPath).toLowerCase();
-    }
-    return path.resolve(command) === path.resolve(ripgrepPath);
-  };
-  const hasGlob = (args, pattern) =>
-    args.some(
-      (arg, index) =>
-        (arg === "--glob" || arg === "--iglob" || arg === "-g") &&
-        args[index + 1] === pattern,
-    );
-
-  childProcess.spawn = function containedRipgrepSpawn(command, args, options) {
-    if (!sameExecutable(command) || !Array.isArray(args)) {
-      return directSpawn.call(this, command, args, options);
-    }
-    const boundedArgs = [...args];
-    const boundaryArgs = [];
-    for (const pattern of ["!.git", "!**/.git"]) {
-      if (!hasGlob(boundedArgs, pattern)) {
-        boundaryArgs.push("--iglob", pattern);
-      }
-    }
-    if (boundaryArgs.length > 0) {
-      const separator = boundedArgs.indexOf("--");
-      boundedArgs.splice(
-        separator === -1 ? boundedArgs.length : separator,
-        0,
-        ...boundaryArgs,
-      );
-    }
-    return directSpawn.call(this, command, boundedArgs, options);
   };
 }
 
@@ -827,7 +771,9 @@ function installFirstTurnTracer() {
       end(kind === "tls" ? "tcp-connected" : "connected"),
     );
     socket.once("secureConnect", () => end("tls-ready"));
-    socket.once("error", (error) => end(error?.code || error?.message || "error"));
+    socket.once("error", (error) =>
+      end(error?.code || error?.message || "error"),
+    );
     socket.once("close", () => end("closed before connect"));
     return socket;
   };
@@ -932,13 +878,14 @@ function installFirstTurnTracer() {
       }`,
     );
     child.once("exit", (code, signal) => end(`exit ${signal || code}`));
-    child.once("error", (error) => end(error?.code || error?.message || "error"));
+    child.once("error", (error) =>
+      end(error?.code || error?.message || "error"),
+    );
     return child;
   };
 }
 
 installEnvironmentProxyTransports();
-installContainedRipgrepBoundary();
 installFirstTurnTracer();
 
 // @cursor/sdk location: the engine passes an absolute path
@@ -979,8 +926,8 @@ try {
 }
 // Loading the SDK is a multi-megabyte CJS bundle plus native bindings, and it
 // happens lazily on the FIRST control request — so it sits on the critical path
-// between ZSR admission and the session appearing, where it was previously
-// indistinguishable from the boundary's own cost.
+// between execution admission and the session appearing, where it would
+// otherwise be indistinguishable from the boundary's own cost.
 process.stderr.write(
   `[cursor-host] ready in ${Date.now() - hostStartedAt}ms ` +
     `(@cursor/sdk require=${Date.now() - sdkRequireStartedAt}ms)\n`,
@@ -1039,11 +986,10 @@ try {
   );
 }
 
-/** A contained session gets a Zeros-owned, workspace/provider-scoped store.
+/** A gateway session gets a Zeros-owned, workspace/provider-scoped store.
  * Seed it once from Cursor's normal store so existing conversations resume;
- * all later writes stay on the explicit capability instead of the user's
- * broader HOME. This code runs inside ZSR, where the source is read-only and
- * the destination is the sole writable provider-state root. */
+ * all later writes use the durable explicit path under either the native or
+ * kernel execution boundary. */
 function initializeContainedStateRoot() {
   const target = process.env.ZEROS_CURSOR_STATE_ROOT;
   if (!target) return null;
@@ -1268,7 +1214,9 @@ function getPlatform() {
     platformPromise = (async () => {
       if (typeof sdk.createAgentPlatform !== "function") return null;
       return sdk.createAgentPlatform(
-        containedStateRoot ? { localStore: jsonlStoreAt(containedStateRoot) } : {},
+        containedStateRoot
+          ? { localStore: jsonlStoreAt(containedStateRoot) }
+          : {},
       );
     })().catch(() => null);
   }

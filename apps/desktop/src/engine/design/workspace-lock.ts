@@ -2,10 +2,11 @@
 // Historical macOS ACL cleanup — the workspace-level compatibility wrapper
 // ──────────────────────────────────────────────────────────
 //
-// The strong Code/Design boundary belongs to each Zeros-launched actor's
-// immutable provider sandbox and to engine path authorization. A persistent
-// same-user ACL is the wrong scope: it also blocks the user's other editors,
-// Git clients, and coding platforms. New builds therefore never install one.
+// A persistent same-user ACL is the wrong scope: it also blocks the user's
+// other editors, Git clients, and coding platforms. Native Code now uses an
+// explicit behavioral contract plus Zeros-owned path authorization; a future
+// autonomous Design agent uses ZSR and the Design API. New builds never install
+// a checkout ACL for either actor.
 //
 // Boot owns the cold, durable ACL migration so admission and canvas writes do
 // not walk the tree.
@@ -24,6 +25,7 @@ import {
   getWorkspaceMeta,
   setWorkspaceMeta,
 } from "../git/state";
+import { runGit } from "../git/git-exec";
 import { discoverDesignDirectories } from "./directory";
 import { designDirectoryNameFor } from "./directory-registry";
 
@@ -63,8 +65,8 @@ export async function unfenceDesignDirectory(
 }
 
 /** Release a historical ACL before a Git rewrite. There is intentionally no
- * re-fence: new runtime isolation is attached to Zeros actors, not the shared
- * checkout. */
+ * re-fence: the current actor contracts do not change permissions on the
+ * shared checkout. */
 export async function withDesignDirectoryWritable<T>(
   workspacePath: string,
   fn: () => Promise<T>,
@@ -126,4 +128,12 @@ export async function unlockLegacyDesignWorkspaceLock(
   workspacePath: string,
 ): Promise<void> {
   await cleanupLegacyDesignFilesystemGuards(workspacePath);
+  // Removing an ACL changes file metadata on macOS even when the bytes and
+  // executable bit are untouched. Refresh Git's stat cache so subsequent
+  // checkout/index operations do not misread those clean tracked files as
+  // changed. A dirty or unmerged entry can make refresh exit non-zero, but Git
+  // still refreshes the clean entries it can prove.
+  await runGit(workspacePath, ["update-index", "-q", "--refresh"]).catch(
+    () => undefined,
+  );
 }

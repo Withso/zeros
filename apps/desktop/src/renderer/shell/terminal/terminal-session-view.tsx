@@ -30,10 +30,10 @@
 // SIGWINCH, and the old narrow prompt(s) stayed in scrollback.
 //
 // Fix is structural:
-//   1. Don't spawn the PTY until `fit.proposeDimensions()` returns
-//      a real (>= 4 col, >= 2 row) measurement. A ResizeObserver
-//      polls until we have stable dims, with a 1.5 s fallback to
-//      80×24 so a broken layout still gives a usable shell.
+//   1. Don't spawn the PTY until the view is visible with a real host box
+//      and `fit.proposeDimensions()` returns a usable measurement. A
+//      ResizeObserver retries as layout settles. A 1.5 s fallback to
+//      80×24 handles missing font metrics, only while visible and laid out.
 //   2. After spawn, the live ResizeObserver waits for native-window bursts
 //      to settle and suspends completely during known pane drags, then fits
 //      once on the next frame. This collapses a gesture into one PTY resize.
@@ -189,6 +189,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   restartOnKeyRef.current = restartOnKey;
   const xtermRef = useRef<XTerm | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const trySpawnRef = useRef<((allowFallback?: boolean) => void) | null>(null);
+  const spawnStartedRef = useRef(false);
   const resizeSchedulerRef = useRef<ReturnType<
     typeof createTerminalResizeScheduler
   > | null>(null);
@@ -425,7 +427,6 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     // Gated spawn: wait for a real proposed measurement before calling
     // `pty_create`. This observer disconnects as soon as spawning succeeds;
     // the settled live-resize scheduler below owns later geometry changes.
-    let spawned = false;
     let spawnRaf = 0;
     let cancelled = false;
     let roSpawn: ResizeObserver | null = null;
@@ -435,31 +436,37 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       roSpawn = null;
     };
 
-    const tryMeasureAndSpawn = () => {
-      if (spawned || cancelled) return;
-      // proposeDimensions() returns undefined when the host has zero
-      // box, and a positive `{cols, rows}` once it has real layout.
+    const tryMeasureAndSpawn = (allowFallback = false) => {
+      if (spawnStartedRef.current || cancelled || !hasVisibleHost()) return;
+      // FitAddon can propose a small positive grid under display:none. A
+      // parked view must never resize the live PTY merely by attaching.
       const dims = fit.proposeDimensions();
-      if (!isUsableTerminalDimensions(dims)) {
+      const measured = isUsableTerminalDimensions(dims);
+      if (!measured && !allowFallback) {
         return; // keep polling
       }
-      spawned = true;
+      spawnStartedRef.current = true;
       stopSpawnObserver();
-      try {
-        fit.fit();
-      } catch {
-        /* fall through using proposed dims via lastDimsRef */
+      if (measured) {
+        try {
+          fit.fit();
+        } catch {
+          /* fall through using proposed dims via lastDimsRef */
+        }
+        lastDimsRef.current = {
+          cols: term.cols || dims.cols,
+          rows: term.rows || dims.rows,
+        };
+      } else {
+        lastDimsRef.current = { cols: FALLBACK_COLS, rows: FALLBACK_ROWS };
       }
-      lastDimsRef.current = {
-        cols: term.cols || dims.cols,
-        rows: term.rows || dims.rows,
-      };
       void spawn(term);
     };
+    trySpawnRef.current = tryMeasureAndSpawn;
 
     // First try after one paint frame — the common case (panel already
     // expanded at full size on mount) clears here.
-    spawnRaf = requestAnimationFrame(tryMeasureAndSpawn);
+    spawnRaf = requestAnimationFrame(() => tryMeasureAndSpawn());
 
     // Keep trying as the container reaches its real size.
     roSpawn = new ResizeObserver(() => {
@@ -486,7 +493,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         .catch(() => [])
         .then(() => {
           if (cancelled) return;
-          if (!spawned) {
+          if (!spawnStartedRef.current) {
             tryMeasureAndSpawn();
             return;
           }
@@ -501,23 +508,11 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         });
     }
 
-    // Last-resort: spawn with 80×24 if the host never reports real
-    // dims (badly-broken layout, jsdom, …). Keeps the terminal usable
-    // and the post-spawn ResizeObserver will correct dims as soon as
-    // the layout heals.
-    const fallbackTimer = window.setTimeout(() => {
-      if (!spawned && !cancelled) {
-        spawned = true;
-        stopSpawnObserver();
-        lastDimsRef.current = { cols: FALLBACK_COLS, rows: FALLBACK_ROWS };
-        void spawn(term);
-      }
-    }, FIT_FALLBACK_MS);
-
     return () => {
       cancelled = true;
       cancelAnimationFrame(spawnRaf);
-      window.clearTimeout(fallbackTimer);
+      trySpawnRef.current = null;
+      spawnStartedRef.current = false;
       stopSpawnObserver();
       host.removeEventListener("wheel", onWheelCapture, { capture: true });
       term.dispose();
@@ -662,6 +657,10 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   // PTY byte in the open-tab count.
   useEffect(() => {
     return bindPtyWriter(sessionId, (data) => {
+      // A parked view waiting for its first attach will receive the engine's
+      // replay. Appending live bytes now would duplicate that history. Once
+      // attachment starts, continue buffering output through later hides.
+      if (!spawnStartedRef.current) return;
       xtermRef.current?.write(data);
     });
   }, [sessionId]);
@@ -684,7 +683,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       exitedRef.current = true;
       const exitPolicy = terminalExitPolicy(evt.reason);
       restartBlockedRef.current = exitPolicy.restartBlocked;
-      const term = xtermRef.current;
+      const term = spawnStartedRef.current ? xtermRef.current : null;
       if (term) {
         const code = evt.exitCode ?? evt.signal;
         if (exitPolicy.restartBlocked) {
@@ -788,6 +787,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     // alone cannot repaint DOM-renderer rows skipped under visibility:hidden
     // and cannot restore keyboard focus.
     const revealScheduler = createTerminalRevealScheduler(() => {
+      trySpawnRef.current?.();
       applyFit();
       const term = xtermRef.current;
       if (term) {
@@ -800,10 +800,28 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       }
     });
     revealScheduler.request();
-    return () => revealScheduler.dispose();
+    // Hidden mounts do not arm the fallback. Each reveal gets a fresh chance
+    // to measure before using default font dimensions in a visible host.
+    const fallbackTimer = window.setTimeout(() => {
+      trySpawnRef.current?.(true);
+    }, FIT_FALLBACK_MS);
+    return () => {
+      revealScheduler.dispose();
+      window.clearTimeout(fallbackTimer);
+    };
     // applyFit is a stable closure over refs (see post-spawn observer).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
+
+  function hasVisibleHost(): boolean {
+    const host = hostRef.current;
+    return !!(
+      visibleRef.current &&
+      host?.isConnected &&
+      host.clientWidth > 0 &&
+      host.clientHeight > 0
+    );
+  }
 
   // Shared "fit + propose + ptyResize" path. Reads the proposed dims
   // first so we can no-op when nothing changed (avoids IPC churn on
@@ -812,6 +830,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   // term.onResize callback) funnel through here so behaviour stays
   // consistent.
   function applyFit(): void {
+    if (!hasVisibleHost()) return;
     const fit = fitRef.current;
     const term = xtermRef.current;
     if (!fit || !term) return;

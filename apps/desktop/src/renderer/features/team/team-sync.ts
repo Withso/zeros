@@ -33,7 +33,11 @@ import {
   organizationContextShouldRefreshOnFocus,
   organizationContextStillSelected,
 } from "./organization-context-isolation";
-import { reconcileOrganizationWorkspaceOwnership } from "./organization-membership-history";
+import {
+  reconcileOrganizationWorkspaceOwnership,
+  reconcilePersonalWorkspaceOwnership,
+} from "./organization-membership-history";
+import { desktopOrganizationChoices } from "./personal-organization";
 import {
   acceptOrganizationSnapshot,
   getOrganizationStoreGeneration,
@@ -57,8 +61,18 @@ export function useTeamEngineSync(): void {
 
   useEffect(() => {
     // LOCAL bridge only: the engine op is local-only.
-    if (!CONTROL_PLANE_URL || !isNativeRuntime()) return;
+    if (!isNativeRuntime()) return;
     if (!bridge || bridgeStatus !== "connected") return;
+
+    // Old account-owned Personal rows can be detached using local migration
+    // evidence alone, including after the old account was deleted or offline.
+    void reconcilePersonalWorkspaceOwnership().catch((error) => {
+      console.warn(
+        "[organization] local Personal migration deferred:",
+        error instanceof Error ? error.message : error,
+      );
+    });
+    if (!CONTROL_PLANE_URL) return;
 
     let disposed = false;
     let running = false; // exactly one sync in flight at a time
@@ -124,7 +138,11 @@ export function useTeamEngineSync(): void {
         // bridge restart should defer that idempotent repair, not prevent this
         // pass from refreshing the active organization's engine context.
         try {
-          await reconcileOrganizationWorkspaceOwnership(me);
+          await reconcileOrganizationWorkspaceOwnership(
+            me,
+            () =>
+              !disposed && storeGeneration === getOrganizationStoreGeneration(),
+          );
         } catch (error) {
           console.warn(
             "[organization] local workspace ownership repair deferred:",
@@ -133,11 +151,12 @@ export function useTeamEngineSync(): void {
         }
         // Honor the Home switcher's selection; fall back to Personal/first.
         const wantId = getActiveTeamId();
-        const organizations = me.organizations ?? me.teams;
+        const organizations = desktopOrganizationChoices(me);
         const team =
           organizations.find((organization) => organization.id === wantId) ??
           organizations[0];
-        if (disposed) return;
+        if (disposed || storeGeneration !== getOrganizationStoreGeneration())
+          return;
         if (!team) {
           await clearEngine(null);
           return;
@@ -153,6 +172,7 @@ export function useTeamEngineSync(): void {
         const settings = await controlPlane.getOrganizationSettings(team.id);
         if (
           disposed ||
+          storeGeneration !== getOrganizationStoreGeneration() ||
           !organizationContextStillSelected(team.id, getActiveTeamId())
         ) {
           return;

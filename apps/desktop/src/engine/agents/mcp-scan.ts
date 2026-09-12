@@ -15,9 +15,16 @@
 //
 // Scans the user-level (home) configs AND, for any repo roots passed in, each
 // repo's `.cursor/mcp.json` + `.mcp.json` (project-level), tagged per repo.
+//
+// Codex plugins are scanned too, and they are not an edge case: a connector
+// installed from the ChatGPT/Codex desktop MCP-extensions sidebar ships its
+// servers in the PLUGIN's own `.mcp.json`, never in `config.toml`. Since agents
+// no longer load native MCP themselves (adapters/shared/mcp-passthrough.ts),
+// leaving those out would strand exactly the servers a user is most likely to
+// have and least likely to be able to find.
 // ──────────────────────────────────────────────────────────
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -51,6 +58,10 @@ const REPO_SOURCES: readonly SourceDef[] = [
   { source: "cursor-project", label: "Cursor (project)", rel: ".cursor/mcp.json", format: "json" },
   { source: "project", label: "Project (.mcp.json)", rel: ".mcp.json", format: "json" },
 ];
+
+/** Codex plugin bundles live under `$CODEX_HOME/plugins/cache/<marketplace>/
+ *  <plugin>/<version>/.mcp.json`. */
+const CODEX_PLUGIN_CACHE_REL = "plugins/cache";
 
 /** Skip a pathological config file rather than block the scan on a huge parse. */
 const MAX_CONFIG_BYTES = 8 * 1024 * 1024; // 8 MB
@@ -177,6 +188,8 @@ export function scanNativeMcpConfigs(
   repoRoots: readonly string[] = [],
 ): DiscoveredMcpSource[] {
   const home = SOURCES.map((def) => scanSource(homeDir, def));
+  const codexPlugins = scanCodexPluginMcp(homeDir);
+  if (codexPlugins.servers.length > 0) home.push(codexPlugins);
   const perRepo: DiscoveredMcpSource[] = [];
   const seen = new Set<string>();
   for (const root of repoRoots) {
@@ -190,4 +203,144 @@ export function scanNativeMcpConfigs(
     }
   }
   return [...home, ...perRepo];
+}
+
+/** Discover the MCP servers Codex plugins declare. One aggregated source
+ *  rather than one per plugin: the dialog groups by where a user would look,
+ *  and "Codex plugins" is a single place in their head.
+ *
+ *  Only the newest version directory of each plugin is read — the cache keeps
+ *  old ones, and offering three copies of the same server is worse than
+ *  offering none.
+ *
+ *  A relative `command` is skipped. Those launchers resolve against the
+ *  plugin's own directory (`"./bin/…"` with a `cwd` in the manifest), and the
+ *  Zeros registration shape has no cwd to carry — importing one would create a
+ *  server that cannot start. HTTP servers, which is what every user-installed
+ *  connector actually is, carry a URL and are unaffected. */
+export function scanCodexPluginMcp(
+  homeDir: string = os.homedir(),
+  codexHomeOverride?: string,
+): DiscoveredMcpSource {
+  const cacheRoot = codexPluginCacheRoot(homeDir, codexHomeOverride);
+  const out: DiscoveredMcpSource = {
+    source: "codex-plugins",
+    label: "Codex plugins",
+    path: cacheRoot,
+    exists: existsSync(cacheRoot),
+    servers: [],
+  };
+  if (!out.exists) return out;
+  const seen = new Set<string>();
+  try {
+    for (const versionDir of codexPluginVersionDirs(cacheRoot)) {
+      const manifest = scanSource(versionDir, {
+        source: out.source,
+        label: out.label,
+        rel: ".mcp.json",
+        format: "json",
+      });
+      for (const server of manifest.servers) {
+        if (server.transport === "stdio" && !path.isAbsolute(server.command))
+          continue;
+        if (seen.has(server.name)) continue;
+        seen.add(server.name);
+        out.servers.push(server);
+      }
+    }
+  } catch {
+    out.warning = "could not read the Codex plugin cache";
+  }
+  return out;
+}
+
+/** Every MCP server name Codex plugins declare — including the ones
+ *  `scanCodexPluginMcp` filters out as un-importable.
+ *
+ *  Disabling and importing want different sets. An import must be usable, so a
+ *  launcher with a relative `command` is dropped there; a DISABLE only needs
+ *  the name, and skipping such a server would leave it running. Deliberately
+ *  unfiltered for that reason. */
+export function codexPluginMcpServerNames(
+  homeDir: string = os.homedir(),
+  codexHomeOverride?: string,
+): string[] {
+  const cacheRoot = codexPluginCacheRoot(homeDir, codexHomeOverride);
+  if (!existsSync(cacheRoot)) return [];
+  const names = new Set<string>();
+  try {
+    for (const versionDir of codexPluginVersionDirs(cacheRoot)) {
+      const file = path.join(versionDir, ".mcp.json");
+      if (!existsSync(file)) continue;
+      try {
+        const doc = JSON.parse(readFileSync(file, "utf8")) as {
+          mcpServers?: unknown;
+        };
+        const map = doc?.mcpServers;
+        if (typeof map !== "object" || map === null || Array.isArray(map))
+          continue;
+        for (const name of Object.keys(map)) if (name) names.add(name);
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return [...names];
+  }
+  return [...names];
+}
+
+/** `$CODEX_HOME/plugins/cache`, honouring an explicit override then the env. */
+function codexPluginCacheRoot(homeDir: string, override?: string): string {
+  const codexHome =
+    override?.trim() ||
+    process.env.CODEX_HOME?.trim() ||
+    path.join(homeDir, ".codex");
+  return path.join(codexHome, CODEX_PLUGIN_CACHE_REL);
+}
+
+/** Newest version directory of every plugin under the cache root. */
+function* codexPluginVersionDirs(cacheRoot: string): Generator<string> {
+  for (const marketplace of readdirSync(cacheRoot, { withFileTypes: true })) {
+    if (!marketplace.isDirectory()) continue;
+    const marketplaceDir = path.join(cacheRoot, marketplace.name);
+    let plugins;
+    try {
+      plugins = readdirSync(marketplaceDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const plugin of plugins) {
+      if (!plugin.isDirectory()) continue;
+      const versionDir = newestVersionDir(
+        path.join(marketplaceDir, plugin.name),
+      );
+      if (versionDir) yield versionDir;
+    }
+  }
+}
+
+/** Newest version directory under a plugin dir, by mtime — the cache has no
+ *  "current" marker and version strings are not consistently comparable
+ *  (`0.1.2` next to `26.901.41123`). */
+function newestVersionDir(pluginDir: string): string | null {
+  let newest: { dir: string; mtimeMs: number } | null = null;
+  let entries;
+  try {
+    entries = readdirSync(pluginDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = path.join(pluginDir, entry.name);
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(dir).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!newest || mtimeMs > newest.mtimeMs) newest = { dir, mtimeMs };
+  }
+  return newest?.dir ?? null;
 }

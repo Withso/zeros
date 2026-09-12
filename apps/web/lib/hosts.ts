@@ -9,6 +9,7 @@
 // session cookie to Domain=.zeros.build — keep app cookies host-only).
 
 import type { Env } from "./session";
+import { DEPLOYMENT_MANIFEST_PATH } from "./deployment-manifest.mjs";
 
 export const DEFAULT_APP_ORIGIN = "https://app.zeros.build";
 export const DEFAULT_MARKETING_ORIGIN = "https://zeros.build";
@@ -20,7 +21,7 @@ const DEFAULT_MARKETING_HOSTS = [
   "zeros.design",
 ];
 
-export type HostKind = "app" | "marketing";
+export type HostKind = "app" | "marketing" | "ops";
 
 export function appOrigin(env: Pick<Env, "APP_ORIGIN"> | Env): string {
   const raw = (env.APP_ORIGIN || DEFAULT_APP_ORIGIN).trim();
@@ -81,6 +82,7 @@ export function isAppHost(hostname: string, env: Env): boolean {
  * hosts, set MARKETING_HOSTS to include them (e.g. `127.0.0.1,localhost`).
  */
 export function classifyHost(hostname: string, env: Env): HostKind {
+  if (env.ZEROS_SURFACE === "ops") return "ops";
   const host = hostname.toLowerCase();
   if (isMarketingHost(host, env)) return "marketing";
   if (isAppHost(host, env)) return "app";
@@ -113,6 +115,10 @@ export function isAppOnlyPath(pathname: string): boolean {
 export const APP_CSP =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
+/** Ops has no inline script or third-party asset allowance. */
+export const OPS_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+
 /** Marketing CSP — allows Google Fonts used by apps/marketing/index.html. */
 export const MARKETING_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
@@ -125,17 +131,40 @@ const SHARED_SECURITY_HEADERS: Record<string, string> = {
   "Cross-Origin-Opener-Policy": "same-origin",
 };
 
-/** Apply per-host CSP + shared security headers onto a Response. */
-export function applyHostHeaders(res: Response, kind: HostKind): Response {
+const REVALIDATED_UI_ASSET_PATHS = new Set([
+  "/account-deletion.js",
+  "/dashboard.js",
+  "/dashboard.css",
+  "/dashboard-tokens.css",
+  "/ops.js",
+  "/ops.css",
+]);
+
+/** Apply per-host CSP, shared security headers, and runtime asset policy. */
+export function applyHostHeaders(
+  res: Response,
+  kind: HostKind,
+  pathname: string,
+): Response {
   const headers = new Headers(res.headers);
   for (const [k, v] of Object.entries(SHARED_SECURITY_HEADERS)) {
     if (!headers.has(k)) headers.set(k, v);
   }
-  if (!headers.has("Content-Security-Policy")) {
-    headers.set(
-      "Content-Security-Policy",
-      kind === "marketing" ? MARKETING_CSP : APP_CSP,
-    );
+  const currentCsp = headers.get("Content-Security-Policy");
+  const hostCsp =
+    kind === "marketing" ? MARKETING_CSP : kind === "ops" ? OPS_CSP : APP_CSP;
+  // `_headers` gives bare static responses APP_CSP as a safe fallback. When a
+  // static response traverses host middleware, replace only that known generic
+  // value; preserve any narrower policy explicitly authored by a route.
+  if (!currentCsp || (kind !== "app" && currentCsp === APP_CSP)) {
+    headers.set("Content-Security-Policy", hostCsp);
+  }
+  // `_headers` is not applied to responses that pass through Pages Functions.
+  // Override Pages' four-hour static default here as the authoritative path.
+  if (REVALIDATED_UI_ASSET_PATHS.has(pathname)) {
+    headers.set("Cache-Control", "no-cache");
+  } else if (pathname === DEPLOYMENT_MANIFEST_PATH) {
+    headers.set("Cache-Control", "no-store");
   }
   return new Response(res.body, {
     status: res.status,

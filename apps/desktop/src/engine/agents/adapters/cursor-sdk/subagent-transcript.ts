@@ -68,10 +68,10 @@ export function cursorProjectSlug(cwd: string): string {
  *  level and probe `<dir>/subagents/<subagentId>.jsonl`. Returns null when not
  *  found (best-effort — never throws).
  *
- *  `home` MUST be the home the Cursor host actually ran with. Under ZSR that is
- *  the session's projected HOME, not `homedir()` — a contained agent writes its
- *  transcripts into the projection, so defaulting to the real home silently
- *  found nothing and every subagent card came up empty. */
+ *  `home` MUST be the home the Cursor host actually ran with. A deployment may
+ *  provide a different HOME through its selected execution boundary; blindly
+ *  defaulting to the engine's home then finds no transcripts and leaves every
+ *  subagent card empty. */
 export function findSubagentTranscriptPath(
   cwd: string,
   subagentAgentId: string,
@@ -205,8 +205,8 @@ interface SubagentTranscriptFile {
 }
 
 /** The `<home>/.cursor/projects/<slug(cwd)>/agent-transcripts` root for a cwd.
- *  `home` defaults to the engine's own home for the uncontained/legacy path;
- *  every ZSR session passes its projected HOME instead. */
+ * `home` defaults to the engine's own home; a prepared boundary passes the
+ * provider process's exact HOME when it differs. */
 export function agentTranscriptsRoot(
   cwd: string,
   opts?: { home?: string },
@@ -232,7 +232,9 @@ export function agentIdFromTranscriptPath(path: string): string {
 
 /** List every subagent transcript file under an agent-transcripts `root`, with
  *  its mtime (cheap — no file reads). Exported for tests. */
-export function listSubagentTranscriptFiles(root: string): SubagentTranscriptFile[] {
+export function listSubagentTranscriptFiles(
+  root: string,
+): SubagentTranscriptFile[] {
   const out: SubagentTranscriptFile[] = [];
   try {
     if (!existsSync(root)) return out;
@@ -276,11 +278,16 @@ function readFirstUserText(path: string): string {
     }
     if (!isObj(obj) || obj.role !== "user") continue;
     const message = isObj(obj.message) ? obj.message : null;
-    const content = message && Array.isArray(message.content) ? message.content : null;
+    const content =
+      message && Array.isArray(message.content) ? message.content : null;
     if (!content) return "";
     const parts: string[] = [];
     for (const block of content) {
-      if (isObj(block) && block.type === "text" && typeof block.text === "string") {
+      if (
+        isObj(block) &&
+        block.type === "text" &&
+        typeof block.text === "string"
+      ) {
         parts.push(block.text);
       }
     }
@@ -304,7 +311,9 @@ function normalizePrompt(s: string): string {
  *  final report (pulled out of `steps`). The leading user message is the
  *  prompt (shown in the Prompt block) — skipped; later user messages are
  *  tool_result echoes with nothing extra to render. */
-export function parseSubagentTranscript(jsonl: string): ParsedSubagentTranscript {
+export function parseSubagentTranscript(
+  jsonl: string,
+): ParsedSubagentTranscript {
   const steps: NormalizedSubagentStep[] = [];
   let finalText = "";
   for (const line of jsonl.split("\n")) {
@@ -317,7 +326,8 @@ export function parseSubagentTranscript(jsonl: string): ParsedSubagentTranscript
     }
     if (!isObj(obj) || obj.role !== "assistant") continue;
     const message = isObj(obj.message) ? obj.message : null;
-    const content = message && Array.isArray(message.content) ? message.content : null;
+    const content =
+      message && Array.isArray(message.content) ? message.content : null;
     if (!content) continue;
     for (const block of content) {
       if (!isObj(block)) continue;
@@ -368,16 +378,31 @@ function mapTranscriptTool(
   const n = name.toLowerCase();
   const inp = isObj(input) ? input : {};
   if (/read/.test(n))
-    return { toolKind: "read", title: "Read", rawInput: { path: str(inp.path ?? inp.file_path ?? inp.target_file) } };
+    return {
+      toolKind: "read",
+      title: "Read",
+      rawInput: { path: str(inp.path ?? inp.file_path ?? inp.target_file) },
+    };
   if (/grep/.test(n))
-    return { toolKind: "search", title: "Grep", rawInput: { pattern: str(inp.pattern ?? inp.query ?? inp.regex) } };
+    return {
+      toolKind: "search",
+      title: "Grep",
+      rawInput: { pattern: str(inp.pattern ?? inp.query ?? inp.regex) },
+    };
   if (/glob/.test(n))
-    return { toolKind: "search", title: "Glob", rawInput: { pattern: str(inp.glob_pattern ?? inp.pattern) } };
+    return {
+      toolKind: "search",
+      title: "Glob",
+      rawInput: { pattern: str(inp.glob_pattern ?? inp.pattern) },
+    };
   if (/(shell|bash|exec|terminal|\brun\b)/.test(n))
     return {
       toolKind: "execute",
       title: "Bash",
-      rawInput: { command: str(inp.command ?? inp.cmd ?? inp.script), description: str(inp.description) },
+      rawInput: {
+        command: str(inp.command ?? inp.cmd ?? inp.script),
+        description: str(inp.description),
+      },
     };
   if (/(edit|write|str_replace|create_file|apply_patch)/.test(n))
     return {
@@ -391,13 +416,29 @@ function mapTranscriptTool(
       },
     };
   if (/^ls$|list_dir|listdir|list_files/.test(n))
-    return { toolKind: "list", title: "List", rawInput: { path: str(inp.path ?? inp.dir ?? inp.directory) } };
+    return {
+      toolKind: "list",
+      title: "List",
+      rawInput: { path: str(inp.path ?? inp.dir ?? inp.directory) },
+    };
   if (/delete/.test(n))
-    return { toolKind: "delete", title: "Delete", rawInput: { path: str(inp.path ?? inp.file_path) } };
+    return {
+      toolKind: "delete",
+      title: "Delete",
+      rawInput: { path: str(inp.path ?? inp.file_path) },
+    };
   if (/web.?search/.test(n))
-    return { toolKind: "web_search", title: "Web search", rawInput: { query: str(inp.query ?? inp.q) } };
+    return {
+      toolKind: "web_search",
+      title: "Web search",
+      rawInput: { query: str(inp.query ?? inp.q) },
+    };
   if (/fetch/.test(n))
-    return { toolKind: "fetch", title: "Fetch", rawInput: { url: str(inp.url ?? inp.URL) } };
+    return {
+      toolKind: "fetch",
+      title: "Fetch",
+      rawInput: { url: str(inp.url ?? inp.URL) },
+    };
   // Was `/^mcp__|mcp/`, where `^` bound only to the first alternative — so the
   // bare `mcp` branch already matched everything the anchored one did, making
   // the whole pattern exactly `/mcp/` with a misleading anchor bolted on

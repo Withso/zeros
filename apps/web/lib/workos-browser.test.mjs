@@ -85,6 +85,53 @@ test("auth start is a stateless facade for the matching Railway service", async 
   assert.match(response.headers.get("set-cookie"), new RegExp(SESSION_ID));
 });
 
+test("the isolated Ops project uses its separate Railway browser namespace", async () => {
+  let forwarded;
+  await beginWorkOSBrowserAuth(
+    new Request("https://ops-alpha.zeros.build/auth/start"),
+    {
+      ...ENV,
+      APP_ORIGIN: "https://ops-alpha.zeros.build",
+      WORKOS_BROWSER_ROUTE_PREFIX: "/ops",
+    },
+    {
+      fetch: async (url, init) => {
+        forwarded = { url, init };
+        return new Response(null, {
+          status: 303,
+          headers: {
+            location: "https://api.workos.com/user_management/authorize",
+          },
+        });
+      },
+    },
+  );
+  assert.equal(forwarded.url, `${CONTROL_PLANE_URL}/ops/auth/start`);
+});
+
+test("auth start preserves only the fixed step-up max_age", async () => {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(null, {
+      status: 303,
+      headers: { location: "https://api.workos.com/user_management/authorize" },
+    });
+  };
+  await beginWorkOSBrowserAuth(
+    new Request(`${APP_ORIGIN}/auth/start?max_age=300`),
+    ENV,
+    { fetch },
+  );
+  await beginWorkOSBrowserAuth(
+    new Request(`${APP_ORIGIN}/auth/start?max_age=99999`),
+    ENV,
+    { fetch },
+  );
+  assert.equal(new URL(calls[0].url).searchParams.get("max_age"), "300");
+  assert.equal(new URL(calls[1].url).searchParams.has("max_age"), false);
+});
+
 test("callback and logout forward only their required opaque cookie", async () => {
   const calls = [];
   const fetch = async (url, init) => {

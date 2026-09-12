@@ -88,6 +88,18 @@ export function firstLeafId(node: PaneNode): string {
   return node.type === "leaf" ? node.id : firstLeafId(node.first);
 }
 
+/** The leaf whose tab strip owns the tree's TOP-RIGHT corner: a row split hands
+ *  the corner to its second (right) child, a column split to its first (top)
+ *  child. Code's chat strip seats the workbench expand control there, so that
+ *  control stays at the window's top-right edge in every split shape —
+ *  `leafIds().at(-1)` would sink it to the bottom pane after a Split Down. */
+export function topRightLeafId(node: PaneNode): string {
+  if (node.type === "leaf") return node.id;
+  return node.direction === "row"
+    ? topRightLeafId(node.second)
+    : topRightLeafId(node.first);
+}
+
 export function hasLeaf(node: PaneNode, paneId: string): boolean {
   if (node.type === "leaf") return node.id === paneId;
   return hasLeaf(node.first, paneId) || hasLeaf(node.second, paneId);

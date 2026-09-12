@@ -9,16 +9,22 @@
 // Layer files:
 //   ~/.zeros/settings.toml              user    (dev: ~/.zeros-dev)
 //   ~/.zeros/settings.managed.toml      managed (admin policy; resolver stub in v1)
-//   <repo>/.zeros/settings.toml         repo    (shared — committed)
+//   <repo>/.zeros/settings.toml         legacy migration input only
 //   <repo>/.zeros/settings.local.toml   repo-local (personal — gitignored)
+//   <worktree>/.zeros/settings.toml     workspace-local (tracked-name fallback: settings.local.toml)
 //
 // Validation is per-leaf, not per-file: a bad value drops that one key with a
-// warning, never the whole document. Unknown keys are ALWAYS preserved so an
-// older Zeros never strips keys written by a newer one.
+// warning, never the whole document. Writers preserve unknown text on disk;
+// repository/workspace resolution exposes only supported, scope-appropriate keys.
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
+import { personalPreferencesSchema } from "@zeros/protocol/personal-preferences";
 import { GITHUB_AUTH_METHODS } from "@zeros/protocol/github-auth";
+import {
+  DESIGN_DIRECTORY_ID_PATTERN,
+  sanitizeDesignDirectoryName,
+} from "../design/directory-path";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
 export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
@@ -58,6 +64,8 @@ export const SCHEMA_URL_USER =
   "https://zeros.build/schemas/settings.schema.json";
 export const SCHEMA_URL_REPO =
   "https://zeros.build/schemas/settings.repo.schema.json";
+export const SCHEMA_URL_WORKSPACE =
+  "https://zeros.build/schemas/settings.workspace.schema.json";
 
 export const RUN_ACTION_PLATFORMS = ["mac", "linux", "win"] as const;
 
@@ -303,19 +311,26 @@ export type McpSettingsServer = z.infer<typeof mcpServerSchema>;
  *  POSIX separators, nesting allowed (`apps/web/designs`). The folder itself
  *  is committed repo content (recognizable by its committed
  *  `.zeros-canvas.json` marker); this key only selects WHICH one is active.
- *  Layering gives the product's scoping story for free: the committed repo
- *  file carries the team default, `.zeros/settings.local.toml` a per-machine
- *  override, and a worktree's own local file pins one workspace to a
- *  different folder — so two live workspaces can target `Web Design/` and
- *  `Mobile Design/` at once. Absent = "Zeros Design". */
+ *  The personal main-checkout file selects the directory for all linked local
+ *  workspaces. Absent = "Zeros Design". */
 const designSchema = z
   .object({
     directory: z
       .string()
+      .refine(
+        (value) => sanitizeDesignDirectoryName(value) !== null,
+        "Expected a safe repo-relative Design directory",
+      )
       .describe(
         "Repo-relative folder the design surface reads and writes " +
           '(default "Zeros Design"). The folder is committed content; this ' +
           "key just selects which design folder is active.",
+      ),
+    directory_id: z
+      .string()
+      .regex(DESIGN_DIRECTORY_ID_PATTERN)
+      .describe(
+        "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml.",
       ),
   })
   .partial();
@@ -507,6 +522,9 @@ const browserSchema = z
  *  `env_files` / `mcp` / `file_include_globs` also live here only since the
  *  2026-07-17 repo-file slimming (they used to be repo keys too). */
 export const userSettingsSchema = repoSettingsSchema.extend({
+  preferences: personalPreferencesSchema.optional(),
+  preferences_version: z.literal(1).optional(),
+  agent_preferences_version: z.literal(1).optional(),
   env: z
     .record(z.string(), z.string())
     .optional()
@@ -530,6 +548,33 @@ export const userSettingsSchema = repoSettingsSchema.extend({
   providers: z.record(z.string(), providerSchema).optional(),
 });
 
+/** The personal repository file shares validated user preference shapes. */
+export const repoLocalSettingsSchema = userSettingsSchema
+  .omit({
+    preferences: true,
+    preferences_version: true,
+    agent_preferences_version: true,
+    env: true,
+    env_files: true,
+    models: true,
+    browser: true,
+    tool_approvals_enabled: true,
+    providers: true,
+    github: true,
+  })
+  .extend({
+    settings_version: z.literal(2).optional(),
+    settings_migration_notes: z.array(z.string()).optional(),
+  })
+  .strict();
+
+/** Per-checkout execution overrides; provisioning and account choices keep
+ * their broader repository/user owners. */
+export const workspaceLocalSettingsSchema = repoLocalSettingsSchema.omit({
+  file_include_globs: true,
+  workspaces: true,
+});
+
 /** Managed (admin policy) layer can set anything a user can. Stub in v1. */
 export const managedSettingsSchema = userSettingsSchema;
 
@@ -548,15 +593,15 @@ export type SettingsLayerName =
   | "workspace-local"
   | "managed";
 
-/** Keys ignored (with a warning) when they appear in a repo-scoped layer.
- *  The committed repo file may set none of these; the personal (gitignored)
- *  repo-local file MAY set `workspaces` — a machine-specific worktrees-path
- *  override is exactly what that file exists for. (The published repo JSON
- *  schema stays the strict committed shape; repo-local accepting `workspaces`
- *  is a deliberate engine-side superset.) `providers` is user-only across ALL
- *  repo-scoped layers (repo / repo-local / workspace-local) — agent auth and
- *  binary/gateway overrides are per-user, never per-repo or per-worktree. */
+/** Ownership restrictions for active personal settings and legacy migration
+ *  inputs. The published repo schema describes repo-local, including its
+ *  workspaces.path override. Agent authentication and executable/gateway
+ *  choices remain user-owned. `repo` and `workspace-local` validation shapes
+ *  below are retained for migration; their bridge names alias repo-local. */
 export const USER_ONLY_KEYS = [
+  "preferences",
+  "preferences_version",
+  "agent_preferences_version",
   "models",
   "workspaces",
   "browser",
@@ -567,32 +612,33 @@ export const USER_ONLY_KEYS = [
 const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
   team: USER_ONLY_KEYS,
   repo: USER_ONLY_KEYS,
-  "repo-local": ["models", "browser", "tool_approvals_enabled", "providers"],
-  // workspace-local is the worktree's own gitignored file — same trust + key
-  // rules as repo-local (per-machine personal config, just per-worktree).
-  "workspace-local": [
+  "repo-local": [
+    "preferences",
+    "preferences_version",
+    "agent_preferences_version",
     "models",
     "browser",
     "tool_approvals_enabled",
     "providers",
+    "github",
+  ],
+  // Workspace overrides cannot change where other worktrees are created.
+  "workspace-local": [
+    "preferences",
+    "preferences_version",
+    "agent_preferences_version",
+    "models",
+    "browser",
+    "tool_approvals_enabled",
+    "providers",
+    "workspaces",
+    "github",
   ],
 };
 
-/** Keys the COMMITTED repo settings file doesn't read (2026-07-17 slimming):
- *  repo files carry scripts (+ the git / prompts tables the repo-page tabs
- *  edit, and repo-local's `workspaces.path`) — nothing else. `env` and
- *  `env_files` moved to the Keychain env vault; `mcp` and
- *  `file_include_globs` came back to the personal repo-local file only
- *  (see REPO_UNSUPPORTED_BY_LAYER).
- *  Ignored with a warning, never stripped from the file (no migration —
- *  stale keys stay inert on disk and survive read-modify-write).
- *
- *  2026-07-22: `mcp` returned to the REPO-LOCAL layer only (see
- *  REPO_UNSUPPORTED_BY_LAYER) — the Customize tab's repo scope writes per-repo
- *  MCP servers into the personal, gitignored `.zeros/settings.local.toml`.
- *  The COMMITTED repo file and workspace-local still refuse `mcp`: a
- *  clone-borne file must not be able to register an MCP server (the stdio-RCE
- *  gate the 2026-07-17 slimming introduced stays for shared files). */
+/** Unsupported keys in retired shared/worktree files. Migration must not
+ *  activate previously dormant MCP commands, host environment, or copy rules.
+ *  Legacy bytes remain in their recovery files. */
 export const REPO_FILE_UNSUPPORTED_KEYS = [
   "env",
   "env_files",
@@ -600,40 +646,13 @@ export const REPO_FILE_UNSUPPORTED_KEYS = [
   "file_include_globs",
 ] as const;
 
-/** The subset of REPO_FILE_UNSUPPORTED_KEYS each repo-scoped layer ignores.
- *  repo-local reads `mcp` (per-repo MCP servers, personal file) and
- *  `file_include_globs`; the committed repo file and workspace-local ignore
- *  the full set.
- *
- *  2026-07-29: `file_include_globs` returned to the REPO-LOCAL layer only,
- *  the same way `mcp` did on 2026-07-22. "Files to copy" is a PER-PROJECT
- *  question — one repo needs `.env` + certs, another needs nothing — and the
- *  user layer could only express one global answer. repo-local is the personal,
- *  gitignored `.zeros/settings.local.toml`: same trust as the user file, just
- *  scoped to one repo, which is exactly what the settings pane's "This project"
- *  scope writes.
- *
- *  Still refused by the COMMITTED repo file: `.worktreeinclude` is the
- *  committed, team-shared mechanism (and outranks this key anyway), so a
- *  second clone-borne way to name host files for copying buys nothing.
- *
- *  On the clone-borne question generally: nothing stops a repo COMMITTING a
- *  `.zeros/settings.local.toml` (ensureLocalSettingsIgnored only runs on our
- *  own writes), so the repo-local layer is not categorically un-clone-borne.
- *  That matters for `mcp` — a stdio server is host RCE — and is why the
- *  committed file still refuses it. It does NOT add reach for this key: a
- *  hostile `file_include_globs` can only name paths INSIDE the repo (git
- *  enumerates them; setup-hooks' resolveContainedPaths rejects absolute and
- *  `..`), and copies them into that repo's own worktree — strictly less than
- *  a committed `.worktreeinclude`, which is designed to do exactly this and
- *  outranks the key anyway.
- *  Still refused by workspace-local: seeding is resolved against the MAIN
- *  checkout at create time, so a worktree's own file could never take effect
- *  and accepting it would be a silent no-op. */
+/** Active repo-local supports MCP and files-to-copy preferences. The reader
+ *  verifies local Git exclusion and refuses tracked personal settings before
+ *  using this shape. Environment secrets retain their vault ownership. */
 const REPO_UNSUPPORTED_BY_LAYER: Record<string, readonly string[]> = {
   repo: REPO_FILE_UNSUPPORTED_KEYS,
   "repo-local": ["env", "env_files"],
-  "workspace-local": REPO_FILE_UNSUPPORTED_KEYS,
+  "workspace-local": ["env", "env_files", "file_include_globs"],
 };
 
 /** The layers backed by in-repo files (`.zeros/settings*.toml`). */
@@ -694,6 +713,7 @@ function sanitizeTable(
       // Nested per-model tables intentionally expose only validated fields;
       // their in-place TOML writer still preserves unknown keys on disk.
       if (preserveUnknown) out[k] = v;
+      else warnings.push(`${basePath}.${k}: unsupported key — ignored`);
       continue;
     }
     const r = field.safeParse(v);
@@ -852,6 +872,7 @@ function sanitizeModels(
 function sanitizeMcp(
   value: unknown,
   warnings: string[],
+  preserveUnknown = true,
 ): Record<string, unknown> | undefined {
   if (!isPlainObject(value)) {
     warnings.push(`mcp: expected a table — ignored`);
@@ -861,7 +882,8 @@ function sanitizeMcp(
   for (const [k, v] of Object.entries(value)) {
     if (DANGEROUS_KEYS.has(k)) continue;
     if (k !== "servers") {
-      out[k] = v; // unknown key under [mcp] → preserve verbatim
+      if (preserveUnknown) out[k] = v;
+      else warnings.push(`mcp.${k}: unsupported key — ignored`);
       continue;
     }
     if (!Array.isArray(v)) {
@@ -902,6 +924,7 @@ export function sanitizeLayer(
     return { doc: {}, warnings };
   }
   const userOnly = USER_ONLY_BY_LAYER[layer] ?? [];
+  const repositoryScoped = REPO_SCOPED_LAYERS.has(layer);
   const doc: RawSettingsDoc = {};
 
   for (const [key, value] of Object.entries(raw)) {
@@ -919,20 +942,17 @@ export function sanitizeLayer(
       );
       continue;
     }
-    // Scripts (setup / archive / run actions) are REPO settings — they live in
-    // the COMMITTED `.zeros/settings.toml`, deliberately shared by every Zeros
-    // install that opens the repo (like `.vscode/`). The personal gitignored
-    // files carry user-only keys (workspaces path, git/prompt overrides) and
-    // are not read for scripts: a stale `[scripts]` in settings.local.toml
-    // would otherwise SHADOW the committed file (repo-local outranks repo in
-    // the resolver), so an edit in the UI would silently not apply.
-    if (
-      key === "scripts" &&
-      (layer === "repo-local" || layer === "workspace-local")
-    ) {
-      warnings.push(
-        `scripts: script settings live in the committed .zeros/settings.toml — ignored in ${layer} settings`,
-      );
+    // Version is migration metadata, never a runtime preference.
+    if (key === "settings_version" || key === "settings_migration_notes")
+      continue;
+    if (key === "preferences_version" || key === "agent_preferences_version") {
+      if (value === 1) doc[key] = 1;
+      continue;
+    }
+    if (key === "preferences") {
+      const parsed = personalPreferencesSchema.safeParse(value);
+      if (parsed.success) doc.preferences = parsed.data;
+      else warnings.push("preferences: invalid app preferences — ignored");
       continue;
     }
     if (key === "$schema") {
@@ -999,7 +1019,7 @@ export function sanitizeLayer(
       continue;
     }
     if (key === "mcp") {
-      const mcp = sanitizeMcp(value, warnings);
+      const mcp = sanitizeMcp(value, warnings, !repositoryScoped);
       if (mcp) doc.mcp = mcp;
       continue;
     }
@@ -1014,30 +1034,45 @@ export function sanitizeLayer(
       if (models) doc.models = models;
       continue;
     }
+    if (key === "design") {
+      let candidate = value;
+      if (isPlainObject(value) && hasOwn(value, "isolation")) {
+        warnings.push(
+          "design.isolation: unsupported retired setting — ignored",
+        );
+        candidate = Object.fromEntries(
+          Object.entries(value).filter(([nested]) => nested !== "isolation"),
+        );
+      }
+      const table = sanitizeTable(
+        designSchema.shape,
+        candidate,
+        key,
+        warnings,
+        !repositoryScoped,
+      );
+      if (table && Object.keys(table).length > 0) doc[key] = table;
+      continue;
+    }
     const shape = hasOwn(TABLE_SHAPES, key) ? TABLE_SHAPES[key] : undefined;
     if (shape) {
       // Browser policy is a privileged product boundary. Unlike ordinary
       // forward-compatible tables, do not project unknown browser switches
       // (for example a hand-written raw-CDP escape hatch) into effective
       // settings before that capability has an explicit schema and review.
-      if (key === "browser" && isPlainObject(value)) {
-        for (const nested of Object.keys(value)) {
-          if (!hasOwn(shape, nested)) {
-            warnings.push(`browser.${nested}: unsupported key — ignored`);
-          }
-        }
-      }
       const table = sanitizeTable(
         shape,
         value,
         key,
         warnings,
-        key !== "browser",
+        !repositoryScoped && key !== "browser",
       );
       if (table) doc[key] = table;
       continue;
     }
-    doc[key] = value; // unknown top-level key → preserve verbatim
+    if (repositoryScoped)
+      warnings.push(`${key}: unsupported key — ignored in ${layer} settings`);
+    else doc[key] = value;
   }
 
   return { doc, warnings };

@@ -1,12 +1,17 @@
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   fstatSync,
+  fsyncSync,
   lstatSync,
   openSync,
   readFileSync,
   realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
 } from "node:fs";
 import path from "node:path";
 
@@ -16,16 +21,12 @@ import {
   type GithubCredential,
 } from "@zeros/protocol/github-auth";
 
-export const CLOUD_GITHUB_CREDENTIAL_FILE =
-  "/run/zeros/github-credential.json";
+export const CLOUD_GITHUB_CREDENTIAL_FILE = "/run/zeros/github-credential.json";
 const MAX_DOCUMENT_BYTES = 24 * 1024;
 const MAX_LIFETIME_MS = 24 * 60 * 60 * 1_000;
 const CLOCK_SKEW_MS = 60_000;
-const METHODS = new Set<GithubAuthMethod>([
-  "gh-cli",
-  "github-app",
-  "pat",
-]);
+const PROACTIVE_REFRESH_WINDOW_MS = 10 * 60_000;
+const METHODS = new Set<GithubAuthMethod>(["gh-cli", "github-app", "pat"]);
 
 export interface CloudGithubCredentialProjection {
   readonly version: 1;
@@ -38,10 +39,11 @@ export interface CloudGithubCredentialProjection {
   readonly credential: GithubCredential | null;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: string[]): boolean {
-  return (
-    Object.keys(value).sort().join("\0") === expected.sort().join("\0")
-  );
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: string[],
+): boolean {
+  return Object.keys(value).sort().join("\0") === expected.sort().join("\0");
 }
 
 export function cloudOwnerSubjectSha256(ownerSubject: string): string {
@@ -239,6 +241,95 @@ export function readCloudGithubCredentialProjection(options: {
   }
 }
 
+/** Install a control-plane-minted working copy without ever accepting a
+ * different owner, host, method, or credential shape. The rename is atomic so
+ * the engine watcher cannot observe a partial token document. */
+export function installCloudGithubCredentialProjection(options: {
+  readonly document: unknown;
+  readonly ownerSubject: string;
+  readonly file?: string;
+  readonly expectedUid?: number;
+  readonly now?: number;
+}): CloudGithubCredentialProjection {
+  const file = options.file ?? CLOUD_GITHUB_CREDENTIAL_FILE;
+  const expectedUid = options.expectedUid ?? 0;
+  const now = options.now ?? Date.now();
+  if (
+    !path.isAbsolute(file) ||
+    !Number.isInteger(expectedUid) ||
+    expectedUid < 0 ||
+    !Number.isSafeInteger(now)
+  ) {
+    throw new Error("cloud GitHub credential projection options are invalid");
+  }
+  const directory = path.dirname(file);
+  const directoryStat = lstatSync(directory);
+  if (
+    !directoryStat.isDirectory() ||
+    directoryStat.isSymbolicLink() ||
+    directoryStat.uid !== expectedUid ||
+    (directoryStat.mode & 0o077) !== 0 ||
+    realpathSync(directory) !== directory
+  ) {
+    throw new Error("cloud GitHub credential projection directory is unsafe");
+  }
+  try {
+    const current = lstatSync(file);
+    if (
+      !current.isFile() ||
+      current.isSymbolicLink() ||
+      current.uid !== expectedUid ||
+      current.nlink !== 1 ||
+      (current.mode & 0o777) !== 0o600 ||
+      realpathSync(file) !== file
+    ) {
+      throw new Error("cloud GitHub credential projection is unsafe");
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  const projection = parseProjection(
+    options.document,
+    options.ownerSubject,
+    now,
+  );
+  const serialized = `${JSON.stringify(projection)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > MAX_DOCUMENT_BYTES) {
+    throw new Error("cloud GitHub credential document is invalid");
+  }
+  const temporary = path.join(
+    directory,
+    `.github-credential-${process.pid}-${randomBytes(12).toString("hex")}.tmp`,
+  );
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(
+      temporary,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    writeFileSync(descriptor, serialized, "utf8");
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, file);
+    const directoryDescriptor = openSync(directory, "r");
+    try {
+      fsyncSync(directoryDescriptor);
+    } finally {
+      closeSync(directoryDescriptor);
+    }
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+    rmSync(temporary, { force: true });
+  }
+  return projection;
+}
+
 export interface CloudGithubCredentialProjectionWatcher {
   stop(): void;
 }
@@ -255,6 +346,7 @@ export function watchCloudGithubCredentialProjection(options: {
     credential: GithubCredential | null,
     method: GithubAuthMethod | null,
   ) => void;
+  readonly onRefreshNeeded?: (method: "github-app") => void;
   readonly onRejected?: () => void;
 }): CloudGithubCredentialProjectionWatcher {
   const pollMs = options.pollMs ?? 1_000;
@@ -262,18 +354,34 @@ export function watchCloudGithubCredentialProjection(options: {
     throw new Error("cloud GitHub credential watcher interval is invalid");
   }
   let lastIdentity: string | null = null;
+  let refreshRequestedGeneration: string | null = null;
   let stopped = false;
   const poll = () => {
     if (stopped) return;
     try {
+      const now = (options.now ?? Date.now)();
       const projection = readCloudGithubCredentialProjection({
         ownerSubject: options.ownerSubject,
         ...(options.file ? { file: options.file } : {}),
         ...(options.expectedUid === undefined
           ? {}
           : { expectedUid: options.expectedUid }),
-        now: (options.now ?? Date.now)(),
+        now,
       });
+      if (
+        projection?.method === "github-app" &&
+        projection.expiresAt - now <= PROACTIVE_REFRESH_WINDOW_MS
+      ) {
+        if (refreshRequestedGeneration !== projection.generation) {
+          options.onRefreshNeeded?.("github-app");
+          refreshRequestedGeneration = projection.generation;
+        }
+      } else if (
+        !projection ||
+        refreshRequestedGeneration !== projection.generation
+      ) {
+        refreshRequestedGeneration = null;
+      }
       const identity = projection
         ? `${projection.generation}:${createHash("sha256")
             .update(JSON.stringify(projection))

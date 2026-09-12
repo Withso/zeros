@@ -4,7 +4,7 @@
 
 import React, { useState } from "react";
 import {
-  MessagesSquare,
+  MessageCircle,
   RotateCcw,
   Terminal as TerminalIcon,
 } from "lucide-react";
@@ -21,7 +21,13 @@ import {
 import { Tooltip } from "../../shared/ui/primitives";
 import { formatChatHistoryTime } from "./chat-history";
 
-const HISTORY_BUTTON_CLS = "shrink-0 text-fg2";
+/** 14px glyph. The size MUST live here, not on the icon: Button's base
+ *  `[&_svg]:size-4` is a descendant selector and outranks any `size-*` utility
+ *  on the svg itself, so a per-icon class is silently ignored. On the button,
+ *  cn()'s twMerge sees the same `[&_svg]:size-*` group and keeps this one.
+ *  message-circle is a full-bleed bubble, so at the shared 16px it read much
+ *  heavier than the "⋯" beside it. */
+const HISTORY_BUTTON_CLS = "shrink-0 text-fg2 [&_svg]:size-3.5";
 const HISTORY_ROW_CLS =
   "flex max-w-[420px] min-w-[300px] items-center gap-2 px-2 py-1.5 text-fg1";
 const HISTORY_TIME_CLS = "ml-2 shrink-0 text-xs tabular-nums text-fg2";
@@ -49,12 +55,15 @@ export function ChatHistoryMenu({
             className={HISTORY_BUTTON_CLS}
             aria-label="Chat history"
           >
-            <MessagesSquare className="size-3.5" />
+            <MessageCircle />
           </Button>
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent
-        align="start"
+        // The trigger sits at the strip's right end (beside the "⋯" menu), so
+        // the panel hangs leftward from it — `align="start"` would push a
+        // 300px-wide list off the window edge.
+        align="end"
         sideOffset={6}
         className="max-h-[360px] min-w-[300px] overflow-y-auto p-1"
       >

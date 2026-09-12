@@ -161,6 +161,7 @@ export function resolveAgentCapabilityPorts(
   const configuration = declared?.configuration;
 
   const value: AgentCapabilityPorts = {
+    ...(declared?.extensions ? { extensions: declared.extensions } : {}),
     ...(conversation ? { conversation } : {}),
     ...(browser ? { browser } : {}),
     ...(backgroundWork ? { backgroundWork } : {}),

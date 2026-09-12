@@ -630,9 +630,8 @@ describe("tab close while a provider session is still binding", () => {
       const newSession = vi
         .spyOn(state.agents, "newSession")
         .mockImplementationOnce(async (_requestedAgentId, options) => {
-          firstAdmissionSignal = (
-            options as { admissionSignal?: AbortSignal }
-          ).admissionSignal;
+          firstAdmissionSignal = (options as { admissionSignal?: AbortSignal })
+            .admissionSignal;
           await firstGate;
           return {
             executionId: `${agentId}-cancelled-late-execution`,
@@ -695,7 +694,7 @@ describe("tab close while a provider session is still binding", () => {
   );
 
   it.each(["codex", "claude", "cursor"])(
-    "queues %s creation behind a registered Design territory update",
+    "does not queue native %s creation behind a registered Design territory update",
     async (agentId) => {
       const { state } = testEngine(30_025);
       const { client, messages } = testClient();
@@ -737,9 +736,8 @@ describe("tab close while a provider session is still binding", () => {
       await transitionReady;
 
       const start = state.handleMessage(newSessionMessage(agentId), client);
-      await Promise.resolve();
-
-      expect(newSession).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(newSession).toHaveBeenCalledOnce());
+      await start;
       expect(messages).not.toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -749,10 +747,6 @@ describe("tab close while a provider session is still binding", () => {
         ]),
       );
 
-      releaseTransition();
-      await Promise.all([transition, start]);
-
-      expect(newSession).toHaveBeenCalledOnce();
       expect(messages).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -768,11 +762,13 @@ describe("tab close while a provider session is still binding", () => {
           expect.objectContaining({ type: "AGENT_ERROR" }),
         ]),
       );
+      releaseTransition();
+      await transition;
     },
   );
 
   it.each(["codex", "claude", "cursor"])(
-    "queues %s resume behind a registered Design territory update",
+    "does not queue native %s resume behind a registered Design territory update",
     async (agentId) => {
       const { state } = testEngine(30_027);
       const { client, messages } = testClient();
@@ -830,13 +826,8 @@ describe("tab close while a provider session is still binding", () => {
         } as EngineMessage,
         client,
       );
-      await Promise.resolve();
-
-      expect(loadSession).not.toHaveBeenCalled();
-      releaseTransition();
-      await Promise.all([transition, resume]);
-
-      expect(loadSession).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(loadSession).toHaveBeenCalledOnce());
+      await resume;
       expect(messages).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -850,11 +841,13 @@ describe("tab close while a provider session is still binding", () => {
           expect.objectContaining({ type: "AGENT_ERROR" }),
         ]),
       );
+      releaseTransition();
+      await transition;
     },
   );
 
   it.each(["codex", "claude", "cursor"])(
-    "retries %s creation when a territory update closes admission mid-bind",
+    "keeps native %s creation alive when a Design territory update overlaps admission",
     async (agentId) => {
       const { state } = testEngine(30_026);
       const { client, messages } = testClient();
@@ -867,16 +860,12 @@ describe("tab close while a provider session is still binding", () => {
       });
       const newSession = vi
         .spyOn(state.agents, "newSession")
-        .mockImplementationOnce(async () => {
+        .mockImplementation(async () => {
           await firstBlocked;
           return {
-            executionId: `superseded-${agentId}-execution`,
-            sessionId: `superseded-${agentId}-execution`,
+            executionId: `native-${agentId}-execution`,
+            sessionId: `native-${agentId}-execution`,
           };
-        })
-        .mockResolvedValueOnce({
-          executionId: `retried-${agentId}-execution`,
-          sessionId: `retried-${agentId}-execution`,
         });
       const endSession = vi
         .spyOn(state.agents, "endSession")
@@ -904,17 +893,14 @@ describe("tab close while a provider session is still binding", () => {
       releaseFirst();
       await Promise.all([transition, start]);
 
-      expect(newSession).toHaveBeenCalledTimes(2);
-      expect(endSession).toHaveBeenCalledWith(
-        agentId,
-        `superseded-${agentId}-execution`,
-      );
+      expect(newSession).toHaveBeenCalledOnce();
+      expect(endSession).not.toHaveBeenCalled();
       expect(messages).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
             type: "AGENT_SESSION_CREATED",
             session: expect.objectContaining({
-              executionId: `retried-${agentId}-execution`,
+              executionId: `native-${agentId}-execution`,
             }),
           }),
         ]),
@@ -928,7 +914,7 @@ describe("tab close while a provider session is still binding", () => {
   );
 
   it.each(["codex", "claude", "cursor"])(
-    "returns a recoverable %s prompt restart signal while Design territory is changing",
+    "keeps native %s prompts running while Design territory is changing",
     async (agentId) => {
       const { state } = testEngine(30_028);
       const { client, messages } = testClient();
@@ -969,16 +955,15 @@ describe("tab close while a provider session is still binding", () => {
         client,
       );
 
-      expect(prompt).not.toHaveBeenCalled();
-      expect(messages).toEqual(
+      expect(prompt).toHaveBeenCalledWith(
+        agentId,
+        "session-1",
+        [{ type: "text", text: "hi" }],
+        "user-1",
+      );
+      expect(messages).not.toEqual(
         expect.arrayContaining([
-          expect.objectContaining({
-            type: "AGENT_PROMPT_FAILED",
-            failure: expect.objectContaining({
-              kind: "lifecycle-superseded",
-              stage: "prompt",
-            }),
-          }),
+          expect.objectContaining({ type: "AGENT_PROMPT_FAILED" }),
         ]),
       );
       expect(messages).not.toEqual(

@@ -94,6 +94,15 @@ const TABLES = [
   "remote_restricted_workspaces",
   "turns",
   "schema_migrations",
+  "cloud_device_registrations",
+  "cloud_replica_local_state",
+  "cloud_replica_entries",
+  "cloud_replica_apply_journal",
+  "cloud_replica_divergences",
+  "cloud_record_sync_state",
+  "cloud_workspace_fork_jobs",
+  "cloud_workspace_fork_job_entries",
+  "cloud_workspace_fork_job_records",
 ];
 
 // Dropped by migration 7 (idealized Phase-0 guesses, superseded): the engine

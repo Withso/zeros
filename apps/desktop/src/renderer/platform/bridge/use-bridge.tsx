@@ -26,11 +26,10 @@ import {
   type ConnectionStatus,
 } from "./ws-client";
 import { getActiveBridge, setActiveBridge } from "./active-bridge";
-import {
-  wireGithubCredentialWriteback,
-} from "./github-token-sync";
+import { wireGithubCredentialWriteback } from "./github-token-sync";
 import { nativeListen, useNativeRuntime } from "../runtime";
 import { toast } from "../../shared/ui/primitives/elements";
+import { refreshCloudWorkspaceRuntime } from "../cloud-workspace-access";
 
 /** Stable toast key for the connection-rejected card: a re-rejection REPLACES
  *  the visible toast instead of stacking one per reconnect attempt. */
@@ -53,7 +52,13 @@ function disposeClientIfEffectWasNotReplayed(
 export function BridgeProvider({ children }: { children: React.ReactNode }) {
   // Create the transport before descendants render so their first snapshot is
   // already scoped to the real client. Connection itself remains asynchronous.
-  const [client] = useState(() => new RuntimeClient());
+  const [client] = useState(
+    () =>
+      new RuntimeClient(
+        { kind: "local" },
+        { refreshCloudConnectionTarget: refreshCloudWorkspaceRuntime },
+      ),
+  );
   const nativeRuntime = useNativeRuntime();
   const connectionEffectEpoch = useRef(0);
 

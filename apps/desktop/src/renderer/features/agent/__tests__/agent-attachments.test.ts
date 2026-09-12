@@ -47,6 +47,10 @@ describe("modelContextTokens", () => {
   });
 
   it("still resolves the gpt / cursor families", () => {
+    // Official GPT-6 Astra model metadata: 1,050,000-token context window and
+    // 128,000 max output. This resolver budgets prompt-side attachments only;
+    // tokenUsage.modelContextWindow remains authoritative once Codex reports it.
+    expect(modelContextTokens("gpt-6-astra")).toBe(1_050_000);
     expect(modelContextTokens("gpt-5.5")).toBe(256_000);
     // The `^gpt-5` catch-all answers for the curated 5.6 ids. Not independently
     // verifiable in-repo (codex ships no static per-model context table) — the
@@ -57,18 +61,21 @@ describe("modelContextTokens", () => {
     expect(modelContextTokens("composer-2.5")).toBe(200_000);
   });
 
-  it("leaves grok-4.5 on the conservative fallback (nothing to verify against)", () => {
+  it("leaves Cursor Grok on the conservative fallback (nothing to verify against)", () => {
     // @cursor/sdk's turn-ended usage carries token counts only — no context
-    // window — so a constant here would be a guess. Under-budgeting is the
-    // safe direction: it rejects a file the model might have handled, rather
-    // than overflowing the window. Documented, not silently missing.
-    expect(modelContextTokens("grok-4.5")).toBe(
-      modelContextTokens("totally-unknown-model"),
-    );
+    // window — and Cursor's official Grok 4.6 page does not publish one. A
+    // constant here would therefore be a guess. Under-budgeting is the safe
+    // direction: it rejects a file the model might have handled, rather than
+    // overflowing the window. Documented, not silently missing.
+    for (const id of ["grok-4.5", "grok-4.6"]) {
+      expect(modelContextTokens(id), id).toBe(
+        modelContextTokens("totally-unknown-model"),
+      );
+    }
   });
 
-  it("keeps the live-only Cursor Router on the conservative fallback", () => {
-    // The runtime supplies the Router's actual model choice per turn; there is
+  it("keeps Cursor Auto on the conservative fallback", () => {
+    // The runtime supplies Auto's actual model choice per turn; there is
     // no stable context window to encode before a live provider admits it.
     expect(modelContextTokens("default")).toBe(
       modelContextTokens("totally-unknown-model"),
@@ -82,15 +89,13 @@ describe("modelContextTokens", () => {
 
   it("ANTI-ROT: no curated model silently lands on the unknown-model fallback", () => {
     // The original failure mode was a NEW model nobody added a row for. Walk
-    // the real catalog so that can't pass CI again. Grok is the one documented
-    // exception (see above).
+    // the real catalog so that can't pass CI again. Cursor Auto and the two Grok
+    // versions are explicit documented exceptions above; do not skip every
+    // liveRequired row, because that would let a new model evade this gate.
     const fallback = modelContextTokens("totally-unknown-model");
     for (const [family, list] of Object.entries(catalog.families)) {
-      for (const m of list as Array<{
-        value: string;
-        liveRequired?: boolean;
-      }>) {
-        if (m.value === "grok-4.5" || m.liveRequired === true) continue;
+      for (const m of list as Array<{ value: string }>) {
+        if (["default", "grok-4.5", "grok-4.6"].includes(m.value)) continue;
         expect(modelContextTokens(m.value), `${family}/${m.value}`).not.toBe(
           fallback,
         );

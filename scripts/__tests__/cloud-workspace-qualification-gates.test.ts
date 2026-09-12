@@ -11,6 +11,7 @@ import {
   resolveRemoteSourceCommit,
   shouldDeleteStaleEphemeralSnapshot,
   validateEphemeralSnapshotName,
+  validateDeletableQualificationSnapshotName,
 } from "../cloud-workspace-validation/lib/qualification-gates";
 
 describe("cloud workspace qualification gates", () => {
@@ -180,6 +181,24 @@ describe("cloud workspace qualification gates", () => {
       "zeros-zsr-ci-12345-2-extra",
     ]) {
       expect(() => validateEphemeralSnapshotName(name)).toThrow(/snapshot/i);
+    }
+  });
+
+  it("allows failed release-candidate cleanup without matching reusable snapshots", () => {
+    for (const name of [
+      "zeros-zsr-ci-12345-2",
+      "zeros-zsr-candidate-12345-2",
+    ]) {
+      expect(() => validateDeletableQualificationSnapshotName(name)).not.toThrow();
+    }
+    for (const name of [
+      "zeros-engine-v1",
+      "zeros-zsr-candidate-main-2",
+      "zeros-zsr-qualified-12345-2",
+    ]) {
+      expect(() => validateDeletableQualificationSnapshotName(name)).toThrow(
+        /run-scoped/i,
+      );
     }
   });
 

@@ -9,7 +9,11 @@ import {
   notifyWorkspacesChanged,
   notifyWorkspacesChangedForIds,
 } from "../../state/use-projects";
-import { ghOwnersCache, remoteBranchesCache } from "../../state/read-caches";
+import {
+  designDirectoryTargetCache,
+  ghOwnersCache,
+  remoteBranchesCache,
+} from "../../state/read-caches";
 import { loadAgents } from "../../features/agent/agents-cache";
 import {
   workingDirectoriesCache,
@@ -28,6 +32,7 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   resetGitRefreshKeysForTests();
+  designDirectoryTargetCache.clear();
   workingDirectoriesCache.clear();
 });
 
@@ -149,6 +154,26 @@ describe("git refresh scope generations", () => {
     expect(listeners[1]).toHaveBeenCalledOnce();
     expect(listeners[2]).not.toHaveBeenCalled();
     for (const release of unsubscribe) release();
+  });
+
+  it("invalidates Design targets when marker recognition changes", () => {
+    const target = { directory: "Odocs - Design", exists: false };
+    designDirectoryTargetCache.setData("ws:workspace-a", target);
+    designDirectoryTargetCache.setData("repo:/repo/a", target);
+    const workspaceBefore =
+      designDirectoryTargetCache.getSnapshot("ws:workspace-a");
+    const repoBefore = designDirectoryTargetCache.getSnapshot("repo:/repo/a");
+
+    triggerGitRefreshForWorkspaceIdsForTests(["workspace-a"], {
+      designRecognitionChanged: true,
+    });
+
+    expect(designDirectoryTargetCache.getSnapshot("ws:workspace-a")).not.toBe(
+      workspaceBefore,
+    );
+    expect(designDirectoryTargetCache.getSnapshot("repo:/repo/a")).not.toBe(
+      repoBefore,
+    );
   });
 
   it("uses an explicit coarse publication when the changed cwd is unknown", () => {

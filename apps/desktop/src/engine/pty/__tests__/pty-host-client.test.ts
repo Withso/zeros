@@ -15,6 +15,9 @@
 import { describe, it, expect, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   spawnPtyViaHost,
@@ -23,6 +26,7 @@ import {
 } from "../pty-host-client";
 import type { PtyHandle } from "../service";
 import type { PtyExitReason } from "@zeros/protocol/messages";
+import { HostExecutionBoundary } from "../../agents/containment/host-boundary";
 
 const SHELL =
   process.env.SHELL && process.env.SHELL.length > 0
@@ -152,6 +156,78 @@ describe("pty-host-client — out-of-process node-pty", () => {
     ]);
     expect(result).not.toBeNull();
   });
+
+  it.runIf(process.platform !== "win32")(
+    "rebinds a host supervisor to the trusted PTY launcher",
+    async () => {
+      const dataRoot = await mkdtemp(
+        path.join(tmpdir(), "zeros-pty-supervisor-parent-"),
+      );
+      const priorDataRoot = process.env.ZEROS_DATA_DIR;
+      process.env.ZEROS_DATA_DIR = dataRoot;
+      let prepared: Awaited<
+        ReturnType<HostExecutionBoundary["prepare"]>
+      > | null = null;
+      try {
+        prepared = await new HostExecutionBoundary().prepare({
+          executionId: "pty-supervisor-parent",
+          actor: "repo-code-task",
+          cwd: process.cwd(),
+          workspaceRoot: process.cwd(),
+        });
+        const launch = prepared.wrapSpawn({
+          command: "/bin/sh",
+          args: ["-c", "printf 'ZEROS_SUPERVISED_PTY_OK\\n'"],
+          cwd: process.cwd(),
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          stdio: "inherit",
+        });
+        let output = "";
+        let resolveExit!: (value: {
+          code: number | null;
+          reason?: PtyExitReason;
+        }) => void;
+        const exit = new Promise<{
+          code: number | null;
+          reason?: PtyExitReason;
+        }>((resolve) => {
+          resolveExit = resolve;
+        });
+        const handle = spawnPtyViaHost({
+          shell: launch.command,
+          args: [...launch.args],
+          cwd: launch.cwd,
+          cols: 80,
+          rows: 24,
+          env: { ...launch.env },
+          immediateParentPidArgIndex: launch.immediateParentPidArgIndex,
+        });
+        handle.onSpawned((pid) => prepared!.trackProcessGroup(pid));
+        handle.onData((chunk) => {
+          output += chunk;
+        });
+        handle.onExit((code, _signal, reason) => resolveExit({ code, reason }));
+
+        const result = await Promise.race([
+          exit,
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(
+              () => reject(new Error("supervised PTY did not exit")),
+              4_000,
+            ),
+          ),
+        ]);
+        expect(result).toEqual({ code: 0, reason: undefined });
+        expect(output).toContain("ZEROS_SUPERVISED_PTY_OK");
+      } finally {
+        disposePtyHost();
+        await prepared?.stopAndProve().catch(() => undefined);
+        if (priorDataRoot === undefined) delete process.env.ZEROS_DATA_DIR;
+        else process.env.ZEROS_DATA_DIR = priorDataRoot;
+        await rm(dataRoot, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.runIf(process.platform !== "win32" && JOB_CONTROL_SHELL !== undefined)(
     "reaps a background job when its live terminal is killed",

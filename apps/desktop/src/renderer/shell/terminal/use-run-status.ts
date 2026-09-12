@@ -52,6 +52,7 @@ export function useRunStatuses(
   workspace: Workspace | null,
   folderKey: string,
   actions: RunAction[],
+  active = true,
 ): RunStatusesSnapshot {
   const workspaceId = workspace?.id ?? null;
   const repoRoot =
@@ -77,7 +78,7 @@ export function useRunStatuses(
   }));
   useEffect(() => {
     const actionIds = actionIdsKey ? actionIdsKey.split("\n") : [];
-    if (!workspaceId || !folderKey || actionIds.length === 0) return;
+    if (!active || !workspaceId || !folderKey || actionIds.length === 0) return;
     let cancelled = false;
     // Monotonic pull token: DB_CHANGED can fire back-to-back (running → then
     // finished) and responses may resolve out of order — only the LATEST
@@ -118,7 +119,15 @@ export function useRunStatuses(
       cancelled = true;
       off?.();
     };
-  }, [workspaceId, repoRoot, folderKey, actionIdsKey, cacheKey, bridge]);
+  }, [
+    workspaceId,
+    repoRoot,
+    folderKey,
+    actionIdsKey,
+    cacheKey,
+    bridge,
+    active,
+  ]);
   if (!workspaceId || !folderKey) {
     return { statuses: EMPTY_RUN_STATUSES, ready: false };
   }

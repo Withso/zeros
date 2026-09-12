@@ -17,9 +17,13 @@ export interface DashboardMe {
     displayName: string | null;
     avatarUrl?: string | null;
   };
+  capabilities?: { createOrganization: boolean };
   organizations?: DashboardOrganization[];
   teams?: DashboardOrganization[];
 }
+export declare function organizationCreationAllowed(
+  capabilities: DashboardMe["capabilities"] | null | undefined,
+): boolean;
 export declare function safeOrganizationLogo(value: unknown): string | null;
 export declare function dashboardReturnUrl(
   appBase: string,
@@ -49,6 +53,16 @@ export declare function accountAccessPage(input: {
 export declare function accountRecoveryPage(input: {
   session: SessionData;
   recoveryCode: string | null;
+  signOutHref: string;
+}): string;
+export declare function accountDeletionPage(input: {
+  session: SessionData;
+  deletion: {
+    id?: unknown;
+    recoveryCode?: unknown;
+    purgeAfter?: unknown;
+    state?: unknown;
+  };
   signOutHref: string;
 }): string;
 export declare function dashboardPage(input: {

@@ -57,7 +57,7 @@ async function main() {
 
   const attachments: Item[] = [
     {
-      relPath: ".context-graph/local/attachments/att-1/screenshot.png",
+      relPath: ".context/local/attachments/att-1/screenshot.png",
       name: "screenshot.png",
       scope: "local",
       category: "attachment",
@@ -67,7 +67,7 @@ async function main() {
       attachmentId: "att-1",
     },
     {
-      relPath: ".context-graph/shared/attachments/att-2/transcript.txt",
+      relPath: ".context/shared/attachments/att-2/transcript.txt",
       name: "transcript.txt",
       scope: "shared",
       category: "attachment",
@@ -79,7 +79,7 @@ async function main() {
         "User\nhow @.context actually works?? does it tell the agents to use it as a playground? or artifacts?\nwhat are the instructions to these agents...",
     },
     {
-      relPath: ".context-graph/local/attachments/att-3/notes.md",
+      relPath: ".context/local/attachments/att-3/notes.md",
       name: "notes.md",
       scope: "local",
       category: "attachment",
@@ -91,7 +91,7 @@ async function main() {
         "# Plan\n\n- ship the context graph\n- canvas with pan/zoom\n- checkbox = shared (not gitignored)\n\n> first version out now, improve later",
     },
     {
-      relPath: ".context-graph/local/attachments/att-4/data.json",
+      relPath: ".context/local/attachments/att-4/data.json",
       name: "data.json",
       scope: "local",
       category: "attachment",
@@ -101,7 +101,7 @@ async function main() {
       attachmentId: "att-4",
     },
     {
-      relPath: ".context-graph/shared/attachments/att-5/big-shot.png",
+      relPath: ".context/shared/attachments/att-5/big-shot.png",
       name: "big-shot.png",
       scope: "shared",
       category: "attachment",
@@ -111,7 +111,7 @@ async function main() {
       attachmentId: "att-5",
     },
     {
-      relPath: ".context-graph/local/attachments/att-6/portrait.jpg",
+      relPath: ".context/local/attachments/att-6/portrait.jpg",
       name: "portrait.jpg",
       scope: "local",
       category: "attachment",
@@ -121,7 +121,7 @@ async function main() {
       attachmentId: "att-6",
     },
     {
-      relPath: ".context-graph/local/attachments/att-7/banner.webp",
+      relPath: ".context/local/attachments/att-7/banner.webp",
       name: "banner.webp",
       scope: "local",
       category: "attachment",
@@ -131,7 +131,7 @@ async function main() {
       attachmentId: "att-7",
     },
     {
-      relPath: ".context-graph/local/attachments/att-8/context-card.tsx",
+      relPath: ".context/local/attachments/att-8/context-card.tsx",
       name: "context-card.tsx",
       scope: "local",
       category: "attachment",
@@ -143,7 +143,7 @@ async function main() {
         'export function ContextCard() {\n  return <article data-kind="attachment" />;\n}',
     },
     {
-      relPath: ".context-graph/shared/attachments/att-9/config.toml",
+      relPath: ".context/shared/attachments/att-9/config.toml",
       name: "config.toml",
       scope: "shared",
       category: "attachment",
@@ -154,7 +154,7 @@ async function main() {
       previewText: '[canvas]\nlayout = "diamond"\nthumbnail_size = 256',
     },
     {
-      relPath: ".context-graph/local/attachments/att-10/setup.sh",
+      relPath: ".context/local/attachments/att-10/setup.sh",
       name: "setup.sh",
       scope: "local",
       category: "attachment",
@@ -164,7 +164,7 @@ async function main() {
       attachmentId: "att-10",
     },
     {
-      relPath: ".context-graph/local/attachments/att-11/reference.bin",
+      relPath: ".context/local/attachments/att-11/reference.bin",
       name: "reference.bin",
       scope: "local",
       category: "attachment",
@@ -176,7 +176,7 @@ async function main() {
   ];
   const docs: Item[] = [
     {
-      relPath: ".context-graph/shared/docs/handoff.md",
+      relPath: ".context/shared/docs/handoff.md",
       name: "handoff.md",
       scope: "shared",
       category: "doc",
@@ -184,10 +184,10 @@ async function main() {
       bytes: 2_048,
       mtimeMs: 12,
       previewText:
-        "# Handoff\n\nThe worktree is clean; Changes tab shows the shared attachments only.\nSee .context-graph/shared for the docs the team can read.",
+        "# Handoff\n\nThe worktree is clean; Changes tab shows the shared attachments only.\nSee .context/shared for the docs the team can read.",
     },
     {
-      relPath: ".context-graph/local/scratch.txt",
+      relPath: ".context/local/scratch.txt",
       name: "scratch.txt",
       scope: "local",
       category: "doc",
@@ -203,7 +203,7 @@ async function main() {
     ? Array.from(
         { length: 400 },
         (_, index): Item => ({
-          relPath: `.context-graph/local/attachments/perf-${index}/image-${index}.png`,
+          relPath: `.context/local/attachments/perf-${index}/image-${index}.png`,
           name: `image-${index}.png`,
           scope: "local",
           category: "attachment",
@@ -232,8 +232,8 @@ async function main() {
                 ...i,
                 scope: shared ? "shared" : "local",
                 relPath: i.relPath.replace(
-                  /^\.context-graph\/(?:local|shared)\//,
-                  `.context-graph/${shared ? "shared" : "local"}/`,
+                  /^\.context\/(?:local|shared)\//,
+                  `.context/${shared ? "shared" : "local"}/`,
                 ),
               }
             : i,

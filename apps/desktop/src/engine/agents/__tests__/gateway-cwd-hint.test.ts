@@ -42,6 +42,8 @@ type GwInternals = {
       additionalDirectories: string[];
       targetBranch?: string;
       customInstructions?: string;
+      designDirectory?: string;
+      designDirectories?: string[];
     }
   >;
   prompt(
@@ -305,7 +307,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     expect(sink[0]).toEqual([text("hi")]);
   });
 
-  it("re-asserts only the current Design territory on a true non-native resume", async () => {
+  it("re-asserts live Design territory without a retired projection on a true non-native resume", async () => {
     const gw = makeGateway();
     const gwi = gw as unknown as GwInternals;
     const sink: ContentBlock[][] = [];
@@ -347,12 +349,19 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     expect(executionId).not.toBe("true-territory");
     expect(gwi.sessionsInstructed.has(executionId)).toBe(true);
     expect(gwi.sessionsTerritoryNoticePending.has(executionId)).toBe(true);
+    gwi.executionToInstructionCtx.set(executionId, {
+      additionalDirectories: [],
+      designDirectory,
+      designDirectories: [designDirectory],
+    });
 
     await gw.prompt("claude", executionId, [text("continue")]);
     const head = sink[0]![0] as { text: string };
     expect(head.text).toContain("<system_instruction>");
     expect(head.text).toContain(designDirectory);
     expect(head.text).toContain("never create, edit, append, truncate");
+    expect(head.text).not.toContain("zeros-isolation-context");
+    expect(head.text).toContain("live, readable product context");
     expect(head.text).not.toContain("target branch");
     expect(sink[0]![1]).toEqual(text("continue"));
   });

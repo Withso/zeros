@@ -60,6 +60,9 @@ import { fileURLToPath } from "node:url";
 import net from "node:net";
 
 import { runDesignWorkspaceSmoke } from "./ui-smoke-design-workspace.mjs";
+import { runPersonalOrganizationSmoke } from "./ui-smoke-personal.mjs";
+import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
+import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -409,9 +412,22 @@ try {
       "search-open-focus",
     ),
   );
-  const modelRow = (label) =>
-    page.locator("[cmdk-item]").filter({ hasText: label }).first();
-  const rowText = async (label) => (await modelRow(label).textContent()) ?? "";
+  const modelRow = (label) => {
+    const exactLabel = new RegExp(
+      `^${label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+    );
+    return page
+      .locator("[cmdk-item]")
+      .filter({
+        has: page.locator("[data-model-name]", { hasText: exactLabel }),
+      })
+      .first();
+  };
+  const filteredModelNames = async () =>
+    page
+      .locator("[cmdk-item] [data-model-name]")
+      .allTextContents()
+      .then((labels) => labels.map((label) => label.trim()));
   const modelMenu = () => page.locator("[cmdk-root]").locator("xpath=..");
   const selectedModel = () => page.getByTestId("selected-model-browser");
   const catalog = () => page.getByTestId("model-catalog-sidecar");
@@ -1047,7 +1063,7 @@ try {
     .getByRole("group", { name: "Cursor" })
     .locator("[data-model-section-title]")
     .hover();
-  const cursorName = catalogRow("Cursor Grok 4.5").locator("[data-model-name]");
+  const cursorName = catalogRow("Cursor Grok 4.6").locator("[data-model-name]");
   const cursorNameAtRest = await cursorName.evaluate((name) => ({
     clientWidth: name.clientWidth,
     scrollWidth: name.scrollWidth,
@@ -1058,9 +1074,9 @@ try {
     JSON.stringify(cursorNameAtRest),
   );
   const cursorRowHeightBeforeHover = await catalogRow(
-    "Cursor Grok 4.5",
+    "Cursor Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
-  const cursorActionOverlay = catalogRow("Cursor Grok 4.5").locator(
+  const cursorActionOverlay = catalogRow("Cursor Grok 4.6").locator(
     "[data-model-row-actions]",
   );
   const cursorActionLayout = await cursorActionOverlay
@@ -1069,9 +1085,9 @@ try {
       right: getComputedStyle(overlay).right,
     }))
     .catch(() => null);
-  await catalogRow("Cursor Grok 4.5").hover();
+  await catalogRow("Cursor Grok 4.6").hover();
   const cursorRowHeightAfterHover = await catalogRow(
-    "Cursor Grok 4.5",
+    "Cursor Grok 4.6",
   ).evaluate((row) => row.getBoundingClientRect().height);
   check(
     "hover actions overlay long labels without reflowing the row",
@@ -1323,10 +1339,13 @@ try {
     searchItemGaps.join(","),
   );
   await searchInput.fill("Fable");
+  const expectedFableResults = ["Fable 5", "Fable 5.1"];
+  const fableSearchResults = await filteredModelNames();
   check(
-    "search filters to matching model results",
-    (await page.locator("[cmdk-item]").count()) === 1 &&
-      (await rowText("Fable 5")).includes("Fable 5"),
+    "search filters to both Fable model results",
+    fableSearchResults.length === expectedFableResults.length &&
+      expectedFableResults.every((label) => fableSearchResults.includes(label)),
+    JSON.stringify(fableSearchResults),
   );
   const searchRowHeight = await modelRow("Fable 5").evaluate(
     (row) => row.getBoundingClientRect().height,
@@ -1482,11 +1501,16 @@ try {
         .length === searchSelectionsBeforeEdit,
   );
   await page.keyboard.press("Escape");
+  const restoredFableResults = await filteredModelNames();
   check(
-    "closing a filtered result editor preserves its query and result",
+    "closing a filtered result editor preserves its query and both results",
     (await menuOpen()) &&
       (await searchInput.inputValue()) === "Fable" &&
-      (await page.locator("[cmdk-item]").count()) === 1,
+      restoredFableResults.length === expectedFableResults.length &&
+      expectedFableResults.every((label) =>
+        restoredFableResults.includes(label),
+      ),
+    JSON.stringify(restoredFableResults),
   );
   await searchInput.fill("");
   check(
@@ -2404,6 +2428,10 @@ try {
       ),
     JSON.stringify(browserRetention.active),
   );
+
+  await runPersonalOrganizationSmoke({ page, check });
+  await runCustomizeSmoke({ page, check });
+  await runTerminalWorkbenchSmoke({ page, check });
 
   // Whole-run invariant.
   check(

@@ -23,6 +23,11 @@ import * as path from "node:path";
 import { zerosDataDir } from "../db/paths";
 
 export const SHADOW_GIT_RECOVERY_HOLD_FILE = ".shadow-git-recovery-hold.json";
+/** Durable native-host lifecycle record. Unlike the legacy ZSR process-domain
+ * descriptor, this carries no filesystem policy: it exists only so a new
+ * engine can prove unrestricted provider process groups from a crashed engine
+ * are gone before publishing fresh workspace authority. */
+export const HOST_PROCESS_RECOVERY_HOLD_FILE = "host-boundary.json";
 export const ORBSTACK_MACHINE_RECOVERY_HOLD_FILE =
   ".zsr-orbstack-machine-recovery.json";
 export const PROVIDER_HOME_RECOVERY_HOLD_FILE = ".provider-home-recovery.json";
@@ -120,12 +125,41 @@ export async function removeSessionDir(sessionId: string): Promise<void> {
   }
   if (
     (await hasPendingProcessDomainRecovery(root)) ||
+    (await hasPendingHostProcessRecovery(root)) ||
     (await hasPendingShadowGitRecovery(root)) ||
     (await hasPendingOrbStackMachineRecovery(root)) ||
     (await hasPendingProviderHomeRecovery(root))
   )
     return;
   await fsp.rm(root, { recursive: true, force: true });
+}
+
+async function hasPendingHostProcessRecovery(sessionRoot: string) {
+  const boundaryRoot = path.join(sessionRoot, "boundary");
+  let generations: import("node:fs").Dirent[];
+  try {
+    generations = await fsp.readdir(boundaryRoot, { withFileTypes: true });
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  for (const generation of generations) {
+    if (!generation.isDirectory() || generation.isSymbolicLink()) continue;
+    try {
+      await fsp.lstat(
+        path.join(
+          boundaryRoot,
+          generation.name,
+          HOST_PROCESS_RECOVERY_HOLD_FILE,
+        ),
+      );
+      // Generic GC never interprets lifecycle authority. Malformed records are
+      // conservative holds for the dedicated host-boundary recovery pass.
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    }
+  }
+  return false;
 }
 
 async function hasPendingShadowGitRecovery(sessionRoot: string) {
@@ -265,6 +299,7 @@ async function isRecognizableLegacySession(sessionRoot: string) {
 async function hasPendingRecovery(sessionRoot: string) {
   return (
     (await hasPendingProcessDomainRecovery(sessionRoot)) ||
+    (await hasPendingHostProcessRecovery(sessionRoot)) ||
     (await hasPendingShadowGitRecovery(sessionRoot)) ||
     (await hasPendingOrbStackMachineRecovery(sessionRoot)) ||
     (await hasPendingProviderHomeRecovery(sessionRoot))

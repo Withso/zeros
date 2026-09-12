@@ -2029,7 +2029,7 @@ export function EmptyState({
   icon: Icon = GitBranch,
 }: {
   title: string;
-  subtitle: string;
+  subtitle?: string;
   /** Glyph above the title — defaults to the source-view branch mark. */
   icon?: LucideIcon;
 }) {
@@ -2037,9 +2037,11 @@ export function EmptyState({
     <div className="flex h-full flex-col items-center justify-center gap-2 px-10 text-center">
       <Icon className="text-fg2 size-7" />
       <p className="text-fg1 m-0 text-sm font-medium">{title}</p>
-      <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
-        {subtitle}
-      </p>
+      {subtitle && (
+        <p className="text-fg2 m-0 max-w-[420px] text-xs leading-[1.55]">
+          {subtitle}
+        </p>
+      )}
     </div>
   );
 }

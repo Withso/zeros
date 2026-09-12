@@ -39,6 +39,15 @@ export interface BoundaryRequest {
   /** User-authorized roots from the equivalent normal workspace posture.
    * The policy builder subtracts protected authority after adding these. */
   additionalReadWriteRoots?: readonly string[];
+  /** Explicit read-only context roots for this actor. */
+  additionalReadOnlyRoots?: readonly string[];
+  /** Git owners whose Design roots overlap this execution's authority. The
+   * boundary uses this semantic map directly; it does not imply sparse
+   * checkout, a projection, or an alternate execution backend. */
+  codeTerritoryOwners?: readonly {
+    workspaceRoot: string;
+    protectedDesignDirectories: readonly string[];
+  }[];
   /** Stable parent directories that contain Zeros-managed worktrees. Code
    * actors receive these as read-only collections, then reopen only their
    * current workspace and explicitly authorized islands. This protects a
@@ -64,22 +73,10 @@ export interface BoundaryRequest {
   /** Engine-minted, method-scoped loopback façades such as the dedicated MCP
    * gateway. Only these may carve a port out of Zeros' reserved control range. */
   trustedLocalPorts?: readonly number[];
-  /** Optional generation-private OCI engine. It runs as an unprivileged
-   * sibling inside the same ZSR namespaces, never as a host-daemon tunnel. */
-  containerWorker?: ContainerWorkerRequest;
-  /** Safe redacted reason a discovered private backend could not be admitted.
-   * This refines remediation while the stable parity restriction remains
-   * `container-workflows-unavailable`. */
-  containerWorkerUnavailableReason?:
-    | "insufficient-disk-space"
-    | "private-runtime-unavailable"
-    /** A design actor asked for one. Refused by rule, not by capability: a
-     * container engine is a shared namespace, so it must never be a place
-     * where design and code authority can meet. */
-    | "design-actor-refused";
   /** The equivalent normal workspace exposes a Docker/Podman CLI or endpoint.
-   * If no private worker can satisfy it, diagnostics must report a parity
-   * restriction instead of silently pointing that CLI at a dead socket. */
+   * Kernel-isolated boundaries report that workflow as unavailable rather
+   * than silently pointing the CLI at an engine-owned VM or dead socket.
+   * Lightweight host boundaries preserve the ambient workflow unchanged. */
   containerWorkflowExpected?: boolean;
   /** Canonical Git workspace owners nested in user-authorized writable roots
    * whose Design territory is part of this generation. Tree-level integrations
@@ -87,24 +84,6 @@ export interface BoundaryRequest {
   additionalGitWorkspaceRoots?: readonly string[];
   backendHint?: ExecutionBoundaryBackend;
 }
-
-export interface EmbeddedContainerWorkerRequest {
-  readonly runtime: "podman";
-  readonly backend: "embedded-linux";
-  /** Absolute executable available in the equivalent normal-workspace PATH. */
-  readonly executable: string;
-}
-
-export interface OrbStackContainerWorkerRequest {
-  readonly runtime: "podman";
-  readonly backend: "orbstack-machine";
-  /** Absolute, physical OrbStack CLI selected by the trusted Mac engine. */
-  readonly executable: string;
-}
-
-export type ContainerWorkerRequest =
-  | EmbeddedContainerWorkerRequest
-  | OrbStackContainerWorkerRequest;
 
 export interface BoundarySpawnRequest {
   command: string;
@@ -124,10 +103,10 @@ export interface RepoTaskBoundaryRequest {
   workspaceRoot: string;
   repoRoot: string;
   /** Complete task environment, used to preserve normal task behavior and
-   * discover an optional dedicated container worker. */
+   * describe capabilities to a qualified cloud boundary when applicable. */
   env?: Readonly<Record<string, string>>;
-  /** PATH/login-shell discovery uses the normal contained filesystem/network
-   * baseline but must not provision local-service or container capabilities. */
+  /** PATH/login-shell discovery uses the normal actor environment but must not
+   * provision local-service or container capabilities. */
   serviceCapabilities?: "full" | "none";
   /** Publish the exact authority snapshot before boundary preparation yields.
    * Lifecycle reconciliation uses it to distinguish a safe owner event that
@@ -143,7 +122,11 @@ export interface BoundaryTerritoryContributionSnapshot {
   readonly workspaceRoot: string;
   readonly grants: readonly string[];
   readonly full: boolean;
+  /** Filesystem write/deny authority only. */
   readonly identity: string | null;
+  /** Optional interactive-session context generation. Repository tasks do not
+   * restart merely because protected committed bytes changed. */
+  readonly contextIdentity?: string | null;
 }
 
 export interface BoundaryAuthoritySnapshot {
@@ -152,12 +135,16 @@ export interface BoundaryAuthoritySnapshot {
 }
 
 /** Synchronous spawn descriptor used by provider APIs (notably Claude's SDK)
- * whose custom-process callback cannot await. The immutable kernel policy is
- * installed before this point. Interactive cold admission may still be
- * attesting that policy in the background; wrapping always places the provider
- * under the same already-installed fence and returns its qualified supervisor. */
+ * whose custom-process callback cannot await. The selected actor boundary is
+ * admitted before this point: a native lifecycle owner for Code, or an
+ * installed kernel policy and supervisor for Design/cloud. */
 export interface BoundaryLaunchSpec extends BoundarySpawnRequest {
   stdio: "pipe" | "inherit";
+  /** Index of an argv value that a trusted intermediate launcher must replace
+   * with its own PID immediately before spawn. Host-supervised PTYs use this
+   * to bind lifecycle ownership to the Node PTY host instead of incorrectly
+   * claiming that the engine is the supervisor's immediate parent. */
+  immediateParentPidArgIndex?: number;
 }
 
 export interface BoundaryProcessExit {
@@ -257,10 +244,10 @@ export interface CloudWorkerToolchain {
 
 export interface PreparedBoundary {
   readonly generation: TerritoryGeneration;
-  /** Behavioral proof for this exact immutable boundary. The kernel policy is
-   * already installed before `prepare()` returns. In background-attestation
-   * mode this may still be pending while the provider starts; rejection means
-   * the boundary has revoked and proven its exact process tree stopped. */
+  /** Behavioral proof for this exact actor boundary. Native Code resolves its
+   * lifecycle proof directly. For ZSR, the kernel policy is installed before
+   * `prepare()` returns and a live canary may finish in the background;
+   * rejection revokes and proves the exact process tree stopped. */
   readonly attestation: Promise<void>;
   readonly status: ExecutionBoundaryStatus;
   /** Cwd-independent identity of the registered Design write subtraction used
@@ -307,10 +294,9 @@ export interface ExecutionBoundary {
    * Implementations must fail closed when a prior process domain cannot be
    * proven empty. */
   recoverStaleProcesses?(): Promise<ExecutionBoundaryRecoveryResult>;
-  /** Recover mutable Git/provider state only after external container mounts
-   * have also been retired. Keeping this separate from process recovery makes
-   * the boot ordering explicit and prevents copying a tree a surviving VM can
-   * still mutate. */
+  /** Recover mutable Git/provider state only after stale process domains are
+   * retired. Keeping this separate makes the boot ordering explicit and
+   * preserves compatibility with older session-state recovery. */
   recoverStaleMutableState?(): Promise<ExecutionBoundaryRecoveryResult>;
   probe(request: BoundaryRequest): Promise<BoundaryProbeResult>;
   prepare(
@@ -332,8 +318,8 @@ export interface AdmissionControl {
   readonly signal?: AbortSignal;
   /** `blocking` is the conservative default for Run, Setup, utilities, and
    * pre-warmed boundaries. Interactive agent create/resume may use
-   * `background`: immutable kernel enforcement is still established before
-   * return, while the live behavioral canary completes concurrently. */
+   * `background`; a ZSR kernel policy is still established before return while
+   * its live behavioral canary completes concurrently. */
   readonly attestation?: "blocking" | "background";
 }
 

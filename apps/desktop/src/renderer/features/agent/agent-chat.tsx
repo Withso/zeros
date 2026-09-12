@@ -3218,7 +3218,7 @@ export function AgentChat({
 
   // Image attachments are universal —
   // every image is persisted to
-  // <cwd>/.context-graph/<scope>/attachments/…; vision-capable agents also get
+  // <cwd>/.context/<scope>/attachments/…; vision-capable agents also get
   // the transient inline ImageContent block, while everyone else gets a text
   // block referencing the path (their models still Read the file). Transcript
   // payloads retain only that path, never the full-resolution base64.

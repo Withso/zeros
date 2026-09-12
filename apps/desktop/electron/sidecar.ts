@@ -75,6 +75,15 @@ import {
   stripWorkOSApiKeys,
 } from "./desktop-engine-auth-config";
 import { desktopAuthConfig } from "./workos-desktop-config";
+import {
+  cloudReplicaSessionControlLine,
+  handleCloudReplicaEngineControl,
+} from "./cloud-replica-host-runtime";
+import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
+import {
+  CloudReplicaSessionWriter,
+  seedCloudReplicaSessionToEngineIfEnabled,
+} from "./cloud-replica-session-lifecycle";
 
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
@@ -118,6 +127,24 @@ const state: SidecarStateShape = {
   spawnGeneration: 0,
   watchdogTimer: null,
 };
+
+const cloudReplicaSessionWriter = new CloudReplicaSessionWriter<ChildProcess>({
+  createLine: cloudReplicaSessionControlLine,
+  signedOutLine: `${JSON.stringify({
+    type: "host.cloudReplicaSession",
+    session: null,
+  })}\n`,
+  getTarget: () => {
+    const child = state.child;
+    return child && !child.killed && child.stdin?.writable ? child : null;
+  },
+  write: (child, line) => {
+    child.stdin!.write(line);
+  },
+  onWarning: (reason) => {
+    console.warn(`[cloud-replica] session update failed (${reason})`);
+  },
+});
 
 /** Current engine child identity for read-only diagnostics. Null while the
  * sidecar is stopped or between crash-recovery generations. */
@@ -345,6 +372,32 @@ function resolveZsrSupervisorPath(): string | null {
   return existsSync(dev) ? dev : null;
 }
 
+/** Resolve the unrestricted native lifecycle supervisor. It applies no ZSR
+ * policy; it only keeps provider descendants in a crash-recoverable process
+ * group. Like the ZSR supervisor, it needs Electron's Node mode because the
+ * packaged engine is a Bun-compiled executable rather than a script runtime. */
+function resolveHostProcessSupervisorPath(): string | null {
+  if (IS_PACKAGED) {
+    const packaged = path.join(
+      process.resourcesPath,
+      "host-process-supervisor.mjs",
+    );
+    return existsSync(packaged) ? packaged : null;
+  }
+  const development = path.resolve(
+    __dirname,
+    "..",
+    "apps",
+    "desktop",
+    "src",
+    "engine",
+    "agents",
+    "containment",
+    "host-process-supervisor.mjs",
+  );
+  return existsSync(development) ? development : null;
+}
+
 /** Resolve SRT's required ripgrep helper without relying on the launcher's
  * PATH. Packaged builds execute the staged Resources copy; development first
  * accepts that same build output, then resolves the pinned optional package. */
@@ -369,62 +422,6 @@ function resolveZsrRipgrepPath(): string | null {
   } catch {
     return null;
   }
-}
-
-function resolveZsrContainerWorkerPath(): string | null {
-  if (IS_PACKAGED) {
-    const packaged = path.join(
-      process.resourcesPath,
-      "zsr-container-worker.mjs",
-    );
-    return existsSync(packaged) ? packaged : null;
-  }
-  const dev = path.resolve(
-    __dirname,
-    "..",
-    "apps",
-    "desktop",
-    "src",
-    "engine",
-    "agents",
-    "containment",
-    "zsr-container-worker.mjs",
-  );
-  return existsSync(dev) ? dev : null;
-}
-
-function resolveZsrOrbStackContainerHostPath(): string | null {
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-orbstack-container-host.mjs")
-    : path.resolve(
-        __dirname,
-        "..",
-        "apps",
-        "desktop",
-        "src",
-        "engine",
-        "agents",
-        "containment",
-        "zsr-orbstack-container-host.mjs",
-      );
-  return existsSync(candidate) ? candidate : null;
-}
-
-function resolveZsrOrbStackCloudInitPath(): string | null {
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-orbstack-cloud-init.yaml")
-    : path.resolve(
-        __dirname,
-        "..",
-        "apps",
-        "desktop",
-        "src",
-        "engine",
-        "agents",
-        "containment",
-        "zsr-orbstack-cloud-init.yaml",
-      );
-  return existsSync(candidate) ? candidate : null;
 }
 
 function resolveZsrMacosProcessDomainHelperPath(): string | null {
@@ -1422,24 +1419,16 @@ async function doSpawnEngine(
   // to `node` on PATH; see pty-host-client.ts.)
   extraEnv.ZEROS_PTY_HOST_RUNTIME = process.execPath;
   extraEnv.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
+  extraEnv.ZEROS_HOST_SUPERVISOR_RUNTIME = process.execPath;
+  const hostProcessSupervisor = resolveHostProcessSupervisorPath();
+  if (hostProcessSupervisor) {
+    extraEnv.ZEROS_HOST_SUPERVISOR_SCRIPT = hostProcessSupervisor;
+  }
   extraEnv.ZEROS_ZSR_SUPERVISOR_RUNTIME = process.execPath;
   const zsrSupervisor = resolveZsrSupervisorPath();
   if (zsrSupervisor) extraEnv.ZEROS_ZSR_SUPERVISOR_SCRIPT = zsrSupervisor;
   const zsrRipgrep = resolveZsrRipgrepPath();
   if (zsrRipgrep) extraEnv.ZEROS_ZSR_RIPGREP_PATH = zsrRipgrep;
-  const zsrContainerWorker = resolveZsrContainerWorkerPath();
-  if (zsrContainerWorker) {
-    extraEnv.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT = zsrContainerWorker;
-  }
-  const zsrOrbStackContainerHost = resolveZsrOrbStackContainerHostPath();
-  if (zsrOrbStackContainerHost) {
-    extraEnv.ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT =
-      zsrOrbStackContainerHost;
-  }
-  const zsrOrbStackCloudInit = resolveZsrOrbStackCloudInitPath();
-  if (zsrOrbStackCloudInit) {
-    extraEnv.ZEROS_ZSR_ORBSTACK_CLOUD_INIT = zsrOrbStackCloudInit;
-  }
   const zsrMacosProcessDomain = resolveZsrMacosProcessDomainHelperPath();
   if (zsrMacosProcessDomain) {
     extraEnv.ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER = zsrMacosProcessDomain;
@@ -1636,16 +1625,50 @@ async function doSpawnEngine(
         if (state.child === child) state.localToken = authority;
         return;
       }
-      const snapshot = parseVaultControl(line);
-      if (!snapshot) return;
+      let controlValue: unknown;
       try {
-        setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
-      } catch (err) {
-        console.warn(
-          "[Zeros] MCP vault persist failed:",
-          err instanceof Error ? err.message : String(err),
-        );
+        controlValue = JSON.parse(line) as unknown;
+      } catch {
+        controlValue = null;
       }
+      void handleCloudReplicaEngineControl(
+        controlValue,
+        (responseLine) => {
+          if (
+            state.child === child &&
+            child.stdin &&
+            child.stdin.writable &&
+            !child.killed
+          ) {
+            child.stdin.write(responseLine);
+          }
+        },
+        undefined,
+        () => {
+          if (state.child !== child || child.killed || !child.stdin?.writable) {
+            return Promise.resolve();
+          }
+          return pushCloudReplicaSessionToEngine();
+        },
+      )
+        .then((handled) => {
+          if (handled) return;
+          const snapshot = parseVaultControl(line);
+          if (!snapshot) return;
+          try {
+            setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
+          } catch (err) {
+            console.warn(
+              "[Zeros] MCP vault persist failed:",
+              err instanceof Error ? err.message : String(err),
+            );
+          }
+        })
+        .catch(() => {
+          console.warn(
+            "[cloud-replica] engine control failed (handler_failed)",
+          );
+        });
     },
   );
 
@@ -1735,6 +1758,13 @@ async function doSpawnEngine(
   // out of the spawn environment prevents the engine's terminal and agent
   // subprocesses from inheriting a durable credential.
   void pushGithubCredentialToEngine();
+
+  // Seed only the short-lived WorkOS bearer and public device identity. The
+  // Ed25519 private key remains in Electron safeStorage; signing requests make
+  // the reverse trip over fd 3 and return over this same stdin pipe.
+  seedCloudReplicaSessionToEngineIfEnabled({
+    push: pushCloudReplicaSessionToEngine,
+  });
 
   // Seed the engine's OAuth token vault from the durable store (safeStorage) so
   // the MCP gateway restores its sign-ins without re-auth. Pushed on stdin
@@ -1901,6 +1931,19 @@ export async function pushGithubCredentialToEngine(): Promise<void> {
   } catch {
     /* engine exiting — the next spawn re-seeds over stdin */
   }
+}
+
+/** Refresh/clear the engine's in-memory cloud-replica session over the private
+ * parent pipe. Never place this bearer in argv, env, renderer IPC, or logs. */
+export function pushCloudReplicaSessionToEngine(): Promise<void> {
+  if (!cloudWorkspaceDesktopCapabilityEnabled()) {
+    cloudReplicaSessionWriter.invalidate();
+    return Promise.resolve();
+  }
+  // push() advances its generation before starting any asynchronous auth or
+  // safeStorage read. Auth-change callers can therefore invalidate an older
+  // bearer immediately, before awaiting unrelated work.
+  return cloudReplicaSessionWriter.push();
 }
 
 /** Seed the engine's MCP OAuth token vault from the durable store (safeStorage)
@@ -2120,7 +2163,13 @@ export function startEngineCodeWatcher(): void {
         );
       }
       if (Date.now() - respawnDeferredSince < BUSY_MAX_DEFER_MS) {
-        setTimeout(() => void triggerRespawn(), BUSY_POLL_MS);
+        setTimeout(() => {
+          void triggerRespawn().catch((error: unknown) => {
+            console.warn(
+              `[Zeros] deferred engine respawn failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }, BUSY_POLL_MS);
         return;
       }
       console.warn(
@@ -2287,7 +2336,11 @@ export function startEngineCodeWatcher(): void {
       const wait = isBurst() ? DEBOUNCE_BURST_MS : DEBOUNCE_NORMAL_MS;
       if (scheduled) clearTimeout(scheduled);
       scheduled = setTimeout(() => {
-        void triggerRespawn();
+        void triggerRespawn().catch((error: unknown) => {
+          console.warn(
+            `[Zeros] debounced engine respawn failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }, wait);
     };
     if (existsSync(cliSrc)) {
@@ -2351,95 +2404,101 @@ export function startWatchdog(): void {
   const RESPAWN_BACKOFF_CAP_MS = 5 * 60_000;
   let nextRespawnAllowedAt = 0;
 
-  state.watchdogTimer = setInterval(async () => {
-    if (state.shuttingDown) return;
+  state.watchdogTimer = setInterval(() => {
+    void (async () => {
+      if (state.shuttingDown) return;
 
-    const port = state.port;
-    const instance = state.instance;
-    if (port === null || instance === null) {
-      // No owned manifest — never spawned successfully, or a respawn is
-      // mid-flight. Nothing to monitor. Port and instance are published
-      // together after parseOwnedEngineManifest accepts our exact child.
+      const port = state.port;
+      const instance = state.instance;
+      if (port === null || instance === null) {
+        // No owned manifest — never spawned successfully, or a respawn is
+        // mid-flight. Nothing to monitor. Port and instance are published
+        // together after parseOwnedEngineManifest accepts our exact child.
+        fails = 0;
+        return;
+      }
+
+      if (await engineResponsive(port, instance)) {
+        fails = 0;
+        respawnsWithoutContact = 0;
+        nextRespawnAllowedAt = 0;
+        return;
+      }
+
+      fails += 1;
+      if (fails < FAIL_THRESHOLD) return;
+
+      const root = state.root;
+      if (!root) {
+        fails = 0;
+        return;
+      }
+
+      if (Date.now() < nextRespawnAllowedAt) {
+        // Hold-off window from a previous zero-contact respawn — keep probing
+        // (a recovered engine resets everything above) but don't kill/relaunch
+        // yet. Cap `fails` so the counter can't run away while we wait.
+        fails = FAIL_THRESHOLD;
+        return;
+      }
+
+      console.error(
+        `[Zeros] engine unreachable on port ${port} after ${FAIL_THRESHOLD} probes; respawning`,
+      );
       fails = 0;
-      return;
-    }
+      respawnsWithoutContact += 1;
+      if (respawnsWithoutContact >= 2) {
+        const backoffMs = zeroContactRespawnBackoffMs(respawnsWithoutContact, {
+          probeWindowMs: POLL_INTERVAL_MS * FAIL_THRESHOLD,
+          capMs: RESPAWN_BACKOFF_CAP_MS,
+        });
+        nextRespawnAllowedAt = Date.now() + backoffMs;
+        // The lsof evidence dump is throttled to the first few zero-contact
+        // cycles: it was logged on EVERY cycle, and during a storm the repeated
+        // multi-line listener tables were a major main.log flooder.
+        if (respawnsWithoutContact <= 3) {
+          console.error(
+            `[Zeros] ${respawnsWithoutContact} watchdog respawns in a row with zero successful probes — ` +
+              `respawning is not recovering this; a stale process may be black-holing the port. ` +
+              `Next attempt in ${Math.round(backoffMs / 1000)}s. ` +
+              `Listeners on ${currentEnginePortRange()}:\n` +
+              (await describeRangeListeners()),
+          );
+        } else {
+          console.error(
+            `[Zeros] watchdog zero-contact respawn #${respawnsWithoutContact}; ` +
+              `backing off ${Math.round(backoffMs / 1000)}s before the next attempt`,
+          );
+        }
+      }
 
-    if (await engineResponsive(port, instance)) {
-      fails = 0;
-      respawnsWithoutContact = 0;
-      nextRespawnAllowedAt = 0;
-      return;
-    }
-
-    fails += 1;
-    if (fails < FAIL_THRESHOLD) return;
-
-    const root = state.root;
-    if (!root) {
-      fails = 0;
-      return;
-    }
-
-    if (Date.now() < nextRespawnAllowedAt) {
-      // Hold-off window from a previous zero-contact respawn — keep probing
-      // (a recovered engine resets everything above) but don't kill/relaunch
-      // yet. Cap `fails` so the counter can't run away while we wait.
-      fails = FAIL_THRESHOLD;
-      return;
-    }
-
-    console.error(
-      `[Zeros] engine unreachable on port ${port} after ${FAIL_THRESHOLD} probes; respawning`,
-    );
-    fails = 0;
-    respawnsWithoutContact += 1;
-    if (respawnsWithoutContact >= 2) {
-      const backoffMs = zeroContactRespawnBackoffMs(respawnsWithoutContact, {
-        probeWindowMs: POLL_INTERVAL_MS * FAIL_THRESHOLD,
-        capMs: RESPAWN_BACKOFF_CAP_MS,
-      });
-      nextRespawnAllowedAt = Date.now() + backoffMs;
-      // The lsof evidence dump is throttled to the first few zero-contact
-      // cycles: it was logged on EVERY cycle, and during a storm the repeated
-      // multi-line listener tables were a major main.log flooder.
-      if (respawnsWithoutContact <= 3) {
+      try {
+        const newPort = await spawnEngine(root);
+        console.log(`[Zeros] watchdog respawned engine on port ${newPort}`);
+        emitEvent("engine-restarted", newPort);
+        // Belt-and-suspenders cleanup: even with killCurrentChild now
+        // doing SIGTERM→SIGKILL escalation, edge cases (a freshly-
+        // spawned child crashing before we got its handle, an engine
+        // that fork-exec'd a stuck subprocess on its port) can still
+        // leave a listener stranded in this channel's range. Reaping
+        // after every respawn — not just cold start — catches those.
+        // Skips the current `state.child` PID via lsof's process
+        // matching (the new engine is `bun apps/desktop/src/cli.ts` or the prod
+        // binary; both match the engine-pattern but we filter by PID
+        // below).
+        await reapOrphanEngines(state.child?.pid);
+      } catch (err) {
         console.error(
-          `[Zeros] ${respawnsWithoutContact} watchdog respawns in a row with zero successful probes — ` +
-            `respawning is not recovering this; a stale process may be black-holing the port. ` +
-            `Next attempt in ${Math.round(backoffMs / 1000)}s. ` +
-            `Listeners on ${currentEnginePortRange()}:\n` +
-            (await describeRangeListeners()),
-        );
-      } else {
-        console.error(
-          `[Zeros] watchdog zero-contact respawn #${respawnsWithoutContact}; ` +
-            `backing off ${Math.round(backoffMs / 1000)}s before the next attempt`,
+          `[Zeros] watchdog respawn failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
         );
       }
-    }
-
-    try {
-      const newPort = await spawnEngine(root);
-      console.log(`[Zeros] watchdog respawned engine on port ${newPort}`);
-      emitEvent("engine-restarted", newPort);
-      // Belt-and-suspenders cleanup: even with killCurrentChild now
-      // doing SIGTERM→SIGKILL escalation, edge cases (a freshly-
-      // spawned child crashing before we got its handle, an engine
-      // that fork-exec'd a stuck subprocess on its port) can still
-      // leave a listener stranded in this channel's range. Reaping
-      // after every respawn — not just cold start — catches those.
-      // Skips the current `state.child` PID via lsof's process
-      // matching (the new engine is `bun apps/desktop/src/cli.ts` or the prod
-      // binary; both match the engine-pattern but we filter by PID
-      // below).
-      await reapOrphanEngines(state.child?.pid);
-    } catch (err) {
+    })().catch((error: unknown) => {
       console.error(
-        `[Zeros] watchdog respawn failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[Zeros] watchdog timer failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
   }, POLL_INTERVAL_MS);
 }
 

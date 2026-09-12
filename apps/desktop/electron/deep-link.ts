@@ -172,6 +172,9 @@ export async function handleUrl(rawUrl: string): Promise<void> {
     }
     const providerError = rawProviderError;
     if (state && (code || providerError)) {
+      // macOS can cold-launch a different Dev worktree to receive this URL.
+      // Its encrypted shared callback relay requires native safeStorage.
+      await app.whenReady();
       const { acceptWorkOSDesktopCallback } = await import(
         "./ipc/commands/workos-auth"
       );

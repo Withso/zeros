@@ -28,7 +28,12 @@ function frameFromDocumentId(documentId: string): string {
   return frame;
 }
 
-class WorkspaceDesignRepository implements DesignDocumentRepository {
+/** Durable, engine-owned Design draft repository. The active draft remains
+ * ordinary uncommitted repository content, but every mutation reaches it
+ * through the Design transaction journal/CAS implementation in document.ts.
+ * Agent adapters receive a DesignApi backed by this store; they never receive
+ * this path or direct filesystem authority. */
+export class DesignDraftStore implements DesignDocumentRepository {
   constructor(private readonly workspacePath: string) {}
 
   async read(documentId: string): Promise<DesignWebDocumentInput> {
@@ -67,7 +72,7 @@ export function getWorkspaceDesignApi(workspacePath: string): DesignApi {
     workspaceApis.set(key, retained);
     return retained;
   }
-  const api = new DesignApi(new WorkspaceDesignRepository(key), {
+  const api = new DesignApi(new DesignDraftStore(key), {
     // This instance is retained exclusively behind WorkspaceService's local,
     // workspace-id-resolved human Design surface. Any future agent/transport
     // adapter must construct its own fail-closed, capability-authorized API.

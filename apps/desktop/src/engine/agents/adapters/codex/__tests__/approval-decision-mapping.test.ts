@@ -117,6 +117,37 @@ describe("Codex ordered command approval decisions", () => {
     ],
   };
 
+  it("distinguishes write-stdin callbacks and retains their opaque approval id", () => {
+    const request = mapApprovalToCanonical(
+      {
+        zerosSessionId: "s",
+        fileEditPathsByItemId: new Map(),
+      } as never,
+      {
+        permissionId: "permission-1",
+        method: EXEC,
+        params: {
+          kind: "writeStdin",
+          itemId: "terminal-item-1",
+          approvalId: "stdin-callback-1",
+          reason: "The command is waiting for confirmation",
+          availableDecisions: ["accept", "decline"],
+        },
+      } as never,
+    );
+
+    expect(request.toolCall).toMatchObject({
+      toolCallId: "terminal-item-1",
+      title: "Send input to running terminal",
+      kind: "execute",
+      rawInput: {
+        approvalKind: "writeStdin",
+        approvalId: "stdin-callback-1",
+        reason: "The command is waiting for confirmation",
+      },
+    });
+  });
+
   it("presents every native decision in provider order and preserves escalation context", () => {
     const request = mapApprovalToCanonical(
       {

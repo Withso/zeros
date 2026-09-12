@@ -11,8 +11,18 @@
 //
 // Behavior contract:
 //
-//   - The fixed messages-square icon is always first and lists closed
-//     tabs (workspace-wide); restoring one lands in THIS pane.
+//   - `leading` (the Code/Design mode toggle) is the strip's fixed first
+//     control, ahead of the history icon; `trailing` (the workbench expand
+//     control, only while that panel is collapsed) is pinned past the "⋯"
+//     menu. Both live OUTSIDE the scrolling lane, so neither moves as tabs
+//     scroll. The owning column decides which pane in a split gets them (see
+//     conversation/pane-layout.tsx) — this strip only seats what it is handed.
+//     The row's height matches Workbench's header exactly, so the expand
+//     control keeps one position across the collapse toggle.
+//   - The fixed message-circle icon lists closed tabs (workspace-wide);
+//     restoring one lands in THIS pane. It is pinned at the strip's right end,
+//     immediately left of the "⋯" menu, so the pane's two menu controls read as
+//     one cluster instead of straddling the tabs.
 //   - "+" is the only new-tab control; new tabs are created in THIS
 //     pane. It stays fixed after the lane while only the tabs scroll.
 //   - The "⋯" menu is pinned at the far right: the first Split Right can grow
@@ -31,6 +41,7 @@ import React, {
   useLayoutEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import {
   ClipboardList,
@@ -93,20 +104,57 @@ import {
 
 /** Outer shell — the chat-tab row. The tabs are floating Chrome-style pills
  *  on the pane's --pane-bg window fill (bg1 focused / bg0 not; no border/fill of
- *  its own). h-11 seats the h-7 pills
- *  in ~8px of top/bottom breathing room via items-center — the row's height
- *  IS its vertical padding (children use h-full, so it stays a definite
- *  height rather than intrinsic py-*). Keep in sync with the placeholder
- *  strip in conversation/pane-layout.tsx so the chrome band doesn't jump height. */
-const STRIP_SHELL_CLS = "flex h-11 shrink-0 items-center overflow-hidden";
+ *  its own). h-10 is the app's chrome-band height: the global TopBar, Workbench's
+ *  header, and the PR status row are all 40px, and Workbench's header seats the
+ *  same h-7 pills in the same 6px of top/bottom breathing room via items-center
+ *  — the row's height IS its vertical padding (children use h-full, so it stays
+ *  a definite height rather than intrinsic py-*).
+ *
+ *  2026-09-01: this was h-11 (44px). Once Code's own header row was removed, the
+ *  strip became the column's FIRST row, sitting beside Workbench's h-10 header —
+ *  and the workbench expand control, which lives in whichever of the two owns it,
+ *  landed 2px lower when the panel was collapsed. One shared height is the fix,
+ *  so this constant is EXPORTED and the placeholder band in
+ *  conversation/pane-layout.tsx consumes it rather than restating the literal. */
+export const CHAT_STRIP_SHELL_CLS =
+  "flex h-10 shrink-0 items-center overflow-hidden";
 
-/** History and plus sit outside the scroll viewport. The lane shrink-wraps
- * while tabs fit, then consumes the available room and scrolls; the asymmetric
- * padding leaves the same four-pixel content gutter the workspace strip uses. */
-const HISTORY_CONTROL_CLS = "flex h-full shrink-0 items-center pl-2";
+/** Column-owned strip slots. 2026-09-01: Code's conversation column dropped its
+ * own h-10 name/mode row, so the mode toggle became this strip's fixed leading
+ * control and the collapsed-workbench expand button its fixed trailing one.
+ * Each slot owns only the window-edge gutter — the neighbouring control's own
+ * `pl-2`/`pr-2` supplies the gap between them. Exported so the no-workspace
+ * placeholder band in conversation/pane-layout.tsx seats them identically.
+ *
+ * `relative z-40` lifts both slots ABOVE the host pane's inactive-window veil
+ * (`bg-bg0/30`, z-30 — see ChatPane in conversation/pane-layout.tsx). That veil
+ * exists to dim a pane's own chrome and transcript when it isn't the focused
+ * window, and it should keep doing that for the pane's tabs, history, "+" and
+ * "⋯". These two controls are NOT pane-scoped: they act on the whole workspace
+ * (Code↔Design) and the whole column (expand Workbench), and they only borrow a
+ * corner of one pane's strip because the column no longer has a row of its own.
+ * Dimming them by 30% toward bg0 made the mode toggle read as unavailable
+ * whenever the top-left pane happened to be unfocused. z-40 matches the drag
+ * drop overlay, which is a LATER sibling and so still paints over the strip
+ * mid-drag. The pane's bg0 window fill still shows behind them (a ~1% shift
+ * against bg1), so the surrounding strip keeps reading as recessed. */
+export const CHAT_STRIP_LEADING_CLS =
+  "relative z-40 flex h-full shrink-0 items-center pl-2 pr-1";
+export const CHAT_STRIP_TRAILING_CLS =
+  "relative z-40 flex h-full shrink-0 items-center pr-2";
+
+/** History, plus, and the "⋯" menu all sit outside the scroll viewport. The lane
+ * shrink-wraps while tabs fit, then consumes the available room and scrolls.
+ *
+ * 2026-09-01: history moved from the strip's left edge to its right end, so it
+ * dropped the left gutter it used to own there — it now abuts the "⋯" menu, and
+ * the two 24px icon buttons' own internal padding is the separation. The leading
+ * slot picked up `pr-1` in exchange: with history gone from between them, the
+ * mode toggle would otherwise sit 4px from the first tab pill. */
+const HISTORY_CONTROL_CLS = "flex h-full shrink-0 items-center";
 const PLUS_CONTROL_CLS = "flex h-full shrink-0 items-center";
-/** The "⋯" pane menu is pinned at the far right, after the flexible
- *  filler, so it stays put no matter how many tabs are open. */
+/** Both menu controls are pinned at the far right, after the flexible filler,
+ *  so they stay put no matter how many tabs are open. */
 const PANE_MENU_CONTROL_CLS = "flex h-full shrink-0 items-center pr-2";
 const TAB_VIEWPORT_CLS = "relative h-full min-w-0 shrink overflow-hidden";
 const TAB_NAV_CLS =
@@ -208,6 +256,12 @@ export interface ChatTabsProps {
   onSplit: (dir: "right" | "down") => void;
   canSplitRight: boolean;
   canSplitDown: boolean;
+  /** Column-level control pinned before the history icon (the mode toggle).
+   *  Handed to exactly one pane per column, so a split shows it once. */
+  leading?: ReactNode;
+  /** Column-level control pinned past the "⋯" menu at the window's right edge
+   *  (the workbench expand button while that panel is collapsed). */
+  trailing?: ReactNode;
 }
 
 // ── Component ────────────────────────────────────────────
@@ -227,6 +281,8 @@ export function ChatTabs({
   onSplit,
   canSplitRight,
   canSplitDown,
+  leading,
+  trailing,
 }: ChatTabsProps) {
   // Sticky strip refs + compositor-synced fade/hover machinery. All of
   // this is unchanged from the single-strip era — just scoped per pane.
@@ -450,10 +506,14 @@ export function ChatTabs({
   // ── Render ───────────────────────────────────────────
 
   return (
-    <div className={STRIP_SHELL_CLS}>
-      <div className={HISTORY_CONTROL_CLS}>
-        <ChatHistoryMenu chats={historyChats} onRestoreChat={onRestoreChat} />
-      </div>
+    <div className={CHAT_STRIP_SHELL_CLS}>
+      {/* Fixed leading slot — outside the scrolling lane, so the mode toggle
+          holds the strip's left edge no matter how far the tabs scroll. */}
+      {leading ? (
+        <div className={CHAT_STRIP_LEADING_CLS} data-chat-strip-leading="">
+          {leading}
+        </div>
+      ) : null}
 
       <div className={TAB_VIEWPORT_CLS}>
         <div
@@ -528,6 +588,11 @@ export function ChatTabs({
 
       <div className="min-w-0 flex-1" aria-hidden="true" />
 
+      {/* Closed-chat history — pinned left of the pane menu. */}
+      <div className={HISTORY_CONTROL_CLS}>
+        <ChatHistoryMenu chats={historyChats} onRestoreChat={onRestoreChat} />
+      </div>
+
       {/* Pane menu — fixed at the right end of the strip. */}
       <div className={PANE_MENU_CONTROL_CLS}>
         <DropdownMenu>
@@ -567,6 +632,15 @@ export function ChatTabs({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+
+      {/* Fixed trailing slot — last, so the workbench expand control keeps the
+          window's right edge it holds from Workbench's own header while that
+          panel is open. */}
+      {trailing ? (
+        <div className={CHAT_STRIP_TRAILING_CLS} data-chat-strip-trailing="">
+          {trailing}
+        </div>
+      ) : null}
     </div>
   );
 }

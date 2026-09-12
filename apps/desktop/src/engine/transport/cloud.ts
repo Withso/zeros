@@ -3,24 +3,24 @@
 // ──────────────────────────────────────────────────────────
 //
 // A cloud workspace is the SAME Zeros engine running inside a remote sandbox.
-// The Mac renderer reaches it over a public preview-URL WSS — which terminates
-// at the sandbox provider's reverse proxy and is forwarded to whatever port the
-// engine binds on 0.0.0.0 inside the box. THIS transport is that port.
+// The Mac renderer reaches it through an Electron-main-owned loopback tunnel;
+// OpenSSH forwards that private connection to this port inside the exact
+// generation's sandbox. Provider preview access is a separate HTTP-only path.
 //
 // It is a SEPARATE transport from LocalTransport on purpose:
 // LocalTransport's loopback/Origin gate is a DNS-rebinding defense for a server
 // that only binds 127.0.0.1, and must NOT be relaxed to serve cloud. CloudTransport
-// instead binds 0.0.0.0 (the preview proxy IS the network boundary) and gates the
-// /ws upgrade with a worker-minted connection token.
+// instead binds 0.0.0.0 behind the sandbox network boundary and gates every
+// /ws upgrade with a one-use, engine/generation/authority-bound admission.
 //
-// The transport uses a shared connection token, extended keep-alive timeouts,
-// and server-side pings, surfacing each peer as a `kind: "cloud"` client so the
-// engine can serve the full bridge (handshake, file tree, and PTY). Production
-// multi-user hosting additionally requires account/workspace binding; when
-// `accountAuth` is unset, the shared bridge token is the only remote gate.
+// A static bootstrap token exists only for image qualification. Production
+// clients are redeemed through the control plane and arrive with a
+// server-asserted account plus authority epoch, never a reusable WorkOS bearer.
+// Each peer is surfaced as `kind: "cloud"` so the engine can serve the normal
+// bridge (handshake, file tree, Git, Design transactions, and PTY).
 //
-// HTTP routes:  GET /health (status; ungated — the preview proxy + the worker
-//                            probe it, and it carries no secrets)
+// HTTP routes:  GET /health (status; ungated — provider/worker probes use it,
+//                            and it carries no secrets)
 // WebSocket:    /ws (the renderer's bridge; token-gated)
 // ──────────────────────────────────────────────────────────
 
@@ -31,6 +31,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
+import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
 import {
   MAX_BRIDGE_FRAME_BYTES,
@@ -38,6 +39,10 @@ import {
 } from "@zeros/protocol/schemas";
 import type { EngineMessage } from "../types";
 import type { Transport, TransportClient } from "./types";
+import type {
+  CloudRuntimeClientAdmission,
+  CloudRuntimeReadiness,
+} from "../cloud-runtime-registration";
 
 /** Constant-time string compare for equal-length candidates. Length mismatches
  *  are rejected before the constant-time byte comparison.
@@ -139,6 +144,11 @@ const MAX_CONTROL_HANDLER_PEER_QUEUED_FRAMES = 8;
 const MAX_CONTROL_HANDLER_PEER_QUEUED_BYTES = 4 * 1024 * 1024;
 const MAX_HANDLER_RETAINED_BYTES = 64 * 1024 * 1024;
 const FORCE_CLOSE_TIMEOUT_MS = 1_000;
+const INTERNAL_READINESS_PATH = "/internal/readiness";
+const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ENGINE_CONNECT_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
 
 const CONTROL_HANDLER_MESSAGE_TYPES = new Set<string>([
   "OWNER_SIGNED_OUT",
@@ -186,17 +196,27 @@ export function parseCloudTransportPort(
 export interface CloudTransportOptions {
   /** TCP port the in-sandbox engine binds (on 0.0.0.0) behind the preview proxy. */
   port: number;
-  /** Worker-minted connection token presented on the /ws upgrade. New clients
-   *  use the safe WebSocket subprotocol carrier; trusted non-browser probes
-   *  may use `x-zeros-cloud-token`, and `?token=` remains a compatibility path.
+  /** Worker-minted connection token presented on the /ws upgrade. Browser
+   *  clients use the WebSocket subprotocol carrier; trusted non-browser probes
+   *  may use `x-zeros-cloud-token`. Credentials are never accepted in URLs.
    *  This outer bearer is mandatory even when account binding adds a second gate. */
   token: string;
+  /** Redeems a one-use, generation-bound desktop capability through the
+   * heartbeat-authenticated control-plane channel. The bootstrap token above
+   * remains available only to the image-owned setup qualification probe. */
+  verifyToken?: (token: string) => Promise<CloudRuntimeClientAdmission | null>;
   /** Bounded test/operator tuning. Production uses the conservative defaults;
    * callers cannot raise any value above its package-owned security ceiling. */
   maxConnections?: number;
   handshakeTimeoutMs?: number;
   maxBufferedBytes?: number;
   maxTotalBufferedBytes?: number;
+  /** Root-owned image helper probe. The endpoint is reachable only over a
+   * loopback TCP connection with a loopback Host and this distinct token. */
+  internalReadiness?: {
+    token: string;
+    read: () => CloudRuntimeReadiness | null;
+  };
 }
 
 interface QueuedHandlerMessage {
@@ -215,6 +235,8 @@ class CloudClient implements TransportClient {
   private forceCloseTimer: ReturnType<typeof setTimeout> | null = null;
   constructor(
     readonly id: string,
+    readonly accountUserId: string | null,
+    readonly authorityEpoch: number | null,
     private readonly ws: WebSocket,
     private readonly maxBufferedBytes: number,
     private readonly maxTotalBufferedBytes: number,
@@ -291,10 +313,20 @@ export class CloudTransport implements Transport {
   // OS-assigned ephemeral port once the server is listening (see start()).
   private port: number;
   private readonly token: string;
+  private readonly verifyToken:
+    | ((token: string) => Promise<CloudRuntimeClientAdmission | null>)
+    | null;
+  private readonly pendingAdmissions = new WeakMap<
+    WebSocket,
+    { accountUserId: string | null; authorityEpoch: number | null }
+  >();
   private readonly maxConnections: number;
   private readonly handshakeTimeoutMs: number;
   private readonly maxBufferedBytes: number;
   private readonly maxTotalBufferedBytes: number;
+  private readonly internalReadiness:
+    | { token: string; read: () => CloudRuntimeReadiness | null }
+    | undefined;
   private handlerInFlight = 0;
   private controlHandlerInFlight = 0;
   private handlerInFlightBytes = 0;
@@ -312,6 +344,7 @@ export class CloudTransport implements Transport {
     }
   >();
   private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pendingUpgrades = 0;
   private getInfo:
     | (() => { version: string; uptime: number; connections: number })
     | null = null;
@@ -338,6 +371,13 @@ export class CloudTransport implements Transport {
     }
     this.port = opts.port;
     this.token = opts.token;
+    if (
+      opts.verifyToken !== undefined &&
+      typeof opts.verifyToken !== "function"
+    ) {
+      throw new Error("cloud transport token verifier is invalid");
+    }
+    this.verifyToken = opts.verifyToken ?? null;
     this.maxConnections = boundedInteger(
       opts.maxConnections,
       DEFAULT_MAX_CONNECTIONS,
@@ -366,6 +406,14 @@ export class CloudTransport implements Transport {
       MAX_TOTAL_BUFFERED_BYTES,
       "cloud maxTotalBufferedBytes",
     );
+    if (
+      opts.internalReadiness &&
+      (!READINESS_TOKEN_PATTERN.test(opts.internalReadiness.token) ||
+        typeof opts.internalReadiness.read !== "function")
+    ) {
+      throw new Error("cloud internal readiness configuration is invalid");
+    }
+    this.internalReadiness = opts.internalReadiness;
     this.httpServer = createServer((req, res) => this.handleHTTP(req, res));
     // Authenticated WebSocket peers consume `maxConnections`; reserve a small
     // bounded lane for health probes and in-progress HTTP upgrades without
@@ -385,27 +433,19 @@ export class CloudTransport implements Transport {
     });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
-      const url = new URL(request.url ?? "", "http://sandbox");
-      // No loopback/Origin gate here (that is LocalTransport's DNS-rebinding
-      // defense for a 127.0.0.1 server). The preview proxy is the network
-      // boundary; the connection token is the auth. A missing/!=`/ws` path or a
-      // bad token drops the socket.
-      if (
-        url.pathname === "/ws" &&
-        this.clients.size < this.maxConnections &&
-        this.isTokenValid(url, request.headers)
-      ) {
-        this.wss.handleUpgrade(request, socket, head, (ws) =>
-          this.wss.emit("connection", ws, request),
-        );
-      } else {
-        socket.destroy();
-      }
+      void this.handleUpgrade(request, socket, head);
     });
 
     this.wss.on("connection", (ws: WebSocket) => {
+      const admission = this.pendingAdmissions.get(ws) ?? {
+        accountUserId: null,
+        authorityEpoch: null,
+      };
+      this.pendingAdmissions.delete(ws);
       const client = new CloudClient(
         randomUUID(),
+        admission.accountUserId,
+        admission.authorityEpoch,
         ws,
         this.maxBufferedBytes,
         this.maxTotalBufferedBytes,
@@ -858,32 +898,104 @@ export class CloudTransport implements Transport {
     });
   }
 
-  /** The token gate. Prefer the header or browser WebSocket subprotocol so
-   *  credentials do not enter URLs or request-target logs; accept the query
-   *  form for existing clients. */
-  private isTokenValid(url: URL, headers: IncomingMessage["headers"]): boolean {
-    const queryTokens = url.searchParams.getAll("token");
-    if (queryTokens.length > 1) return false;
+  /** Parse one unambiguous credential carrier. Credentials use a header or
+   * browser WebSocket subprotocol so they cannot enter URLs, request-target
+   * logs, history, or referrers. */
+  private tokenCredential(
+    url: URL,
+    headers: IncomingMessage["headers"],
+  ): string | null {
+    if (url.searchParams.has("token")) return null;
     const header = headers["x-zeros-cloud-token"];
-    if (Array.isArray(header) && header.length !== 1) return false;
+    if (Array.isArray(header) && header.length !== 1) return null;
     const fromHeader = Array.isArray(header)
       ? (header[0] ?? "")
       : (header ?? "");
     const fromProtocol = tokenFromWebSocketProtocols(headers);
     const carrierCount =
-      Number(queryTokens.length === 1) +
-      Number(header !== undefined) +
-      Number(fromProtocol.present);
-    if (carrierCount !== 1) return false;
-    if (queryTokens.length === 1) {
-      return tokensMatch(this.token, queryTokens[0]);
+      Number(header !== undefined) + Number(fromProtocol.present);
+    if (carrierCount !== 1) return null;
+    return header !== undefined ? fromHeader : fromProtocol.token;
+  }
+
+  private async authenticateToken(token: string): Promise<{
+    accountUserId: string | null;
+    authorityEpoch: number | null;
+  } | null> {
+    if (tokensMatch(this.token, token)) {
+      return { accountUserId: null, authorityEpoch: null };
     }
-    if (header !== undefined) return tokensMatch(this.token, fromHeader);
-    return tokensMatch(this.token, fromProtocol.token);
+    if (!this.verifyToken || !ENGINE_CONNECT_TOKEN_PATTERN.test(token)) {
+      return null;
+    }
+    try {
+      const admission = await this.verifyToken(token);
+      if (
+        !admission ||
+        !UUID_PATTERN.test(admission.accountUserId) ||
+        !Number.isSafeInteger(admission.authorityEpoch) ||
+        admission.authorityEpoch < 1
+      ) {
+        return null;
+      }
+      return admission;
+    } catch {
+      return null;
+    }
+  }
+
+  private async handleUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): Promise<void> {
+    const url = new URL(request.url ?? "", "http://sandbox");
+    const credential = this.tokenCredential(url, request.headers);
+    // No loopback/Origin gate here (that is LocalTransport's DNS-rebinding
+    // defense for a 127.0.0.1 server). An exact capability is the boundary.
+    if (
+      url.pathname !== "/ws" ||
+      credential === null ||
+      this.clients.size + this.pendingUpgrades >= this.maxConnections
+    ) {
+      socket.destroy();
+      return;
+    }
+    this.pendingUpgrades += 1;
+    socket.pause();
+    let upgraded = false;
+    const timeout = setTimeout(() => socket.destroy(), this.handshakeTimeoutMs);
+    timeout.unref?.();
+    try {
+      const admission = await this.authenticateToken(credential);
+      if (
+        !admission ||
+        socket.destroyed ||
+        this.clients.size >= this.maxConnections
+      ) {
+        return;
+      }
+      socket.resume();
+      this.wss.handleUpgrade(request, socket, head, (ws) => {
+        upgraded = true;
+        this.pendingAdmissions.set(ws, admission);
+        this.wss.emit("connection", ws, request);
+      });
+    } catch {
+      // Authentication and ws parsing both fail closed below.
+    } finally {
+      clearTimeout(timeout);
+      this.pendingUpgrades = Math.max(0, this.pendingUpgrades - 1);
+      if (!upgraded && !socket.destroyed) socket.destroy();
+    }
   }
 
   private handleHTTP(req: IncomingMessage, res: ServerResponse): void {
     const url = new URL(req.url ?? "", "http://sandbox");
+    if (url.pathname === INTERNAL_READINESS_PATH) {
+      this.handleInternalReadiness(url, req, res);
+      return;
+    }
     if (url.pathname === "/health" && req.method === "GET") {
       const info = this.getInfo?.() ?? {
         version: "unknown",
@@ -901,6 +1013,85 @@ export class CloudTransport implements Transport {
         transport: "cloud",
         health: "/health",
         ws: "/ws",
+      }),
+    );
+  }
+
+  private handleInternalReadiness(
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
+    const reject = () => {
+      res.writeHead(404, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end("not found");
+    };
+    const remote = req.socket.remoteAddress ?? "";
+    const remoteIsLoopback =
+      remote === "127.0.0.1" ||
+      remote === "::1" ||
+      remote === "::ffff:127.0.0.1";
+    let hostIsLoopback = false;
+    try {
+      const host = new URL(`http://${req.headers.host ?? ""}`).hostname;
+      hostIsLoopback =
+        host === "127.0.0.1" || host === "[::1]" || host === "localhost";
+    } catch {
+      hostIsLoopback = false;
+    }
+    const rawToken = req.headers["x-zeros-readiness-token"];
+    const token = Array.isArray(rawToken) ? "" : (rawToken ?? "");
+    if (
+      !this.internalReadiness ||
+      req.method !== "GET" ||
+      url.search !== "" ||
+      !remoteIsLoopback ||
+      !hostIsLoopback ||
+      !tokensMatch(this.internalReadiness.token, token)
+    ) {
+      reject();
+      return;
+    }
+    let readiness: CloudRuntimeReadiness | null = null;
+    try {
+      readiness = this.internalReadiness.read();
+    } catch {
+      readiness = null;
+    }
+    if (
+      !readiness ||
+      readiness.version !== 1 ||
+      !UUID_PATTERN.test(readiness.instanceId) ||
+      !Number.isSafeInteger(readiness.protocolVersion) ||
+      readiness.protocolVersion < 1 ||
+      readiness.protocolVersion > 65_535 ||
+      readiness.health !== "ready" ||
+      readiness.durableRecordConnected !== true
+    ) {
+      res.writeHead(503, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Retry-After": "1",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end("unavailable");
+      return;
+    }
+    res.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.end(
+      JSON.stringify({
+        version: 1,
+        audience: "zeros-cloud-engine-readiness-v1",
+        ready: true,
+        engine: readiness,
       }),
     );
   }

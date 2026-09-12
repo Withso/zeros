@@ -67,7 +67,7 @@ organization membership is inactive.
 
 The foundation landed as one reviewed PR so schema, server, web, desktop,
 tests, and runbooks could not be promoted in incompatible combinations. Live
-Alpha qualification then found three integration defects that could only be
+Alpha qualification then found four integration defects that could only be
 fixed after that merge; each corrective patch received its own green review
 and was promoted in order. The phases below remain logical gates, not
 independently supported partial designs:
@@ -107,8 +107,10 @@ reinterprets product ownership.
 
 ## Durable identity boundary
 
-- `users.id` is the durable Zeros account ID. Product data never uses a WorkOS
-  subject as its owner key.
+- `users.id` is the durable Zeros account ID. Server-side product data never
+  uses a WorkOS subject as its owner key. Desktop Personal workspaces are
+  device-local and have no account owner; see
+  [Personal ownership](organizations-and-teams.md#personal).
 - `user_identities(provider, provider_sub)` maps a verified WorkOS `sub` to one
   Zeros account. The mapping key is `provider='workos'`, not the Google or
   GitHub credential used at sign-in.
@@ -136,17 +138,101 @@ its provider memberships, revokes sessions/grants, emits durable security
 events, and queues a bounded notification email. Product rows continue to use
 the unchanged Zeros UUID.
 
-If someone later signs in with a newly created WorkOS User that has the same
-email, Zeros does **not** relink it. A recent provider authentication creates a
-24-hour recovery request and displays only its public `ZR-…` locator. An exact
-`support_admin` operator must reauthenticate within five minutes, verify the
-evidence out of band, and approve the exact request. A `developer` is not a
-recovery operator, and a `support_admin` does not receive developer-only app
-surfaces. Approval supersedes the deleted identity,
-binds the new subject to the original UUID, increments the account revision,
-audits the operation, and sends a notification. It does not silently restore
-collaborative memberships; those must be re-provisioned by the organization or
-enterprise directory.
+A customer-requested final purge uses a separate provider-erasure protocol.
+After the grace period, the lifecycle worker acquires the same stable-target
+session lock used by WorkOS commands and event ingress, drains every command it
+can associate by local UUID, provider subject, session, or current email, and
+then appends one `purge.provider_erasure_fenced` lifecycle event per erased
+WorkOS User or Organization identifier before requesting provider deletion.
+Email matching is a bounded cleanup fallback used only after the stable UUID
+target is fixed, for unbound browser shells and ephemeral commands or events
+containing the target's still-live profile data. It never selects ownership or
+expands exact-subject provider deletion, which excludes subjects bound to
+another local account.
+Each fence contains only a domain-separated SHA-256 digest of the
+provider-issued opaque identifier; it never stores the raw identifier or an
+email digest. Migration `0061` projects that evidence into an exact-key,
+append-only fence and records whether every historical purge was reconciled.
+Both evidence tables reference the associated `deletion_requests` row with
+`ON DELETE RESTRICT`; finalizers mark that request `purged` rather than deleting
+it. The request and both evidence tables are therefore one retention unit.
+The digest is pseudonymous and can still link repeated appearances of the same
+opaque provider subject, so access is limited to the system role and database
+owner. Retain fences and reconciliation evidence indefinitely: they are the
+minimum denial record that prevents a delayed token, callback, or event from
+recreating an erased subject. Include all three parts of the retention unit in
+backup, restore, and purge-retention validation; none is exported as ordinary
+customer data.
+
+Webhook and Events API ingestion resolve all currently linked targets before
+taking those same sorted locks, then recheck the durable digest fence before
+persisting any raw payload. A matching late event creates only a redacted
+deduplication row (`data={}`, no object, User, or Organization ID) and cannot
+recreate an identity event, session, or membership projection. The separate
+provider-erasure fences and reconciliation evidence remain indefinitely under
+the retention contract above. Final account erasure also removes provider-event
+rows for the captured subjects or current email and session tombstones for
+either the local account or captured subjects. Organization-owned invitation
+records and their audit history remain Organization data while the Organization
+exists, even when the recipient later deletes a Zeros account; an Organization
+purge removes them under that Organization's own deletion/retention policy, not
+silently as part of account erasure.
+
+After applying `0061`, a database owner must inspect historical readiness from
+a controlled shell before accepting new subjects:
+
+```sh
+# Source checkout
+pnpm --dir apps/control-plane workos-erasure:manage --status
+
+# Production image (/app)
+node dist/manage-workos-provider-erasure.js --status
+```
+
+For each unresolved deletion request, use retained provider-side audit evidence
+to identify either every exact erased WorkOS User/Organization ID or that no
+WorkOS subject existed. Set the exact deployment channel, deletion-request UUID,
+an active `platform_owner` actor UUID, `fenced` or `no_workos_subject`
+disposition, the bounded subject JSON, and a non-sensitive incident/evidence
+reference in the corresponding `CONTROL_PLANE_WORKOS_ERASURE_*` variables. Run
+the command without `--execute`, copy its target-bound approval, and rerun the
+unchanged request with `CONTROL_PLANE_WORKOS_ERASURE_APPROVAL` plus `--execute`.
+Production also requires
+`CONTROL_PLANE_WORKOS_ERASURE_PRODUCTION_CONFIRMED=true`. The command refuses
+the application role, hashes raw provider IDs before persistence, takes the same
+stable subject locks as runtime ingress, and appends evidence atomically. Do not
+save these one-shot variables on the web service or place raw IDs in the
+evidence reference. If evidence cannot establish a disposition, leave the
+request unresolved: unknown-subject login and ingestion must remain retryably
+unavailable rather than guessing.
+
+Before a customer-requested final purge, someone signing in with a newly
+created WorkOS User that has the same email is **not** relinked automatically.
+A recent provider authentication creates a 24-hour recovery request and
+displays only its public `ZR-…` locator. An exact `platform_owner` must
+reauthenticate with WorkOS within five minutes, verify the evidence out of
+band, and approve the exact request. Developers have no standing
+account-recovery authority. The historical `support_admin` enum value remains
+readable only for already-persisted compatibility data and cannot be newly
+granted. Approval supersedes the deleted identity, binds the new subject to the
+original UUID, increments the account revision, audits the operation, and
+sends a notification. It does not silently restore collaborative memberships;
+those must be re-provisioned by the organization or enterprise directory.
+
+After final Zeros account purge, there is no retained account to recover: its
+email is anonymized and its provider mapping is erased. A genuinely new WorkOS
+User with the same email is therefore a fresh signup once all historical purge
+evidence is reconciled. The exact old WorkOS subject remains fenced and can
+never sign up again, even if a stale token or provider replay presents it.
+
+During the declared Auth0-to-WorkOS cutover, an active account whose eligible
+sign-in identity is still an active Auth0 mapping uses the same reviewed
+ceremony. A fresh WorkOS authentication creates the bounded `ZR-…` request;
+email alone still cannot transfer ownership. Exact owner approval supersedes
+the reviewed Auth0 identity, preserves the Zeros UUID and active account state,
+and projects retained Zeros-managed collaborative memberships to the new
+WorkOS subject through the durable command outbox. Directory-managed SCIM
+memberships remain authoritative and are never converted by this migration.
 
 An active account reached through a different WorkOS subject returns
 `account_exists`; email alone is never enough to merge it. Browser and desktop
@@ -154,7 +240,31 @@ render fixed guidance for `account_exists`, `reauthentication_required`,
 inactive accounts, and reviewed recovery. Raw provider/database messages are
 discarded.
 
-### Recovery-operator bootstrap and revocation
+### Preparing a clean Alpha sign-in test
+
+Use a previously unused email address (or a distinct alias delivered to a
+mailbox the tester controls) for a first-time signup. Keep that WorkOS User for
+returning-login, logout, persistence, and additional sign-in-method tests.
+Signing out, clearing a browser session, or reinstalling the desktop client
+does not reset the server-side account.
+
+Do not delete WorkOS Users as setup for ordinary signup tests. Deleting only
+the provider User leaves the durable Zeros account and compatibility Personal
+records in place. It also does not reset the device-local Personal collection.
+Before final Zeros purge, authenticating through a newly created WorkOS User
+whose new provider subject reuses that email must enter reviewed recovery, not
+a new empty account. After a separately requested and completed final purge, a
+new provider subject follows the fresh-signup rule above. Neither choice of
+AuthKit entry screen bypasses these boundaries.
+
+Test provider deletion separately, using a disposable account with both clients
+open. Expect access revocation, followed by a recovery-required state on a new
+same-email sign-in. Complete the operator-reviewed recovery to reuse the
+retained account. A destructive Alpha reset is a separate, explicitly approved
+operation with its own exact scope; never delete product rows or relink
+identities by email merely to make a sign-in test pass.
+
+### Staff-role bootstrap and revocation
 
 `users.staff_role` is deliberately not writable by `zeros_app`; neither an API
 route nor compromised application code can grant staff authority. Use the
@@ -171,8 +281,10 @@ Set `DATABASE_URL` plus these target-bound inputs:
   Zeros account.
 - `CONTROL_PLANE_STAFF_ACTOR_USER_ID` — the accountable human operator's Zeros
   UUID. A second person is preferred for Production bootstrap.
-- `CONTROL_PLANE_STAFF_ROLE` — `support_admin`, `developer`, or `none` for
-  revocation.
+- `CONTROL_PLANE_STAFF_ROLE` — `platform_owner`, `developer`, or `none` for
+  revocation. `platform_owner` is the standing accountable owner; a `developer`
+  may perform a sensitive deletion operation only through an exact, expiring,
+  one-shot owner grant in the isolated Ops surface.
 - `CONTROL_PLANE_STAFF_REASON` — a 16–512 character audit reason.
 
 Run the read-only plan first:
@@ -472,6 +584,46 @@ Recorded initial session policy was 30-day maximum / 7-day inactivity for web
 and 90-day maximum / 30-day inactivity for desktop; the dashboard remains the
 authority and must be re-audited before deployment.
 
+### Authentication API custom-domain changes
+
+The WorkOS SDK in Railway and the desktop public client's code exchange and
+refresh requests use the origin of the validated `AUTH_ISSUER` configuration.
+For example, an issuer under `https://auth-api.zeros.build/user_management/…`
+routes API requests through `https://auth-api.zeros.build`. The complete issuer
+string is still matched byte-for-byte during JWT verification. Neither the
+issuer nor the network destination is taken from an unverified token. Keep
+`AUTH_JWKS_URL` explicitly configured to the environment's published JWKS URL.
+
+When enabling or changing a production Authentication API domain:
+
+1. Set the WorkOS AuthKit, Authentication API, and Admin Portal CNAMEs to **DNS
+   only** in Cloudflare, preserving their WorkOS-provided targets. WorkOS domain
+   verification alone does not establish that the proxy setting is correct.
+2. Read the environment's discovery metadata and qualify the exact issuer and
+   JWKS against fresh Web and Desktop tokens using the token-contract probe.
+   Do not guess a trailing slash or substitute an AuthKit UI domain for the API
+   domain.
+3. Update `AUTH_ISSUER` and `AUTH_JWKS_URL` together in Railway production and the
+   GitHub production release environment. Keep the audience and separate client
+   IDs unchanged unless a separately qualified Application migration requires
+   them to change. Sandbox and shared Dev Alpha settings remain independent.
+4. Promote the tested backend and rebuild the signed desktop from the same
+   Beta-validated release commit. Existing installed binaries retain their
+   compiled issuer and API behavior until updated; changing release variables
+   does not repair those binaries.
+5. Verify browser login, desktop handoff, API identity, and token refresh on the
+   released build. Record the deployment SHA, release version, and test results.
+   Preserve strict issuer, audience, client, signature, and verified-email
+   checks throughout the migration.
+
+Rollback must restore a coordinated provider-domain, backend configuration,
+and desktop token contract. Reverting only one issuer variable can leave the
+other clients unable to authenticate. Follow the frozen release promotion
+process in [deployment-environments.md](deployment-environments.md).
+
+References: [WorkOS Authentication API domains](https://workos.com/docs/custom-domains/auth-api)
+and [AuthKit DNS requirements](https://workos.com/docs/custom-domains/authkit).
+
 ## WorkOS dashboard checklist
 
 Perform this independently for Alpha, Beta, and Production and record the
@@ -513,7 +665,7 @@ result without copying secrets into tickets or repository files.
    this document. Store its signing secret only in Railway. Confirm the Events
    API repair worker uses the same event set and environment.
 10. Apply branding, support/contact, legal, and localization settings. Keep the
-   Zeros signed-out page a launch surface, not a second login UI.
+    Zeros signed-out page a launch surface, not a second login UI.
 11. Confirm Radar remains disabled and record that state. Do not change its
     enforcement behavior as part of this rollout.
 12. For Production, evaluate an AuthKit custom domain as a branding and
@@ -545,19 +697,82 @@ Railway-only secrets. Rotate each independently per channel. A cookie-password
 rotation invalidates outstanding browser sealed sessions, so schedule and
 communicate it as a forced browser sign-in.
 
-WorkOS mode does not require `ZEPTOMAIL_TOKEN` or `EMAIL_FROM` for organization
+WorkOS mode does not require `RESEND_API_KEY` or `EMAIL_FROM` for organization
 invitations; the WorkOS invitation command owns the one delivery. Those
 variables remain optional for Zeros-specific recovery/account-lifecycle
 security notifications and the Auth0 rollback path. WorkOS custom email
 branding/domain configuration is not a generic transactional email API, so a
 separate provider is still required if those product notifications must be
-delivered. Security notifications use the durable outbox with a stable client
-reference, and operators must monitor failures rather than treating an HTTP
-timeout as proof that a message was not accepted.
+delivered. Zeros uses a Railway-only, sending-only, domain-restricted Resend key
+for that purpose. Security notifications use the durable outbox with a stable
+Resend idempotency key and persist the accepted provider message ID. Operators
+must monitor failures rather than treating an HTTP timeout as proof that a
+message was not accepted.
+
+The public support/contact mailbox is `hi@zeros.build`. Zeros-generated
+Resend messages set that address as `Reply-To` and link to it in recovery and
+security notices. `EMAIL_FROM` remains a sender on the verified sending
+domain; it does not determine the reply destination. Configure each WorkOS
+environment's Admin Portal support/reply address and access-blocked support
+address, plus Google's OAuth user support email, to the same public mailbox.
 
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
+
+Local `pnpm electron:dev` is a fourth desktop scheme, not a fourth data
+environment. On first launch, Dev fetches the seven public-client fields from
+`https://api-alpha.zeros.build/auth/desktop/dev-config` and atomically caches
+them at `~/.zeros-dev/auth/alpha.env` with mode `0600`. The versioned endpoint
+is anonymous, Alpha-only, and projects public fields explicitly; it never
+returns WorkOS management credentials or user/session data. Deploy the Alpha
+control-plane endpoint before rolling out the automatic launcher to new Macs.
+Every checkout loads that same user-level profile. The launcher refreshes a
+cache older than one hour with a bounded request to the fixed Alpha origin;
+it refuses redirects and invalid contracts. A service outage retains a valid
+cache; first-use failure gives an actionable launcher error. Explicit complete
+shell profiles still work without discovery. The launcher ignores checkout-local auth files
+and injects the shared values with process-level precedence, which prevents an
+old worktree from pinning a stale client ID after rotation; explicit shell
+values may override one run and have final precedence; overrides are never
+written back to the cache. Its effective values must use the Alpha app origin,
+API/audience,
+Desktop Application client ID, and Web Application issuer/JWKS pair atomically.
+Cached reads and publication require a canonical profile directory owned by
+the current OS user, without group or world write permissions; symlinks in the
+directory path are rejected, including on first use.
+Zeros terminals remove the parent app's public auth selectors from their child
+environment, so a nested Dev launch reloads this profile instead of inheriting
+stale Alpha or release-channel values; an operator can still export an explicit
+override after the terminal starts.
+
+The launcher validates that boundary before starting the stack and Electron
+main validates it again before any browser handoff. Alpha Pages alone accepts
+both `zeros-alpha://` and `zeros-dev://` returns; Beta and Production continue
+to accept only their exact release scheme. First use provisions the profile;
+a partial, legacy-Auth0, or non-Alpha profile is rejected and never falls back
+to the retired ticket handoff. Never place `WORKOS_API_KEY` or any WorkOS
+management credential in the profile or a desktop launch environment.
+
+Dev instances share the channel's encrypted session store and coordinate token
+rotation with a cross-process lock. Signing in once makes the session available
+to existing worktrees through file notifications and to future launches through
+durable storage. Once a complete Alpha WorkOS configuration is active, a legacy
+Auth0 Dev session is removed with compare-and-swap and requires one WorkOS
+sign-in. A concurrent WorkOS replacement, unrelated credentials, local data,
+and packaged Auth0 rollback sessions are preserved. A late legacy handoff cannot
+overwrite a migrated Dev session.
+
+The OS may deliver a `zeros-dev://` callback to a sibling worktree. Matching
+callbacks are relayed through a bounded, expiring encrypted mailbox; only the
+initiating main process retains the PKCE verifier and exchanges the code.
+Cancellation and expiry remove routing entries, and a consumed callback cannot
+be replayed. In-progress browser ceremonies are cancelled by an app restart;
+completed sessions persist. Shared login applies to normal Dev launches;
+`ZEROS_ISOLATE=1` retains its separate credential-store behavior.
+Malformed routing data is repaired with compare-and-swap, retaining valid
+sibling entries. Newer schema versions are preserved and require an updated
+checkout; valid sibling records with larger deadlines or capacity are retained.
 
 ## Rollout and rollback
 
@@ -620,6 +835,17 @@ Manual Alpha acceptance must verify:
 - user profile update/deletion, session revocation, organization/member/invite
   webhook idempotency, reordering, lost-response recovery, and Events API
   repair;
+- account and Organization purge racing event ingress, plus delayed User,
+  session, membership, invitation, and Organization events after final
+  erasure, proving that rejected late events create only redacted deduplication
+  rows while the purged deletion request, provider-erasure fences, and
+  reconciliation evidence survive the exercised purge and enforcement paths,
+  and Organization-owned invitation/audit records survive account erasure while
+  an Organization purge removes them under the Organization's own
+  deletion/retention policy. Record separate evidence that the append-only and
+  `ON DELETE RESTRICT` constraints, backup/restore procedure, and retention jobs
+  preserve the indefinite retention contract; one Alpha run proves only the
+  finite paths it exercises;
 - one and only one native WorkOS invitation email, proving there is no Zepto
   duplicate and `invitation_token` accepts through exact server-side
   correlation, strict state/PKCE on web, and the exact release-channel deep
@@ -686,16 +912,68 @@ idempotency/reordering/repair, account-deletion projection, reviewed recovery,
 organization/member/invite convergence, directory and last-owner safeguards,
 tenant RLS, cloud create/wake denial, SSE replay, and stream-outage behavior.
 The database-backed control-plane suite passes every forward migration path,
-including the owner-only support-operator bootstrap and revocation path.
+including the database-owner staff-role bootstrap and revocation path.
 
-Still required before Alpha can be called fully qualified:
+### Disposable-data Alpha qualification — 2026-09-01 (Asia/Kolkata)
 
-- Explicitly approved deletion of the disposable WorkOS test user while Web and
-  Desktop are open, followed by recreated-identity recovery. The destructive
-  provider deletion is intentionally not inferred from general test approval.
-- Selection and owner-mediated bootstrap of a dedicated `support_admin`, then a
-  live two-person recovery approval and immediate revocation of that temporary
-  authority.
+The final automation-safe campaign used newly generated addresses under the
+RFC-reserved `.test` domain. WorkOS staging deliberately suppresses delivery to
+that domain, so the campaign could create and delete only its own provider
+users without contacting a person or reusing a real identity. It used WorkOS's
+documented programmatic staging flow; it did not automate or claim evidence for
+the dynamic Hosted AuthKit UI.
+
+Against deployed Alpha baseline
+`b063e6aa9dbb094f01ea95db3b54f6165006787b`, the campaign verified:
+
+- invalid Magic Auth rejection, successful programmatic Magic Auth, the exact
+  Web Application `client_id`, and a provider session identifier;
+- first-account bootstrap with one permanent local-only Personal root;
+- collaborative organization projection, exactly one native WorkOS invitation,
+  local invitation acceptance, active provider membership, role convergence,
+  member removal, and continued Personal access for the removed member;
+- exact 30-day account and organization deletion timestamps, organization and
+  account restore, stable Zeros account/organization identifiers after restore,
+  and immediate denial after provider-user deletion; and
+- cleanup of every newly created WorkOS test identity. The corresponding
+  disposable Zeros accounts remain in their scheduled grace period so the
+  ordinary purge worker, rather than manual database edits, owns final erasure.
+
+The last recreated-identity step exposed a real combined lifecycle defect: if
+the WorkOS User was deleted while the Zeros account was already in its deletion
+grace period, a newly verified same-email identity received `account_exists`
+instead of reviewed recovery, and provider deletion could discard the retained
+collaboration snapshot. The corrective candidate now:
+
+- enters reviewed recovery for both `identity_disabled` and
+  `deletion_pending` accounts;
+- recovers the replacement identity without silently cancelling the customer's
+  pending deletion request;
+- preserves Zeros-managed collaborative memberships while the account remains
+  globally denied, but still removes SCIM-authoritative access; and
+- only after the customer explicitly restores the account, reprojects retained
+  memberships to the replacement WorkOS identity with new durable revisions.
+
+The regression exercises that entire sequence atomically, including the SCIM
+exception and replacement-membership outbox command. That campaign's complete
+database-backed control-plane suite was green with 343 tests; the current
+post-cutover suite is green with 348, including reviewed migration of an active
+Auth0 identity and fail-closed active-WorkOS-identity conflict handling. A
+campaign run against the final merged and deployed corrective
+SHA remains a release gate; the failed baseline is retained here as evidence
+and is not relabeled as a pass.
+
+At that historical snapshot, the remaining Alpha requirements were:
+
+- A provider-user deletion while Web and Desktop are simultaneously open,
+  followed by the real reviewed-recovery UI. The reserved-domain campaign
+  proves server-side revocation and the recovery-required boundary, but it does
+  not substitute for observing both released clients or for a human operator
+  approval ceremony.
+- Owner-mediated bootstrap of the exact `platform_owner` and `developer`
+  identities, then a live two-person Ops grant/recovery exercise proving the
+  developer has no standing authority and the exact temporary grant is consumed
+  or revoked immediately.
 - A clean first-time and returning Google/GitHub identity-linking exercise for
   the same person; existing preserved identities currently exercise the safer
   recovery path instead.

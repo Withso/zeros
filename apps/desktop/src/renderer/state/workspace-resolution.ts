@@ -90,18 +90,19 @@ export function workspaceKindFromManagedPath(
   return worktreePathParts(folder)?.kind ?? null;
 }
 
-/** A confirmed Workspace row is authoritative server state. A current user
- * request is a separate renderer-local presentation intent and therefore wins
- * only while its exact mode RPC is pending. Create/path hints still apply only
- * before a row confirms. */
+/** A confirmed Workspace row is authoritative server state. A mode request is
+ * only busy/selection intent until the RPC commits the new row; letting it
+ * replace the mounted surface early can unmount a live composer and expose a
+ * Design tree for a transition that ultimately fails. Create/path hints still
+ * apply only before a row confirms. */
 export function resolveWorkspacePresentationKind(input: {
   confirmedKind?: "code" | "design" | null;
   requestedKind?: "code" | "design" | null;
   pendingKind?: "code" | "design" | null;
   folder?: string | null;
 }): "code" | "design" {
-  if (input.requestedKind) return input.requestedKind;
   if (input.confirmedKind) return input.confirmedKind;
+  if (input.requestedKind) return input.requestedKind;
   return (
     input.pendingKind ??
     workspaceKindFromManagedPath(input.folder) ??

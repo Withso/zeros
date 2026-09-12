@@ -469,7 +469,9 @@ function applyOperation(
       changed: next.revision !== state.revision,
       inverseOperations: [inverse],
       affectedNodeIds: [],
-      affectedFiles: [".zeros-canvas.json"],
+      // Logical document metadata identity; the repository maps this to the
+      // stable directory's .zeros/design/<id>/document.json sidecar.
+      affectedFiles: ["document.json"],
     };
   }
   if (operation.type === "token.set") {

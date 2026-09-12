@@ -40,6 +40,10 @@ import type {
 export interface StartForChatOptions extends StartSessionOptions {
   /** Absolute path the agent subprocess should use as cwd. */
   cwd?: string;
+  /** Explicit immutable execution actor. Design surfaces must also provide the
+   * exact document id; ordinary conversations omit this and stay native Code. */
+  agentRole?: "code" | "design";
+  designDocumentId?: string;
   /** Force the engine execution to rebuild even when one is already ready.
    *  A durable provider conversation is resumed unless replacement is
    *  explicitly requested below. Used when model/effort config drifted. */
