@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
-import './hero-role.css'
+import './hero-role.css?v=role-doto-5'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 
@@ -10,7 +10,17 @@ type Role = (typeof ROLES)[number]
 
 /**
  * Cycles the hero audience word with a scramble decode: code glyphs,
- * design-tool marks, then matrix digits. Glyphs stay at the hero type size.
+ * design-tool marks, then 0-9 and A-Z. Code and matrix follow word length;
+ * developers → designers is a five-slot scramble of design marks,
+ * one keyboard mark, and ~30% A-Z, then a
+ * left-to-right decode into the word. Revealed `designers` letters use
+ * the same headline size and tracking as builders and developers;
+ * scramble glyphs and designers A-Z are 60px; designers marks are 50px
+ * square-dot SVGs matched to Doto ExtraBold.
+ * The live word is clipped to the hidden `developers` sizer so
+ * scramble cannot wrap, leak, or resize the headline. Settled
+ * role words and scramble text use Doto ExtraBold 800 at
+ * hsl(0 0% 80%).
  */
 export function HeroRoleCycle() {
   const textRef = useRef<HTMLSpanElement>(null)
