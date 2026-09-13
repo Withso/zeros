@@ -145,20 +145,20 @@ export function zerosCodeViewOptions(opts?: {
   codeThemeId?: string;
   /** Diff surface bg. Workbench file-tab diffs use "sidebar-bg" (default). */
   surface?: "bg1" | "bg2" | "sidebar-bg";
-}): CodeViewOptions<undefined> {
+}): CodeViewOptions<undefined, undefined> {
+  const presentation = zerosSharedDiffPresentation(opts);
   return {
-    ...zerosSharedDiffPresentation(opts),
+    ...presentation,
+    // The shadow DOM paints its own block padding independently of the virtual
+    // layout. Keep both flush with the workbench pane, including split diffs.
+    unsafeCSS: `${presentation.unsafeCSS}\n:host { --diffs-gap-block: 0px; }`,
     ...(opts?.disableFileHeader ? { disableFileHeader: true } : {}),
-    // Remove the leading top gap above the first line. With disableFileHeader,
-    // @pierre/diffs stacks TWO top paddings that the file-viewer doesn't want
-    // (its own toolbar already sits above): the CodeView layout's paddingTop AND
-    // the file metrics' paddingTop (which falls back to `spacing` — ~8px — when
-    // the header is disabled). Both together read as "too much gap before the
-    // first line" that vanishes on scroll. Zero both so the diff starts flush
-    // under the toolbar. Scoped to this builder (workbench file viewer only); the
-    // Changes/Review/EditCard PatchDiffs use zerosDiffOptions and keep the
-    // library defaults.
-    layout: { ...DEFAULT_CODE_VIEW_LAYOUT, paddingTop: 0 },
-    itemMetrics: { paddingTop: 0 },
+    layout: {
+      ...DEFAULT_CODE_VIEW_LAYOUT,
+      paddingTop: 0,
+      paddingBottom: 0,
+      gap: 0,
+    },
+    itemMetrics: { paddingTop: 0, paddingBottom: 0, spacing: 0 },
   };
 }

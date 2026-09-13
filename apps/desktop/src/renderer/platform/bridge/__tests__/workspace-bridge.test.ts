@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import type { ChangesHistory } from "@zeros/protocol/changes-history";
 import {
   requestWorkspaceList,
   bridgeFileTree,
@@ -326,6 +327,53 @@ describe("workspace-bridge read ops", () => {
     );
     expect(out).toEqual(res);
   });
+
+  it.each<ChangesHistory>([
+    { kind: "last-turn" },
+    { kind: "turns" },
+    {
+      kind: "turn-range",
+      from: { chatId: "chat", turnId: "first" },
+      to: { chatId: "chat", turnId: "last" },
+    },
+    { kind: "commits" },
+    { kind: "commit-range", from: "a".repeat(40), to: "b".repeat(40) },
+  ])(
+    "forwards the $kind comparison to the engine instead of falling back to unstaged",
+    async (history) => {
+      let sent: unknown;
+      const bridge = {
+        request: async (message: unknown) => {
+          sent = message;
+          return {
+            type: "WORKSPACE_RESPONSE",
+            op: "git.diff",
+            result: { hunks: [] },
+          };
+        },
+      } as unknown as RuntimeClient;
+      await bridgeGitDiff(bridge, {
+        workspaceId: "workspace",
+        filePath: "cities/example.md",
+        history,
+        rawPatch: true,
+        fullContext: true,
+        summaryLimit: 1000,
+      });
+      expect(sent).toMatchObject({
+        type: "WORKSPACE_REQUEST",
+        op: "git.diff",
+        params: {
+          workspaceId: "workspace",
+          filePath: "cities/example.md",
+          history,
+          rawPatch: true,
+          fullContext: true,
+          summaryLimit: 1000,
+        },
+      });
+    },
+  );
 
   it("bridgeGitCommit sends git.commit (a WRITE op) and returns the result", async () => {
     const seen: { op?: string } = {};

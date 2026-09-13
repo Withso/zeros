@@ -29,7 +29,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.266: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.31: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (602 resolved package/version records)
+PACKAGE INVENTORY (601 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.266
@@ -645,21 +645,22 @@ PACKAGE INVENTORY (602 resolved package/version records)
   Source: https://github.com/openai/codex
   License documents: 9d71575ecfd9, d17f227e4df5
 
-@pierre/diffs@1.2.11
+@pierre/diffs@1.4.1
   License: apache-2.0
   Surfaces: root pnpm workspace
   License documents: 13d92be18d5c
 
-@pierre/theme@1.0.3
-  License: MIT
-  Surfaces: root pnpm workspace
-  Source: https://github.com/pierrecomputer/theme
-  License documents: aef11f1ea109
-
-@pierre/theming@0.0.1
+@pierre/theme@2.0.0
   License: apache-2.0
   Surfaces: root pnpm workspace
-  License documents: d17f227e4df5
+  Author: Pierre Computer <support@pierre.co>
+  Source: https://github.com/pierrecomputer/pierre
+  License documents: 13d92be18d5c, d64db9acda54
+
+@pierre/theming@1.0.1
+  License: apache-2.0
+  Surfaces: root pnpm workspace
+  License documents: 13d92be18d5c
 
 @pierre/trees@1.0.0-beta.4
   License: apache-2.0
@@ -1823,12 +1824,6 @@ devlop@1.1.0
   Author: Titus Wormer <tituswormer@gmail.com> (https://wooorm.com)
   Source: https://github.com/wooorm/devlop
   License documents: 6f296a5eccc1
-
-diff@8.0.3
-  License: BSD-3-Clause
-  Surfaces: root pnpm workspace
-  Source: https://github.com/kpdecker/jsdiff
-  License documents: eda81a415869
 
 diff@9.0.0
   License: BSD-3-Clause
@@ -5505,8 +5500,8 @@ Source labels: @anthropic-ai/sandbox-runtime@0.0.75 — LICENSE
 ================================================================================
 DOCUMENT 13d92be18d5c
 SHA-256: 13d92be18d5ceac526f33cc96b6902a14d168f3e1d4b16be738f0fa70da7fe98
-Applies to: @pierre/diffs@1.2.11, @pierre/trees@1.0.0-beta.4
-Source labels: @pierre/diffs@1.2.11 — LICENSE.md; @pierre/trees@1.0.0-beta.4 — LICENSE.md
+Applies to: @pierre/diffs@1.4.1, @pierre/theme@2.0.0, @pierre/theming@1.0.1, @pierre/trees@1.0.0-beta.4
+Source labels: @pierre/diffs@1.4.1 — LICENSE.md; @pierre/theme@2.0.0 — LICENSE; @pierre/theming@1.0.1 — LICENSE.md; @pierre/trees@1.0.0-beta.4 — LICENSE.md
 ================================================================================
 
                                  Apache License
@@ -10861,35 +10856,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 ================================================================================
-DOCUMENT aef11f1ea109
-SHA-256: aef11f1ea1092ed19cf5c2ace111cdca883ceabe2a69af2ee7afec648aa5c36d
-Applies to: @pierre/theme@1.0.3
-Source labels: @pierre/theme@1.0.3 — LICENSE
-================================================================================
-
-MIT License
-
-Copyright (c) 2026 The Pierre Computer Company
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-
-================================================================================
 DOCUMENT b41d08bc3624
 SHA-256: b41d08bc3624d8c436fc80237d73ebb361985a67f4504bbcd703e5ca2b27254c
 Applies to: define-data-property@1.1.4, typed-array-buffer@1.0.3
@@ -12784,8 +12750,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.190.1, @daytona/toolbox-api-client@0.190.1, @openai/codex@0.153.4, @openai/codex@0.153.4-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.153.4 generated protocol — LICENSE; @openai/codex@0.153.4-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.190.1, @daytona/toolbox-api-client@0.190.1, @openai/codex@0.153.4, @openai/codex@0.153.4-darwin-arm64, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.153.4 generated protocol — LICENSE; @openai/codex@0.153.4-darwin-arm64 staged native runtime — LICENSE; clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License
@@ -13131,6 +13097,46 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+================================================================================
+DOCUMENT d64db9acda54
+SHA-256: d64db9acda54bde8eb5ca1a679166b9376fc8bd8059967a396a156b3db8a1983
+Applies to: @pierre/theme@2.0.0
+Source labels: @pierre/theme@2.0.0 — NOTICE.md
+================================================================================
+
+This theme was built on top of
+[GitHub's Visual Studio Code Theme](https://github.com/primer/github-vscode-theme),
+reusing its technique and build tooling, which we have since iterated on for
+more specific language tokens.
+
+`@pierre/theme` is licensed under Apache-2.0 (see `LICENSE`). The original MIT
+license for `primer/github-vscode-theme` is included below for attribution.
+
+Original license for `primer/github-vscode-theme`:
+
+```
+MIT License
+
+Copyright (c) 2020 Primer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
+COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
+IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+```
 
 ================================================================================
 DOCUMENT d90bf0a089da
@@ -14301,8 +14307,8 @@ IN THE SOFTWARE.
 ================================================================================
 DOCUMENT eda81a415869
 SHA-256: eda81a415869e67809f6a9f3fd6056062cb83a462118e07eec5e92b2e0c40ce9
-Applies to: diff@8.0.3, diff@9.0.0
-Source labels: diff@8.0.3 — LICENSE; diff@9.0.0 — LICENSE
+Applies to: diff@9.0.0
+Source labels: diff@9.0.0 — LICENSE
 ================================================================================
 
 BSD 3-Clause License

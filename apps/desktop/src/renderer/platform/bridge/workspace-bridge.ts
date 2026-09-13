@@ -1,3 +1,7 @@
+import type {
+  ChangesHistory,
+  TurnHistoryCursor,
+} from "@zeros/protocol/changes-history";
 // ──────────────────────────────────────────────────────────
 // workspace-bridge — renderer-to-engine workspace API client
 // ──────────────────────────────────────────────────────────
@@ -157,10 +161,17 @@ export async function workspaceOp(
 export async function bridgeTurnsList(
   bridge: RuntimeClient,
   workspaceId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    before?: number;
+    after?: TurnHistoryCursor;
+  },
 ): Promise<TurnInfo[]> {
-  const r = (await workspaceOp(bridge, "turns.list", { workspaceId })) as
-    | { turns?: TurnInfo[] }
-    | undefined;
+  const r = (await workspaceOp(bridge, "turns.list", {
+    workspaceId,
+    ...options,
+  })) as { turns?: TurnInfo[] } | undefined;
   return r?.turns ?? [];
 }
 
@@ -1022,12 +1033,15 @@ export async function bridgeGitDiff(
   args: {
     workspaceId: string;
     filePath?: string;
+    oldFilePath?: string;
     against?: "index" | "HEAD" | "main";
     mode?: DiffMode;
     base?: string;
     head?: string;
     rawPatch?: boolean;
+    fullContext?: boolean;
     summaryLimit?: number;
+    history?: ChangesHistory;
   },
 ): Promise<{
   hunks: Hunk[];
@@ -1038,12 +1052,15 @@ export async function bridgeGitDiff(
   return (await workspaceOp(bridge, "git.diff", {
     workspaceId: args.workspaceId,
     filePath: args.filePath,
+    ...(args.oldFilePath ? { oldFilePath: args.oldFilePath } : {}),
     against: args.against,
     mode: args.mode,
     base: args.base,
     head: args.head,
     rawPatch: args.rawPatch,
+    ...(args.fullContext ? { fullContext: true } : {}),
     summaryLimit: args.summaryLimit,
+    ...(args.history ? { history: args.history } : {}),
   })) as {
     hunks: Hunk[];
     patch?: string;
@@ -1072,6 +1089,7 @@ export async function bridgeGitLog(
   args: {
     workspaceId: string;
     limit?: number;
+    skip?: number;
     since?: number;
     ref?: string;
     base?: string;
@@ -1080,6 +1098,7 @@ export async function bridgeGitLog(
   const r = (await workspaceOp(bridge, "git.log", {
     workspaceId: args.workspaceId,
     limit: args.limit,
+    ...(args.skip !== undefined ? { skip: args.skip } : {}),
     since: args.since,
     ref: args.ref,
     base: args.base,

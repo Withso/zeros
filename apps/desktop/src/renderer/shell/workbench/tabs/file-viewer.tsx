@@ -1,3 +1,7 @@
+import {
+  changesHistoryKey,
+  type ChangesHistory,
+} from "@zeros/protocol/changes-history";
 // ──────────────────────────────────────────────────────────
 // FileViewer — read-only file content pane (Files tab)
 // ──────────────────────────────────────────────────────────
@@ -22,6 +26,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   AlignJustify,
   Check,
@@ -54,7 +59,10 @@ import { useInstantViewSwitch } from "@/renderer/shared/ui/use-instant-view-swit
 import { useWorkspaceDispatch } from "@/renderer/state/workspace-store";
 import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import type { ViewerMode } from "../tab-model";
-import { WORKBENCH_TITLE_CHIP_CLS, WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
+import {
+  WORKBENCH_TITLE_CHIP_CLS,
+  WORKBENCH_TITLE_ACTION_CLS,
+} from "../tab-chrome";
 import { triggerGitRefresh } from "../../use-git-refresh-key";
 import {
   currentFileHash,
@@ -100,9 +108,18 @@ interface FileViewerProps {
   /** Which diff to show — mirrors the Changes filter the file was opened from:
    *  "all" (worktree vs base), "uncommitted" (worktree vs HEAD), or "commit"
    *  (that commit's own diff, via `diffSha`). Defaults to "all". */
-  diffScope?: "all" | "uncommitted" | "staged" | "unstaged" | "commit" | "turn";
+  diffScope?:
+    | "all"
+    | "uncommitted"
+    | "staged"
+    | "unstaged"
+    | "commit"
+    | "turn"
+    | "history";
   /** Commit SHA when `diffScope === "commit"`. */
   diffSha?: string;
+  diffHistory?: ChangesHistory;
+  diffBaseBranch?: string;
   /** When `diffScope === "turn"`: the chat + turn whose AUTHORED diff to show
    *  (the per-turn footer / turn-filtered Changes list open files this way). */
   turnChatId?: string;
@@ -119,6 +136,9 @@ interface FileViewerProps {
   viewerMode?: ViewerMode;
   /** Persist an explicit mode choice on the owning workspace tab. */
   onViewerModeChange?: (mode: ViewerMode) => void;
+  /** Hide the Diff/Preview/Edit choice while retaining the selected surface.
+   *  Changes uses this only for its legacy unsaved-draft compatibility layer. */
+  showModeToggle?: boolean;
   /** Parent-owned Git/file generation. One coordinator per mounted tab surface
    * prevents every retained file layer from registering duplicate bridge and
    * agent-stream listeners. */
@@ -126,15 +146,16 @@ interface FileViewerProps {
   /** Read-only target → hide the Discard action regardless. */
   readOnly?: boolean;
   /** Rendered at the START of the header row, before the path breadcrumbs. The
-   *  workbench Changes tab injects its sidebar controls here while its sidebar
-   *  is hidden, so toolbar + file + viewer controls read as ONE row. */
+   *  workbench Changes tab keeps its scope and turn filters here. */
   headerLeading?: React.ReactNode;
   /** Rendered at the END of the header row, after the viewer controls. The
    *  Files tab injects its fixed right-sidebar controls here, keeping those
    *  actions on one full-width row whether the tree is visible or hidden. */
   headerTrailing?: React.ReactNode;
-  /** Give this viewer's header the Files-tab second-row separator. Changes
-   *  embeds the same viewer but retains its existing seamless toolbar. */
+  /** Optional shared header host for retained viewers. Undefined keeps the
+   *  header inline; null hides it for an unselected retained viewer. */
+  headerContainer?: HTMLElement | null;
+  /** Separate the Files/Changes toolbar from the viewer body with a border. */
   headerBorder?: boolean;
   /** Rendered beside the file content but below the full-width header. The
    *  Files tab injects its resize seam and right-side tree body here. */
@@ -201,6 +222,8 @@ export function FileViewer({
   diff,
   diffScope,
   diffSha,
+  diffHistory,
+  diffBaseBranch,
   turnChatId,
   turnId,
   discardable,
@@ -208,10 +231,12 @@ export function FileViewer({
   contentRevision,
   viewerMode,
   onViewerModeChange,
+  showModeToggle = true,
   refreshKey,
   readOnly,
   headerLeading,
   headerTrailing,
+  headerContainer,
   headerBorder,
   bodyTrailing,
   onOpenPath,
@@ -234,6 +259,8 @@ export function FileViewer({
     diffSha ?? "",
     turnChatId ?? "",
     turnId ?? "",
+    ...(diffHistory ? [changesHistoryKey(diffHistory)] : []),
+    ...(diffBaseBranch !== undefined ? [diffBaseBranch] : []),
   ]);
 
   const readQuery = useMemo<WorkspaceFileReadQuery>(
@@ -250,10 +277,21 @@ export function FileViewer({
       path,
       diffScope,
       diffSha,
+      diffHistory,
+      ...(diffBaseBranch !== undefined ? { baseBranch: diffBaseBranch } : {}),
       turnChatId,
       turnId,
     }),
-    [workspaceId, path, diffScope, diffSha, turnChatId, turnId],
+    [
+      workspaceId,
+      path,
+      diffScope,
+      diffSha,
+      diffHistory,
+      diffBaseBranch,
+      turnChatId,
+      turnId,
+    ],
   );
   // useSyncExternalStore gives the destination its exact cached snapshot in
   // the selection render. There is no component-local "loading reset" paint.
@@ -347,6 +385,7 @@ export function FileViewer({
       isNewFile &&
       diffScope !== "commit" &&
       diffScope !== "turn" &&
+      diffScope !== "history" &&
       result.content != null
     )
       return buildAddPatch(path, result.content);
@@ -365,7 +404,10 @@ export function FileViewer({
   // The selected COMMIT doesn't touch this file (empty commit diff, resolved).
   // Show an honest "not part of this commit" state rather than a faked diff.
   const notInCommit =
-    isText && diffScope === "commit" && !diffLoading && rawDiff === "";
+    isText &&
+    (diffScope === "commit" || diffScope === "history") &&
+    !diffLoading &&
+    rawDiff === "";
 
   // "Diff is available": opened from Changes we KNOW it changed (intent), even
   // while the patch is still loading; from All Files only once a non-empty diff
@@ -433,6 +475,7 @@ export function FileViewer({
         changeAdvanceIntent({
           diffScope,
           diffSha,
+          diffHistory,
           turnChatId,
           turnId,
         }),
@@ -444,6 +487,7 @@ export function FileViewer({
     openInWorkbench,
     diffScope,
     diffSha,
+    diffHistory,
     turnChatId,
     turnId,
   ]);
@@ -538,128 +582,132 @@ export function FileViewer({
     : diffAvailable
       ? ["diff", "edit"]
       : ["edit"];
-  const showToggle = isText && modeOptions.length > 1;
+  const showToggle = showModeToggle && isText && modeOptions.length > 1;
 
-  return (
-    <div ref={viewerRef} className="bg-bg1 flex h-full min-h-0 flex-col">
-      {/* Header — path breadcrumbs + (mode toggle) + copy, one row. h-9 +
-          px-2: the same chrome band height + inset as the browser toolbar
-          and the terminal sub-tab strip (was h-10/px-3). The Files surface
-          opts into a bottom border because this is its second chrome row. */}
-      <div
-        data-testid="files-viewer-header"
-        className={cn(
-          "bg-bg1 flex h-9 shrink-0 items-center justify-between gap-2 px-2",
-          headerBorder && "border-border1 border-b",
-        )}
-      >
-        <div className="flex min-w-0 items-center gap-2">
-          {headerLeading}
-          <div
-            data-testid="file-path-actions"
-            className="flex min-w-0 items-center gap-1"
-          >
-            {path && <PathBreadcrumbs path={path} />}
-            {canCopy && (
-              <CodeBlockCopyButton
-                text={result!.content ?? ""}
-                className={WORKBENCH_TITLE_ACTION_CLS}
-              />
-            )}
-          </div>
+  // Changes hosts this row above its retained viewer deck and stable sidebar.
+  const header = (
+    <div
+      data-testid="files-viewer-header"
+      className={cn(
+        "bg-bg1 flex h-9 shrink-0 items-center justify-between gap-2 px-2",
+        headerContainer && "h-full",
+        headerBorder && "border-border1 border-b",
+      )}
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        {headerLeading}
+        <div
+          data-testid="file-path-actions"
+          className="flex min-w-0 items-center gap-1"
+        >
+          {path && <PathBreadcrumbs path={path} />}
+          {canCopy && (
+            <CodeBlockCopyButton
+              text={result!.content ?? ""}
+              className={WORKBENCH_TITLE_ACTION_CLS}
+            />
+          )}
         </div>
-        <div className="flex shrink-0 items-center gap-1">
-          {/* Viewed — when the file has changes. Dims its Changes-list row and
-              auto-advances to the next change (D3). */}
-          {hasDiff && (
-            <Tooltip label={viewed ? "Mark as not viewed" : "Mark as viewed"}>
-              <button
-                type="button"
-                onClick={toggleViewed}
-                className="text-fg2 hover:text-fg1 flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-xs transition-colors"
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        {/* Viewed — when the file has changes. Dims its Changes-list row and
+          auto-advances to the next change (D3). */}
+        {hasDiff && (
+          <Tooltip label={viewed ? "Mark as not viewed" : "Mark as viewed"}>
+            <button
+              type="button"
+              onClick={toggleViewed}
+              className="text-fg2 hover:text-fg1 flex items-center gap-1.5 rounded-sm px-1.5 py-0.5 text-xs transition-colors"
+            >
+              <span
+                className={cn(
+                  "flex size-3.5 items-center justify-center rounded-sm border transition-colors",
+                  viewed ? "border-fg2 bg-fg2 text-bg1" : "border-border3",
+                )}
               >
-                <span
-                  className={cn(
-                    "flex size-3.5 items-center justify-center rounded-sm border transition-colors",
-                    viewed ? "border-fg2 bg-fg2 text-bg1" : "border-border3",
-                  )}
-                >
-                  {viewed && <Check className="size-2.5" strokeWidth={3} />}
-                </span>
-                Viewed
-              </button>
-            </Tooltip>
-          )}
-          {/* Discard — ONLY when opened from the All-changes filter on a file
-              with uncommitted work (discardable) and a writable target. */}
-          {discardable &&
-            !sourceReadOnly &&
-            (!fileMissing || diffAvailable) && (
+                {viewed && <Check className="size-2.5" strokeWidth={3} />}
+              </span>
+              Viewed
+            </button>
+          </Tooltip>
+        )}
+        {/* Discard — ONLY when opened from the All-changes filter on a file
+          with uncommitted work (discardable) and a writable target. */}
+        {discardable && !sourceReadOnly && (!fileMissing || diffAvailable) && (
+          <Tooltip
+            label={isNewFile ? "Delete untracked file" : "Discard changes"}
+          >
+            <button
+              type="button"
+              onClick={() => setDiscardTarget(path)}
+              disabled={discardingPath === path}
+              aria-busy={discardingPath === path}
+              className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
+            >
+              <Undo2 className="size-3.5" />
+            </button>
+          </Tooltip>
+        )}
+        {/* Unified ⇄ split — only in Diff mode. */}
+        {diffShown && (
+          <div className="bg-bg2 flex items-center rounded-md p-0.5">
+            {(
+              [
+                ["unified", AlignJustify],
+                ["split", Columns2],
+              ] as const
+            ).map(([s, Icon]) => (
               <Tooltip
-                label={isNewFile ? "Delete untracked file" : "Discard changes"}
+                key={s}
+                label={s === "unified" ? "Unified view" : "Split view"}
               >
                 <button
                   type="button"
-                  onClick={() => setDiscardTarget(path)}
-                  disabled={discardingPath === path}
-                  aria-busy={discardingPath === path}
-                  className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
-                >
-                  <Undo2 className="size-3.5" />
-                </button>
-              </Tooltip>
-            )}
-          {/* Unified ⇄ split — only in Diff mode. */}
-          {diffShown && (
-            <div className="bg-bg2 flex items-center rounded-md p-0.5">
-              {(
-                [
-                  ["unified", AlignJustify],
-                  ["split", Columns2],
-                ] as const
-              ).map(([s, Icon]) => (
-                <Tooltip
-                  key={s}
-                  label={s === "unified" ? "Unified view" : "Split view"}
-                >
-                  <button
-                    type="button"
-                    onClick={() => setDiffStyle(s)}
-                    className={cn(
-                      "flex items-center rounded-sm p-1 transition-colors",
-                      diffStyle === s
-                        ? "bg-bg1 text-fg1 shadow-sm"
-                        : "text-fg2 hover:text-fg1",
-                    )}
-                  >
-                    <Icon className="size-3.5" />
-                  </button>
-                </Tooltip>
-              ))}
-            </div>
-          )}
-          {showToggle && (
-            <div className="bg-bg2 flex items-center rounded-md p-0.5 text-xs">
-              {modeOptions.map((v) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => onViewerModeChange?.(v)}
+                  onClick={() => setDiffStyle(s)}
                   className={cn(
-                    "rounded-sm px-2 py-0.5 capitalize transition-colors",
-                    mode === v
+                    "flex items-center rounded-sm p-1 transition-colors",
+                    diffStyle === s
                       ? "bg-bg1 text-fg1 shadow-sm"
                       : "text-fg2 hover:text-fg1",
                   )}
                 >
-                  {v}
+                  <Icon className="size-3.5" />
                 </button>
-              ))}
-            </div>
-          )}
-          {headerTrailing}
-        </div>
+              </Tooltip>
+            ))}
+          </div>
+        )}
+        {showToggle && (
+          <div className="bg-bg2 flex items-center rounded-md p-0.5 text-xs">
+            {modeOptions.map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => onViewerModeChange?.(v)}
+                className={cn(
+                  "rounded-sm px-2 py-0.5 capitalize transition-colors",
+                  mode === v
+                    ? "bg-bg1 text-fg1 shadow-sm"
+                    : "text-fg2 hover:text-fg1",
+                )}
+              >
+                {v}
+              </button>
+            ))}
+          </div>
+        )}
+        {headerTrailing}
       </div>
+    </div>
+  );
+
+  return (
+    <div ref={viewerRef} className="bg-bg1 flex h-full min-h-0 flex-col">
+      {headerContainer === undefined
+        ? header
+        : headerContainer
+          ? createPortal(header, headerContainer)
+          : null}
 
       {/* Body row. Optional trailing content starts below the fixed header. */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -835,7 +883,7 @@ function DiffView({
   useScrollMemory(diffScroller, scrollKey ?? null);
   // getSingularPatch parses one file's patch → the FileDiffMetadata CodeView
   // wants; it throws on a non-single-file / malformed patch, so guard it.
-  const items = useMemo<CodeViewItem[]>(() => {
+  const items = useMemo<CodeViewItem<undefined>[]>(() => {
     try {
       return [
         {

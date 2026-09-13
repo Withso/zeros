@@ -19,6 +19,7 @@
     "./version": "./src/version.ts",
     "./schemas": "./src/schemas.ts",
     "./github-auth": "./src/github-auth.ts",
+    "./changes-history": "./src/changes-history.ts",
     "./identities": "./src/identities.ts",
     "./containment": "./src/containment.ts",
     "./external-url": "./src/external-url.ts",

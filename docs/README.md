@@ -7,6 +7,8 @@ contributors after the change that introduced them has shipped.
   renderer's loading, caching, navigation, and retained-surface invariants.
 - [Navigation state persistence](navigation-state-persistence.md) documents
   owner-keyed selection and cleanup behavior.
+- [Changes comparisons and history](changes-history.md) defines working-tree,
+  commit, and turn comparisons, refresh identity, retention, and regression coverage.
 - [Organizations, teams, and workspace ownership](organizations-and-teams.md)
   defines Personal, tenant and child-team identity, roles, placement metadata,
   browser-management boundaries, and compatibility contracts.

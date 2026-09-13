@@ -110,6 +110,7 @@ export function prefetchWorkspaceSurface(
     path: activeTab.filePath,
     diffScope: activeTab.diffScope,
     diffSha: activeTab.diffSha,
+    diffHistory: activeTab.diffHistory,
     turnChatId: activeTab.turnChatId,
     turnId: activeTab.turnId,
   });

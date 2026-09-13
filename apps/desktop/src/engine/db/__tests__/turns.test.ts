@@ -25,6 +25,120 @@ function tmpDbFile(): string {
 }
 
 describe("turns table", () => {
+  it("pages with stable identities when a prior page is deleted or a tied turn is updated", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    for (const turnId of ["a", "b", "c", "d"]) {
+      startTurn({
+        chatId: turnId,
+        turnId,
+        workspaceId: "workspace",
+        folder: "/repo",
+        agentId: null,
+        summary: null,
+        startedAt: 1,
+        preSnapshot: "pre",
+      });
+      finishTurn(turnId, turnId, {
+        endedAt: 2,
+        status: "completed",
+        stopReason: null,
+        postSnapshot: "post",
+        files: [
+          { path: "file", status: "modified", additions: 1, deletions: 1 },
+        ],
+      });
+    }
+    const page = listTurnsForWorkspace("workspace", 2);
+    expect(page.map((turn) => turn.turnId)).toEqual(["d", "c"]);
+    deleteTurnsForChat("d");
+    clearTurnSnapshots("a", ["a"]); // a rev change must not reorder history
+    const next = listTurnsForWorkspace("workspace", 2, 0, 1, {
+      after: page[1],
+    });
+    expect(next.map((turn) => turn.turnId)).toEqual(["b", "a"]);
+  });
+
+  it("retains every authored turn for All Turns while bounding unattributed checkpoints", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    for (let index = 0; index < 105; index++) {
+      const turnId = `${index}`;
+      startTurn({
+        chatId: "chat",
+        turnId,
+        workspaceId: "workspace",
+        folder: "/repo",
+        agentId: null,
+        summary: null,
+        startedAt: index,
+        preSnapshot: "pre",
+      });
+      finishTurn("chat", turnId, {
+        endedAt: index + 1,
+        status: "completed",
+        stopReason: null,
+        postSnapshot: "post",
+        files:
+          index % 2
+            ? []
+            : [
+                {
+                  path: "file",
+                  status: "modified",
+                  additions: 1,
+                  deletions: 1,
+                },
+              ],
+      });
+    }
+    const prunable = turnsWithSnapshotsBeyond("chat", 2, {
+      preserveAuthored: true,
+    });
+    expect(prunable).toHaveLength(50);
+    expect(prunable.every((id) => Number(id) % 2 === 1)).toBe(true);
+    clearTurnSnapshots("chat", prunable);
+    expect(
+      listTurnsForWorkspace("workspace", -1).every(
+        (turn) => turn.preSnapshot && turn.postSnapshot,
+      ),
+    ).toBe(true);
+  });
+
+  it("pages file-changing turns past 200 while pinning the newest timestamp", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    for (let index = 0; index < 206; index++) {
+      startTurn({
+        chatId: "history",
+        turnId: `${index}`,
+        workspaceId: "workspace",
+        folder: "/repo",
+        agentId: null,
+        summary: null,
+        startedAt: index,
+        preSnapshot: "pre",
+      });
+      finishTurn("history", `${index}`, {
+        endedAt: index + 1,
+        status: "completed",
+        stopReason: "end_turn",
+        postSnapshot: "post",
+        files: [
+          { path: "a.txt", status: "modified", additions: 1, deletions: 1 },
+        ],
+      });
+    }
+    const first = listTurnsForWorkspace("workspace", 200);
+    expect(first).toHaveLength(200);
+    expect(first[0].turnId).toBe("205");
+    expect(
+      listTurnsForWorkspace("workspace", 200, 200, first[0].startedAt).map(
+        (turn) => turn.turnId,
+      ),
+    ).toEqual(["5", "4", "3", "2", "1", "0"]);
+    expect(
+      listTurnsForWorkspace("workspace", 200, 0, 3).map((turn) => turn.turnId),
+    ).toEqual(["3", "2", "1", "0"]);
+    expect(listTurnsForWorkspace("another", 200)).toEqual([]);
+  });
   afterEach(() => {
     closeZerosDb();
     setZerosDbPathForTesting(null);

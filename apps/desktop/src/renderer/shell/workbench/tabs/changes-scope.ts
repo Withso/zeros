@@ -11,10 +11,36 @@
 // keyed by the git target (a worktree id, or the trunk's repo root), and read
 // back through the live changes-filter-store.
 //
-// First visit to a workspace's Changes tab → DEFAULT_SCOPE ("All changes"); after
+// First visit to a workspace's Changes tab → DEFAULT_SCOPE ("Branch"); after
 // the user picks a scope it's remembered per workspace until they change it.
+// Branch retains the persisted "all" kind and its full-branch comparison.
+
+import {
+  changesHistoryKey,
+  changesHistorySchema,
+  type ChangesHistory,
+} from "@zeros/protocol/changes-history";
+
+export function isHistoryScope(scope: Scope): scope is ChangesHistory {
+  return [
+    "commits",
+    "commit-range",
+    "turns",
+    "last-turn",
+    "turn-range",
+  ].includes(scope.kind);
+}
+
+export function scopeIdentity(scope: Scope): string {
+  return isHistoryScope(scope)
+    ? changesHistoryKey(scope)
+    : scope.kind === "commit"
+      ? scope.sha
+      : scope.kind;
+}
 
 export type Scope =
+  | ChangesHistory
   | { kind: "all" }
   | { kind: "uncommitted" }
   | { kind: "staged" }
@@ -30,7 +56,7 @@ const MAX_PERSISTED_TARGETS = 128;
 /** Narrow an unknown blob to a valid Scope. Defensive against a corrupt / legacy
  *  localStorage entry — a bad value degrades to null (→ the default), never
  *  throws or seeds a malformed scope. */
-function asScope(v: unknown): Scope | null {
+export function asScope(v: unknown): Scope | null {
   if (!v || typeof v !== "object") return null;
   const kind = (v as { kind?: unknown }).kind;
   if (kind === "all") return { kind: "all" };
@@ -48,7 +74,8 @@ function asScope(v: unknown): Scope | null {
       };
     }
   }
-  return null;
+  const history = changesHistorySchema.safeParse(v);
+  return history.success ? history.data : null;
 }
 
 /** The whole `{ [target]: Scope }` map, with every entry validated. */

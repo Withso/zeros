@@ -122,7 +122,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@octokit/rest": "^22.0.0",
     "@openai/codex": "0.153.4",
-    "@pierre/diffs": "1.2.11",
+    "@pierre/diffs": "1.4.1",
     "@pierre/trees": "1.0.0-beta.4",
     "@radix-ui/react-avatar": "^1.1.11",
     "@radix-ui/react-collapsible": "^1.1.12",

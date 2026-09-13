@@ -93,6 +93,100 @@ describe("diff / status / log", () => {
     }
   });
 
+  it("returns complete file context only when explicitly requested", async () => {
+    upsertRepoByRoot({ repoRoot, repoSlug: "test" });
+    const before = Array.from({ length: 80 }, (_, i) => `line ${i + 1}`).join("\n") + "\n";
+    await writeFile(path.join(repoRoot, "README.md"), before);
+    await execFileAsync("git", ["commit", "-am", "long file", "-q"], { cwd: repoRoot });
+    await writeFile(path.join(repoRoot, "README.md"), before.replace("line 40\n", "changed line\n"));
+    const query = { workspaceId: repoRoot, filePath: "README.md", mode: "worktree-vs-head" as const, rawPatch: true };
+    expect((await diff(query)).patch).not.toContain(" line 1\n");
+    const full = await diff({ ...query, fullContext: true });
+    expect(full.patch).toContain(" line 1\n");
+    expect(full.patch).toContain(" line 80\n");
+    expect(full.patch).toContain("+changed line\n");
+  });
+
+  it("rejects an unbounded whole-tree full-context request", async () => {
+    await expect(
+      diff({
+        workspaceId,
+        mode: "worktree-vs-head",
+        rawPatch: true,
+        fullContext: true,
+      }),
+    ).rejects.toThrow("fullContext requires a file path filter");
+  });
+
+  it("compares an unborn repository against the empty tree in live Changes scopes", async () => {
+    const unborn = path.join(workdir, "unborn");
+    await mkdir(unborn);
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: unborn });
+    upsertRepoByRoot({ repoRoot: unborn, repoSlug: "unborn" });
+    expect(
+      await diff({
+        workspaceId: unborn,
+        mode: "worktree-vs-base",
+        rawPatch: true,
+        summaryLimit: 1000,
+      }),
+    ).toMatchObject({ hunks: [], patch: "" });
+    await writeFile(path.join(unborn, "added.md"), "staged\n");
+    await writeFile(path.join(unborn, "removed.md"), "removed\n");
+    await execFileAsync("git", ["add", "."], { cwd: unborn });
+    await appendFile(path.join(unborn, "added.md"), "unstaged\n");
+    await rm(path.join(unborn, "removed.md"));
+
+    for (const mode of ["worktree-vs-base", "worktree-vs-head"] as const) {
+      const result = await diff({
+        workspaceId: unborn,
+        mode,
+        rawPatch: true,
+        summaryLimit: 1000,
+      });
+      expect(result.patch).toContain("+staged\n+unstaged");
+      expect(result.patch).not.toContain("removed.md");
+    }
+    const staged = await diff({
+      workspaceId: unborn,
+      mode: "index-vs-head",
+      rawPatch: true,
+    });
+    expect(staged.patch).toContain("removed.md");
+    expect(staged.patch).not.toContain("+unstaged");
+    const unstaged = await diff({
+      workspaceId: unborn,
+      mode: "worktree-vs-index",
+      rawPatch: true,
+    });
+    expect(unstaged.patch).toContain("+unstaged");
+    expect(unstaged.patch).toContain("-removed");
+    expect(
+      await diff({ workspaceId: unborn, mode: "base", rawPatch: true }),
+    ).toMatchObject({ hunks: [], patch: "" });
+    expect(await changeCounts(unborn)).toEqual({
+      all: 1,
+      uncommitted: 1,
+      staged: 2,
+      unstaged: 2,
+    });
+    expect(await changeLineCounts(unborn)).toEqual({
+      additions: 2,
+      deletions: 0,
+    });
+    await writeFile(path.join(unborn, "untracked.md"), "new\n");
+    expect(await changeCounts(unborn)).toEqual({
+      all: 2,
+      uncommitted: 2,
+      staged: 2,
+      unstaged: 3,
+    });
+    expect(await changeLineCounts(unborn)).toEqual({
+      additions: 3,
+      deletions: 0,
+    });
+  });
+
   describe("status", () => {
     it("returns empty arrays on a clean worktree", async () => {
       const s = await status(workspaceId);

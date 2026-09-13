@@ -1,3 +1,8 @@
+import {
+  changesHistorySchema,
+  turnHistoryCursorSchema,
+} from "@zeros/protocol/changes-history";
+import { historyDiff, listHistoryTurns } from "../git/history-diff";
 import { stageDesignRegistry } from "../design/metadata-git";
 // ──────────────────────────────────────────────────────────
 // WorkspaceService — the Remote Workspace API over the bridge
@@ -309,7 +314,6 @@ import {
   CHAT_MESSAGE_DELTA_CAP,
 } from "../db/messages";
 import {
-  listTurnsForWorkspace,
   listTurnsForChat,
   getTurn,
   deleteTurnsFrom,
@@ -5492,19 +5496,35 @@ export class WorkspaceService {
         };
       case "git.diff": {
         const filePath = optStr(params, "filePath");
+        const oldFilePath = optStr(params, "oldFilePath");
         // (#4) git.diff returns file CONTENT (hunks). For a remote client,
         // refuse an explicit secret path and filter secret files out of a
         // whole-tree diff — the same boundary as file.read.
-        if (remote && filePath && isSensitiveRepoPath(filePath)) {
+        if (
+          remote &&
+          ((filePath && isSensitiveRepoPath(filePath)) ||
+            (oldFilePath && isSensitiveRepoPath(oldFilePath)))
+        ) {
           throw new GitError({
             code: "VALIDATION_FAILED",
             message:
               "refusing to diff a secret/credential file over a remote connection",
           });
         }
-        const result = await diff({
+        const history =
+          params.history === undefined
+            ? null
+            : changesHistorySchema.safeParse(params.history);
+        if (history && !history.success) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Invalid Changes history selection",
+          });
+        }
+        const options = {
           workspaceId: reqStr(params, "workspaceId"),
           filePath,
+          oldFilePath,
           against: optStr(params, "against") as
             | "index"
             | "HEAD"
@@ -5518,8 +5538,12 @@ export class WorkspaceService {
           base: optStr(params, "base"),
           head: optStr(params, "head"),
           rawPatch: params.rawPatch === true,
+          fullContext: params.fullContext === true,
           summaryLimit: optNum(params, "summaryLimit"),
-        });
+        };
+        const result = history?.success
+          ? await historyDiff(options, history.data)
+          : await diff(options);
         if (remote) {
           result.hunks = filterSecretHunks(result.hunks);
           if (result.files) result.files = filterSecretFiles(result.files);
@@ -5554,6 +5578,7 @@ export class WorkspaceService {
             workspaceId: reqStr(params, "workspaceId"),
             limit: optNum(params, "limit"),
             since: optNum(params, "since"),
+            skip: optNum(params, "skip"),
             ref: optStr(params, "ref"),
             base: optStr(params, "base"),
           }),
@@ -6375,10 +6400,15 @@ export class WorkspaceService {
       // truncation + per-path 3-way-merge restore (see git/turns-git.ts).
       case "turns.list":
         return {
-          turns: listTurnsForWorkspace(
-            reqStr(params, "workspaceId"),
-            optNum(params, "limit") ?? 200,
-          ),
+          turns: await listHistoryTurns(reqStr(params, "workspaceId"), {
+            limit: optNum(params, "limit"),
+            offset: optNum(params, "offset"),
+            before: optNum(params, "before"),
+            after:
+              params.after === undefined
+                ? undefined
+                : turnHistoryCursorSchema.parse(params.after),
+          }),
         };
       case "turns.get":
         return {

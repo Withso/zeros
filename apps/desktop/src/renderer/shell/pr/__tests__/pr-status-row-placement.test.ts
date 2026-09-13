@@ -24,7 +24,7 @@ describe("shared PR status row placement", () => {
     expect(review).not.toMatch(/<PrStatusRow\b/);
   });
 
-  it("leaves the shared chrome borderless until a created PR status is shown", () => {
+  it("separates the PR row from the body before and after PR creation", () => {
     const column = source(
       "apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx",
     );
@@ -43,7 +43,8 @@ describe("shared PR status row placement", () => {
       /return \(\s*<div className="([^"]+)"/,
     )?.[1];
     expect(emptyRowClasses).toBeDefined();
-    expect(emptyRowClasses?.split(/\s+/)).not.toContain("border-b");
+    expect(emptyRowClasses?.split(/\s+/)).toContain("border-b");
+    expect(emptyRowClasses?.split(/\s+/)).toContain("border-border1");
 
     expect(island).toMatch(
       /data-pr-island=""[\s\S]*?"flex h-10 shrink-0 items-center gap-2\.5 border-y px-2"/,

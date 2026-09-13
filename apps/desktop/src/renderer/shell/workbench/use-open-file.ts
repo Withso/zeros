@@ -1,3 +1,4 @@
+import { type ChangesHistory } from "@zeros/protocol/changes-history";
 // ──────────────────────────────────────────────────────────
 // useOpenFileInWorkbench / useOpenChatFileInWorkbench — open a file in the workbench viewer
 // ──────────────────────────────────────────────────────────
@@ -63,8 +64,16 @@ function relativeToCwd(abs: string, cwd: string): string | null {
  *  whether the Discard control is allowed (All-changes filter + uncommitted). */
 export interface OpenFileOpts {
   diff?: boolean;
-  diffScope?: "all" | "uncommitted" | "staged" | "unstaged" | "commit" | "turn";
+  diffScope?:
+    | "all"
+    | "uncommitted"
+    | "staged"
+    | "unstaged"
+    | "commit"
+    | "turn"
+    | "history";
   diffSha?: string;
+  diffHistory?: ChangesHistory;
   /** When `diffScope === "turn"`: the chat + turn whose authored diff to show. */
   turnChatId?: string;
   turnId?: string;
@@ -95,6 +104,7 @@ export function useOpenFileInWorkbench(): (
         diff: opts?.diff ?? false,
         diffScope: opts?.diffScope,
         diffSha: opts?.diffSha,
+        diffHistory: opts?.diffHistory,
         turnChatId: opts?.turnChatId,
         turnId: opts?.turnId,
         discardable: opts?.discardable ?? false,

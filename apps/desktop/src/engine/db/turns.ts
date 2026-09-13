@@ -19,6 +19,10 @@
 
 import { openZerosDb } from "./index";
 import { nextRev } from "./sync";
+import {
+  turnHistoryCursorSchema,
+  type TurnHistoryCursor,
+} from "@zeros/protocol/changes-history";
 
 export type TurnFileStatus = "added" | "modified" | "deleted" | "renamed";
 
@@ -326,19 +330,45 @@ export function getTurn(chatId: string, turnId: string): TurnRow | null {
  *  filters and must never appear as misleading "0 files" entries here. Ordered
  *  by wall-clock start — `ord` is per-CHAT (MAX+1 within a chat) so it can't order
  *  ACROSS the chats that share a workspace; `started_at` is the cross-chat
- *  signal, with the globally-monotonic `rev` as a stable tiebreaker. */
+ *  signal. Immutable identities break ties: updating a row's rev must never
+ *  move it across a pagination cursor or change an inclusive range. */
 export function listTurnsForWorkspace(
   workspaceId: string,
   limit = 200,
+  offset = 0,
+  before = Number.MAX_SAFE_INTEGER,
+  options: { localMainRoots?: string[]; after?: TurnHistoryCursor } = {},
 ): TurnRow[] {
+  if (
+    !Number.isSafeInteger(limit) ||
+    limit < -1 ||
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    !Number.isSafeInteger(before)
+  )
+    throw new Error("Invalid turn history pagination");
   if (!workspaceId) return [];
+  if (options.after) turnHistoryCursorSchema.parse(options.after);
+  const roots = options.localMainRoots;
+  const owner = roots?.length
+    ? `(workspace_id IN (?, 'local-main') AND folder IN (${roots.map(() => "?").join(",")}))`
+    : "workspace_id = ?";
+  const cursor = options.after;
   const rows = openZerosDb()
     .prepare(
       `SELECT ${SELECT_COLS} FROM turns
-       WHERE workspace_id = ? AND files IS NOT NULL AND files <> '[]'
-       ORDER BY started_at DESC, rev DESC LIMIT ?`,
+       WHERE ${owner} AND started_at <= ? AND files IS NOT NULL AND files <> '[]'
+       ${cursor ? "AND (started_at, chat_id, turn_id) < (?, ?, ?)" : ""}
+       ORDER BY started_at DESC, chat_id DESC, turn_id DESC LIMIT ? OFFSET ?`,
     )
-    .all(workspaceId, limit) as TurnDbRow[];
+    .all(
+      workspaceId,
+      ...(roots ?? []),
+      before,
+      ...(cursor ? [cursor.startedAt, cursor.chatId, cursor.turnId] : []),
+      limit,
+      cursor ? 0 : offset,
+    ) as TurnDbRow[];
   return rows.map(toTurnRow).filter((turn) => turn.files.length > 0);
 }
 
@@ -393,16 +423,24 @@ export function deleteTurnsForChat(chatId: string): void {
 export function turnsWithSnapshotsBeyond(
   chatId: string,
   keep: number,
+  options: { preserveAuthored?: boolean } = {},
 ): string[] {
   if (!chatId) return [];
+  // All Turns and explicit ranges depend on authored snapshots throughout the
+  // chat's lifetime. Only unattributed recovery checkpoints may expire.
+  const candidate = options.preserveAuthored
+    ? "AND (files IS NULL OR files = '[]')"
+    : "";
   const rows = openZerosDb()
     .prepare(
       `SELECT turn_id FROM turns
        WHERE chat_id = ?
+         ${candidate}
          AND (pre_snapshot IS NOT NULL OR post_snapshot IS NOT NULL)
          AND turn_id NOT IN (
            SELECT turn_id FROM turns
            WHERE chat_id = ?
+             ${candidate}
              AND (pre_snapshot IS NOT NULL OR post_snapshot IS NOT NULL)
            ORDER BY ord DESC LIMIT ?
          )`,

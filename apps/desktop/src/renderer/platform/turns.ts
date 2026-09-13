@@ -11,6 +11,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { getActiveBridge } from "./bridge/active-bridge";
+import type { TurnHistoryCursor } from "@zeros/protocol/changes-history";
 import {
   bridgeTurnsList,
   bridgeTurnsGet,
@@ -122,9 +123,17 @@ function requireBridge(action: string) {
 }
 
 /** File-changing turns in a workspace, newest first (the Changes dropdown). */
-export async function turnsList(workspaceId: string): Promise<TurnInfo[]> {
+export async function turnsList(
+  workspaceId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    before?: number;
+    after?: TurnHistoryCursor;
+  },
+): Promise<TurnInfo[]> {
   if (!workspaceId) return [];
-  return bridgeTurnsList(requireBridge("list turns"), workspaceId);
+  return bridgeTurnsList(requireBridge("list turns"), workspaceId, options);
 }
 
 /** One turn's recorded metadata (footer duration + authored file pills). */

@@ -270,8 +270,8 @@ import {
   turnFileDiffs,
 } from "./git/turns-git";
 
-/** Per-chat cap on retained turn snapshots. Beyond this, the oldest turns'
- *  hidden refs are pruned on each new turn (the rows stay for the dropdown). */
+/** Per-chat cap on unattributed recovery checkpoints. Authored turn snapshots
+ * stay available for the complete Changes history until the chat is deleted. */
 const TURN_SNAPSHOT_RETENTION = 100;
 
 /** In-flight state for a turn being recorded (a `prompt()` round-trip). Captured
@@ -7679,14 +7679,14 @@ export class ZerosEngine {
           }),
         );
       }
-      // Retention: cap this chat's hidden turn snapshots so a long-lived chat
-      // doesn't pin an unbounded set of commits. The rows stay (they still feed
-      // the dropdown/footer); only the now-old git refs are dropped + their OIDs
-      // nulled. Best-effort, inside the same guard as the rest of finishTurn.
+      // Keep authored snapshots for the complete Changes history. Bound only
+      // unattributed recovery checkpoints; deleting an authored checkpoint
+      // would make All Turns and older range selections permanently unreadable.
       if (ctx.isGit) {
         const stale = turnsWithSnapshotsBeyond(
           ctx.chatId,
           TURN_SNAPSHOT_RETENTION,
+          { preserveAuthored: true },
         );
         if (stale.length > 0) {
           await deleteSnapshotRefs(ctx.root, ctx.chatId, stale);

@@ -55,9 +55,9 @@ export function NewTabEnvironmentMenu({
           }}
           aria-label="Environment"
         >
-          <Play className="size-4" />
+          <Play className="size-3.5" />
           <span>Environment</span>
-          <ChevronRight className="text-fg2 ml-auto size-4" aria-hidden />
+          <ChevronRight className="text-fg2 ml-auto size-3.5" aria-hidden />
         </CommandItem>
       </DropdownMenuTrigger>
       <DropdownMenuContent
@@ -111,9 +111,10 @@ function EnvironmentItems({
       {entries.map((entry) => (
         <DropdownMenuItem
           key={entry.terminalId}
+          className="[&_svg]:size-3.5"
           onSelect={() => onSelect(entry.terminalId, entry.title)}
         >
-          <DynamicIcon name={entry.icon} className="text-fg2 size-4" />
+          <DynamicIcon name={entry.icon} className="text-fg2 size-3.5" />
           <span className="min-w-0 truncate">{entry.title}</span>
         </DropdownMenuItem>
       ))}
@@ -154,7 +155,7 @@ export function NewTabEnvironmentSearchResults({
           value={`environment:${entry.terminalId}`}
           onSelect={() => onSelect(entry.terminalId, entry.title)}
         >
-          <DynamicIcon name={entry.icon} className="text-fg2 size-4" />
+          <DynamicIcon name={entry.icon} className="text-fg2 size-3.5" />
           <span className="min-w-0 truncate">{entry.title}</span>
         </CommandItem>
       ))}

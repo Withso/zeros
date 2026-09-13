@@ -40,6 +40,18 @@ export const ComposerAttachmentMenu = memo(function ComposerAttachmentMenu({
     if (concealed && open) setOpen(false);
   }, [concealed, open]);
 
+  // A tooltip finishing its exit can briefly consume Radix's first Escape.
+  // This controlled menu closes at the capture boundary so the visible overlay
+  // always honors the key while Radix still owns focus restoration.
+  useEffect(() => {
+    if (!open || concealed) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [concealed, open]);
+
   return (
     <DropdownMenu open={open && !concealed} onOpenChange={setOpen}>
       <Tooltip label="Attach or link">

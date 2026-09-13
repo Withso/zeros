@@ -1,3 +1,7 @@
+import {
+  changesHistorySchema,
+  type ChangesHistory,
+} from "@zeros/protocol/changes-history";
 // ──────────────────────────────────────────────────────────
 // Workbench Tab Manager — Types + localStorage persistence
 // ──────────────────────────────────────────────────────────
@@ -67,9 +71,17 @@ export interface WorkbenchTab {
    *  the file was opened from: "all" (worktree vs base = committed + uncommitted),
    *  "uncommitted" (working tree vs HEAD), or "commit" (that commit's own diff,
    *  via `diffSha`). Omitted → "all" (e.g. opened from All Files). */
-  diffScope?: "all" | "uncommitted" | "staged" | "unstaged" | "commit" | "turn";
+  diffScope?:
+    | "all"
+    | "uncommitted"
+    | "staged"
+    | "unstaged"
+    | "commit"
+    | "turn"
+    | "history";
   /** Files/Changes tab: the commit SHA when `diffScope === "commit"`. */
   diffSha?: string;
+  diffHistory?: ChangesHistory;
   /** Files/Changes tab: when `diffScope === "turn"`, the chat + turn whose
    *  agent-authored diff the viewer shows (opened from the per-turn footer
    *  pills or the Changes-tab turn filter). */
@@ -90,10 +102,12 @@ export interface WorkbenchTab {
   contentRevision?: number;
   /** Review tab's last selected inner destination, owned by this worktree. */
   reviewSubtab?: ReviewSubtab;
-  /** Changes tab's flat/tree presentation, owned by this worktree. */
+  /** Legacy presentation retained for serialized compatibility. Changes now
+   * always displays its sidebar as a folder tree. */
   changesView?: ChangesViewMode;
-  /** Explicit File/Changes viewer choice. New path intents clear it so the
-   * entry point's Diff/Preview/Edit default remains authoritative. */
+  /** Changes body presentation; omitted on older tabs means all file diffs. */
+  changesPresentation?: "all" | "single";
+  /** Explicit Files-tab viewer choice. Changes is a diff-only surface. */
   viewerMode?: ViewerMode;
   /** File tab only: whether this tab's workspace tree is visible beside its
    * viewer. Owned by the individual tab so A → B → A restores independently.
@@ -176,11 +190,11 @@ export function canonicalBrowsableHttpUrl(raw: unknown): string {
 function isLoopbackBrowserUrl(raw: string): boolean {
   if (!raw) return false;
   try {
-    const hostname = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const hostname = new URL(raw).hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/g, "");
     return (
-      hostname === "localhost" ||
-      hostname === "127.0.0.1" ||
-      hostname === "::1"
+      hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
     );
   } catch {
     return false;
@@ -220,8 +234,10 @@ export function createFilesTab(
       | "staged"
       | "unstaged"
       | "commit"
-      | "turn";
+      | "turn"
+      | "history";
     diffSha?: string;
+    diffHistory?: ChangesHistory;
     turnChatId?: string;
     turnId?: string;
     discardable?: boolean;
@@ -240,6 +256,7 @@ export function createFilesTab(
     ...(opts?.diff ? { diff: true } : {}),
     ...(opts?.diffScope ? { diffScope: opts.diffScope } : {}),
     ...(opts?.diffSha ? { diffSha: opts.diffSha } : {}),
+    ...(opts?.diffHistory ? { diffHistory: opts.diffHistory } : {}),
     ...(opts?.turnChatId ? { turnChatId: opts.turnChatId } : {}),
     ...(opts?.turnId ? { turnId: opts.turnId } : {}),
     ...(opts?.discardable ? { discardable: true } : {}),
@@ -288,6 +305,7 @@ export function blankFixedFilesTab(tab: WorkbenchTab): WorkbenchTab {
     diff: false,
     diffScope: undefined,
     diffSha: undefined,
+    diffHistory: undefined,
     turnChatId: undefined,
     turnId: undefined,
     discardable: false,
@@ -616,6 +634,13 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
     seenIds.add(id);
     tabs.push({
       ...(candidate as WorkbenchTab),
+      diffHistory: changesHistorySchema.safeParse(candidate.diffHistory).success
+        ? changesHistorySchema.parse(candidate.diffHistory)
+        : undefined,
+      changesPresentation:
+        type === "changes" && candidate.changesPresentation === "single"
+          ? "single"
+          : undefined,
       id,
       type,
       title: typeof candidate.title === "string" ? candidate.title : "",
@@ -637,9 +662,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         changesView: validChangesView(firstChanges.changesView),
         browserConversationId: undefined,
         fileTreeVisible: undefined,
-        viewerMode: changesFilePath
-          ? validViewerMode(firstChanges.viewerMode)
-          : undefined,
+        viewerMode: undefined,
       }
     : { ...createChangesTab(), pinned: true };
   const homeReview: WorkbenchTab = firstReview
@@ -733,6 +756,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
                 diff: false,
                 diffScope: undefined,
                 diffSha: undefined,
+                diffHistory: undefined,
                 turnChatId: undefined,
                 turnId: undefined,
                 discardable: false,

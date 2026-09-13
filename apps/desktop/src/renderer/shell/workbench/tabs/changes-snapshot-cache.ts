@@ -1,3 +1,8 @@
+import {
+  changesHistoryKey,
+  changesHistorySchema,
+} from "@zeros/protocol/changes-history";
+import { isHistoryScope } from "./changes-scope";
 // ──────────────────────────────────────────────────────────
 // Last-confirmed Changes snapshots
 // ──────────────────────────────────────────────────────────
@@ -10,7 +15,11 @@
 // claim "No changes".
 
 import type { FileChangeStatus } from "@/renderer/platform/git";
-import { getSetting, removeSetting, setSetting } from "@/renderer/platform/settings";
+import {
+  getSetting,
+  removeSetting,
+  setSetting,
+} from "@/renderer/platform/settings";
 
 import type { ChangedFile } from "./changes-parse";
 import type { Scope } from "./changes-scope";
@@ -26,6 +35,7 @@ export interface CachedChangesSection {
 interface StoredSectionEntry {
   workspaceId: string;
   scope: Scope;
+  baseBranch?: string;
   savedAt: number;
   sections: CachedChangesSection[];
 }
@@ -101,7 +111,10 @@ function sanitizeScope(value: unknown): Scope | null {
   ) {
     return { kind: raw.kind };
   }
-  if (raw.kind !== "commit") return null;
+  if (raw.kind !== "commit") {
+    const history = changesHistorySchema.safeParse(value);
+    return history.success ? history.data : null;
+  }
   const sha = boundedString(raw.sha);
   const message =
     typeof raw.message === "string" && raw.message.length <= MAX_IDENTITY_CHARS
@@ -195,11 +208,23 @@ export function sanitizeChangesSections(
   return sections;
 }
 
-export function changesSnapshotKey(workspaceId: string, scope: Scope): string {
+export function changesSnapshotKey(
+  workspaceId: string,
+  scope: Scope,
+  baseBranch?: string,
+): string {
   return JSON.stringify([
     workspaceId,
     scope.kind,
-    scope.kind === "commit" ? scope.sha : null,
+    scope.kind === "commit"
+      ? scope.sha
+      : isHistoryScope(scope)
+        ? changesHistoryKey(scope)
+        : null,
+    ...((scope.kind === "all" || scope.kind === "commits") &&
+    baseBranch !== undefined
+      ? [baseBranch]
+      : []),
   ]);
 }
 
@@ -227,11 +252,13 @@ function readPayload(): StoredPayload {
     const entry = valueEntry as Record<string, unknown>;
     const workspaceId = boundedString(entry.workspaceId);
     const scope = sanitizeScope(entry.scope);
+    const baseBranch = optionalString(entry.baseBranch);
     const savedAt = entry.savedAt;
     const sections = sanitizeChangesSections(entry.sections);
     if (
       !workspaceId ||
       !scope ||
+      baseBranch === null ||
       typeof savedAt !== "number" ||
       !Number.isFinite(savedAt) ||
       !sections ||
@@ -239,9 +266,15 @@ function readPayload(): StoredPayload {
     ) {
       continue;
     }
-    const key = changesSnapshotKey(workspaceId, scope);
+    const key = changesSnapshotKey(workspaceId, scope, baseBranch);
     sectionByKey.delete(key);
-    sectionByKey.set(key, { workspaceId, scope, savedAt, sections });
+    sectionByKey.set(key, {
+      workspaceId,
+      scope,
+      baseBranch,
+      savedAt,
+      sections,
+    });
   }
 
   const countByOwner = new Map<string, StoredCountEntry>();
@@ -323,7 +356,7 @@ export function loadPersistedChangesSnapshots(): {
   return {
     sections: new Map(
       payload.sections.map((entry) => [
-        changesSnapshotKey(entry.workspaceId, entry.scope),
+        changesSnapshotKey(entry.workspaceId, entry.scope, entry.baseBranch),
         entry.sections,
       ]),
     ),
@@ -337,14 +370,17 @@ export function persistChangesSections(
   workspaceId: string,
   scope: Scope,
   sections: CachedChangesSection[],
+  baseBranch?: string,
 ): void {
   if (!workspaceId) return;
   const confirmed = sanitizeChangesSections(sections);
   if (!confirmed) return;
   const payload = readPayload();
-  const key = changesSnapshotKey(workspaceId, scope);
+  const key = changesSnapshotKey(workspaceId, scope, baseBranch);
   payload.sections = payload.sections.filter(
-    (entry) => changesSnapshotKey(entry.workspaceId, entry.scope) !== key,
+    (entry) =>
+      changesSnapshotKey(entry.workspaceId, entry.scope, entry.baseBranch) !==
+      key,
   );
   // Never restore an old non-empty snapshot after Git confirmed this key empty.
   if (confirmed.length === 0) {
@@ -356,7 +392,13 @@ export function persistChangesSections(
     return;
   }
   const savedAt = nextSavedAt();
-  payload.sections.push({ workspaceId, scope, savedAt, sections: confirmed });
+  payload.sections.push({
+    workspaceId,
+    scope,
+    baseBranch,
+    savedAt,
+    sections: confirmed,
+  });
   writePayload(payload, savedAt);
 }
 
@@ -412,7 +454,7 @@ const restored = loadPersistedChangesSnapshots();
 const sectionCache = restored.sections;
 const countCache = restored.counts;
 const sectionListeners = new Map<string, Set<() => void>>();
-const requestTokens = new Map<string, number>();
+const requestTokens = new Map<string, { token: number; generation?: number }>();
 let nextRequestToken = 0;
 
 function writeBounded<T>(
@@ -462,19 +504,28 @@ export function writeChangesSections(
   workspaceId: string,
   scope: Scope,
   sections: CachedChangesSection[],
+  baseBranch?: string,
 ): void {
-  const key = changesSnapshotKey(workspaceId, scope);
+  const key = changesSnapshotKey(workspaceId, scope, baseBranch);
   if (sectionCache.get(key) === sections) return;
   writeBounded(sectionCache, key, sections, MAX_SECTION_KEYS);
-  persistChangesSections(workspaceId, scope, sections);
+  persistChangesSections(workspaceId, scope, sections, baseBranch);
   for (const listener of sectionListeners.get(key) ?? []) listener();
 }
 
 /** Claim the latest publication token for one exact scope. A response may
  * resolve for its caller, but only the newest token may update shared rows. */
-export function beginChangesSectionsRequest(key: string): number {
+export function beginChangesSectionsRequest(
+  key: string,
+  generation?: number,
+): number {
+  const prior = requestTokens.get(key);
+  if (generation !== undefined && prior?.generation !== undefined) {
+    if (generation === prior.generation) return prior.token;
+    if (generation < prior.generation) return -1;
+  }
   nextRequestToken += 1;
-  requestTokens.set(key, nextRequestToken);
+  requestTokens.set(key, { token: nextRequestToken, generation });
   while (requestTokens.size > MAX_SECTION_KEYS * 2) {
     const oldest = requestTokens.keys().next().value as string | undefined;
     if (oldest === undefined) break;
@@ -487,7 +538,7 @@ export function isCurrentChangesSectionsRequest(
   key: string,
   token: number,
 ): boolean {
-  return requestTokens.get(key) === token;
+  return requestTokens.get(key)?.token === token;
 }
 
 export function readChangesCount(workspaceId: string): number | undefined {
