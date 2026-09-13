@@ -2,6 +2,9 @@
 // that exact execution and is retried with backoff without poisoning unrelated
 // agents, utilities, Run/Setup, auth, or app-core state.
 
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
@@ -12,6 +15,29 @@ import type {
 } from "../containment/types";
 import type { AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    readdirSync: (...args: Parameters<typeof actual.readdirSync>) => {
+      // CI's shared temp root contains unreadable system-owned entries. Keep
+      // that failure deterministic so these tests require their own workspace.
+      const target = path.resolve(String(args[0]));
+      if (target === "/tmp" || target === actual.realpathSync(tmpdir())) {
+        throw Object.assign(
+          new Error("Cannot scan the shared temp directory"),
+          {
+            code: "EACCES",
+          },
+        );
+      }
+      return actual.readdirSync(...args);
+    },
+  };
+});
+
+let fixtureRoot: string;
 
 interface GatewayInternals {
   adapters: Map<string, AgentAdapter>;
@@ -35,7 +61,7 @@ interface GatewayInternals {
 
 function makeGateway(executionBoundary: ExecutionBoundary): GatewayInternals {
   return new AgentGateway({
-    projectRoot: "/tmp/zeros-test",
+    projectRoot: fixtureRoot,
     executionBoundary,
     events: {
       onSessionUpdate: () => {},
@@ -49,11 +75,15 @@ function makeGateway(executionBoundary: ExecutionBoundary): GatewayInternals {
 
 describe("AgentGateway boundary retirement auto-heal", () => {
   beforeEach(() => {
+    fixtureRoot = realpathSync(
+      mkdtempSync(path.join(tmpdir(), "zeros-gateway-retirement-recovery-")),
+    );
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    rmSync(fixtureRoot, { recursive: true, force: true });
   });
 
   it("retries a failed stop proof without holding unrelated admissions", async () => {
@@ -83,7 +113,7 @@ describe("AgentGateway boundary retirement auto-heal", () => {
       registeredDesignAuthorityIdentity: "registered-v1",
       territoryContributions: [
         {
-          workspaceRoot: "/tmp",
+          workspaceRoot: fixtureRoot,
           grants: [],
           full: true,
           identity: "workspace-v1",
@@ -104,13 +134,13 @@ describe("AgentGateway boundary retirement auto-heal", () => {
       /not yet proven stopped/i,
     );
     expect(() =>
-      gw.assertWorkspaceDesignAuthorityRetirementsProven("/tmp"),
+      gw.assertWorkspaceDesignAuthorityRetirementsProven(fixtureRoot),
     ).toThrow(/not yet proven stopped/i);
     expect(() =>
       gw.assertWorkspaceDesignAuthorityRetirementsProven("/unrelated"),
     ).not.toThrow();
     await expect(
-      gw.newSession("strict", { cwd: "/tmp" }),
+      gw.newSession("strict", { cwd: fixtureRoot }),
     ).resolves.toMatchObject({ executionId: expect.any(String) });
 
     // First retry (5s) still fails and reschedules.
