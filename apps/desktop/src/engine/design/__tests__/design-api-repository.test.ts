@@ -1,3 +1,4 @@
+import { parseCanvasFixture } from "./storage-fixtures";
 import {
   applyDesignTransaction,
   type DesignOperation,
@@ -104,6 +105,59 @@ describe("filesystem Design API repository", () => {
         outcome.state,
       ),
     ).rejects.toThrow("Design document changed");
+  });
+
+  it("persists independent document styles and appended layers through the Design repository", async () => {
+    const frame = await createDesignFrame(root, { title: "Canvas children" });
+    const current = await readDesignWebDocumentState(root, frame.file);
+    const authoredRoot = current.files[frame.file]!.match(
+      /<main\b[^>]*>[\s\S]*?<\/main>/,
+    )![0];
+    const outcome = applyDesignTransaction(
+      current,
+      {
+        schemaVersion: 1,
+        transactionId: "document-styles-and-children",
+        documentId: current.documentId,
+        baseRevision: current.revision,
+        actor: { kind: "human", id: "tester" },
+        intent: "Arrange the canvas and add a child",
+        createdAt: 1,
+        operations: [
+          {
+            operationId: "body-layout",
+            type: "node.set-styles",
+            nodeId: "::zeros-document-body",
+            styles: { display: "grid", overflow: "hidden" },
+            scope: "auto",
+            responsiveContext: "base",
+            stateContext: "default",
+          },
+          {
+            operationId: "body-child",
+            type: "node.set-html",
+            nodeId: "::zeros-document-body",
+            mode: "append",
+            html: '<div data-oid="canvas-child" style="display:block;width:100px;height:100px"></div>',
+          },
+        ],
+      },
+      designWebTransactionAdapter,
+    );
+    await commitDesignWebDocumentState(
+      root,
+      frame.file,
+      current.revision,
+      outcome.state,
+    );
+    const committed = await readDesignFrame(root, frame.file);
+    expect(committed.source).toContain(authoredRoot);
+    expect(committed.source).toContain(
+      '<body style="display:grid; overflow:hidden;">',
+    );
+    expect(committed.source).toContain('data-oid="canvas-child"');
+    expect(committed.source).not.toContain('data-oid="::zeros-document-body"');
+    expect(committed.nodeCount).toBe(2);
   });
 
   it("finishes a validated write-ahead journal before exposing a document", async () => {
@@ -217,10 +271,10 @@ describe("filesystem Design API repository", () => {
       designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
       "utf8",
     );
-    await rm(path.join(root, ".zeros"), { recursive: true });
+    await rm(path.join(root, DESIGN_DIRECTORY_NAME, "design.toml"));
     await writeFile(
       path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
-      metadata,
+      JSON.stringify(parseCanvasFixture(metadata)),
     );
     const original = (await readFile(sourcePath, "utf8")).replace(
       "</head>",
@@ -265,13 +319,15 @@ describe("filesystem Design API repository", () => {
     expect(await readFile(sourcePath, "utf8")).toContain(
       "recovered legacy edit",
     );
-    expect(await readFile(sourcePath, "utf8")).not.toContain("zeros-frame");
+    expect(await readFile(sourcePath, "utf8")).not.toContain(
+      'name="zeros-frame"',
+    );
     await expect(readFile(journal)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(
       readFile(path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json")),
     ).rejects.toMatchObject({ code: "ENOENT" });
     expect(designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME)).toContain(
-      `${path.sep}.zeros${path.sep}design${path.sep}`,
+      `${path.sep}design.toml`,
     );
   });
 
@@ -474,7 +530,7 @@ describe("filesystem Design API repository", () => {
       current.revision,
       outcome.state,
     );
-    const canvas = JSON.parse(
+    const canvas = parseCanvasFixture(
       await readFile(
         designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
         "utf8",

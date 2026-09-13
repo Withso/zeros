@@ -1,3 +1,4 @@
+import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
 // ──────────────────────────────────────────────────────────
 // Design document — portable HTML/CSS frames + app-owned canvas state
 // ──────────────────────────────────────────────────────────
@@ -8,8 +9,8 @@
 //   Zeros Design/*.html      one top-level file per frame
 //   Zeros Design/*.css       shared authored styles
 //   Zeros Design/tokens.css  typed design tokens + layout reset
-//   .zeros/design-dir.toml   tracked stable directory identities
-//   .zeros/design/<id>/document.json  tracked frame and Foundation metadata
+//   Zeros Design/design.toml  stable identity, frame and Foundation metadata
+//   Zeros Design/rules.md     short Design API ownership instructions
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
@@ -49,7 +50,8 @@ import {
 import { withDesignDirectoryNameLease } from "./directory-registry";
 import { discoverDesignDirectories } from "./directory";
 import {
-  DESIGN_DIRECTORY_REGISTRY_FILE,
+  readDesignRegistrySource,
+  ensureDesignMetadataLayout,
   recoverWorkspaceDesignMetadata,
   type DesignMetadataSnapshot,
 } from "./metadata";
@@ -366,7 +368,7 @@ const TOKENS_SEED = `@layer reset {
   *, *::before, *::after { box-sizing: border-box; }
   html, body { min-height: 100%; margin: 0; }
   body { background: var(--bg1); color: var(--fg1); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-  body [data-oid] { display: flex; flex-direction: column; flex-shrink: 0; position: relative; margin: 0; }
+  body [data-oid] { display: block; flex-direction: column; flex-shrink: 0; position: relative; margin: 0; }
   h1, h2, h3, h4, h5, h6, p, span, a, strong, em, small, label { display: block; }
   img, svg { display: block; max-width: 100%; }
   button, input, textarea, select { font: inherit; }
@@ -483,7 +485,7 @@ const FRAME_SEED = (
     <title>${escapeText(title)}</title>
   </head>
   <body>
-    <main data-oid="${oid}-main" style="min-height:100%; padding:var(--space-8); gap:var(--space-4);"></main>
+    <main data-oid="${oid}-main" data-zeros-frame-root style="display:block; position:relative; height:100vh;"></main>
   </body>
 </html>
 `;
@@ -664,16 +666,18 @@ function normalizeGeometry(
 }
 
 async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
-  const registry = readDesignStorageFile(
-    workspacePath,
-    DESIGN_DIRECTORY_REGISTRY_FILE,
-  );
+  const registry = readDesignRegistrySource(workspacePath);
   const target = canvasPath(workspacePath);
   const file = path.relative(workspacePath, target).split(path.sep).join("/");
   const source = readDesignStorageFile(workspacePath, file);
   const retainSnapshot = (canvas: CanvasDocument): CanvasDocument =>
     Object.defineProperty(canvas, canvasReadSnapshot, {
-      value: { registry, file, source },
+      value: {
+        registry: registry.source,
+        registryFile: registry.file,
+        file,
+        source,
+      },
     });
   const registered = designDirectoryEntry(
     workspacePath,
@@ -710,7 +714,11 @@ async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
     frame_info?: unknown;
   };
   try {
-    raw = JSON.parse(source) as typeof raw;
+    raw = (
+      file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
+        ? parseDesignManifest(source)?.document
+        : JSON.parse(source)
+    ) as typeof raw;
   } catch {
     throw new Error("Design canvas metadata contains invalid JSON.");
   }
@@ -811,6 +819,33 @@ async function readCanvas(workspacePath: string): Promise<CanvasDocument> {
           },
         }
       : {}),
+  });
+}
+
+/** Explicit folder adoption can rebuild metadata without healing or rewriting
+ * authored HTML. Only the trusted Settings Design action calls this helper. */
+export async function inspectDesignFilesForAdoption(
+  workspace: string,
+  directory: string,
+): Promise<Record<string, unknown>> {
+  return withDesignDirectoryNameLease(workspace, directory, async () => {
+    const canvas: CanvasDocument = {
+      version: 3,
+      frames: {},
+      frame_info: {},
+      foundation: migrateDesignFoundationManifest(undefined),
+    };
+    for (const file of await discoverFrameFiles(workspace)) {
+      const source = await readBoundedDesignFrameSource(workspace, file);
+      const document = parse(source, { sourceCodeLocationInfo: true });
+      const meta = readFrameMeta(document, file, canvas);
+      canvas.frames[file] = nextFrameGeometry(
+        Object.values(canvas.frames),
+        meta,
+      );
+      canvas.frame_info[file] = { title: meta.title, kind: meta.kind };
+    }
+    return { ...canvas };
   });
 }
 
@@ -937,6 +972,13 @@ export async function initializeDesignDocument(
       )
     )
       created.push(...(await writeCanvas(workspacePath, canvas)));
+    else
+      created.push(
+        ...ensureDesignMetadataLayout(
+          workspacePath,
+          designDirectoryNameFor(workspacePath),
+        ),
+      );
     return { created };
   });
 }
@@ -1052,6 +1094,11 @@ async function initializeDesignDocumentUnlocked(
     !designDirectoryEntry(workspacePath, designDirectoryNameFor(workspacePath))
   )
     await writeCanvas(workspacePath, canvas);
+  else
+    ensureDesignMetadataLayout(
+      workspacePath,
+      designDirectoryNameFor(workspacePath),
+    );
 }
 
 function nextFrameGeometry(
@@ -4875,7 +4922,7 @@ export async function updateDesignToken(
 }
 
 export const DESIGN_GUIDES = Object.freeze({
-  frame: `One top-level .html file is one frame. Link ./tokens.css and keep the body as the design. Frame titles, kinds, geometry and foundation metadata are stored separately in .zeros/design/<directory-id>/document.json; use the Design API to change them. Give every rendered element inside body a stable unique data-oid, but leave html, head, body, meta, link, title, style, script, and template as non-selectable document plumbing.`,
+  frame: `One top-level .html file is one frame. Link ./tokens.css and keep the body as the design. Frame titles, kinds, geometry and foundation metadata are stored separately in this Design folder’s design.toml; use the Design API to change them. Give every rendered element inside body a stable unique data-oid, but leave html, head, body, meta, link, title, style, script, and template as non-selectable document plumbing.`,
   layout: `Use normal HTML flow and flexbox for structural layout. Prefer flex containers, gap, padding, alignment, and intrinsic sizing over absolute positioning inside a frame.`,
   tokens: `Use var(--token) from tokens.css whenever a matching color, spacing, radius, or type token exists. Add typed @property declarations before introducing a new token.`,
   workflow: `Inspect the live element selection and frames and make targeted HTML/CSS edits only under Zeros Design/. Call lint_design, re-read the affected frame, use screenshot_frame to visually verify it, then call lint_design again so exact-generation browser contrast, overflow, and spacing checks are included. Resolve errors and review non-blocking advisories. JavaScript and external URLs are not part of design documents.`,

@@ -887,3 +887,38 @@ export async function bridgeDesignRenameDirectory(
     ...args,
   })) as { committedPointer: boolean };
 }
+
+export async function bridgeDesignRemoveDirectory(
+  bridge: RuntimeClient,
+  args: { repoRoot: string; directory: string },
+): Promise<void> {
+  await workspaceOp(bridge, "design.removeDirectory", { ...args });
+}
+
+export interface DesignFolderPreviewWire {
+  directory: string;
+  metadataSource: "folder" | "git" | "rebuild";
+  frameCount: number;
+  revision: string;
+}
+export async function bridgePreviewExistingDesignDirectory(
+  bridge: RuntimeClient,
+  repoRoot: string,
+  folder: string,
+): Promise<DesignFolderPreviewWire> {
+  return (await workspaceOp(bridge, "design.previewExistingDirectory", {
+    repoRoot,
+    folder,
+  })) as DesignFolderPreviewWire;
+}
+export async function bridgeAdoptDesignDirectory(
+  bridge: RuntimeClient,
+  repoRoot: string,
+  preview: DesignFolderPreviewWire,
+): Promise<{ selected: boolean }> {
+  return (await workspaceOp(bridge, "design.adoptDirectory", {
+    repoRoot,
+    folder: preview.directory,
+    revision: preview.revision,
+  })) as { selected: boolean };
+}

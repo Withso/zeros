@@ -9,8 +9,13 @@
 
 export const DESIGN_RUNTIME_PROTOCOL = "zeros-design-runtime";
 export const DESIGN_RUNTIME_VERSION = 2;
+/** Mirrors design-core's document-scoped style/append target. Never emitted as
+ * a data-oid: the HTML body is document plumbing, not an authored layer. */
+export const DESIGN_RUNTIME_DOCUMENT_BODY_ID = "::zeros-document-body";
 /** Shared renderer/engine bound for one additive design selection. */
 export const DESIGN_SELECTION_NODE_LIMIT = 32;
+/** Reserve one operation for the container in a 256-operation transaction. */
+export const DESIGN_LAYOUT_CHILD_LIMIT = 255;
 /** Computed snapshots mirror a fixed, app-owned style catalog. Leave bounded
  * headroom for new editor fields without invalidating otherwise-valid ready
  * events whenever that catalog crosses an arbitrary power-of-two boundary. */
@@ -74,8 +79,9 @@ export type DesignRuntimeHitMode =
  * future rotations turn about, so an editor can draw and manipulate the shape
  * the user actually sees.
  *
- * Chains built from translation, z-rotation, and positive scale are exact.
- * Skew, mirroring, and 3D transforms report `rotation: 0` with the
+ * Chains built from translation, z-rotation, and nonzero scale are exact.
+ * Mirroring reports an equivalent positively oriented border box.
+ * Skew and 3D transforms report `rotation: 0` with the
  * axis-aligned `rect` position, because no rotated rectangle describes them.
  */
 export interface DesignRuntimeNodeBox {
@@ -98,6 +104,30 @@ export interface DesignRuntimeNodeBox {
   originY: number;
 }
 
+/** Untransformed border-box position in the immediate parent's padding box.
+ * Optional on older runtimes. Read with the inspector snapshot, never by the
+ * host's pointer handlers. */
+export interface DesignRuntimeNodeLayout {
+  x: number;
+  y: number;
+  parentId: string | null;
+  parentWidth: number;
+  parentHeight: number;
+  parentDisplay: string;
+  parentPosition: string;
+  isContainingBlock: boolean;
+}
+
+export interface DesignRuntimeChildrenLayout {
+  /** All direct authored children, including hidden layers. */
+  count: number;
+  /** Visible HTML children with a layout box. Never includes grandchildren. */
+  nodeIds: string[];
+  x: "start" | "center" | "end" | "stretch" | "mixed";
+  y: "start" | "center" | "end" | "stretch" | "mixed";
+  truncated: boolean;
+}
+
 export interface DesignRuntimeNodeDetails {
   sourceVersion: string;
   oid: string;
@@ -116,6 +146,12 @@ export interface DesignRuntimeNodeDetails {
   /** Transform-aware geometry. Omitted by older runtimes; the editor then
    * falls back to the axis-aligned `rect`. */
   box?: DesignRuntimeNodeBox;
+  layout?: DesignRuntimeNodeLayout;
+  /** A bounded aggregate for container controls; omitted by older runtimes. */
+  childrenLayout?: DesignRuntimeChildrenLayout;
+  /** Affine map from the children's padding-box coordinates to frame space.
+   * Includes ancestor transforms, reflections, borders, and container scroll. */
+  childCoordinateSpace?: [number, number, number, number, number, number];
   styles: Record<string, string>;
   /** Computed-style keys with a direct active declaration on this element.
    * Omitted by older runtimes; inspector chrome treats omission as unknown. */
@@ -450,6 +486,45 @@ function isRuntimeTextSizing(value: unknown): value is DesignRuntimeTextSizing {
   );
 }
 
+export function isRuntimeNodeLayout(
+  value: unknown,
+): value is DesignRuntimeNodeLayout {
+  return (
+    isRecord(value) &&
+    isFiniteNumber(value.x) &&
+    isFiniteNumber(value.y) &&
+    (value.parentId === null ||
+      (typeof value.parentId === "string" && value.parentId.length <= 256)) &&
+    isFiniteNumber(value.parentWidth) &&
+    value.parentWidth >= 0 &&
+    isFiniteNumber(value.parentHeight) &&
+    value.parentHeight >= 0 &&
+    typeof value.parentDisplay === "string" &&
+    typeof value.parentPosition === "string" &&
+    typeof value.isContainingBlock === "boolean"
+  );
+}
+
+function isRuntimeChildrenLayout(
+  value: unknown,
+): value is DesignRuntimeChildrenLayout {
+  return (
+    isRecord(value) &&
+    Number.isSafeInteger(value.count) &&
+    (value.count as number) >= 0 &&
+    Array.isArray(value.nodeIds) &&
+    value.nodeIds.length <= DESIGN_LAYOUT_CHILD_LIMIT &&
+    value.nodeIds.length <= (value.count as number) &&
+    value.nodeIds.every(
+      (oid) => typeof oid === "string" && oid.length > 0 && oid.length <= 256,
+    ) &&
+    new Set(value.nodeIds).size === value.nodeIds.length &&
+    ["start", "center", "end", "stretch", "mixed"].includes(String(value.x)) &&
+    ["start", "center", "end", "stretch", "mixed"].includes(String(value.y)) &&
+    typeof value.truncated === "boolean"
+  );
+}
+
 function isRuntimeNodeDetails(
   value: unknown,
 ): value is DesignRuntimeNodeDetails {
@@ -471,6 +546,13 @@ function isRuntimeNodeDetails(
     value.breadcrumb.every((part) => typeof part === "string") &&
     isRuntimeRect(value.rect) &&
     (value.box === undefined || isRuntimeNodeBox(value.box)) &&
+    (value.layout === undefined || isRuntimeNodeLayout(value.layout)) &&
+    (value.childrenLayout === undefined ||
+      isRuntimeChildrenLayout(value.childrenLayout)) &&
+    (value.childCoordinateSpace === undefined ||
+      (Array.isArray(value.childCoordinateSpace) &&
+        value.childCoordinateSpace.length === 6 &&
+        value.childCoordinateSpace.every(isFiniteNumber))) &&
     Object.keys(value.styles).length <= DESIGN_RUNTIME_STYLE_SNAPSHOT_LIMIT &&
     Object.values(value.styles).every((style) => typeof style === "string") &&
     (value.authoredStyleProperties === undefined ||
@@ -687,7 +769,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     "overflow", "overflowX", "overflowY", "aspectRatio", "objectFit", "objectPosition",
     "opacity", "mixBlendMode", "isolation", "boxShadow", "textShadow", "filter",
     "backdropFilter", "clipPath",
-    "transform", "transformOrigin", "perspective", "perspectiveOrigin",
+    "transform", "transformOrigin", "rotate", "scale", "translate", "perspective", "perspectiveOrigin",
     "transition", "transitionProperty", "transitionDuration", "transitionTimingFunction",
     "transitionDelay", "animation", "animationName", "animationDuration",
     "animationTimingFunction", "animationDelay", "animationIterationCount",
@@ -855,6 +937,10 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return element && element.getAttribute
       ? element.getAttribute("data-oid") || ""
       : "";
+  }
+
+  function targetOidOf(element) {
+    return element === document.body ? ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)} : oidOf(element);
   }
 
   function directText(element) {
@@ -1161,10 +1247,8 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var a = linear[0], b = linear[1], c = linear[2], d = linear[3];
     var determinant = a * d - b * c;
     var scaleX = Math.sqrt(a * a + b * b);
-    // A mirrored or collapsed chain has no rotation to report, and a skewed one
-    // paints a parallelogram that no rotated rectangle describes. Both keep the
-    // axis-aligned bounding box rather than claiming a wrong orientation.
-    if (determinant <= 0 || scaleX <= 0) return box;
+    // A collapsed or skewed chain cannot be represented by an oriented box.
+    if (determinant === 0 || scaleX <= 0) return box;
     if (Math.abs((a * c + b * d) / (scaleX * scaleX)) > 0.0005) return box;
     // The transform maps the box's own origin to the affine translation, so the
     // bounding box's minimum corner recovers where that origin landed.
@@ -1172,6 +1256,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var minY = Math.min(0, b * width, b * width + d * height, d * height);
     box.x = roundedGeometry(rect.x - minX);
     box.y = roundedGeometry(rect.y - minY);
+    if (determinant < 0) {
+      // Reflect the local Y axis to describe the same four painted corners
+      // with positive extents, as required by the host's rectangle contract.
+      box.x = roundedGeometry(box.x + c * height);
+      box.y = roundedGeometry(box.y + d * height);
+      box.originY = roundedGeometry(1 - box.originY);
+      determinant = -determinant;
+    }
     box.width = roundedGeometry(width);
     box.height = roundedGeometry(height);
     box.rotation = roundedGeometry((Math.atan2(b, a) * 180) / Math.PI);
@@ -1261,7 +1353,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
 
   function authoredStylePropertiesOf(element) {
     var cached = authoredStylePropertiesCache.get(element);
-    if (cached) return cached.slice();
+    if (cached && cached.inline === element.style.cssText) return cached.properties.slice();
     var authored = new Set(declarationProperties(element.style));
     var rules = styleRuleMetadata();
     for (var ruleIndex = 0; ruleIndex < rules.length; ruleIndex += 1) {
@@ -1275,7 +1367,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       }
     }
     var result = Array.from(authored).slice(0, 128);
-    authoredStylePropertiesCache.set(element, result);
+    authoredStylePropertiesCache.set(element, { inline: element.style.cssText, properties: result });
     return result.slice();
   }
 
@@ -1295,6 +1387,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       var oid = oidOf(node);
       if (oid && !next.has(oid)) next.set(oid, node);
     }
+    if (document.body) next.set(${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)}, document.body);
     elementsByOid = next;
     visibilityOverridesByOid.forEach(function (_display, oid) {
       if (!next.has(oid)) visibilityOverridesByOid.delete(oid);
@@ -1350,8 +1443,98 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result.reverse();
   }
 
+  function layoutOriginOf(element) {
+    var x = 0, y = 0, depth = 0;
+    for (var node = element; node && depth < MAX_TRANSFORM_CHAIN; node = node.offsetParent) {
+      depth += 1;
+      x += node.offsetLeft || 0;
+      y += node.offsetTop || 0;
+      if (node.offsetParent) {
+        x += node.offsetParent.clientLeft || 0;
+        y += node.offsetParent.clientTop || 0;
+      }
+    }
+    return { x: x, y: y };
+  }
+
+  function layoutOf(element, computed) {
+    var parent = element.parentElement;
+    var parentComputed = parent ? getComputedStyle(parent) : null;
+    var own = layoutOriginOf(element);
+    var parentOrigin = parent ? layoutOriginOf(parent) : { x: 0, y: 0 };
+    var parentSize = parentComputed ? borderBoxSizeOf(parentComputed) : null;
+    var x = own.x - parentOrigin.x - (parent ? parent.clientLeft || 0 : 0);
+    var y = own.y - parentOrigin.y - (parent ? parent.clientTop || 0 : 0);
+    // Preserve subpixels for absolute children; offsetLeft/Top are integers.
+    if (parent && element.offsetParent === parent && computed.position === "absolute") {
+      var left = parseFloat(computed.left), top = parseFloat(computed.top);
+      if (isFinite(left)) x = left + (parseFloat(computed.marginLeft) || 0);
+      if (isFinite(top)) y = top + (parseFloat(computed.marginTop) || 0);
+    }
+    return {
+      x: x, y: y,
+      parentId: parent ? targetOidOf(parent) || null : null,
+      parentWidth: Math.max(0, parentSize ? parentSize.width - computedEdgeTotal(parentComputed, ["borderLeftWidth", "borderRightWidth"]) : parent ? parent.clientWidth || 0 : window.innerWidth),
+      parentHeight: Math.max(0, parentSize ? parentSize.height - computedEdgeTotal(parentComputed, ["borderTopWidth", "borderBottomWidth"]) : parent ? parent.clientHeight || 0 : window.innerHeight),
+      parentDisplay: parentComputed ? parentComputed.display : "block",
+      parentPosition: parentComputed ? parentComputed.position : "static",
+      isContainingBlock: !!parent && (element.offsetParent === parent || parentComputed.position !== "static")
+    };
+  }
+
+  function childCoordinateSpaceOf(element, computed, rect) {
+    var size = borderBoxSizeOf(computed);
+    var matrix = size ? accumulatedLinearOf(element) : null;
+    if (!matrix || Math.abs(matrix[0] * matrix[3] - matrix[1] * matrix[2]) < 0.000001) return undefined;
+    var a = matrix[0], b = matrix[1], c = matrix[2], d = matrix[3];
+    var x = (parseFloat(computed.borderLeftWidth) || 0) - element.scrollLeft;
+    var y = (parseFloat(computed.borderTopWidth) || 0) - element.scrollTop;
+    return [a, b, c, d,
+      rect.x - Math.min(0, a * size.width, c * size.height, a * size.width + c * size.height) + a * x + c * y,
+      rect.y - Math.min(0, b * size.width, d * size.height, b * size.width + d * size.height) + b * x + d * y];
+  }
+
+  function childConstraintOf(element, computed, authored, axis) {
+    var property = "--zeros-layout-" + axis;
+    var marker = authored.indexOf(property) >= 0 ? computed.getPropertyValue(property).trim() : "";
+    if (["start", "center", "end", "stretch"].indexOf(marker) >= 0) return marker;
+    if (computed.position !== "absolute" && computed.position !== "fixed") return "start";
+    var start = axis === "x" ? "left" : "top";
+    var end = axis === "x" ? "right" : "bottom";
+    var hasStart = authored.indexOf(start) >= 0 && computed[start] !== "auto";
+    var hasEnd = authored.indexOf(end) >= 0 && computed[end] !== "auto";
+    return hasEnd ? hasStart ? "stretch" : "end" : "start";
+  }
+
+  function childrenLayoutOf(element, computed) {
+    var children = [];
+    for (var index = 0; index < element.children.length; index += 1) {
+      var child = element.children[index];
+      if (oidOf(child)) children.push(child);
+    }
+    var result = { count: children.length, nodeIds: [], x: "start", y: "start", truncated: children.length > ${DESIGN_LAYOUT_CHILD_LIMIT} };
+    if (result.truncated) {
+      result.x = result.y = "mixed";
+      return result;
+    }
+    if (computed.display === "contents" || !visibleOf(element, computed)) return result;
+    for (var index = 0; index < children.length; index += 1) {
+      var child = children[index];
+      if (!(child instanceof HTMLElement)) continue;
+      var childComputed = getComputedStyle(child);
+      if (childComputed.display === "contents" || !visibleOf(child, childComputed)) continue;
+      var authored = authoredStylePropertiesOf(child);
+      var x = childConstraintOf(child, childComputed, authored, "x");
+      var y = childConstraintOf(child, childComputed, authored, "y");
+      result.x = result.nodeIds.length === 0 ? x : result.x === x ? x : "mixed";
+      result.y = result.nodeIds.length === 0 ? y : result.y === y ? y : "mixed";
+      result.nodeIds.push(oidOf(child));
+    }
+    return result;
+  }
+
   function detailsOf(element) {
-    var oid = oidOf(element);
+    var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"
       ? window.CSS.escape(oid)
@@ -1367,11 +1550,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       name: nameOf(element),
       text: textEditable ? editableTextOf(element) : directText(element),
       textEditable: textEditable,
-      selector: "[data-oid=\"" + escaped + "\"]",
+      selector: element === document.body ? "body" : "[data-oid=\"" + escaped + "\"]",
       visible: visibleOf(element, computed),
       breadcrumb: breadcrumbOf(element),
       rect: rect,
       box: boxOf(element, computed, rect),
+      layout: layoutOf(element, computed),
+      childrenLayout: childrenLayoutOf(element, computed),
+      childCoordinateSpace: childCoordinateSpaceOf(element, computed, rect),
       styles: stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
@@ -1380,7 +1566,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function frameDetailsOf(element) {
-    var oid = oidOf(element);
+    var oid = targetOidOf(element);
     if (oid) return detailsOf(element);
     var computed = getComputedStyle(element);
     var authoredStyleProperties = authoredStylePropertiesOf(element);
@@ -1397,6 +1583,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       breadcrumb: [],
       rect: rect,
       box: boxOf(element, computed, rect),
+      childrenLayout: childrenLayoutOf(element, computed),
       styles: stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
@@ -1404,9 +1591,14 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function frameElement() {
-    return document.querySelector("main[data-oid]") ||
-      document.body ||
-      document.documentElement;
+    var body = document.body;
+    if (body) {
+      var roots = Array.from(body.children).filter(function (child) { return !!oidOf(child); });
+      // Only explicitly seeded frame shells share the canvas row. An authored
+      // main/div may be a small visible layer with its own children and styles.
+      if (roots.length === 1 && roots[0].hasAttribute("data-zeros-frame-root")) return roots[0];
+    }
+    return body || document.documentElement;
   }
 
   function parsedColor(value) {
@@ -1882,7 +2074,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * reflects the styles just applied — and every later read in this same task is
    * free, which is what lets the children come along without a second reflow. */
   function geometryOf(element, includeChildren) {
-    var oid = oidOf(element);
+    var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var computed = getComputedStyle(element);
     var rect = rectOf(element);
@@ -1994,8 +2186,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         var rule = rules[ruleIndex];
         if (rule.type !== CSSRule.STYLE_RULE || !rule.selectorText || !rule.style) continue;
         var selectorMatch = selectorPattern.exec(rule.selectorText.trim());
-        if (!selectorMatch) continue;
-        var ruleOid = selectorMatch[1] || selectorMatch[2] || selectorMatch[3] || "";
+        var ruleOid = rule.selectorText.trim() === "body"
+          ? ${JSON.stringify(DESIGN_RUNTIME_DOCUMENT_BODY_ID)}
+          : selectorMatch ? selectorMatch[1] || selectorMatch[2] || selectorMatch[3] || "" : "";
         if (!ruleOid) continue;
         var bucket = index.get(ruleOid);
         if (!bucket) {

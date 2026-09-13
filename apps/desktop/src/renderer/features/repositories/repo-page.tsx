@@ -5,9 +5,9 @@
 // PAGE: RepoPage
 // ROUTE: activePage === "repo" (store.activeRepoId picks the project)
 // PURPOSE: The Home surface's per-repository hub. A centered page column shows
-//          the repo's logo + name on top, with one segmented toggle below it —
-//          Workspaces · Environment · Git · Actions · Paths — and the active
-//          view's content underneath. Scripts and run actions live INSIDE the
+//          the repo's logo + name on top, with Code/Design modes beside the
+//          tabs. Code holds Workspaces, Environment, Git, Actions, Files and
+//          Paths; Design holds Directory and Preferences. Scripts and run actions live INSIDE the
 //          Environment view (below Secrets). No inner section
 //          nav, no per-page sidebar; Paths carries the repo's identity/paths/
 //          remove-repository content. The only header chrome is the
@@ -41,6 +41,8 @@ import { branchDisplayName } from "../../shared/lib/branch-name";
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
 import { WorkspaceContextMenu } from "../../shared/ui/workspace-context-menu";
+import { WorkspaceModeToggleView } from "../../shared/ui/workspace-mode-header";
+import { repoPageModeForView } from "../../state/repo-page-mode";
 import { RepositoryIcon } from "./repository-icon";
 import {
   selectRepoPageView,
@@ -80,7 +82,7 @@ import {
 
 // ── View model ───────────────────────────────────────────
 //
-// The page has ONE selector: "workspaces" plus each visible settings section.
+// Each mode has its own tabs, with selection memory owned by the repository.
 // MCP is not a view — it lives on the Customize page (repo scope). Paths IS
 // one: it holds the repo identity (Name / Slug / Origin / Root path), the
 // workspaces-path editor, and Remove repository.
@@ -91,6 +93,7 @@ const CONFIG_VIEW_IDS = [
   "actions",
   "files",
   "design",
+  "design-preferences",
   "paths",
 ] as const satisfies readonly RepoSectionId[];
 
@@ -104,6 +107,12 @@ function isConfigViewId(value: string): value is RepoConfigViewId {
 
 /** The toggle entries for the settings views, in REPO_SECTIONS order. */
 const CONFIG_VIEWS = REPO_SECTIONS.filter((s) => isConfigViewId(s.id));
+const CODE_CONFIG_VIEWS = CONFIG_VIEWS.filter(
+  (s) => repoPageModeForView(s.id) === "code",
+);
+const DESIGN_CONFIG_VIEWS = CONFIG_VIEWS.filter(
+  (s) => repoPageModeForView(s.id) === "design",
+);
 /** Retain common repo/view pairs without keeping every repository form alive. */
 const MAX_RETAINED_REPO_VIEWS = 8;
 
@@ -386,6 +395,8 @@ export function RepoPage({ project }: { project: Project }) {
     selectRepoPageView(state, project.id),
   );
   const view = persistedView;
+  const mode = repoPageModeForView(view);
+  const configViews = mode === "code" ? CODE_CONFIG_VIEWS : DESIGN_CONFIG_VIEWS;
 
   // Recently visited repo/view trees survive repository and section switches.
   // This retains local form state and Keychain-backed rows; the shared settings
@@ -467,7 +478,7 @@ export function RepoPage({ project }: { project: Project }) {
         <OpenRepoSettingsButton repoRoot={project.repoRoot} />
       </div>
 
-      {/* Left-aligned page column: logo + name, the one view toggle, then the
+      {/* Left-aligned page column: logo + name, the mode toggle and tabs, then the
           active view. The left gutter is responsive, growing with the window
           width but capped at 100px so the content hugs the left on wide screens. */}
       <div ref={pageScrollRef} className="min-h-0 flex-1 overflow-y-auto">
@@ -488,33 +499,58 @@ export function RepoPage({ project }: { project: Project }) {
               </h1>
             </div>
 
-            <Tabs
-              value={view}
-              onValueChange={(v) => setView(v as RepoPageView)}
+            <div
+              className="flex w-full min-w-0 items-center gap-1"
+              data-repo-settings-navigation=""
             >
-              <TabsList className="h-8">
-                <TabsTrigger value="workspaces" className="text-xs">
-                  Workspaces
-                </TabsTrigger>
-                {CONFIG_VIEWS.map((s) => (
-                  <TabsTrigger
-                    key={s.id}
-                    value={s.id}
-                    className="text-xs"
-                    // Warm on intent: the Files tab's scan is the only repo-page
-                    // read the boot/hover settings prefetch doesn't already
-                    // cover, so opening it would otherwise land on a spinner.
-                    // The click handler itself never awaits.
-                    onPointerEnter={
-                      s.id === "files" ? warmFilesToCopy : undefined
-                    }
-                    onFocus={s.id === "files" ? warmFilesToCopy : undefined}
-                  >
-                    {s.label}
-                  </TabsTrigger>
-                ))}
-              </TabsList>
-            </Tabs>
+              <WorkspaceModeToggleView
+                mode={mode}
+                disabled={!pageActive}
+                switching={false}
+                ariaLabel="Repository settings mode"
+                onModeChange={(next) =>
+                  dispatch({
+                    type: "SET_REPO_PAGE_MODE",
+                    projectId: project.id,
+                    mode: next,
+                  })
+                }
+              />
+              <Tabs
+                key={mode}
+                value={view}
+                onValueChange={(v) => setView(v as RepoPageView)}
+                className="min-w-0 overflow-x-auto"
+              >
+                <TabsList
+                  className="h-7"
+                  aria-label={`${mode === "code" ? "Code" : "Design"} repository settings`}
+                >
+                  {mode === "code" && (
+                    <TabsTrigger value="workspaces" className="py-0.5 text-xs">
+                      Workspaces
+                    </TabsTrigger>
+                  )}
+                  {configViews.map((s) => (
+                    <TabsTrigger
+                      key={s.id}
+                      value={s.id}
+                      className="py-0.5 text-xs"
+                      // Warm on intent: the Files tab's scan is the only repo-page
+                      // read the boot/hover settings prefetch doesn't already
+                      // cover, so opening it would otherwise land on a spinner.
+                      // The click handler itself never awaits.
+                      onPointerEnter={
+                        s.id === "files" ? warmFilesToCopy : undefined
+                      }
+                      onFocus={s.id === "files" ? warmFilesToCopy : undefined}
+                    >
+                      {s.label}
+                    </TabsTrigger>
+                  ))}
+                </TabsList>
+              </Tabs>
+            </div>
           </div>
 
           <div className="w-full pt-8">

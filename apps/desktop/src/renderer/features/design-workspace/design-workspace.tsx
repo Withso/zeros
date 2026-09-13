@@ -37,7 +37,10 @@ import type {
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
-import { type DesignOperation } from "@zeros/design-core";
+import {
+  DESIGN_TRANSACTION_MAX_OPERATIONS,
+  type DesignOperation,
+} from "@zeros/design-core";
 import type {
   DesignAuthoredKeyframes,
   DesignStyleProvenance,
@@ -45,6 +48,10 @@ import type {
 
 import { exportDesignPng } from "../../platform/design";
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
+import {
+  canInsertDesignFrame,
+  designFrameInsertionOperations,
+} from "./design-frame-insertion";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -66,6 +73,7 @@ import {
   insertDesignAssetCached,
   applyDesignHistoryCached,
   applyDesignTransactionCached,
+  applyDesignEditCached,
   renameDesignFrameAndRefresh,
   commitDesigns,
   saveDesigns,
@@ -211,6 +219,22 @@ import { hasDesignAssetDrag, readDesignAssetDrag } from "./design-assets";
 import { DesignThemeEditor } from "./design-theme-editor";
 import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import { DesignStyleEditor } from "./design-style-editor";
+import {
+  designLayoutChildUpdates,
+  designLayoutChildrenSummary,
+  designLayoutResizedFrame,
+  isDesignLayoutChildAction,
+} from "./design-layout-children";
+import {
+  designLayoutActionStyles,
+  designLayoutActionUpdates,
+  designLayoutTransform,
+  preserveDesignLayoutPins,
+  designLayoutFieldValue,
+  roundDesignLayoutValue,
+  type DesignLayoutAction,
+  type DesignLayoutFieldOptions,
+} from "./design-layout-values";
 import { DesignCanvasBackgroundEditor } from "./design-canvas-background-editor";
 import {
   normalizeDesignCanvasBackground,
@@ -262,6 +286,7 @@ import {
   isDesignRuntimeStylePropertyAuthored,
   normalizeDesignStyleFieldInput,
   parseDesignStyleNumericParts,
+  readDesignComputedStyle,
   replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
   scrubDesignNumericValue,
@@ -3200,6 +3225,7 @@ function DesignCanvas({
         selectionKey: string;
         nodes: Array<{
           nodeId: string;
+          details: DesignRuntimeNodeDetails;
           position: string;
           left: number;
           top: number;
@@ -3209,6 +3235,7 @@ function DesignCanvas({
       }
     | {
         mode: "resize";
+        details: DesignRuntimeNodeDetails;
         frame: DesignCanvasFrameWire;
         nodeId: string;
         width: number;
@@ -4399,6 +4426,7 @@ function DesignCanvas({
           ? [
               {
                 nodeId,
+                details,
                 position:
                   details.styles.position === "static"
                     ? "relative"
@@ -4436,11 +4464,11 @@ function DesignCanvas({
             frame: gesture.frame.file,
             sourceVersion: gesture.frame.sourceVersion,
             nodeId: node.nodeId,
-            styles: {
+            styles: preserveDesignLayoutPins(node.details, {
               position: node.position,
-              left: `${node.left + gesture.dx}px`,
-              top: `${node.top + gesture.dy}px`,
-            },
+              left: `${Math.round(node.left + gesture.dx)}px`,
+              top: `${Math.round(node.top + gesture.dy)}px`,
+            }),
           }),
         ),
       ).catch(() => {});
@@ -4474,6 +4502,7 @@ function DesignCanvas({
           ? current
           : {
               mode: "resize" as const,
+              details: selectedNodeDetails,
               frame: selectedFrame,
               nodeId: selectedNodeDetails.oid,
               // The element's own box, not the larger bounding box a rotation
@@ -4496,10 +4525,10 @@ function DesignCanvas({
         frame: gesture.frame.file,
         sourceVersion: gesture.frame.sourceVersion,
         nodeId: gesture.nodeId,
-        styles: {
+        styles: preserveDesignLayoutPins(gesture.details, {
           width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`,
           height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px`,
-        },
+        }),
       }).catch(() => {});
       return true;
     },
@@ -4522,22 +4551,21 @@ function DesignCanvas({
       gesture.mode === "move"
         ? gesture.nodes.map((node) => ({
             nodeId: node.nodeId,
-            styles: {
+            styles: preserveDesignLayoutPins(node.details, {
               position: node.position,
-              left: `${node.left + gesture.dx}px`,
-              top: `${node.top + gesture.dy}px`,
-            },
+              left: `${Math.round(node.left + gesture.dx)}px`,
+              top: `${Math.round(node.top + gesture.dy)}px`,
+            }),
           }))
         : [
             {
               nodeId: gesture.nodeId,
-              styles: {
+              styles: preserveDesignLayoutPins(gesture.details, {
                 width: `${Math.max(1, Math.round(gesture.width + gesture.dw))}px`,
                 height: `${Math.max(1, Math.round(gesture.height + gesture.dh))}px`,
-              },
+              }),
             },
           ];
-    const foundation = canvasFoundation.data;
     const commit =
       updates.length === 1
         ? updateDesignNodeStylesCached(workspaceId, {
@@ -4546,28 +4574,22 @@ function DesignCanvas({
             sourceVersion: gesture.frame.sourceVersion,
             styles: updates[0]!.styles,
           })
-        : foundation
-          ? applyDesignTransactionCached(workspaceId, gesture.frame.file, {
-              schemaVersion: 1,
-              transactionId: `desktop:${crypto.randomUUID()}`,
-              documentId: foundation.summary.documentId,
-              baseRevision: foundation.summary.revision,
-              actor: { kind: "human", id: "desktop" },
-              intent: `Move ${updates.length} selected layers`,
-              createdAt: Date.now(),
-              operations: updates.map((update) => ({
-                operationId: `move:${crypto.randomUUID()}`,
-                type: "node.set-styles" as const,
-                nodeId: update.nodeId,
-                styles: update.styles,
-                scope: "auto" as const,
-                responsiveContext: "base",
-                stateContext: "default",
-              })),
-            })
-          : Promise.reject(
-              new Error("The selected design document is still loading."),
-            );
+        : applyDesignEditCached(workspaceId, gesture.frame, {
+            schemaVersion: 1,
+            transactionId: `desktop:${crypto.randomUUID()}`,
+            actor: { kind: "human", id: "desktop" },
+            intent: `Move ${updates.length} selected layers`,
+            createdAt: Date.now(),
+            operations: updates.map((update) => ({
+              operationId: `move:${crypto.randomUUID()}`,
+              type: "node.set-styles" as const,
+              nodeId: update.nodeId,
+              styles: update.styles,
+              scope: "auto" as const,
+              responsiveContext: "base",
+              stateContext: "default",
+            })),
+          });
     void commit
       .catch((error) => {
         void Promise.all(
@@ -4585,7 +4607,7 @@ function DesignCanvas({
         });
       })
       .finally(() => setSelectionOverlaySuppressed(false));
-  }, [canvasFoundation.data, workspaceId]);
+  }, [workspaceId]);
 
   /** Move/resize previews paint one node; release publishes one engine write. */
   const startFrameGesture = useCallback(
@@ -4810,6 +4832,24 @@ function DesignCanvas({
           };
       const start = { x: event.clientX, y: event.clientY };
       const base = parseDesignTransform(details.styles.transform ?? "none");
+      // Independent CSS scale is outside transform's rotation. Reflecting one
+      // axis reverses the angle authored inside it, while two flips cancel.
+      // A just-clicked flip can still be awaiting its confirmed detail read.
+      const previewScale = designLivePreviewValue(
+        workspaceId,
+        frame.file,
+        details.oid,
+        "scale",
+      );
+      const scales = (
+        previewScale === undefined
+          ? (details.styles.scale ?? "none")
+          : (previewScale ?? "none")
+      )
+        .split(/\s+/)
+        .map(Number);
+      const rotationDirection =
+        scales[0]! * (scales[1] ?? scales[0]!) < 0 ? -1 : 1;
       const feedback = overlay.querySelector<HTMLElement>(
         "[data-design-rotation-feedback]",
       );
@@ -4853,11 +4893,13 @@ function DesignCanvas({
         );
         if (!moved && Math.abs(delta) < 0.2) return;
         moved = true;
-        const rotate = Math.round((base.rotate + delta) * 10) / 10;
+        const rotate =
+          Math.round((base.rotate + delta * rotationDirection) * 10) / 10;
         latestTransform = formatDesignTransform({ ...base, rotate });
         // Paint the angle that is actually being authored, so the outline and
         // the element never disagree by a rounding step.
-        latestRotation = overlayFrame.rotation + (rotate - base.rotate);
+        latestRotation =
+          overlayFrame.rotation + (rotate - base.rotate) * rotationDirection;
         // The overlay is already anchored on the pivot, so turning it further
         // about that same point needs no reflow and no repositioning.
         overlay.style.transform = `rotate(${latestRotation}deg)`;
@@ -5562,11 +5604,11 @@ function DesignCanvas({
       const updates = () =>
         starts.map((start) => ({
           nodeId: start.details.oid,
-          styles: {
+          styles: preserveDesignLayoutPins(start.details, {
             position: start.position,
             left: `${Math.round(start.left + delta.x)}px`,
             top: `${Math.round(start.top + delta.y)}px`,
-          },
+          }),
         }));
       // The whole group is one flight: its members must never land a frame apart.
       const loop = createDesignGestureLoop<unknown>({
@@ -5900,7 +5942,7 @@ function DesignCanvas({
           const rect = latestRects.get(start.details.oid) ?? start.details.rect;
           return {
             nodeId: start.details.oid,
-            styles: {
+            styles: preserveDesignLayoutPins(start.details, {
               position: start.position,
               left: `${Math.round(
                 start.left + rect.x - start.details.rect.x,
@@ -5920,7 +5962,7 @@ function DesignCanvas({
                   rect.height,
                 ),
               )}px`,
-            },
+            }),
           };
         });
       // The whole group is one flight: its members must never land a frame apart.
@@ -6164,9 +6206,7 @@ function DesignCanvas({
       const startY = event.clientY;
       const box = designSelectionBox(details);
       const startOverlay = designSelectionOverlayFrame(box);
-      const ownTransform = parseDesignTransform(
-        details.styles.transform ?? "none",
-      );
+      const ownTransform = designLayoutTransform(details);
       // A rotated or scaled chain needs gesture math of its own: pointer travel
       // maps through the element's own axes, the held anchor has to be kept
       // still by hand, and peer snapping would align a bounding box the user
@@ -6178,8 +6218,8 @@ function DesignCanvas({
         Math.abs(ownTransform.skewX) > 0.001 ||
         Math.abs(ownTransform.skewY) > 0.001;
       const ancestorRotation = box.rotation - ownTransform.rotate;
-      const ancestorScaleX = box.scaleX / (ownTransform.scaleX || 1);
-      const ancestorScaleY = box.scaleY / (ownTransform.scaleY || 1);
+      const ancestorScaleX = box.scaleX / (Math.abs(ownTransform.scaleX) || 1);
+      const ancestorScaleY = box.scaleY / (Math.abs(ownTransform.scaleY) || 1);
       const start = turned
         ? {
             x: box.x,
@@ -6335,6 +6375,7 @@ function DesignCanvas({
             computedPosition === "static" ? "relative" : computedPosition;
           styles.top = `${vertical.offset}px`;
         }
+        Object.assign(styles, preserveDesignLayoutPins(details, styles));
         const width = start.width + horizontal.sizeTravel * box.scaleX;
         const height = start.height + vertical.sizeTravel * box.scaleY;
         // A rotated element grows away from its own top-left and turns about a
@@ -7093,6 +7134,7 @@ function DesignCanvas({
             ? rootCandidate.rect
             : null,
         labeledFrame: input.frame.kind !== "text",
+        frameRootId: runtimeState?.snapshot?.frame.oid,
       });
       if (target.kind === "node") {
         return {
@@ -7351,8 +7393,105 @@ function DesignCanvas({
     }
   }, []);
 
-  /** Frame is a real modal canvas tool: pointer-down owns one inverse-zoom
-   * drag and commits the final world rect as the frame's initial geometry. */
+  /** A frame drawn inside a document belongs to its nearest frame container. */
+  const createChildFrame = useCallback(
+    async (
+      owner: DesignCanvasFrameWire,
+      start: { x: number; y: number },
+      end?: { x: number; y: number },
+    ) => {
+      if (!workspaceId || !folder || creatingFrameRef.current) return;
+      creatingFrameRef.current = true;
+      setCreatingFrame(true);
+      const selection = designWorkspaceView(workspaceId);
+      try {
+        const runtime = designFrameRuntime(workspaceId, owner.file);
+        if (!runtime)
+          throw new Error("The frame is still preparing its editable surface.");
+        let parent = await runtime.getElementAtLoc(start.x, start.y, {
+          mode: "deepest",
+        });
+        // Text and images can be hit while drawing; insert beside them inside
+        // their nearest frame, never inside a text node or a void element.
+        for (
+          let depth = 0;
+          parent && !canInsertDesignFrame(parent) && depth < 32;
+          depth++
+        ) {
+          parent = parent.layout?.parentId
+            ? await runtime.getNodeDetails(parent.layout.parentId)
+            : null;
+        }
+        if (!parent) {
+          const snapshot = await runtime.getSnapshot();
+          parent = snapshot.frame.oid
+            ? await runtime.getNodeDetails(snapshot.frame.oid)
+            : null;
+        }
+        if (!parent || !canInsertDesignFrame(parent))
+          throw new Error("Select a drawable frame for the new child.");
+        const nodeId = `frame-${crypto.randomUUID()}`;
+        const operations = designFrameInsertionOperations(
+          parent,
+          nodeId,
+          start,
+          end,
+        );
+        const key = designFoundationKey(
+          workspaceId,
+          owner.file,
+          parent.sourceVersion,
+        );
+        const foundation = await designFoundationCache.load(
+          key,
+          () => fetchDesignFoundation(key),
+          { maxAgeMs: Number.POSITIVE_INFINITY },
+        );
+        const result = await applyDesignTransactionCached(
+          workspaceId,
+          owner.file,
+          {
+            schemaVersion: 1,
+            transactionId: `desktop:${crypto.randomUUID()}`,
+            documentId: foundation.summary.documentId,
+            baseRevision: foundation.summary.revision,
+            actor: { kind: "human", id: "desktop" },
+            intent: "Create child frame",
+            createdAt: Date.now(),
+            operations,
+          },
+        );
+        const current = designWorkspaceView(workspaceId);
+        const nextFrame = result.snapshot?.frames.find(
+          (frame) => frame.file === owner.file,
+        );
+        if (
+          nextFrame &&
+          current.selectedFrame === selection.selectedFrame &&
+          current.selectedNodeId === selection.selectedNodeId
+        ) {
+          // Publish identity immediately; the incoming runtime's ready snapshot
+          // completes details for the newly authored node.
+          void selectDesignNode({
+            workspaceId,
+            folder,
+            frame: nextFrame,
+            nodeId,
+          }).catch(() => {});
+        }
+      } catch (error) {
+        toast.error("Couldn't create the child frame", {
+          description: errorMessage(error),
+        });
+      } finally {
+        creatingFrameRef.current = false;
+        setCreatingFrame(false);
+      }
+    },
+    [folder, workspaceId],
+  );
+
+  /** Pointer-down captures one canvas owner and inverse-zoom drag. */
   const startFrameCreation = useCallback(
     (event: React.PointerEvent<HTMLElement>) => {
       if (
@@ -7376,6 +7515,11 @@ function DesignCanvas({
         gestureViewport,
       );
       const pointerOwner = event.currentTarget;
+      const ownerFile = pointerOwner.closest<HTMLElement>("[data-design-frame]")
+        ?.dataset.designFrame;
+      const owner = snapshot?.frames.find(
+        (frame) => frame.file === ownerFile && frame.kind !== "text",
+      );
       const pointerId = event.pointerId;
       let latest = start;
       let moved = false;
@@ -7447,7 +7591,16 @@ function DesignCanvas({
         );
         cleanup(false);
         activateTool("select");
-        void createFrame(geometry).finally(hideCreationDraft);
+        const creation = owner
+          ? createChildFrame(
+              owner,
+              { x: start.x - owner.x, y: start.y - owner.y },
+              moved
+                ? { x: latest.x - owner.x, y: latest.y - owner.y }
+                : undefined,
+            )
+          : createFrame(geometry);
+        void creation.finally(hideCreationDraft);
       };
       const cancel = () => cleanup();
 
@@ -7466,6 +7619,7 @@ function DesignCanvas({
       activeTool,
       activateTool,
       createFrame,
+      createChildFrame,
       hideCreationDraft,
       paintCreationDraft,
       snapshot?.frames,
@@ -9144,6 +9298,8 @@ interface InspectorEditFieldProps {
   hint?: string;
   placeholder?: string;
   styleProperty?: string;
+  whole?: boolean;
+  compact?: boolean;
   motion?: {
     modeActive: boolean;
     trackActive: boolean;
@@ -9163,7 +9319,9 @@ interface InspectorFieldPresentation {
 function inspectorFieldPresentation(
   property: string | undefined,
   value: string,
+  whole = false,
 ): InspectorFieldPresentation {
+  if (whole) value = roundDesignLayoutValue(value);
   if (!property || value.trim() === "") return { text: value, unit: null };
   const numeric = parseDesignStyleNumericParts(value);
   if (!numeric) return { text: value, unit: null };
@@ -9194,6 +9352,8 @@ function InspectorEditField({
   hint,
   placeholder,
   styleProperty,
+  whole = false,
+  compact = false,
   motion,
   onInspect,
   onPreview,
@@ -9221,25 +9381,27 @@ function InspectorEditField({
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [presentation, setPresentation] = useState<InspectorFieldPresentation>(
-    () => inspectorFieldPresentation(styleProperty, String(value)),
+    () => inspectorFieldPresentation(styleProperty, String(value), whole),
   );
 
   const setPresentedDraft = useCallback(
     (next: string) => {
       draftRef.current = next;
       setDraft(next);
-      setPresentation(inspectorFieldPresentation(styleProperty, next));
+      setPresentation(inspectorFieldPresentation(styleProperty, next, whole));
     },
-    [styleProperty],
+    [styleProperty, whole],
   );
   const unitOptions = presentation.unit
     ? designStyleUnitOptions(styleProperty ?? "", presentation.unit)
     : [];
 
-  const resolveDraft = (next: string, baseline: string) =>
-    styleProperty
+  const resolveDraft = (next: string, baseline: string) => {
+    const resolved = styleProperty
       ? normalizeDesignStyleFieldInput(styleProperty, next, baseline)
       : resolveDesignNumericExpression(next, baseline);
+    return whole ? roundDesignLayoutValue(resolved) : resolved;
+  };
 
   useEffect(() => {
     if (document.activeElement === inputRef.current) return;
@@ -9300,6 +9462,10 @@ function InspectorEditField({
       return;
     }
     const baseline = baselineRef.current;
+    if (requestedDraft === baseline) {
+      cancelPreview();
+      return;
+    }
     const resolvedDraft = resolveDraft(requestedDraft, baseline);
     if (resolvedDraft !== requestedDraft) setPresentedDraft(resolvedDraft);
     if (resolvedDraft === baseline) {
@@ -9332,9 +9498,14 @@ function InspectorEditField({
         data-design-inspector-field=""
         data-design-applied={applied ? "" : undefined}
         data-design-style-property={styleProperty}
+        data-design-layout-field={compact ? "" : undefined}
         className={cn(
           "flex h-7 min-w-0 items-center overflow-hidden rounded-sm transition-colors",
-          applied ? "zd-design-control-applied" : "zd-design-control-quiet",
+          compact
+            ? "zd-design-layout-field"
+            : applied
+              ? "zd-design-control-applied"
+              : "zd-design-control-quiet",
         )}
       >
         <button
@@ -9342,9 +9513,17 @@ function InspectorEditField({
           disabled={disabled}
           className={cn(
             "text-muted-fg hover:text-fg1 flex h-full shrink-0 cursor-ew-resize items-center justify-center text-[10px] font-medium focus-visible:outline-none disabled:cursor-default",
-            label.length > 4 ? "max-w-16 min-w-10 px-1.5" : "w-7",
+            compact
+              ? "w-5"
+              : label.length > 4
+                ? "max-w-16 min-w-10 px-1.5"
+                : "w-7",
           )}
-          title={`Drag to scrub ${label}. Option for decimals; Shift for larger steps.`}
+          title={
+            whole
+              ? `Drag to scrub ${label}. Shift for larger steps.`
+              : `Drag to scrub ${label}. Option for decimals; Shift for larger steps.`
+          }
           aria-label={`Scrub ${label}`}
           onPointerDown={(event) => {
             const startValue = baselineRef.current;
@@ -9365,15 +9544,18 @@ function InspectorEditField({
           onPointerMove={(event) => {
             const scrub = scrubRef.current;
             if (!scrub || scrub.pointerId !== event.pointerId) return;
-            const multiplier = event.altKey ? 0.1 : event.shiftKey ? 10 : 1;
+            const multiplier =
+              !whole && event.altKey ? 0.1 : event.shiftKey ? 10 : 1;
             const next = scrubDesignNumericValue(
               scrub.startValue,
               (event.clientX - scrub.startX) * multiplier,
             );
-            if (next === null || next === scrub.latestValue) return;
-            scrub.latestValue = next;
-            setPresentedDraft(next);
-            preview(next);
+            if (next === null) return;
+            const resolved = whole ? roundDesignLayoutValue(next) : next;
+            if (resolved === scrub.latestValue) return;
+            scrub.latestValue = resolved;
+            setPresentedDraft(resolved);
+            preview(resolved);
           }}
           onPointerUp={(event) => {
             const scrub = scrubRef.current;
@@ -9390,18 +9572,41 @@ function InspectorEditField({
             cancelPreview();
           }}
         >
-          <Label htmlFor={id} className="pointer-events-none text-[10px]">
-            {label}
+          <Label
+            htmlFor={id}
+            className={cn(
+              "pointer-events-none",
+              compact ? "text-xs" : "text-[10px]",
+            )}
+          >
+            {compact && label === "Rotation" ? (
+              <svg
+                viewBox="0 0 16 16"
+                className="size-3.5"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.25"
+                aria-hidden="true"
+              >
+                <path d="M2 12h12M3 12l7-9M7 12a4 4 0 0 0-1.5-3" />
+              </svg>
+            ) : (
+              label
+            )}
           </Label>
         </button>
         <Input
           ref={inputRef}
           id={id}
+          aria-label={label}
           value={presentation.text}
           placeholder={placeholder}
           disabled={disabled}
           title={hint}
-          className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-1.5 py-0 font-mono text-[11px] shadow-none focus-visible:border-transparent"
+          className={cn(
+            "h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-1.5 py-0 shadow-none focus-visible:border-transparent",
+            compact ? "px-0.5 font-sans text-xs" : "font-mono text-[11px]",
+          )}
           onFocus={() => {
             baselineRef.current = String(value);
             onInspect?.();
@@ -9451,7 +9656,8 @@ function InspectorEditField({
             } else if (event.key === "ArrowUp" || event.key === "ArrowDown") {
               const normalized = resolveDraft(draft, baselineRef.current);
               const direction = event.key === "ArrowUp" ? 1 : -1;
-              const multiplier = event.altKey ? 0.1 : event.shiftKey ? 10 : 1;
+              const multiplier =
+                !whole && event.altKey ? 0.1 : event.shiftKey ? 10 : 1;
               const next = scrubDesignNumericValue(
                 normalized,
                 direction * multiplier,
@@ -9478,7 +9684,10 @@ function InspectorEditField({
             }
           }}
         />
-        {presentation.unit && unitOptions.length > 0 ? (
+        {compact && styleProperty === "rotate" ? (
+          <span className="text-muted-fg pr-2 text-xs">°</span>
+        ) : null}
+        {!compact && presentation.unit && unitOptions.length > 0 ? (
           <Select
             value={presentation.unit}
             disabled={disabled}
@@ -9530,14 +9739,14 @@ function InspectorEditField({
             </SelectContent>
           </Select>
         ) : null}
-        {motion || applied ? (
+        {motion || (!compact && applied) ? (
           <div
             className={cn(
               "zd-design-field-actions absolute top-0 right-0 flex h-full items-center rounded-r-sm",
               (motion?.modeActive || motion?.trackActive) &&
                 "zd-design-field-actions-visible",
             )}
-            data-has-unit={presentation.unit ? "true" : undefined}
+            data-has-unit={presentation.unit && !compact ? "true" : undefined}
             data-has-hint={hint ? "true" : undefined}
           >
             {motion ? (
@@ -9615,6 +9824,11 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   property,
   value,
   computedValue,
+  options,
+  details,
+  onLayoutAction,
+  onPreviewLayoutAction,
+  disabled,
   applied,
   hint,
   onInspect,
@@ -9632,6 +9846,11 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
   property: string;
   value: string;
   computedValue: string;
+  options?: DesignLayoutFieldOptions;
+  details?: DesignRuntimeNodeDetails;
+  onLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
+  onPreviewLayoutAction?: (action: DesignLayoutAction) => Promise<void>;
+  disabled?: boolean;
   applied: boolean;
   hint?: string;
   onInspect: (property: string, computedValue: string) => void;
@@ -9650,14 +9869,59 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
     nodeId,
     property,
   );
-  const displayedValue =
+  const farEdge =
+    property === "left" ? "right" : property === "top" ? "bottom" : property;
+  const farLiveValue = useDesignLivePreviewValue(
+    workspaceId,
+    frame,
+    nodeId,
+    farEdge,
+  );
+  let displayedValue =
     liveValue === undefined ? value || computedValue : (liveValue ?? "");
+  if (options?.geometry && details) {
+    displayedValue = designLayoutFieldValue(details, property);
+    if (
+      (property === "left" || property === "top") &&
+      liveValue === "auto" &&
+      typeof farLiveValue === "string"
+    ) {
+      const difference =
+        (parseFloat(readDesignComputedStyle(details.styles, farEdge)) || 0) -
+        (parseFloat(farLiveValue) || 0);
+      displayedValue = `${(parseFloat(displayedValue) || 0) + difference}px`;
+    }
+    if (
+      typeof liveValue === "string" &&
+      Number.isFinite(parseFloat(liveValue))
+    ) {
+      const baseline =
+        parseFloat(readDesignComputedStyle(details.styles, property)) || 0;
+      displayedValue = `${(parseFloat(displayedValue) || 0) + parseFloat(liveValue) - baseline}${property === "rotate" ? "deg" : "px"}`;
+    }
+  }
+  const layoutAction = (next: string): DesignLayoutAction => {
+    if (next.trim() === "") return { type: "reset", property };
+    const number = Number.parseFloat(next);
+    if (!Number.isFinite(number)) throw new Error("Enter a finite number.");
+    return property === "rotate"
+      ? { type: "rotation", value: number }
+      : {
+          type:
+            property === "width" || property === "height" ? "size" : "position",
+          axis: property === "left" || property === "width" ? "x" : "y",
+          value: number,
+        };
+  };
   return (
     <InspectorEditField
       label={label}
       value={displayedValue}
       placeholder="-"
       styleProperty={property}
+      whole={options?.whole}
+      compact={options?.compact}
+      disabled={disabled}
       applied={applied}
       hint={hint}
       motion={
@@ -9676,9 +9940,17 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
           typeof liveValue === "string" ? liveValue : computedValue,
         )
       }
-      onPreview={(next) => onPreviewStyles({ [property]: next || null })}
+      onPreview={(next) =>
+        options?.geometry && onPreviewLayoutAction
+          ? onPreviewLayoutAction(layoutAction(next))
+          : onPreviewStyles({ [property]: next || null })
+      }
       onCancelPreview={onCancelPreview}
-      onCommit={(next) => onCommitStyles({ [property]: next || null })}
+      onCommit={(next) =>
+        options?.geometry && onLayoutAction
+          ? onLayoutAction(layoutAction(next))
+          : onCommitStyles({ [property]: next || null })
+      }
     />
   );
 });
@@ -9868,6 +10140,16 @@ function DesignInspector({
     ],
   );
 
+  const layoutActionQueueRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueInspectorAction = useCallback(
+    <T,>(action: () => Promise<T>): Promise<T> => {
+      const task = layoutActionQueueRef.current.then(action);
+      layoutActionQueueRef.current = task.catch(() => {});
+      return task;
+    },
+    [],
+  );
+
   const runHistory = useCallback(
     (direction: "undo" | "redo") => {
       if (!workspaceId) return;
@@ -9876,7 +10158,9 @@ function DesignInspector({
       // fast keypresses become two ordered history steps rather than one being
       // discarded while the first bridge round trip is in flight.
       setPendingHistoryActions((current) => current + 1);
-      void applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction)
+      void queueInspectorAction(() =>
+        applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction),
+      )
         .then((result) => {
           if (result.historySelection === undefined) return;
           const selected = result.historySelection
@@ -9901,7 +10185,7 @@ function DesignInspector({
           setPendingHistoryActions((current) => Math.max(0, current - 1));
         });
     },
-    [frame, workspaceId],
+    [frame, workspaceId, queueInspectorAction],
   );
 
   const saveDesignChanges = useCallback(() => {
@@ -9909,7 +10193,7 @@ function DesignInspector({
     // Do not suppress a repeated Command-S while an earlier save is running.
     // Each request enters the same workspace mutation lane as focused-draft
     // publication, so the newest edit is always validated after publication.
-    void saveDesigns(workspaceId)
+    void queueInspectorAction(() => saveDesigns(workspaceId))
       .then(() => {
         toast.success("Design draft saved", {
           description: "Changes remain unstaged and uncommitted.",
@@ -9922,12 +10206,12 @@ function DesignInspector({
           id: `design-save:${workspaceId}`,
         });
       });
-  }, [workspaceId]);
+  }, [workspaceId, queueInspectorAction]);
 
   const stageDesignChanges = useCallback(() => {
     if (!workspaceId || designGitAction) return;
     setDesignGitAction("stage");
-    void stageDesigns(workspaceId)
+    void queueInspectorAction(() => stageDesigns(workspaceId))
       .then(() => {
         toast.success("Design changes staged", {
           description: "No commit was created.",
@@ -9941,12 +10225,12 @@ function DesignInspector({
         });
       })
       .finally(() => setDesignGitAction(null));
-  }, [designGitAction, workspaceId]);
+  }, [designGitAction, workspaceId, queueInspectorAction]);
 
   const commitDesignChanges = useCallback(() => {
     if (!workspaceId || designGitAction) return;
     setDesignGitAction("commit");
-    void commitDesigns(workspaceId)
+    void queueInspectorAction(() => commitDesigns(workspaceId))
       .then(() => {
         toast.success("Staged Design changes committed", {
           id: `design-commit:${workspaceId}`,
@@ -9959,7 +10243,7 @@ function DesignInspector({
         });
       })
       .finally(() => setDesignGitAction(null));
-  }, [designGitAction, workspaceId]);
+  }, [designGitAction, workspaceId, queueInspectorAction]);
 
   useEffect(() => {
     if (!active) return;
@@ -10026,6 +10310,25 @@ function DesignInspector({
         : [],
     [selectedNodeId, selectedNodeIds, styleTargetNodeId],
   );
+  const layoutRuntimeState = useDesignRuntimeStore((state) =>
+    workspaceId && frame
+      ? state.byWorkspace[workspaceId]?.frames[frame.file]
+      : undefined,
+  );
+  const layoutParents = useMemo(
+    () =>
+      styleNodeIds.flatMap((nodeId) => {
+        const node =
+          nodeId === elementDetails?.oid
+            ? elementDetails
+            : layoutRuntimeState?.detailsByNode[nodeId];
+        return node && node.sourceVersion === elementDetails?.sourceVersion
+          ? [node]
+          : [];
+      }),
+    [elementDetails, layoutRuntimeState, styleNodeIds],
+  );
+  const layoutRootId = layoutRuntimeState?.snapshot?.frame.oid;
   const styleEditContextRef = useRef({
     workspaceId,
     folder,
@@ -10033,7 +10336,7 @@ function DesignInspector({
     styleNodeIds,
     selectedNodeId: styleTargetNodeId,
     elementDetails,
-    foundationData,
+    layoutRootId,
   });
   const stylePreviewIntentRef = useRef(0);
   styleEditContextRef.current = {
@@ -10043,7 +10346,7 @@ function DesignInspector({
     styleNodeIds,
     selectedNodeId: styleTargetNodeId,
     elementDetails,
-    foundationData,
+    layoutRootId,
   };
   const stylesForNode = useCallback(
     (nodeId: string, styles: Record<string, string | null>) => {
@@ -10203,42 +10506,251 @@ function DesignInspector({
         });
         return;
       }
-      if (!context.foundationData) {
-        throw new Error("The selected design document is still loading.");
-      }
       const properties = Object.keys(styles).sort();
-      await applyDesignTransactionCached(
-        context.workspaceId,
-        context.frame.file,
-        {
-          schemaVersion: 1,
-          transactionId: `desktop:${crypto.randomUUID()}`,
-          documentId: context.foundationData.summary.documentId,
-          baseRevision: context.foundationData.summary.revision,
-          actor: { kind: "human", id: "desktop" },
-          intent: `Set ${properties.join(", ")} on ${context.styleNodeIds.length} layers`,
-          createdAt: Date.now(),
-          coalesceKey: `styles:${context.styleNodeIds.join(":")}:${properties.join(":")}`,
-          operations: context.styleNodeIds.map((nodeId) => ({
-            operationId: `styles:${crypto.randomUUID()}`,
-            type: "node.set-styles" as const,
-            nodeId,
-            styles: stylesForNode(nodeId, styles),
-            scope: "auto" as const,
-            responsiveContext: "base",
-            stateContext: "default",
-          })),
-        },
-      );
+      await applyDesignEditCached(context.workspaceId, context.frame, {
+        schemaVersion: 1,
+        transactionId: `desktop:${crypto.randomUUID()}`,
+        actor: { kind: "human", id: "desktop" },
+        intent: `Set ${properties.join(", ")} on ${context.styleNodeIds.length} layers`,
+        createdAt: Date.now(),
+        coalesceKey: `styles:${context.styleNodeIds.join(":")}:${properties.join(":")}`,
+        operations: context.styleNodeIds.map((nodeId) => ({
+          operationId: `styles:${crypto.randomUUID()}`,
+          type: "node.set-styles" as const,
+          nodeId,
+          styles: stylesForNode(nodeId, styles),
+          scope: "auto" as const,
+          responsiveContext: "base",
+          stateContext: "default",
+        })),
+      });
     },
     [stylesForNode],
+  );
+
+  const previewLayoutAction = useCallback(
+    async (action: DesignLayoutAction) => {
+      const context = styleEditContextRef.current;
+      if (!context.workspaceId || !context.frame) return;
+      const runtimeState =
+        useDesignRuntimeStore.getState().byWorkspace[context.workspaceId]
+          ?.frames[context.frame.file];
+      await Promise.all(
+        context.styleNodeIds.map(async (nodeId) => {
+          const details =
+            runtimeState?.detailsByNode[nodeId] ??
+            (nodeId === context.selectedNodeId ? context.elementDetails : null);
+          if (!details) return;
+          const geometry = await previewDesignNodeGeometry({
+            workspaceId: context.workspaceId!,
+            frame: context.frame!,
+            nodeId,
+            styles: designLayoutActionStyles(details, action),
+            children: true,
+          });
+          const spacingRoot = paintDesignInspectorPreviewDetails(
+            context.workspaceId!,
+            context.frame!.file,
+            geometry,
+          );
+          if (spacingRoot)
+            paintDesignInlineGapHandles(
+              spacingRoot,
+              geometry,
+              geometry.children,
+              designWorkspaceView(context.workspaceId!).zoom,
+            );
+        }),
+      );
+    },
+    [],
+  );
+
+  const commitLayoutAction = useCallback(
+    (action: DesignLayoutAction): Promise<void> => {
+      // Capture the semantic owner at intent. Queued clicks must never follow a
+      // later selection, and every relative rotation reads its own latest value.
+      const context = styleEditContextRef.current;
+      const task = layoutActionQueueRef.current.then(async () => {
+        const { workspaceId, frame, styleNodeIds } = context;
+        if (!workspaceId || !frame || styleNodeIds.length === 0) return;
+        const runtime = designFrameRuntime(workspaceId, frame.file);
+        if (!runtime) throw new Error("The selected frame is still loading.");
+        const details = await Promise.all(
+          styleNodeIds.map((nodeId) => runtime.getNodeDetails(nodeId)),
+        );
+        let updates: Map<string, Record<string, string | null>>;
+        if (isDesignLayoutChildAction(action)) {
+          const children = designLayoutChildrenSummary(details);
+          if (children.truncated)
+            throw new Error(
+              "Select a smaller frame to arrange its children together.",
+            );
+          const childDetails = await Promise.all(
+            children.nodeIds.map(async (nodeId) => {
+              try {
+                return await runtime.getNodeDetails(nodeId);
+              } catch (error) {
+                // A child removed after intent no longer belongs in this batch.
+                if (
+                  error &&
+                  typeof error === "object" &&
+                  "code" in error &&
+                  error.code === "NODE_NOT_FOUND"
+                )
+                  return null;
+                throw error;
+              }
+            }),
+          );
+          updates = designLayoutChildUpdates(
+            details,
+            childDetails.filter(
+              (node): node is DesignRuntimeNodeDetails => node !== null,
+            ),
+            action,
+          );
+        } else if (action.type === "resize-fill") {
+          const targets = details.filter(
+            (node) =>
+              node.oid !== context.layoutRootId && node.layout?.parentId,
+          );
+          const parentIds = [
+            ...new Set(targets.map((node) => node.layout!.parentId!)),
+          ];
+          const parents = await Promise.all(
+            parentIds.map((nodeId) => runtime.getNodeDetails(nodeId)),
+          );
+          updates = designLayoutChildUpdates(parents, targets, {
+            type: "center",
+          });
+          for (const node of targets)
+            updates.set(node.oid, {
+              ...updates.get(node.oid),
+              ...designLayoutActionStyles(node, action),
+            });
+        } else updates = designLayoutActionUpdates(details, action);
+        if (updates.size === 0) return;
+        const currentFrame = { ...frame, sourceVersion: runtime.sourceVersion };
+        const fittedRoot =
+          action.type === "resize-fit"
+            ? details.find(
+                (node) =>
+                  node.oid === context.layoutRootId && updates.has(node.oid),
+              )
+            : undefined;
+        const fittedGeometry = fittedRoot
+          ? {
+              x: frame.x,
+              y: frame.y,
+              z: frame.z,
+              ...designLayoutResizedFrame(
+                fittedRoot,
+                updates.get(fittedRoot.oid)!,
+              ),
+            }
+          : null;
+        const operations: DesignOperation[] = [...updates].map(
+          ([nodeId, styles]) => ({
+            operationId: `layout:${crypto.randomUUID()}`,
+            type: "node.set-styles",
+            nodeId,
+            styles,
+            scope: "auto",
+            responsiveContext: "base",
+            stateContext: "default",
+          }),
+        );
+        if (fittedGeometry)
+          operations.push({
+            operationId: `layout:${crypto.randomUUID()}`,
+            type: "frame.set-geometry",
+            frame: frame.file,
+            geometry: fittedGeometry,
+          });
+        if (operations.length > DESIGN_TRANSACTION_MAX_OPERATIONS)
+          throw new Error(
+            "Select a smaller frame to arrange its children together.",
+          );
+        try {
+          for (const [nodeId, styles] of updates) {
+            const geometry = await previewDesignNodeGeometry({
+              workspaceId,
+              frame: currentFrame,
+              nodeId,
+              styles,
+              children: true,
+            });
+            const spacingRoot = paintDesignInspectorPreviewDetails(
+              workspaceId,
+              frame.file,
+              geometry,
+            );
+            if (spacingRoot)
+              paintDesignInlineGapHandles(
+                spacingRoot,
+                geometry,
+                geometry.children,
+                designWorkspaceView(workspaceId).zoom,
+              );
+          }
+          if (operations.length === 1) {
+            const [nodeId, styles] = updates.entries().next().value!;
+            await updateDesignNodeStylesCached(workspaceId, {
+              frame: frame.file,
+              nodeId,
+              sourceVersion: currentFrame.sourceVersion,
+              styles,
+            });
+          } else {
+            await applyDesignEditCached(workspaceId, currentFrame, {
+              schemaVersion: 1,
+              transactionId: `desktop:${crypto.randomUUID()}`,
+              actor: { kind: "human", id: "desktop" },
+              intent: `Update layout on ${styleNodeIds.length} layers`,
+              createdAt: Date.now(),
+              operations,
+            });
+          }
+        } catch (error) {
+          await Promise.all(
+            [...updates.keys()].map(async (nodeId) => {
+              try {
+                const restored = await clearDesignNodeStylePreviewTransient({
+                  workspaceId,
+                  frame: frame.file,
+                  sourceVersion: runtime.sourceVersion,
+                  nodeId,
+                });
+                paintDesignInspectorPreviewDetails(
+                  workspaceId,
+                  frame.file,
+                  restored,
+                );
+              } catch {
+                /* The runtime may have been replaced by a newer generation. */
+              }
+            }),
+          );
+          throw error;
+        }
+      });
+      layoutActionQueueRef.current = task.catch(() => {});
+      return task;
+    },
+    [],
   );
 
   const styleContext =
     workspaceId && folder && frame && styleTargetNodeId && elementDetails
       ? { workspaceId, folder, frame, nodeId: styleTargetNodeId }
       : null;
-  const styleField = (label: string, property: string, value: string) => {
+  const styleField = (
+    label: string,
+    property: string,
+    value: string,
+    options?: DesignLayoutFieldOptions,
+  ) => {
     if (!styleContext) return null;
     const frameGeometryProperty = frameStyleTarget
       ? (
@@ -10257,6 +10769,9 @@ function DesignInspector({
           key={`${styleContext.workspaceId}:${styleContext.frame.file}:frame:${geometryKey}`}
           label={label}
           value={geometryValue}
+          whole={options?.whole}
+          compact={options?.compact}
+          disabled={pendingHistoryActions > 0}
           applied
           onPreview={(next) => {
             const number = Number(next);
@@ -10313,6 +10828,11 @@ function DesignInspector({
         property={property}
         value={designStyleFieldValue(authoredProperties, property, value)}
         computedValue={value}
+        options={options}
+        details={elementDetails ?? undefined}
+        onLayoutAction={commitLayoutAction}
+        onPreviewLayoutAction={previewLayoutAction}
+        disabled={pendingHistoryActions > 0}
         applied={applied}
         hint={
           provenance?.ownerKey === provenanceOwnerKey &&
@@ -10527,6 +11047,11 @@ function DesignInspector({
                     : undefined
                 }
                 renderField={styleField}
+                onLayoutAction={commitLayoutAction}
+                frameSelected={
+                  frameStyleTarget || elementDetails.oid === layoutRootId
+                }
+                layoutParents={layoutParents}
                 disabled={pendingHistoryActions > 0}
                 onPreviewStyles={previewSelectedStyles}
                 onCancelStylePreview={clearSelectedStylePreview}

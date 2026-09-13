@@ -1,0 +1,41 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://zeros.build/schemas/design.schema.json",
+  "title": "Zeros Design folder manifest",
+  "description": "Each Design folder carries design.toml: format zeros-design, envelope version 1, a stable ID and the complete document metadata. Optional nulls are JSON pointers into document for lossless TOML encoding. Commit this file with the Design source; .zeros contains private state.",
+  "type": "object",
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "zeros-design"
+    },
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^design_[a-zA-Z0-9_-]{1,64}$"
+    },
+    "nulls": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "document": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {}
+    }
+  },
+  "required": [
+    "format",
+    "version",
+    "id",
+    "document"
+  ],
+  "additionalProperties": false
+}

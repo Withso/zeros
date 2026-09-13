@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DesignTransaction } from "@zeros/design-core";
 
 const platformMocks = vi.hoisted(() => ({
   applyTransaction: vi.fn(),
@@ -44,20 +45,22 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
 
 vi.mock("../../../platform/bridge/active-bridge", () => ({
   onActiveBridgeConnected: vi.fn(
-    (
-      listener: (client: unknown, info: { initial: boolean }) => void,
-    ) => {
+    (listener: (client: unknown, info: { initial: boolean }) => void) => {
       bridgeMocks.connectedListener = listener;
       return () => {};
     },
   ),
 }));
 
-import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
+import type {
+  DesignFoundationOpenWire,
+  DesignWorkspaceSnapshotWire,
+} from "../../../platform/git";
 import {
   applyDesignWorkspaceRefreshVersion,
   appendDesignNodeHtmlCached,
   applyDesignHistoryCached,
+  applyDesignEditCached,
   applyDesignTransactionCached,
   designFrameDocumentCache,
   designFrameDocumentKey,
@@ -65,6 +68,7 @@ import {
   designFoundationKey,
   designWorkspaceSnapshotCache,
   fetchDesignWorkspaceSnapshot,
+  fetchDesignFoundation,
   invalidateDesignWorkspaceSnapshot,
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
@@ -161,6 +165,296 @@ describe("design workspace cache", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  describe("edits with asynchronous document metadata", () => {
+    const workspaceId = "ws_loading_edit";
+    const draft = (): Omit<
+      DesignTransaction,
+      "documentId" | "baseRevision"
+    > => ({
+      schemaVersion: 1,
+      transactionId: "desktop:loading-edit",
+      actor: { kind: "human", id: "desktop" },
+      intent: "Align selected layers",
+      createdAt: 1,
+      operations: ["heading", "copy"].map((nodeId) => ({
+        operationId: `align:${nodeId}`,
+        type: "node.set-styles",
+        nodeId,
+        styles: { left: "20px" },
+        scope: "auto",
+        responsiveContext: "base",
+        stateContext: "default",
+      })),
+    });
+    const opened = (
+      documentId: string,
+      revision: string,
+    ): DesignFoundationOpenWire => ({
+      summary: {
+        apiVersion: 1,
+        documentId,
+        revision,
+        entryFile: "home.html",
+        fileCount: 1,
+        nodeCount: 2,
+        valid: true,
+        diagnostics: [],
+        lastValidRevision: revision,
+        history: {
+          canUndo: false,
+          canRedo: false,
+          undoDepth: 0,
+          redoDepth: 0,
+          retainedBytes: 0,
+          retainedReceiptBytes: 0,
+          revision,
+          lastReconciliationReason: null,
+        },
+      },
+      foundation: {
+        documentId,
+        revision,
+        manifest: {
+          schemaVersion: 1,
+          parameters: [],
+          variants: [],
+          components: [],
+        },
+        keyframes: [],
+      },
+    });
+
+    it("joins the exact in-flight document read before committing the original targets once", async () => {
+      const current = snapshot([
+        { file: "home.html" },
+        { file: "pricing.html" },
+      ]);
+      const frame = current.frames[0]!;
+      const key = designFoundationKey(
+        workspaceId,
+        frame.file,
+        frame.sourceVersion,
+      );
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(
+          workspaceId,
+          "pricing.html",
+          current.frames[1]!.sourceVersion,
+        ),
+        opened("document:pricing", "pricing:1"),
+      );
+      let finishRead!: (value: DesignFoundationOpenWire) => void;
+      platformMocks.foundationOpen.mockReturnValue(
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+      );
+      platformMocks.applyTransaction.mockResolvedValue({ result: null });
+      const projection = designFoundationCache.load(key, () =>
+        fetchDesignFoundation(key),
+      );
+      const intent = draft();
+      const edit = applyDesignEditCached(workspaceId, frame, intent);
+
+      await vi.waitFor(() =>
+        expect(platformMocks.foundationOpen).toHaveBeenCalledTimes(1),
+      );
+      expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
+      expect(designFoundationCache.getSnapshot(key).data).toBeUndefined();
+      finishRead(opened("document:home", "home:1"));
+      await Promise.all([projection, edit]);
+
+      expect(platformMocks.foundationOpen).toHaveBeenCalledExactlyOnceWith(
+        workspaceId,
+        "home.html",
+      );
+      expect(platformMocks.applyTransaction).toHaveBeenCalledExactlyOnceWith(
+        workspaceId,
+        "home.html",
+        {
+          ...intent,
+          documentId: "document:home",
+          baseRevision: "home:1",
+        },
+      );
+    });
+
+    it("keeps a metadata wait ahead of Undo in the workspace mutation lane", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      let finishRead!: (value: DesignFoundationOpenWire) => void;
+      platformMocks.foundationOpen.mockReturnValue(
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+      );
+      const operations: string[] = [];
+      platformMocks.applyTransaction.mockImplementation(async () => {
+        operations.push("edit");
+        return { result: null, snapshot: current };
+      });
+      platformMocks.history.mockImplementation(async () => {
+        operations.push("undo");
+        return { result: null, snapshot: current };
+      });
+
+      const edit = applyDesignEditCached(workspaceId, frame, draft());
+      const undo = applyDesignHistoryCached(workspaceId, frame.file, "undo");
+      await vi.waitFor(() =>
+        expect(platformMocks.foundationOpen).toHaveBeenCalledTimes(1),
+      );
+      expect(platformMocks.history).not.toHaveBeenCalled();
+      finishRead(opened("document:home", "home:1"));
+      await Promise.all([edit, undo]);
+      expect(operations).toEqual(["edit", "undo"]);
+    });
+
+    it("isolates same-named files in another workspace without blocking its ready edit", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      const otherWorkspaceId = "ws_other_edit";
+      for (const owner of [workspaceId, otherWorkspaceId])
+        designWorkspaceSnapshotCache.setData(owner, current);
+      designFoundationCache.setData(
+        designFoundationKey(otherWorkspaceId, frame.file, frame.sourceVersion),
+        opened("document:other", "other:1"),
+      );
+      let finishRead!: (value: DesignFoundationOpenWire) => void;
+      platformMocks.foundationOpen.mockReturnValue(
+        new Promise((resolve) => {
+          finishRead = resolve;
+        }),
+      );
+      platformMocks.applyTransaction.mockResolvedValue({ result: null });
+      const pending = applyDesignEditCached(workspaceId, frame, draft());
+      await applyDesignEditCached(otherWorkspaceId, frame, draft());
+      expect(platformMocks.applyTransaction).toHaveBeenCalledExactlyOnceWith(
+        otherWorkspaceId,
+        frame.file,
+        expect.objectContaining({
+          documentId: "document:other",
+          baseRevision: "other:1",
+        }),
+      );
+      finishRead(opened("document:home", "home:1"));
+      await pending;
+      expect(platformMocks.applyTransaction).toHaveBeenLastCalledWith(
+        workspaceId,
+        frame.file,
+        expect.objectContaining({
+          documentId: "document:home",
+          baseRevision: "home:1",
+        }),
+      );
+      expect(platformMocks.foundationOpen).toHaveBeenCalledExactlyOnceWith(
+        workspaceId,
+        frame.file,
+      );
+    });
+
+    it("opens the generation confirmed by a preceding style edit instead of a captured old projection", async () => {
+      const current = snapshot();
+      const frame = current.frames[0]!;
+      const next = {
+        ...current,
+        frames: [{ ...frame, sourceVersion: "a".repeat(24) }],
+      };
+      designWorkspaceSnapshotCache.setData(workspaceId, current);
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.updateStyles.mockResolvedValue({
+        mutation: {
+          changed: true,
+          frame: {
+            ...next.frames[0],
+            source: "<main></main>",
+            srcDoc: "<main></main>",
+            tree: [],
+          },
+          lint: next.lint,
+        },
+        snapshot: next,
+        foundationRevision: { before: "home:1", after: "home:2" },
+      });
+      platformMocks.foundationOpen.mockResolvedValue(
+        opened("document:home", "home:2"),
+      );
+      platformMocks.applyTransaction.mockResolvedValue({ result: null });
+
+      await Promise.all([
+        updateDesignNodeStylesCached(workspaceId, {
+          frame: frame.file,
+          nodeId: "hero",
+          sourceVersion: frame.sourceVersion,
+          styles: { width: "320px" },
+        }),
+        applyDesignEditCached(workspaceId, frame, draft()),
+      ]);
+
+      expect(platformMocks.applyTransaction).toHaveBeenCalledExactlyOnceWith(
+        workspaceId,
+        frame.file,
+        expect.objectContaining({ baseRevision: "home:2" }),
+      );
+      expect(platformMocks.foundationOpen).toHaveBeenCalledTimes(1);
+      expect(
+        designFoundationCache.getSnapshot(
+          designFoundationKey(
+            workspaceId,
+            frame.file,
+            next.frames[0]!.sourceVersion,
+          ),
+        ).data?.summary.revision,
+      ).toBe("home:2");
+    });
+
+    it("reuses a warm exact projection without introducing another read", async () => {
+      const frame = snapshot().frames[0]!;
+      designFoundationCache.setData(
+        designFoundationKey(workspaceId, frame.file, frame.sourceVersion),
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction.mockResolvedValue({ result: null });
+      await applyDesignEditCached(workspaceId, frame, draft());
+      expect(platformMocks.foundationOpen).not.toHaveBeenCalled();
+      expect(platformMocks.applyTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports a real metadata failure without writing and allows the next edit to recover", async () => {
+      const frame = snapshot().frames[0]!;
+      platformMocks.foundationOpen
+        .mockRejectedValueOnce(new Error("Document read failed."))
+        .mockResolvedValue(opened("document:home", "home:1"));
+      platformMocks.applyTransaction.mockResolvedValue({ result: null });
+      await expect(
+        applyDesignEditCached(workspaceId, frame, draft()),
+      ).rejects.toThrow("Document read failed.");
+      expect(platformMocks.applyTransaction).not.toHaveBeenCalled();
+      await applyDesignEditCached(workspaceId, frame, draft());
+      expect(platformMocks.foundationOpen).toHaveBeenCalledTimes(2);
+      expect(platformMocks.applyTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not replay a write with an ambiguous transport failure after metadata becomes ready", async () => {
+      const frame = snapshot().frames[0]!;
+      platformMocks.foundationOpen.mockResolvedValue(
+        opened("document:home", "home:1"),
+      );
+      platformMocks.applyTransaction.mockRejectedValue(
+        new Error("Request timeout: WORKSPACE_REQUEST"),
+      );
+      await expect(
+        applyDesignEditCached(workspaceId, frame, draft()),
+      ).rejects.toThrow("Request timeout: WORKSPACE_REQUEST");
+      expect(platformMocks.applyTransaction).toHaveBeenCalledTimes(1);
+      expect(platformMocks.readSnapshot).not.toHaveBeenCalled();
+    });
   });
 
   it("does not supersede a cold snapshot already queued for the first bridge connection", async () => {
@@ -737,7 +1031,7 @@ describe("design workspace cache", () => {
     expect(stable.protocolCapability).toBe("d".repeat(64));
   });
 
-  it("adopts a confirmed style generation before publishing its workspace snapshot", async () => {
+  it("adopts a confirmed style generation and refreshed container pins before publishing its workspace snapshot", async () => {
     const workspaceId = "ws_design";
     const previous = snapshot();
     const previousFrame = previous.frames[0]!;
@@ -784,9 +1078,37 @@ describe("design workspace cache", () => {
       },
       previousFrame.sourceVersion,
     );
+    const parentDetails = {
+      ...nodeDetails,
+      oid: "parent",
+      sourceVersion: previousFrame.sourceVersion,
+      childrenLayout: {
+        count: 1,
+        nodeIds: ["hero"],
+        x: "start" as const,
+        y: "start" as const,
+        truncated: false,
+      },
+    };
+    useDesignRuntimeStore
+      .getState()
+      .publishNodeDetails(
+        workspaceId,
+        "/design/a",
+        previousFrame.file,
+        parentDetails,
+        previousFrame.sourceVersion,
+      );
+    const refreshedParent = {
+      ...parentDetails,
+      sourceVersion: nextSourceVersion,
+      childrenLayout: { ...parentDetails.childrenLayout, x: "end" as const },
+    };
+    const getNodeDetails = vi.fn().mockResolvedValue(refreshedParent);
     runtimeMocks.designFrameRuntime.mockReturnValue({
       sourceVersion: previousFrame.sourceVersion,
       commitStyles: runtimeMocks.commitStyles,
+      getNodeDetails,
     });
     runtimeMocks.commitStyles.mockImplementation(async () => {
       expect(
@@ -832,6 +1154,11 @@ describe("design workspace cache", () => {
     expect(
       designRuntimeFrameState(workspaceId, previousFrame.file)?.sourceVersion,
     ).toBe(nextSourceVersion);
+    expect(getNodeDetails).toHaveBeenCalledExactlyOnceWith("parent");
+    expect(
+      designRuntimeFrameState(workspaceId, previousFrame.file)?.detailsByNode
+        .parent,
+    ).toBe(refreshedParent);
   });
 
   it("keeps motion keyframe transactions on the mounted runtime generation", async () => {
@@ -1429,7 +1756,8 @@ describe("design workspace cache", () => {
 
     vi.resetModules();
     const reloaded = await import("../state/design-workspace-cache");
-    const boot = reloaded.designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+    const boot =
+      reloaded.designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
 
     expect(boot.data?.frames).toEqual(expected.frames);
     expect(boot.data?.tokens).toEqual(expected.tokens);
@@ -1443,9 +1771,9 @@ describe("design workspace cache", () => {
 
   it("never reuses a persisted preview for an adapted workspace path", () => {
     const cached = snapshot();
-    expect(
-      designWorkspaceSnapshotMatchesPath(cached, "/work/design"),
-    ).toBe(true);
+    expect(designWorkspaceSnapshotMatchesPath(cached, "/work/design")).toBe(
+      true,
+    );
     expect(
       designWorkspaceSnapshotMatchesPath(cached, "/private/work/design"),
     ).toBe(false);

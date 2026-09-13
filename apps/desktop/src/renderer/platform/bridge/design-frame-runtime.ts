@@ -12,6 +12,7 @@ import {
   DESIGN_RUNTIME_PROTOCOL,
   DESIGN_RUNTIME_VERSION,
   isDesignRuntimeFrameMessage,
+  isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
   type DesignRuntimeCapabilities,
   type DesignRuntimeHostCancel,
@@ -200,6 +201,7 @@ function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
         ["fixed", "auto"].includes(details.textSizing.height) &&
         typeof details.textSizing.availableWidth === "number" &&
         Number.isFinite(details.textSizing.availableWidth))) &&
+    (details.layout === undefined || isRuntimeNodeLayout(details.layout)) &&
     typeof details.selector === "string" &&
     Array.isArray(details.breadcrumb) &&
     !!details.rect &&
@@ -799,6 +801,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
 }
 
 const connectionsByFrame = new Map<string, DesignRuntimeConnectionImpl>();
+const connectingByFrame = new Map<string, DesignRuntimeConnectionImpl>();
 
 function frameKey(workspaceId: string, frame: string): string {
   return `${workspaceId}\u0000${frame}`;
@@ -818,18 +821,33 @@ export function connectDesignFrameRuntime(
   const source = iframe.contentWindow;
   if (!source) throw runtimeError("iframe has no content window");
   const key = frameKey(workspaceId, frame);
-  connectionsByFrame.get(key)?.destroy();
+  connectingByFrame.get(key)?.destroy();
   const connection = new DesignRuntimeConnectionImpl(
     source,
     sourceVersion,
     host,
-    callbacks,
+    {
+      ...callbacks,
+      onReady: (capabilities) => {
+        if (connectingByFrame.get(key) !== connection) return;
+        connectingByFrame.delete(key);
+        connectionsByFrame.get(key)?.destroy();
+        connectionsByFrame.set(key, connection);
+        callbacks.onReady?.(capabilities);
+      },
+    },
   );
-  connectionsByFrame.set(key, connection);
+  // An HTTP error document also fires iframe.onload. Only a validated runtime
+  // handshake makes it usable for hit testing and edits. Keep an outgoing
+  // buffered document available until its replacement has actually connected.
+  connectingByFrame.set(key, connection);
   const destroy = connection.destroy.bind(connection);
   connection.destroy = () => {
     if (connectionsByFrame.get(key) === connection) {
       connectionsByFrame.delete(key);
+    }
+    if (connectingByFrame.get(key) === connection) {
+      connectingByFrame.delete(key);
     }
     destroy();
   };

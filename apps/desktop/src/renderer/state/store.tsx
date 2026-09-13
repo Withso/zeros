@@ -119,7 +119,10 @@ export type RepoPageView =
   | "actions"
   | "files"
   | "design"
+  | "design-preferences"
   | "paths";
+export type RepoPageMode = "code" | "design";
+export type RepoPageModeViews = Partial<Record<RepoPageMode, RepoPageView>>;
 
 // Current providers use CLI-subprocess backends. Legacy values
 // ("chatgpt" / "openai" / "ide") stay in the union so existing
@@ -228,6 +231,8 @@ export type WorkspaceState = {
   // Repository-hub tabs belong to their repository, not to the app. Switching
   // repo A → B → A therefore restores A's own last view rather than leaking B's.
   repoPageViewByProject: Record<string, RepoPageView>;
+  // Remember each mode's tab while its sibling mode is visible.
+  repoPageViewByModeByProject: Record<string, RepoPageModeViews>;
   isLoading: boolean;
 
   // AI settings

@@ -23,69 +23,139 @@ Future Design agent (ZSR, disabled) ──────────┘
 ```
 
 The active Design directory comes from the private `[design] directory_id`
-selection and this checkout's tracked `.zeros/design-dir.toml` registry. Legacy
-`[design] directory` paths remain readable; `Zeros Design/`
-is the unconfigured pointer default. A repository's first Design use with no
-pointer and no recognized document creates a folder named after the
-repository (`<repo name> - Design/`, see `firstUseDesignDirectoryName`); a
-checkout that already carries `Zeros Design/` keeps using it, and a single
-recognized document is adopted instead of creating a second folder. The
-directory remains materialized and readable in both views. Registry entries
-in the working tree, Git index and HEAD recognize documents; old branches can
-still use `.zeros-canvas.json` markers. Protection covers all recognized source
-roots and their exact metadata files.
+selection and the `design.toml` manifests in this checkout. Legacy `[design]
+directory` paths remain readable. `Zeros Design/` is the unconfigured pointer
+default; first Design use creates `<repo name> - Design/` when no Design folder
+exists. A single discovered folder is reused. Multiple folders can be selected
+in Settings. Source remains materialized and readable in Code and Design views.
 
 ### Source, metadata and personal state
 
 ```text
 <repo>/
-  Product - Design/                 HTML, CSS, tokens, components, assets
-  .zeros/
-    design-dir.toml                 tracked directory registry
-    design/<stable-id>/document.json tracked frame and Foundation metadata
-    settings.local.toml             private main-checkout settings
+  Product - Design/
+    design.toml         tracked identity and complete document metadata
+    rules.md            short Design API ownership instructions
+    home.html           authored frames
+    tokens.css          shared tokens
+    components/         shared components
+    assets/             images and other assets
+  .zeros/               ignored private settings and local state
 ```
 
-The registry is version 1, with entries such as:
+Every Design folder, including its manifest and rules, belongs to the Design
+API. Code agents may read it, but generic file and Git operations cannot mutate
+it. Zeros Settings and Design mode manage it. Commit the folder and its
+`design.toml` together; uncommitted work remains on disk but is not available to
+other clones or branches until committed.
+
+Repository Settings → Design → Directory scans the main checkout, including
+untracked Zeros manifests, without requiring any worktrees. Its folder list
+supports inline rename (double-click or the pencil; Enter/blur saves and Escape
+cancels) and choosing an existing folder. Rename preserves the selected directory
+when another row is renamed.
+
+The trash action is **Remove Design registration**, with an explicit confirmation.
+It preserves the directory and all authored source/assets, removes only its
+manifest, legacy registry entry/document metadata, and unmodified generated rules,
+and forgets this checkout's remembered registration. Custom rules are preserved.
+The preserved source becomes ordinary Code, including a folder named `Zeros
+Design`; the legacy default read path alone does not establish Design ownership.
+Tracked metadata removal is committed separately from staged source changes so
+HEAD/index discovery cannot immediately restore the removed registration. Open
+Design workspaces must switch to Code before removal. The operation is local-only
+and uses the engine's Design-owner handoff and workspace mutation lane. Other
+worktrees retain their own committed copies until updated through normal Git.
+Choosing the folder again rebuilds metadata from its preserved source; removed
+canvas-only state requires restoring the prior manifest from Git.
+
+The manifest has a format discriminator, an envelope version and a stable ID:
 
 ```toml
+format = "zeros-design"
 version = 1
+id = "design_example"
 
-[directories.design_example]
-path = "Product - Design"
+[document]
+version = 3
+
+[document.frames]
+[document.frame_info]
+
+[document.foundation]
+schemaVersion = 1
+parameters = []
+variants = []
+components = []
 ```
 
-Document metadata is version 3: `frames` holds geometry keyed by HTML filename,
-`frame_info` holds titles and frame/text kinds, and `foundation` retains the
-versioned Foundation manifest. Canvas viewport state, transaction journals and
-recovery records are local runtime state, outside the source directory and
-outside Git. Element editing IDs (`data-oid`, `data-zid`) remain in code.
+`document.frames` stores geometry keyed by HTML filename; `frame_info` stores
+frame titles and kinds; `foundation` stores parameters, variants and components.
+Unknown JSON document extensions survive migration and edits. TOML has no null,
+so an optional envelope `nulls` array records JSON pointers into `document`;
+empty-string placeholders at those exact locations decode to null. No document
+keys are reserved for this encoding. Canvas viewport state, recovery journals
+and transaction history stay in private engine storage, outside Git.
 
-First Design use migrates legacy canvas metadata and `zeros-frame` HTML tags
-through the Design API. It preserves frame identity, geometry, titles, kinds,
-Foundation data and unrelated source bytes; the legacy canvas marker is removed
-only as part of a recoverable transaction. Unknown document extension fields
-survive edits; malformed geometry, unsupported versions, duplicate legacy/new
-metadata, unsafe paths, symlinks, hard links and conflicting recovery records
-pause writes without discarding the conflicting files. Read-only remote reads
-do not migrate. Legacy path-derived IDs let older branches migrate the same
-document independently; subsequent directory renames retain that ID.
+Discovery validates `format = "zeros-design"`; a file named `design.toml` alone
+does not make a folder Design territory. Working-tree discovery is bounded,
+skips private storage, dependencies and nested repositories, and refreshes on
+Design entry, Settings listing and watcher recognition changes. Exact Git index
+and HEAD manifests also preserve ownership of old paths during moves. A moved
+folder retains its ID. Duplicated IDs, overlapping folders, unsafe paths,
+symlinks, hard links, malformed metadata and competing copies pause writes.
 
-Personal settings select a document without sharing a user's preferences.
-Worktrees inherit unset settings from the main checkout while resolving the
-selected ID against their own checked-out registry. Directory renaming commits
-the source move and registry path update together; the private selection keeps
-the same ID. The Design source directory contains authored code and artifacts.
+The Files tab receives validated Design roots alongside its file listing through
+both the native and engine bridge paths. Root-level Design folders appear in the
+separate **Design files** section, including uncommitted portable manifests and
+legacy registrations. Nested folders keep their existing place in the tree.
+The listing and ownership share one cached snapshot per checkout, so refreshing
+metadata without changing filenames still updates the split. An unrelated
+`design.toml` never establishes ownership. Older engines that omit the ownership
+field retain the legacy canvas-marker fallback.
 
-Design Stage, Unstage and Commit include source plus the selected document's
-metadata. Registry staging and commits project only that directory's entry;
-other directories' staged/unstaged entries retain their own state. Code actions
-exclude these exact metadata paths. Design Stage force-adds them if an existing
-repository ignore rule hides `.zeros`; private settings remain excluded.
-Archives finish recoverable writes and capture ignored Design content as well
-as tracked metadata. Source, metadata and settings retain separate restore
-ownership. The repository's `.gitignore` permits only the tracked Design
-registry and document files under `.zeros`; runtime siblings remain ignored.
+Repository Settings → Design → Directory → **Use existing folder** explicitly adopts a source folder
+inside the repository. The preview first uses existing metadata, then looks for
+saved metadata in the index and HEAD (including older formats). Without saved
+metadata it rebuilds frame information from source, leaving authored files
+untouched. Canvas positions and other metadata-only values cannot be recovered
+from source alone. The preview identifies that case before confirmation and is
+checked again before writing. If selecting it would invalidate a live worktree,
+the folder is registered while existing selections stay active. Commit it and
+update those worktrees before using the normal folder selector. Deleting
+`.zeros/` loses private preferences but
+leaves per-folder identity and shared metadata intact; folders are rediscovered
+without a central registry.
+
+### Migration and Git
+
+Read-only access remains compatible with `.zeros/design-dir.toml`,
+`.zeros/design/design-dir.toml`, `.zeros/design/design.toml`, each central
+`<id>/document.json` or `metadata.json`, and source `.zeros-canvas.json` markers.
+On a Design write, every entry in a central registry migrates into its source
+folder before the old storage becomes private. IDs, geometry, Foundation data
+and extensions are preserved. Recoverable transactions write the manifests
+before removing predecessor files. Legacy canvas markers and inline frame
+metadata migrate through the Design API. Interrupted older transactions remain
+recoverable. Reading an older branch does not rewrite it.
+
+Design Stage, Unstage and Commit include the selected source folder and its
+manifest. During migration, projection of shared legacy registry entries keeps
+other folders' staged and committed states independent. Directory renaming moves
+source and manifest together in one scoped commit; the private selection retains
+the same ID. Generic Code actions exclude all recognized Design roots and legacy
+metadata. Archives finish recoverable writes before capturing source and metadata.
+
+Design writes maintain an idempotent block in the root `.gitignore`: ignore
+`/.zeros/` and keep Design manifests and rules visible. The previous
+`.zeros/design/` exception is removed. Existing exclusions for other files,
+including private files inside a chosen folder, are preserved.
+A higher-priority ignore rule that still hides Design metadata pauses the write
+and identifies the conflicting paths. This changes ordinary working files;
+it does not stage, commit or push. Review and commit the `.gitignore` change as
+repository configuration. Files already tracked under `.zeros` remain tracked
+until their migration deletions are committed; Git ignore rules cannot untrack
+existing commits.
 
 Surfaces that can enter Design ask the engine first (`design.listDirectories`
 returns the entry `target` and whether it exists). The workspace mode toggle
@@ -96,6 +166,10 @@ design workspace will open or create.
 `workspaces.view_mode` selects the visible surface. `kind` remains a synchronized
 compatibility mirror for older clients. Switching views does not run checkout,
 stash, sparse-checkout, stage, commit, merge, rebase, pull, or process migration.
+The mode toggle and shell both select the confirmed workspace mode. A pending
+request marks the control busy but does not select the destination icon before
+its surface is ready. The engine's mode receipt publishes the row and initial
+Design snapshot together; a refused switch keeps the original selection.
 
 Entering Design may initialize a missing foundation as ordinary uncommitted
 files. Exiting leaves the working tree and index unchanged. A durable transition
@@ -258,7 +332,12 @@ Escape restores the exact baseline.
 - **Creation:** `F`/`A` creates frames and `T` creates text from one inverse
   pan/zoom transform. Click uses the documented default geometry; drag uses the
   exact world-space rectangle. A host-side draft paints synchronously and one
-  transaction commits the result.
+  transaction commits the result. Drawing inside a frame creates a child in
+  its nearest containing frame; drawing on the canvas creates a new document.
+  New children start with None and participate in their parent's Stack/Grid
+  when enabled. Runtime child coordinate maps account for transformed ancestors,
+  reflections, borders, and scroll. Parent positioning and insertion share one
+  undoable transaction.
 - **Inline text:** one uncontrolled plaintext editor owns caret, selection,
   composition, and the draft. Latest-wins runtime previews mutate the exact
   text node without broad React publication. Paste strips markup but preserves
@@ -267,6 +346,17 @@ Escape restores the exact baseline.
 - **Layers:** frames fold independently in one virtualized row list. Keyboard,
   visibility, hover, and selection are frame-keyed. Uncached hover reads
   coalesce to active plus latest instead of forming a queue.
+  Only a sole direct child explicitly marked `data-zeros-frame-root` by frame
+  creation shares the canvas row. Existing unmarked `main`/`div` roots remain
+  real child layers, even when they fill the viewport or have no descendants.
+  Their canvas frame targets `body` independently. The document-scoped API ID
+  `::zeros-document-body` supports body styles and appending top-level content;
+  it is never added as a `data-oid`, selectable layer, or source identity. Generic
+  delete/replace/text operations do not accept that document target. Missing
+  body tags are materialized only by an explicit mutation. Original trees and
+  authored IDs remain intact; viewing existing sources adds no root markers.
+  Automatic body style edits stay local to that frame; editing a shared body
+  stylesheet declaration requires explicit rule scope.
 - **Style inspector:** typed values remain local drafts until Enter/blur;
   Escape restores the focus-time value. Scrubs, sliders, and color gestures
   preview live and commit once. Authored-versus-computed state, shorthands,
@@ -278,6 +368,38 @@ Escape restores the exact baseline.
 - **Theme:** the Base/named-mode token editor is persistent, draggable, and
   non-modal. It neither traps focus nor blocks canvas, Layers, or inspector.
   Theme state belongs to the workspace, not an element.
+- **Layout inspector:** the fixed Layout section presents whole-pixel parent-local
+  positions and border-box dimensions, clockwise quarter turns, independent flips,
+  alignment, constraint pins, and Clip content. Viewing or cancelling a rounded
+  value never rewrites authored CSS. New frames explicitly use normal block flow;
+  choosing None disables auto layout without hiding the element. Other style
+  sections and the CSS editor retain their existing precision and semantics.
+  Ratios, flex factors, and relative CSS units in Layout also retain fractions.
+  All three geometry columns grow with the inspector; the transform tools keep
+  a 72px minimum so their three targets remain usable at the narrowest width.
+  Pins author standard insets (including `calc()` for center offsets); the directly
+  authored `--zeros-layout-x` / `--zeros-layout-y` custom properties retain the
+  start/center/end/stretch intent for the editor and canvas gestures. These names
+  are serialized compatibility contracts. Optional runtime `layout` context is
+  measured with node details and validated at the frame bridge, so the inspector
+  does not infer parent coordinates from a transformed screen rectangle.
+  Alignment and constraints appear only for containers with direct authored
+  children, including top-level canvas frames. They arrange visible direct
+  children; hidden layers and grandchildren are left alone. The optional,
+  validated `childrenLayout` aggregate supplies presence, eligible child IDs,
+  and shared or mixed pin intent in the existing exact-key runtime readback.
+  Distribution equalizes gaps between at least three children. Resize to fit
+  encloses visible child bounds with the container's padding; resize to fill
+  stretches a nested frame inside its parent. Canvas-frame fitting commits
+  viewport geometry and styles together. Preparing a containing block and
+  freezing a flow container's measured dimensions happen in the same bounded
+  transaction as child edits, preventing collapsed frames or partial history.
+  A ready runtime can precede its Foundation projection. Layout actions,
+  multi-layer styles, and keyboard nudges preview immediately and resolve the
+  exact workspace/frame/source metadata inside the existing mutation lane.
+  A cold read is shared with the inspector, keeps the captured edit targets,
+  and cannot be overtaken by later writes or Undo. Document read failures and
+  transaction conflicts retain their normal error and recovery handling.
 - **Motion:** node-local keyframe tracks, preview, playback, and paths exist only
   in explicit Motion mode. Draft identity is workspace + frame + node, not
   source revision. Playback updates a small scalar owner store rather than the
@@ -291,6 +413,21 @@ text commits prepare one incoming live iframe while the displayed iframe keeps
 painting, then swap after runtime handshake, fonts/layout, theme, selected-node
 readback, and compositor frames are ready. Rapid A → B → C replaces only the
 unpainted incoming buffer.
+
+Native frame resources, snapshot reads, and Design mutations resolve the same
+active directory in an operation-scoped lease. They do not depend on an earlier
+mode switch priming the legacy directory name. Code view retains read access;
+document mutations still require Design mode. Capability, path, symlink and
+source-generation checks remain in force on native resource reads.
+
+Only a successful private runtime handshake publishes a connection for canvas
+interaction. An incoming buffer keeps the outgoing ready connection until it
+connects. A changed engine capability starts a new frame session using the
+current semantic generation, including after an in-place style adoption. A
+failed native handshake revalidates the workspace and hydrates that frame through
+the bounded, exact-version, sanitized bridge cache. Persistent failures offer
+an inline Retry frame action. Recovery timers stop for inactive surfaces and
+retired sessions; mutations are never automatically replayed.
 
 Runtime snapshots and hot collection references remain stable. Style writes
 retain the existing tree reference where structure permits; display/visibility

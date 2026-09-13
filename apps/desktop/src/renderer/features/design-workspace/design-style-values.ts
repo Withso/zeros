@@ -431,6 +431,7 @@ export function designStyleUnitOptions(
 ): string[] {
   const normalizedProperty = cssStyleProperty(property);
   let options: readonly string[] = [];
+  if (normalizedProperty === "rotate") return ["deg"];
   if (DESIGN_MS_DEFAULT_PROPERTIES.has(normalizedProperty)) {
     options = ["ms", "s"];
   } else if (
@@ -593,6 +594,12 @@ const DESIGN_LAYOUT_PROPERTIES = new Set([
   "hyphens",
   "transform",
   "transform-origin",
+  "rotate",
+  "scale",
+  "translate",
+  "overflow",
+  "overflow-x",
+  "overflow-y",
   "perspective",
   "perspective-origin",
 ]);
@@ -609,6 +616,8 @@ export function normalizeDesignStyleFieldInput(
   const resolved = resolveDesignNumericExpression(input, baseline);
   const parsed = parseDesignNumericValue(resolved);
   if (!parsed || parsed.unit) return resolved;
+  if (normalizedProperty === "rotate")
+    return `${formatDesignNumber(parsed.number)}deg`;
   if (DESIGN_PX_DEFAULT_PROPERTIES.has(normalizedProperty)) {
     return `${formatDesignNumber(parsed.number)}px`;
   }
