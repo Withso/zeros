@@ -1,13 +1,102 @@
 import { describe, expect, it, vi } from "vitest";
 import { createExtensionResource } from "../extensions-cache";
 import { decodeCustomizeSelection } from "../customize-model";
+import { providerAuthChanged } from "../../../platform/provider-auth-state";
 import {
   extensionProviders,
   type ExtensionInventory,
 } from "@zeros/protocol/agent-extensions";
 
 describe("customization ownership", () => {
-  it("bounds selection to supported category/provider pairs", () => {
+  it("makes late reads unreachable after an authentication change", async () => {
+    let finish!: (value: ExtensionInventory) => void;
+    const resource = createExtensionResource(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const query = { category: "apps", provider: "codex" } as const;
+    const oldKey = resource.key(query);
+    const pending = resource.cache.load(oldKey, () => resource.fetch(oldKey));
+    await Promise.resolve();
+    providerAuthChanged();
+    const newKey = resource.key(query);
+    expect(newKey).not.toBe(oldKey);
+    finish({ entries: [], warnings: ["Old account"] });
+    await pending;
+    expect(resource.cache.getSnapshot(newKey).data).toBeUndefined();
+    await expect(resource.fetch(oldKey)).rejects.toThrow("connection changed");
+  });
+  it("never retains entries from a different or unverified account after a partial refresh", async () => {
+    const read = vi.fn().mockResolvedValue({
+      identity: "account-a",
+      sources: [{ id: "account", kind: "account", state: "complete" }],
+      entries: [
+        {
+          id: "private",
+          name: "Private",
+          description: "",
+          sourcePath: "Account",
+          sourceId: "account",
+          status: "available",
+        },
+      ],
+      warnings: [],
+    });
+    const resource = createExtensionResource(read);
+    const key = resource.key({ category: "apps", provider: "codex" });
+    await resource.cache.load(key, () => resource.fetch(key));
+    read.mockResolvedValue({
+      identity: "account-b",
+      sources: [{ id: "account", kind: "account", state: "partial" }],
+      entries: [],
+      warnings: [],
+      partial: true,
+    });
+    resource.cache.invalidate(key);
+    await resource.cache.load(key, () => resource.fetch(key));
+    expect(resource.cache.getSnapshot(key).data?.entries).toEqual([]);
+  });
+
+  it("removes confirmed local deletions when only the account source failed", async () => {
+    const read = vi.fn().mockResolvedValue({
+      identity: "same-account",
+      sources: [
+        { id: "local", kind: "local", state: "complete" },
+        { id: "account", kind: "account", state: "complete" },
+      ],
+      entries: [
+        {
+          id: "deleted",
+          name: "Deleted",
+          description: "",
+          sourcePath: "/local",
+          sourceId: "local",
+          status: "configured",
+        },
+      ],
+      warnings: [],
+    });
+    const resource = createExtensionResource(read);
+    const key = resource.key({ category: "plugins", provider: "codex" });
+    await resource.cache.load(key, () => resource.fetch(key));
+    read.mockResolvedValue({
+      identity: "same-account",
+      sources: [
+        { id: "local", kind: "local", state: "complete" },
+        { id: "account", kind: "account", state: "partial" },
+      ],
+      entries: [],
+      warnings: [],
+      partial: true,
+    });
+    resource.cache.invalidate(key);
+    await resource.cache.load(key, () => resource.fetch(key));
+    expect(resource.cache.getSnapshot(key).data?.entries).toEqual([]);
+  });
+
+  it("keeps backend inventories available but restores Customize to Zeros-owned capabilities", () => {
     expect(extensionProviders("mcp")).toEqual([
       "zeros",
       "claude",
@@ -23,7 +112,13 @@ describe("customization ownership", () => {
     expect(extensionProviders("apps")).toBe(extensionProviders("plugins"));
     expect(
       decodeCustomizeSelection({ category: "plugins", provider: "zeros" }),
-    ).toEqual({ category: "plugins", provider: "claude" });
+    ).toEqual({ category: "mcp", provider: "zeros" });
+    expect(
+      decodeCustomizeSelection({ category: "skills", provider: "cursor" }),
+    ).toEqual({ category: "skills", provider: "zeros" });
+    expect(
+      decodeCustomizeSelection({ category: "apps", provider: "codex" }),
+    ).toEqual({ category: "mcp", provider: "zeros" });
     expect(
       decodeCustomizeSelection({ category: "removed", provider: "missing" }),
     ).toEqual({ category: "mcp", provider: "zeros" });
@@ -32,18 +127,23 @@ describe("customization ownership", () => {
     const read = vi
       .fn()
       .mockResolvedValueOnce({
+        identity: "same-account",
+        sources: [{ id: "account", kind: "account", state: "complete" }],
         entries: [
           {
             id: "cloud",
             name: "Cloud",
             description: "",
             sourcePath: "Account",
+            sourceId: "account",
             status: "available",
           },
         ],
         warnings: [],
       })
       .mockResolvedValue({
+        identity: "same-account",
+        sources: [{ id: "account", kind: "account", state: "partial" }],
         entries: [],
         warnings: ["Native inventory unavailable"],
         partial: true,

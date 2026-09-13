@@ -409,13 +409,24 @@ async function fileHasNonEmptyField(
   }
 }
 
+/** Only keychain modification metadata is read; `security` is never given -w
+ * or -g, so credential bytes are not requested. */
+export function keychainAuthModifiedAtMs(metadata: string): number {
+  const match =
+    /"mdat"<timedate>=[^\n]*?"(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})Z/.exec(
+      metadata,
+    );
+  if (!match) return 0;
+  const [, year, month, day, hour, minute, second] = match;
+  return Date.UTC(+year, +month - 1, +day, +hour, +minute, +second);
+}
+
 /** Most-recent mtime across every credential file referenced by a probe.
  *  Used by the gateway to decide whether a runtime "auth-failed" marker
  *  is still relevant: if the user re-signed-in via Terminal.app, the
  *  credentials file gets re-written and its mtime jumps past the failure
- *  time, so we can confidently re-probe. Returns 0 for keychain/command
- *  probes (no fs signal available), so the marker still expires via the
- *  30 min TTL there. */
+ *  time, so we can re-probe. Keychain uses its public modification date;
+ *  command probes may declare credential files solely as a change signal. */
 export async function latestAuthFileMtimeMs(probe: AuthProbe): Promise<number> {
   switch (probe.kind) {
     case "file": {
@@ -447,9 +458,27 @@ export async function latestAuthFileMtimeMs(probe: AuthProbe): Promise<number> {
       }
       return max;
     }
-    case "keychain":
+    case "keychain": {
+      if (process.platform !== "darwin") return 0;
+      try {
+        const { stdout } = await execFileP(
+          "security",
+          ["find-generic-password", "-s", probe.service],
+          {
+            timeout: 1500,
+            killSignal: "SIGKILL",
+          },
+        );
+        return keychainAuthModifiedAtMs(stdout);
+      } catch {
+        return 0;
+      }
+    }
     case "command":
-      return 0;
+      return latestAuthFileMtimeMs({
+        kind: "file",
+        paths: probe.credentialFiles ?? [],
+      });
     case "secret-account":
       // secrets.json is shared across every account, so its mtime isn't a
       // per-account signal — return 0 (TTL-only runtime invalidation),

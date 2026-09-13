@@ -1176,9 +1176,9 @@ export function designConstraintSides(input: {
   }
   const authored = input.authored ? new Set(input.authored) : null;
   const pinned = (side: DesignConstraintSide) => {
-    if (authored) return authored.has(side);
-    const value = input.styles?.[side]?.trim() ?? "auto";
-    return value !== "auto" && value !== "";
+    const value = input.styles?.[side]?.trim();
+    if (authored) return authored.has(side) && value !== "auto";
+    return value !== undefined && value !== "auto" && value !== "";
   };
   const axis = (
     start: DesignConstraintSide,
@@ -1190,9 +1190,21 @@ export function designConstraintSides(input: {
     if (hasEnd) return [end];
     return [start];
   };
+  const markedAxis = (
+    name: "x" | "y",
+    start: DesignConstraintSide,
+    end: DesignConstraintSide,
+  ): readonly DesignConstraintSide[] => {
+    const marker = input.styles?.[`--zeros-layout-${name}`];
+    if (marker === "center") return [];
+    if (marker === "start") return [start];
+    if (marker === "end") return [end];
+    if (marker === "stretch") return [start, end];
+    return axis(start, end);
+  };
   return {
-    horizontal: axis("left", "right"),
-    vertical: axis("top", "bottom"),
+    horizontal: markedAxis("x", "left", "right"),
+    vertical: markedAxis("y", "top", "bottom"),
   };
 }
 

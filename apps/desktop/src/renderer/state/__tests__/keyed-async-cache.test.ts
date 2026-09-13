@@ -17,6 +17,26 @@ function deferred<T>(): {
 }
 
 describe("KeyedAsyncCache", () => {
+  it("restores an exact-key snapshot synchronously without resetting its freshness", async () => {
+    const updatedAt = Date.now() - 29 * 60_000;
+    const initialSnapshot = vi.fn((key: string) =>
+      key === "saved" ? { data: "previous", updatedAt } : undefined,
+    );
+    const cache = new KeyedAsyncCache<string>({ initialSnapshot });
+    const snapshot = cache.getSnapshot("saved");
+    expect(snapshot).toMatchObject({ data: "previous", loading: false, updatedAt });
+    expect(cache.getSnapshot("saved")).toBe(snapshot);
+    expect(initialSnapshot).toHaveBeenCalledOnce();
+    expect(cache.getSnapshot("other").data).toBeUndefined();
+    const fetcher = vi.fn(async () => "fresh");
+    await cache.load("saved", fetcher, { maxAgeMs: 30 * 60_000 });
+    expect(fetcher).not.toHaveBeenCalled();
+    const pending = cache.load("saved", fetcher, { maxAgeMs: 28 * 60_000 });
+    expect(cache.getSnapshot("saved")).toMatchObject({ data: "previous", refreshing: true });
+    await pending;
+    expect(cache.getSnapshot("saved").data).toBe("fresh");
+  });
+
   it("evicts inactive LRU payloads when a byte-style weight budget is exceeded", async () => {
     const cache = new KeyedAsyncCache<string>({
       maxEntries: 10,

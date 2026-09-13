@@ -354,16 +354,17 @@ export function queuedPromptPresentation(input: {
   return "queued-card";
 }
 
-/** A protection failure is the one admission failure that owns a durable turn
- * footer requested by product: keep its active prompt so the exact stopped
- * label has an anchor. Ordinary provider/startup failures restore the text to
- * the composer, and true follow-ups remain disposable queue rows. */
+/** Protection failures retain their stopped-turn footer; authentication failures
+ * retain the prompt as context for the next normal send after Settings sign-in.
+ * Other startup failures restore composer text; follow-ups remain queue rows. */
 export function shouldPreserveAdmissionPromptOnFailure(
   failureKind: string | null | undefined,
   presentation: "active-turn" | "queued-card" | undefined,
 ): boolean {
   return (
-    failureKind === "design-protection-failed" && presentation === "active-turn"
+    (failureKind === "design-protection-failed" ||
+      failureKind === "auth-required") &&
+    presentation === "active-turn"
   );
 }
 
@@ -511,7 +512,8 @@ export function sendAdmissionPark(input: {
   expectedEnvKey: string | undefined;
 }): "session-build" | "drift-respawn" | null {
   if (!input.hasAgent || input.status === "streaming") return null;
-  if (!input.hasSession) return "session-build";
+  if (!input.hasSession || input.status === "auth-required")
+    return "session-build";
   if (
     input.expectedEnvKey !== undefined &&
     input.appliedChatEnvKey !== undefined &&

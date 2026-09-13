@@ -98,7 +98,7 @@ describe("workspace mode toggle", () => {
     expect(markup).toContain('aria-pressed="false"');
     expect(markup).toContain('class="lucide lucide-code-xml size-4"');
     expect(markup).toContain('class="lucide lucide-pen-tool size-4"');
-    expect(markup).toContain("p-1");
+    expect(markup).toContain("p-0.5");
     // No row of its own, and no workspace name: the toggle is a bare control
     // its host seats (Code's chat strip, Design's named header row).
     expect(markup).not.toContain("h-10");
@@ -111,14 +111,17 @@ describe("workspace mode toggle", () => {
     for (const buttonTag of buttonTags) {
       const buttonClasses =
         buttonTag.match(/class="([^"]*)"/)?.[1]?.split(" ") ?? [];
-      expect(buttonClasses).toContain("size-4");
-      expect(buttonClasses).not.toContain("h-6");
-      expect(buttonClasses).not.toContain("w-6");
+      expect(buttonClasses).toContain("h-6");
+      expect(buttonClasses).toContain("w-6");
+      expect(buttonClasses).toContain("rounded-md");
     }
     const toggleTag = markup.match(
       /<div data-workspace-mode-toggle=""[^>]*>/,
     )?.[0];
-    expect(toggleTag).toContain("gap-2");
+    expect(toggleTag).toContain("h-7");
+    expect(toggleTag).toContain("rounded-lg");
+    expect(toggleTag).toContain("bg-bg2");
+    expect(toggleTag).not.toContain("border");
     const codeButtonClasses =
       markup
         .match(/<button[^>]*data-workspace-mode="code"[^>]*>/)?.[0]
@@ -129,9 +132,16 @@ describe("workspace mode toggle", () => {
         .match(/<button[^>]*data-workspace-mode="design"[^>]*>/)?.[0]
         ?.match(/class="([^"]*)"/)?.[1]
         ?.split(" ") ?? [];
-    expect(codeButtonClasses).toContain("text-fg1");
-    expect(codeButtonClasses).not.toContain("bg-bg2-hover");
+    expect(codeButtonClasses).toContain("text-blue-fg");
+    expect(codeButtonClasses).toContain("hover:text-blue-fg");
+    expect(codeButtonClasses).toContain("bg-bg1-highlight");
+    expect(codeButtonClasses).toContain("hover:bg-bg1-highlight");
+    expect(codeButtonClasses).not.toContain("hover:bg-bg1-highlight/80");
+    expect(codeButtonClasses).not.toContain("bg-bg1-highlight/80");
     expect(designButtonClasses).toContain("text-fg3");
+    expect(designButtonClasses).toContain("hover:text-fg3");
+    expect(designButtonClasses).toContain("hover:bg-bg1-highlight/80");
+    expect(designButtonClasses).not.toContain("bg-bg1-highlight");
   });
 
   it("keeps the selected mode fully visible while the switch settles", () => {

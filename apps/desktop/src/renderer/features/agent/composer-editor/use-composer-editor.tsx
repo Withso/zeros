@@ -156,6 +156,8 @@ export interface UseComposerEditorOpts {
   onDeleteKey?: () => boolean;
   /** Inline-action slash commands (returns true if it ran the action). */
   onSlashCommand?: (name: string) => boolean;
+  /** Request live commands when the picker first opens, without sending text. */
+  onSlashOpen?: () => void;
   /** Terminal slash commands (returns true if it opened the terminal flow). */
   onTerminalCommand?: (name: string) => boolean;
   /** Fired on every doc change (surfaces use it to mirror live drafts). */
@@ -684,6 +686,7 @@ export function useComposerEditor(
         // blurred. loadWorkspaceFiles is stable (useCallback []), and its
         // .finally re-pushes results into the already-open menu via refreshRef.
         onMentionOpen: () => loadWorkspaceFiles(true),
+        onSlashOpen: () => optsRef.current.onSlashOpen?.(),
         prEnabled,
         onPickMention,
         onPickSlash,

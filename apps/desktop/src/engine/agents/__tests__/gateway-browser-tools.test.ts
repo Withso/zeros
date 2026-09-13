@@ -1,6 +1,19 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AgentAdapter, AgentBrowserUse } from "../types";
+
+let fixtureRoot: string;
+beforeEach(() => {
+  fixtureRoot = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), "zeros-gateway-browser-")),
+  );
+});
+afterEach(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
 
 const { acquire, enabled } = vi.hoisted(() => ({
   acquire: vi.fn(),
@@ -24,8 +37,8 @@ vi.mock("../../git/state", () => ({
   // admission refuses a cwd outside its canonical workspace before any
   // browser capability is resolved.
   getWorkspaceById: vi.fn(() => ({
-    path: "/tmp",
-    repoRoot: "/tmp",
+    path: fixtureRoot,
+    repoRoot: fixtureRoot,
   })),
   listWorkspaces: vi.fn(() => []),
   worktreesRoot: vi.fn(() => "/managed/worktrees"),
@@ -66,7 +79,7 @@ describe("AgentGateway Zeros browser ownership", () => {
       },
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
@@ -89,7 +102,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     gateway.adapters.set("codex", adapter);
 
     await gateway.newSession("codex", {
-      cwd: "/tmp",
+      cwd: fixtureRoot,
       workspaceId: "workspace-zeros",
       conversationId: "conversation-zeros",
     });
@@ -97,8 +110,8 @@ describe("AgentGateway Zeros browser ownership", () => {
     expect(acquire).toHaveBeenCalledWith({
       workspaceId: "workspace-zeros",
       conversationId: "conversation-zeros",
-      workspaceRoot: "/tmp",
-      mainRepoRoot: "/tmp",
+      workspaceRoot: fixtureRoot,
+      mainRepoRoot: fixtureRoot,
     });
     expect(received).toEqual({
       kind: "codex-app-server",
@@ -132,7 +145,7 @@ describe("AgentGateway Zeros browser ownership", () => {
         },
       } as unknown as AgentAdapter;
       const gateway = new AgentGateway({
-        projectRoot: "/tmp",
+        projectRoot: fixtureRoot,
         executionBoundary: testExecutionBoundary(),
         events: {
           onSessionUpdate: () => {},
@@ -155,7 +168,7 @@ describe("AgentGateway Zeros browser ownership", () => {
       gateway.adapters.set(agentId, adapter);
 
       await gateway.newSession(agentId, {
-        cwd: "/tmp",
+        cwd: fixtureRoot,
         workspaceId: "workspace-zeros",
         conversationId: "conversation-zeros",
       });
@@ -163,7 +176,11 @@ describe("AgentGateway Zeros browser ownership", () => {
       expect(received).toEqual(expected);
       expect(acquire).not.toHaveBeenCalled();
       if (agentId === "claude") {
-        expect(enabled).toHaveBeenCalledWith("/tmp", "/tmp", "claude");
+        expect(enabled).toHaveBeenCalledWith(
+          fixtureRoot,
+          fixtureRoot,
+          "claude",
+        );
       }
     },
   );
@@ -187,7 +204,7 @@ describe("AgentGateway Zeros browser ownership", () => {
       },
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
@@ -202,9 +219,9 @@ describe("AgentGateway Zeros browser ownership", () => {
     };
     gateway.adapters.set("claude", adapter);
 
-    await gateway.newSession("claude", { cwd: "/tmp" });
+    await gateway.newSession("claude", { cwd: fixtureRoot });
 
-    expect(enabled).toHaveBeenCalledWith("/tmp", undefined, "claude");
+    expect(enabled).toHaveBeenCalledWith(fixtureRoot, undefined, "claude");
     expect(received).toEqual({ kind: "claude-agent-sdk" });
     expect(acquire).not.toHaveBeenCalled();
   });
@@ -229,7 +246,7 @@ describe("AgentGateway Zeros browser ownership", () => {
       prompt,
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
@@ -255,7 +272,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     };
     gateway.adapters.set("claude", adapter);
 
-    const created = await gateway.newSession("claude", { cwd: "/tmp" });
+    const created = await gateway.newSession("claude", { cwd: fixtureRoot });
     enabled.mockReturnValue(true);
     const executionId = created.executionId ?? created.sessionId;
     await gateway.prompt("claude", executionId, [
@@ -292,7 +309,7 @@ describe("AgentGateway Zeros browser ownership", () => {
       prompt,
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
@@ -318,7 +335,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     };
     gateway.adapters.set("claude", adapter);
 
-    const created = await gateway.newSession("claude", { cwd: "/tmp" });
+    const created = await gateway.newSession("claude", { cwd: fixtureRoot });
     const executionId = created.executionId ?? created.sessionId;
     await gateway.prompt("claude", executionId, [
       { type: "text", text: "Continue without browser access" },
@@ -338,7 +355,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     });
     const received = new Map<string, AgentBrowserUse | undefined>();
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
@@ -376,7 +393,7 @@ describe("AgentGateway Zeros browser ownership", () => {
         },
       } as unknown as AgentAdapter);
       await gateway.newSession(agentId, {
-        cwd: "/tmp",
+        cwd: fixtureRoot,
         workspaceId: `workspace-${agentId}`,
         conversationId: `conversation-${agentId}`,
       });

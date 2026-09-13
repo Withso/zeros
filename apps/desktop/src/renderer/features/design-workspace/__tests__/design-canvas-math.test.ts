@@ -1192,6 +1192,22 @@ describe("design rotated selection geometry", () => {
     ).toEqual([{ side: "left", axis: "horizontal", x: 0, y: 60, length: 0 }]);
   });
 
+  it("ignores reset insets and follows explicit designer pins", () => {
+    expect(
+      designConstraintSides({
+        position: "absolute",
+        authored: ["left", "right", "top", "bottom"],
+        styles: { left: "auto", right: "20px", top: "30px", bottom: "auto" },
+      }),
+    ).toEqual({ horizontal: ["right"], vertical: ["top"] });
+    expect(
+      designConstraintSides({
+        position: "absolute",
+        styles: { "--zeros-layout-x": "center", "--zeros-layout-y": "end" },
+      }),
+    ).toEqual({ horizontal: [], vertical: ["bottom"] });
+  });
+
   it("bakes a quantized angle into the rotation cursor", () => {
     const cursor = designRotationCursor(46);
     expect(cursor.startsWith('url("data:image/svg+xml,<svg')).toBe(true);

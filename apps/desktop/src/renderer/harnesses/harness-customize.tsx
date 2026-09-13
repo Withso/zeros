@@ -23,6 +23,7 @@ if (!getSetting("customize:selection", null))
 upsertProject({ repoRoot: "/fixture/repo-a", name: "Repo A" });
 upsertProject({ repoRoot: "/fixture/repo-b", name: "Repo B" });
 const libraries = new Map<string, ExtensionEntry[]>();
+const inventoryProviders: string[] = [];
 Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
 });
@@ -47,7 +48,10 @@ RuntimeClient.prototype.request = async function <
       exists: false,
       path: `${scope}/.zeros/settings.local.toml`,
     };
-  if (request.op === "extensions.list")
+  if (request.op === "extensions.list") {
+    inventoryProviders.push(String(params.provider));
+    document.getElementById("inventory-providers")!.textContent =
+      JSON.stringify(inventoryProviders);
     result = {
       entries:
         params.provider === "zeros"
@@ -82,6 +86,7 @@ RuntimeClient.prototype.request = async function <
               ],
       warnings: [],
     };
+  }
   if (request.op === "skills.saveZeros") {
     const entry: ExtensionEntry = {
       id: String(params.name),
@@ -131,6 +136,7 @@ createRoot(document.getElementById("root")!).render(
         <main className="h-screen">
           <CustomizePage />
           <output id="last-write" hidden />
+          <output id="inventory-providers" hidden />
         </main>
       </BridgeProvider>
     </TooltipProvider>

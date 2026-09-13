@@ -81,22 +81,37 @@ export function readSkillFile(file: string): {
   }
 }
 
-export function listSkillDirectory(root: string): ExtensionEntry[] {
+export function listSkillDirectory(
+  root: string,
+  onIncomplete?: () => void,
+): ExtensionEntry[] {
   let entries;
   try {
     entries = readdirSync(root, { withFileTypes: true });
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") onIncomplete?.();
     return [];
   }
+  if (entries.length > MAX_SKILLS) onIncomplete?.();
   return entries
+    .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, MAX_SKILLS)
     .flatMap((entry) => {
+      if (
+        !entry.isDirectory() &&
+        !entry.isSymbolicLink() &&
+        !(entry.isFile() && entry.name.endsWith(".md"))
+      )
+        return [];
       const file =
         entry.isFile() && entry.name.endsWith(".md")
           ? path.join(root, entry.name)
           : path.join(root, entry.name, "SKILL.md");
       const skill = readSkillFile(file);
-      if (!skill) return [];
+      if (!skill) {
+        if (existsSync(file)) onIncomplete?.();
+        return [];
+      }
       return [
         {
           id: entry.name.replace(/\.md$/, ""),
@@ -136,7 +151,8 @@ function writableSkillPath(name: string, repoRoot?: string): string {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  if (repoRoot) ensureLocalSettingsIgnored(personalRepoRoot(repoRoot), ".zeros/skills/");
+  if (repoRoot)
+    ensureLocalSettingsIgnored(personalRepoRoot(repoRoot), ".zeros/skills/");
   return file;
 }
 

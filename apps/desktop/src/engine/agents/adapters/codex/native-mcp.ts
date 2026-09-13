@@ -1,3 +1,5 @@
+import type { PluginInstalledResponse } from "./generated/v2/PluginInstalledResponse";
+import type { PluginReadResponse } from "./generated/v2/PluginReadResponse";
 // ──────────────────────────────────────────────────────────
 // Native MCP scoping for Codex threads
 // ──────────────────────────────────────────────────────────
@@ -14,6 +16,7 @@
 import { codexPluginMcpServerNames } from "../../mcp-scan";
 import type { JsonValue as GenJsonValue } from "./generated/serde_json/JsonValue";
 import type { CodexAppServerHandle } from "./app-server";
+import { isBundledCodexRuntimePlugin } from "./bundled-runtime-plugins";
 
 /** Placeholder transport paired with `enabled = false`.
  *
@@ -30,8 +33,7 @@ const DISABLED_SERVER_COMMAND = "zeros-disabled-mcp-server";
  *  and `mcpServerStatus/list` answers for the thread being configured.
  *
  *  `codex_apps` is the account Apps bridge. Tool-free helper threads disable
- *  it. Normal chats explicitly keep it because Customize now enumerates its
- *  account entries and runtime availability through app/list and app/installed.
+ *  it. Normal chats keep it unless a local declaration shadows the name.
  *
  *  A hardcoded provider-internal name is a guess about codex's internals, and
  *  it is deliberately a SAFE one: an entry naming a server codex does not know
@@ -52,6 +54,8 @@ const CODEX_INTERNAL_SERVER_NAMES = ["codex_apps"] as const;
  *      way, so this is the common case rather than the exotic one. */
 export interface NativeMcpSurface {
   serverNames: string[];
+  /** Local declarations must not inherit an internal account bridge's exemption. */
+  shadowedAccountServerNames?: string[];
   /** Config-declared servers that use the Streamable HTTP transport, by name →
    *  their `url`. Codex infers a server's transport from the keys present
    *  (`command` ⇒ stdio, `url` ⇒ http) and rejects an entry carrying BOTH with
@@ -68,19 +72,23 @@ export interface NativeMcpSurface {
  *  of `config.toml`: a file parse misses the project-local layer and races the
  *  user editing the file.
  *
- *  Plugin-declared names come from the plugin cache on disk, because the
- *  app-server has no method that reports them before a thread exists —
- *  `config/read` omits them entirely and `mcpServerStatus/list` answers for
- *  the current thread, which is the one being configured. `CODEX_HOME` is
- *  ambient for both the engine and the codex child (config-isolation.ts), so
- *  they read the same cache.
+ *  Normal chats use plugin/installed provenance and plugin/read to exclude
+ *  MCP from local packages while preserving account plugins. Helpers and
+ *  restricted actors exclude the whole disk plugin surface. The disk scan is
+ *  also a conservative fallback when provenance cannot be verified. Pass the
+ *  same CODEX_HOME as the child so isolation cannot select a different cache.
  *
  *  Reading starts nothing: codex spins MCP servers up per `thread/start`, not
  *  at `initialize`. Each half degrades on its own. */
 export async function readNativeMcpSurface(
   runtime: Pick<CodexAppServerHandle, "requestTyped">,
   cwd?: string,
-  opts?: { timeoutMs?: number; codexHome?: string },
+  opts?: {
+    timeoutMs?: number;
+    codexHome?: string;
+    includePlugins?: boolean;
+    requireConfig?: boolean;
+  },
 ): Promise<NativeMcpSurface> {
   const configured = await runtime
     .requestTyped<"config/read", { config?: { mcp_servers?: unknown } | null }>(
@@ -88,14 +96,42 @@ export async function readNativeMcpSurface(
       { includeLayers: false, ...(cwd ? { cwd } : {}) },
       { timeoutMs: opts?.timeoutMs ?? 10_000 },
     )
-    .then((r) => enabledMcpServers(r?.config?.mcp_servers))
-    .catch(() => ({ names: [] as string[], httpUrls: {} as Record<string, string> }));
+    .then((r) => {
+      const config = r?.config;
+      if (
+        opts?.requireConfig &&
+        (!config ||
+          typeof config !== "object" ||
+          Array.isArray(config) ||
+          (config.mcp_servers != null &&
+            (typeof config.mcp_servers !== "object" ||
+              Array.isArray(config.mcp_servers))))
+      )
+        throw new Error("Incomplete MCP configuration");
+      return enabledMcpServers(config?.mcp_servers);
+    })
+    .catch(() => {
+      if (opts?.requireConfig)
+        throw new Error(
+          "Could not read the MCP configuration. Retry opening this chat.",
+        );
+      return { names: [] as string[], httpUrls: {} as Record<string, string> };
+    });
   let fromPlugins: string[] = [];
   try {
-    fromPlugins = codexPluginMcpServerNames(undefined, opts?.codexHome);
+    fromPlugins =
+      opts?.includePlugins === false
+        ? await localPluginMcpServerNames(runtime, cwd, opts?.codexHome)
+        : codexPluginMcpServerNames(undefined, opts?.codexHome);
   } catch {
-    fromPlugins = [];
+    // Older/partially available providers cannot prove which plugins belong
+    // to the account. Suppress their disk MCP surface until discovery works.
+    fromPlugins = codexPluginMcpServerNames(undefined, opts?.codexHome);
   }
+  const localNames = new Set([...configured.names, ...fromPlugins]);
+  const shadowedAccountServerNames = CODEX_INTERNAL_SERVER_NAMES.filter(
+    (name) => localNames.has(name),
+  );
   return {
     serverNames: [
       ...new Set([
@@ -104,12 +140,80 @@ export async function readNativeMcpSurface(
         ...CODEX_INTERNAL_SERVER_NAMES,
       ]),
     ],
+    ...(shadowedAccountServerNames.length > 0
+      ? { shadowedAccountServerNames }
+      : {}),
     // Only present when there is something to carry, so the common surface
     // stays the plain `{ serverNames }` shape.
     ...(Object.keys(configured.httpUrls).length > 0
       ? { httpServerUrls: configured.httpUrls }
       : {}),
   };
+}
+
+/** Account-managed packages may be materialized on disk too. Use provider
+ * provenance rather than filesystem location or an HTTP transport heuristic. */
+async function localPluginMcpServerNames(
+  runtime: Pick<CodexAppServerHandle, "requestTyped">,
+  cwd?: string,
+  codexHome?: string,
+): Promise<string[]> {
+  const response = await runtime.requestTyped<
+    "plugin/installed",
+    PluginInstalledResponse
+  >(
+    "plugin/installed",
+    { ...(cwd ? { cwds: [cwd] } : {}) },
+    { timeoutMs: 3_000 },
+  );
+  if (
+    !Array.isArray(response.marketplaces) ||
+    response.marketplaceLoadErrors?.length
+  )
+    throw new Error("Incomplete plugin provenance");
+  const local = response.marketplaces.flatMap((market) =>
+    market.plugins
+      .filter(
+        (plugin) =>
+          plugin.installed &&
+          plugin.enabled &&
+          !plugin.remotePluginId &&
+          plugin.source.type !== "remote",
+      )
+      .map((plugin) => ({ market, plugin })),
+  );
+  if (local.length > 128) throw new Error("Too many local plugins");
+  const deadline = Date.now() + 5_000;
+  const names: string[] = [];
+  await Promise.all(
+    Array.from({ length: Math.min(4, local.length) }, async () => {
+      for (;;) {
+        const item = local.shift();
+        if (!item) return;
+        if (
+          await isBundledCodexRuntimePlugin(item.market, item.plugin, codexHome)
+        )
+          continue;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error("Plugin discovery timed out");
+        const result = await runtime.requestTyped<
+          "plugin/read",
+          PluginReadResponse
+        >(
+          "plugin/read",
+          {
+            pluginName: item.plugin.name,
+            ...(item.market.path
+              ? { marketplacePath: item.market.path }
+              : { remoteMarketplaceName: item.market.name }),
+          },
+          { timeoutMs: Math.min(2_000, remaining) },
+        );
+        names.push(...result.plugin.mcpServers);
+      }
+    }),
+  );
+  return names;
 }
 
 /** Enabled `mcp_servers` names, plus every configured HTTP transport. Disabled
@@ -120,7 +224,7 @@ function enabledMcpServers(servers: unknown): {
   httpUrls: Record<string, string>;
 } {
   const names: string[] = [];
-  const httpUrls: Record<string, string> = {};
+  const httpUrls: Record<string, string> = Object.create(null);
   if (typeof servers !== "object" || servers === null || Array.isArray(servers))
     return { names, httpUrls };
   for (const [name, cfg] of Object.entries(
@@ -181,7 +285,7 @@ export function mcpDisabledThreadConfig(
   surface: NativeMcpSurface,
 ): Record<string, GenJsonValue> {
   if (surface.serverNames.length === 0) return {};
-  const servers: Record<string, GenJsonValue> = {};
+  const servers: Record<string, GenJsonValue> = Object.create(null);
   for (const name of surface.serverNames) {
     // An http server keeps its own `url` as the placeholder transport. Adding
     // `command` to a table that already has `url` makes codex reject the whole

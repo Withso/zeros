@@ -17,6 +17,36 @@ export interface DesignLayerWindow {
   end: number;
 }
 
+/** Only the explicitly seeded shell identified by the runtime can share the
+ * canvas row. Unmarked authored roots remain children of the document body,
+ * including roots smaller than the viewport and roots with no children.
+ * Keep the raw tree intact for hit testing and persisted selections. */
+export function designFrameLayerChildren(
+  nodes: readonly DesignRuntimeTreeNode[],
+  frameRootId: string | null | undefined,
+): readonly DesignRuntimeTreeNode[] {
+  if (nodes.length === 1) {
+    const node = nodes[0]!;
+    if (node.tag === "body" || node.tag === "html")
+      return designFrameLayerChildren(node.children, frameRootId);
+    if (node.oid === frameRootId) return node.children;
+  }
+  if (
+    !nodes.some(
+      (node) =>
+        node.oid === frameRootId || node.tag === "body" || node.tag === "html",
+    )
+  )
+    return nodes;
+  return nodes.flatMap((node) =>
+    node.tag === "body" || node.tag === "html"
+      ? [...designFrameLayerChildren(node.children, frameRootId)]
+      : node.oid === frameRootId
+        ? node.children
+        : [node],
+  );
+}
+
 /** Fixed-row virtualization window for very large authored trees. Small trees
  * stay whole for simpler accessibility; large trees retain an overscan buffer
  * so wheel and keyboard travel never reveal an unpainted seam. */
@@ -187,6 +217,8 @@ export function resolveDesignFrameBodyTarget(input: {
   rootRect?: DesignRuntimeRect | null;
   /** False for text frames, whose root is the content itself. */
   labeledFrame: boolean;
+  /** Explicit runtime style owner; a full-size authored child is still a layer. */
+  frameRootId?: string;
 }): DesignFrameBodyTarget {
   const path = designLayerPathIds(input.nodes, input.deepestNodeId);
   if (path.length === 0) return { kind: "unresolved" };
@@ -197,6 +229,10 @@ export function resolveDesignFrameBodyTarget(input: {
   const rootIsFrameBody =
     input.labeledFrame &&
     singleRoot &&
+    (input.frameRootId === undefined ||
+      path[0] === input.frameRootId ||
+      input.nodes[0]?.tag === "body" ||
+      input.nodes[0]?.tag === "html") &&
     (path.length === 1
       ? designFrameBodyRootCoverage(input.deepestRect, input.frameSize)
       : input.rootRect

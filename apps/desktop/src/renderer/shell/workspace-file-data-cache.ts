@@ -68,6 +68,14 @@ export interface WorkspaceFileDiffQuery {
 const fileReadCache = new KeyedAsyncCache<ReadFileResult>(96);
 const fileDiffCache = new KeyedAsyncCache<string>(160);
 
+// A large Changes summary has no per-file patches to reuse. Pointer travel
+// must not start a Git process for every crossed row while earlier reads are
+// still running. Bound speculative reads across keys and retain only the most
+// recent waiting intent; explicit viewer loads bypass these slots.
+const MAX_DIFF_PREFETCHES = 2;
+const diffPrefetches = new Map<string, Promise<string>>();
+let queuedDiffPrefetch: WorkspaceFileDiffQuery | null = null;
+
 function normalizeCwd(cwd: string): string {
   if (cwd === "/" || /^[A-Za-z]:[\\/]$/.test(cwd)) return cwd;
   return cwd.replace(/[\\/]+$/, "");
@@ -232,11 +240,11 @@ export function loadWorkspaceFileDiff(
   query: WorkspaceFileDiffQuery,
   options: { force?: boolean; maxAgeMs?: number } = {},
 ): Promise<string> {
-  return fileDiffCache.load(
-    workspaceFileDiffKey(query),
-    () => fetchWorkspaceFileDiff(query),
-    options,
-  );
+  const key = workspaceFileDiffKey(query);
+  if (queuedDiffPrefetch && workspaceFileDiffKey(queuedDiffPrefetch) === key) {
+    queuedDiffPrefetch = null;
+  }
+  return fileDiffCache.load(key, () => fetchWorkspaceFileDiff(query), options);
 }
 
 export function prefetchWorkspaceFileRead(
@@ -255,9 +263,32 @@ export function prefetchWorkspaceFileDiff(
   query: WorkspaceFileDiffQuery | null | undefined,
 ): void {
   if (!query?.workspaceId || !query.path) return;
-  void loadWorkspaceFileDiff(query, { maxAgeMs: 15_000 }).catch(() => {
-    // Preserve an existing exact-key snapshot; the visible viewer owns errors.
-  });
+  queuedDiffPrefetch = query;
+  drainDiffPrefetch();
+}
+
+function drainDiffPrefetch(): void {
+  const query = queuedDiffPrefetch;
+  if (!query) return;
+  const key = workspaceFileDiffKey(query);
+  if (diffPrefetches.has(key)) {
+    queuedDiffPrefetch = null;
+    return;
+  }
+  if (diffPrefetches.size >= MAX_DIFF_PREFETCHES) return;
+
+  queuedDiffPrefetch = null;
+  const pending = loadWorkspaceFileDiff(query, { maxAgeMs: 15_000 });
+  diffPrefetches.set(key, pending);
+  const release = () => {
+    // A test reset may have installed a newer request for this same key.
+    if (diffPrefetches.get(key) !== pending) return;
+    diffPrefetches.delete(key);
+    drainDiffPrefetch();
+  };
+  // A failed prefetch releases its slot too. The exact-key cache retains any
+  // confirmed patch and the selected viewer owns error presentation.
+  void pending.then(release, release);
 }
 
 /** Publish content already read for another purpose (currently untracked-file
@@ -330,6 +361,8 @@ export function invalidateAllWorkspaceFileData(): void {
 
 /** Test-only reset. Cache instances stay module singletons in production. */
 export function resetWorkspaceFileDataCacheForTests(): void {
+  queuedDiffPrefetch = null;
+  diffPrefetches.clear();
   fileReadCache.clear();
   fileDiffCache.clear();
 }

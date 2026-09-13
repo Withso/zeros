@@ -564,7 +564,16 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
       .getByRole("tab", { name: "Test", exact: true })
       .locator("svg.lucide-flask-conical"),
   ).toBeVisible();
+  const settingsReads = () =>
+    page.evaluate(
+      () =>
+        window.__zerosTerminalSmoke.messages.filter(
+          (message) => message.op === "settings.resolve",
+        ).length,
+    );
+  const readsBeforeIcon = await settingsReads();
   await page.evaluate(() => window.__zerosTerminalSmoke.setRunIcon("bug"));
+  await expect.poll(settingsReads).toBe(readsBeforeIcon + 1);
   await expect(
     sidebar()
       .getByRole("tab", { name: "Test", exact: true })

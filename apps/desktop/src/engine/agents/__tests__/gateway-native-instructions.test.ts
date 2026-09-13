@@ -7,7 +7,7 @@
 // in-band <system_instruction> block. Adapters without the flag keep the
 // legacy mechanism A untouched.
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -120,7 +120,15 @@ function text(t: string): ContentBlock {
   return { type: "text", text: t };
 }
 
-const CWD = os.tmpdir();
+let CWD: string;
+beforeEach(() => {
+  CWD = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), "zeros-gateway-native-")),
+  );
+});
+afterEach(() => {
+  rmSync(CWD, { recursive: true, force: true });
+});
 
 describe("gateway native system-instruction routing", () => {
   let previousUserSettingsDir: string | undefined;

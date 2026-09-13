@@ -1,5 +1,5 @@
 import {
-  designMetadataGitPaths,
+  DESIGN_METADATA_PROTECTED_PATHS,
   isDesignMetadataRepoPath,
 } from "../design/metadata";
 import {
@@ -7,14 +7,16 @@ import {
   designRegistryAtGitRef,
 } from "../design/metadata-git";
 import {
-  DESIGN_DIRECTORY_REGISTRY_FILE,
-  designDocumentRelativePath,
+  DESIGN_DIRECTORY_REGISTRY_FILES,
+  DESIGN_RULES_FILE,
+  designDocumentMetadataDirectory,
 } from "../design/metadata";
 // Write-path git operations: commit, push, pull, rebase, stash,
 // change-target-branch. All shell out via git-exec.ts — system git
 // handles the gnarly edge cases (auth helpers, refspecs, line-ending
 // conversion) that isomorphic-git is shakier on.
 
+import { existsSync } from "node:fs";
 import { copyFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -34,6 +36,7 @@ import { GitError } from "./errors";
 import { getWorkspaceById, updateWorkspace } from "./state";
 import { resolveRepoGit } from "../settings/repo-git";
 import {
+  activeDesignDirectoryNameFor,
   DEFAULT_DESIGN_DIRECTORY_NAME,
   designDirectoryNameFor,
 } from "../design/directory-registry";
@@ -318,6 +321,7 @@ async function updateHeadFromSnapshot(opts: {
   expectedHead: string | null;
   message: string;
   amend: boolean;
+  identity?: "zeros";
 }): Promise<string> {
   const { stdout: treeOut } = await runGit(opts.cwd, ["write-tree"], {
     env: opts.snapshot.env,
@@ -336,7 +340,13 @@ async function updateHeadFromSnapshot(opts: {
       parents = [opts.expectedHead];
     }
   }
-  const commitArgs = ["commit-tree", tree];
+  const commitArgs = [
+    ...(opts.identity === "zeros"
+      ? ["-c", "user.name=Zeros", "-c", "user.email=zeros@localhost"]
+      : []),
+    "commit-tree",
+    tree,
+  ];
   for (const parent of parents) commitArgs.push("-p", parent);
   commitArgs.push("-m", opts.message);
   let authorEnv: Record<string, string> = {};
@@ -382,6 +392,95 @@ async function updateHeadFromSnapshot(opts: {
   return nextHead;
 }
 
+/** Trusted Settings rename; caller owns the workspace Git lane. */
+export async function commitDesignDirectoryMove(
+  cwd: string,
+  from: string,
+  to: string,
+  id: string,
+): Promise<void> {
+  await assertGitCheckpointReady(cwd);
+  const expectedHead = await currentHead(cwd);
+  const snapshot = await createCommitIndexSnapshot(cwd, expectedHead);
+  try {
+    await scopeDesignRegistryCommit(cwd, from, expectedHead, snapshot.env);
+    const roots = [
+      from,
+      to,
+      ...DESIGN_DIRECTORY_REGISTRY_FILES,
+      DESIGN_RULES_FILE,
+      designDocumentMetadataDirectory(id),
+    ];
+    const excluded = (await stagedPaths(cwd, snapshot.env)).filter(
+      (file) => !roots.some((root) => repoPathOverlapsDesignRoot(file, root)),
+    );
+    await resetSnapshotPaths(cwd, snapshot, expectedHead, excluded);
+    await updateHeadFromSnapshot({
+      cwd,
+      snapshot,
+      expectedHead,
+      message: `Rename design directory to ${to}`,
+      amend: false,
+      identity: "zeros",
+    });
+  } finally {
+    await rm(snapshot.directory, { recursive: true, force: true });
+  }
+}
+
+/** Settings unregister commits exact metadata paths without absorbing source staging.
+ * The real index is untouched until HEAD advances; failed commits can restore the
+ * working metadata without losing the user's staged metadata snapshot. */
+export async function commitDesignMetadataRemoval(
+  cwd: string,
+  directory: string,
+  files: string[],
+): Promise<void> {
+  const expectedHead = await currentHead(cwd);
+  const snapshot = await createCommitIndexSnapshot(cwd, expectedHead);
+  try {
+    await runGit(
+      cwd,
+      expectedHead ? ["read-tree", expectedHead] : ["read-tree", "--empty"],
+      { env: snapshot.env },
+    );
+    const retained = files.filter((file) => existsSync(path.join(cwd, file)));
+    const removed = files.filter((file) => !retained.includes(file));
+    if (removed.length)
+      await runGit(
+        cwd,
+        [
+          "update-index",
+          "--force-remove",
+          "--ignore-missing",
+          "--",
+          ...removed,
+        ],
+        { env: snapshot.env },
+      );
+    if (retained.length)
+      await runGit(
+        cwd,
+        ["add", "-f", "--", ...retained.map((file) => `:(literal)${file}`)],
+        { env: snapshot.env },
+      );
+    if (!(await stagedPaths(cwd, snapshot.env)).length) return;
+    await updateHeadFromSnapshot({
+      cwd,
+      snapshot,
+      expectedHead,
+      message: `Remove Design registration for ${directory}`,
+      amend: false,
+      identity: "zeros",
+    });
+  } finally {
+    // Cleanup must not report a failed commit after HEAD has already advanced.
+    await rm(snapshot.directory, { recursive: true, force: true }).catch(
+      () => undefined,
+    );
+  }
+}
+
 export async function commit(opts: CommitOptions): Promise<CommitResult> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const authority = opts.authority ?? "code";
@@ -418,6 +517,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
   const expectedHead = await currentHead(ws.path);
   let protectedDesignDirs: string[] = [activeDesignDir];
   if (authority === "code") {
+    const selectedDesignDir = activeDesignDirectoryNameFor(ws.path);
     // Code authority is the complement of EVERY semantic Design root, not only
     // the active canvas. HEAD/index can retain an old root during a rename and
     // a repository may intentionally carry several Design documents. Sticky
@@ -437,7 +537,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     );
     protectedDesignDirs = [
       ...new Set([
-        activeDesignDir,
+        ...(selectedDesignDir ? [selectedDesignDir] : []),
         ...(pointer.configured ? [pointer.directory] : []),
         ...discoveredDesignDirs,
         ...stickyDesignDirs,
@@ -446,7 +546,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     const explicitDesignPaths = (files ?? []).filter(
       (candidate) =>
         isDesignMetadataRepoPath(candidate) ||
-        designMetadataGitPaths(ws.path).some((metadata) =>
+        DESIGN_METADATA_PROTECTED_PATHS.some((metadata) =>
           repoPathOverlapsDesignRoot(candidate, metadata),
         ) ||
         protectedDesignDirs.some((designDir) =>
@@ -517,7 +617,8 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     const metadataPaths =
       authority === "design"
         ? [
-            DESIGN_DIRECTORY_REGISTRY_FILE,
+            ...DESIGN_DIRECTORY_REGISTRY_FILES,
+            DESIGN_RULES_FILE,
             ...(
               await Promise.all([
                 designRegistryAtGitRef(ws.path, expectedHead),
@@ -526,7 +627,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
             ).flatMap((registry) =>
               Object.entries(registry?.directories ?? {})
                 .filter(([, entry]) => entry.path === activeDesignDir)
-                .map(([id]) => designDocumentRelativePath(id)),
+                .map(([id]) => designDocumentMetadataDirectory(id)),
             ),
           ]
         : [];
@@ -534,7 +635,9 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
     const belongsToSelectedLane = (candidate: string): boolean =>
       authority === "design"
         ? repoPathOverlapsDesignRoot(candidate, activeDesignDir) ||
-          metadataPaths.includes(candidate)
+          metadataPaths.some((root) =>
+            repoPathOverlapsDesignRoot(candidate, root),
+          )
         : !isDesignMetadataRepoPath(candidate) &&
           !protectedDesignDirs.some((designDir) =>
             repoPathOverlapsDesignRoot(candidate, designDir),

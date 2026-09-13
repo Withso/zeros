@@ -41,8 +41,8 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import {
-  loadWorkspaceFiles,
-  peekWorkspaceFiles,
+  loadWorkspaceFileListing,
+  peekWorkspaceFileListing,
 } from "../../workspace-files-cache";
 import {
   DESIGN_FILES_LABEL,
@@ -111,7 +111,7 @@ export function saveDesignPaneCollapsed(cwd: string, collapsed: boolean): void {
 }
 
 // ── Does this workspace have a section? ──────────────────
-/** True when `cwd`'s tracked listing evidences a root-level design document.
+/** True when `cwd`'s listing identifies a root-level Design document.
  *  Reads the same cache the trees do: synchronously when it is warm, otherwise
  *  after the shared load lands (the tree's own load joins that request). */
 export function useHasDesignSection(
@@ -129,10 +129,11 @@ export function useHasDesignSection(
       return;
     }
     let cancelled = false;
-    void loadWorkspaceFiles(cwd)
-      .then((files) => {
+    void loadWorkspaceFileListing(cwd)
+      .then(({ files, designDirectories }) => {
         if (cancelled) return;
-        const has = designSectionDirectories(files).length > 0;
+        const has =
+          designSectionDirectories(files, designDirectories).length > 0;
         setState((current) =>
           current.cwd === cwd && current.has === has ? current : { cwd, has },
         );
@@ -151,8 +152,10 @@ export function useHasDesignSection(
 
 function hasDesignDocument(cwd: string | undefined): boolean {
   if (!cwd) return false;
-  const warm = peekWorkspaceFiles(cwd);
-  return warm ? designSectionDirectories(warm).length > 0 : false;
+  const warm = peekWorkspaceFileListing(cwd);
+  return warm
+    ? designSectionDirectories(warm.files, warm.designDirectories).length > 0
+    : false;
 }
 
 // ── The pane ─────────────────────────────────────────────

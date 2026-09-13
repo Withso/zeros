@@ -22,13 +22,18 @@
 // defense-in-depth, and existence-check `executable_path` so a stale entry
 // degrades to the default resolution instead of failing the spawn.
 //
-// Secrets (API keys) are NOT handled here — those stay couriered from the
-// Keychain by the renderer's deriveProviderEnv; this module never reads secrets.
+// Electron supplies an in-memory credential projection over the private parent
+// pipe. This module selects it from trusted auth preferences for headless work
+// as well as interactive spawns; it never opens the encrypted store itself.
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { opSettingsResolve } from "./ops";
+import {
+  providerCredential,
+  providerAccountProfile,
+} from "../agents/provider-credentials";
 
 /** agentId → the env var its gateway base_url maps to. Mirror of the renderer's
  *  PROVIDER_ENV_CONFIG[*].gatewayBaseUrlVar (provider-prefs.ts). Today only
@@ -48,6 +53,25 @@ export interface ProviderSpawn {
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+/** Registry probes must inspect the selected method, just like a spawn. A
+ * repository cannot select a personal credential or influence this verdict. */
+export function usesProviderApiKey(cwd: string, agentId: string): boolean {
+  try {
+    const resolved = opSettingsResolve(cwd);
+    const source = resolved.sources[`providers.${agentId}.auth`];
+    const providers = resolved.effective.providers;
+    return (
+      source !== undefined &&
+      TRUSTED_PROVIDER_LAYERS.includes(source) &&
+      isPlainObject(providers) &&
+      isPlainObject(providers[agentId]) &&
+      providers[agentId].auth === "api-key"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Fill spawn gaps from the user's resolved `[providers.<agentId>]` settings —
@@ -71,9 +95,10 @@ export function applyUserProviderConfig(
   }
 
   const providers = resolved.effective.providers;
-  if (!isPlainObject(providers)) return base;
-  const cfg = providers[agentId];
-  if (!isPlainObject(cfg)) return base;
+  const cfg =
+    isPlainObject(providers) && isPlainObject(providers[agentId])
+      ? providers[agentId]
+      : {};
 
   const trusted = (leaf: string): boolean => {
     const s = resolved.sources[leaf];
@@ -81,7 +106,57 @@ export function applyUserProviderConfig(
   };
 
   const env = { ...(base.env ?? {}) };
+  const profile = !(
+    cfg.auth === "api-key" && trusted(`providers.${agentId}.auth`)
+  )
+    ? providerAccountProfile(agentId)
+    : null;
+  // Account profiles are an explicit exception to ambient config pass-through.
+  // This happens AFTER the untrusted spawn/env merge; only the private host
+  // pipe can choose the root. CLI/API keep their existing native roots.
+  if (
+    profile &&
+    "configDir" in profile &&
+    typeof profile.configDir === "string" &&
+    profile.configDir
+  ) {
+    env[agentId === "claude" ? "CLAUDE_CONFIG_DIR" : "CODEX_HOME"] =
+      profile.configDir;
+  }
   let cliBinary = base.cliBinary;
+
+  const credential = providerCredential(
+    agentId,
+    trusted(`providers.${agentId}.auth`) ? cfg.auth : undefined,
+  );
+  const keyVar = (
+    {
+      claude: "ANTHROPIC_API_KEY",
+      codex: "OPENAI_API_KEY",
+      cursor: "CURSOR_API_KEY",
+    } as Record<string, string>
+  )[agentId];
+  if (
+    agentId !== "cursor" &&
+    keyVar &&
+    cfg.auth === "cli" &&
+    trusted(`providers.${agentId}.auth`)
+  ) {
+    env[keyVar] = "";
+    if (agentId === "claude") {
+      if ("ANTHROPIC_AUTH_TOKEN" in env) env.ANTHROPIC_AUTH_TOKEN = "";
+      if ("CLAUDE_CODE_OAUTH_TOKEN" in env) env.CLAUDE_CODE_OAUTH_TOKEN = "";
+    }
+  } else if (
+    agentId === "cursor" &&
+    cfg.auth === "subscription" &&
+    trusted("providers.cursor.auth")
+  ) {
+    // An explicit subscription choice must not silently fall back to an
+    // inherited API key after sign-out or expiry.
+    env.CURSOR_API_KEY = credential?.apiKey ?? "";
+  } else if (keyVar && !env[keyVar] && credential)
+    env[keyVar] = credential.apiKey;
 
   // base_url → gateway env var (claude → ANTHROPIC_BASE_URL). Fallback only:
   // skip when the caller already couriered it (couriered value wins).

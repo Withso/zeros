@@ -12,6 +12,93 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState } from "./fixtures";
 
 describe("CSS provenance and mutation", () => {
+  it("keeps automatic body edits local when frames share a stylesheet", () => {
+    const html =
+      '<html><head><link rel="stylesheet" href="shared.css"></head><body><div data-oid="child">Keep</div></body></html>';
+    const css = "body { display:block; overflow:visible; }";
+    const state = createDesignWebDocumentState({
+      documentId: "frame-a",
+      entryFile: "a.html",
+      files: { "a.html": html, "b.html": html, "shared.css": css },
+    });
+    const input = {
+      nodeId: "::zeros-document-body",
+      styles: { display: "grid", overflow: "hidden" },
+    };
+    const changed = mutateDesignNodeStyles(state, { ...input, scope: "auto" });
+    expect(changed.files["shared.css"]).toBe(css);
+    expect(changed.files["b.html"]).toBe(html);
+    expect(changed.files["a.html"]).toBe(
+      html.replace("<body>", '<body style="display:grid; overflow:hidden;">'),
+    );
+
+    const explicit = mutateDesignNodeStyles(state, { ...input, scope: "rule" });
+    expect(explicit.files["shared.css"]).toBe(
+      "body { display:grid; overflow:hidden; }",
+    );
+    expect(explicit.files["a.html"]).toBe(html);
+    expect(explicit.files["b.html"]).toBe(html);
+  });
+
+  it("edits the canvas body without changing the authored frame or its descendants", () => {
+    const content =
+      '<main data-oid="red" style="height:64px;background:red"><div data-oid="child"></div></main>';
+    const html = `<!doctype html><html><head><style>body { display:block; } main { display:block; }</style></head><body>${content}</body></html>`;
+    const state = createDesignWebDocumentState({
+      documentId: "body-isolation",
+      entryFile: "index.html",
+      files: { "index.html": html },
+    });
+    const changed = mutateDesignNodeStyles(state, {
+      nodeId: "::zeros-document-body",
+      styles: { display: "grid", overflow: "hidden" },
+    });
+    expect(changed.files["index.html"]).toContain(content);
+    expect(changed.files["index.html"]).toContain("body { display:grid; }");
+    expect(changed.files["index.html"]).toContain(
+      '<body style="overflow:hidden;">',
+    );
+    expect(changed.files["index.html"]).toContain("main { display:block; }");
+  });
+  it.each(["parent", "child"])(
+    "keeps %s layout and appearance overrides local with shared selectors",
+    (nodeId) => {
+      const html =
+        '<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><div data-oid="parent" class="frame"><div data-oid="child" class="frame"></div></div></body></html>';
+      const css =
+        '.frame { display:block; opacity:1; overflow:visible; background:white; } [data-oid="parent"] .frame { rotate:0deg; }';
+      const state = createDesignWebDocumentState({
+        documentId: "frame-isolation",
+        entryFile: "index.html",
+        files: { "index.html": html, "styles.css": css },
+      });
+      const changed = mutateDesignNodeStyles(state, {
+        nodeId,
+        scope: "auto",
+        styles: {
+          display: "grid",
+          opacity: "0.7",
+          overflow: "hidden",
+          background: "red",
+          rotate: "90deg",
+        },
+      });
+      expect(changed.files["styles.css"]).toBe(css);
+      expect(
+        changed.decisions.every(
+          (decision) => decision.appliedScope === "inline",
+        ),
+      ).toBe(true);
+      const otherId = nodeId === "parent" ? "child" : "parent";
+      expect(changed.files["index.html"]).toContain(
+        `<div data-oid="${otherId}" class="frame">`,
+      );
+      expect(changed.files["index.html"]).toContain(
+        `<div data-oid="${nodeId}" class="frame" style="display:grid; opacity:0.7; overflow:hidden; background:red; rotate:90deg;">`,
+      );
+    },
+  );
+
   it.each([
     ':root[data-zd-theme="dark"]',
     "[data-zd-theme='dark']",

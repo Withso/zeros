@@ -61,9 +61,8 @@ import {
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
-import { readDesignProtocolResource } from "./design/protocol-resource";
 import {
-  designMetadataGitPaths,
+  DESIGN_METADATA_PROTECTED_PATHS,
   isDesignMetadataRepoPath,
 } from "./design/metadata";
 import { getWorkspaceDesignApi } from "./design/design-api";
@@ -118,6 +117,7 @@ import {
   runSessionId,
 } from "@zeros/protocol/run-actions";
 import { getAuthStatus, setTokenStore } from "./git/github";
+import { seedProviderCredentials } from "./agents/provider-credentials";
 import {
   closeGitCredentialBroker,
   prepareGitCredentialShellEnvironment,
@@ -191,6 +191,8 @@ import {
   parseCloudReplicaProofResponse,
 } from "./cloud-replica-host-control";
 import { canonicalResourceUri } from "./agents/gateway/oauth-url";
+import { providerLoginCommand } from "./pty/provider-login";
+import { applyUserProviderConfig } from "./settings/provider-env";
 import { resolveClaudeBinary } from "./agents/claude-binary";
 import { AgentFailureError, type AgentGatewayOptions } from "./agents/types";
 import {
@@ -499,6 +501,8 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   // These keep the physical project registered but can establish or rename
   // the semantic Design roots consumed by ZSR Design admission.
   "design.renameDirectory",
+  "design.removeDirectory",
+  "design.adoptDirectory",
   "gh.publishRepo",
   "git.initInPlace",
   "project.upsert",
@@ -555,7 +559,9 @@ function pathCanChangeDesignRecognition(candidate: unknown): boolean {
     normalized === ".zeros/settings.toml" ||
     normalized === ".zeros/settings.local.toml" ||
     (normalized.includes("/") &&
-      path.posix.basename(normalized) === DESIGN_CANVAS_FILE)
+      [DESIGN_CANVAS_FILE, "design.toml"].includes(
+        path.posix.basename(normalized),
+      ))
   );
 }
 
@@ -1173,12 +1179,21 @@ export class ZerosEngine {
     this.workspace.setRepoTaskBoundaryFactory(repoTaskBoundaryFactory);
     // Let the mcp.gateway.* ops reach the (lazily-created) gateway instance.
     this.workspace.setGatewayAccessor(() => this.mcpGateway);
+    this.workspace.setSessionToolAccess({
+      inventory: (agentId, sessionId, cwd) =>
+        this.agents.readSessionToolInventory(agentId, sessionId, cwd),
+      list: (agentId, sessionId, cwd) =>
+        this.agents.readSessionTools(agentId, sessionId, cwd),
+      authenticate: (agentId, sessionId, cwd, toolId) =>
+        this.agents.authenticateSessionTool(agentId, sessionId, cwd, toolId),
+    });
     this.workspace.setNativeExtensionReader((query) => {
-      if (query.provider === "codex" && (query.category === "apps" || query.category === "plugins")) {
-        return this.agents.readExtensionInventory("codex", query.category, query.repoRoot);
-      }
-      if (query.provider === "claude" && query.category === "apps") {
-        return this.agents.readExtensionInventory("claude", "apps", query.repoRoot);
+      if (query.provider === "codex" || query.provider === "claude") {
+        return this.agents.readExtensionInventory(
+          query.provider,
+          query.category,
+          query.repoRoot,
+        );
       }
       return Promise.resolve(null);
     });
@@ -1665,12 +1680,14 @@ export class ZerosEngine {
         );
         if (!parsed) return null;
         const { workspaceId, resourcePath } = parsed;
-        const workspace = getWorkspaceById(workspaceId);
-        if (!workspace || workspace.kind !== "design") return null;
-        const resource = await readDesignProtocolResource(workspace.path, {
-          path: resourcePath,
-          sourceVersion: url.searchParams.get("v"),
-        });
+        const resource = await this.workspace.readDesignProtocolResource(
+          workspaceId,
+          {
+            path: resourcePath,
+            sourceVersion: url.searchParams.get("v"),
+          },
+        );
+        if (!resource) return null;
         return {
           status: resource.status,
           headers: resource.headers,
@@ -3528,14 +3545,26 @@ export class ZerosEngine {
     } catch {
       return null;
     }
-    const rootBySettingsPath = new Map<string, { root: string; workspace: boolean }>();
+    const rootBySettingsPath = new Map<
+      string,
+      { root: string; workspace: boolean }
+    >();
     for (const root of repoRoots) {
       const owner = personalRepoRoot(root);
       const checkout = personalWorkspaceRoot(root);
-      rootBySettingsPath.set(repoLocalSettingsPath(owner), { root: owner, workspace: false });
+      rootBySettingsPath.set(repoLocalSettingsPath(owner), {
+        root: owner,
+        workspace: false,
+      });
       if (checkout !== owner) {
-        rootBySettingsPath.set(repoLocalSettingsPath(checkout), { root: checkout, workspace: true });
-        rootBySettingsPath.set(repoSettingsPath(checkout), { root: checkout, workspace: true });
+        rootBySettingsPath.set(repoLocalSettingsPath(checkout), {
+          root: checkout,
+          workspace: true,
+        });
+        rootBySettingsPath.set(repoSettingsPath(checkout), {
+          root: checkout,
+          workspace: true,
+        });
       }
     }
     const scopedRepos = new Set<string>();
@@ -3551,9 +3580,10 @@ export class ZerosEngine {
       path: string;
       repoRoot: string;
       archivedAt?: number | null;
-    }> = listWorkspaces({ archived: false }).filter((workspace) =>
-      scopedRepos.has(personalRepoRoot(workspace.repoRoot)) ||
-      scopedWorkspaces.has(personalWorkspaceRoot(workspace.path)),
+    }> = listWorkspaces({ archived: false }).filter(
+      (workspace) =>
+        scopedRepos.has(personalRepoRoot(workspace.repoRoot)) ||
+        scopedWorkspaces.has(personalWorkspaceRoot(workspace.path)),
     );
     // Main-checkout edits also affect its own territory, including repositories
     // with no workspace rows. Workspace overrides affect only their checkout.
@@ -4950,6 +4980,9 @@ export class ZerosEngine {
             }
             this.sessionLoadResponses.set(executionId, {
               ...(this.sessionLoadResponses.get(executionId) ?? {}),
+              // A reload before the first prompt still needs the chat's prior
+              // context. The first completed provider prompt retires this flag.
+              resumedFresh: true,
               ...(session.modes ? { modes: session.modes } : {}),
               ...(session.models ? { models: session.models } : {}),
               ...(session.providerBinding
@@ -5422,6 +5455,13 @@ export class ZerosEngine {
                   .finally(() => {
                     activePrompt.adapterSettled = true;
                   });
+            const loaded = this.sessionLoadResponses.get(msg.sessionId);
+            if (activePrompt.adapterSettled && loaded?.resumedFresh) {
+              this.sessionLoadResponses.set(msg.sessionId, {
+                ...loaded,
+                resumedFresh: false,
+              });
+            }
             // Gated on the DURABLE fact, not on terminalPublished: the watchdog
             // can announce a stop in a window where it had no row to close yet
             // (a pre-snapshot still running past the deadline), and this is the
@@ -7245,6 +7285,51 @@ export class ZerosEngine {
     /** Original renderer send time, already bounded at the engine boundary. */
     startedAt?: number,
   ): void {
+    // Continue after authentication reuses the original turn ID. Keep its DB
+    // row throughout reconnection/cancellation, then replace that exact tail
+    // bubble on admission instead of coalescing the prompt text a second time.
+    const previous = this.sessionMessages.get(sessionId) ?? [];
+    const tail = previous.at(-1);
+    const chatId = this.sessionChat.get(sessionId);
+    if (
+      chatId &&
+      userMessageId &&
+      tail?.id === userMessageId &&
+      tail.kind === "text" &&
+      tail.role === "user"
+    ) {
+      const message: AgentTextMessage = {
+        id: userMessageId,
+        kind: "text",
+        role: "user",
+        text:
+          bubble?.displayText ??
+          prompt
+            .map((block) => (block.type === "text" ? block.text : ""))
+            .join(""),
+        createdAt: startedAt ?? tail.createdAt,
+        ...(bubble?.segments?.length ? { segments: bubble.segments } : {}),
+        ...(bubble?.attachments?.length
+          ? { attachments: bubble.attachments }
+          : {}),
+        ...(bubble?.autoAction ? { autoAction: bubble.autoAction } : {}),
+      };
+      this.sessionMessages.set(sessionId, [...previous.slice(0, -1), message]);
+      try {
+        upsertChatMessagesBulk(chatId, [
+          {
+            msgId: message.id,
+            kind: message.kind,
+            payload: JSON.stringify(message),
+            createdAt: message.createdAt,
+          },
+        ]);
+        this.scheduleMessagesChanged(chatId);
+      } catch {
+        /* Persistence must never disturb the live stream. */
+      }
+      return;
+    }
     const hasRich =
       !!bubble &&
       ((bubble.segments != null && bubble.segments.length > 0) ||
@@ -8953,7 +9038,7 @@ export class ZerosEngine {
       protectedRoots = [
         ...new Set([
           activeDesignDirectory,
-          ...designMetadataGitPaths(workspaceRoot).map((file) =>
+          ...DESIGN_METADATA_PROTECTED_PATHS.map((file) =>
             path.join(workspaceRoot, file),
           ),
           ...(pointer.valid
@@ -9123,7 +9208,11 @@ export class ZerosEngine {
     reattach: boolean,
     canonicalWsId: string | null,
   ): Promise<void> {
-    let cwdInput = msg.cwd;
+    if (msg.loginProvider && (client.kind !== "local" || !msg.ephemeral)) {
+      ptyExit();
+      return;
+    }
+    let cwdInput = msg.loginProvider ? PTY_AGENT_AUTH_CWD : msg.cwd;
     if (client.kind !== "local" && !reattach) {
       // A qualified cloud workspace runs the provider's own login CLI in a
       // repository-free cwd under the attested human-worker identity. The URL
@@ -9223,9 +9312,19 @@ export class ZerosEngine {
       ptyExit();
       return;
     }
+    const loginProvider = msg.loginProvider;
+    const loginBinary = loginProvider
+      ? applyUserProviderConfig(this.root, loginProvider, {}).cliBinary ||
+        process.env[
+          loginProvider === "claude" ? "ZEROS_CLAUDE_CLI_PATH" : "ZEROS_CODEX_CLI_PATH"
+        ] || loginProvider
+      : undefined;
     const info = this.pty.create({
       sessionId: msg.sessionId,
       resolvedCwd,
+      ...(loginProvider && loginBinary
+        ? { command: providerLoginCommand(loginProvider, loginBinary) }
+        : {}),
       cols: msg.cols,
       rows: msg.rows,
       // A cloud transport connected to a qualified in-workspace coordinator is
@@ -9558,6 +9657,8 @@ export class ZerosEngine {
       token?: string | null;
       method?: unknown;
       credential?: unknown;
+      credentials?: unknown;
+      requestId?: unknown;
       data?: unknown;
     };
     try {
@@ -9595,6 +9696,15 @@ export class ZerosEngine {
     if (msg.type === "host.githubToken") {
       seedGithubToken(typeof msg.token === "string" ? msg.token : null);
       this.primeGithubLogin();
+      return;
+    }
+    if (msg.type === "host.providerCredentials") {
+      if (!this.cloudWorker && seedProviderCredentials(msg.credentials)) {
+        if (typeof msg.requestId === "string" && /^[0-9a-f-]{36}$/i.test(msg.requestId)) {
+          this.publishPrivateHostControl(`${JSON.stringify({ type: "engine.providerCredentialsApplied", requestId: msg.requestId })}\n`);
+        }
+        void this.agents.refreshRegistry().catch(() => {});
+      }
       return;
     }
     if (msg.type === "host.githubCredential") {

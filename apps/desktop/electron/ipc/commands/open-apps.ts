@@ -20,7 +20,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
-import { readFile, unlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { CommandHandler } from "../router";
@@ -246,6 +246,7 @@ async function resolveIcnsPath(appPath: string): Promise<string | null> {
     ).trim();
     if (raw) {
       const name = raw.toLowerCase().endsWith(".icns") ? raw : `${raw}.icns`;
+      if (path.basename(name) !== name) return null;
       const p = path.join(resources, name);
       if (existsSync(p)) return p;
     }
@@ -267,9 +268,6 @@ async function resolveIcnsPath(appPath: string): Promise<string | null> {
   }
 }
 
-/** Monotonic suffix so parallel extractions never collide on the temp PNG. */
-let iconTmpSeq = 0;
-
 /** The user's actual installed artwork for an .app bundle, as a 48px PNG
  *  data URL — extracted with macOS `sips` from the bundle's .icns.
  *
@@ -278,29 +276,49 @@ let iconTmpSeq = 0;
  *  (SIGTRAP) for every path. `sips`/`plutil` are plain macOS CLIs, so they can
  *  only ever fail soft. Null on any failure → the renderer falls back to a
  *  bundled/lucide mark. */
-async function appIconDataUrl(appPath: string): Promise<string | null> {
+export async function appIconDataUrl(appPath: string): Promise<string | null> {
   if (process.platform !== "darwin") return null;
   const icns = await resolveIcnsPath(appPath);
   if (!icns) return null;
-  const out = path.join(
-    os.tmpdir(),
-    `zeros-openin-icon-${process.pid}-${iconTmpSeq++}.png`,
-  );
+  let directory: string | undefined;
   try {
+    directory = await mkdtemp(path.join(os.tmpdir(), "zeros-app-icon-"));
+    const out = path.join(directory, "icon.png");
     await execFileText(
       "/usr/bin/sips",
       ["-s", "format", "png", "-Z", "48", icns, "--out", out],
       4000,
     );
     const png = await readFile(out);
-    return png.length > 0
+    return png.length > 0 && png.length <= 64 * 1024
       ? `data:image/png;base64,${png.toString("base64")}`
       : null;
   } catch {
     return null;
   } finally {
-    void unlink(out).catch(() => {});
+    if (directory)
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
   }
+}
+
+/** Resolve only a bundle identifier. Spotlight output is verified against the
+ * bundle's Info.plist before artwork is read; no renderer-authored path or
+ * executable is accepted and applications are never launched here. */
+export async function nativeAppIconByBundleId(bundleId: string): Promise<string | null> {
+  if (process.platform !== "darwin" || !/^[\w-]+(?:\.[\w-]+)+$/.test(bundleId) || bundleId.length > 255) return null;
+  // Spotlight can be disabled or omit system apps. Launch Services owns the
+  // installed-app registry and this AppKit query neither launches an app nor
+  // sends Apple Events to it. The identifier stays a separate argv value.
+  const registered = await execFileText("/usr/bin/osascript", ["-l", "JavaScript", "-e", 'ObjC.import("AppKit"); function run(argv) { const url = $.NSWorkspace.sharedWorkspace.URLForApplicationWithBundleIdentifier(argv[0]); return url.isNil() ? "" : ObjC.unwrap(url.path); }', bundleId], 2000).then((value) => value.trim()).catch(() => "");
+  const candidates = registered ? [registered] : (await mdfind(bundleId)).slice(0, 8);
+  for (const candidate of candidates) {
+    if (!candidate.endsWith(".app") || !path.isAbsolute(candidate)) continue;
+    try {
+      const actual = (await execFileText("/usr/bin/plutil", ["-extract", "CFBundleIdentifier", "raw", "-o", "-", path.join(candidate, "Contents/Info.plist")], 2000)).trim();
+      if (actual.toLowerCase() === bundleId.toLowerCase()) return await appIconDataUrl(candidate);
+    } catch { /* app was uninstalled or Spotlight returned a stale hit */ }
+  }
+  return null;
 }
 
 export interface DetectedOpenApp {

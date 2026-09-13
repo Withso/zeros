@@ -212,6 +212,7 @@ mac:
   # block into Info.plist so macOS LaunchServices routes zeros://
   # URLs to our .app.
   extendInfo:
+    NSAppleEventsUsageDescription: Zeros needs permission to interact with other apps for computer and browser tasks you request.
     CFBundleURLTypes:
       - CFBundleURLName: Zeros
         CFBundleURLSchemes:

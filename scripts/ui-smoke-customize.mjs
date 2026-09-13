@@ -5,12 +5,9 @@ export async function runCustomizeSmoke({ page, check }) {
     `${new URL(page.url()).origin}/apps/desktop/src/renderer/harnesses/harness-customize.html`,
   );
   const providerTabs = page.getByRole("tablist", { name: "Agent provider" });
-  await expect(providerTabs.getByRole("tab")).toHaveText([
-    "Zeros",
-    "Claude",
-    "Codex",
-    "Cursor",
-  ]);
+  await expect(providerTabs).toHaveCount(0);
+  await expect(page.getByRole("tab")).toHaveText(["MCP", "Skills"]);
+  await page.getByRole("tab", { name: "Skills", exact: true }).click();
   await page.getByRole("button", { name: "New skill", exact: true }).click();
   await page.getByLabel("Name", { exact: true }).fill("review-changes");
   await page.getByLabel("When to use it").fill("Review changed code");
@@ -45,58 +42,17 @@ export async function runCustomizeSmoke({ page, check }) {
     true,
   );
 
-  for (const category of ["Plugins", "Apps"]) {
-    await page.getByRole("tab", { name: category, exact: true }).click();
-    await expect(providerTabs.getByRole("tab")).toHaveText([
-      "Claude",
-      "Codex",
-      "Cursor",
-    ]);
-    await expect(
-      page.getByRole("button", { name: /New skill|New MCP/ }),
-    ).toHaveCount(0);
-  }
-  await page.getByRole("tab", { name: "Codex", exact: true }).click();
-  await expect(
-    page.getByRole("heading", { name: "Cloud notes", exact: true }),
-  ).toBeVisible();
-  await expect(page.getByText("Available", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("Unavailable in Zeros", { exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByText(/Some features require the native app/),
-  ).toBeVisible();
-  check(
-    "account apps distinguish callable tools from native surface limitations",
-    true,
-  );
-  await page.screenshot({
-    path: ".context/customize-codex-apps.png",
-    fullPage: true,
-  });
-  await page.getByRole("tab", { name: "Claude", exact: true }).click();
   await page.getByRole("tab", { name: "MCP", exact: true }).click();
-  await expect(providerTabs.getByRole("tab")).toHaveText([
-    "Zeros",
-    "Claude",
-    "Codex",
-    "Cursor",
-  ]);
-  await expect(
-    page.getByRole("heading", { name: "claude fixture", exact: true }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /New MCP server/ }),
-  ).toHaveCount(0);
-  await page.getByRole("tab", { name: "Zeros", exact: true }).click();
   await expect(
     page.getByRole("button", { name: /New MCP server/ }),
   ).toBeVisible();
-  check(
-    "provider rows and creation controls match every Customize category",
-    true,
+  check("Customize exposes only Zeros MCP and skills editing", true);
+  const queriedProviders = JSON.parse(
+    await page.locator("#inventory-providers").textContent(),
   );
+  expect(queriedProviders.length).toBeGreaterThan(0);
+  expect(queriedProviders.every((provider) => provider === "zeros")).toBe(true);
+  check("Customize does not start hidden provider discovery", true);
   await page.screenshot({
     path: ".context/customize-final.png",
     fullPage: true,

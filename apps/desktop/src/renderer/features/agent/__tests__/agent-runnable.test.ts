@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
+import { setProviderPrefs } from "../../settings/provider-prefs";
 import { isRemovedAgent, isRunnableAgent } from "../agent-runnable";
 
 function agent(
@@ -19,6 +20,38 @@ function agent(
 }
 
 describe("isRunnableAgent", () => {
+  it("does not infer API authentication from an installed runtime", () => {
+    setProviderPrefs("claude", { authMethod: "apiKey" });
+    setProviderPrefs("codex", { authMethod: "apiKey" });
+    try {
+      expect(
+        isRunnableAgent(
+          agent("claude", { installed: true, authenticated: false }),
+        ),
+      ).toBe(false);
+      expect(
+        isRunnableAgent(
+          agent("codex", { installed: true, authenticated: false }),
+        ),
+      ).toBe(false);
+    } finally {
+      setProviderPrefs("claude", { authMethod: "cli" });
+      setProviderPrefs("codex", { authMethod: "cli" });
+    }
+  });
+
+  it("requires a confirmed Cursor credential even though the bundled runtime is installed", () => {
+    expect(
+      isRunnableAgent(
+        agent("cursor", { installed: true, authenticated: false }),
+      ),
+    ).toBe(false);
+    expect(
+      isRunnableAgent(
+        agent("cursor", { installed: true, authenticated: true }),
+      ),
+    ).toBe(true);
+  });
   it("does not turn an unavailable contained auth probe into signed-out state", () => {
     const unavailable = {
       installed: true,

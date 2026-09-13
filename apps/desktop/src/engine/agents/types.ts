@@ -233,6 +233,9 @@ export interface AgentGatewayOptions {
 
 export interface AgentAdapterContext {
   projectRoot: string;
+  /** Private host-selected authentication identity for account-scoped caches.
+   * Never serialize or log this fingerprint. */
+  authenticationContext?: () => string;
   /** MCP servers to register with the agent (passed via agent-specific config). */
   mcpServers: McpServerRegistration[];
   /** Per-session state directory root. Adapter-owned subdirs inside. */
@@ -443,16 +446,32 @@ export interface AgentSafetyCapabilityPort {
   }): Promise<void>;
 }
 
+export interface AgentSessionToolsCapabilityPort {
+  inventory?(opts: {
+    sessionId: string;
+  }): Promise<import("@zeros/protocol/agent-extensions").SessionToolsInventorySnapshot>;
+  list(opts: {
+    sessionId: string;
+  }): Promise<import("@zeros/protocol/agent-extensions").SessionToolsSnapshot>;
+  authenticate?(opts: {
+    sessionId: string;
+    toolId: string;
+  }): Promise<{ authorizationUrl: string }>;
+}
+
 export interface AgentCapabilityPorts {
+  readonly sessionTools?: AgentSessionToolsCapabilityPort;
   readonly extensions?: {
     list(opts: {
-      category: "apps" | "plugins";
+      category: import("@zeros/protocol/agent-extensions").ExtensionCategory;
       cwd: string;
       scope?: "user" | "repo";
       env?: Record<string, string>;
       cliBinary?: string;
       executionBoundary?: PreparedBoundary;
-    }): Promise<import("@zeros/protocol/agent-extensions").ExtensionInventory | null>;
+    }): Promise<
+      import("@zeros/protocol/agent-extensions").ExtensionInventory | null
+    >;
   };
   readonly conversation?: AgentConversationCapabilityPort;
   readonly browser?: AgentBrowserCapabilityPort;
@@ -496,6 +515,8 @@ export interface AgentAdapter {
    *  `systemInstruction` is the assembled first-turn instruction body — passed
    *  ONLY to adapters declaring `nativeSystemInstruction` (see above). */
   newSession(opts: {
+    /** Private authentication fingerprint captured before admission awaits. */
+    authenticationContext?: string;
     /** Zeros-owned ephemeral route. Gateway always supplies this; optional only
      * for direct adapter test/back-compat callers. */
     executionId?: ExecutionId;
@@ -517,6 +538,8 @@ export interface AgentAdapter {
    *  instructions, and covers the degraded resume-→-fresh-thread fallback,
    *  whose new thread would otherwise have no orientation at all). */
   loadSession(opts: {
+    /** Private authentication fingerprint captured before admission awaits. */
+    authenticationContext?: string;
     executionId?: ExecutionId;
     providerBinding?: ProviderBinding;
     /** @deprecated Pre-identity-model locator accepted during migration. */

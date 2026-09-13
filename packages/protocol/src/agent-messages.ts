@@ -27,6 +27,11 @@ export interface AgentTextMessage {
   role: AgentMessageRole;
   text: string;
   createdAt: number;
+  /** A prompt stopped by provider authentication. Its original expanded text
+   * survives Settings navigation and reload as context for the next user send;
+   * attachment bytes remain in the context graph. Historical markers retain
+   * the stopped footer. Optional for compatibility with older transcripts. */
+  authRecovery?: { text: string };
   /** Engine-side message id from the SessionNotification chunk. Used
    *  to coalesce streaming chunks of the SAME message; differs across
    *  turns, so without this every turn's agent reply would merge into

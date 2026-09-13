@@ -274,6 +274,10 @@ export function useNativeRuntime(): NativeRuntimeState {
       // Make sure the shared poll is running. Idempotent.
       ensurePollStarted();
     }
+    // A sibling/child effect may have published readiness after this render
+    // but before this subscriber attached. Replay the shared snapshot so a
+    // warm settings page cannot remain stuck in browser mode on reload.
+    sync(cachedReady);
 
     return () => {
       readyListeners.delete(sync);

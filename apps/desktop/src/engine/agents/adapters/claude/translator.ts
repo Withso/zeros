@@ -134,6 +134,8 @@ interface ClaudeAssistantContentBlock {
 
 interface ClaudeMessageEvent {
   type: "user" | "assistant";
+  /** SDK errors are synthetic notices, never evidence of a model fallback. */
+  error?: string;
   /** Anthropic stamps `parent_tool_use_id` at the envelope level when
    *  the message originates from inside a Task subagent. The renderer uses
    *  this to route child events into the
@@ -1834,7 +1836,7 @@ export class ClaudeStreamTranslator {
       return;
     const actual = event.message?.model;
     const expected = this.expectedModel;
-    if (!actual || !expected) return;
+    if (!actual || !expected || event.error || actual === "<synthetic>") return;
     // The configured id may carry the `[1m]` long-context suffix or lack the
     // dated-snapshot tail the wire reports — prefix-match the normalized id
     // so "claude-opus-4-8[1m]" matches "claude-opus-4-8-20260115".

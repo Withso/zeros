@@ -522,7 +522,7 @@ describe("design runtime protocol", () => {
             },
           ],
           frame: {
-            oid: "",
+            oid: "::zeros-document-body",
             tag: "body",
             selector: "body",
             styles: {

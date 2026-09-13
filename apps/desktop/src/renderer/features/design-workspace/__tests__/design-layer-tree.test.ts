@@ -14,6 +14,7 @@ import {
   designLayerSiblingId,
   designLayerTopLevelSelectionIds,
   designLayerVirtualWindow,
+  designFrameLayerChildren,
   flattenDesignLayerTree,
   resolveDesignFrameBodyTarget,
   resolveDesignLayerHit,
@@ -48,6 +49,49 @@ const tree = [
 ];
 
 describe("design layer tree", () => {
+  it("keeps a viewport-sized authored frame selectable when the document body owns the canvas", () => {
+    const input = {
+      nodes: [tree[0]!],
+      deepestNodeId: "hero",
+      deepestRect: { x: 0, y: 0, width: 600, height: 400 },
+      selectedNodeId: null,
+      intent: "plain" as const,
+      frameSize: { width: 600, height: 400 },
+      labeledFrame: true,
+      frameRootId: "::zeros-document-body",
+    };
+    expect(resolveDesignFrameBodyTarget(input)).toEqual({
+      kind: "node",
+      nodeId: "hero",
+    });
+    expect(
+      resolveDesignFrameBodyTarget({ ...input, frameRootId: "hero" }),
+    ).toEqual({ kind: "clear" });
+  });
+  it("represents the editable frame root once and exposes only its real children", () => {
+    const root = tree[0]!;
+    expect(designFrameLayerChildren([root], root.oid)).toBe(root.children);
+    expect(
+      designFrameLayerChildren([{ ...root, children: [] }], root.oid),
+    ).toEqual([]);
+    expect(
+      designFrameLayerChildren(tree, root.oid).map((node) => node.oid),
+    ).toEqual(["heading", "footer"]);
+    // A nested main must not make its real parent disappear.
+    expect(designFrameLayerChildren(tree, "heading")).toBe(tree);
+    expect(designFrameLayerChildren(tree, null)).toBe(tree);
+  });
+
+  it("unwraps legacy document plumbing without inventing frame children", () => {
+    const legacy = [
+      { ...tree[0]!, oid: "body", tag: "body", children: [tree[0]!] },
+    ];
+    expect(designFrameLayerChildren(legacy, "hero")).toBe(tree[0]!.children);
+    expect(
+      designFrameLayerChildren(legacy, null).map((node) => node.oid),
+    ).toEqual(["hero"]);
+  });
+
   it("keeps small trees whole and windows dense layer sets with overscan", () => {
     expect(
       designLayerVirtualWindow({

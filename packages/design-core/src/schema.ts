@@ -74,6 +74,9 @@ export const designPortableIdSchema = designIdSchema.refine(
 );
 
 export const designNodeIdSchema = designIdSchema;
+/** Document-scoped target for body styles and appending top-level content.
+ * This is an API identity, never an authored data-oid or a selectable layer. */
+export const DESIGN_DOCUMENT_BODY_ID = "::zeros-document-body";
 export const designDocumentIdSchema = designPortableIdSchema;
 export const designRevisionSchema = z
   .string()

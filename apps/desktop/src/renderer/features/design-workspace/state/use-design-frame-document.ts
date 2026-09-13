@@ -1,6 +1,6 @@
 // Full frame hydration is a bounded fallback for hosts without the authenticated
-// zeros-design: protocol. Electron canvases render directly from the protocol
-// and never place every frame's HTML/srcDoc in renderer memory.
+// zeros-design: protocol, or for an individual frame whose protocol handshake
+// fails. Healthy Electron canvases render directly from the protocol.
 
 import { useCachedRead } from "../../../state/use-cached-read";
 import {

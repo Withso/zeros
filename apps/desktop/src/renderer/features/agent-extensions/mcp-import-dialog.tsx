@@ -285,9 +285,9 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
         <DialogHeader>
           <DialogTitle>Import MCP servers</DialogTitle>
           <DialogDescription>
-            Found in your other tools’ configs and Codex plugins. Agents only
-            use servers listed here, so import the ones you want — they then
-            work in Claude, Codex, and Cursor alike. Token-shaped env values
+            Choose local MCP configurations to copy into Zeros. Imported
+            servers are available to Claude, Codex, and Cursor. Token-shaped env
+            values
             move to your Keychain; secret HTTP headers move to the gateway’s
             encrypted vault.
           </DialogDescription>

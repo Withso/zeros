@@ -21,8 +21,8 @@ import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
-import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
+import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import {
   extractUnavailableModelId,
   isModelUnavailableError,
@@ -681,7 +681,9 @@ const CURSOR_EFFORT_VALUES = new Set([
 ]);
 
 /** Preserve Cursor's full model record at the adapter boundary while deriving
- * only the common capabilities Zeros already knows how to render. */
+ * only the common capabilities Zeros already knows how to render. `label` is
+ * advisory: a curated cursor row keeps its catalog name (see
+ * AdvertisedModel.label), so Cursor rebranding an id renames nothing. */
 export function cursorAdvertisedModel(
   item: CursorModelListItem,
 ): AdvertisedModel | null {
@@ -1057,6 +1059,17 @@ async function loadSdk(): Promise<CursorSdkModule> {
   return sdkPromise;
 }
 
+// The SDK's team source loads team rules and dashboard-managed skills without
+// enabling project/user/plugin MCP. Capture it once at admission; mode rebuilds
+// must reuse the same sources and must not widen a restricted actor's runtime.
+type CursorSettingSources = [] | ["team"];
+
+function cursorSettingSources(
+  boundary?: PreparedBoundary,
+): CursorSettingSources {
+  return nativeMcpPassthroughEnabled(undefined, boundary) ? ["team"] : [];
+}
+
 interface Session {
   /** Zeros-owned live execution route; deliberately not the SDK agent id. */
   zerosSessionId: string;
@@ -1090,6 +1103,7 @@ interface Session {
    *  toggles into/out of Auto mode — autoReview is create-time only. */
   env?: Record<string, string>;
   mcpServers?: McpServerRegistration[];
+  settingSources: CursorSettingSources;
   /** The autoReview value currently baked into `agent` (set at create/resume).
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
@@ -1132,10 +1146,31 @@ interface CursorSessionRuntime {
 export class CursorSdkAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
   readonly capabilityPorts = {
+    sessionTools: {
+      list: async ({ sessionId }) => {
+        const session = this.sessions.get(sessionId);
+        if (!session) throw new Error("This chat session ended.");
+        return {
+          state: "unsupported" as const,
+          detail:
+            "Cursor does not report MCP connection status. Dashboard tools require Cursor-hosted agents.",
+          entries: (session.mcpServers ?? this.ctx.mcpServers).map(
+            (server) => ({
+              id: server.name,
+              name: server.name,
+              status: "error" as const,
+              detail: "Cursor cannot verify this connection through its SDK.",
+            }),
+          ),
+        };
+      },
+    },
     configuration: {
       readProvenance: async (opts) =>
         configurationProvenanceFor("cursor", {
           protectedTerritory: Boolean(opts.territory),
+          nativeMcpRequiresImport: true,
+          nativeSettingSources: cursorSettingSources(opts.executionBoundary),
           suppressUnsafeSources: Boolean(
             opts.territory && !opts.executionBoundary,
           ),
@@ -1391,6 +1426,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       cwd: string;
       env?: Record<string, string>;
       mcpServers?: McpServerRegistration[];
+      settingSources: CursorSettingSources;
     },
     autoReview: boolean = autoReviewFor(CURSOR_DEFAULT_MODE),
   ): void {
@@ -1409,7 +1445,12 @@ export class CursorSdkAdapter implements AgentAdapter {
         sdk.platform.prewarm({
           apiKey,
           cwd: opts.cwd,
-          local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
+          local: this.buildLocalOpts(
+            opts.cwd,
+            opts.env,
+            autoReview,
+            opts.settingSources,
+          ),
           ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
         }),
       ).catch(reportSkipped);
@@ -1450,6 +1491,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       session.apiKey,
       {
         cwd: session.cwd,
+        settingSources: session.settingSources,
         ...(session.env ? { env: session.env } : {}),
         ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
       },
@@ -1683,11 +1725,12 @@ export class CursorSdkAdapter implements AgentAdapter {
     executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const apiKey = this.resolveApiKey(opts.env);
+    const settingSources = cursorSettingSources(opts.executionBoundary);
     const runtime = await this.createSessionRuntime(opts);
     // Fire-and-forget, and BEFORE the awaits below on purpose: the whole point
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
-    this.prewarmWorkspace(runtime.sdk, apiKey, opts);
+    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, settingSources });
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -1732,6 +1775,7 @@ export class CursorSdkAdapter implements AgentAdapter {
               opts.cwd,
               opts.env,
               autoReviewFor(CURSOR_DEFAULT_MODE),
+              settingSources,
             ),
             mode: sdkModeFor(CURSOR_DEFAULT_MODE),
             ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -1760,6 +1804,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       cancelRequested: false,
       env: opts.env,
       mcpServers: opts.mcpServers,
+      settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
     };
@@ -1790,6 +1835,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     executionBoundary?: PreparedBoundary;
   }): Promise<LoadSessionResponse> {
     const apiKey = this.resolveApiKey(opts.env);
+    const settingSources = cursorSettingSources(opts.executionBoundary);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const providerResumeId = opts.providerBinding?.resumeId ?? opts.sessionId;
     if (!providerResumeId) {
@@ -1803,7 +1849,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // Same overlap as newSession: a reopened chat pays the identical cold
     // workspace/backend cost on its first turn, so warm it while the catalog
     // and `Agent.resume` are still in flight.
-    this.prewarmWorkspace(runtime.sdk, apiKey, opts);
+    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, settingSources });
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -1864,6 +1910,7 @@ export class CursorSdkAdapter implements AgentAdapter {
               opts.cwd,
               opts.env,
               autoReviewFor(CURSOR_DEFAULT_MODE),
+              settingSources,
             ),
             ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
           }),
@@ -1916,6 +1963,7 @@ export class CursorSdkAdapter implements AgentAdapter {
                 opts.cwd,
                 opts.env,
                 autoReviewFor(CURSOR_DEFAULT_MODE),
+                settingSources,
               ),
               mode: sdkModeFor(CURSOR_DEFAULT_MODE),
               ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -1944,6 +1992,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       cancelRequested: false,
       env: opts.env,
       mcpServers: opts.mcpServers,
+      settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
     });
@@ -2446,7 +2495,12 @@ export class CursorSdkAdapter implements AgentAdapter {
           session.env,
         ),
         cwd: session.cwd,
-        local: this.buildLocalOpts(session.cwd, session.env, want),
+        local: this.buildLocalOpts(
+          session.cwd,
+          session.env,
+          want,
+          session.settingSources,
+        ),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
       });
       session.appliedAutoReview = want;
@@ -2553,11 +2607,11 @@ export class CursorSdkAdapter implements AgentAdapter {
   /** Background one-shot text generation (the AI chat-title call): a
    *  throwaway `Agent.create` → `send` → `run.wait()`, whose `.result` IS
    *  the assistant's final text — no translator, no stream consumers. The
-   *  system instruction is prepended to the message text (the SDK has no
-   *  separate system-prompt param). Runs in "plan" (the SDK's read-only
-   *  mode) — the user's raw prompt is forwarded verbatim, and a background
-   *  call must never be able to edit files or fire MCP tools (mirrors the
-   *  Claude allowedTools:[] / Codex read-only-sandbox one-shots). NOTE:
+   *  title instruction is prepended to the message text for compatibility
+   *  with accounts lacking the SDK's gated system-prompt override. Empty
+   *  tools and settings sources prevent a background helper from invoking
+   *  workspace or native extension tools. Plan mode is an additional guard.
+   *  NOTE:
    *  each call counts as one request against the user's Cursor plan — the
    *  caller decides that trade-off. */
   async generateText(opts: {
@@ -2589,7 +2643,8 @@ export class CursorSdkAdapter implements AgentAdapter {
         apiKey,
         model: this.modelSelection(modelId, modelState, opts.env),
         cwd,
-        local: this.buildLocalOpts(cwd, opts.env),
+        local: { cwd, settingSources: [] },
+        tools: [],
         mode: "plan",
       });
       const run = await agent.send(
@@ -2623,13 +2678,12 @@ export class CursorSdkAdapter implements AgentAdapter {
   // ── helpers ─────────────────────────────────────────────
 
   private resolveApiKey(env?: Record<string, string>): string {
-    const key =
-      env?.CURSOR_API_KEY?.trim() || process.env.CURSOR_API_KEY?.trim();
+    const key = (env?.CURSOR_API_KEY ?? process.env.CURSOR_API_KEY)?.trim();
     if (!key) {
       throw new AgentFailureError({
         kind: "auth-required",
         message:
-          "Cursor SDK needs an API key. Add one in Settings → Providers → Cursor (CURSOR_API_KEY).",
+          "Connect your Cursor account or add an API key in Settings → Providers → Cursor.",
         agentId: AGENT_ID,
       });
     }
@@ -2645,8 +2699,9 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  which is why a mode change into/out of Auto needs a rebuild. */
   private buildLocalOpts(
     cwd: string,
-    env?: Record<string, string>,
-    autoReview = false,
+    env: Record<string, string> | undefined,
+    autoReview: boolean,
+    settingSources: CursorSettingSources,
   ): Record<string, unknown> {
     // Multi-root parity with Claude's `--add-dir` (`/add-dir` writes
     // ZEROS_ADDITIONAL_DIRS). @cursor/sdk 1.0.28 added `local.dirs` for exactly
@@ -2662,34 +2717,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       cwd,
       ...(additionalDirs.length > 0 ? { dirs: [cwd, ...additionalDirs] } : {}),
       ...(autoReview ? { autoReview: true } : {}),
-      // Ambient Cursor settings layers to load from disk. These carry repo
-      // rules and org policy — and, unavoidably, MCP servers.
-      //
-      // Native MCP pass-through is OFF (adapters/shared/mcp-passthrough.ts),
-      // but Cursor is the one provider with no MCP-only lever: `@cursor/sdk`
-      // exposes `settingSources` and nothing finer, so every layer is
-      // all-or-nothing across MCP AND rules. Dropping them all would enforce
-      // the policy exactly ("Without local.settingSources, only inline servers
-      // are loaded" — cursor.com/docs/sdk/typescript) and take repo rules and
-      // org policy down with it — a worse regression than the one being fixed,
-      // and one nobody asked for.
-      //
-      // So the layers are split by what they are FOR:
-      //   • dropped — `user` (~/.cursor/mcp.json) and `plugins`, the personal
-      //     "installed it once, now it is in every Zeros chat" sources that
-      //     motivated this policy. Their non-MCP content is personal
-      //     preference Zeros already owns.
-      //   • kept — `project` (repo rules, AGENTS.md) and `team`/`mdm` (org
-      //     policy an admin deliberately administers).
-      //
-      // Known residue: a repo's own committed `.cursor/mcp.json`, and a
-      // team/MDM-administered server, still reach Cursor. Both are declared by
-      // someone who meant to declare them for this repo or org, and both are
-      // already offered by the MCP import scan. Closing them needs an
-      // MCP-scoped option from `@cursor/sdk` that does not exist yet.
-      settingSources: nativeMcpPassthroughEnabled()
-        ? ["user", "project", "team", "mdm", "plugins"]
-        : ["project", "team", "mdm"],
+      // Team rules and managed skills have a separate SDK loading path. Keep
+      // project/user/plugins excluded: those also connect unimported MCP.
+      // Dashboard MCP still belongs to Cursor-hosted execution.
+      settingSources: [...settingSources],
     };
     if (env?.CURSOR_SANDBOX === "1") {
       local.sandboxOptions = { enabled: true };

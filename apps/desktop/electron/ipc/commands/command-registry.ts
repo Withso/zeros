@@ -10,6 +10,9 @@
 // ──────────────────────────────────────────────────────────
 
 import { setCommand } from "../router";
+import { cursorSubscription } from "./cursor-subscription";
+import { providerSubscription } from "./provider-subscription";
+import { nativeAppIcons, toolArtworkImages } from "./computer-use";
 import {
   dialogPickFolder,
   engineResetToDefault,
@@ -114,6 +117,8 @@ export function registerAllCommands(): void {
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.
   setCommand("app_info", appInfo);
+  setCommand("cursor_subscription", cursorSubscription);
+  setCommand("provider_subscription", providerSubscription);
 
   // App settings (plain-JSON, main-process readable) + in-place engine
   // restart. These settings persist to <userData>/app-settings.json so
@@ -148,6 +153,8 @@ export function registerAllCommands(): void {
   // Topbar "Open in…" — installed-IDE probe (+ real app icons) and the
   // open-a-worktree-in-a-detected-IDE launcher. See commands/open-apps.ts.
   setCommand("detect_open_apps", detectOpenApps);
+  setCommand("native_app_icons", nativeAppIcons);
+  setCommand("tool_artwork_images", toolArtworkImages);
   setCommand("open_in_app", openInApp);
 
   // Cloud access is brokered entirely in Electron main. Provider SSH and

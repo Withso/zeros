@@ -21,7 +21,6 @@ import {
   Check,
   CircleDollarSign,
   GitFork,
-  LogIn,
   MoreHorizontal,
   Play,
   RotateCcw,
@@ -44,7 +43,6 @@ import {
   PopoverContent,
   PopoverTrigger,
   Tooltip,
-  ZerosSpinner,
 } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useOpenFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
@@ -387,12 +385,6 @@ interface TurnFooterProps {
   onFork?: () => void;
   /** Warm the exact historical transcript when the menu item gains intent. */
   onForkIntent?: () => void;
-  /** Background CLI sign-in (Claude/Codex auth-required failures only). When
-   *  provided alongside the SIGN IN REQUIRED status, the static pill becomes
-   *  a clickable "Sign in" button that drives the CLI login headlessly and
-   *  redirects to the browser. Null/undefined = keep the plain pill. */
-  signInPhase?: "idle" | "starting" | "waiting" | "success" | "error" | null;
-  onSignIn?: () => void;
 }
 
 export const TurnFooter = memo(function TurnFooter({
@@ -408,8 +400,6 @@ export const TurnFooter = memo(function TurnFooter({
   onContinue,
   onFork,
   onForkIntent,
-  signInPhase,
-  onSignIn,
 }: TurnFooterProps) {
   const openInWorkbench = useOpenFileInWorkbench();
   // Stable actions context — identity doesn't change on store mutations, so
@@ -653,60 +643,13 @@ export const TurnFooter = memo(function TurnFooter({
   return (
     <>
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-        {statusLabel &&
-          (statusLabel === "SIGN IN REQUIRED" && onSignIn && signInPhase ? (
-            // Clickable variant of the status pill (same chrome + hover) —
-            // one click drives the CLI login headlessly and opens the
-            // browser (background-signin.ts). Busy while the browser
-            // round-trip is in flight; "Signed in" flashes on success
-            // before the session rebuild clears the failure.
-            <div className="basis-full">
-              <Button
-                type="button"
-                onClick={onSignIn}
-                disabled={
-                  signInPhase === "starting" ||
-                  signInPhase === "waiting" ||
-                  signInPhase === "success"
-                }
-                variant="secondary"
-                size="sm"
-              >
-                {signInPhase === "starting" || signInPhase === "waiting" ? (
-                  <>
-                    <ZerosSpinner size={16} />
-                    {signInPhase === "waiting"
-                      ? "Waiting for browser sign-in…"
-                      : "Signing in…"}
-                  </>
-                ) : signInPhase === "success" ? (
-                  <>
-                    <Check
-                      className="size-3"
-                      strokeWidth={2}
-                      aria-hidden="true"
-                    />
-                    Signed in
-                  </>
-                ) : (
-                  <>
-                    <LogIn
-                      className="size-3"
-                      strokeWidth={2}
-                      aria-hidden="true"
-                    />
-                    Sign in
-                  </>
-                )}
-              </Button>
-            </div>
-          ) : (
-            <div className="basis-full">
-              <span className="border-border3 bg-bg1 text-fg1 inline-flex w-fit rounded-sm border px-2 py-0.5 text-xs tracking-wide">
-                {statusLabel}
-              </span>
-            </div>
-          ))}
+        {statusLabel && (
+          <div className="basis-full">
+            <span className="border-border3 bg-bg1 text-fg1 inline-flex w-fit rounded-sm border px-2 py-0.5 text-xs tracking-wide">
+              {statusLabel}
+            </span>
+          </div>
+        )}
         <Tooltip label="Agent run time">
           <span className="text-fg2 tabular-nums">
             {formatElapsed(durationMs)}

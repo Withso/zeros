@@ -14,6 +14,41 @@ import {
 import { FRAME_HTML, webState } from "./fixtures";
 
 describe("HTML source adapter", () => {
+  it.each([
+    '<!doctype html><html><body><main data-oid="red"></main></body></html>',
+    '<!doctype html><html><head><title>Design</title></head><main data-oid="red"></main></html>',
+    '<main data-oid="red"></main>',
+    '<main data-oid="red"></main></body>',
+    "<!doctype html><head><title>Empty</title></head></body></html>",
+    "<!doctype html><html><head><title>Empty</title></head></html>",
+  ])(
+    "appends frame children safely with authored or implicit body tags: %s",
+    (source) => {
+      const child = '<div data-oid="new-child"></div>';
+      const updated = mutateDesignNodeHtmlSource(
+        source,
+        "::zeros-document-body",
+        child,
+        "append",
+      );
+      expect(updated).toContain(`${child}</body>`);
+      if (source.includes('data-oid="red"'))
+        expect(updated).toContain('<main data-oid="red"></main>');
+      expect(updated).not.toContain('data-oid="::zeros-document-body"');
+      expect(updated.match(/<\/body>/g)).toHaveLength(1);
+      expect(() =>
+        mutateDesignNodeHtmlSource(
+          source,
+          "::zeros-document-body",
+          child,
+          "replace-inner",
+        ),
+      ).toThrow("only be appended");
+      expect(() =>
+        mutateDesignNodeDeleteSource(source, "::zeros-document-body"),
+      ).toThrow("not found");
+    },
+  );
   it("projects stable hierarchy and exact authored spans", () => {
     const state = webState();
     const projection = parseDesignWebProjection({

@@ -60,6 +60,10 @@ export interface AsyncCacheLoadOptions {
 
 export interface KeyedAsyncCacheOptions<T> {
   maxEntries?: number;
+  /** Optional, already-validated durable snapshot for an exact key. Read
+   * synchronously on first access so reopening never paints a cold fallback.
+   * The original timestamp preserves freshness across app restarts. */
+  initialSnapshot?: (key: string) => { data: T; updatedAt: number } | undefined;
   /** Optional aggregate payload budget. Active/subscribed entries may exceed
    * it temporarily; inactive LRU entries are pruned as soon as ownership ends. */
   maxWeight?: number;
@@ -88,6 +92,7 @@ export class KeyedAsyncCache<T> {
   private readonly maxEntries: number;
   private readonly maxWeight: number;
   private readonly weightOf: ((value: T) => number) | null;
+  private readonly initialSnapshot: KeyedAsyncCacheOptions<T>["initialSnapshot"];
 
   public constructor(options: number | KeyedAsyncCacheOptions<T> = 64) {
     if (typeof options === "number") {
@@ -96,6 +101,7 @@ export class KeyedAsyncCache<T> {
         : 64;
       this.maxWeight = Number.POSITIVE_INFINITY;
       this.weightOf = null;
+      this.initialSnapshot = undefined;
       return;
     }
     this.maxEntries = Number.isFinite(options.maxEntries)
@@ -105,6 +111,7 @@ export class KeyedAsyncCache<T> {
       ? Math.max(0, options.maxWeight!)
       : Number.POSITIVE_INFINITY;
     this.weightOf = options.weightOf ?? null;
+    this.initialSnapshot = options.initialSnapshot;
   }
 
   /** Return the stable snapshot for `key`, creating its initial record once. */
@@ -328,13 +335,16 @@ export class KeyedAsyncCache<T> {
       existing.accessOrder = ++this.accessOrder;
       return existing;
     }
+    const initial = this.initialSnapshot?.(key);
     const entry: CacheEntry<T> = {
-      snapshot: INITIAL_SNAPSHOT as AsyncCacheSnapshot<T>,
+      snapshot: initial
+        ? { ...INITIAL_SNAPSHOT, ...initial, loading: false }
+        : INITIAL_SNAPSHOT as AsyncCacheSnapshot<T>,
       listeners: new Set(),
-      stale: true,
+      stale: !initial,
       generation: 0,
       accessOrder: ++this.accessOrder,
-      weight: 0,
+      weight: this.snapshotWeight(initial?.data),
     };
     this.entries.set(key, entry);
     // The caller may be about to subscribe or start a request. Never evict the

@@ -21,6 +21,7 @@ import { Button } from "@/renderer/shared/ui";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
+import { ToolIdentityIcon } from "./tool-identity-icon";
 import { isImagePath, nativeCodexBrowserPresentation } from "./event-meta";
 import {
   cachedBrowserFavicon,
@@ -158,7 +159,7 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
         );
       }
     }
-    const detail = renderDetail(message);
+    const detail = renderDetail(message, ctx);
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );
@@ -256,27 +257,43 @@ export function NativeBrowserToolRow({
 }) {
   const session = useConversationBrowserActivity(ctx.chatId ?? undefined);
   const activity = browserActivityOverride ?? browserToolActivity(tool);
-  const meta = nativeCodexBrowserPresentation(tool, session?.url, activity);
+  const meta = nativeCodexBrowserPresentation(
+    tool,
+    activity?.external ? undefined : session?.url,
+    activity,
+  );
   const usesWebsiteIcon = Boolean(
     activity && browserActivityUsesWebsiteIcon(activity),
   );
+  const pageUrl =
+    activity?.url ?? (!activity?.external ? inheritedUrl : undefined);
   const faviconDataUrl = usesWebsiteIcon
-    ? ((meta.faviconMatchesLivePage ? session?.faviconDataUrl : undefined) ??
-      cachedBrowserFavicon(activity?.url ?? inheritedUrl))
+    ? ((!activity?.external && meta.faviconMatchesLivePage
+        ? session?.faviconDataUrl
+        : undefined) ?? cachedBrowserFavicon(pageUrl))
     : undefined;
-  const NativeIcon = !usesWebsiteIcon
-    ? SquareMousePointer
-    : faviconDataUrl
-      ? () => (
-          <img src={faviconDataUrl} alt="" className="size-3 rounded-[2px]" />
-        )
-      : Globe2;
+  const siteIcon = usesWebsiteIcon
+    ? (faviconDataUrl ??
+      activity?.faviconUrl ??
+      (activity?.external && pageUrl
+        ? new URL("/favicon.ico", pageUrl).href
+        : undefined))
+    : undefined;
+  const NativeIcon = () => (
+    <ToolIdentityIcon
+      appId={activity?.appId}
+      faviconUrl={siteIcon}
+      fallback={usesWebsiteIcon ? Globe2 : SquareMousePointer}
+      active={ctx.attachmentImagesActive !== false}
+      className="size-3"
+    />
+  );
   return (
     <EventRow
       message={tool}
       ctx={ctx}
       meta={{ ...meta, Icon: NativeIcon }}
-      detail={renderDetail(tool)}
+      detail={renderDetail(tool, ctx)}
     />
   );
 }
@@ -287,7 +304,10 @@ export function NativeBrowserToolRow({
  *  User-feedback driven: "max height ~7-8 lines is enough." */
 const DETAIL_MAX_H = "max-h-[200px]";
 
-function renderDetail(message: AgentMessage): React.ReactNode {
+function renderDetail(
+  message: AgentMessage,
+  ctx: RendererContext,
+): React.ReactNode {
   if (message.kind === "tool") {
     const tool = message as AgentToolMessage;
 
@@ -354,14 +374,15 @@ function renderDetail(message: AgentMessage): React.ReactNode {
       if (texts.length > 0 || images.length > 0) {
         return (
           <div className={`${DETAIL_MAX_H} overflow-y-auto`}>
-            {images.map((src, i) => (
-              <img
-                key={i}
-                src={src}
-                alt="tool output"
-                className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
-              />
-            ))}
+            {ctx.attachmentImagesActive !== false &&
+              images.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt="tool output"
+                  className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
+                />
+              ))}
             {texts.length > 0 && (
               <HighlightedCode
                 code={texts.join("\n")}

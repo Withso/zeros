@@ -1,8 +1,9 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter } from "../types";
@@ -10,9 +11,19 @@ import type { BoundaryRequest, PreparedBoundary } from "../containment/types";
 import type { ProviderBinding } from "@zeros/protocol/identities";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
+let fixtureRoot: string;
+beforeEach(() => {
+  fixtureRoot = realpathSync(
+    mkdtempSync(path.join(os.tmpdir(), "zeros-gateway-identity-")),
+  );
+});
+afterEach(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
+
 function gatewayWith(adapter: AgentAdapter) {
   const gateway = new AgentGateway({
-    projectRoot: "/tmp",
+    projectRoot: fixtureRoot,
     executionBoundary: testExecutionBoundary(),
     events: {
       onSessionUpdate: () => {},
@@ -71,7 +82,7 @@ describe("AgentGateway identity lifecycle", () => {
         }
       | undefined;
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary({
         onPrepare: (request) => {
           preparedRequest = request;
@@ -110,7 +121,7 @@ describe("AgentGateway identity lifecycle", () => {
 
   it("does not let best-effort account decoration invalidate provider auth", async () => {
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
@@ -145,7 +156,7 @@ describe("AgentGateway identity lifecycle", () => {
   it("prepares and retires a ZSR boundary for a one-shot title process", async () => {
     let preparedRequest: BoundaryRequest | undefined;
     let receivedBoundary: PreparedBoundary | undefined;
-    const root = "/tmp";
+    const root = fixtureRoot;
     const gateway = new AgentGateway({
       projectRoot: root,
       executionBoundary: testExecutionBoundary({
@@ -228,7 +239,7 @@ describe("AgentGateway identity lifecycle", () => {
 
   it("does not let one failed one-shot teardown poison later admissions", async () => {
     const gateway = new AgentGateway({
-      projectRoot: "/tmp",
+      projectRoot: fixtureRoot,
       executionBoundary: testExecutionBoundary({
         stopError: new Error("transient boundary teardown proof failed"),
       }),
@@ -283,7 +294,7 @@ describe("AgentGateway identity lifecycle", () => {
       /transient boundary teardown proof failed/,
     );
     await expect(
-      gateway.newSession("future-agent", { cwd: "/tmp" }),
+      gateway.newSession("future-agent", { cwd: fixtureRoot }),
     ).resolves.toMatchObject({ executionId: expect.any(String) });
     await expect(
       gateway.generateTitle("future-agent", {
@@ -315,7 +326,7 @@ describe("AgentGateway identity lifecycle", () => {
     } as unknown as AgentAdapter);
 
     const created = await gateway.newSession("future-agent", {
-      cwd: "/tmp",
+      cwd: fixtureRoot,
       onExecutionCreated: (id) => order.push(`route:${id}`),
     });
     expect(order).toEqual([
@@ -332,7 +343,7 @@ describe("AgentGateway identity lifecycle", () => {
       disposeSession,
     } as unknown as AgentAdapter);
     await expect(
-      rejecting.newSession("rejecting-agent", { cwd: "/tmp" }),
+      rejecting.newSession("rejecting-agent", { cwd: fixtureRoot }),
     ).rejects.toThrow("startup failed after allocation");
     expect(disposeSession).toHaveBeenCalledWith(executionId);
 
@@ -345,7 +356,7 @@ describe("AgentGateway identity lifecycle", () => {
     } as unknown as AgentAdapter);
     await expect(
       routeRejecting.newSession("route-rejecting-agent", {
-        cwd: "/tmp",
+        cwd: fixtureRoot,
         onExecutionCreated: () => {
           throw new Error("route publication rejected");
         },
@@ -383,7 +394,7 @@ describe("AgentGateway identity lifecycle", () => {
       newSession: adapterStart,
       disposeSession,
     } as unknown as AgentAdapter);
-    const flight = gateway.newSession("slow-agent", { cwd: "/tmp" });
+    const flight = gateway.newSession("slow-agent", { cwd: fixtureRoot });
     // Attach the rejection handler in the SAME tick the promise is created.
     // The timer advance below rejects `flight` while the test is still inside
     // fake-timer flushes, so a handler attached only after those awaits leaves
@@ -440,7 +451,7 @@ describe("AgentGateway identity lifecycle", () => {
     };
 
     const loaded = await gateway.loadSession("future-agent", binding, {
-      cwd: "/tmp",
+      cwd: fixtureRoot,
     });
 
     expect(receivedBinding).toEqual(binding);
@@ -471,7 +482,7 @@ describe("AgentGateway identity lifecycle", () => {
     };
 
     const loaded = await gateway.loadSession("future-agent", binding, {
-      cwd: "/tmp",
+      cwd: fixtureRoot,
       onExecutionCreated: (executionId) => {
         order.push(`route:${executionId}`);
       },
@@ -504,7 +515,7 @@ describe("AgentGateway identity lifecycle", () => {
           kind: "native",
           resumeId: "provider-conversation-1",
         },
-        { cwd: "/tmp" },
+        { cwd: fixtureRoot },
       ),
     ).rejects.toThrow("resume failed after allocation");
 
@@ -524,7 +535,7 @@ describe("AgentGateway identity lifecycle", () => {
           kind: "native",
           resumeId: "thread-1",
         },
-        { cwd: "/tmp" },
+        { cwd: fixtureRoot },
       ),
     ).rejects.toMatchObject({
       failure: { kind: "protocol-error", stage: "loadSession" },
@@ -552,7 +563,7 @@ describe("AgentGateway identity lifecycle", () => {
           kind: "native",
           resumeId: "provider-conversation-1",
         },
-        { cwd: "/tmp" },
+        { cwd: fixtureRoot },
       ),
     ).rejects.toMatchObject({
       failure: { kind: "protocol-error", stage: "loadSession" },
@@ -584,13 +595,13 @@ describe("AgentGateway identity lifecycle", () => {
 
     await expect(
       gateway.forkProviderBinding("future-agent", source, {
-        cwd: "/tmp",
+        cwd: fixtureRoot,
       }),
     ).resolves.toEqual(forked);
     expect(forkProviderBinding).toHaveBeenCalledWith(
       expect.objectContaining({
         providerBinding: source,
-        cwd: "/tmp",
+        cwd: fixtureRoot,
       }),
     );
     expect(gateway.executionToAgent.size).toBe(0);
@@ -607,7 +618,9 @@ describe("AgentGateway identity lifecycle", () => {
       agentId: "future-agent",
     } as AgentAdapter);
     await expect(
-      unsupported.forkProviderBinding("future-agent", source, { cwd: "/tmp" }),
+      unsupported.forkProviderBinding("future-agent", source, {
+        cwd: fixtureRoot,
+      }),
     ).rejects.toMatchObject({
       failure: { kind: "protocol-error", stage: "forkSession" },
     });
@@ -624,7 +637,9 @@ describe("AgentGateway identity lifecycle", () => {
       }),
     } as unknown as AgentAdapter);
     await expect(
-      substituting.forkProviderBinding("future-agent", source, { cwd: "/tmp" }),
+      substituting.forkProviderBinding("future-agent", source, {
+        cwd: fixtureRoot,
+      }),
     ).rejects.toMatchObject({
       failure: { kind: "protocol-error", stage: "forkSession" },
     });

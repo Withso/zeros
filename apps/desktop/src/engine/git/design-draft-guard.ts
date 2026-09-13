@@ -1,7 +1,6 @@
 import {
-  designDocumentRelativePath,
-  DESIGN_DIRECTORY_REGISTRY_FILE,
-  designMetadataGitPaths,
+  designDocumentMetadataDirectory,
+  DESIGN_METADATA_PROTECTED_PATHS,
   isDesignMetadataRepoPath,
 } from "../design/metadata";
 import { designRegistryAtGitRef } from "../design/metadata-git";
@@ -12,16 +11,14 @@ import {
   resolveDesignDirectoryPointerState,
 } from "../design/directory";
 import {
-  DEFAULT_DESIGN_DIRECTORY_NAME,
+  activeDesignDirectoryNameFor,
   DESIGN_CANVAS_FILE,
-  designDirectoryNameFor,
   sanitizeDesignDirectoryName,
 } from "../design/directory-registry";
 import { repoPathOverlapsDesignRoot } from "../design/path-authority";
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 import { GitError } from "./errors";
 import { runGit } from "./git-exec";
-import { getWorkspaceById } from "./state";
 
 export type DesignIntegrationComparison =
   | "merge-side"
@@ -35,9 +32,7 @@ export async function semanticDesignDirectories(opts: {
   path: string;
   repoRoot: string;
 }): Promise<string[]> {
-  const active = getWorkspaceById(opts.workspaceId)
-    ? designDirectoryNameFor(opts.path)
-    : DEFAULT_DESIGN_DIRECTORY_NAME;
+  const active = activeDesignDirectoryNameFor(opts.path);
   const [discovered, sticky, pointer] = await Promise.all([
     discoverDesignDirectories(opts.path),
     stickyRecognizedDesignDirectories(opts.path),
@@ -48,11 +43,11 @@ export async function semanticDesignDirectories(opts: {
   ]);
   return [
     ...new Set([
-      active,
+      ...(active ? [active] : []),
       ...(pointer.configured ? [pointer.directory] : []),
       ...discovered,
       ...sticky,
-      ...designMetadataGitPaths(opts.path),
+      ...DESIGN_METADATA_PROTECTED_PATHS,
     ]),
   ].sort((left, right) => left.localeCompare(right));
 }
@@ -84,9 +79,9 @@ export async function designDirectoriesAtRef(
       }),
       ...(registry
         ? [
-            DESIGN_DIRECTORY_REGISTRY_FILE,
+            ...DESIGN_METADATA_PROTECTED_PATHS,
             ...Object.keys(registry.directories).map(
-              designDocumentRelativePath,
+              designDocumentMetadataDirectory,
             ),
           ]
         : []),

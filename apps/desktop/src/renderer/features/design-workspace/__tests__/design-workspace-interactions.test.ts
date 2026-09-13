@@ -235,8 +235,8 @@ describe("design workspace interaction wiring", () => {
       "if (!previewDirtyRef.current) preview(resolvedDraft);",
     );
     // The scrub drag is direct manipulation and must stay live.
-    expect(source).toContain("scrub.latestValue = next;");
-    expect(source).toContain("preview(next);");
+    expect(source).toContain("scrub.latestValue = resolved;");
+    expect(source).toContain("preview(resolved);");
   });
 
   /** Every gesture shares one dispatcher: one flight, newest styles win, and
@@ -773,7 +773,8 @@ describe("design workspace interaction wiring", () => {
     expect(uiSource.match(/font-size:\s*13px/g)).toHaveLength(1);
     expect(uiSource).toContain(".zd-design-field-actions");
     expect(source).toContain("aria-label={`Unit for ${label}`}");
-    expect(styleEditorSource).toContain('label="Box sizing"');
+    expect(styleEditorSource).toContain('<StyleSection title="Layout" fixed>');
+    expect(styleEditorSource).not.toContain('label="Box sizing"');
   });
 
   it("keeps one Style inspector with PNG export and no Data or PR surface", () => {
