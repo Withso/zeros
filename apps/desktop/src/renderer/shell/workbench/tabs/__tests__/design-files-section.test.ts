@@ -56,6 +56,25 @@ const REALISTIC_LISTING = [
 ];
 
 describe("recognizing the design directory", () => {
+  it("sections portable manifests using the engine's validated roots", () => {
+    const files = [
+      "0kit -Design/design.toml",
+      "0kit -Design/home.html",
+      "src/index.ts",
+    ];
+    const roots = designSectionDirectories(files, ["0kit -Design"]);
+    expect(roots).toEqual(["0kit -Design"]);
+    expect(filterDesignListing(files, "exclude-design", roots)).toEqual([
+      "src/index.ts",
+    ]);
+    expect(filterDesignListing(files, "only-design", roots)).toEqual(
+      files.slice(0, 2),
+    );
+    // An unrelated application's TOML file never establishes Design ownership.
+    expect(designSectionDirectories(files, [])).toEqual([]);
+    expect(designSectionDirectories(files)).toEqual([]);
+  });
+
   it("takes the directory holding a committed canvas marker", () => {
     expect(designDirectoryOfMarker("ZerosDesign/.zeros-canvas.json")).toBe(
       "ZerosDesign",
@@ -319,7 +338,7 @@ describe("Files tab wiring", () => {
       /reconcileTreePathList\(splitListing\(warm, designFilterRef\.current\)\)/,
     );
     expect(tree).toMatch(
-      /filterDesignListing\(\s*rawIgnoredPaths,\s*filter,\s*designSectionDirectories\(rawTrackedPaths\)/,
+      /filterDesignListing\(\s*rawIgnoredPaths,\s*filter,\s*designSectionDirectories\(rawTrackedPaths, listing\.designDirectories\)/,
     );
   });
 

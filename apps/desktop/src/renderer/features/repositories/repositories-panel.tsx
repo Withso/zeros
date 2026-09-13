@@ -46,6 +46,7 @@ import {
   Pencil,
   PenTool,
   Plus,
+  Settings2,
   Trash2,
   Wand2,
   type LucideIcon,
@@ -182,6 +183,7 @@ export type RepoSectionId =
   | "actions"
   | "files"
   | "design"
+  | "design-preferences"
   | "paths";
 
 export const REPO_SECTIONS: {
@@ -197,8 +199,9 @@ export const REPO_SECTIONS: {
   // people hit on day one when a fresh workspace won't boot without its .env.
   { id: "files", label: "Files", icon: Copy },
   // Which committed folder is the design directory (mode-model pointer).
-  // Internal-gated at the repo-page tab strip, not here.
-  { id: "design", label: "Design", icon: PenTool },
+  // The persisted `design` destination is Directory in the Design mode tabs.
+  { id: "design", label: "Directory", icon: PenTool },
+  { id: "design-preferences", label: "Preferences", icon: Settings2 },
   { id: "paths", label: "Paths", icon: Folder },
 ];
 
@@ -413,6 +416,8 @@ export function RepoDetail({
   surfaceActive?: boolean;
 }) {
   switch (section) {
+    case "design-preferences":
+      return null;
     case "paths":
       return <PathsSection project={project} />;
     case "design":

@@ -4,10 +4,12 @@
 
 import type {
   HomePage,
+  RepoPageModeViews,
   RepoPageView,
   WorkspacePage,
   WorkspaceState,
 } from "./store";
+import { repoPageModeForView } from "./repo-page-mode";
 import {
   parseWorkspaceListFilter,
   type WorkspaceListFilter,
@@ -32,6 +34,7 @@ export interface PersistedUiState {
   activeRepoId: string | null;
   /** Per-repository hub tab, keyed by stable project id. */
   repoPageViewByProject: Record<string, RepoPageView>;
+  repoPageViewByModeByProject: Record<string, RepoPageModeViews>;
   newAgentFolder: string | null;
   /** The workspace folder the user was last viewing — restored on boot so the
    *  app reopens on the same workspace instead of "No workspace selected". */
@@ -59,6 +62,7 @@ const VALID_REPO_VIEWS = new Set<RepoPageView>([
   "actions",
   "files",
   "design",
+  "design-preferences",
   "paths",
 ]);
 /** Persisted navigation identity is useful, but must not grow forever. */
@@ -115,6 +119,32 @@ function parseRepoViewMap(raw: unknown): Record<string, RepoPageView> {
     )
     .slice(-MAX_SCOPED_NAV_ENTRIES);
   return Object.fromEntries(entries);
+}
+
+function parseRepoModeViewMap(raw: unknown): Record<string, RepoPageModeViews> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const entries: Array<[string, RepoPageModeViews]> = [];
+  for (const [projectId, value] of Object.entries(raw)) {
+    if (
+      !projectId ||
+      !value ||
+      typeof value !== "object" ||
+      Array.isArray(value)
+    )
+      continue;
+    const views: RepoPageModeViews = {};
+    for (const mode of ["code", "design"] as const) {
+      const view = (value as Record<string, unknown>)[mode];
+      if (
+        typeof view === "string" &&
+        VALID_REPO_VIEWS.has(view as RepoPageView) &&
+        repoPageModeForView(view as RepoPageView) === mode
+      )
+        views[mode] = view as RepoPageView;
+    }
+    if (Object.keys(views).length) entries.push([projectId, views]);
+  }
+  return Object.fromEntries(entries.slice(-MAX_SCOPED_NAV_ENTRIES));
 }
 
 function parseBoundedTimestampMap(
@@ -230,6 +260,11 @@ export function loadPersistedUiState(): Partial<PersistedUiState> {
         parsed.repoPageViewByProject,
       );
     }
+    if ("repoPageViewByModeByProject" in parsed) {
+      out.repoPageViewByModeByProject = parseRepoModeViewMap(
+        parsed.repoPageViewByModeByProject,
+      );
+    }
     if (
       (!out.repoPageViewByProject ||
         Object.keys(out.repoPageViewByProject).length === 0) &&
@@ -304,6 +339,7 @@ export function schedulePersistUiState(state: WorkspaceState): void {
     lastHomePage: state.lastHomePage,
     activeRepoId: state.activeRepoId,
     repoPageViewByProject: state.repoPageViewByProject,
+    repoPageViewByModeByProject: state.repoPageViewByModeByProject,
     newAgentFolder: state.newAgentFolder,
     lastWorkspaceFolder: state.lastWorkspaceFolder,
     lastWorkspaceByRepoRoot: state.lastWorkspaceByRepoRoot,

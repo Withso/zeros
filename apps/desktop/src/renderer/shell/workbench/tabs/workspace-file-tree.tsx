@@ -36,8 +36,9 @@ import {
 } from "@pierre/trees/react";
 
 import {
-  loadWorkspaceFiles,
-  peekWorkspaceFiles,
+  loadWorkspaceFileListing,
+  peekWorkspaceFileListing,
+  type WorkspaceFileListing,
 } from "../../workspace-files-cache";
 import { prefetchWorkspaceFileRead } from "../../workspace-file-data-cache";
 import { isNativeRuntime, nativeInvoke } from "@/renderer/platform/runtime";
@@ -250,15 +251,21 @@ const TREE_SHADOW_CSS = `
 `;
 
 const EMPTY_FILE_PATHS: string[] = [];
+const EMPTY_FILE_LISTING: WorkspaceFileListing = { files: EMPTY_FILE_PATHS };
 
 /** One side of the code / design split (design-files-section.ts), or the whole
  *  listing when this tree isn't part of a split. */
 function splitListing(
-  paths: readonly string[],
+  listing: WorkspaceFileListing,
   filter: DesignListingFilter | undefined,
 ): readonly string[] {
-  if (!filter) return paths;
-  return filterDesignListing(paths, filter, designSectionDirectories(paths));
+  const { files, designDirectories } = listing;
+  if (!filter) return files;
+  return filterDesignListing(
+    files,
+    filter,
+    designSectionDirectories(files, designDirectories),
+  );
 }
 
 /** Basename of a POSIX repo-relative path. Exported so callers labelling a
@@ -385,38 +392,36 @@ export const WorkspaceFileTree = React.forwardRef<
   // Captured once, like every model option: which side of the design split
   // this tree shows is static per surface.
   const designFilterRef = useRef(designFilter);
+  const initialListingRef = useRef(
+    cwd
+      ? (peekWorkspaceFileListing(cwd) ?? EMPTY_FILE_LISTING)
+      : EMPTY_FILE_LISTING,
+  );
   const initialPathsRef = useRef(
     (() => {
-      const warm = cwd
-        ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS)
-        : EMPTY_FILE_PATHS;
-      // Split the SEED too, so the design document is on the right side of the
-      // split in the very first paint instead of one listing later.
+      const warm = initialListingRef.current;
+      // Split the first paint using the same validated ownership as later reads.
       return reconcileTreePathList(splitListing(warm, designFilterRef.current));
     })(),
   );
   const [pathsSnapshot, setPathsSnapshot] = useState<{
     cwd: string | undefined;
-    paths: string[];
-  }>(() => ({ cwd, paths: initialPathsRef.current }));
-  // A reused tree fiber can receive another workspace before its load effect
-  // runs. Associate rows with their cwd and synchronously use that cwd's warm
-  // snapshot; never expose the prior workspace's paths under the new chrome.
-  const rawTrackedPaths = useMemo(
+    listing: WorkspaceFileListing;
+  }>(() => ({ cwd, listing: initialListingRef.current }));
+  // A reused fiber synchronously switches to the destination's whole snapshot.
+  const listing = useMemo(
     () =>
       pathsSnapshot.cwd === cwd
-        ? pathsSnapshot.paths
+        ? pathsSnapshot.listing
         : cwd
-          ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS)
-          : EMPTY_FILE_PATHS,
+          ? (peekWorkspaceFileListing(cwd) ?? EMPTY_FILE_LISTING)
+          : EMPTY_FILE_LISTING,
     [cwd, pathsSnapshot],
   );
+  const rawTrackedPaths = listing.files;
   const trackedPaths = useMemo(
-    () =>
-      reconcileTreePathList(
-        splitListing(rawTrackedPaths, designFilterRef.current),
-      ),
-    [rawTrackedPaths],
+    () => reconcileTreePathList(splitListing(listing, designFilterRef.current)),
+    [listing],
   );
 
   // Captured once: a pre-opened tree starts focused on its file. Read via
@@ -475,7 +480,7 @@ export const WorkspaceFileTree = React.forwardRef<
   // (a git refresh) rebuilds the tree WITH them.
   // Split the same way as the tracked listing: gitignored entries inside the
   // design document belong to its tree, not the code tree. The directories come
-  // from the TRACKED listing (the marker is committed), so an ignored root that
+  // from the same validated listing snapshot, so an ignored root that
   // merely shares a design folder's name prefix stays where it is.
   const { paths: rawIgnoredPaths, expandedDirs } = useIgnoredEntries(
     cwd,
@@ -489,9 +494,9 @@ export const WorkspaceFileTree = React.forwardRef<
     return filterDesignListing(
       rawIgnoredPaths,
       filter,
-      designSectionDirectories(rawTrackedPaths),
+      designSectionDirectories(rawTrackedPaths, listing.designDirectories),
     );
-  }, [rawIgnoredPaths, rawTrackedPaths]);
+  }, [rawIgnoredPaths, rawTrackedPaths, listing.designDirectories]);
   // The two lists come from different git queries against a worktree that is
   // being written to, so they can disagree — and EVERY form of disagreement is a
   // throw from the tree store, inside a layout effect, which unwinds to the ROOT
@@ -591,20 +596,20 @@ export const WorkspaceFileTree = React.forwardRef<
   useEffect(() => {
     if (!active) return;
     if (!cwd) {
-      setPathsSnapshot({ cwd: undefined, paths: EMPTY_FILE_PATHS });
+      setPathsSnapshot({ cwd: undefined, listing: EMPTY_FILE_LISTING });
       return;
     }
     let cancelled = false;
     // Ordinary remounts may reuse the short-lived cache. A real refresh signal
     // invalidates this cwd in useGitRefreshKey BEFORE reloadKey changes, so a
     // create/delete always performs a fresh list and cannot serve a stale path.
-    void loadWorkspaceFiles(cwd)
-      .then((files) => {
+    void loadWorkspaceFileListing(cwd)
+      .then((listing) => {
         if (!cancelled) {
           setPathsSnapshot((current) =>
-            current.cwd === cwd && current.paths === files
+            current.cwd === cwd && current.listing === listing
               ? current
-              : { cwd, paths: files },
+              : { cwd, listing },
           );
         }
       })

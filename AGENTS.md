@@ -17,14 +17,17 @@ These instructions apply to the entire repository. Read and follow
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
-- Treat the active Design directory (resolved from private `[design] directory_id`
-  and tracked `.zeros/design-dir.toml`, with legacy `directory` compatibility,
-  `Zeros Design/` as the unconfigured default and `<repo name> - Design/`
-  created on a repository's first design use), its `.zeros/design-dir.toml`
-  registry and `.zeros/design/<id>/document.json` metadata as engine-owned
-  territory. Do not create, edit, move, delete, stage, or commit files there with shell, patch, editor, or
-  generic Git tools. Use the Design API/Design surface; when it is unavailable,
-  stop and ask the user instead of removing ACLs or retrying around an error.
+- Treat every Design directory identified by a Zeros `design.toml` as
+  engine-owned territory, including its `rules.md`, source and metadata. Private
+  `[design] directory_id` selects the active folder; legacy `directory` paths,
+  `.zeros/design-dir.toml`, `.zeros/design/` metadata and `.zeros-canvas.json`
+  remain readable compatibility formats. Do not create, edit, move, delete,
+  stage or commit Design files through shell, patch, editor or generic Git
+  tools. Use the Design API/Design surface; when it is unavailable, stop and
+  ask the user instead of removing ACLs or retrying around an error.
+- Commit each Design folder with its `design.toml` and `rules.md`; do not
+  gitignore it. Zeros Settings and Design mode manage it through the Design
+  API. `.zeros/` contains private local state and is ignored by default.
 
 ## Renderer invariants
 

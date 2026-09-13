@@ -1,6 +1,11 @@
 import {
+  parseCanvasFixture,
+  useLegacyDesignStorage,
+} from "../../design/__tests__/storage-fixtures";
+import {
   commitDesignMetadata,
   designDocumentMetadataPath,
+  DESIGN_DIRECTORY_REGISTRY_FILE,
 } from "../../design/metadata";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
@@ -25,6 +30,7 @@ import {
   commitDesignWebDocumentState,
   createDesignFrame,
   readDesignWebDocumentState,
+  readDesignWorkspaceSnapshot,
 } from "../../design/document";
 import {
   DESIGN_CANVAS_FILE,
@@ -547,6 +553,76 @@ describe("WorkspaceService", () => {
     ).toBe("design-workspace");
   });
 
+  it("adopts an existing folder without invalidating an older worktree's private selection", async () => {
+    const { upsertRepoByRoot } = await import("../../db/projects");
+    upsertRepoByRoot({ repoRoot: dir, repoSlug: "adopt-existing" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+    execFileSync("git", ["config", "user.email", "test@example.com"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-m", "seed"], { cwd: dir });
+    const workspace = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "adopt-existing",
+      kind: "code",
+    });
+    try {
+      const before = designDirectoryNameFor(workspace.path);
+      fs.mkdirSync(path.join(dir, "Brand"));
+      fs.writeFileSync(
+        path.join(dir, "Brand/home.html"),
+        "<html><body><main>Brand</main></body></html>",
+      );
+      const preview = (await svc.handle("design.previewExistingDirectory", {
+        repoRoot: dir,
+        folder: path.join(dir, "Brand"),
+      })) as { revision: string };
+      await expect(
+        svc.handle("design.adoptDirectory", {
+          repoRoot: dir,
+          folder: "Brand",
+          revision: preview.revision,
+        }),
+      ).resolves.toMatchObject({ selected: false });
+      expect(fs.existsSync(path.join(dir, "Brand/design.toml"))).toBe(true);
+      expect(designDirectoryNameFor(workspace.path)).toBe(before);
+      await expect(
+        svc.handle(
+          "design.previewExistingDirectory",
+          { repoRoot: dir, folder: "Brand" },
+          { remote: true },
+        ),
+      ).rejects.toBeInstanceOf(Error);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: workspace.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("keeps Zeros manifest creation on the Design API while allowing unrelated design.toml files", async () => {
+    const { upsertRepoByRoot } = await import("../../db/projects");
+    upsertRepoByRoot({ repoRoot: dir, repoSlug: "manifest-boundary" });
+    await expect(
+      svc.handle("file.write", {
+        workspaceId: dir,
+        path: "ordinary/design.toml",
+        content: 'name = "ordinary"\n',
+      }),
+    ).resolves.toMatchObject({ kind: "success" });
+    await expect(
+      svc.handle("file.write", {
+        workspaceId: dir,
+        path: "new-design/design.toml",
+        content:
+          'format = "zeros-design"\nversion = 1\nid = "design_new"\n[document]\nversion = 3\n',
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(fs.existsSync(path.join(dir, "new-design/design.toml"))).toBe(false);
+  });
+
   it("file.write writes a registered repo ROOT file for LOCAL; remote raw-path + non-strings rejected", async () => {
     const { upsertRepoByRoot } = await import("../../db/projects");
     const repoC = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-write-op-"));
@@ -708,6 +784,62 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("discovers and unregisters a main-checkout Design folder without worktrees", async () => {
+    await svc.handle("project.upsert", { repoRoot: dir });
+    fs.mkdirSync(path.join(dir, "Brand"));
+    fs.writeFileSync(path.join(dir, "Brand/index.html"), "<h1>Keep me</h1>");
+    commitDesignMetadata(dir, "Brand", '{"version":3,"frames":{}}');
+    fs.mkdirSync(path.join(dir, "Unrelated"));
+    fs.writeFileSync(
+      path.join(dir, "Unrelated/design.toml"),
+      'name = "another application"\n',
+    );
+    await expect(
+      svc.handle("file.tree", {
+        workspaceId: dir,
+        includeDesignDirectories: true,
+      }),
+    ).resolves.toMatchObject({
+      files: expect.arrayContaining([
+        "Brand/design.toml",
+        "Brand/index.html",
+        "Unrelated/design.toml",
+      ]),
+      designDirectories: ["Brand"],
+    });
+    await expect(
+      svc.handle("design.listDirectories", { workspaceId: dir }),
+    ).resolves.toMatchObject({
+      directories: ["Brand"],
+      target: { directory: "Brand", exists: true },
+    });
+    await expect(
+      svc.handle(
+        "design.removeDirectory",
+        { repoRoot: dir, directory: "Brand" },
+        { remote: true },
+      ),
+    ).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(
+      svc.handle("design.removeDirectory", {
+        repoRoot: path.dirname(dir),
+        directory: "Brand",
+      }),
+    ).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+    await expect(
+      svc.handle("design.removeDirectory", {
+        repoRoot: dir,
+        directory: "Brand",
+      }),
+    ).resolves.toEqual({ removed: true });
+    expect(fs.readFileSync(path.join(dir, "Brand/index.html"), "utf8")).toBe(
+      "<h1>Keep me</h1>",
+    );
+    await expect(
+      svc.handle("design.listDirectories", { workspaceId: dir }),
+    ).resolves.toMatchObject({ directories: [] });
+  });
+
   it("previews an empty reserved folder as a design directory that still needs creation", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -748,7 +880,7 @@ describe("WorkspaceService", () => {
           svc.handle("design.listDirectories", {
             workspaceId: created.workspaceId,
           }),
-        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+        ).resolves.toMatchObject({ target: null });
       } finally {
         fs.writeFileSync(settingsFile, original);
       }
@@ -817,25 +949,22 @@ describe("WorkspaceService", () => {
         path.join(design.path, alternateDirectory),
         { recursive: true },
       );
+      fs.rmSync(path.join(design.path, alternateDirectory, "design.toml"));
       commitDesignMetadata(
         design.path,
         alternateDirectory,
-        fs.readFileSync(
-          designDocumentMetadataPath(design.path, originalDirectory),
-          "utf8",
+        JSON.stringify(
+          parseCanvasFixture(
+            fs.readFileSync(
+              designDocumentMetadataPath(design.path, originalDirectory),
+              "utf8",
+            ),
+          ),
         ),
       );
       execFileSync(
         "git",
-        [
-          "add",
-          "-f",
-          "--",
-          originalDirectory,
-          alternateDirectory,
-          ".zeros/design-dir.toml",
-          ".zeros/design",
-        ],
+        ["add", "-f", "--", originalDirectory, alternateDirectory],
         { cwd: design.path },
       );
       execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
@@ -1384,6 +1513,121 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it.each([".zeros/design-dir.toml", ".zeros/design/design-dir.toml"])(
+    "migrates %s and document.json on Design use and checkpoints both renames",
+    async (legacyRegistry) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const workspace = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: "metadata-rename",
+        kind: "design",
+      });
+      const params = { workspaceId: workspace.workspaceId };
+      const git = (...args: string[]) =>
+        execFileSync("git", args, { cwd: workspace.path, encoding: "utf8" });
+      try {
+        const directory = designDirectoryNameFor(workspace.path);
+        const frame = await createDesignFrame(workspace.path, {
+          title: "Existing design",
+          geometry: { x: 42, y: 24, w: 600, h: 400, z: 0 },
+        });
+        const metadata = path
+          .relative(
+            workspace.path,
+            designDocumentMetadataPath(workspace.path, directory),
+          )
+          .split(path.sep)
+          .join("/");
+        const before = fs.readFileSync(
+          path.join(workspace.path, metadata),
+          "utf8",
+        );
+        const { metadata: legacyMetadata } = useLegacyDesignStorage(
+          workspace.path,
+          directory,
+          legacyRegistry,
+        );
+        git(
+          "add",
+          "-f",
+          ".zeros/design",
+          legacyRegistry,
+          directory,
+          ".gitignore",
+        );
+        git("commit", "-q", "-m", "Existing Design metadata");
+
+        // Read-only observation must preserve the old checkout. A local Design
+        // snapshot performs the upgrade even when the workspace is already open.
+        await readDesignWorkspaceSnapshot(workspace.path, {
+          writeBack: false,
+        });
+        expect(fs.existsSync(path.join(workspace.path, legacyMetadata))).toBe(
+          true,
+        );
+        expect(fs.existsSync(path.join(workspace.path, legacyRegistry))).toBe(
+          true,
+        );
+        const snapshot = await svc.handle("design.snapshot", params);
+        expect(snapshot).toMatchObject({
+          snapshot: {
+            frames: [
+              expect.objectContaining({
+                file: frame.file,
+                x: 42,
+                y: 24,
+                width: 600,
+                height: 400,
+              }),
+            ],
+          },
+        });
+        expect(
+          fs.readFileSync(path.join(workspace.path, metadata), "utf8"),
+        ).toBe(before);
+        expect(fs.existsSync(path.join(workspace.path, legacyMetadata))).toBe(
+          false,
+        );
+        expect(fs.existsSync(path.join(workspace.path, legacyRegistry))).toBe(
+          false,
+        );
+        expect(git("diff", "--cached", "--name-only")).toBe("");
+
+        await svc.handle("design.stage", params);
+        const staged = git("diff", "--cached", "--name-only", "--no-renames")
+          .trim()
+          .split("\n");
+        expect(staged).toEqual(
+          expect.arrayContaining([metadata, legacyMetadata, legacyRegistry]),
+        );
+        await svc.handle("design.unstage", params);
+        expect(git("diff", "--cached", "--name-only")).toBe("");
+        expect(fs.existsSync(path.join(workspace.path, metadata))).toBe(true);
+        await svc.handle("design.stage", params);
+        await svc.handle("design.commit", {
+          ...params,
+          message: "Rename Design metadata files",
+        });
+        const committed = git("ls-tree", "-r", "--name-only", "HEAD")
+          .trim()
+          .split("\n");
+        expect(committed).toContain(metadata);
+        expect(committed).not.toContain(DESIGN_DIRECTORY_REGISTRY_FILE);
+        expect(committed).not.toContain(legacyMetadata);
+        expect(committed).not.toContain(legacyRegistry);
+        expect(git("status", "--porcelain")).toBe("");
+      } finally {
+        await svc.handle("workspace.delete", {
+          ...params,
+          includeBranch: true,
+        });
+      }
+    },
+  );
+
   it("re-enters an initialized non-default Design directory while its draft is still uncommitted", async () => {
     fs.mkdirSync(path.join(dir, ".zeros"), { recursive: true });
     fs.writeFileSync(
@@ -1719,6 +1963,129 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it.each(["design", "code"] as const)(
+    "serves the same Design folder through the native protocol after restart in %s view",
+    async (mode) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const created = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: "design-protocol-folder",
+        kind: "design",
+      });
+      const directory = designDirectoryNameFor(created.path);
+      try {
+        const reply = (await svc.handle("design.frame.create", {
+          workspaceId: created.workspaceId,
+          title: "Native frame",
+          x: 0,
+          y: 0,
+          w: 400,
+          h: 300,
+          z: 0,
+        })) as { frame: { file: string } };
+        if (mode === "code")
+          await svc.handle("workspace.setMode", {
+            workspaceId: created.workspaceId,
+            mode,
+          });
+        forgetDesignDirectoryName(created.path);
+        const { snapshot } = (await svc.handle("design.snapshot", {
+          workspaceId: created.workspaceId,
+        })) as {
+          snapshot: {
+            frames: Array<{ file: string; sourceVersion: string }>;
+          };
+        };
+        const frame = snapshot.frames.find(
+          (candidate) => candidate.file === reply.frame.file,
+        )!;
+        expect(frame).toBeDefined();
+        const source = fs.readFileSync(
+          path.join(created.path, directory, frame.file),
+          "utf8",
+        );
+        const resource = await svc.readDesignProtocolResource(
+          created.workspaceId,
+          { path: frame.file, sourceVersion: frame.sourceVersion },
+        );
+        expect(resource?.status).toBe(200);
+        expect(resource?.body.toString("utf8")).toContain(
+          "data-zeros-design-runtime",
+        );
+        expect(
+          fs.readFileSync(
+            path.join(created.path, directory, frame.file),
+            "utf8",
+          ),
+        ).toBe(source);
+        expect(
+          (
+            await svc.readDesignProtocolResource(created.workspaceId, {
+              path: frame.file,
+              sourceVersion: "0".repeat(24),
+            })
+          )?.status,
+        ).toBe(409);
+        expect(
+          (
+            await svc.readDesignProtocolResource(created.workspaceId, {
+              path: "../hello.txt",
+              sourceVersion: null,
+            })
+          )?.status,
+        ).toBe(404);
+        const select = () =>
+          svc.handle("design.selection.set", {
+            workspaceId: created.workspaceId,
+            frame: frame.file,
+            sourceVersion: frame.sourceVersion,
+            selectionVersion: 1,
+            updatedAt: Date.now(),
+          });
+        if (mode === "design") {
+          await expect(select()).resolves.toEqual({ ok: true });
+          expect(getDesignSelection(created.workspaceId)?.filePath).toBe(
+            `${directory}/${frame.file}`,
+          );
+          forgetDesignDirectoryName(created.path);
+          await expect(
+            svc.handle("design.canvas.update", {
+              workspaceId: created.workspaceId,
+              frame: frame.file,
+              x: 10,
+              y: 20,
+              w: 420,
+              h: 320,
+              z: 0,
+            }),
+          ).resolves.toMatchObject({
+            geometry: { x: 10, y: 20, w: 420, h: 320 },
+          });
+          forgetDesignDirectoryName(created.path);
+          await expect(
+            svc.handle("design.save", { workspaceId: created.workspaceId }),
+          ).resolves.toEqual({ ok: true });
+          expect(fs.existsSync(path.join(created.path, "Zeros Design"))).toBe(
+            false,
+          );
+        } else {
+          await expect(select()).rejects.toThrow(
+            "Design mutations are available only in Design mode.",
+          );
+        }
+      } finally {
+        primeDesignDirectoryName(created.path, directory);
+        await svc.handle("workspace.delete", {
+          workspaceId: created.workspaceId,
+          includeBranch: true,
+        });
+      }
+    },
+  );
+
   it("keeps the live uncommitted Design draft readable in Code view", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -1781,31 +2148,25 @@ describe("WorkspaceService", () => {
       );
       const alternateDesign = path.join(created.path, "Alternate Design");
       fs.cpSync(currentDesign, alternateDesign, { recursive: true });
+      fs.rmSync(path.join(alternateDesign, "design.toml"));
       commitDesignMetadata(
         created.path,
         "Alternate Design",
-        fs.readFileSync(
-          designDocumentMetadataPath(
-            created.path,
-            designDirectoryNameFor(created.path),
+        JSON.stringify(
+          parseCanvasFixture(
+            fs.readFileSync(
+              designDocumentMetadataPath(
+                created.path,
+                designDirectoryNameFor(created.path),
+              ),
+              "utf8",
+            ),
           ),
-          "utf8",
         ),
       );
-      execFileSync(
-        "git",
-        [
-          "add",
-          "-f",
-          "--",
-          "Alternate Design",
-          ".zeros/design-dir.toml",
-          ".zeros/design",
-        ],
-        {
-          cwd: created.path,
-        },
-      );
+      execFileSync("git", ["add", "-f", "--", "Alternate Design"], {
+        cwd: created.path,
+      });
       execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
         cwd: created.path,
       });
@@ -2157,6 +2518,27 @@ describe("WorkspaceService", () => {
         code: "VALIDATION_FAILED",
         remediation: designGitAction,
       });
+      // The whole metadata subtree has the same ownership, including future
+      // files that are not yet registered or present on disk.
+      for (const metadata of [
+        ".zeros/design/rules.md",
+        ".zeros/design/future/data.json",
+        ".zeros/design-dir.toml",
+      ]) {
+        await expect(
+          svc.handle("file.write", {
+            workspaceId: created.workspaceId,
+            path: metadata,
+            content: "code edit",
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+        await expect(
+          svc.handle("git.stage", {
+            workspaceId: created.workspaceId,
+            paths: [metadata],
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      }
       // A pathless clean is refused while unsaved (untracked) design files
       // exist — it would silently destroy not-yet-saved frames.
       fs.writeFileSync(
@@ -2297,14 +2679,16 @@ describe("WorkspaceService", () => {
 
       // A folder reserved for first use has no marker yet. The primed pointer
       // is unioned in — never intersected — so it is still refused.
-      primeDesignDirectoryName(created.path, "reserved-designs");
-      await expect(
-        svc.handle("file.write", {
-          workspaceId: created.workspaceId,
-          path: "reserved-designs/document.json",
-          content: "nope\n",
-        }),
-      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      for (const reserved of ["reserved-designs", "Zeros Design"]) {
+        primeDesignDirectoryName(created.path, reserved);
+        await expect(
+          svc.handle("file.write", {
+            workspaceId: created.workspaceId,
+            path: `${reserved}/document.json`,
+            content: "nope\n",
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      }
 
       // HEAD/index recognition remains authoritative while a marker is
       // missing from the worktree (for example an unstaged deletion). The
@@ -3916,6 +4300,8 @@ describe("WorkspaceService", () => {
       { cwd: workspace.path, encoding: "utf8" },
     );
     expect(staged).toContain(`${designDirectory}/checkout.html`);
+    expect(staged).toContain(`${designDirectory}/design.toml`);
+    expect(staged).toContain(`${designDirectory}/rules.md`);
     expect(staged).not.toContain("outside.txt");
 
     execFileSync("git", ["add", "--", "outside.txt"], {
@@ -3952,6 +4338,8 @@ describe("WorkspaceService", () => {
       { cwd: workspace.path, encoding: "utf8" },
     );
     expect(committedPaths).toContain(`${designDirectory}/checkout.html`);
+    expect(committedPaths).toContain(`${designDirectory}/design.toml`);
+    expect(committedPaths).toContain(`${designDirectory}/rules.md`);
     expect(committedPaths).not.toContain("outside.txt");
     expect(
       execFileSync("git", ["status", "--porcelain", "--", "outside.txt"], {

@@ -178,6 +178,131 @@ describe("workspace file data cache", () => {
     });
   });
 
+  it("bounds slow diff previews across a large dependency cleanup and warms only the latest waiting intent", async () => {
+    const pending = deferred<Awaited<ReturnType<typeof gitDiff>>>();
+    diffFile.mockReturnValue(pending.promise);
+    const queries = Array.from({ length: 2_309 }, (_, index) => ({
+      workspaceId: "workspace-cleanup",
+      path: `node_modules/package-${index}/index.js`,
+      diffScope: "staged" as const,
+    }));
+
+    for (const query of queries) prefetchWorkspaceFileDiff(query);
+    await Promise.resolve();
+    // Pointer travel must not turn every crossed row into a live Git process.
+    expect(diffFile).toHaveBeenCalledTimes(2);
+
+    pending.resolve({ patch: "deleted dependency" } as never);
+    await vi.waitFor(() => expect(diffFile).toHaveBeenCalledTimes(3));
+    expect(diffFile).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-cleanup",
+      filePath: queries.at(-1)!.path,
+      mode: "index-vs-head",
+      rawPatch: true,
+    });
+    await vi.waitFor(() =>
+      expect(peekWorkspaceFileDiff(queries.at(-1)!)).toBe("deleted dependency"),
+    );
+    expect(peekWorkspaceFileDiff(queries[2])).toBeUndefined();
+  });
+
+  it("opens a selected file immediately even when preview slots are occupied", async () => {
+    const pending = deferred<Awaited<ReturnType<typeof gitDiff>>>();
+    diffFile.mockReturnValue(pending.promise);
+    const query = { workspaceId: "workspace-a", path: "a.ts" };
+    prefetchWorkspaceFileDiff(query);
+    prefetchWorkspaceFileDiff({ ...query, path: "b.ts" });
+    const selected = { ...query, path: "selected.ts" };
+    prefetchWorkspaceFileDiff(selected);
+    await Promise.resolve();
+    expect(diffFile).toHaveBeenCalledTimes(2);
+
+    diffFile.mockResolvedValueOnce({ patch: "selected patch" } as never);
+    await expect(loadWorkspaceFileDiff(selected)).resolves.toBe(
+      "selected patch",
+    );
+    expect(diffFile).toHaveBeenCalledTimes(3);
+    pending.resolve({ patch: "preview patch" } as never);
+    await vi.waitFor(() =>
+      expect(peekWorkspaceFileDiff(query)).toBe("preview patch"),
+    );
+    // Selection consumed the queued intent; settling the previews cannot retry it.
+    expect(diffFile).toHaveBeenCalledTimes(3);
+    expect(peekWorkspaceFileDiff(selected)).toBe("selected patch");
+  });
+
+  it("uses a newer aggregate snapshot for a queued intent without mixing owners or scopes", async () => {
+    const pending = deferred<Awaited<ReturnType<typeof gitDiff>>>();
+    diffFile.mockReturnValue(pending.promise);
+    prefetchWorkspaceFileDiff({ workspaceId: "workspace-a", path: "a.ts" });
+    prefetchWorkspaceFileDiff({ workspaceId: "workspace-a", path: "b.ts" });
+    const queryA = {
+      workspaceId: "workspace-a",
+      path: "shared.ts",
+      diffScope: "staged" as const,
+    };
+    const queryB = { ...queryA, workspaceId: "workspace-b" };
+    prefetchWorkspaceFileDiff(queryA);
+    prefetchWorkspaceFileDiff({ ...queryA, diffScope: "unstaged" });
+    prefetchWorkspaceFileDiff(queryB);
+    primeWorkspaceFileDiff(queryB, "aggregate b");
+    await Promise.resolve();
+    pending.resolve({ patch: "preview a" } as never);
+    await vi.waitFor(() =>
+      expect(
+        peekWorkspaceFileDiff({ workspaceId: "workspace-a", path: "b.ts" }),
+      ).toBe("preview a"),
+    );
+
+    expect(diffFile).toHaveBeenCalledTimes(2);
+    expect(peekWorkspaceFileDiff(queryA)).toBeUndefined();
+    expect(peekWorkspaceFileDiff(queryB)).toBe("aggregate b");
+    invalidateWorkspaceFileData("/workspace-b", "workspace-b");
+    diffFile.mockResolvedValueOnce({ patch: "updated b" } as never);
+    prefetchWorkspaceFileDiff(queryB);
+    expect(peekWorkspaceFileDiff(queryB)).toBe("aggregate b");
+    await vi.waitFor(() =>
+      expect(peekWorkspaceFileDiff(queryB)).toBe("updated b"),
+    );
+    expect(diffFile).toHaveBeenCalledTimes(3);
+  });
+
+  it("drops obsolete waiting previews when intent returns to an in-flight file", async () => {
+    const pending = deferred<Awaited<ReturnType<typeof gitDiff>>>();
+    diffFile.mockReturnValue(pending.promise);
+    const query = { workspaceId: "workspace-a", path: "a.ts" };
+    prefetchWorkspaceFileDiff(query);
+    prefetchWorkspaceFileDiff({ ...query, path: "b.ts" });
+    prefetchWorkspaceFileDiff({ ...query, path: "no-longer-hovered.ts" });
+    prefetchWorkspaceFileDiff(query);
+    await Promise.resolve();
+    pending.resolve({ patch: "preview patch" } as never);
+    await vi.waitFor(() =>
+      expect(peekWorkspaceFileDiff(query)).toBe("preview patch"),
+    );
+    expect(diffFile).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases failed preview slots so the latest intent can still load", async () => {
+    const pending = deferred<void>();
+    diffFile.mockImplementation(() =>
+      pending.promise.then(() => {
+        throw new Error("engine disconnected");
+      }),
+    );
+    prefetchWorkspaceFileDiff({ workspaceId: "workspace-a", path: "a.ts" });
+    prefetchWorkspaceFileDiff({ workspaceId: "workspace-a", path: "b.ts" });
+    const latest = { workspaceId: "workspace-b", path: "latest.ts" };
+    prefetchWorkspaceFileDiff(latest);
+    await Promise.resolve();
+    diffFile.mockResolvedValueOnce({ patch: "reconnected patch" } as never);
+    pending.resolve();
+    await vi.waitFor(() =>
+      expect(peekWorkspaceFileDiff(latest)).toBe("reconnected patch"),
+    );
+    expect(diffFile).toHaveBeenCalledTimes(3);
+  });
+
   it("invalidates only one workspace's diff snapshots for an exact event", async () => {
     const queryA = {
       workspaceId: "workspace-a",

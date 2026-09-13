@@ -1,3 +1,5 @@
+import { parseCanvasFixture } from "./storage-fixtures";
+import { parseDesignManifest, serializeDesignManifest } from "../manifest";
 import {
   mkdtemp,
   mkdir,
@@ -38,10 +40,7 @@ import {
   writeDesignNodeHtml,
 } from "../document";
 import { withDesignDocumentWrite } from "../document-write-lock";
-import {
-  designDocumentMetadataPath,
-  DESIGN_DIRECTORY_REGISTRY_FILE,
-} from "../metadata";
+import { designDocumentMetadataPath } from "../metadata";
 import {
   resetDesignRuntimeAuditsForTests,
   setDesignRuntimeAudit,
@@ -62,12 +61,9 @@ describe("design document", () => {
   it("seeds the portable HTML/CSS document and discovers stable frame geometry", async () => {
     const result = await initializeDesignDocument(root);
     expect(result.created).toEqual(
-      expect.arrayContaining([
-        `${DESIGN_DIRECTORY_NAME}/tokens.css`,
-        DESIGN_DIRECTORY_REGISTRY_FILE,
-      ]),
+      expect.arrayContaining([`${DESIGN_DIRECTORY_NAME}/tokens.css`]),
     );
-    const canvasSeed = JSON.parse(
+    const canvasSeed = parseCanvasFixture(
       await readFile(
         designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
         "utf8",
@@ -103,6 +99,9 @@ describe("design document", () => {
     expect(source).not.toContain('name="zeros-frame"');
     expect(source).not.toContain("width=640,height=360");
     expect(source).toContain('href="./tokens.css"');
+    expect(source).toMatch(/<main\b[^>]*style="[^"]*display:block/);
+    expect(source).toContain("height:100vh;");
+    expect(source).toContain("data-zeros-frame-root");
     expect(source).not.toContain("<script");
     expect(source).toMatch(/<main\b[^>]*>\s*<\/main>/);
     expect(source).not.toContain("<h1");
@@ -116,6 +115,7 @@ describe("design document", () => {
       "utf8",
     );
     expect(tokens).toContain("body [data-oid]");
+    expect(tokens).toMatch(/body \[data-oid\] \{ display: block;/);
     expect(tokens).not.toMatch(/^\s*\[data-oid\]/m);
 
     await updateDesignFrameGeometry(root, created.file, {
@@ -189,7 +189,7 @@ describe("design document", () => {
     );
 
     await updateDesignFrameGeometry(root, "legacy.html", { x: 75 });
-    const migrated = JSON.parse(
+    const migrated = parseCanvasFixture(
       await readFile(
         designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME),
         "utf8",
@@ -217,7 +217,10 @@ describe("design document", () => {
           )
           .split(path.sep),
       );
-      const unsupported = `${JSON.stringify({ version, frames: {} })}\n`;
+      const unsupported = serializeDesignManifest(
+        parseDesignManifest(await readFile(target, "utf8"))!.id,
+        { version, frames: {} },
+      );
       await writeFile(target, unsupported, "utf8");
 
       await expect(readDesignWorkspaceSnapshot(root)).rejects.toThrow(
@@ -866,25 +869,29 @@ describe("design document", () => {
   it("fails closed without replacing malformed canvas metadata", async () => {
     await initializeDesignDocument(root);
     const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
-    const malformed = '{"version":2,"frames":';
+    const malformed = 'format = "zeros-design"\n[document';
     await writeFile(target, malformed, "utf8");
 
-    await expect(readDesignWorkspaceSnapshot(root)).rejects.toThrow(
-      "invalid JSON",
-    );
+    await expect(readDesignWorkspaceSnapshot(root)).rejects.toThrow();
     expect(await readFile(target, "utf8")).toBe(malformed);
   });
 
   it("preserves extension metadata when updating a frame", async () => {
     const frame = await createDesignFrame(root, { title: "Extensions" });
     const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
-    const original = JSON.parse(await readFile(target, "utf8"));
+    const original = parseCanvasFixture(await readFile(target, "utf8"));
     original.extension = { revision: 7 };
     original.frames[frame.file].extension = "geometry";
     original.frame_info[frame.file].extension = "frame";
-    await writeFile(target, JSON.stringify(original));
+    await writeFile(
+      target,
+      serializeDesignManifest(
+        parseDesignManifest(await readFile(target, "utf8"))!.id,
+        original,
+      ),
+    );
     await updateDesignFrameGeometry(root, frame.file, { x: 200 });
-    const saved = JSON.parse(await readFile(target, "utf8"));
+    const saved = parseCanvasFixture(await readFile(target, "utf8"));
     expect(saved.extension).toEqual(original.extension);
     expect(saved.frames[frame.file].extension).toBe("geometry");
     expect(saved.frame_info[frame.file].extension).toBe("frame");
@@ -895,9 +902,12 @@ describe("design document", () => {
     async (geometry) => {
       const frame = await createDesignFrame(root);
       const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
-      const original = JSON.parse(await readFile(target, "utf8"));
+      const original = parseCanvasFixture(await readFile(target, "utf8"));
       original.frames[frame.file] = geometry;
-      const source = JSON.stringify(original);
+      const source = serializeDesignManifest(
+        parseDesignManifest(await readFile(target, "utf8"))!.id,
+        original,
+      );
       await writeFile(target, source);
       await expect(
         updateDesignFrameGeometry(root, frame.file, { x: 200 }),
@@ -929,8 +939,8 @@ describe("design document", () => {
     expect(mutation.frame.sourceVersion).not.toBe(before.sourceVersion);
     expect(mutation.frame.source).toBe(
       sourceBefore.replace(
-        "padding:var(--space-8); gap:var(--space-4);",
-        "padding:32px; gap:var(--space-4); background-color:var(--bg2);",
+        "height:100vh;",
+        "height:100vh; padding:32px; background-color:var(--bg2);",
       ),
     );
     expect(

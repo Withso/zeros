@@ -241,6 +241,8 @@ describe("loadPersistedUiState — scoped navigation", () => {
       "git",
       "actions",
       "files",
+      "design",
+      "design-preferences",
       "paths",
     ] as const;
     localStorage.setItem(
@@ -278,6 +280,58 @@ describe("loadPersistedUiState — scoped navigation", () => {
     });
     expect(out.repoPageViewByProject).toEqual({
       "project-b": "environment",
+    });
+  });
+
+  it("restores mode-specific repository tabs and rejects tabs in the wrong mode", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        activePage: "repo",
+        activeRepoId: "project-a",
+        repoPageViewByProject: { "project-a": "design-preferences" },
+        repoPageViewByModeByProject: {
+          "project-a": { code: "git", design: "design-preferences" },
+          "project-b": { code: "design", design: "files" },
+          "project-c": { code: "paths", design: "unknown" },
+          "project-d": null,
+          "project-e": ["git"],
+          "": { code: "git" },
+        },
+      }),
+    );
+    expect(loadPersistedUiState()).toMatchObject({
+      activePage: "repo",
+      activeRepoId: "project-a",
+      repoPageViewByProject: { "project-a": "design-preferences" },
+      repoPageViewByModeByProject: {
+        "project-a": { code: "git", design: "design-preferences" },
+        "project-c": { code: "paths" },
+      },
+    });
+    expect(
+      Object.keys(loadPersistedUiState().repoPageViewByModeByProject!),
+    ).toHaveLength(2);
+  });
+
+  it("bounds repository mode memories to the newest 128 owners", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        repoPageViewByModeByProject: Object.fromEntries(
+          Array.from({ length: 140 }, (_, index) => [
+            `project-${index}`,
+            { code: "git", design: "design-preferences" },
+          ]),
+        ),
+      }),
+    );
+    const restored = loadPersistedUiState().repoPageViewByModeByProject!;
+    expect(Object.keys(restored)).toHaveLength(128);
+    expect(restored["project-0"]).toBeUndefined();
+    expect(restored["project-139"]).toEqual({
+      code: "git",
+      design: "design-preferences",
     });
   });
 

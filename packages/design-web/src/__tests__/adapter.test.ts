@@ -6,6 +6,85 @@ import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState, webTransaction } from "./fixtures";
 
 describe("web transaction adapter", () => {
+  it.each([
+    '<style>body { overflow:visible; }</style><div data-oid="child">Keep</div>',
+    '<!doctype html><style>body { overflow:visible; }</style><div data-oid="child">Keep</div></html>',
+    '<html><body><style>body { overflow:visible; }</style><div data-oid="child">Keep</div></body></html>',
+  ])("preserves embedded CSS spans when clipping a canvas body: %s", (html) => {
+    const initial = createDesignWebDocumentState({
+      documentId: "body-clip",
+      entryFile: "index.html",
+      files: { "index.html": html },
+    });
+    const session = new DesignTransactionSession(
+      initial,
+      designWebTransactionAdapter,
+    );
+    session.apply(
+      webTransaction(initial, "clip-body", [
+        {
+          operationId: "clip",
+          type: "node.set-styles",
+          nodeId: "::zeros-document-body",
+          styles: {
+            overflow: "hidden",
+            "overflow-x": "hidden",
+            "overflow-y": "hidden",
+          },
+          scope: "auto",
+          responsiveContext: "base",
+          stateContext: "default",
+        },
+      ]),
+    );
+    const changed = session.currentState().files;
+    expect(changed["index.html"]).toContain(
+      "<style>body { overflow:hidden; }</style>",
+    );
+    expect(changed["index.html"]).toContain(
+      '<body style="overflow-x:hidden; overflow-y:hidden;">',
+    );
+    expect(changed["index.html"]).toContain('<div data-oid="child">Keep</div>');
+    expect(session.undo()?.state.files).toEqual(initial.files);
+    expect(session.redo()?.state.files).toEqual(changed);
+  });
+
+  it("restores exact source after canvas styles and a top-level child insertion", () => {
+    const initial = webState();
+    const session = new DesignTransactionSession(
+      initial,
+      designWebTransactionAdapter,
+    );
+    session.apply(
+      webTransaction(initial, "canvas-body-edit", [
+        {
+          operationId: "body-style",
+          type: "node.set-styles",
+          nodeId: "::zeros-document-body",
+          styles: { display: "grid", overflow: "hidden" },
+          scope: "auto",
+          responsiveContext: "base",
+          stateContext: "default",
+        },
+        {
+          operationId: "body-child",
+          type: "node.set-html",
+          nodeId: "::zeros-document-body",
+          mode: "append",
+          html: '<div data-oid="new-frame"></div>',
+        },
+      ]),
+    );
+    const changed = session.currentState().files;
+    expect(changed[initial.entryFile]).toContain(
+      '<div data-oid="new-frame"></div>',
+    );
+    expect(changed[initial.entryFile]).toContain(
+      'style="display:grid; overflow:hidden;"',
+    );
+    expect(session.undo()?.state.files).toEqual(initial.files);
+    expect(session.redo()?.state.files).toEqual(changed);
+  });
   it("round-trips an authored CSS edit through exact source inverses", () => {
     const initial = webState();
     const session = new DesignTransactionSession(

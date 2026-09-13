@@ -786,6 +786,27 @@ export async function bridgeMessageSearch(
 
 // ── Files (read) ────────────────────────────────────────────
 
+export interface WorkspaceFileListing {
+  files: string[];
+  /** Absent on older engines; an empty array is a confirmed lack of Design roots. */
+  designDirectories?: string[];
+}
+
+export async function bridgeWorkspaceFileListing(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  limit?: number,
+): Promise<WorkspaceFileListing> {
+  const result = (await workspaceOp(bridge, "file.tree", {
+    workspaceId,
+    limit,
+    includeDesignDirectories: true,
+  })) as WorkspaceFileListing;
+  if (!Array.isArray(result?.files))
+    throw new Error("Invalid workspace file listing");
+  return result;
+}
+
 /** Repo-relative file list under a workspace (gitignore-aware). The engine
  *  filters secret paths for remote clients. */
 export async function bridgeFileTree(

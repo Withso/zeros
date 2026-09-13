@@ -27,11 +27,15 @@ import {
   type DesignFrameRuntimeConnection,
 } from "../../platform/bridge/design-frame-runtime";
 import { designProtocolFrameUrl } from "../../platform/bridge/design-protocol-url";
+import { Button } from "../../shared/ui/primitives/button";
 import {
   captureDesignRuntimeScreenshot,
   reconcileDesignRuntimeSnapshot,
 } from "./state/design-selection";
-import { reconcileDesignWorkspaceRuntimeAudit } from "./state/design-workspace-cache";
+import {
+  reconcileDesignWorkspaceRuntimeAudit,
+  refreshDesignWorkspaceSnapshot,
+} from "./state/design-workspace-cache";
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 
@@ -81,6 +85,7 @@ function scheduleIdle(work: () => void): () => void {
 // --- RENDER ---
 
 type DesignDocumentBuffer = "displayed" | "incoming";
+const FRAME_HANDSHAKE_TIMEOUT_MS = 5_000;
 
 interface DesignFrameDocumentBufferProps {
   workspaceId: string;
@@ -104,6 +109,7 @@ interface DesignFrameDocumentBufferProps {
     documentSourceVersion: string,
     connection: DesignFrameRuntimeConnection,
   ) => void;
+  onLoadFailure: (documentSourceVersion: string) => void;
 }
 
 /**
@@ -127,11 +133,16 @@ function DesignFrameDocumentBuffer({
   onSnapshot,
   onConnection,
   onReady,
+  onLoadFailure,
 }: DesignFrameDocumentBufferProps) {
   const nativeRuntime = useNativeRuntime();
   const connectionRef = useRef<DesignFrameRuntimeConnection | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const loadedKeyRef = useRef<string | null>(null);
+  const handshakeTimerRef = useRef<number | null>(null);
+  const [failedProtocolSource, setFailedProtocolSource] = useState<
+    string | null
+  >(null);
   const latestRef = useRef({
     folder,
     frame,
@@ -150,18 +161,81 @@ function DesignFrameDocumentBuffer({
     autoCapture,
     theme,
   };
-  const loadKey = `${workspaceId}\u0000${frame.file}\u0000${documentSourceVersion}`;
+  const protocolSource = nativeRuntime.ready
+    ? designProtocolFrameUrl({
+        workspaceId,
+        capability: protocolCapability,
+        frame: frame.file,
+        sourceVersion: documentSourceVersion,
+      })
+    : null;
+  const useProtocol =
+    protocolSource !== null && failedProtocolSource !== protocolSource;
+  const loadKey = `${workspaceId}\u0000${frame.file}\u0000${documentSourceVersion}\u0000${useProtocol ? protocolSource : "srcdoc"}`;
+  const clearHandshakeTimer = useCallback(() => {
+    if (handshakeTimerRef.current === null) return;
+    window.clearTimeout(handshakeTimerRef.current);
+    handshakeTimerRef.current = null;
+  }, []);
+  const failConnection = useCallback(
+    (connection: DesignFrameRuntimeConnection) => {
+      if (
+        connectionRef.current !== connection ||
+        !latestRef.current.runtimeActive
+      )
+        return;
+      clearHandshakeTimer();
+      connection.destroy();
+      connectionRef.current = null;
+      loadedKeyRef.current = null;
+      onConnection(documentSourceVersion, null);
+      if (useProtocol) {
+        // HTTP error pages fire load but cannot complete the private handshake.
+        // Recover this one frame through the existing bounded, sanitized bridge
+        // cache, and revalidate the workspace's per-launch capability/version.
+        setFailedProtocolSource(protocolSource);
+        void refreshDesignWorkspaceSnapshot(workspaceId).catch(() => {});
+      } else {
+        onLoadFailure(documentSourceVersion);
+      }
+    },
+    [
+      clearHandshakeTimer,
+      documentSourceVersion,
+      onConnection,
+      onLoadFailure,
+      protocolSource,
+      useProtocol,
+      workspaceId,
+    ],
+  );
+  const watchHandshake = useCallback(
+    (connection: DesignFrameRuntimeConnection) => {
+      clearHandshakeTimer();
+      if (
+        !latestRef.current.runtimeActive ||
+        connection.supports("getSnapshot")
+      )
+        return;
+      handshakeTimerRef.current = window.setTimeout(
+        () => failConnection(connection),
+        FRAME_HANDSHAKE_TIMEOUT_MS,
+      );
+    },
+    [clearHandshakeTimer, failConnection],
+  );
 
   const setIframe = useCallback(
     (node: HTMLIFrameElement | null) => {
       if (node === iframeRef.current) return;
+      clearHandshakeTimer();
       connectionRef.current?.destroy();
       connectionRef.current = null;
       onConnection(documentSourceVersion, null);
       iframeRef.current = node;
       if (!node) loadedKeyRef.current = null;
     },
-    [documentSourceVersion, onConnection],
+    [clearHandshakeTimer, documentSourceVersion, onConnection],
   );
 
   const connectCurrentIframe = useCallback(() => {
@@ -175,6 +249,7 @@ function DesignFrameDocumentBuffer({
       documentSourceVersion,
       node,
       {
+        onReady: clearHandshakeTimer,
         onSnapshot: (snapshot, event) => {
           if (event !== "ready") {
             onSnapshot(snapshot);
@@ -183,8 +258,7 @@ function DesignFrameDocumentBuffer({
           const finishReady = () => {
             if (
               connectionRef.current === connection &&
-              connection.sourceVersion ===
-                latestRef.current.frame.sourceVersion
+              connection.sourceVersion === latestRef.current.frame.sourceVersion
             ) {
               onReady(documentSourceVersion, connection);
             }
@@ -233,20 +307,24 @@ function DesignFrameDocumentBuffer({
               finishReady();
             })
             .catch(() => {
-              // A newer buffered generation now owns readiness.
+              failConnection(connection);
             });
         },
       },
     );
     connectionRef.current = connection;
     onConnection(documentSourceVersion, connection);
+    watchHandshake(connection);
   }, [
+    clearHandshakeTimer,
     documentSourceVersion,
+    failConnection,
     frame.file,
     onConnection,
     onReady,
     onSnapshot,
     workspaceId,
+    watchHandshake,
   ]);
 
   // StrictMode can replay passive cleanup without replaying the DOM ref. The
@@ -256,44 +334,67 @@ function DesignFrameDocumentBuffer({
       connectCurrentIframe();
     }
     return () => {
+      clearHandshakeTimer();
       connectionRef.current?.destroy();
       connectionRef.current = null;
       onConnection(documentSourceVersion, null);
     };
-  }, [connectCurrentIframe, documentSourceVersion, loadKey, onConnection]);
+  }, [
+    clearHandshakeTimer,
+    connectCurrentIframe,
+    documentSourceVersion,
+    loadKey,
+    onConnection,
+  ]);
+
+  useEffect(() => {
+    const connection = connectionRef.current;
+    if (runtimeActive && connection) watchHandshake(connection);
+    return clearHandshakeTimer;
+  }, [clearHandshakeTimer, runtimeActive, watchHandshake]);
 
   useEffect(() => {
     if (!runtimeActive || (!selected && !autoCapture)) return;
     const connection = connectionRef.current;
     if (!connection) return;
-    void connection.getSnapshot().then(onSnapshot).catch(() => {
-      // A replacement buffer publishes its own exact ready snapshot.
-    });
+    void connection
+      .getSnapshot()
+      .then(onSnapshot)
+      .catch(() => {
+        // A replacement buffer publishes its own exact ready snapshot.
+      });
   }, [autoCapture, onSnapshot, runtimeActive, selected]);
 
   useEffect(() => {
     if (!runtimeActive) return;
     const connection = connectionRef.current;
     if (!connection) return;
-    void connection.setTheme(theme).then(onSnapshot).catch(() => {
-      // A replacement buffer applies the latest theme before it is revealed.
-    });
+    void connection
+      .setTheme(theme)
+      .then(onSnapshot)
+      .catch(() => {
+        // A replacement buffer applies the latest theme before it is revealed.
+      });
   }, [onSnapshot, runtimeActive, theme]);
 
-  const protocolSource = nativeRuntime.ready
-    ? designProtocolFrameUrl({
-        workspaceId,
-        capability: protocolCapability,
-        frame: frame.file,
-        sourceVersion: documentSourceVersion,
-      })
-    : null;
   const fallback = useDesignFrameDocument(
     workspaceId,
     frame.file,
     documentSourceVersion,
-    runtimeActive && protocolSource === null,
+    runtimeActive && !useProtocol,
   );
+  useEffect(() => {
+    if (runtimeActive && !useProtocol && fallback.error && !fallback.data) {
+      onLoadFailure(documentSourceVersion);
+    }
+  }, [
+    documentSourceVersion,
+    fallback.data,
+    fallback.error,
+    onLoadFailure,
+    runtimeActive,
+    useProtocol,
+  ]);
   const fallbackSrcDoc =
     fallback.data?.srcDoc ??
     '<!doctype html><html><body style="margin:0"></body></html>';
@@ -301,9 +402,7 @@ function DesignFrameDocumentBuffer({
   return (
     <iframe
       ref={setIframe}
-      {...(protocolSource
-        ? { src: protocolSource }
-        : { srcDoc: fallbackSrcDoc })}
+      {...(useProtocol ? { src: protocolSource } : { srcDoc: fallbackSrcDoc })}
       sandbox="allow-scripts"
       data-design-document-source-version={documentSourceVersion}
       data-design-source-version={frame.sourceVersion}
@@ -318,6 +417,7 @@ function DesignFrameDocumentBuffer({
       aria-label={`${frame.title} design frame`}
       aria-hidden={buffer === "incoming" ? true : undefined}
       onLoad={() => {
+        if (!useProtocol && !fallback.data) return;
         loadedKeyRef.current = loadKey;
         connectCurrentIframe();
       }}
@@ -325,7 +425,19 @@ function DesignFrameDocumentBuffer({
   );
 }
 
-export function DesignFrameRuntimeIframe({
+export function DesignFrameRuntimeIframe(props: DesignFrameRuntimeIframeProps) {
+  // A new engine capability is a new document session even when the authored
+  // generation is unchanged. An adopted live buffer may still have an older
+  // immutable URL; reload the current generation and negotiate readiness anew.
+  return (
+    <DesignFrameRuntimeSession
+      key={`${props.workspaceId}\u0000${props.frame.file}\u0000${props.protocolCapability ?? "bridge"}`}
+      {...props}
+    />
+  );
+}
+
+function DesignFrameRuntimeSession({
   workspaceId,
   protocolCapability,
   folder,
@@ -347,6 +459,10 @@ export function DesignFrameRuntimeIframe({
     string | null
   >(null);
   const [readySourceVersions, setReadySourceVersions] = useState<string[]>([]);
+  const [failedSourceVersion, setFailedSourceVersion] = useState<string | null>(
+    null,
+  );
+  const [retryAttempt, setRetryAttempt] = useState(0);
   const connectionsByDocumentRef = useRef(
     new Map<string, DesignFrameRuntimeConnection>(),
   );
@@ -440,6 +556,11 @@ export function DesignFrameRuntimeIframe({
         connectionsByDocumentRef.current.set(sourceVersion, connection);
       } else {
         connectionsByDocumentRef.current.delete(sourceVersion);
+        setReadySourceVersions((current) =>
+          current.includes(sourceVersion)
+            ? current.filter((version) => version !== sourceVersion)
+            : current,
+        );
       }
     },
     [],
@@ -447,15 +568,16 @@ export function DesignFrameRuntimeIframe({
 
   const handleDocumentReady = useCallback(
     (sourceVersion: string, connection: DesignFrameRuntimeConnection) => {
-      if (
-        connectionsByDocumentRef.current.get(sourceVersion) !== connection
-      ) {
+      if (connectionsByDocumentRef.current.get(sourceVersion) !== connection) {
         return;
       }
       setReadySourceVersions((current) =>
         current.includes(sourceVersion)
           ? current
           : [...current, sourceVersion].slice(-2),
+      );
+      setFailedSourceVersion((current) =>
+        current === sourceVersion ? null : current,
       );
       const latest = latestRef.current;
       if (
@@ -560,7 +682,7 @@ export function DesignFrameRuntimeIframe({
     <div className="relative size-full overflow-hidden">
       {buffers.map((entry) => (
         <DesignFrameDocumentBuffer
-          key={entry.sourceVersion}
+          key={`${entry.sourceVersion}:${retryAttempt}`}
           workspaceId={workspaceId}
           protocolCapability={protocolCapability}
           folder={folder}
@@ -579,6 +701,7 @@ export function DesignFrameRuntimeIframe({
           onSnapshot={handleSnapshot}
           onConnection={handleConnection}
           onReady={handleDocumentReady}
+          onLoadFailure={setFailedSourceVersion}
         />
       ))}
       {!documentReady ? (
@@ -596,6 +719,29 @@ export function DesignFrameRuntimeIframe({
             className="bg-bg1 pointer-events-none absolute inset-0 z-[2]"
           />
         )
+      ) : null}
+      {active && failedSourceVersion === frame.sourceVersion ? (
+        <div
+          data-design-frame-load-error=""
+          className="bg-bg1 text-muted-fg absolute inset-0 z-[2] flex flex-col items-center justify-center gap-2 text-xs [transform:scale(var(--design-canvas-inverse-zoom,1))]"
+          onPointerDown={(event) => event.stopPropagation()}
+          onDoubleClick={(event) => event.stopPropagation()}
+        >
+          <span>Couldn’t load this frame.</span>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={(event) => {
+              event.stopPropagation();
+              setFailedSourceVersion(null);
+              setReadySourceVersions([]);
+              setRetryAttempt((current) => current + 1);
+              void refreshDesignWorkspaceSnapshot(workspaceId).catch(() => {});
+            }}
+          >
+            Retry frame
+          </Button>
+        </div>
       ) : null}
     </div>
   );

@@ -50,6 +50,7 @@ export function publishDesignLivePreviewStyles(
   styles: Readonly<Record<string, string | null>>,
 ): DesignLivePreviewPublication {
   const key = ownerKey(workspaceId, frame, nodeId);
+  discardPendingGesture(key, styles);
   const publication = Object.fromEntries(
     Object.keys(styles).map((property) => {
       const sequence = ++publicationSequence;
@@ -91,6 +92,53 @@ export function publishDesignLivePreviewStyles(
 const GESTURE_PUBLICATION_INTERVAL_MS = 100;
 const MAX_GESTURE_PUBLICATION_OWNERS = 32;
 const gesturePublishedAt = new Map<string, number>();
+const pendingGestures = new Map<
+  string,
+  {
+    workspaceId: string;
+    frame: string;
+    nodeId: string;
+    styles: Record<string, string | null>;
+    timer: ReturnType<typeof setTimeout>;
+  }
+>();
+
+function discardPendingGesture(
+  key: string,
+  properties?: Readonly<Record<string, string | null>>,
+  matchingValuesOnly = false,
+): void {
+  const pending = pendingGestures.get(key);
+  if (!pending) return;
+  if (properties) {
+    for (const [property, value] of Object.entries(properties)) {
+      if (!matchingValuesOnly || pending.styles[property] === value)
+        delete pending.styles[property];
+    }
+    if (Object.keys(pending.styles).length > 0) return;
+  }
+  clearTimeout(pending.timer);
+  pendingGestures.delete(key);
+}
+
+function rememberGesturePublication(key: string, now: number): void {
+  if (gesturePublishedAt.size >= MAX_GESTURE_PUBLICATION_OWNERS)
+    gesturePublishedAt.clear();
+  gesturePublishedAt.set(key, now);
+}
+
+function flushPendingGesture(key: string): void {
+  const pending = pendingGestures.get(key);
+  if (!pending) return;
+  discardPendingGesture(key);
+  rememberGesturePublication(key, Date.now());
+  publishDesignLivePreviewStyles(
+    pending.workspaceId,
+    pending.frame,
+    pending.nodeId,
+    pending.styles,
+  );
+}
 
 /** Mirror a running gesture's authored values into the inspector at a readable
  * rate rather than on every frame.
@@ -98,7 +146,9 @@ const gesturePublishedAt = new Map<string, number>();
  * The canvas paints its own overlay, so nothing on the surface the user is
  * dragging needs this store; only the inspector reads it, and a publication per
  * frame re-renders every open field for numbers being read at a glance. Ten a
- * second is indistinguishable from sixty and costs a sixth as much.
+ * second is indistinguishable from sixty and costs a sixth as much. Retain one
+ * trailing publication per owner so pausing the pointer cannot lose its last
+ * value. Cancellation and settlement discard that pending publication.
  *
  * `settle` always publishes: the value the inspector is left showing has to be
  * exactly the one the commit will prune, or a speculative number outlives the
@@ -112,20 +162,32 @@ export function publishDesignGestureLivePreview(
 ): void {
   const key = ownerKey(workspaceId, frame, nodeId);
   const now = Date.now();
-  if (
-    !options.settle &&
-    now - (gesturePublishedAt.get(key) ?? 0) < GESTURE_PUBLICATION_INTERVAL_MS
-  ) {
+  const elapsed = now - (gesturePublishedAt.get(key) ?? 0);
+  if (!options.settle && elapsed < GESTURE_PUBLICATION_INTERVAL_MS) {
+    const pending = pendingGestures.get(key);
+    if (pending) Object.assign(pending.styles, styles);
+    else {
+      if (pendingGestures.size >= MAX_GESTURE_PUBLICATION_OWNERS)
+        flushPendingGesture(pendingGestures.keys().next().value!);
+      pendingGestures.set(key, {
+        workspaceId,
+        frame,
+        nodeId,
+        styles: { ...styles },
+        timer: setTimeout(
+          () => flushPendingGesture(key),
+          GESTURE_PUBLICATION_INTERVAL_MS - elapsed,
+        ),
+      });
+    }
     return;
   }
+  const pendingStyles = pendingGestures.get(key)?.styles;
+  const latest = pendingStyles ? { ...pendingStyles, ...styles } : styles;
+  discardPendingGesture(key);
   if (options.settle) gesturePublishedAt.delete(key);
-  else {
-    if (gesturePublishedAt.size >= MAX_GESTURE_PUBLICATION_OWNERS) {
-      gesturePublishedAt.clear();
-    }
-    gesturePublishedAt.set(key, now);
-  }
-  publishDesignLivePreviewStyles(workspaceId, frame, nodeId, styles);
+  else rememberGesturePublication(key, now);
+  publishDesignLivePreviewStyles(workspaceId, frame, nodeId, latest);
 }
 
 export function clearDesignLivePreview(
@@ -135,6 +197,10 @@ export function clearDesignLivePreview(
   expectedPublication?: DesignLivePreviewPublication,
 ): void {
   const key = ownerKey(workspaceId, frame, nodeId);
+  if (!expectedPublication) {
+    discardPendingGesture(key);
+    gesturePublishedAt.delete(key);
+  }
   useDesignLivePreviewStore.setState((state) => {
     const current = state.byOwner[key];
     if (!current) return state;
@@ -184,6 +250,7 @@ export function clearCommittedDesignLivePreviewStyles(
   committedStyles: Readonly<Record<string, string | null>>,
 ): void {
   const key = ownerKey(workspaceId, frame, nodeId);
+  discardPendingGesture(key, committedStyles, true);
   useDesignLivePreviewStore.setState((state) => {
     const current = state.byOwner[key];
     if (!current) return state;
@@ -240,6 +307,7 @@ export function useDesignLivePreviewValue(
 export function resetDesignLivePreviewForTests(): void {
   publicationSequence = 0;
   latestPublicationByProperty.clear();
+  for (const key of pendingGestures.keys()) discardPendingGesture(key);
   gesturePublishedAt.clear();
   useDesignLivePreviewStore.setState({ byOwner: {}, ownerOrder: [] });
 }

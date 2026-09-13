@@ -1,3 +1,5 @@
+import { commitDesignDirectoryMove } from "./ops";
+import { designMetadataIndexPaths } from "../design/metadata-git";
 // ──────────────────────────────────────────────────────────
 // Design mode — one workspace, two concurrent views
 // ──────────────────────────────────────────────────────────
@@ -39,12 +41,19 @@ import path from "node:path";
 import { ensureLocalSettingsIgnored } from "../settings/personal-repo";
 import {
   designDirectoryEntry,
+  designDirectoryFromSettings,
+  readDirectoryDesignManifest,
+  readDesignStorageFile,
+  designDocumentMetadataPath,
+  commitDesignMetadata,
+  ensureDesignMetadataLayout,
   designMetadataGitPaths,
-  DESIGN_DIRECTORY_REGISTRY_FILE,
   prepareDesignDirectoryRename,
   recoverDesignDirectoryRename,
+  recoverWorkspaceDesignMetadata,
   validateDesignSettings,
 } from "../design/metadata";
+import { stageDesignRegistry } from "../design/metadata-git";
 
 import {
   previewDesignDirectoryForEnter,
@@ -61,7 +70,7 @@ import {
   rememberRecognizedDesignDirectories,
   stickyRecognizedDesignDirectories,
 } from "../design/recognition-store";
-import { opSettingsPreviewWrite, opSettingsWrite } from "../settings/ops";
+import { opSettingsPreviewWrite, opSettingsWrite, opSettingsResolve } from "../settings/ops";
 import { GitError } from "./errors";
 import { runGit } from "./git-exec";
 import { withWorkspaceGitMutation } from "./mutation-lock";
@@ -126,7 +135,7 @@ export async function enterDesignMode<T = void>(
   workspace: Workspace,
   beforePublish?: () => Promise<T>,
 ): Promise<T | undefined> {
-  recoverDesignDirectoryRename(workspace.path);
+  recoverWorkspaceDesignMetadata(workspace.path);
   // Decide WHICH folder is the design folder before anything durable happens:
   // the `[design] directory` pointer, with recognition/adoption of committed
   // design folders (the copy-paste-between-repos case). A refusal here aborts
@@ -277,7 +286,7 @@ async function renameDesignDirectoryAdmitted(opts: {
     });
   }
   if (from === to) return { committedPointer: false };
-  recoverDesignDirectoryRename(opts.repoRoot);
+  recoverWorkspaceDesignMetadata(opts.repoRoot);
   validateDesignSettings(opts.repoRoot, { design: { directory: to } });
   const liveDesign = listWorkspaces({ archived: false }).filter(
     (workspace) =>
@@ -334,13 +343,37 @@ async function renameDesignDirectoryAdmitted(opts: {
   // Legacy documents migrate through the same Design API as ordinary entry.
   // The stable ID is saved before the move, so recovery follows a renamed
   // registry entry without requiring a shared/private path rewrite.
-  await ensureDesignDocumentInitialized(opts.repoRoot, from);
-  const entry = designDirectoryEntry(opts.repoRoot, from)!;
-  opSettingsWrite(
-    "repo-local",
-    { design: { directory_id: entry.id, directory: null } },
+  const selected = designDirectoryFromSettings(
     opts.repoRoot,
+    opSettingsResolve(opts.repoRoot).effective,
   );
+  const renameSelected = !selected || selected === from;
+  if (!readDirectoryDesignManifest(opts.repoRoot, from)) {
+    if (renameSelected)
+      await ensureDesignDocumentInitialized(opts.repoRoot, from);
+    else {
+      const file = path
+        .relative(
+          opts.repoRoot,
+          designDocumentMetadataPath(opts.repoRoot, from),
+        )
+        .split(path.sep)
+        .join("/");
+      const source = readDesignStorageFile(opts.repoRoot, file);
+      if (source === null)
+        throw new Error(
+          "The Design metadata is missing. Restore it before renaming.",
+        );
+      commitDesignMetadata(opts.repoRoot, from, source);
+    }
+  }
+  const entry = designDirectoryEntry(opts.repoRoot, from)!;
+  if (renameSelected)
+    opSettingsWrite(
+      "repo-local",
+      { design: { directory_id: entry.id, directory: null } },
+      opts.repoRoot,
+    );
   prepareDesignDirectoryRename(opts.repoRoot, from, to);
   // Record legacy marker removal before git mv enumerates its source index.
   await runGit(opts.repoRoot, [
@@ -356,32 +389,20 @@ async function renameDesignDirectoryAdmitted(opts: {
   await mkdir(toParent, { recursive: true });
   await runGit(opts.repoRoot, ["mv", "--", from, to]);
   recoverDesignDirectoryRename(opts.repoRoot);
-  primeDesignDirectoryName(opts.repoRoot, to);
+  if (renameSelected) primeDesignDirectoryName(opts.repoRoot, to);
+  ensureDesignMetadataLayout(opts.repoRoot, to);
+  const legacyPaths = await designMetadataIndexPaths(opts.repoRoot, to);
   await runGit(opts.repoRoot, [
     "add",
     "-A",
     "-f",
     "--",
     literalGitPathspec(to),
-    ...designMetadataGitPaths(opts.repoRoot, to).map(literalGitPathspec),
+    ...legacyPaths.map(literalGitPathspec),
   ]);
-  await runGit(opts.repoRoot, [
-    "-c",
-    "user.name=Zeros",
-    "-c",
-    "user.email=zeros@localhost",
-    "commit",
-    "--no-verify",
-    "-m",
-    `Rename design directory to ${to}`,
-    "--",
-    literalGitPathspec(from),
-    literalGitPathspec(to),
-    literalGitPathspec(DESIGN_DIRECTORY_REGISTRY_FILE),
-    ...designMetadataGitPaths(opts.repoRoot, to)
-      .filter((file) => file !== DESIGN_DIRECTORY_REGISTRY_FILE)
-      .map(literalGitPathspec),
-  ]);
+  // The old shared entry is removed; the manifest already moved with source.
+  await stageDesignRegistry(opts.repoRoot, from);
+  await commitDesignDirectoryMove(opts.repoRoot, from, to, entry.id);
   // Serialized compatibility field: settings are always personal now.
   return { committedPointer: false };
 }

@@ -52,6 +52,7 @@ import { Button, ScrollArea, Tooltip, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
   designLayerAncestorIds,
+  designFrameLayerChildren,
   designLayerBlockEdges,
   designLayerRevealWindow,
   designLayerRovingTabStop,
@@ -310,7 +311,7 @@ function OwnedDesignWorkspaceSidebarPanels({
   // subscription instead of one per frame. The runtime store also carries
   // details, screenshots, and hover state, all of which churn far more often
   // than a document tree — a shallow compare keeps those out of this panel.
-  const treesByFile = useDesignRuntimeStore(
+  const rawTreesByFile = useDesignRuntimeStore(
     useShallow((state) => {
       const runtimeFrames = workspaceId
         ? state.byWorkspace[workspaceId]?.frames
@@ -323,6 +324,37 @@ function OwnedDesignWorkspaceSidebarPanels({
       }
       return trees;
     }),
+  );
+  const rootIdsByFile = useDesignRuntimeStore(
+    useShallow((state) => {
+      const roots: Record<string, string> = {};
+      const runtimeFrames = workspaceId
+        ? state.byWorkspace[workspaceId]?.frames
+        : undefined;
+      for (const [file, runtimeFrame] of Object.entries(runtimeFrames ?? {})) {
+        const oid = runtimeFrame.snapshot?.frame.oid;
+        if (oid) roots[file] = oid;
+      }
+      return roots;
+    }),
+  );
+  const treesByFile = useMemo(() => {
+    const trees: Record<string, readonly DesignRuntimeTreeNode[]> = {};
+    for (const [file, tree] of Object.entries(rawTreesByFile)) {
+      trees[file] = designFrameLayerChildren(
+        tree,
+        frames.find((frame) => frame.file === file)?.kind === "text"
+          ? null
+          : rootIdsByFile[file],
+      );
+    }
+    return trees;
+  }, [frames, rawTreesByFile, rootIdsByFile]);
+  const rootSelected = Boolean(
+    selectedFrame &&
+    selectedNodeId &&
+    selectedNodeId === rootIdsByFile[selectedFrame.file] &&
+    selectedFrame.kind !== "text",
   );
   const frameLayoutIconsByFile = useDesignRuntimeStore(
     useShallow((state) => {
@@ -405,10 +437,12 @@ function OwnedDesignWorkspaceSidebarPanels({
     return designLayerBlockEdges(
       panelRows.map((row) => {
         if (row.frame.file !== selectedFrame?.file) return false;
-        if (row.kind === "frame") return frameSelected && !selectedNodeId;
+        if (row.kind === "frame")
+          return (frameSelected && !selectedNodeId) || rootSelected;
         if (row.kind === "pending") return false;
         return (
           frameSelected ||
+          rootSelected ||
           selected.has(row.layer.node.oid) ||
           selectionSubtreeIds.has(row.layer.node.oid)
         );
@@ -416,6 +450,7 @@ function OwnedDesignWorkspaceSidebarPanels({
     );
   }, [
     frameSelected,
+    rootSelected,
     panelRows,
     selectedFrame?.file,
     selectedNodeId,
@@ -576,7 +611,9 @@ function OwnedDesignWorkspaceSidebarPanels({
   /** Keep an externally selected canvas layer inside the scroll viewport. */
   useLayoutEffect(() => {
     if (!selectedNodeId || !selectedFrame) return;
-    const rowKey = layerRowKey(selectedFrame.file, selectedNodeId);
+    const rowKey = rootSelected
+      ? frameRowKey(selectedFrame.file)
+      : layerRowKey(selectedFrame.file, selectedNodeId);
     const index = panelRows.findIndex((row) => row.key === rowKey);
     if (index < 0) return;
     const element = Array.from(
@@ -586,7 +623,13 @@ function OwnedDesignWorkspaceSidebarPanels({
     ).find((candidate) => candidate.dataset.designPanelRow === rowKey);
     if (element) element.scrollIntoView({ block: "nearest" });
     else revealRowAtIndex(index, false);
-  }, [panelRows, revealRowAtIndex, selectedFrame, selectedNodeId]);
+  }, [
+    panelRows,
+    revealRowAtIndex,
+    rootSelected,
+    selectedFrame,
+    selectedNodeId,
+  ]);
 
   if (!isDesign) return null;
 
@@ -749,8 +792,10 @@ function OwnedDesignWorkspaceSidebarPanels({
 
   const rovingRowKey = designLayerRovingTabStop(
     renderedRows.map((row) => row.key),
-    selectedFrame && selectedNodeId
-      ? layerRowKey(selectedFrame.file, selectedNodeId)
+    selectedFrame && (selectedNodeId || frameSelected)
+      ? rootSelected || frameSelected
+        ? frameRowKey(selectedFrame.file)
+        : layerRowKey(selectedFrame.file, selectedNodeId!)
       : null,
   );
   const headingId = `${panelId}-heading`;
@@ -852,7 +897,8 @@ function OwnedDesignWorkspaceSidebarPanels({
                   // the canvas selection target — merely showing its tree is
                   // not selection, mirroring Figma's frame rows.
                   const frameRowSelected =
-                    activeFrame && frameSelected && !selectedNodeId;
+                    activeFrame &&
+                    ((frameSelected && !selectedNodeId) || rootSelected);
                   return (
                     <Tooltip
                       key={row.key}
@@ -927,7 +973,9 @@ function OwnedDesignWorkspaceSidebarPanels({
                 const inSelectionSubtree =
                   activeFrame &&
                   !selectedLayer &&
-                  (frameSelected || selectionSubtreeIds.has(layer.node.oid));
+                  (frameSelected ||
+                    rootSelected ||
+                    selectionSubtreeIds.has(layer.node.oid));
                 const hoveredLayer =
                   hoveredFrameFile === frame.file &&
                   hoveredNodeId === layer.node.oid;

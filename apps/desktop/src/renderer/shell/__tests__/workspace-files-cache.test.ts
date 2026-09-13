@@ -1,16 +1,23 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { listWorkspaceFiles } from "@/renderer/platform/git";
+import {
+  listWorkspaceFiles,
+  listWorkspaceFileListing,
+} from "@/renderer/platform/git";
 import {
   invalidateAllWorkspaceFiles,
   invalidateWorkspaceFiles,
   loadWorkspaceFiles,
+  loadWorkspaceFileListing,
   peekWorkspaceFiles,
+  peekWorkspaceFileListing,
+  type WorkspaceFileListing,
   resetWorkspaceFilesCacheForTests,
 } from "../workspace-files-cache";
 
 vi.mock("@/renderer/platform/git", () => ({
   listWorkspaceFiles: vi.fn(),
+  listWorkspaceFileListing: vi.fn(),
 }));
 
 const listFiles = vi.mocked(listWorkspaceFiles);
@@ -30,6 +37,9 @@ describe("workspace-files-cache invalidation", () => {
   beforeEach(() => {
     resetWorkspaceFilesCacheForTests();
     listFiles.mockReset();
+    vi.mocked(listWorkspaceFileListing)
+      .mockReset()
+      .mockImplementation(async (cwd) => ({ files: await listFiles(cwd) }));
   });
 
   it("bypasses a fresh TTL entry after a workspace refresh", async () => {
@@ -124,5 +134,54 @@ describe("workspace-files-cache invalidation", () => {
 
     expect(peekWorkspaceFiles("/repo-1")).toBeNull();
     expect(peekWorkspaceFiles("/repo-0")).toEqual(["/repo-0/file.ts"]);
+  });
+
+  it("publishes changed Design ownership even when every filename is unchanged", async () => {
+    const listing = vi.mocked(listWorkspaceFileListing);
+    listing.mockResolvedValueOnce({
+      files: ["Brand/design.toml"],
+      designDirectories: ["Brand"],
+    });
+    const first = await loadWorkspaceFileListing("/repo");
+    invalidateWorkspaceFiles("/repo");
+    listing.mockResolvedValueOnce({
+      files: ["Brand/design.toml"],
+      designDirectories: ["Brand"],
+    });
+    expect(await loadWorkspaceFileListing("/repo")).toBe(first);
+    invalidateWorkspaceFiles("/repo");
+    listing.mockResolvedValueOnce({
+      files: ["Brand/design.toml"],
+      designDirectories: [],
+    });
+    const refreshed = await loadWorkspaceFileListing("/repo");
+    expect(refreshed.files).toBe(first.files);
+    expect(refreshed.designDirectories).toEqual([]);
+    expect(refreshed).not.toBe(first);
+  });
+
+  it("deduplicates file and Design reads, isolates workspaces, and rejects stale registration responses", async () => {
+    const listing = vi.mocked(listWorkspaceFileListing);
+    const old = deferred<WorkspaceFileListing>();
+    listing.mockReturnValueOnce(old.promise);
+    const oldLoad = loadWorkspaceFileListing("/a");
+    const filesLoad = loadWorkspaceFiles("/a");
+    expect(listing).toHaveBeenCalledTimes(1);
+    listing.mockResolvedValueOnce({ files: ["b.ts"], designDirectories: [] });
+    const other = await loadWorkspaceFileListing("/b");
+    expect(peekWorkspaceFileListing("/a")).toBeNull();
+    invalidateWorkspaceFiles("/a");
+    listing.mockResolvedValueOnce({
+      files: ["Brand/home.html"],
+      designDirectories: [],
+    });
+    const fresh = await loadWorkspaceFileListing("/a");
+    old.resolve({ files: ["Brand/design.toml"], designDirectories: ["Brand"] });
+    await Promise.all([oldLoad, filesLoad]);
+    expect(peekWorkspaceFileListing("/a")).toBe(fresh);
+    expect(peekWorkspaceFileListing("/b")).toBe(other);
+    invalidateWorkspaceFiles("/a");
+    listing.mockRejectedValueOnce(new Error("reconnecting"));
+    expect(await loadWorkspaceFileListing("/a")).toBe(fresh);
   });
 });

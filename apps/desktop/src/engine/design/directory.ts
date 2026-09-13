@@ -5,7 +5,7 @@
 // Two independent facts meet here:
 //
 //   1. THE POINTER — private settings select a stable directory_id, resolved
-//      against this checkout's tracked .zeros/design-dir.toml. Legacy paths
+//      against this checkout's per-folder design.toml manifests. Legacy paths
 //      remain readable. Without a selection, the pointer is "Zeros Design".
 //   2. RECOGNITION — registry entries in the working tree, index and HEAD,
 //      plus legacy .zeros-canvas.json markers on older branches. Keeping all
@@ -50,11 +50,12 @@ import { opSettingsResolve } from "../settings/ops";
 import { designRegistryAtGitRef } from "./metadata-git";
 import { hasInvalidDesignSettings } from "./directory-path";
 import {
-  DESIGN_DIRECTORY_REGISTRY_FILE,
+  DESIGN_DIRECTORY_REGISTRY_FILES,
   designDirectoryFromSettings,
   legacyDesignDirectoryId,
   readDesignDirectoryRegistry,
-  recoverDesignDirectoryRename,
+  recoverWorkspaceDesignMetadata,
+  refreshDesignManifestDiscovery,
   validateDesignSettings,
 } from "./metadata";
 import {
@@ -523,6 +524,7 @@ export function designDiscoveryCacheStatsForTests(): {
 export async function discoverDesignDirectories(
   cwd: string,
 ): Promise<string[]> {
+  refreshDesignManifestDiscovery(cwd);
   const found = new Set<string>();
 
   const indexSignature = await indexEvidenceSignature(cwd);
@@ -540,10 +542,16 @@ export async function discoverDesignDirectories(
         "-z",
         "--",
         "*/.zeros-canvas.json",
-        DESIGN_DIRECTORY_REGISTRY_FILE,
+        "*/design.toml",
+        ...DESIGN_DIRECTORY_REGISTRY_FILES,
       ]);
       const directories = [...markerDirectories(stdout)];
-      if (stdout.split("\0").includes(DESIGN_DIRECTORY_REGISTRY_FILE)) {
+      if (
+        stdout.split("\0").some((file) => file.endsWith("/design.toml")) ||
+        DESIGN_DIRECTORY_REGISTRY_FILES.some((file) =>
+          stdout.split("\0").includes(file),
+        )
+      ) {
         readingRegistry = true;
         const registry = await designRegistryAtGitRef(cwd, ":");
         directories.push(
@@ -605,7 +613,12 @@ export async function discoverDesignDirectories(
         { maxBufferBytes: 64 * 1024 * 1024 },
       );
       const directories = [...markerDirectories(stdout)];
-      if (stdout.split("\0").includes(DESIGN_DIRECTORY_REGISTRY_FILE)) {
+      if (
+        stdout.split("\0").some((file) => file.endsWith("/design.toml")) ||
+        DESIGN_DIRECTORY_REGISTRY_FILES.some((file) =>
+          stdout.split("\0").includes(file),
+        )
+      ) {
         const registry = await designRegistryAtGitRef(cwd, headOid ?? "HEAD");
         directories.push(
           ...Object.values(registry?.directories ?? {}).map(
@@ -799,7 +812,7 @@ export async function resolveDesignDirectoryForEnter(
   },
   opts: { strict?: boolean; additionalRecognized?: readonly string[] } = {},
 ): Promise<string> {
-  recoverDesignDirectoryRename(workspace.path);
+  recoverWorkspaceDesignMetadata(workspace.path);
   const name = await previewDesignDirectoryForEnter(workspace, opts);
   primeDesignDirectoryName(workspace.path, name);
   return name;

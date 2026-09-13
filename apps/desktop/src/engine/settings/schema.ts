@@ -330,7 +330,7 @@ const designSchema = z
       .string()
       .regex(DESIGN_DIRECTORY_ID_PATTERN)
       .describe(
-        "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml.",
+        "Stable ID from a Design folder's design.toml in this checkout.",
       ),
   })
   .partial();
