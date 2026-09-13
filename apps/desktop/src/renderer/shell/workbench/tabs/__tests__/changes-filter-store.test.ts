@@ -27,6 +27,31 @@ beforeEach(() => {
 });
 
 describe("changes-filter-store", () => {
+  it("restores ranges by owner and updates changed endpoints without reference churn on equal selections", () => {
+    const range = {
+      kind: "turn-range" as const,
+      from: { chatId: "chat", turnId: "first" },
+      to: { chatId: "chat", turnId: "last" },
+    };
+    setChangesTurnFilter("wt-a", { chatId: "legacy", turnId: "turn" });
+    setChangesScope("wt-a", range);
+    const first = getChangesFilter("wt-a");
+    expect(first.turn).toBeNull();
+    setChangesScope("wt-a", structuredClone(range));
+    expect(getChangesFilter("wt-a")).toBe(first);
+    setChangesScope("wt-a", {
+      ...range,
+      to: { chatId: "other", turnId: "last" },
+    });
+    expect(getChangesFilter("wt-a")).not.toBe(first);
+    setChangesScope("wt-b", { kind: "commits" });
+    resetChangesFilterForTests();
+    expect(getChangesFilter("wt-a").scope).toMatchObject({
+      ...range,
+      to: { chatId: "other", turnId: "last" },
+    });
+    expect(getChangesFilter("wt-b").scope).toEqual({ kind: "commits" });
+  });
   it("seeds from the persisted scope/turn and defaults to All changes", () => {
     expect(getChangesFilter("wt-1")).toEqual({
       scope: { kind: "all" },

@@ -41,6 +41,67 @@ function changedFile(path = "src/app.tsx"): ChangedFile {
 beforeEach(installStorage);
 
 describe("Changes snapshot persistence", () => {
+  it("keeps Branch and All Commits snapshots separate for each comparison base", () => {
+    for (const scope of [
+      { kind: "all" as const },
+      { kind: "commits" as const },
+    ]) {
+      const sections = [
+        { kind: "committed" as const, title: null, files: [changedFile()] },
+      ];
+      writeChangesSections("base-owner", scope, sections, "main");
+      expect(
+        readChangesSections(changesSnapshotKey("base-owner", scope, "release")),
+      ).toBeUndefined();
+      expect(
+        readChangesSections(changesSnapshotKey("base-owner", scope, "main")),
+      ).toBe(sections);
+      const restored = loadPersistedChangesSnapshots().sections;
+      expect(
+        restored.get(changesSnapshotKey("base-owner", scope, "release")),
+      ).toBeUndefined();
+      expect(
+        restored.has(changesSnapshotKey("base-owner", scope, "main")),
+      ).toBe(true);
+    }
+  });
+  it("lets either same-generation surface publish while rejecting an older refresh", () => {
+    const key = changesSnapshotKey("shared-flight", { kind: "last-turn" });
+    const firstSurface = beginChangesSectionsRequest(key, 1);
+    const secondSurface = beginChangesSectionsRequest(key, 1);
+    // If the second surface unmounts, it must not strand the first surface's
+    // response from their shared in-flight request.
+    expect(secondSurface).toBe(firstSurface);
+    expect(isCurrentChangesSectionsRequest(key, firstSurface)).toBe(true);
+    const refreshed = beginChangesSectionsRequest(key, 2);
+    expect(isCurrentChangesSectionsRequest(key, firstSurface)).toBe(false);
+    const obsoleteSurface = beginChangesSectionsRequest(key, 1);
+    expect(isCurrentChangesSectionsRequest(key, obsoleteSurface)).toBe(false);
+    expect(isCurrentChangesSectionsRequest(key, refreshed)).toBe(true);
+  });
+  it("restores history list metadata only for the same endpoints", () => {
+    const scope = {
+      kind: "commit-range" as const,
+      from: "aaaaaaa",
+      to: "bbbbbbb",
+    };
+    persistChangesSections("workspace", scope, [
+      { kind: "committed", title: null, files: [changedFile()] },
+    ]);
+    const snapshots = loadPersistedChangesSnapshots();
+    expect(
+      snapshots.sections.get(changesSnapshotKey("workspace", scope))?.[0]
+        .files[0].path,
+    ).toBe("src/app.tsx");
+    expect(
+      snapshots.sections.has(
+        changesSnapshotKey("workspace", { ...scope, to: "ccccccc" }),
+      ),
+    ).toBe(false);
+    expect(snapshots.sections.has(changesSnapshotKey("other", scope))).toBe(
+      false,
+    );
+  });
   it("round-trips list metadata under its exact workspace and scope key", () => {
     persistChangesSections("workspace-a", { kind: "all" }, [
       { kind: "committed", title: null, files: [changedFile()] },

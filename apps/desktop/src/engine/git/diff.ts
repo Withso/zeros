@@ -8,6 +8,7 @@
 
 import * as git from "isomorphic-git";
 import nodeFs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { resolveRepoForGitOp } from "./worktree";
 import { runGit, runGitRead, assertSafeGitRef } from "./git-exec";
@@ -296,11 +297,15 @@ export async function changeCounts(
     forkPoint(ws.path, ws.baseBranch, remote),
   ]);
   const parsed = parsePorcelain(stdout);
-  const floor = resolvedFloor ?? "HEAD";
-  const [allTracked, uncommittedTracked] = await Promise.all([
-    diffNameStatus(ws.path, [floor]),
-    diffNameStatus(ws.path, ["HEAD"]),
-  ]);
+  const head = resolvedFloor ? "HEAD" : await headOrEmptyTree(ws.path);
+  const floor = resolvedFloor ?? head;
+  const [allTracked, uncommittedTracked, stagedTracked, unstagedTracked] =
+    await Promise.all([
+      diffNameStatus(ws.path, [floor]),
+      diffNameStatus(ws.path, [head]),
+      diffNameStatus(ws.path, ["--cached"]),
+      diffNameStatus(ws.path, []),
+    ]);
 
   const conflicts = new Set<string>();
   addVisibleChanges(conflicts, parsed.conflicted, includePath);
@@ -314,10 +319,10 @@ export async function changeCounts(
   addVisiblePaths(uncommitted, parsed.untracked, includePath);
 
   const staged = new Set(conflicts);
-  addVisibleChanges(staged, parsed.staged, includePath);
+  addVisibleChanges(staged, stagedTracked, includePath);
 
   const unstaged = new Set(conflicts);
-  addVisibleChanges(unstaged, parsed.unstaged, includePath);
+  addVisibleChanges(unstaged, unstagedTracked, includePath);
   addVisiblePaths(unstaged, parsed.untracked, includePath);
 
   return {
@@ -502,7 +507,12 @@ export async function changeLineCounts(
     (untrackedPath) => !isInternal(untrackedPath) && includePath(untrackedPath),
   );
   const [tracked, untrackedLines] = await Promise.all([
-    numstatTotals(ws.path, [resolvedFloor ?? "HEAD"], includePath, conflicted),
+    numstatTotals(
+      ws.path,
+      [resolvedFloor ?? (await headOrEmptyTree(ws.path))],
+      includePath,
+      conflicted,
+    ),
     untrackedAdditions(ws.path, untracked),
   ]);
   return {
@@ -612,12 +622,17 @@ export type DiffMode =
   | "worktree-vs-head"
   | "worktree-vs-base"
   | "base"
-  | "refs";
+  | "refs"
+  | "range";
 
 export interface DiffOptions {
   workspaceId: string;
   /** Restrict to a single file. */
   filePath?: string;
+  /** Keep rename detection intact when restricting a comparison to one file. */
+  oldFilePath?: string;
+  /** Engine-owned authored path groups used by turn history comparisons. */
+  filePaths?: string[];
   /** @deprecated Legacy selector, mapped onto `mode` via `againstToMode`. As of
    *  the 2026-06-19 audit it has NO caller — every call site (renderer
    *  `gitDiff`, `workspace-bridge`, `service.ts`) passes `mode`. Retained only
@@ -633,6 +648,8 @@ export interface DiffOptions {
   /** Also return the raw unified-diff text in `DiffResult.patch`.
    *  `@pierre/diffs` <PatchDiff> consumes this directly — no parse. */
   rawPatch?: boolean;
+  /** Complete context for a visible file's native hunk expansion controls. */
+  fullContext?: boolean;
   /** Return a bounded metadata-only result once the comparison contains more
    *  than this many tracked files. A whole-tree patch can be tens or hundreds
    *  of megabytes for generated/vendor trees; the Changes list needs paths and
@@ -678,7 +695,7 @@ function diffRangeArgs(opts: DiffOptions, baseBranch: string): string[] {
     case "index-vs-head":
       return ["--cached"];
     case "worktree-vs-head":
-      return ["HEAD"];
+      return [baseBranch];
     case "worktree-vs-base":
       // `baseBranch` has been resolved to the fork point (or "HEAD" for a fresh
       // branch) by diff() below — a SINGLE ref means "diff it against the WORKING
@@ -686,7 +703,8 @@ function diffRangeArgs(opts: DiffOptions, baseBranch: string): string[] {
       return [baseBranch];
     case "base":
       return [`${baseBranch}...HEAD`];
-    case "refs": {
+    case "refs":
+    case "range": {
       if (!opts.base) {
         throw new GitError({
           code: "VALIDATION_FAILED",
@@ -698,7 +716,9 @@ function diffRangeArgs(opts: DiffOptions, baseBranch: string): string[] {
       // (flag injection) before they reach the `git diff` argv.
       const base = assertSafeGitRef(opts.base, "diff.base");
       const head = assertSafeGitRef(opts.head ?? "HEAD", "diff.head");
-      return [`${base}...${head}`];
+      // Explicit history endpoints compare the two trees directly. The older
+      // snapshot need not be an ancestor (concurrent turns are independent).
+      return mode === "range" ? [base, head] : [`${base}...${head}`];
     }
     case "worktree-vs-index":
     default:
@@ -751,9 +771,9 @@ function parseNumstatFiles(out: string): NumstatFile[] {
 async function diffFileSummary(
   worktreePath: string,
   rangeArgs: readonly string[],
-  filePath?: string,
+  filePaths: string[] = [],
 ): Promise<DiffFileSummary[]> {
-  const suffix = filePath ? ["--", filePath] : [];
+  const suffix = filePaths.length ? ["--", ...filePaths] : [];
   const [{ stdout: numstat }, { stdout: names }] = await Promise.all([
     runGitRead(
       worktreePath,
@@ -1051,7 +1071,31 @@ export function parseUnifiedDiff(raw: string): Hunk[] {
   return out;
 }
 
+/** An unborn branch has no HEAD. Git recognizes its object-format-specific
+ * empty tree without writing an object, so these remain read-only probes. */
+async function headOrEmptyTree(worktreePath: string): Promise<string> {
+  const head = await gitTry(worktreePath, ["rev-parse", "--verify", "HEAD"]);
+  if (head) return head;
+  const { stdout } = await runGitRead(worktreePath, [
+    "rev-parse",
+    "--show-object-format",
+  ]);
+  return createHash(stdout.trim() === "sha256" ? "sha256" : "sha1")
+    .update("tree 0\0")
+    .digest("hex");
+}
+
 export async function diff(opts: DiffOptions): Promise<DiffResult> {
+  if (
+    opts.fullContext &&
+    !opts.filePath &&
+    (!opts.filePaths || opts.filePaths.length === 0)
+  ) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "diff.fullContext requires a file path filter",
+    });
+  }
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   // Branch-relative diffs compare against the worktree's FORK POINT — the commit
   // it diverged from its base. Anchoring to the fork point (not the base's live
@@ -1061,6 +1105,10 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
   const mode = opts.mode ?? againstToMode(opts.against);
   let rangeOpts = opts;
   let baseBranch = ws.baseBranch;
+  const comparisonBase =
+    opts.base !== undefined
+      ? assertSafeGitRef(opts.base, "diff.base")
+      : ws.baseBranch;
   const { remote } = resolveRepoGit(ws.repoRoot);
   if (mode === "refs" && opts.base) {
     rangeOpts = {
@@ -1068,20 +1116,36 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
       base: (await forkPoint(ws.path, opts.base, remote)) ?? opts.base,
     };
   } else if (mode === "base") {
+    if (!(await gitTry(ws.path, ["rev-parse", "--verify", "HEAD"]))) {
+      return { hunks: [], ...(opts.rawPatch ? { patch: "" } : {}) };
+    }
     baseBranch =
-      (await forkPoint(ws.path, ws.baseBranch, remote)) ?? ws.baseBranch;
+      (await forkPoint(ws.path, comparisonBase, remote)) ?? comparisonBase;
   } else if (mode === "worktree-vs-base") {
     // Anchor at the fork point and diff it against the WORKING TREE, so "All
     // changes" lists this branch's whole contribution — committed AND
-    // uncommitted — in one pass. A fresh branch (no commits past base, or unborn
-    // HEAD) has no fork point → fall back to HEAD, i.e. `git diff HEAD`, which
-    // surfaces just the uncommitted working tree (the only changes there are).
-    baseBranch = (await forkPoint(ws.path, ws.baseBranch, remote)) ?? "HEAD";
+    // uncommitted — in one pass. Before the first commit, the empty tree is
+    // the baseline. A fresh branch with commits uses its current HEAD.
+    baseBranch =
+      (await forkPoint(ws.path, comparisonBase, remote)) ??
+      (await headOrEmptyTree(ws.path));
+  } else if (mode === "worktree-vs-head") {
+    baseBranch = await headOrEmptyTree(ws.path);
   }
   // core.quotePath=false so non-ASCII paths appear unquoted in the
   // `diff --git` header → parseUnifiedDiff captures them (the remote secret
   // filter keys on that path; a quoted/unparsed path fails closed).
   const rangeArgs = diffRangeArgs(rangeOpts, baseBranch);
+  const filePaths =
+    opts.filePaths ??
+    (opts.filePath
+      ? [
+          ...new Set([
+            opts.filePath,
+            ...(opts.oldFilePath ? [opts.oldFilePath] : []),
+          ]),
+        ].map((path) => `:(literal)${path}`)
+      : []);
   let summaryFiles: DiffFileSummary[] | undefined;
   if (opts.summaryLimit !== undefined) {
     if (
@@ -1098,7 +1162,7 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
     // a generated tree would make the unified patch exceed the RPC/buffer cap.
     // Preflight before materializing any file content so the fallback is fast,
     // deterministic, and identical under Node and the production Bun runtime.
-    summaryFiles = await diffFileSummary(ws.path, rangeArgs, opts.filePath);
+    summaryFiles = await diffFileSummary(ws.path, rangeArgs, filePaths);
     if (summaryFiles.length > opts.summaryLimit) {
       return { hunks: [], files: summaryFiles, summary: true };
     }
@@ -1108,10 +1172,10 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
     "core.quotePath=false",
     "diff",
     "--no-color",
-    "-U3",
+    opts.fullContext ? "-U2147483647" : "-U3",
   ];
   args.push(...rangeArgs);
-  if (opts.filePath) args.push("--", opts.filePath);
+  if (filePaths.length) args.push("--", ...filePaths);
   let stdout: string;
   try {
     ({ stdout } = await runGitRead(ws.path, args, {
@@ -1279,6 +1343,8 @@ export interface LogOptions {
   workspaceId: string;
   /** Max commits to return. Defaults to 50. */
   limit?: number;
+  /** Offset into a log pinned to `ref`, for complete paginated history. */
+  skip?: number;
   /** Filter to commits after this unix-ms timestamp. */
   since?: number;
   /** Start at a non-HEAD ref (e.g. 'main' to see only main's history). */
@@ -1300,10 +1366,17 @@ export interface LogOptions {
 export async function log(opts: LogOptions): Promise<Commit[]> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const limit = opts.limit ?? 50;
-  if (limit < 1 || limit > 1000) {
+  const skip = opts.skip ?? 0;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1000) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: "log: 'limit' must be between 1 and 1000",
+    });
+  }
+  if (!Number.isSafeInteger(skip) || skip < 0) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "log: 'skip' must be a non-negative integer",
     });
   }
   if (opts.base) {
@@ -1313,6 +1386,8 @@ export async function log(opts: LogOptions): Promise<Commit[]> {
       limit,
       resolveRepoGit(ws.repoRoot).remote,
       opts.since,
+      skip,
+      opts.ref,
     );
   }
 
@@ -1320,11 +1395,11 @@ export async function log(opts: LogOptions): Promise<Commit[]> {
   const commits = await git.log({
     fs,
     gitdir,
-    depth: limit,
+    depth: skip + limit,
     ref: opts.ref ?? ws.branch,
     since: opts.since ? new Date(opts.since) : undefined,
   });
-  return commits.map((c) => ({
+  return commits.slice(skip).map((c) => ({
     sha: c.oid,
     abbreviatedSha: c.oid.slice(0, 7),
     message: c.commit.message,
@@ -1348,6 +1423,8 @@ async function logRange(
   limit: number,
   remote: string,
   since?: number,
+  skip = 0,
+  ref = "HEAD",
 ): Promise<Commit[]> {
   // Anchor to the worktree's FORK POINT (the commit it diverged from its base),
   // recovered robustly even when the base is remote-only, was deleted, or has
@@ -1355,15 +1432,18 @@ async function logRange(
   // worktree added regardless of how/where the base moved. null = nothing added.
   const floor = await forkPoint(worktreePath, base, remote);
   if (!floor) return [];
-  const args = ["log", `--max-count=${limit}`, "-z", `--format=${LOG_FORMAT}`];
+  assertSafeGitRef(ref, "log.ref");
+  const args = [
+    "log",
+    "--topo-order",
+    `--max-count=${limit}`,
+    `--skip=${skip}`,
+    "-z",
+    `--format=${LOG_FORMAT}`,
+  ];
   if (since) args.push(`--since=${new Date(since).toISOString()}`);
-  args.push(`${floor}..HEAD`);
-  let stdout: string;
-  try {
-    ({ stdout } = await runGitRead(worktreePath, args));
-  } catch {
-    return [];
-  }
+  args.push(`${floor}..${ref}`);
+  const { stdout } = await runGitRead(worktreePath, args);
   return stdout
     .split("\0")
     .filter((r) => r.length > 0)

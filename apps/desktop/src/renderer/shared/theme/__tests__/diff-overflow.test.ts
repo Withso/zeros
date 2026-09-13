@@ -11,6 +11,17 @@ describe("file and diff overflow policy", () => {
     expect(zerosCodeViewOptions().overflow).toBe("wrap");
   });
 
+  it("keeps the rendered code and virtual scroll geometry flush with the pane", () => {
+    const options = zerosCodeViewOptions({ disableFileHeader: true });
+    expect(options.layout).toMatchObject({ paddingTop: 0, paddingBottom: 0 });
+    expect(options.itemMetrics).toMatchObject({
+      paddingTop: 0,
+      paddingBottom: 0,
+    });
+    // Metrics alone do not remove the shadow DOM's independently painted gap.
+    expect(options.unsafeCSS).toMatch(/--diffs-gap-block:\s*0px/);
+  });
+
   it("keeps hover/Review PatchDiff chrome aligned with the Changes file viewer", () => {
     const patch = zerosDiffOptions({
       disableFileHeader: true,
@@ -24,10 +35,10 @@ describe("file and diff overflow policy", () => {
     expect(patch).toMatchObject({
       theme: file.theme,
       themeType: file.themeType,
-      unsafeCSS: file.unsafeCSS,
       diffStyle: file.diffStyle,
       overflow: file.overflow,
       disableFileHeader: file.disableFileHeader,
     });
+    expect(file.unsafeCSS).toContain(patch.unsafeCSS);
   });
 });

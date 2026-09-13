@@ -81,7 +81,7 @@ const DropdownMenuSubContent = React.forwardRef<
   <DropdownMenuPrimitive.SubContent
     ref={ref}
     className={cn(
-      "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-lg border border-border2 p-1 shadow-[var(--shadow-dropdown)]",
+      "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden rounded-lg border p-1 shadow-[var(--shadow-dropdown)]",
       className,
     )}
     {...props}
@@ -137,7 +137,7 @@ const DropdownMenuContent = React.forwardRef<
           onCloseAutoFocus?.(event);
         }}
         className={cn(
-          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden rounded-lg border border-border2 p-1 shadow-[var(--shadow-dropdown)]",
+          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden rounded-lg border p-1 shadow-[var(--shadow-dropdown)]",
           className,
         )}
         {...props}
@@ -167,25 +167,44 @@ DropdownMenuItem.displayName = DropdownMenuPrimitive.Item.displayName;
 
 const DropdownMenuCheckboxItem = React.forwardRef<
   React.ComponentRef<typeof DropdownMenuPrimitive.CheckboxItem>,
-  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem>
->(({ className, children, checked, ...props }, ref) => (
-  <DropdownMenuPrimitive.CheckboxItem
-    ref={ref}
-    className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
-      className,
-    )}
-    checked={checked}
-    {...props}
-  >
-    <span className="absolute left-2 flex h-3.5 w-3.5 items-center justify-center">
-      <DropdownMenuPrimitive.ItemIndicator>
-        <Check className="h-4 w-4" />
-      </DropdownMenuPrimitive.ItemIndicator>
-    </span>
-    {children}
-  </DropdownMenuPrimitive.CheckboxItem>
-));
+  React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.CheckboxItem> & {
+    /** Trailing boxed selection for range/group menus. */
+    indicatorSide?: "start" | "end";
+  }
+>(
+  (
+    { className, children, checked, indicatorSide = "start", ...props },
+    ref,
+  ) => (
+    <DropdownMenuPrimitive.CheckboxItem
+      ref={ref}
+      className={cn(
+        "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        indicatorSide === "end" && "pr-8 pl-2",
+        className,
+      )}
+      checked={checked}
+      {...props}
+    >
+      <span
+        className={cn(
+          "absolute flex size-3.5 items-center justify-center",
+          indicatorSide === "start"
+            ? "left-2"
+            : "border-border4 right-2 rounded-sm border",
+          indicatorSide === "end" &&
+            checked &&
+            "bg-inverted-bg border-inverted-bg text-inverted-fg",
+        )}
+      >
+        <DropdownMenuPrimitive.ItemIndicator>
+          <Check className={indicatorSide === "end" ? "size-3" : "size-4"} />
+        </DropdownMenuPrimitive.ItemIndicator>
+      </span>
+      {children}
+    </DropdownMenuPrimitive.CheckboxItem>
+  ),
+);
 DropdownMenuCheckboxItem.displayName =
   DropdownMenuPrimitive.CheckboxItem.displayName;
 

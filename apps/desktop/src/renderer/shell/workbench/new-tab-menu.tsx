@@ -231,7 +231,7 @@ export function WorkbenchNewTabMenu({
             setSelection(value);
             if (value !== "environment") setEnvironmentOpen(false);
           }}
-          className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:h-10 [&_[data-slot=command-input-wrapper]]:shrink-0"
+          className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:h-10 [&_[data-slot=command-input-wrapper]]:shrink-0 [&_[data-slot=command-input-wrapper]_svg]:size-3.5"
         >
           <CommandInput
             autoFocus
@@ -256,11 +256,11 @@ export function WorkbenchNewTabMenu({
             {!searching && (
               <CommandGroup>
                 <CommandItem value="new-file" onSelect={addBlankFile}>
-                  <File className="size-4" />
+                  <File className="size-3.5" />
                   <span>File</span>
                 </CommandItem>
                 <CommandItem value="new-browser" onSelect={() => addBrowser()}>
-                  <Globe className="size-4" />
+                  <Globe className="size-3.5" />
                   <span>Browser</span>
                 </CommandItem>
                 <CommandItem
@@ -270,7 +270,7 @@ export function WorkbenchNewTabMenu({
                     close();
                   }}
                 >
-                  <Terminal className="size-4" />
+                  <Terminal className="size-3.5" />
                   <span>Terminal</span>
                 </CommandItem>
                 <NewTabEnvironmentMenu
@@ -297,7 +297,7 @@ export function WorkbenchNewTabMenu({
                   value={`url:${directUrl}`}
                   onSelect={() => addBrowser(directUrl, "Browser")}
                 >
-                  <Globe className="size-4" />
+                  <Globe className="size-3.5" />
                   <div className="min-w-0 flex-1">
                     <div className="truncate">Open URL</div>
                     <div className="text-fg2 truncate text-xs">{directUrl}</div>
@@ -326,7 +326,7 @@ export function WorkbenchNewTabMenu({
                     value={`recent:${entry.url}`}
                     onSelect={() => addBrowser(entry.url, entry.title)}
                   >
-                    <Globe className="size-4" />
+                    <Globe className="size-3.5" />
                     <div className="min-w-0 flex-1">
                       <div className="truncate">{entry.title || "Browser"}</div>
                       <div className="text-fg2 truncate text-xs">
@@ -348,7 +348,11 @@ export function WorkbenchNewTabMenu({
                   >
                     {/* The file's own type glyph — the tab this row opens will
                         carry the same one (workbenchTabIconPath). */}
-                    <FileTypeIcon name={file.path} size={16} />
+                    <FileTypeIcon
+                      name={file.path}
+                      size={14}
+                      className="size-3.5"
+                    />
                     <div className="min-w-0 flex-1">
                       <div className="truncate">{file.name}</div>
                       {file.directory && (

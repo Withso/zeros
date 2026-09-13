@@ -31,6 +31,35 @@ afterEach(() => {
 });
 
 describe("tab factories", () => {
+  it("retains and validates a historical comparison when a file tab is restored", () => {
+    const diffHistory = {
+      kind: "turn-range" as const,
+      from: { chatId: "chat-a", turnId: "first" },
+      to: { chatId: "chat-b", turnId: "last" },
+    };
+    const tab = createFilesTab("src/file.ts", {
+      diff: true,
+      diffScope: "history",
+      diffHistory,
+    });
+    const restored = normalizeWorkbenchTabs(
+      JSON.parse(JSON.stringify([tab])),
+    ).find((item) => item.id === tab.id);
+    expect(restored).toMatchObject({
+      diff: true,
+      diffScope: "history",
+      diffHistory,
+    });
+    expect(blankFixedFilesTab(tab).diffHistory).toBeUndefined();
+    const malformed = {
+      ...tab,
+      diffHistory: { kind: "turn-range", from: {} },
+    } as WorkbenchTab;
+    expect(
+      normalizeWorkbenchTabs([malformed]).find((item) => item.id === tab.id)
+        ?.diffHistory,
+    ).toBeUndefined();
+  });
   it("creates path-backed and blank File tabs with the right labels", () => {
     expect(() => createFilesTab("  ")).toThrow(/non-empty file path/);
     expect(createFilesTab("src/app/index.html", { diff: true })).toMatchObject({
@@ -587,6 +616,7 @@ describe("normalizeWorkbenchTabs", () => {
         filePath: "src/a.ts",
         changesView: "tree",
         viewerMode: "diff",
+        changesPresentation: "single",
       },
       {
         id: "review-valid",
@@ -605,7 +635,8 @@ describe("normalizeWorkbenchTabs", () => {
 
     expect(out.find((tab) => tab.id === "changes-valid")).toMatchObject({
       changesView: "tree",
-      viewerMode: "diff",
+      changesPresentation: "single",
+      viewerMode: undefined,
     });
     expect(out.find((tab) => tab.id === "review-valid")?.reviewSubtab).toBe(
       "checks",

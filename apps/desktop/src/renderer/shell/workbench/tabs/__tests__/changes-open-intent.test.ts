@@ -26,6 +26,30 @@ const TURN: TurnInfo = {
 } as unknown as TurnInfo;
 
 describe("changeOpenIntent", () => {
+  it("preserves the range when opening and advancing without discard or live-file fallback", () => {
+    const diffHistory = {
+      kind: "turn-range" as const,
+      from: { chatId: "chat", turnId: "first" },
+      to: { chatId: "chat", turnId: "last" },
+    };
+    const intent = changeOpenIntent(
+      diffHistory,
+      null,
+      file({ isNewFile: true, committed: false }),
+    );
+    expect(intent).toEqual({
+      diff: true,
+      diffScope: "history",
+      diffHistory,
+      discardable: false,
+    });
+    expect(
+      changeAdvanceIntent({
+        diffScope: intent.diffScope,
+        diffHistory: intent.diffHistory,
+      }),
+    ).toEqual({ diff: true, diffScope: "history", diffHistory });
+  });
   it("routes to the turn's authored diff while a turn filter is active", () => {
     expect(changeOpenIntent({ kind: "all" }, TURN, file())).toEqual({
       diff: true,

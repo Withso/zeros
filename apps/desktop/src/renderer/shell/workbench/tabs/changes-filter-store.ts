@@ -21,6 +21,7 @@ import { useSyncExternalStore } from "react";
 
 import {
   DEFAULT_SCOPE,
+  scopeIdentity,
   clearChangesScopes,
   loadChangesScope,
   saveChangesScope,
@@ -59,7 +60,7 @@ function emit(): void {
 
 function scopeEquals(a: Scope, b: Scope): boolean {
   if (a.kind !== b.kind) return false;
-  return a.kind !== "commit" || b.kind !== "commit" || a.sha === b.sha;
+  return scopeIdentity(a) === scopeIdentity(b);
 }
 
 function turnEquals(a: TurnFilterId | null, b: TurnFilterId | null): boolean {

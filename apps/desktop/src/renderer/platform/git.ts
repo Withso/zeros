@@ -1,3 +1,4 @@
+import type { ChangesHistory } from "@zeros/protocol/changes-history";
 // ──────────────────────────────────────────────────────────
 // Native bindings — Git, GitHub, detach, and cross-tool IPC
 // ──────────────────────────────────────────────────────────
@@ -751,9 +752,7 @@ export async function designStage(workspaceId: string): Promise<{ ok: true }> {
   return bridgeDesignStage(requireBridge("stage designs"), workspaceId);
 }
 
-export async function designSave(
-  workspaceId: string,
-): Promise<{ ok: true }> {
+export async function designSave(workspaceId: string): Promise<{ ok: true }> {
   return bridgeDesignSave(requireBridge("validate designs"), workspaceId);
 }
 
@@ -1378,12 +1377,15 @@ export type DiffMode =
 export async function gitDiff(args: {
   workspaceId: string;
   filePath?: string;
+  oldFilePath?: string;
   against?: "index" | "HEAD" | "main";
   mode?: DiffMode;
   base?: string;
   head?: string;
   rawPatch?: boolean;
+  fullContext?: boolean;
   summaryLimit?: number;
+  history?: ChangesHistory;
 }): Promise<{
   hunks: Hunk[];
   patch?: string;
@@ -1410,6 +1412,7 @@ export async function gitShowCommit(args: {
 export async function gitLog(args: {
   workspaceId: string;
   limit?: number;
+  skip?: number;
   since?: number;
   ref?: string;
   base?: string;

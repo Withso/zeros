@@ -36,6 +36,48 @@ function deferred<T>() {
 }
 
 describe("workspace file data cache", () => {
+  it("keeps rename context requests distinct and passes their original path to Git", async () => {
+    const query = {
+      workspaceId: "workspace",
+      path: "new[x].txt",
+      diffScope: "all" as const,
+      fullContext: true,
+    };
+    primeWorkspaceFileDiff(query, "addition without rename source");
+    const renamed = { ...query, oldPath: "old[x].txt" };
+    expect(peekWorkspaceFileDiff(renamed)).toBeUndefined();
+    diffFile.mockResolvedValue({ hunks: [], patch: "rename comparison" });
+    await expect(loadWorkspaceFileDiff(renamed)).resolves.toBe(
+      "rename comparison",
+    );
+    expect(diffFile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filePath: "new[x].txt",
+        oldFilePath: "old[x].txt",
+        fullContext: true,
+      }),
+    );
+    expect(peekWorkspaceFileDiff(query)).toBe("addition without rename source");
+  });
+
+  it("isolates a file's branch comparison when the PR base changes", async () => {
+    const query = {
+      workspaceId: "workspace",
+      path: "a.txt",
+      diffScope: "all" as const,
+      baseBranch: "main",
+    };
+    primeWorkspaceFileDiff(query, "main comparison");
+    expect(
+      peekWorkspaceFileDiff({ ...query, baseBranch: "release" }),
+    ).toBeUndefined();
+    diffFile.mockResolvedValue({ hunks: [], patch: "release comparison" });
+    await loadWorkspaceFileDiff({ ...query, baseBranch: "release" });
+    expect(diffFile).toHaveBeenCalledWith(
+      expect.objectContaining({ base: "release" }),
+    );
+    expect(peekWorkspaceFileDiff(query)).toBe("main comparison");
+  });
   beforeEach(() => {
     resetWorkspaceFileDataCacheForTests();
     readFile.mockReset();
@@ -63,6 +105,79 @@ describe("workspace file data cache", () => {
     expect(
       peekWorkspaceFileRead({ ...query, path: "src/b.ts" }),
     ).toBeUndefined();
+  });
+
+  it("isolates commit and turn range endpoints, shares reads, and retains the latest exact range", async () => {
+    const a = {
+      workspaceId: "workspace",
+      path: "a.ts",
+      diffScope: "history" as const,
+      diffHistory: {
+        kind: "commit-range" as const,
+        from: "aaaaaaa",
+        to: "bbbbbbb",
+      },
+    };
+    const b = { ...a, diffHistory: { ...a.diffHistory, to: "ccccccc" } };
+    primeWorkspaceFileDiff(a, "confirmed a");
+    const pending = deferred<{ hunks: []; patch: string }>();
+    diffFile.mockReturnValueOnce(pending.promise);
+    const first = loadWorkspaceFileDiff(b);
+    const duplicate = loadWorkspaceFileDiff(b);
+    await Promise.resolve();
+    expect(diffFile).toHaveBeenCalledTimes(1);
+    expect(diffFile).toHaveBeenCalledWith({
+      workspaceId: "workspace",
+      filePath: "a.ts",
+      history: b.diffHistory,
+      rawPatch: true,
+    });
+    expect(peekWorkspaceFileDiff(a)).toBe("confirmed a");
+    expect(peekWorkspaceFileDiff(b)).toBeUndefined();
+    primeWorkspaceFileDiff(b, "newer b");
+    pending.resolve({ hunks: [], patch: "stale b" });
+    await Promise.all([first, duplicate]);
+    expect(peekWorkspaceFileDiff(b)).toBe("newer b");
+    const turn = {
+      ...a,
+      diffHistory: {
+        kind: "turn-range" as const,
+        from: { chatId: "chat-a", turnId: "one" },
+        to: { chatId: "chat-b", turnId: "two" },
+      },
+    };
+    primeWorkspaceFileDiff(turn, "turn range");
+    expect(
+      peekWorkspaceFileDiff({
+        ...turn,
+        diffHistory: {
+          ...turn.diffHistory,
+          to: { chatId: "chat-c", turnId: "two" },
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      peekWorkspaceFileDiff({ ...turn, workspaceId: "another" }),
+    ).toBeUndefined();
+  });
+
+  it("loads restored single-commit tabs through the root-safe inclusive history comparison", async () => {
+    diffFile.mockResolvedValue({ hunks: [], patch: "root commit patch" });
+    const sha = "a".repeat(40);
+    await expect(
+      loadWorkspaceFileDiff({
+        workspaceId: "workspace",
+        path: "a.txt",
+        diffScope: "commit",
+        diffSha: sha,
+      }),
+    ).resolves.toBe("root commit patch");
+    expect(diffFile).toHaveBeenCalledWith({
+      workspaceId: "workspace",
+      filePath: "a.txt",
+      history: { kind: "commit-range", from: sha, to: sha },
+      rawPatch: true,
+    });
   });
 
   it("retains confirmed content while a stale cwd revalidates", async () => {
@@ -137,6 +252,35 @@ describe("workspace file data cache", () => {
       path: "src/b.ts",
     });
     expect(peekWorkspaceFileDiff(turn)).toBe("turn patch");
+  });
+
+  it("isolates complete-context snapshots and routes a legacy turn through the exact history comparison", async () => {
+    const turn = {
+      workspaceId: "workspace-1",
+      path: "src/b.ts",
+      diffScope: "turn" as const,
+      turnChatId: "chat-1",
+      turnId: "turn-1",
+    };
+    primeWorkspaceFileDiff(turn, "short patch");
+    diffFile.mockResolvedValueOnce({ hunks: [], patch: "complete patch" });
+
+    await expect(
+      loadWorkspaceFileDiff({ ...turn, fullContext: true }),
+    ).resolves.toBe("complete patch");
+    expect(peekWorkspaceFileDiff(turn)).toBe("short patch");
+    expect(diffTurn).not.toHaveBeenCalled();
+    expect(diffFile).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      filePath: "src/b.ts",
+      history: {
+        kind: "turn-range",
+        from: { chatId: "chat-1", turnId: "turn-1" },
+        to: { chatId: "chat-1", turnId: "turn-1" },
+      },
+      rawPatch: true,
+      fullContext: true,
+    });
   });
 
   it("deduplicates hover/viewer reads while isolating the same path across turns", async () => {

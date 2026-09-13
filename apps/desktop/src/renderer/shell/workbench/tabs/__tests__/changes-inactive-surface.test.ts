@@ -4,6 +4,23 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 describe("inactive retained Changes surface", () => {
+  it("keeps Changes diff-only even while preserving a legacy unsaved draft", () => {
+    const surface = readFileSync(
+      fileURLToPath(new URL("../changes-surface.tsx", import.meta.url)),
+      "utf8",
+    );
+    const viewer = readFileSync(
+      fileURLToPath(new URL("../file-viewer.tsx", import.meta.url)),
+      "utf8",
+    );
+
+    expect(surface).toContain('viewerMode="diff"');
+    expect(surface).toContain("showModeToggle={false}");
+    expect(viewer).toContain(
+      "showModeToggle && isText && modeOptions.length > 1",
+    );
+  });
+
   it("gates its Git subscription and background model work on active", () => {
     const surface = readFileSync(
       fileURLToPath(new URL("../changes-surface.tsx", import.meta.url)),

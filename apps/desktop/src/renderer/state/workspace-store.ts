@@ -1847,6 +1847,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           diff: false,
           diffScope: undefined,
           diffSha: undefined,
+          diffHistory: undefined,
           turnChatId: undefined,
           turnId: undefined,
           discardable: false,
@@ -2013,6 +2014,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             diff: false,
             diffScope: undefined,
             diffSha: undefined,
+            diffHistory: undefined,
             turnChatId: undefined,
             turnId: undefined,
             discardable: false,
@@ -2044,6 +2046,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           t.filePath !== action.path ||
           t.diffScope === "commit" ||
           t.diffScope === "turn" ||
+          t.diffScope === "history" ||
           (!t.diff && !t.discardable && !t.isNewFile)
         )
           return t;

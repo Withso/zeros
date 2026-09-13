@@ -382,6 +382,7 @@ export const FilesTab = React.memo(function FilesTab({
             diff={tab.diff ?? false}
             diffScope={tab.diffScope}
             diffSha={tab.diffSha}
+            diffHistory={tab.diffHistory}
             turnChatId={tab.turnChatId}
             turnId={tab.turnId}
             discardable={tab.discardable ?? false}

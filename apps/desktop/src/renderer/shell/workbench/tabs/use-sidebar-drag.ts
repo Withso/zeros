@@ -2,10 +2,9 @@
 // useSidebarResizeDrag — the workbench sidebar seam drag gesture
 // ──────────────────────────────────────────────────────────
 //
-// One pointer-captured drag handler shared by the File tab's right tree sidebar
-// and the Changes tab's left changed-file sidebar. Both resize the SAME
-// committed width preference (files-sidebar-width), so the seam behaves
-// identically apart from its anchored edge: writes the sidebar element's width
+// One pointer-captured drag handler shared by the File and Changes tabs' right
+// sidebars. Both resize the SAME committed width preference (files-sidebar-width),
+// so the seam behaves identically: writes the sidebar element's width
 // per rAF tick during the drag and commits ONE store update (persist +
 // broadcast) on release. Geometry is resolved once at pointer-down — the
 // captured pointer means the column can't resize mid-drag.

@@ -1,3 +1,7 @@
+import {
+  changesHistoryKey,
+  type ChangesHistory,
+} from "@zeros/protocol/changes-history";
 // ──────────────────────────────────────────────────────────
 // Workspace file data cache — content + per-file diff snapshots
 // ──────────────────────────────────────────────────────────
@@ -42,10 +46,21 @@ export interface WorkspaceFileReadQuery {
 }
 
 export interface WorkspaceFileDiffQuery {
+  fullContext?: boolean;
+  baseBranch?: string;
   workspaceId: string;
   path: string;
-  diffScope?: "all" | "uncommitted" | "staged" | "unstaged" | "commit" | "turn";
+  oldPath?: string;
+  diffScope?:
+    | "all"
+    | "uncommitted"
+    | "staged"
+    | "unstaged"
+    | "commit"
+    | "turn"
+    | "history";
   diffSha?: string;
+  diffHistory?: ChangesHistory;
   turnChatId?: string;
   turnId?: string;
 }
@@ -82,6 +97,10 @@ export function workspaceFileDiffKey(query: WorkspaceFileDiffQuery): string {
     query.diffSha ?? "",
     query.turnChatId ?? "",
     query.turnId ?? "",
+    ...(query.diffHistory ? [changesHistoryKey(query.diffHistory)] : []),
+    ...(query.baseBranch !== undefined ? [query.baseBranch] : []),
+    ...(query.fullContext ? ["full-context"] : []),
+    ...(query.oldPath ? [{ oldPath: query.oldPath }] : []),
   ]);
 }
 
@@ -99,6 +118,21 @@ async function fetchWorkspaceFileDiff(
   const isTurn =
     query.diffScope === "turn" && !!query.turnChatId && !!query.turnId;
   if (isTurn) {
+    if (query.fullContext) {
+      const identity = { chatId: query.turnChatId!, turnId: query.turnId! };
+      return (
+        (
+          await gitDiff({
+            workspaceId: query.workspaceId,
+            filePath: query.path,
+            ...(query.oldPath ? { oldFilePath: query.oldPath } : {}),
+            history: { kind: "turn-range", from: identity, to: identity },
+            rawPatch: true,
+            fullContext: true,
+          })
+        ).patch ?? ""
+      );
+    }
     return (
       (await turnDiff({
         chatId: query.turnChatId!,
@@ -107,7 +141,42 @@ async function fetchWorkspaceFileDiff(
       })) ?? ""
     );
   }
+  if (query.diffScope === "history") {
+    if (!query.diffHistory)
+      throw new Error("Missing Changes history selection");
+    return (
+      (
+        await gitDiff({
+          workspaceId: query.workspaceId,
+          filePath: query.path,
+          ...(query.oldPath ? { oldFilePath: query.oldPath } : {}),
+          history: query.diffHistory,
+          ...(query.fullContext ? { fullContext: true } : {}),
+          ...(query.baseBranch !== undefined ? { base: query.baseBranch } : {}),
+          rawPatch: true,
+        })
+      ).patch ?? ""
+    );
+  }
   const isCommit = query.diffScope === "commit" && !!query.diffSha;
+  if (isCommit) {
+    return (
+      (
+        await gitDiff({
+          workspaceId: query.workspaceId,
+          filePath: query.path,
+          ...(query.oldPath ? { oldFilePath: query.oldPath } : {}),
+          history: {
+            kind: "commit-range",
+            from: query.diffSha!,
+            to: query.diffSha!,
+          },
+          ...(query.fullContext ? { fullContext: true } : {}),
+          rawPatch: true,
+        })
+      ).patch ?? ""
+    );
+  }
   const mode =
     query.diffScope === "uncommitted"
       ? "worktree-vs-head"
@@ -115,14 +184,14 @@ async function fetchWorkspaceFileDiff(
         ? "index-vs-head"
         : query.diffScope === "unstaged"
           ? "worktree-vs-index"
-          : isCommit
-            ? "refs"
-            : "worktree-vs-base";
+          : "worktree-vs-base";
   const result = await gitDiff({
     workspaceId: query.workspaceId,
     filePath: query.path,
+    ...(query.oldPath ? { oldFilePath: query.oldPath } : {}),
     mode,
-    ...(isCommit ? { base: `${query.diffSha}~1`, head: query.diffSha } : {}),
+    ...(query.fullContext ? { fullContext: true } : {}),
+    ...(query.baseBranch !== undefined ? { base: query.baseBranch } : {}),
     rawPatch: true,
   });
   return result.patch ?? "";

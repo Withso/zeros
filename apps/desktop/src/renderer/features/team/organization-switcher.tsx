@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   Building2,
   Check,
@@ -66,6 +67,7 @@ export function OrganizationSwitcher({
   onOpenSettings?: () => void;
   onOrganizationChanged?: () => void;
 }) {
+  const [open, setOpen] = useState(false);
   const {
     organizations: availableOrganizations,
     me,
@@ -87,8 +89,19 @@ export function OrganizationSwitcher({
     active?.name?.trim() ||
     (organizationStatus === "loading" ? "Loading…" : "Personal");
 
+  // Keep Escape deterministic when another Radix layer is completing its exit.
+  // The switcher has no nested menus, so the visible root is always the target.
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [open]);
+
   return (
-    <DropdownMenu>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild>
         <Button
           type="button"

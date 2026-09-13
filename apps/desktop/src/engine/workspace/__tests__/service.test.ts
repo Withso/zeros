@@ -264,11 +264,7 @@ describe("WorkspaceService", () => {
 
     expect(
       fs.existsSync(
-        path.join(
-          workspace.path,
-          ".context/local/attachments",
-          attachmentId,
-        ),
+        path.join(workspace.path, ".context/local/attachments", attachmentId),
       ),
     ).toBe(false);
   });
@@ -3751,6 +3747,29 @@ describe("WorkspaceService", () => {
     expect(patch).not.toContain(".env"); // secret path never leaks in the raw patch
     expect(patch).not.toContain("SECRET=diff"); // secret CONTENT never leaks
     expect(remote.hunks.map((h) => h.filePath)).not.toContain(".env");
+
+    const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: ws.path })
+      .toString()
+      .trim();
+    for (const history of [
+      { kind: "commits" },
+      { kind: "commit-range", from: sha, to: sha },
+    ]) {
+      const selected = (await svc.handle(
+        "git.diff",
+        { workspaceId: ws.workspaceId, history, rawPatch: true },
+        { remote: true },
+      )) as { patch: string };
+      expect(selected.patch).toContain("note.txt");
+      expect(selected.patch).not.toContain("SECRET=diff");
+      expect(selected.patch).not.toContain(".env");
+    }
+    await expect(
+      svc.handle("git.diff", {
+        workspaceId: ws.workspaceId,
+        history: { kind: "commit-range", from: "--output=/tmp/file", to: sha },
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 
   it("classifies read vs write ops (incl. GitHub PR mutations)", () => {

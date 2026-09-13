@@ -12,7 +12,7 @@
 import type { TurnInfo } from "@/renderer/platform/turns";
 import type { OpenFileOpts } from "../use-open-file";
 import type { ChangedFile } from "./changes-parse";
-import type { Scope } from "./changes-scope";
+import { isHistoryScope, type Scope } from "./changes-scope";
 
 export function changeOpenIntent(
   scope: Scope,
@@ -26,6 +26,14 @@ export function changeOpenIntent(
       diffScope: "turn",
       turnChatId: turnFilter.chatId,
       turnId: turnFilter.turnId,
+    };
+  }
+  if (isHistoryScope(scope)) {
+    return {
+      diff: true,
+      diffScope: "history",
+      diffHistory: scope,
+      discardable: false,
     };
   }
   const diffScope = scope.kind === "commit" ? "commit" : scope.kind;
@@ -44,7 +52,7 @@ export function changeOpenIntent(
 export function changeAdvanceIntent(
   identity: Pick<
     OpenFileOpts,
-    "diffScope" | "diffSha" | "turnChatId" | "turnId"
+    "diffScope" | "diffSha" | "diffHistory" | "turnChatId" | "turnId"
   >,
 ): OpenFileOpts {
   return { diff: true, ...identity };

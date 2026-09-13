@@ -21,8 +21,8 @@
 //     files read distinctly in the same list. Hover reveals Discard ("All
 //     changes" filter only) — which fully reverts a tracked file to HEAD or
 //     deletes an untracked/new one, after a confirm.
-//   • ScopeSelect / TurnSelect / ViewToggle → the filter dropdowns + flat⇄tree
-//     toggle; EmptyState / NotAGitRepo / useTrunkGitState / useSourceTarget →
+//   • changes-scope-menu → the combined history dropdown;
+//     EmptyState / NotAGitRepo / useTrunkGitState / useSourceTarget →
 //     the shared target resolution + non-git-trunk onboarding.
 //
 // Commit / push / pull are NOT surfaced here as manual controls — those
@@ -47,17 +47,13 @@ import {
   ChevronRight,
   Folder,
   GitBranch,
-  List,
-  ListTree,
   Undo2,
-  X,
   type LucideIcon,
 } from "lucide-react";
 
 import {
   gitChangeCounts,
   gitDiff,
-  gitLog,
   gitShowCommit,
   gitStatus,
   gitInitInPlace,
@@ -70,18 +66,11 @@ import {
   type StatusResult,
 } from "@/renderer/platform/git";
 import { isNativeRuntime } from "@/renderer/platform/runtime";
+import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-type-icon";
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { useWorkspaceDispatch } from "@/renderer/state/store";
-import {
-  Button,
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-  Tooltip,
-} from "@/renderer/shared/ui/primitives";
+import { Button, Tooltip } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
 import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -98,7 +87,8 @@ import {
   eagerUntrackedPaths,
   visibleChangeWindow,
 } from "./large-change-set";
-import { type Scope } from "./changes-scope";
+import { isHistoryScope, type Scope } from "./changes-scope";
+import { loadChangesCommits, loadChangesTurns } from "./changes-history-list";
 import { trackedFilesForScope } from "./changes-scope-files";
 import {
   getChangesFilter,
@@ -106,7 +96,7 @@ import {
   setChangesTurnFilter,
   useChangesFilter,
 } from "./changes-filter-store";
-import { turnsList, type TurnInfo } from "@/renderer/platform/turns";
+import { type TurnInfo } from "@/renderer/platform/turns";
 import { hashString, isFileViewed, publishChanges } from "./use-viewed-files";
 import { useScrollMemoryRef } from "../../scroll-memory";
 import { discardPath } from "./discard-file";
@@ -199,8 +189,12 @@ function stableSections(previous: Section[], next: Section[]): Section[] {
     : stabilized;
 }
 
-function sectionsCacheKey(workspaceId: string, scope: Scope): string {
-  return changesSnapshotKey(workspaceId, scope);
+function sectionsCacheKey(
+  workspaceId: string,
+  scope: Scope,
+  baseBranch: string,
+): string {
+  return changesSnapshotKey(workspaceId, scope, baseBranch);
 }
 
 function commitsCacheKey(workspaceId: string, baseBranch: string): string {
@@ -240,7 +234,7 @@ function turnsForGeneration(
   refreshKey: number,
 ): Promise<TurnInfo[]> {
   return turnsRequests.run(workspaceId, refreshKey, () =>
-    turnsList(workspaceId),
+    loadChangesTurns(workspaceId),
   );
 }
 
@@ -254,7 +248,7 @@ function commitsForGeneration(
   return commitRequests.run(
     commitsCacheKey(workspaceId, baseBranch),
     refreshKey,
-    () => gitLog({ workspaceId, limit: 50, base: baseBranch }),
+    () => loadChangesCommits(workspaceId, baseBranch),
   );
 }
 
@@ -596,6 +590,10 @@ export interface ChangesModel {
   selectTurnFilter: (t: TurnInfo | null) => void;
   turns: TurnInfo[];
   commits: Commit[];
+  commitsLoading: boolean;
+  turnsLoading: boolean;
+  commitsError: string | null;
+  turnsError: string | null;
   /** The scope-driven lists (empty while a turn filter overrides them). */
   sections: Section[];
   /** What to render: the selected turn's authored files, else `sections`. */
@@ -640,7 +638,7 @@ export function useChangesModel({
   // diverge and race conflicting Viewed-store publishes. First
   // visit → "All changes"; after that the persisted choice, per git target.
   const { scope, turn: turnFilterId } = useChangesFilter(workspaceId);
-  const sectionKey = sectionsCacheKey(workspaceId, scope);
+  const sectionKey = sectionsCacheKey(workspaceId, scope, baseBranch);
   const commitKey = commitsCacheKey(workspaceId, baseBranch);
   // Cached dropdown rows paint in the same render as a workspace switch; their
   // effects below replace them atomically in the background.
@@ -726,9 +724,10 @@ export function useChangesModel({
         workspaceId,
         scope,
         stableSections(current, resolved),
+        baseBranch,
       );
     },
-    [scope, sectionKey, workspaceId],
+    [scope, sectionKey, workspaceId, baseBranch],
   );
   // Recent commit rows power the scope menu before its refresh completes.
   const [commitsSnapshot, setCommitsSnapshot] = useState<{
@@ -742,6 +741,16 @@ export function useChangesModel({
     commitsSnapshot.key === commitKey
       ? commitsSnapshot.commits
       : (changesCommitsCache.get(commitKey) ?? []);
+  const [commitRequest, setCommitRequest] = useState({
+    key: commitKey,
+    loading: !changesCommitsCache.has(commitKey),
+    error: null as string | null,
+  });
+  const [turnRequest, setTurnRequest] = useState({
+    key: workspaceId,
+    loading: !changesTurnsCache.has(workspaceId),
+    error: null as string | null,
+  });
   const [discardTarget, setDiscardTarget] = useState<ChangedFile | null>(null);
   // Loading/error also carry their source key. A newly selected cold target
   // therefore cannot flash the previous target's rows, error, or false empty
@@ -794,15 +803,23 @@ export function useChangesModel({
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
+    setCommitRequest({ key: commitKey, loading: true, error: null });
     void commitsForGeneration(workspaceId, baseBranch, refreshKey)
       .then((c) => {
         if (!cancelled) {
           writeBoundedCache(changesCommitsCache, commitKey, c);
           setCommitsSnapshot({ key: commitKey, commits: c });
+          setCommitRequest({ key: commitKey, loading: false, error: null });
         }
       })
-      .catch(() => {
+      .catch((error) => {
         // A transient git error must not blank a confirmed scope menu.
+        if (!cancelled)
+          setCommitRequest({
+            key: commitKey,
+            loading: false,
+            error: isGitErrorShape(error) ? error.message : String(error),
+          });
       });
     return () => {
       cancelled = true;
@@ -817,11 +834,13 @@ export function useChangesModel({
   useEffect(() => {
     if (!active) return;
     let cancelled = false;
+    setTurnRequest({ key: workspaceId, loading: true, error: null });
     void turnsForGeneration(workspaceId, refreshKey)
       .then((t) => {
         if (cancelled) return;
         writeBoundedCache(changesTurnsCache, workspaceId, t);
         setTurnsSnapshot({ workspaceId, turns: t });
+        setTurnRequest({ key: workspaceId, loading: false, error: null });
         const saved = getChangesFilter(workspaceId).turn;
         if (
           saved &&
@@ -830,8 +849,14 @@ export function useChangesModel({
           setChangesTurnFilter(workspaceId, null);
         }
       })
-      .catch(() => {
+      .catch((error) => {
         // Preserve the last confirmed turn menu until a later refresh succeeds.
+        if (!cancelled)
+          setTurnRequest({
+            key: workspaceId,
+            loading: false,
+            error: isGitErrorShape(error) ? error.message : String(error),
+          });
       });
     return () => {
       cancelled = true;
@@ -850,7 +875,10 @@ export function useChangesModel({
   //  • A commit: that commit's own diff (`gitShowCommit`).
   const reload = useCallback(async () => {
     const requestId = ++reloadRequest.current;
-    const publicationToken = beginChangesSectionsRequest(sectionKey);
+    const publicationToken = beginChangesSectionsRequest(
+      sectionKey,
+      refreshKey,
+    );
     setLoading(true);
     setError(null);
     try {
@@ -907,6 +935,7 @@ export function useChangesModel({
               gitDiff({
                 workspaceId,
                 mode: "worktree-vs-base",
+                base: baseBranch,
                 rawPatch: true,
                 summaryLimit: LARGE_CHANGE_FILE_LIMIT,
               }),
@@ -947,6 +976,20 @@ export function useChangesModel({
             );
             files = [...conflicted, ...flat];
             kind = "committed";
+          } else if (isHistoryScope(scope)) {
+            const result = await gitDiff({
+              workspaceId,
+              history: scope,
+              ...(scope.kind === "commits" ? { base: baseBranch } : {}),
+              rawPatch: true,
+              summaryLimit: LARGE_CHANGE_FILE_LIMIT,
+            });
+            files = changedFilesFromDiffResult(result).map((file) => ({
+              ...file,
+              hash: hashString(file.patch),
+              committed: true,
+            }));
+            kind = "committed";
           } else {
             // A single commit — its own diff.
             const patch = (await gitShowCommit({ workspaceId, sha: scope.sha }))
@@ -980,7 +1023,11 @@ export function useChangesModel({
           {
             workspaceId,
             path: file.path,
-            diffScope: scope.kind,
+            diffScope: isHistoryScope(scope) ? "history" : scope.kind,
+            ...(scope.kind === "all" || scope.kind === "commits"
+              ? { baseBranch }
+              : {}),
+            ...(isHistoryScope(scope) ? { diffHistory: scope } : {}),
             ...(scope.kind === "commit" ? { diffSha: scope.sha } : {}),
           },
           file.patch ?? "",
@@ -1019,6 +1066,7 @@ export function useChangesModel({
     sectionKey,
     scope,
     folder,
+    baseBranch,
     refreshKey,
     setSections,
     setLoading,
@@ -1144,6 +1192,16 @@ export function useChangesModel({
     selectTurnFilter,
     turns,
     commits,
+    commitsLoading:
+      commitRequest.key === commitKey
+        ? commitRequest.loading
+        : !changesCommitsCache.has(commitKey),
+    turnsLoading:
+      turnRequest.key === workspaceId
+        ? turnRequest.loading
+        : !changesTurnsCache.has(workspaceId),
+    commitsError: commitRequest.key === commitKey ? commitRequest.error : null,
+    turnsError: turnRequest.key === workspaceId ? turnRequest.error : null,
     sections,
     effectiveSections,
     loading,
@@ -1163,14 +1221,17 @@ export function ChangesList({
   view,
   loading,
   error,
+  showError = true,
   turnFilterActive,
   rowActions,
   scrollKey,
+  searchQuery = "",
 }: {
   sections: Section[];
   view: ViewMode;
   loading: boolean;
   error: string | null;
+  showError?: boolean;
   /** Loading never blanks an active turn view — its rows come from the turn
    *  record, not the in-flight scope reload. */
   turnFilterActive: boolean;
@@ -1179,6 +1240,9 @@ export function ChangesList({
    *  every workspace switch (per-target ChangesSurface key), so a key scoped
    *  to the worktree restores the reader's place on return. */
   scrollKey?: string;
+  /** A path search reveals matching folders without overwriting their normal
+   * expansion state. Very large results keep the usual collapsed default. */
+  searchQuery?: string;
 }) {
   const memoryRef = useScrollMemoryRef(scrollKey ?? null);
   const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
@@ -1203,14 +1267,16 @@ export function ChangesList({
       className="min-h-0 flex-1 overflow-auto"
       aria-busy={loading || undefined}
     >
-      {error && (
+      {error && showError && (
         <div className="bg-red-bg text-red-fg m-3 rounded-md px-3 py-2 text-xs">
           {error}
         </div>
       )}
       {loading && !turnFilterActive && sections.length === 0 ? null : error &&
         sections.length === 0 ? null : sections.length === 0 ? (
-        <div className="text-fg2 px-3 py-4 text-xs">No changes.</div>
+        <div className="text-fg2 px-3 py-4 text-xs">
+          {searchQuery ? "No files match your search." : "No changes."}
+        </div>
       ) : virtualizeFlat ? (
         <VirtualizedFlatFiles
           sections={sections}
@@ -1223,7 +1289,14 @@ export function ChangesList({
         ))
       ) : (
         sections.map((s) => (
-          <TreeSection key={s.kind} section={s} {...rowActions} />
+          <TreeSection
+            key={s.kind}
+            section={s}
+            searchQuery={
+              flatFileCount <= LARGE_CHANGE_FILE_LIMIT ? searchQuery : ""
+            }
+            {...rowActions}
+          />
         ))
       )}
     </div>
@@ -1307,272 +1380,6 @@ function VirtualizedFlatFiles({
         ))}
       </div>
     </div>
-  );
-}
-
-// ── scope / view controls ──────────────────────
-
-/** First line of a commit message (the summary). */
-function commitSummary(message: string): string {
-  return message.split("\n", 1)[0] || message;
-}
-
-/** Scope picker: All changes · Uncommitted · or any recent commit. Picking a
- *  commit scopes the list to that commit's own diff. A non-default scope renders
- *  as a tag with a clear-to-"All changes" × beside it (no × inside the tag). */
-export function ScopeSelect({
-  scope,
-  commits,
-  changeCounts,
-  onChange,
-}: {
-  scope: Scope;
-  commits: Commit[];
-  /** Live exact-comparison totals for the four non-historical scopes. */
-  changeCounts: ChangeCounts;
-  onChange: (s: Scope) => void;
-}) {
-  const isDefault = scope.kind === "all";
-  const label =
-    scope.kind === "all"
-      ? "All changes"
-      : scope.kind === "uncommitted"
-        ? "Uncommitted"
-        : scope.kind === "staged"
-          ? "Staged"
-          : scope.kind === "unstaged"
-            ? "Unstaged"
-            : commitSummary(scope.message);
-  const countLabel = (count: number) =>
-    `${count} file${count === 1 ? "" : "s"} changed`;
-  return (
-    <div className="flex min-w-0 items-center gap-1">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              "text-fg1 hover:bg-bg2-hover flex min-w-0 items-center gap-1 rounded-sm text-sm font-normal transition-colors",
-              // A non-default scope reads as a tag (filled --bg2 pill); the
-              // default is a plain text trigger (no resting bg).
-              isDefault ? "px-1.5 py-0.5" : "bg-bg2 px-2 py-0.5",
-            )}
-          >
-            <span className="max-w-40 truncate">{label}</span>
-            <ChevronDown className="text-fg2 size-3 shrink-0" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="start"
-          className="max-h-80 w-72 overflow-auto"
-        >
-          <DropdownMenuItem
-            data-selected={scope.kind === "all" || undefined}
-            onClick={() => onChange({ kind: "all" })}
-          >
-            <span>
-              All changes
-              <span className="text-fg2 text-2xxs block">
-                {countLabel(changeCounts.all)}
-              </span>
-            </span>
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            data-selected={scope.kind === "uncommitted" || undefined}
-            onClick={() => onChange({ kind: "uncommitted" })}
-          >
-            <span>
-              Uncommitted
-              <span className="text-fg2 text-2xxs block">
-                {countLabel(changeCounts.uncommitted)}
-              </span>
-            </span>
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            data-selected={scope.kind === "staged" || undefined}
-            onClick={() => onChange({ kind: "staged" })}
-          >
-            <span>
-              Staged
-              <span className="text-fg2 text-2xxs block">
-                {countLabel(changeCounts.staged)}
-              </span>
-            </span>
-          </DropdownMenuItem>
-          <DropdownMenuItem
-            data-selected={scope.kind === "unstaged" || undefined}
-            onClick={() => onChange({ kind: "unstaged" })}
-          >
-            <span>
-              Unstaged
-              <span className="text-fg2 text-2xxs block">
-                {countLabel(changeCounts.unstaged)}
-              </span>
-            </span>
-          </DropdownMenuItem>
-          {commits.length > 0 && (
-            <DropdownMenuSeparator className="bg-border3" />
-          )}
-          {commits.map((c) => (
-            <DropdownMenuItem
-              key={c.sha}
-              data-selected={
-                (scope.kind === "commit" && scope.sha === c.sha) || undefined
-              }
-              onClick={() =>
-                onChange({ kind: "commit", sha: c.sha, message: c.message })
-              }
-            >
-              <span className="min-w-0">
-                <span className="block truncate">
-                  {commitSummary(c.message)}
-                </span>
-                <span className="text-fg2 text-2xxs block truncate">
-                  {c.abbreviatedSha} · {c.authorName}
-                </span>
-              </span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      {!isDefault && (
-        <Tooltip label="Show all changes">
-          <button
-            type="button"
-            onClick={() => onChange({ kind: "all" })}
-            className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-5 shrink-0 items-center justify-center rounded-sm transition-colors"
-          >
-            <X className="size-3.5" />
-          </button>
-        </Tooltip>
-      )}
-    </div>
-  );
-}
-
-/** First non-empty line of a turn's summary (the user's prompt), trimmed. */
-function turnSummary(t: TurnInfo): string {
-  const s = (t.summary ?? "").trim();
-  return s.length > 0 ? s : "Turn";
-}
-
-/** Coarse "x ago" for the turn dropdown subtitle. */
-function relTime(ms: number): string {
-  const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
-  if (s < 60) return "just now";
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-/** Turn filter: "No turns" (the scope filter applies) or one file-changing turn
- *  (its agent-authored changes). Newest first. Conversational/no-op turns never
- *  reach this list. Mirrors ScopeSelect's tag styling and sits beside it. Hidden
- *  entirely when the workspace has no file-changing turns yet. */
-export function TurnSelect({
-  turns,
-  selected,
-  onChange,
-}: {
-  turns: TurnInfo[];
-  selected: TurnInfo | null;
-  onChange: (t: TurnInfo | null) => void;
-}) {
-  if (turns.length === 0 && !selected) return null;
-  const label = selected ? turnSummary(selected) : "No turns";
-  return (
-    <div className="flex min-w-0 items-center gap-1">
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <button
-            type="button"
-            className={cn(
-              "text-fg1 hover:bg-bg2-hover flex min-w-0 items-center gap-1 rounded-sm text-sm font-normal transition-colors",
-              selected ? "bg-bg2 px-2 py-0.5" : "px-1.5 py-0.5",
-            )}
-          >
-            <span className="max-w-40 truncate">{label}</span>
-            <ChevronDown className="text-fg2 size-3 shrink-0" />
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent
-          align="start"
-          className="max-h-80 w-72 overflow-auto"
-        >
-          <DropdownMenuItem
-            data-selected={!selected || undefined}
-            onClick={() => onChange(null)}
-          >
-            No turns
-          </DropdownMenuItem>
-          {turns.length > 0 && <DropdownMenuSeparator className="bg-border3" />}
-          {turns.map((t) => (
-            <DropdownMenuItem
-              key={`${t.chatId}:${t.turnId}`}
-              data-selected={
-                (selected?.chatId === t.chatId &&
-                  selected.turnId === t.turnId) ||
-                undefined
-              }
-              onClick={() => onChange(t)}
-            >
-              <span className="min-w-0">
-                <span className="block truncate">{turnSummary(t)}</span>
-                <span className="text-fg2 text-2xxs block truncate">
-                  {t.files.length} file{t.files.length === 1 ? "" : "s"} ·{" "}
-                  {relTime(t.startedAt)}
-                </span>
-              </span>
-            </DropdownMenuItem>
-          ))}
-        </DropdownMenuContent>
-      </DropdownMenu>
-      {selected && (
-        <Tooltip label="No turns">
-          <button
-            type="button"
-            onClick={() => onChange(null)}
-            className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-5 shrink-0 items-center justify-center rounded-sm transition-colors"
-          >
-            <X className="size-3.5" />
-          </button>
-        </Tooltip>
-      )}
-    </div>
-  );
-}
-
-/** Single flat ⇄ tree toggle. Flat is the default: it shows the TREE icon with
- *  no bg (click → switch to the folder tree). Tree view shows the LIST icon WITH
- *  a bg (click → back to the flat default). The icon is the view you'd switch
- *  to; the bg marks that you've left the default. */
-export function ViewToggle({
-  view,
-  onChange,
-}: {
-  view: ViewMode;
-  onChange: (v: ViewMode) => void;
-}) {
-  const tree = view === "tree";
-  return (
-    <Tooltip label={tree ? "Flat list" : "Folder tree"}>
-      <button
-        type="button"
-        onClick={() => onChange(tree ? "flat" : "tree")}
-        className={cn(
-          "flex size-6 items-center justify-center rounded-sm transition-colors",
-          tree ? "bg-bg2-hover text-fg1" : "text-fg2 hover:bg-bg2-hover/50",
-        )}
-      >
-        {tree ? (
-          <List className="size-3.5" />
-        ) : (
-          <ListTree className="size-3.5" />
-        )}
-      </button>
-    </Tooltip>
   );
 }
 
@@ -1719,6 +1526,7 @@ const FileRow = React.memo(function FileRow({
       )}
       style={{ paddingLeft: 4 + depth * 14 }} // check:ui ignore-line (18px left at depth 1 (flat Changes list); 12px right via pr-3)
     >
+      {!showDir && <FileTypeIcon name={file.path} />}
       {isRename ? (
         // Moved file → "old/path → new/path" (both dirs dimmed, names bright).
         <Tooltip label={`${file.oldPath} → ${file.path}`}>
@@ -1925,9 +1733,24 @@ function StatusGlyph({ status }: { status: FileChangeStatus }) {
 
 // ── file list (tree) ─────────────────────────────────────────
 
-function TreeSection({ section, ...a }: { section: Section } & RowActions) {
+function useTreeExpansion(defaultOpen: boolean, searchQuery: string) {
+  const [open, setOpen] = useState(defaultOpen);
+  const [collapsedSearch, setCollapsedSearch] = useState<string | null>(null);
+  const expanded = searchQuery ? collapsedSearch !== searchQuery : open;
+  const toggle = () => {
+    if (searchQuery) setCollapsedSearch(expanded ? searchQuery : null);
+    else setOpen((value) => !value);
+  };
+  return { expanded, toggle };
+}
+
+function TreeSection({
+  section,
+  searchQuery,
+  ...a
+}: { section: Section; searchQuery: string } & RowActions) {
   const tree = useMemo(() => buildFileTree(section.files), [section.files]);
-  const [open, setOpen] = useState(true);
+  const { expanded, toggle } = useTreeExpansion(true, searchQuery);
   const collapseFolders = section.files.length > LARGE_CHANGE_FILE_LIMIT;
   const rows = tree.map((node) => (
     <TreeRow
@@ -1935,6 +1758,7 @@ function TreeSection({ section, ...a }: { section: Section } & RowActions) {
       node={node}
       depth={1}
       collapseFolders={collapseFolders}
+      searchQuery={searchQuery}
       {...a}
     />
   ));
@@ -1942,12 +1766,12 @@ function TreeSection({ section, ...a }: { section: Section } & RowActions) {
   return (
     <div>
       <SectionHeader
-        open={open}
+        open={expanded}
         title={section.title}
         count={section.files.length}
-        onToggle={() => setOpen((o) => !o)}
+        onToggle={toggle}
       />
-      {open && rows}
+      {expanded && rows}
     </div>
   );
 }
@@ -1956,6 +1780,7 @@ function TreeRow({
   node,
   depth,
   collapseFolders,
+  searchQuery,
   selected,
   viewedKey,
   viewedVersion,
@@ -1964,8 +1789,9 @@ function TreeRow({
   node: TreeNode;
   depth: number;
   collapseFolders: boolean;
+  searchQuery: string;
 } & RowActions) {
-  const [open, setOpen] = useState(!collapseFolders);
+  const { expanded, toggle } = useTreeExpansion(!collapseFolders, searchQuery);
   if (node.file) {
     return (
       <FileRow
@@ -1981,11 +1807,12 @@ function TreeRow({
     <div>
       <button
         type="button"
-        onClick={() => setOpen((o) => !o)}
+        onClick={toggle}
+        aria-expanded={expanded}
         className="text-fg2 hover:bg-bg2-hover/40 flex w-full items-center gap-1.5 py-1 pr-3 text-left text-xs transition-colors"
         style={{ paddingLeft: 4 + depth * 14 }} // check:ui ignore-line (tree folder row — same 4+depth*14 indent as FileRow so files/folders align)
       >
-        {open ? (
+        {expanded ? (
           <ChevronDown className="size-3" />
         ) : (
           <ChevronRight className="size-3" />
@@ -1993,13 +1820,14 @@ function TreeRow({
         <Folder className="size-3.5" />
         <span className="truncate">{node.name}</span>
       </button>
-      {open &&
+      {expanded &&
         node.children.map((c) => (
           <TreeRow
             key={c.name + (c.path ?? "")}
             node={c}
             depth={depth + 1}
             collapseFolders={collapseFolders}
+            searchQuery={searchQuery}
             selected={selected}
             viewedKey={viewedKey}
             viewedVersion={viewedVersion}
