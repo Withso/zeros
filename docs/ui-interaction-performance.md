@@ -225,7 +225,7 @@ A busy indicator may be delayed roughly 100–120 ms to avoid a flash for a fast
 - Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
 - Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
 - Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
-- Terminal retention: the bounded folder deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`.
+- Terminal retention: the bounded folder/session deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`, with stable portal hosts across main-tab and bottom-panel placement (see `docs/terminal-workbench.md`).
 - Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
 - One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
 - Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.

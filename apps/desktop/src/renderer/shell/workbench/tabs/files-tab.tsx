@@ -429,11 +429,8 @@ export const FilesTab = React.memo(function FilesTab({
         <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           <div
             data-testid="files-tree-header"
-            className="border-border1 flex h-9 shrink-0 items-center justify-between gap-2 border-b px-2"
+            className="border-border1 flex h-9 shrink-0 items-center justify-end gap-2 border-b px-2"
           >
-            <span className="text-fg2 truncate text-xs font-medium">
-              No file open
-            </span>
             {sidebarActions}
           </div>
           <div className="flex min-h-0 flex-1 overflow-hidden">

@@ -24,6 +24,14 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
+import { isRunSessionId } from "@zeros/protocol/run-actions";
+import {
+  openTerminalTab,
+  reconcileTerminalTabs,
+  terminalTabNeighbor,
+  visibleWorkbenchTabs,
+  type OpenTerminalIntent,
+} from "../shell/workbench/terminal-tabs";
 
 import { loadAiSettings } from "../shared/lib/openai";
 import { normalizeChatPermissionMode } from "./chat-permission";
@@ -278,6 +286,14 @@ export type Action =
   | { type: "SET_NEW_AGENT_FOLDER"; folder: string | null }
   | { type: "BUMP_PROJECT_GENERATION" }
   // Workbench tabs
+  | ({ type: "OPEN_WORKBENCH_TERMINAL"; scope: string } & OpenTerminalIntent)
+  | {
+      type: "RECONCILE_WORKBENCH_TERMINALS";
+      scope: string;
+      titles: Array<[string, string]>;
+      sessionsReady: boolean;
+      actionsReady: boolean;
+    }
   | { type: "RESET_WORKBENCH_TABS" }
   | {
       type: "ADD_WORKBENCH_TAB";
@@ -739,6 +755,23 @@ function removeWorkbenchTabs(
   if (removed.size === 0) return cur;
 
   const tabs = cur.tabs.filter((t) => !removed.has(t.id));
+  const activeTerminalPanelId = terminalTabNeighbor(
+    tabs.filter((t) => t.terminalPlacement === "panel"),
+    cur.tabs,
+    cur.activeTerminalPanelId ?? null,
+  );
+  if (cur.tabs.some((t) => t.type === "terminal")) {
+    return {
+      ...cur,
+      tabs,
+      activeId: terminalTabNeighbor(
+        visibleWorkbenchTabs(tabs),
+        cur.tabs,
+        cur.activeId,
+      ),
+      activeTerminalPanelId,
+    };
+  }
   if (!cur.activeId || !removed.has(cur.activeId)) {
     return { ...cur, tabs, activeId: cur.activeId };
   }
@@ -1593,6 +1626,32 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     // Each case reads/writes the ACTIVE worktree's slice in workbenchByScope,
     // seeding from the per-scope default home tabs when the
     // worktree has no slice yet.
+    case "OPEN_WORKBENCH_TERMINAL":
+    case "RECONCILE_WORKBENCH_TERMINALS": {
+      const scope = workbenchScopeForFolder(action.scope);
+      const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+      const next =
+        action.type === "OPEN_WORKBENCH_TERMINAL"
+          ? openTerminalTab(cur, action)
+          : reconcileTerminalTabs(
+              cur,
+              new Map(action.titles),
+              (id) =>
+                id === "setup" ||
+                (isRunSessionId(id) || id === "run:add"
+                  ? action.actionsReady
+                  : action.sessionsReady),
+            );
+      if (next === cur) return state;
+      return {
+        ...state,
+        workbenchByScope: setWorkbenchScope(
+          state.workbenchByScope,
+          scope,
+          next,
+        ),
+      };
+    }
     case "RESET_WORKBENCH_TABS": {
       const scope = workbenchScopeKey(state);
       return {
@@ -1713,6 +1772,17 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
       if (!cur.tabs.some((t) => t.id === action.id)) return state;
+      const terminal = cur.tabs.find(
+        (t) => t.id === action.id && t.type === "terminal",
+      );
+      if (terminal?.terminalId) {
+        return reducer(state, {
+          type: "OPEN_WORKBENCH_TERMINAL",
+          scope,
+          terminalId: terminal.terminalId,
+          title: terminal.title,
+        });
+      }
       if (cur.activeId === action.id) return state;
       return {
         ...state,

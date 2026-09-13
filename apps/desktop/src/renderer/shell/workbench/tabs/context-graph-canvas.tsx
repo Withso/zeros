@@ -1,6 +1,6 @@
 // ============================================
 // COMPONENT: ContextGraphCanvas
-// PURPOSE: Lightweight pan/zoom canvas over the workspace's .context-graph —
+// PURPOSE: Lightweight pan/zoom canvas over the workspace's .context —
 //          auto-laid-out cards (attachments + docs) the user can look around
 //          but never drag. Pan: drag / trackpad scroll / space+drag. Zoom:
 //          pinch or ⌘/Ctrl+scroll, anchored at the cursor.

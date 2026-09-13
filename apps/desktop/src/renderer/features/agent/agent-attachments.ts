@@ -181,7 +181,7 @@ export function iconForFile(name: string, mimeType: string): LucideIcon {
  *
  *  Sending an image to a non-vision agent is no
  *  longer marked invalid — the submit flow now writes the bytes to
- *  `<cwd>/.context-graph/<scope>/attachments/...` and references them by path inside
+ *  `<cwd>/.context/<scope>/attachments/...` and references them by path inside
  *  a text block, so EVERY agent at minimum receives the file
  *  location. Vision-capable models (Claude, GPT-5, Cursor Composer-2)
  *  can then call their built-in Read / vision tool on that path;

@@ -40,6 +40,121 @@ const dispatch = (action: Action) =>
   useWorkspaceStore.getState().dispatch(action);
 const slice = () => selectWorkbench(useWorkspaceStore.getState());
 
+describe("terminal placement transactions", () => {
+  it("publishes placement and both destinations in one notification", () => {
+    const scope = "/terminal/atomic";
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "one",
+      title: "One",
+    });
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "two",
+      title: "Two",
+    });
+    const snapshots: unknown[] = [];
+    const off = useWorkspaceStore.subscribe((state) =>
+      snapshots.push(state.workbenchByScope[scope]),
+    );
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "two",
+      title: "Two",
+      placement: "panel",
+    });
+    off();
+    expect(snapshots).toHaveLength(1);
+    const current = useWorkspaceStore.getState().workbenchByScope[scope];
+    expect(
+      current.tabs.find((t) => t.id === current.activeId)?.terminalId,
+    ).toBe("one");
+    expect(
+      current.tabs.find((t) => t.id === current.activeTerminalPanelId),
+    ).toMatchObject({ terminalId: "two", terminalPlacement: "panel" });
+  });
+
+  it("keeps delayed reconciliation in its original workspace and waits for each read kind", () => {
+    const scope = "/terminal/background";
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "plain",
+      title: "Plain",
+    });
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "pty-run-old",
+      title: "Run",
+    });
+    dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: "/terminal/foreground" });
+    const foreground = slice();
+    dispatch({
+      type: "RECONCILE_WORKBENCH_TERMINALS",
+      scope,
+      titles: [],
+      sessionsReady: false,
+      actionsReady: true,
+    });
+    expect(slice()).toBe(foreground);
+    expect(
+      useWorkspaceStore
+        .getState()
+        .workbenchByScope[scope].tabs.filter((t) => t.type === "terminal")
+        .map((t) => t.terminalId),
+    ).toEqual(["plain"]);
+    dispatch({
+      type: "RECONCILE_WORKBENCH_TERMINALS",
+      scope,
+      titles: [],
+      sessionsReady: true,
+      actionsReady: true,
+    });
+    expect(
+      useWorkspaceStore
+        .getState()
+        .workbenchByScope[scope].tabs.some((t) => t.type === "terminal"),
+    ).toBe(false);
+    expect(slice()).toBe(foreground);
+  });
+
+  it("closing a main tab skips a docked neighbor, while closing the panel preserves the main tab", () => {
+    const scope = "/terminal/close";
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "main",
+      title: "Main",
+    });
+    dispatch({
+      type: "OPEN_WORKBENCH_TERMINAL",
+      scope,
+      terminalId: "panel",
+      title: "Panel",
+      placement: "panel",
+    });
+    const current = useWorkspaceStore.getState().workbenchByScope[scope];
+    dispatch({ type: "REMOVE_WORKBENCH_TAB", scope, id: current.activeId! });
+    const closedMain = useWorkspaceStore.getState().workbenchByScope[scope];
+    expect(closedMain.activeId).not.toBe(current.activeTerminalPanelId);
+    expect(closedMain.activeTerminalPanelId).toBe(
+      current.activeTerminalPanelId,
+    );
+    dispatch({
+      type: "REMOVE_WORKBENCH_TAB",
+      scope,
+      id: current.activeTerminalPanelId!,
+    });
+    const closedPanel = useWorkspaceStore.getState().workbenchByScope[scope];
+    expect(closedPanel.activeId).toBe(closedMain.activeId);
+    expect(closedPanel.activeTerminalPanelId).toBeNull();
+  });
+});
+
 let sequence = 0;
 function freshScope(): string {
   sequence += 1;
@@ -55,7 +170,7 @@ describe("workbench default slice", () => {
     expect(workbenchScopeForFolder(null)).toBe("__ambient__");
   });
 
-  it("seeds exactly Open file, Changes, Review, Context with Open file active", () => {
+  it("seeds the file and review homes plus Setup with Open file active", () => {
     freshScope();
     const { tabs, activeId, recentBrowsers } = slice();
 
@@ -64,12 +179,14 @@ describe("workbench default slice", () => {
       ["changes", "Changes"],
       ["review", "Review"],
       ["context", "Context"],
+      ["terminal", "Setup"],
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
       true,
       true,
       true,
+      false,
     ]);
     expect(tabs[0].fixed).toBe(true);
     expect(activeId).toBe(tabs[0].id);
@@ -91,6 +208,7 @@ describe("workbench default slice", () => {
       "Changes",
       "Review",
       "Context",
+      "Setup",
     ]);
     expect(slice().activeId).toBe(slice().tabs[0].id);
     expect(slice().recentBrowsers).toEqual([]);
@@ -230,11 +348,12 @@ describe("ADD_WORKBENCH_TAB", () => {
       "changes",
       "review",
       "context",
+      "terminal",
       "files",
     ]);
     expect(slice().tabs[0].id).toBe(home.id);
-    expect(slice().tabs[4].id).toBe(extra.id);
-    expect(slice().tabs[4].fixed).toBeUndefined();
+    expect(slice().tabs.at(-1)!.id).toBe(extra.id);
+    expect(slice().tabs.at(-1)!.fixed).toBeUndefined();
     expect(slice().activeId).toBe(extra.id);
   });
 
@@ -269,6 +388,7 @@ describe("ADD_WORKBENCH_TAB", () => {
         { type: "changes" },
         { type: "review" },
         { type: "context" },
+        { type: "terminal", terminalId: "setup" },
         { id: fileA.id, fileTreeVisible: false },
       ],
     });
@@ -438,6 +558,7 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
       "changes",
       "review",
       "context",
+      "terminal",
     ]);
   });
 
@@ -511,10 +632,10 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
       updates: { filePath: undefined },
     });
     // Extras close entirely; the close-neighbor policy picks the next tab
-    // (Context now sits between Review and the extra).
+    // (Setup is the nearest surviving tab before the extra).
     expect(slice().tabs.some((tab) => tab.id === extra.id)).toBe(false);
     expect(slice().activeId).toBe(
-      slice().tabs.find((tab) => tab.type === "context")!.id,
+      slice().tabs.find((tab) => tab.terminalId === "setup")!.id,
     );
   });
 
@@ -875,6 +996,7 @@ describe("REORDER_WORKBENCH_TABS", () => {
       browser.id,
       second.id,
       first.id,
+      slice().tabs.find((tab) => tab.terminalId === "setup")!.id,
     ]);
   });
 });

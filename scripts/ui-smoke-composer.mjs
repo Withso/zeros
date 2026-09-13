@@ -64,6 +64,7 @@ import { runPersonalOrganizationSmoke } from "./ui-smoke-personal.mjs";
 import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
 import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
+import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -2472,6 +2473,7 @@ try {
   await runPersonalOrganizationSmoke({ page, check });
   await runCustomizeSmoke({ page, check });
   await runRepoSettingsSmoke({ page, check });
+  await runTerminalWorkbenchSmoke({ page, check });
 
   // Whole-run invariant.
   check(

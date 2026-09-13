@@ -1,7 +1,7 @@
 // ============================================
 // COMPONENT: ContextSurface
 // PURPOSE: THE pinned workbench Context tab — a pan/zoom canvas over the
-//          workspace's .context-graph (composer attachments + shared docs).
+//          workspace's .context (composer attachments + shared docs).
 //          Third home tab after Changes and Review; one per worktree, never
 //          closable. Data rides the shared git refresh bus, so attachment
 //          writes (agent turn end) and external edits re-list live.
@@ -10,7 +10,7 @@
 
 // --- IMPORTS ---
 import React, { useCallback, useEffect, useState } from "react";
-import { Shapes } from "lucide-react";
+import { Book } from "lucide-react";
 
 import {
   setContextGraphShared,
@@ -106,7 +106,7 @@ export const ContextSurface = React.memo(function ContextSurface({
       try {
         const res = await setContextGraphShared(cwd, attachmentId, shared);
         if (!res.ok) {
-          throw new Error("The attachment couldn't be moved");
+          throw new Error(res.error ?? "The attachment couldn't be moved");
         }
         await loadContextGraph(cwd, { force: true });
         triggerGitRefresh(cwd);
@@ -131,15 +131,15 @@ export const ContextSurface = React.memo(function ContextSurface({
   const data = snapshot.data;
   const body = !cwd ? (
     <EmptyState
-      icon={Shapes}
+      icon={Book}
       title="No workspace"
       subtitle="Open a workspace to see its context canvas."
     />
   ) : !isNativeRuntime() ? (
     <EmptyState
-      icon={Shapes}
+      icon={Book}
       title="Desktop only for now"
-      subtitle="The context canvas reads the workspace's .context-graph folder, which includes private (gitignored) material — open this workspace in the desktop app to browse it."
+      subtitle="The context canvas reads the workspace's .context folder, which includes private (gitignored) material — open this workspace in the desktop app to browse it."
     />
   ) : !data && snapshot.loading ? (
     // Cold first list for this folder — sub-100ms locally; render the canvas
@@ -147,16 +147,12 @@ export const ContextSurface = React.memo(function ContextSurface({
     <div className="bg-bg1 min-h-0 flex-1" />
   ) : !data && snapshot.error ? (
     <EmptyState
-      icon={Shapes}
+      icon={Book}
       title="Couldn't read the context graph"
-      subtitle="The engine couldn't list this workspace's .context-graph folder. It retries automatically on the next refresh."
+      subtitle="The engine couldn't list this workspace's .context folder. It retries automatically on the next refresh."
     />
   ) : !data || data.items.length === 0 ? (
-    <EmptyState
-      icon={Shapes}
-      title="Nothing in the context graph yet"
-      subtitle="Files and chat transcripts you attach in the composer land in .context-graph and appear here automatically. Tick a card's checkbox to move it out of gitignore and share it with the repo."
-    />
+    <EmptyState icon={Book} title="No context added" />
   ) : (
     <>
       <ContextGraphCanvas
@@ -174,5 +170,17 @@ export const ContextSurface = React.memo(function ContextSurface({
       )}
     </>
   );
-  return <div className="bg-bg1 flex h-full min-h-0 flex-col">{body}</div>;
+  return (
+    <div className="bg-bg1 flex h-full min-h-0 flex-col">
+      {data?.storageError && (
+        <div
+          role="alert"
+          className="text-fg2 border-border1 border-b px-3 py-2 text-xs"
+        >
+          {data.storageError}
+        </div>
+      )}
+      {body}
+    </div>
+  );
 });

@@ -10,7 +10,7 @@ import { DownloadButton } from './DownloadButton'
 export function Nav({ flush = false }: { flush?: boolean }) {
   return (
     <header className={`sticky top-0 z-50 ${flush ? 'bg-transparent' : 'bg-bg1'}`}>
-      <div className="mx-auto flex h-16 w-full max-w-[1240px] items-center justify-between px-5 sm:px-8 lg:px-10">
+      <div className="mx-auto flex h-16 w-full max-w-[1320px] items-center justify-between px-5 sm:px-8 lg:px-12">
         <a href="/" className="select-none" aria-label="Zeros home">
           <BrandLockup size="lg" />
         </a>

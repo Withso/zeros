@@ -1,28 +1,14 @@
 // ──────────────────────────────────────────────────────────
-// TerminalPanel — workbench terminal panel (Setup / Run / Terminal tabs)
+// TerminalPanel — shared terminal controller and retained view deck
 // ──────────────────────────────────────────────────────────
-//
-// The always-present, resizable second row below the Changes / Review / Files /
-// Browser row. Its former nested sub-tabs are now the row's first-class tabs:
-//
-//   [Setup] [Run?] [Terminal] [Terminal 2] … [+]
-//
-//   • Setup   — the workspace's setup-script output (SetupView), engine-backed
-//               for the trunk AND worktrees alike. Always present (an empty
-//               state for a no-script repo). When Setup is NOT the active
-//               sub-tab, its label carries a status dot (see useSetupTabDot).
-//   • Run     — the repo's `scripts.run` dev server (a deterministic run PTY).
-//               Shown only when the repo defines `scripts.run`. Clicking the tab
-//               just OPENS it — a "Start Run" empty state until the dev server is
-//               actually started (via that button, or the terminal panel header Run
-//               button). Once started/exited, the run terminal renders here.
-//   • Terminal(s) — plain shells; "Terminal" alone, else "Terminal 1/2/3…".
-//   • [+]     — adds a plain terminal.
-//
-// The panel stays mounted while collapsed so xterm DOM, PTYs, engine sync, and
-// auto-seeding survive every workbench tab switch and terminal panel collapse. `expanded`
-// only gates fitting/focus and the selected visual state.
-// ──────────────────────────────────────────────────────────
+// Setup, configured Run actions, and plain shells appear in the main terminal
+// sidebar. Selecting a row opens/focuses that destination's own primary tab.
+// Each tab can dock independently into the existing resizable bottom panel.
+// The renderer moves stable portal hosts between the two surfaces so xterm,
+// scrollback, selection, and PTY subscriptions survive a placement change.
+// The engine still owns processes. UI navigation never starts a Run action.
+// Four workspace folders and twelve session views are retained; hidden views
+// remain inert and suspend focus, measurement, shortcuts, and status reads.
 
 import React, {
   useCallback,
@@ -35,20 +21,36 @@ import React, {
   type ReactNode,
 } from "react";
 import {
+  PanelTop,
   ChevronDown,
   ChevronUp,
   Play,
   Plus,
   RotateCw,
-  Square,
   X,
 } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import { type RunAction } from "@zeros/protocol/run-actions";
 
+import { createPortal } from "react-dom";
+import { defaultScopeFor } from "../tab-model";
+import { workbenchScopeKey } from "../../../state/workspace-store";
+import {
+  addWorkbenchTerminal,
+  openWorkbenchTerminal,
+  closeWorkbenchTerminal,
+} from "../open-terminal";
+import { TerminalPanelResizer } from "../../terminal/terminal-panel-resizer";
+import { RetainedTerminalSurface } from "../../terminal/retained-terminal-surface";
+import {
+  TerminalWorkbenchLayout,
+  type TerminalNavigationEntry,
+} from "../../terminal/terminal-workbench-layout";
+import { useRetainedViewKeySet } from "../../use-retained-view-keys";
 import { cn } from "../../../shared/ui/cn";
 import { Button } from "../../../shared/ui";
 import { Badge, Tooltip } from "../../../shared/ui/primitives";
+import { RunWave } from "../../../shared/ui/loading";
 import { DynamicIcon } from "../../../shared/ui/icon-registry";
 import { useWorkspaceStore } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
@@ -74,23 +76,30 @@ import {
   selectPanelTerminals,
 } from "../../terminal/terminal-registry-sync";
 import { TerminalSessionView } from "../../terminal/terminal-session-view";
-import { RunControl } from "../../terminal/run-control";
+import { useRunShortcut } from "../../terminal/use-run-shortcut";
+import { useRunPreviewUrls } from "../../terminal/use-run-preview-urls";
+import { RunSessionButtons } from "../../terminal/run-session-buttons";
+import { useOpenBrowserInWorkbench } from "../use-open-browser";
+import { prefetchSettingsForRepo } from "../../../features/settings/use-settings";
 import { useRunControl } from "../../terminal/use-run-control";
 import { useRunStatuses } from "../../terminal/use-run-status";
 import { publishRunActivity } from "../../terminal/run-activity-store";
 import { SETUP_SUBTAB } from "../../terminal/use-setup-control";
 import { useRetainedViewKeys } from "../../use-retained-view-keys";
 import { useInstantViewSwitch } from "../../../shared/ui/use-instant-view-switch";
-import {
-  RUN_ADD_SUBTAB,
-  resolveTerminalPanelTab,
-} from "../../terminal/terminal-tab-selection";
+import { RUN_ADD_SUBTAB } from "../../terminal/terminal-tab-selection";
 import { useTerminalPanelLayoutStore } from "../../terminal/terminal-panel-layout";
+import {
+  publishTerminalTabIndicators,
+  peekTerminalTabIndicators,
+  terminalTabIconName,
+} from "../../terminal/terminal-tab-indicators";
 import {
   SetupView,
   isSetupOutcome,
   useOpenScriptsSettings,
   type SetupOutcome,
+  type SetupViewHandle,
 } from "./setup-tab";
 import {
   WORKBENCH_TAB_PILL_ACTIVE_CLS,
@@ -104,17 +113,19 @@ import {
   StickyTabStripFades,
   useStickyTabStrip,
 } from "../../use-sticky-tab-strip";
-import { RunWave, ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { runOverlayWrapperClass } from "./run-overlay-layout";
 
 /** Sync the engine's SHARED terminal registry into a folder's tab strip:
  *  fetch the terminals the engine knows about, ADD those whose cwd
  *  matches THIS folder, REMOVE any confirmed-then-closed on another device, and
- *  re-sync whenever the set changes anywhere. Moved verbatim from the old
- *  terminal panel panel (see git history) — the terminals live here now, so the
- *  sync does too. `synced` gates the auto-seed so we don't duplicate a terminal
- *  another device already opened. */
-function useEngineTerminalSync(folder: string): { synced: boolean } {
+ *  re-sync whenever the set changes anywhere. One controller serves both
+ *  terminal placements. Exact-folder readiness gates the auto-seed so we
+ *  don't duplicate a terminal another device already opened. */
+function useEngineTerminalSync(
+  folder: string,
+  active: boolean,
+): { synced: boolean } {
   const sync = useTerminalStore((s) => s.syncEngineTerminals);
   // Conversation pane terminal-AGENT chats spawn engine PTYs (keyed by CHAT id) into the
   // SAME shared registry. Excluding them here keeps a conversation pane agent terminal from
@@ -123,13 +134,16 @@ function useEngineTerminalSync(folder: string): { synced: boolean } {
   const chatTerminalIds = useWorkspaceStore(
     useShallow((s) => selectExcludedChatTerminalIds(s.chats)),
   );
-  const [synced, setSynced] = useState(false);
+  const [syncedFolder, setSyncedFolder] = useState<string | null>(null);
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
+    let generation = 0;
     const excluded = new Set(chatTerminalIds);
     const refresh = async () => {
+      const request = ++generation;
       const terms = await ptyTerminals();
-      if (cancelled) return;
+      if (cancelled || request !== generation) return;
       // null = engine unreachable: don't reconcile (would wrongly prune tabs).
       if (terms !== null) {
         const { inFolder, aliveIds } = selectPanelTerminals(
@@ -138,21 +152,23 @@ function useEngineTerminalSync(folder: string): { synced: boolean } {
           folder,
         );
         sync(folder, inFolder, aliveIds);
+        setSyncedFolder(folder);
       }
-      setSynced(true);
     };
-    setSynced(false);
+    setSyncedFolder(null);
     void refresh();
     const off = onPtyTerminalsChanged(() => void refresh());
     return () => {
       cancelled = true;
       off();
     };
-  }, [folder, sync, chatTerminalIds]);
-  return { synced };
+  }, [folder, sync, chatTerminalIds, active]);
+  return { synced: syncedFolder === folder };
 }
 
 interface TerminalPanelProps {
+  workbenchHost: HTMLDivElement | null;
+  containerRef: React.RefObject<HTMLDivElement | null>;
   folderKey: string;
   chatCwd: string | undefined;
   /** False while the persistent workspace route is hidden behind Home. */
@@ -171,8 +187,56 @@ export function TerminalPanel({
   folderKey,
   chatCwd,
   surfaceActive = true,
+  workbenchHost,
+  containerRef,
 }: TerminalPanelProps) {
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const [mainBody, setMainBody] = useState<HTMLDivElement | null>(null);
+  const [panelBody, setPanelBody] = useState<HTMLDivElement | null>(null);
+  const [parking, setParking] = useState<HTMLDivElement | null>(null);
+  const setupViewRef = useRef<SetupViewHandle | null>(null);
+  const [busySetupOwners, setBusySetupOwners] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const handleSetupBusyChange = useCallback((owner: string, busy: boolean) => {
+    setBusySetupOwners((previous) => {
+      if (previous.has(owner) === busy) return previous;
+      const next = new Set(previous);
+      if (busy) next.add(owner);
+      else next.delete(owner);
+      return next;
+    });
+  }, []);
+  // The chatless workbench owns the ambient tab slice while its PTYs still
+  // use the resolved engine folder. Keep UI ownership separate from cwd.
+  const scope = useWorkspaceStore(workbenchScopeKey);
+  const workbench = useWorkspaceStore(
+    (state) => state.workbenchByScope[scope] ?? defaultScopeFor(scope),
+  );
+  const dispatch = useWorkspaceStore((state) => state.dispatch);
+  const mainTab =
+    workbench.tabs.find(
+      (tab) =>
+        tab.id === workbench.activeId &&
+        tab.type === "terminal" &&
+        tab.terminalPlacement !== "panel",
+    ) ?? null;
+  const panelTabs = useMemo(
+    () =>
+      workbench.tabs.filter(
+        (tab) => tab.type === "terminal" && tab.terminalPlacement === "panel",
+      ),
+    [workbench.tabs],
+  );
+  const panelTab =
+    panelTabs.find((tab) => tab.id === workbench.activeTerminalPanelId) ??
+    panelTabs[0] ??
+    null;
+  const dockedIds = useMemo(
+    () => new Set(panelTabs.map((tab) => tab.terminalId)),
+    [panelTabs],
+  );
+  const hasPanel = panelTabs.length > 0;
   const { workspace: activeWs } = useActiveWorkspace();
   const expanded = useTerminalPanelLayoutStore(
     (state) => state.layout.expanded,
@@ -237,20 +301,43 @@ export function TerminalPanel({
     () => new Set(folderKeysToRender),
     [folderKeysToRender],
   );
-  const retainedSessions = useMemo(
+  const folderSessions = useMemo(
     () =>
       allSessions.filter((session) => retainedFolderSet.has(session.folder)),
     [allSessions, retainedFolderSet],
   );
+  const availableSessionIds = useMemo(
+    () => new Set(folderSessions.map((s) => s.id)),
+    [folderSessions],
+  );
+  const sessionIdsToRetain = useMemo(
+    () => [
+      ...folderSessions.filter((s) => s.folder === folderKey).map((s) => s.id),
+      ...(mainTab?.terminalId ? [mainTab.terminalId] : []),
+      ...(panelTab?.terminalId ? [panelTab.terminalId] : []),
+    ],
+    [folderSessions, folderKey, mainTab?.terminalId, panelTab?.terminalId],
+  );
+  const retainedSessionIds = useRetainedViewKeySet(
+    sessionIdsToRetain,
+    12,
+    availableSessionIds,
+  );
+  const retainedSessions = useMemo(() => {
+    const ids = new Set(retainedSessionIds);
+    return folderSessions.filter((s) => ids.has(s.id));
+  }, [folderSessions, retainedSessionIds]);
   const activeRaw = useTerminalStore(
     (state) => state.activeTerminalTabByFolder[folderKey] ?? null,
   );
   const createSession = useTerminalStore((s) => s.createSession);
-  const closeSession = useTerminalStore((s) => s.closeSession);
   const setActiveTerminalTab = useTerminalStore((s) => s.setActiveTerminalTab);
 
   const nativeReady = useNativeRuntime().ready;
-  const { synced: engineSynced } = useEngineTerminalSync(folderKey);
+  const { synced: engineSynced } = useEngineTerminalSync(
+    folderKey,
+    surfaceActive,
+  );
 
   const sessions = useMemo(
     () =>
@@ -259,14 +346,29 @@ export function TerminalPanel({
         .sort((a, b) => a.createdAt - b.createdAt),
     [allSessions, folderKey],
   );
-  const { actions, actionsReady, runIdFor, startRun, stopRun } = useRunControl(
-    folderKey,
-    chatCwd,
-  );
+  const runControl = useRunControl(folderKey, chatCwd);
+  const openEnvironment = useOpenScriptsSettings("environment");
+  const { actions, actionsReady, runIdFor, startRun, stopRun } = runControl;
   const { statuses: runStatuses, ready: runStatusesReady } = useRunStatuses(
     activeWs,
     folderKey,
     actions,
+    surfaceActive,
+  );
+  const previewUrls = useRunPreviewUrls(
+    activeWs?.id ?? null,
+    folderKey,
+    actions,
+    runStatuses,
+    surfaceActive,
+  );
+  const openBrowser = useOpenBrowserInWorkbench();
+  const openRunPreview = useCallback(
+    (actionId: string) => {
+      const url = previewUrls[actionId];
+      if (url) openBrowser({ url });
+    },
+    [openBrowser, previewUrls],
   );
   const anyRunActionRunning = actions.some(
     (action) => runStatuses[action.id]?.state === "running",
@@ -352,19 +454,17 @@ export function TerminalPanel({
     showRunAdd,
   ]);
 
-  // The active sub-tab: "setup", an ACTION's run sub-tab, OR a live session
-  // id. A stale/absent value always falls back to Setup. Setup deliberately
-  // remains the first landing surface even in a no-script repo, where it shows
-  // the explanatory "Add setup script" state; a newly auto-seeded shell must
-  // not silently pull a fresh workspace away from Setup.
-  const activeSubTab = useMemo<string>(() => {
-    return resolveTerminalPanelTab({
-      activeId: activeRaw,
-      configuredRunIds: actions.map((action) => runIdFor(action.id)),
-      sessionIds: sessions.map((session) => session.id),
-      showRunAdd,
-    });
-  }, [activeRaw, showRunAdd, actions, runIdFor, sessions]);
+  const activeSubTab = panelTab?.terminalId ?? SETUP_SUBTAB;
+  const isVisible = (folder: string, id: string) =>
+    surfaceActive &&
+    folder === folderKey &&
+    (mainTab?.terminalId === id ||
+      (hasPanel && expanded && panelTab?.terminalId === id));
+  const targetFor = (folder: string, id: string) => {
+    if (folder === folderKey && mainTab?.terminalId === id) return mainBody;
+    if (folder === folderKey && panelTab?.terminalId === id) return panelBody;
+    return parking;
+  };
   useInstantViewSwitch(
     surfaceActive ? `terminal:${folderKey}:${activeSubTab}` : "terminal:hidden",
     panelRef,
@@ -387,116 +487,277 @@ export function TerminalPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [surfaceActive, folderKey, nativeReady, engineSynced, createSession]);
 
-  const handleAddTerminal = useCallback(() => {
-    // The workbench terminal panel always spawns plain shells (no agentId) — the
-    // "system terminal" surface. (The terminal AGENT default is conversation pane chat-only.)
-    createSession(folderKey, null);
-    setExpanded(true);
-  }, [createSession, folderKey, setExpanded]);
-
+  const handleAddTerminal = useCallback(
+    () => addWorkbenchTerminal(folderKey, "panel", scope),
+    [folderKey, scope],
+  );
   const handleActivate = useCallback(
     (id: string) => {
-      setActiveTerminalTab(folderKey, id);
-      setExpanded(true);
+      const title =
+        id === SETUP_SUBTAB
+          ? "Setup"
+          : id === RUN_ADD_SUBTAB
+            ? "Run"
+            : (actions.find((a) => runIdFor(a.id) === id)?.name ??
+              sessions.find((s) => s.id === id)?.title ??
+              "Terminal");
+      openWorkbenchTerminal(folderKey, { terminalId: id, title }, scope);
     },
-    [setActiveTerminalTab, folderKey, setExpanded],
+    [folderKey, sessions, actions, runIdFor, scope],
   );
-  const handleActivateSetup = useCallback(() => {
-    setActiveTerminalTab(folderKey, SETUP_SUBTAB);
-    setExpanded(true);
-  }, [setActiveTerminalTab, folderKey, setExpanded]);
-  // Clicking an action's Run TAB only NAVIGATES to it (it shows the "Start …"
-  // empty state) — it does NOT start the process. Starting is an explicit
-  // action: the empty-state button, or the terminal panel header Run control.
+  const handleActivateSetup = useCallback(
+    () => handleActivate(SETUP_SUBTAB),
+    [handleActivate],
+  );
   const handleActivateRun = useCallback(
-    (actionId: string) => {
-      const id = runIdFor(actionId);
-      if (id) {
-        setActiveTerminalTab(folderKey, id);
-        setExpanded(true);
-      }
-    },
-    [setActiveTerminalTab, folderKey, runIdFor, setExpanded],
+    (id: string) => handleActivate(runIdFor(id)),
+    [handleActivate, runIdFor],
   );
-  const handleActivateRunAdd = useCallback(() => {
-    setActiveTerminalTab(folderKey, RUN_ADD_SUBTAB);
-    setExpanded(true);
-  }, [setActiveTerminalTab, folderKey, setExpanded]);
-  const revealPanel = useCallback(() => setExpanded(true), [setExpanded]);
+  const handleActivateRunAdd = useCallback(
+    () => handleActivate(RUN_ADD_SUBTAB),
+    [handleActivate],
+  );
   const handleClose = useCallback(
-    (id: string) => closeSession(id),
-    [closeSession],
+    (id: string) => {
+      const tab = workbench.tabs.find(
+        (t) => t.type === "terminal" && t.terminalId === id,
+      );
+      if (tab) closeWorkbenchTerminal(folderKey, tab.id, id, scope);
+      else useTerminalStore.getState().closeSession(id);
+    },
+    [workbench.tabs, folderKey, scope],
   );
+  const revealTerminal = useCallback(
+    (id: string, title: string) =>
+      openWorkbenchTerminal(folderKey, { terminalId: id, title }, scope),
+    [folderKey, scope],
+  );
+  useRunShortcut({
+    control: runControl,
+    runStatuses,
+    active: surfaceActive,
+    onRevealTerminal: revealTerminal,
+  });
+  // An empty registry/settings snapshot is authoritative only for its exact
+  // owner after a successful read. Renames update labels without replacing tabs.
+  const terminalTitles = useMemo<Array<[string, string]>>(
+    () => [
+      [SETUP_SUBTAB, "Setup"],
+      ...(showRunAdd ? [[RUN_ADD_SUBTAB, "Run"] as [string, string]] : []),
+      ...actions.map((a) => [runIdFor(a.id), a.name] as [string, string]),
+      ...plainTerminals.map((s) => [s.id, s.title] as [string, string]),
+    ],
+    [showRunAdd, actions, runIdFor, plainTerminals],
+  );
+  useEffect(() => {
+    dispatch({
+      type: "RECONCILE_WORKBENCH_TERMINALS",
+      scope,
+      titles: terminalTitles,
+      sessionsReady: engineSynced,
+      actionsReady,
+    });
+  }, [dispatch, scope, terminalTitles, engineSynced, actionsReady]);
   // Stable across renders (keyed only by sessionId, passed in) so run-session
   // TerminalSessionViews stay memoized through status polls — an attach-only
   // miss replays the engine's buffered output instead of showing a blank pane.
-  const replayRunOnMiss = useCallback(
-    (sessionId: string) =>
-      workspaceRunLog({ workspaceId: activeWs?.id, sessionId })
-        .then((r) => r.log || null)
-        .catch(() => null),
-    [activeWs?.id],
-  );
+  const replayTargetsRef = useRef(setupWorkspaceByFolder);
+  replayTargetsRef.current = setupWorkspaceByFolder;
+  const replayRunOnMiss = useCallback((sessionId: string) => {
+    const folder = useTerminalStore
+      .getState()
+      .sessions.find((s) => s.id === sessionId)?.folder;
+    const workspaceId = folder
+      ? replayTargetsRef.current.get(folder)?.id
+      : undefined;
+    return workspaceRunLog({ workspaceId, sessionId })
+      .then((r) => r.log || null)
+      .catch(() => null);
+  }, []);
 
   const activePlainId = plainTerminals.some((t) => t.id === activeSubTab)
     ? activeSubTab
     : null;
 
   // The Setup tab's status dot (off-tab signal only — see useSetupTabDot).
-  const setupStatus = useSetupStatus(activeWs);
+  const setupStatus = useSetupStatus(activeWs, surfaceActive);
   const setupDot = useSetupTabDot(
     folderKey,
     setupStatus,
-    surfaceActive && expanded && activeSubTab === SETUP_SUBTAB,
+    isVisible(folderKey, SETUP_SUBTAB),
   );
+  const setupRunDisabled =
+    !activeWs ||
+    setupStatus === "running" ||
+    busySetupOwners.has(activeWs.id);
+  const handleRunSetup = useCallback(() => {
+    const control = setupViewRef.current;
+    if (!surfaceActive || !control || setupRunDisabled) return;
+    // Reveal the existing placement before starting. A delayed completion for
+    // this workspace must never navigate away from a newer user selection.
+    handleActivateSetup();
+    void control.run();
+  }, [surfaceActive, setupRunDisabled, handleActivateSetup]);
 
+  const entries: TerminalNavigationEntry[] = terminalTitles.map(
+    ([id, title]) => {
+      const session = plainTerminals.find((s) => s.id === id);
+      const action = actions.find((a) => runIdFor(a.id) === id);
+      const status = action ? (runStatuses[action.id] ?? null) : null;
+      return {
+        id,
+        title,
+        kind: session ? "terminal" : id === SETUP_SUBTAB ? "setup" : "run",
+        runActionId: action?.id,
+        previewUrl: action ? previewUrls[action.id] : null,
+        icon: terminalTabIconName(id, action?.icon),
+        docked: dockedIds.has(id),
+        exited: session ? !session.alive : false,
+        closable: !!session && plainTerminals.length > 1,
+        running: status?.state === "running",
+        dot: id === SETUP_SUBTAB ? setupDot : runTabDot(status),
+      };
+    },
+  );
+  const panelEntry = entries.find((entry) => entry.id === panelTab?.terminalId);
+  useEffect(() => {
+    if (!surfaceActive) return;
+    // A plain shell's exit does not depend on Run settings/status readiness.
+    // While those revalidate, preserve their last confirmed exact-folder dots.
+    const previous = peekTerminalTabIndicators(folderKey);
+    const runIndicators = actionsReady
+      ? actions.map((action) => {
+          const id = runIdFor(action.id);
+          return [
+            id,
+            {
+              running: runStatusesReady
+                ? runStatuses[action.id]?.state === "running"
+                : (previous[id]?.running ?? false),
+              exited: false,
+              dot: runStatusesReady
+                ? runTabDot(runStatuses[action.id] ?? null)
+                : (previous[id]?.dot ?? null),
+              icon: action.icon,
+            },
+          ];
+        })
+      : Object.entries(previous).filter(([id]) => isRunSessionId(id));
+    publishTerminalTabIndicators(
+      folderKey,
+      Object.fromEntries([
+        [SETUP_SUBTAB, { running: false, exited: false, dot: setupDot }],
+        ...runIndicators,
+        ...plainTerminals.map((session) => [
+          session.id,
+          { running: false, exited: !session.alive, dot: null },
+        ]),
+      ]),
+    );
+  }, [
+    surfaceActive,
+    actionsReady,
+    runStatusesReady,
+    folderKey,
+    setupDot,
+    actions,
+    runIdFor,
+    runStatuses,
+    plainTerminals,
+  ]);
   return (
-    <div
-      ref={panelRef}
-      data-terminal-panel=""
-      aria-expanded={expanded}
-      // Collapse and expand SNAP. The panel used to carry
-      // `transition-[flex-basis,min-height] duration-300`, which was wrong in
-      // three ways at once:
-      //   • The body is hidden the instant `expanded` flips, so a collapse
-      //     animated an already-empty box shut for 300ms.
-      //   • The expo-out curve put ~half the travel in the first frame and
-      //     then crawled the last few pixels — read as a jerk, not motion.
-      //   • Worst: xterm's ResizeObserver fires on every animated frame while
-      //     the panel is visible. One expand measured 14 distinct body
-      //     heights, i.e. 14 refits and 14 PTY resizes (SIGWINCH) — the
-      //     shell-redraw storm this file's spawn path (see the header note)
-      //     was written to avoid. Snapping makes it exactly one.
-      className={cn(
-        "bg-bg1 flex shrink-0 flex-col overflow-hidden",
-        expanded ? TERMINAL_PANEL_EXPANDED_LAYOUT_CLS : "min-h-10 basis-10",
-      )}
-    >
-      <TerminalSubTabStrip
-        folderKey={folderKey}
-        showSelection={expanded}
-        setupActive={activeSubTab === SETUP_SUBTAB}
-        setupDot={setupDot}
-        actions={actions}
-        showRunAdd={showRunAdd}
-        runIdFor={runIdFor}
-        runStatuses={runStatuses}
-        activeSubTab={activeSubTab}
-        terminals={plainTerminals}
-        activeTerminalId={activePlainId}
-        onActivateSetup={handleActivateSetup}
-        onActivateRun={handleActivateRun}
-        onActivateRunAdd={handleActivateRunAdd}
-        onActivate={handleActivate}
-        onClose={handleClose}
-        onAdd={handleAddTerminal}
-        trailing={
-          <>
-            <RunControl
-              folderKey={folderKey}
-              chatCwd={chatCwd}
-              onRevealTerminalPanel={revealPanel}
-            />
+    <>
+      {workbenchHost &&
+        createPortal(
+          <TerminalWorkbenchLayout
+            tab={mainTab}
+            entries={entries}
+            onSelect={handleActivate}
+            onClose={handleClose}
+            onAdd={() => addWorkbenchTerminal(folderKey, "tab", scope)}
+            onConfigure={openEnvironment}
+            onConfigureIntent={() => {
+              if (activeWs?.repoRoot)
+                prefetchSettingsForRepo(activeWs.repoRoot);
+            }}
+            onRun={startRun}
+            onRunSetup={handleRunSetup}
+            setupRunDisabled={setupRunDisabled}
+            onStop={stopRun}
+            onOpenPreview={openRunPreview}
+            onDock={() => {
+              if (mainTab?.terminalId)
+                openWorkbenchTerminal(
+                  folderKey,
+                  {
+                    terminalId: mainTab.terminalId,
+                    title: mainTab.title,
+                    placement: "panel",
+                  },
+                  scope,
+                );
+            }}
+            onToggleSidebar={() => {
+              if (mainTab)
+                dispatch({
+                  type: "UPDATE_WORKBENCH_TAB",
+                  scope,
+                  id: mainTab.id,
+                  updates: {
+                    terminalSidebarVisible:
+                      mainTab.terminalSidebarVisible === false,
+                  },
+                });
+            }}
+            bodyRef={setMainBody}
+          />,
+          workbenchHost,
+        )}
+      {hasPanel && <TerminalPanelResizer containerRef={containerRef} />}
+      <div
+        ref={panelRef}
+        style={!hasPanel ? { display: "none" } : undefined}
+        data-terminal-panel=""
+        aria-expanded={expanded}
+        // Collapse and expand SNAP. The panel used to carry
+        // `transition-[flex-basis,min-height] duration-300`, which was wrong in
+        // three ways at once:
+        //   • The body is hidden the instant `expanded` flips, so a collapse
+        //     animated an already-empty box shut for 300ms.
+        //   • The expo-out curve put ~half the travel in the first frame and
+        //     then crawled the last few pixels — read as a jerk, not motion.
+        //   • Worst: xterm's ResizeObserver fires on every animated frame while
+        //     the panel is visible. One expand measured 14 distinct body
+        //     heights, i.e. 14 refits and 14 PTY resizes (SIGWINCH) — the
+        //     shell-redraw storm this file's spawn path (see the header note)
+        //     was written to avoid. Snapping makes it exactly one.
+        className={cn(
+          "bg-bg1 flex shrink-0 flex-col overflow-hidden",
+          expanded ? TERMINAL_PANEL_EXPANDED_LAYOUT_CLS : "min-h-10 basis-10",
+        )}
+      >
+        <TerminalSubTabStrip
+          folderKey={folderKey}
+          showSetup={dockedIds.has(SETUP_SUBTAB)}
+          showSelection={expanded}
+          showRunActivity={surfaceActive}
+          setupActive={activeSubTab === SETUP_SUBTAB}
+          setupDot={setupDot}
+          actions={actions.filter((a) => dockedIds.has(runIdFor(a.id)))}
+          showRunAdd={showRunAdd && dockedIds.has(RUN_ADD_SUBTAB)}
+          runIdFor={runIdFor}
+          runStatuses={runStatuses}
+          activeSubTab={activeSubTab}
+          terminals={plainTerminals.filter((s) => dockedIds.has(s.id))}
+          canCloseTerminal={plainTerminals.length > 1}
+          activeTerminalId={activePlainId}
+          onActivateSetup={handleActivateSetup}
+          onActivateRun={handleActivateRun}
+          onActivateRunAdd={handleActivateRunAdd}
+          onActivate={handleActivate}
+          onClose={handleClose}
+          onAdd={handleAddTerminal}
+          leading={
             <Tooltip label={expanded ? "Collapse panel" : "Expand panel"}>
               <Button
                 variant="ghost"
@@ -505,31 +766,77 @@ export function TerminalPanel({
                 aria-label={expanded ? "Collapse panel" : "Expand panel"}
                 onClick={() => setExpanded(!expanded)}
               >
-                {expanded ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+                {expanded ? (
+                  <ChevronDown className="text-fg2" size={14} />
+                ) : (
+                  <ChevronUp className="text-fg2" size={14} />
+                )}
               </Button>
             </Tooltip>
-          </>
-        }
-      />
-      <div
-        {...(!expanded ? { inert: "" } : {})}
-        className={cn(
-          "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
-          // Keep PTY/xterm state mounted, but remove the clipped body from the
-          // pointer, keyboard-focus, and accessibility trees while collapsed.
-          !expanded && "pointer-events-none invisible",
-        )}
-        aria-hidden={!expanded}
-      >
-        {/* Recent workspace terminals stay mounted (PTY + xterm survival); only
+          }
+          trailing={
+            <>
+              {surfaceActive &&
+                expanded &&
+                panelEntry?.running &&
+                panelEntry.runActionId && (
+                  <RunSessionButtons
+                    title={panelEntry.title}
+                    previewUrl={panelEntry.previewUrl}
+                    showLabels
+                    onOpenPreview={() =>
+                      openRunPreview(panelEntry.runActionId!)
+                    }
+                    onStop={() => stopRun(panelEntry.runActionId!)}
+                  />
+                )}
+              <Tooltip label="Move terminal to tab bar">
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label="Move terminal to tab bar"
+                  onClick={() => {
+                    if (panelTab?.terminalId)
+                      openWorkbenchTerminal(
+                        folderKey,
+                        {
+                          terminalId: panelTab.terminalId,
+                          title: panelTab.title,
+                          placement: "tab",
+                        },
+                        scope,
+                      );
+                  }}
+                >
+                  <PanelTop className="text-fg2 size-3.5" />
+                </Button>
+              </Tooltip>
+            </>
+          }
+        />
+        <div
+          ref={setPanelBody}
+          {...(!expanded ? { inert: "" } : {})}
+          aria-hidden={!expanded}
+          className={cn(
+            "relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
+            !expanded && "pointer-events-none invisible",
+          )}
+        />
+      </div>
+      <div ref={setParking} hidden {...{ inert: "" }} aria-hidden="true" />
+      {/* Recent workspace terminals stay mounted (PTY + xterm survival); only
             the active folder/tab shows. The xterm fits/focuses only while terminal panel
             is expanded, so a collapsed panel doesn't churn layout. */}
-        {retainedSessions.map((s) => {
-          const visibleHere = s.folder === folderKey && s.id === activeSubTab;
-          const isActive = surfaceActive && expanded && visibleHere;
-          return (
+      {retainedSessions.map((s) => {
+        const isActive = isVisible(s.folder, s.id);
+        return (
+          <RetainedTerminalSurface
+            key={s.id}
+            target={targetFor(s.folder, s.id)}
+          >
             <div
-              key={s.id}
+              data-terminal-session={s.id}
               // Hidden sessions are pinned during seam drags (resize-gesture-
               // freeze.ts). A COLLAPSED panel's layers measure 0-height and
               // are skipped, so dragging the panel open mid-gesture still
@@ -567,19 +874,19 @@ export function TerminalPanel({
                 surfaceToken="--bg1"
               />
             </div>
-          );
-        })}
-        {/* Setup — the engine-backed log / empty-state view, for the trunk and
+          </RetainedTerminalSurface>
+        );
+      })}
+      {/* Setup — the engine-backed log / empty-state view, for the trunk and
             worktrees alike (the trunk runs through the same SetupManager now). */}
-        {folderKeysToRender.map((setupFolderKey) => {
-          const isActive =
-            surfaceActive &&
-            expanded &&
-            setupFolderKey === folderKey &&
-            activeSubTab === SETUP_SUBTAB;
-          return (
+      {folderKeysToRender.map((setupFolderKey) => {
+        const isActive = isVisible(setupFolderKey, SETUP_SUBTAB);
+        return (
+          <RetainedTerminalSurface
+            key={`setup:${setupFolderKey}`}
+            target={targetFor(setupFolderKey, SETUP_SUBTAB)}
+          >
             <div
-              key={`setup:${setupFolderKey}`}
               {...(!isActive
                 ? { inert: "", "data-zeros-resize-freeze": "" }
                 : {})}
@@ -592,41 +899,49 @@ export function TerminalPanel({
               aria-hidden={!isActive}
             >
               <SetupView
+                ref={setupFolderKey === folderKey ? setupViewRef : undefined}
                 workspace={setupWorkspaceByFolder.get(setupFolderKey) ?? null}
                 visible={isActive}
+                onBusyChange={handleSetupBusyChange}
               />
             </div>
-          );
-        })}
-        {/* Run — the zero-actions "Add run script" state (the affordance
+          </RetainedTerminalSurface>
+        );
+      })}
+      {/* Run — the zero-actions "Add run script" state (the affordance
             never fully disappears; also what a removed action falls back to —
             no stale badge/Rerun for a script that no longer exists). */}
+      <RetainedTerminalSurface target={targetFor(folderKey, RUN_ADD_SUBTAB)}>
         <div
-          {...(activeSubTab !== RUN_ADD_SUBTAB ? { inert: "" } : {})}
+          {...(!isVisible(folderKey, RUN_ADD_SUBTAB) ? { inert: "" } : {})}
           className={cn(
             "absolute inset-0 flex min-h-0 min-w-0 flex-col overflow-hidden",
-            activeSubTab === RUN_ADD_SUBTAB
+            isVisible(folderKey, RUN_ADD_SUBTAB)
               ? "pointer-events-auto visible"
               : "pointer-events-none invisible",
           )}
-          aria-hidden={activeSubTab !== RUN_ADD_SUBTAB}
+          aria-hidden={!isVisible(folderKey, RUN_ADD_SUBTAB)}
         >
           <RunAddEmpty />
         </div>
-        {/* Run — per-action empty states + the bottom-right status cluster
-            (Stop while running; outcome badge + Rerun after), overlaid on the
-            ACTIVE action's surface. */}
-        {actions.map((action) => {
-          const id = runIdFor(action.id);
-          const session = sessions.find((s) => s.id === id) ?? null;
-          // Same three conditions every sibling layer uses. `visible` overrides
-          // the panel body's `invisible`, so gating on the sub-tab alone left the
-          // overlay painting on a collapsing (and then collapsed) panel after its
-          // terminal was already hidden — see runOverlayWrapperClass.
-          const isActive = surfaceActive && expanded && activeSubTab === id;
-          return (
+      </RetainedTerminalSurface>
+      {/* Run — per-action empty states and completed outcome/Rerun overlays.
+          Live preview and Stop controls belong to the active header. */}
+      {actions.map((action) => {
+        const id = runIdFor(action.id);
+        const session = sessions.find((s) => s.id === id) ?? null;
+        // Same three conditions every sibling layer uses. `visible` overrides
+        // the panel body's `invisible`, so gating on the sub-tab alone left the
+        // overlay painting on a collapsing (and then collapsed) panel after its
+        // terminal was already hidden — see runOverlayWrapperClass.
+        const isActive = isVisible(folderKey, id);
+        return (
+          <RetainedTerminalSurface
+            key={action.id}
+            target={targetFor(folderKey, id)}
+            overlay
+          >
             <div
-              key={action.id}
               {...(!isActive ? { inert: "" } : {})}
               // pointer-events-none even when ACTIVE — this wrapper sits above
               // the run's terminal, so an `auto` here makes the whole pane
@@ -641,13 +956,12 @@ export function TerminalPanel({
                 status={runStatuses[action.id] ?? null}
                 visible={isActive}
                 onStart={() => startRun(action.id)}
-                onStop={() => stopRun(action.id)}
               />
             </div>
-          );
-        })}
-      </div>
-    </div>
+          </RetainedTerminalSurface>
+        );
+      })}
+    </>
   );
 }
 
@@ -663,7 +977,10 @@ const MAX_SETUP_STATUS_SNAPSHOTS = 64;
  *  switch, then re-pulled on every DB_CHANGED{workspaces} broadcast — the
  *  engine fires one for each setup transition (running / passed / failed /
  *  stopped), for the trunk and worktrees alike. */
-function useSetupStatus(workspace: Workspace | null): SetupStatus {
+function useSetupStatus(
+  workspace: Workspace | null,
+  active: boolean,
+): SetupStatus {
   const workspaceId = workspace?.id ?? null;
   const repoRoot =
     workspace && isLocalMainWorkspace(workspace)
@@ -680,7 +997,7 @@ function useSetupStatus(workspace: Workspace | null): SetupStatus {
     status: workspaceId ? (setupStatusCache.get(workspaceId) ?? null) : null,
   }));
   useEffect(() => {
-    if (!workspaceId) return;
+    if (!workspaceId || !active) return;
     let cancelled = false;
     // Monotonic pull token: DB_CHANGED can fire back-to-back (running → then
     // passed) and the responses may resolve out of order — only the LATEST
@@ -730,7 +1047,7 @@ function useSetupStatus(workspace: Workspace | null): SetupStatus {
       cancelled = true;
       off?.();
     };
-  }, [workspaceId, repoRoot, bridge]);
+  }, [workspaceId, repoRoot, bridge, active]);
   if (!workspaceId) return null;
   return snapshot.workspaceId === workspaceId
     ? snapshot.status
@@ -857,7 +1174,7 @@ function useAutoDismissRunBadge(
  *                                 bottom-right, "Run again")
  *   • no session + running     → "Starting …" beat (engine spawned it; the
  *                                 registry sync is about to attach the tab)
- *   • session + running        → bottom-right "Stop" (24px)
+ *   • session + running        → output only; live controls stay in the header
  *   • session + outcome        → bottom-right badge (auto-dismiss 15s after
  *                                 viewed; "stopped" persists) + 24px "Rerun" */
 function RunActionOverlay({
@@ -867,7 +1184,6 @@ function RunActionOverlay({
   status,
   visible,
   onStart,
-  onStop,
 }: {
   folderKey: string;
   action: RunAction;
@@ -875,7 +1191,6 @@ function RunActionOverlay({
   status: WorkspaceRunActionStatus | null;
   visible: boolean;
   onStart: () => void;
-  onStop: () => void;
 }) {
   const state = status?.state ?? null;
   const running = state === "running";
@@ -937,6 +1252,8 @@ function RunActionOverlay({
     );
   }
 
+  if (running) return null;
+
   // Session exists → the terminal renders underneath. Return ONLY the
   // bottom-right cluster: a content-sized box, not a full-cover one made
   // click-through again. Every rect that exists is a rect that can swallow the
@@ -944,22 +1261,13 @@ function RunActionOverlay({
   // isn't there.
   return (
     <div className="pointer-events-auto absolute right-3 bottom-3 flex items-center gap-2">
-      {running ? (
-        <Button variant="secondary" size="sm" onClick={onStop}>
-          <Square />
-          Stop
-        </Button>
-      ) : (
-        <>
-          {outcome && (outcome === "stopped" || badgeVisible) && (
-            <RunStatusBadge outcome={outcome} />
-          )}
-          <Button variant="secondary" size="sm" onClick={onStart}>
-            <RotateCw />
-            Rerun
-          </Button>
-        </>
+      {outcome && (outcome === "stopped" || badgeVisible) && (
+        <RunStatusBadge outcome={outcome} />
       )}
+      <Button variant="secondary" size="sm" onClick={onStart}>
+        <RotateCw />
+        Rerun
+      </Button>
     </div>
   );
 }
@@ -984,8 +1292,8 @@ function RunAddEmpty() {
   );
 }
 
-/** A completed action tab keeps the compact outcome dot. A live action instead
- *  gets the six-stroke wave before its name; stopped/never-run stays plain. */
+/** A completed action keeps its compact outcome dot. Live waves appear in the
+ *  primary tabs and sidebar; bottom-panel tab labels remain text. */
 function runTabDot(
   status: WorkspaceRunActionStatus | null,
 ): SetupOutcome | null {
@@ -999,13 +1307,16 @@ function runTabDot(
 /** Terminal panel's header: Setup · action(s) · Terminal(s) · [+], using the same pill
  *  geometry and selected background as workbench. Setup + run actions carry no ✕;
  *  a plain terminal shows ✕ on hover once there is more than one (the last
- *  terminal can't be closed). The fixed right edge owns RunControl + collapse,
+ *  terminal can't be closed). The fixed right edge owns undock and collapse,
  *  while only the tab area scrolls. Sticky strip (use-sticky-tab-strip.tsx):
  *  the "+" stays fixed after the lane, and the ACTIVE pill pins to whichever
  *  lane edge it reaches so the selection can never scroll out of view. */
 function TerminalSubTabStrip({
   folderKey,
+  showSetup,
+  canCloseTerminal,
   showSelection,
+  showRunActivity,
   setupActive,
   setupDot,
   actions,
@@ -1021,14 +1332,18 @@ function TerminalSubTabStrip({
   onActivate,
   onClose,
   onAdd,
+  leading,
   trailing,
 }: {
   /** The strip's workspace — a switch restarts the scroll at the leading
    *  edge instead of leaking the previous workspace's offset. */
   folderKey: string;
+  showSetup: boolean;
+  canCloseTerminal: boolean;
   /** A collapsed row keeps its tabs usable but intentionally shows no selected
    *  pill; activating any tab expands and reveals its body. */
   showSelection: boolean;
+  showRunActivity: boolean;
   setupActive: boolean;
   /** Off-tab setup status dot (amber running / green passed / red failed or
    *  stopped); null while Setup is active or there's nothing to signal. */
@@ -1047,6 +1362,7 @@ function TerminalSubTabStrip({
   onActivate(id: string): void;
   onClose(id: string): void;
   onAdd(): void;
+  leading: ReactNode;
   trailing: ReactNode;
 }) {
   // A collapsed row shows no selection, so nothing pins or auto-reveals
@@ -1054,13 +1370,18 @@ function TerminalSubTabStrip({
   const strip = useStickyTabStrip({
     activeKey: showSelection ? activeSubTab : null,
     resetKey: folderKey,
-    tabCount: 1 + actions.length + (showRunAdd ? 1 : 0) + terminals.length,
+    tabCount:
+      Number(showSetup) +
+      actions.length +
+      (showRunAdd ? 1 : 0) +
+      terminals.length,
     tabAttr: "data-terminal-tab",
   });
 
   return (
-    <div className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-1 border-b pr-2">
-      <div className="flex h-full min-w-0 flex-1 items-center pl-1">
+    <div className="border-border1 bg-bg1 @container/terminal-header flex h-10 shrink-0 items-center border-b pr-2 pl-1">
+      {leading}
+      <div className="flex h-full min-w-0 flex-1 items-center">
         <div className={STICKY_TAB_VIEWPORT_CLS}>
           <div
             ref={strip.navRef}
@@ -1070,30 +1391,28 @@ function TerminalSubTabStrip({
             {...strip.navProps}
           >
             <div className={STICKY_TAB_ROW_CLS}>
-              <SubTab
-                label="Setup"
-                active={showSelection && setupActive}
-                dot={setupDot}
-                onActivate={onActivateSetup}
-                registerRef={(node) => strip.registerTab(SETUP_SUBTAB, node)}
-              />
+              {showSetup && (
+                <SubTab
+                  label="Setup"
+                  active={showSelection && setupActive}
+                  dot={setupDot}
+                  onActivate={onActivateSetup}
+                  registerRef={(node) => strip.registerTab(SETUP_SUBTAB, node)}
+                />
+              )}
               {actions.map((action) => {
                 const status = runStatuses[action.id] ?? null;
                 return (
                   <SubTab
                     key={action.id}
                     label={action.name}
-                    leading={
-                      status?.state === "running" ? (
-                        <RunWave size={12} className="text-fg2 mr-1.5" />
-                      ) : undefined
-                    }
                     // Selected before its terminal exists too: the body is its
                     // Start state until the explicit Run action begins.
                     active={
                       showSelection && activeSubTab === runIdFor(action.id)
                     }
-                    dot={runTabDot(status)}
+                    running={showRunActivity && status?.state === "running"}
+                    dot={status?.state === "running" ? null : runTabDot(status)}
                     onActivate={() => onActivateRun(action.id)}
                     registerRef={(node) =>
                       strip.registerTab(runIdFor(action.id), node)
@@ -1120,9 +1439,7 @@ function TerminalSubTabStrip({
                   onActivate={() => onActivate(terminal.id)}
                   // The last terminal can't be closed (the "at least one" rule).
                   onClose={
-                    terminals.length > 1
-                      ? () => onClose(terminal.id)
-                      : undefined
+                    canCloseTerminal ? () => onClose(terminal.id) : undefined
                   }
                   registerRef={(node) => strip.registerTab(terminal.id, node)}
                 />
@@ -1142,13 +1459,13 @@ function TerminalSubTabStrip({
               aria-label="New terminal"
               onClick={onAdd}
             >
-              <Plus size={14} />
+              <Plus className="text-fg2" size={14} />
             </Button>
           </Tooltip>
         </div>
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
-      <div className="flex shrink-0 items-center gap-1">{trailing}</div>
+      <div className="ml-1 flex shrink-0 items-center gap-1">{trailing}</div>
     </div>
   );
 }
@@ -1157,18 +1474,18 @@ function TerminalSubTabStrip({
  *  preserving terminal-only status, exited, and close behaviors. */
 function SubTab({
   label,
-  leading,
   active,
   exited,
+  running,
   dot,
   onActivate,
   onClose,
   registerRef,
 }: {
   label: string;
-  leading?: ReactNode;
   active: boolean;
   exited?: boolean;
+  running?: boolean;
   dot?: "running" | SetupOutcome | null;
   onActivate(): void;
   onClose?(): void;
@@ -1198,7 +1515,7 @@ function SubTab({
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       )}
     >
-      {leading}
+      {running && <RunWave size={12} className="mr-1.5" />}
       <span className="max-w-[140px] truncate">
         {label}
         {exited && <span className="ml-1 opacity-70">(exited)</span>}

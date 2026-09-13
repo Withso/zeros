@@ -222,14 +222,14 @@ describe("WorkspaceService", () => {
     };
 
     expect(result.relativePath).toBe(
-      ".context-graph/local/attachments/att-1/shot.png",
+      ".context/local/attachments/att-1/shot.png",
     );
     expect(result.absolutePath).toBe(path.join(dir, result.relativePath));
     expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
       "full-resolution-image",
     );
     expect(
-      fs.readFileSync(path.join(dir, ".context-graph/.gitignore"), "utf8"),
+      fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
     ).toContain("/local/");
   });
 
@@ -266,7 +266,7 @@ describe("WorkspaceService", () => {
       fs.existsSync(
         path.join(
           workspace.path,
-          ".context-graph/local/attachments",
+          ".context/local/attachments",
           attachmentId,
         ),
       ),
@@ -343,7 +343,7 @@ describe("WorkspaceService", () => {
       segments: Array<{ diskPath?: string; thumbnailUri?: string }>;
     };
     expect(payload.attachments[0].diskPath).toMatch(
-      /^\.context-graph\/local\/attachments\/legacy_[a-f0-9]+\//,
+      /^\.context\/local\/attachments\/legacy_[a-f0-9]+\//,
     );
     expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
     expect(payload.attachments[0].thumbnailUri).toBeUndefined();
@@ -432,7 +432,7 @@ describe("WorkspaceService", () => {
     };
 
     expect(payload.attachments[0].diskPath).toMatch(
-      /^\.context-graph\/local\/attachments\/legacy_[a-f0-9]+\//,
+      /^\.context\/local\/attachments\/legacy_[a-f0-9]+\//,
     );
     expect(payload.segments[1].diskPath).toBe(payload.attachments[0].diskPath);
     expect(payload.attachments[0].attachmentId).toMatch(/^legacy_[a-f0-9]+$/);
