@@ -47,6 +47,8 @@ function notImpl(cmd: string, _order: number): CommandHandler {
 const commandTable: Record<string, CommandHandler> = {
   // ── App info (runtime mode / version) — for analytics routing ──
   app_info: notImpl("app_info", 1),
+  cursor_subscription: notImpl("cursor_subscription", 1),
+  provider_subscription: notImpl("provider_subscription", 1),
 
   // ── App settings (plain-JSON, main-readable) + engine restart ──
   app_setting_get: notImpl("app_setting_get", 1),
@@ -69,6 +71,8 @@ const commandTable: Record<string, CommandHandler> = {
   open_agent_config: notImpl("open_agent_config", 3),
   open_install_terminal: notImpl("open_install_terminal", 3),
   detect_open_apps: notImpl("detect_open_apps", 3),
+  native_app_icons: notImpl("native_app_icons", 3),
+  tool_artwork_images: notImpl("tool_artwork_images", 3),
   open_in_app: notImpl("open_in_app", 3),
   cloud_workspace_ssh_copy: notImpl("cloud_workspace_ssh_copy", 3),
   cloud_workspace_ssh_terminal: notImpl("cloud_workspace_ssh_terminal", 3),

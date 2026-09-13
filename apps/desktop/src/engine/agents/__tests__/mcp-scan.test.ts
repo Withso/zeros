@@ -34,6 +34,20 @@ const bySource = (out: ReturnType<typeof scanNativeMcpConfigs>, source: string) 
   out.find((s) => s.source === source)!;
 
 describe("scanNativeMcpConfigs", () => {
+  it("offers Codex project declarations for import", () => {
+    const repo = path.join(home, "repo");
+    write("repo/.codex/config.toml", '[mcp_servers.project_notes]\ncommand = "notes-server"\n');
+    expect(bySource(scanNativeMcpConfigs(home, [repo]), `codex-project:${repo}`)?.servers)
+      .toEqual([{ name: "project_notes", transport: "stdio", command: "notes-server" }]);
+  });
+
+  it("scans the active CODEX_HOME for both configuration and plugins", () => {
+    process.env.CODEX_HOME = path.join(home, "custom-codex");
+    write("custom-codex/config.toml", '[mcp_servers.custom_notes]\nurl = "https://notes.example/mcp"\n');
+    expect(bySource(scanNativeMcpConfigs(home), "codex").servers)
+      .toEqual([{ name: "custom_notes", transport: "http", url: "https://notes.example/mcp" }]);
+  });
+
   it("returns an entry per known home source; all absent when home is empty", () => {
     const out = scanNativeMcpConfigs(home);
     expect(out.map((s) => s.source).sort()).toEqual([

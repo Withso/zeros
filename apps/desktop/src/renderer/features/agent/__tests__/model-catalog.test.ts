@@ -9,6 +9,8 @@ import {
   agentFamily,
   familyForModelValue,
   modelsForAgent,
+  overlayLiveCapabilities,
+  LIVE_OVERLAYABLE_FIELDS,
   modelEnvVarForAgent,
   agentSupportsEffort,
   agentSupportsFast,
@@ -292,6 +294,267 @@ describe("modelsForAgent (curated catalog)", () => {
     expect(
       modelsForAgent("cursor", initialize).map((m) => m.value),
     ).not.toContain("composer-2.5");
+  });
+});
+
+// ── Curated names are never fetched ──────────────────────
+//
+// Regression guard for the shipped bug: the live overlay took `live.label`, so
+// the pinned Claude CLI's own branding renamed the picker mid-release —
+// "Claude Opus 5" rendered as "Opus (1M context)", "Claude Sonnet 5" as
+// "Sonnet", "Claude Haiku 4.5" as "Haiku". Codex (`model/list.displayName`) and
+// Cursor (`models.list().displayName`) feed the SAME overlay, so every family
+// was exposed. Capabilities must still overlay — only names are frozen.
+type LiveInitialize = Parameters<typeof modelsForAgent>[1];
+const live = (models: unknown[]): LiveInitialize =>
+  ({ protocolVersion: 1, _meta: { models } }) as unknown as LiveInitialize;
+
+describe("modelsForAgent — provider renames never reach the UI", () => {
+  it("keeps curated claude names against the CLI's real branding", () => {
+    // Verbatim shape of what `query.supportedModels()` advertised in the bug
+    // report, keyed by the resolved wire ids the adapter forwards.
+    const cli = live([
+      { value: "claude-fable-5-1", label: "Fable 5.1" },
+      { value: "claude-fable-5", label: "Fable" },
+      { value: "claude-opus-5", label: "Opus (1M context)" },
+      { value: "claude-opus-4-8", label: "Opus 4.8" },
+      { value: "claude-sonnet-5", label: "Sonnet" },
+      { value: "claude-haiku-4-5", label: "Haiku" },
+    ]);
+    const byValue = new Map(
+      modelsForAgent("claude", cli).map((m) => [m.value, m.label]),
+    );
+    expect(byValue.get("claude-opus-5[1m]")).toBe("Claude Opus 5");
+    expect(byValue.get("claude-fable-5[1m]")).toBe("Claude Fable 5");
+    expect(byValue.get("claude-fable-5-1[1m]")).toBe("Claude Fable 5.1");
+    expect(byValue.get("claude-sonnet-5[1m]")).toBe("Claude Sonnet 5");
+    expect(byValue.get("claude-haiku-4-5")).toBe("Claude Haiku 4.5");
+    expect(byValue.get("claude-opus-4-8[1m]")).toBe("Claude Opus 4.8");
+  });
+
+  it("renders the version the user asked for, not the provider's context suffix", () => {
+    // The end-to-end assertion: what the picker row and composer pill print.
+    const cli = live([
+      { value: "claude-opus-5", label: "Opus (1M context)" },
+      { value: "claude-sonnet-5", label: "Sonnet" },
+    ]);
+    const list = modelsForAgent("claude", cli);
+    const shown = (value: string) =>
+      displayModelLabel(
+        "claude",
+        list.find((m) => m.value === value)?.label ?? "",
+      );
+    expect(shown("claude-opus-5[1m]")).toBe("Opus 5");
+    expect(shown("claude-sonnet-5[1m]")).toBe("Sonnet 5");
+
+    // The pill reads the same row through resolveModelOption.
+    expect(
+      configuredModelLabelParts(
+        "claude",
+        "claude-opus-5[1m]",
+        resolveModelOption("claude", "claude-opus-5[1m]", cli)?.label ?? "",
+        "high",
+        false,
+        cli,
+      ).model,
+    ).toBe("Opus 5");
+  });
+
+  it("keeps curated codex and cursor names too", () => {
+    const codex = live([
+      { value: "gpt-6-astra", label: "Astra" },
+      { value: "gpt-5.6-sol", label: "Sol (thinking)" },
+      { value: "gpt-5.5", label: "GPT-5.5 renamed upstream" },
+    ]);
+    const codexLabels = new Map(
+      modelsForAgent("codex", codex).map((m) => [m.value, m.label]),
+    );
+    expect(codexLabels.get("gpt-6-astra")).toBe("GPT-6 Astra");
+    expect(codexLabels.get("gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(codexLabels.get("gpt-5.5")).toBe("GPT-5.5");
+
+    const cursor = live([
+      { value: "default", label: "Cursor picks", selectable: true },
+      { value: "composer-2.5", label: "Composer", selectable: true },
+      { value: "grok-4.6", label: "Grok", selectable: true },
+    ]);
+    const cursorLabels = new Map(
+      modelsForAgent("cursor", cursor).map((m) => [m.value, m.label]),
+    );
+    expect(cursorLabels.get("default")).toBe("Auto");
+    expect(cursorLabels.get("composer-2.5")).toBe("Composer 2.5");
+    expect(cursorLabels.get("grok-4.6")).toBe("Cursor Grok 4.6");
+  });
+
+  it("keeps the curated name for a live-gated row the account still advertises", () => {
+    // liveRequired rows only exist BECAUSE the provider vouched for them, which
+    // is exactly when a provider label would have overwritten the catalog's.
+    expect(
+      modelsForAgent(
+        "cursor",
+        live([
+          { value: "default", label: "Auto", selectable: true },
+          { value: "grok-4.5", label: "Grok 4.5 (legacy)", selectable: true },
+        ]),
+      ).find((m) => m.value === "grok-4.5")?.label,
+    ).toBe("Cursor Grok 4.5");
+  });
+
+  it("cannot move one model's name onto a neighbouring row via an alias", () => {
+    // The CLI's floating `opus` selector alias-normalizes to claude-opus-4-8.
+    // Before the fix that put Opus 5's branding on the Opus 4.8 row — the same
+    // lag the adapter guards against for capabilities.
+    const list = modelsForAgent(
+      "claude",
+      live([{ value: "opus", label: "Opus (1M context)" }]),
+    );
+    expect(list.find((m) => m.value === "claude-opus-4-8[1m]")?.label).toBe(
+      "Claude Opus 4.8",
+    );
+    expect(list.map((m) => m.label)).not.toContain("Opus (1M context)");
+  });
+
+  it("survives a blank or missing provider label without blanking the row", () => {
+    const list = modelsForAgent(
+      "claude",
+      live([
+        { value: "claude-opus-5", label: "" },
+        { value: "claude-sonnet-5", label: "   " },
+      ]),
+    );
+    expect(list.find((m) => m.value === "claude-opus-5[1m]")?.label).toBe(
+      "Claude Opus 5",
+    );
+    expect(list.find((m) => m.value === "claude-sonnet-5[1m]")?.label).toBe(
+      "Claude Sonnet 5",
+    );
+  });
+
+  it("still lets live capabilities win while names stay curated", () => {
+    const cli = live([
+      {
+        value: "claude-opus-5",
+        label: "Opus (1M context)",
+        effortLevels: ["low", "high"],
+        supportsFast: false,
+      },
+    ]);
+    const opus = modelsForAgent("claude", cli).find(
+      (m) => m.value === "claude-opus-5[1m]",
+    );
+    expect(opus?.label).toBe("Claude Opus 5");
+    expect(opus?.effortLevels).toEqual(["low", "high"]);
+    expect(opus?.supportsFast).toBe(false);
+    // And the pill's gates read those live answers, not the bundled ones —
+    // freezing the NAME must not freeze the capability overlay.
+    expect(agentSupportsFast("claude", "claude-opus-5[1m]", cli)).toBe(false);
+    expect(effortLevelsFor("claude", "claude-opus-5[1m]", cli)).toEqual([
+      "low",
+      "high",
+    ]);
+  });
+
+  it("lets provider copy fill an empty description but never overwrite ours", () => {
+    // Cursor's Auto row ships curated copy; grok-4.6 ships none.
+    const list = modelsForAgent(
+      "cursor",
+      live([
+        {
+          value: "default",
+          label: "Auto",
+          description: "Cursor's own router blurb.",
+          selectable: true,
+        },
+        {
+          value: "grok-4.6",
+          label: "Cursor Grok 4.6",
+          description: "Fast frontier reasoning.",
+          selectable: true,
+        },
+      ]),
+    );
+    expect(list.find((m) => m.value === "default")?.description).toBe(
+      "Let Cursor choose the model for this turn.",
+    );
+    expect(list.find((m) => m.value === "grok-4.6")?.description).toBe(
+      "Fast frontier reasoning.",
+    );
+  });
+
+  it("still names an UNCURATED family from live discovery", () => {
+    // No curated row means no curated name to protect; a 3rd-party agent that
+    // advertises its own models must still be pickable.
+    expect(
+      modelsForAgent(
+        "totally-unknown-agent",
+        live([{ value: "some-model", label: "Some Model" }]),
+      ),
+    ).toEqual([{ value: "some-model", label: "Some Model" }]);
+  });
+});
+
+describe("overlayLiveCapabilities", () => {
+  const curated = {
+    value: "claude-opus-5[1m]",
+    label: "Claude Opus 5",
+    badge: "New",
+    effortLevels: ["low", "medium", "high"] as const,
+    supportsFast: true,
+    minCliVersion: "2.1.219",
+  };
+
+  it("excludes every display field from the overlay allowlist", () => {
+    for (const field of ["value", "label", "badge", "minCliVersion"]) {
+      expect(LIVE_OVERLAYABLE_FIELDS as readonly string[]).not.toContain(field);
+    }
+  });
+
+  it("never copies a name, id, or badge from the live record", () => {
+    const merged = overlayLiveCapabilities(
+      { ...curated, effortLevels: [...curated.effortLevels] },
+      {
+        value: "claude-opus-5-20260514",
+        label: "Opus (1M context)",
+        badge: "Preview",
+        effortLevels: ["high"],
+        supportsFast: false,
+      },
+    );
+    expect(merged.label).toBe("Claude Opus 5");
+    expect(merged.value).toBe("claude-opus-5[1m]");
+    expect(merged.badge).toBe("New");
+    expect(merged.minCliVersion).toBe("2.1.219");
+    expect(merged.effortLevels).toEqual(["high"]);
+    expect(merged.supportsFast).toBe(false);
+  });
+
+  it("leaves a curated capability standing when live omits it", () => {
+    const merged = overlayLiveCapabilities(
+      { ...curated, effortLevels: [...curated.effortLevels] },
+      { value: "claude-opus-5", label: "Opus (1M context)" },
+    );
+    expect(merged.effortLevels).toEqual(["low", "medium", "high"]);
+    expect(merged.supportsFast).toBe(true);
+  });
+
+  it("does not mutate the curated row it was handed", () => {
+    // CURATED_FAMILIES is module state shared by every caller; a mutating merge
+    // would make one session's provider rename the catalog for all of them.
+    const source = {
+      ...curated,
+      effortLevels: [...curated.effortLevels],
+    };
+    overlayLiveCapabilities(source, {
+      value: "claude-opus-5",
+      label: "Opus (1M context)",
+      effortLevels: [],
+      supportsFast: false,
+      description: "provider copy",
+    });
+    expect(source.label).toBe("Claude Opus 5");
+    expect(source.effortLevels).toEqual(["low", "medium", "high"]);
+    expect(source.supportsFast).toBe(true);
+    expect(source).not.toHaveProperty("description");
   });
 });
 

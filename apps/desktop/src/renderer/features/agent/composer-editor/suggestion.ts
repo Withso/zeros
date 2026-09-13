@@ -267,6 +267,8 @@ export interface ComposerSuggestionsOptions {
    *  file the agent just created (composer never blurred → no focus refresh)
    *  is mentionable. The async landing re-pushes results into the open menu. */
   onMentionOpen: () => void;
+  /** Prepare native session commands without submitting the draft. */
+  onSlashOpen: () => void;
   prEnabled: () => boolean;
   onPickMention: (editor: Editor, range: Range, item: MentionItem) => void;
   onPickSlash: (editor: Editor, range: Range, item: AvailableCommand) => void;
@@ -290,6 +292,7 @@ export const ComposerSuggestions = Extension.create<ComposerSuggestionsOptions>(
       getPrItems: () => [],
       getStatus: (): SuggestionStatus => "ready",
       onMentionOpen: noop,
+      onSlashOpen: noop,
       prEnabled: () => false,
       onPickMention: noop,
       onPickSlash: noop,
@@ -317,7 +320,7 @@ export const ComposerSuggestions = Extension.create<ComposerSuggestionsOptions>(
         items: ({ query }) => o.getSlashItems(query),
         command: ({ editor, range, props }) =>
           o.onPickSlash(editor, range, props),
-        render: makeRender(o.store, "/", o.getStatus) as never,
+        render: makeRender(o.store, "/", o.getStatus, o.onSlashOpen) as never,
       }),
       Suggestion<PrPickerItem, PrPickerItem>({
         editor: this.editor,

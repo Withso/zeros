@@ -30,6 +30,10 @@
 
 /* ── Dark themes (neutral Dark + Orka black) ── */
 :root {
+  /* Composer Tools text actions: preserve blue's hue/saturation while lifting
+     lightness by ten percentage points from the active theme's foreground. */
+  --composer-tool-action-hover: hsl(from var(--blue-fg) h s calc(l + 10));
+
   /* PR status island — open-PR (brown) states.
      Action button flips polarity per theme so its icon never vanishes:
      the light primary button in either dark palette, a solid --brown-fg in Light. */

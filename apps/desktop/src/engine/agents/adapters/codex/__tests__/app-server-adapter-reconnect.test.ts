@@ -58,6 +58,7 @@ vi.mock("../app-server", () => ({
       rt.lastOnUserInputRequest = opts.onUserInputRequest ?? null;
       const request = vi.fn(async (method: string, params: unknown) => {
         rt.requests.push([method, params]);
+        if (method === "config/read") return { config: {} };
         if (method === "model/list") {
           return (
             rt.modelList ?? {
@@ -142,7 +143,7 @@ const TEXT = (t: string): ContentBlock[] => [
   { type: "text", text: t } as never,
 ];
 
-function makeAdapter() {
+function makeAdapter(authenticationContext?: () => string) {
   const emit = {
     onSessionUpdate: vi.fn(),
     onPermissionRequest: vi.fn(),
@@ -155,11 +156,60 @@ function makeAdapter() {
     mcpServers: [],
     sessionDirRoot: "/tmp/sessions",
     emit,
+    authenticationContext,
   };
   return { adapter: new CodexAppServerAdapter(ctx), emit };
 }
 
 describe("codex mid-turn reconnect + per-session crash signalling", () => {
+  it("does not publish models from admission that began under a previous account", async () => {
+    const { adapter } = makeAdapter(() => "account-b");
+    rt.modelList = {
+      data: [{ id: "gpt-5.6-sol", serviceTiers: [{ id: "fast" }] }],
+    };
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      authenticationContext: "account-a",
+    });
+    expect((await adapter.initialize())._meta?.models).toBeUndefined();
+    rt.modelList = { data: [{ id: "gpt-5.6-sol", serviceTiers: [] }] };
+    const second = await adapter.newSession({
+      cwd: "/tmp/proj",
+      authenticationContext: "account-b",
+    });
+    expect(second.initialize._meta?.models).toMatchObject([
+      { supportsFast: false },
+    ]);
+    await adapter.dispose();
+  });
+  it("discovers the new account's models and clears the previous initialize snapshot", async () => {
+    let account = "account-a";
+    const { adapter } = makeAdapter(() => account);
+    rt.modelList = {
+      data: [{ id: "gpt-5.6-sol", serviceTiers: [{ id: "fast" }] }],
+    };
+    const first = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CODEX_HOME: "/profiles/a" },
+    });
+    expect(first.initialize._meta?.models).toMatchObject([
+      { supportsFast: true },
+    ]);
+    account = "account-b";
+    expect((await adapter.initialize())._meta?.models).toBeUndefined();
+    rt.modelList = { data: [{ id: "gpt-5.6-sol", serviceTiers: [] }] };
+    const second = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CODEX_HOME: "/profiles/b" },
+    });
+    expect(second.initialize._meta?.models).toMatchObject([
+      { supportsFast: false },
+    ]);
+    expect(
+      rt.requests.filter(([method]) => method === "model/list"),
+    ).toHaveLength(2);
+    await adapter.dispose();
+  });
   beforeEach(() => {
     // Fake timers so bootSession's [1.5s/4s/9s] slash-command re-poll timers
     // don't linger past the test. Real microtasks/promises are unaffected.

@@ -101,6 +101,7 @@ import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
 import { installIframeHeaderStripping } from "./iframe-headers";
 import { registerAllCommands } from "./ipc/commands";
+import { stopProviderSubscriptions } from "./ipc/commands/provider-subscription";
 import {
   readPersistedAppearanceMode,
   readPersistedWindowBackground,
@@ -140,6 +141,7 @@ import { installDevToolsGuard } from "./devtools";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
+import { pushProviderCredentialsToEngine } from "./sidecar";
 import { watchSecrets } from "./secret-store";
 import { setTokenStore as setGithubTokenStore } from "../src/engine/git/github";
 import {
@@ -1606,6 +1608,9 @@ app.whenReady().then(async () => {
   // apps/desktop/src/renderer/features/auth/auth-context.tsx (auth-store-changed).
   if (process.env.ZEROS_SHARED_SECRETS_DIR) {
     const disposeSecretsWatch = watchSecrets((changedAccounts) => {
+      if (changedAccounts.some(account => account.startsWith("provider-accounts-") || ["anthropic-api-key", "openai-api-key", "cursor-api-key", "cursor-subscription"].includes(account))) {
+        void pushProviderCredentialsToEngine().catch(() => {});
+      }
       if (changedAccounts.includes("auth-session:tokens")) {
         emitEvent("auth-store-changed", {});
         void pushCloudReplicaSessionToEngine();
@@ -1668,7 +1673,17 @@ app.on("window-all-closed", () => {
 
 // Kill the engine child before exit. `before-quit` fires once, even
 // if multiple windows close, so the shutdown is single-threaded.
-app.on("before-quit", () => {
+let subscriptionShutdown: Promise<void> | null = null;
+let subscriptionsStopped = false;
+app.on("before-quit", (event) => {
+  if (!subscriptionsStopped) {
+    event.preventDefault();
+    subscriptionShutdown ??= stopProviderSubscriptions().finally(() => {
+      subscriptionsStopped = true;
+      app.quit();
+    });
+    return;
+  }
   shutdownSidecar();
   const service = browserService;
   browserService = null;

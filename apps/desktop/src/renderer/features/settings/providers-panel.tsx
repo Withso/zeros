@@ -2,11 +2,9 @@
 // Providers panel — Settings → Providers
 // ──────────────────────────────────────────────────────────
 //
-// One tab per supported coding-agent CLI. Each tab is a card
-// that shows the live connection state and lets the user pick
-// how the CLI authenticates (CLI sign-in vs API key) and
-// override the executable path / gateway URL (all shown inline —
-// no "Advanced" disclosure).
+// One tab per coding agent. Connect opens Account / CLI / API choices, with
+// a single effective authentication method. Executable and existing gateway
+// overrides remain separate provider configuration.
 //
 // Reads/writes:
 //   - `provider-prefs:<agentId>` in the native settings store
@@ -33,12 +31,10 @@ import {
   ChevronDown,
   ExternalLink,
   Folder,
-  KeyRound,
+  Check,
   Play,
-  RefreshCw,
-  Terminal,
   Copy,
-  type LucideIcon,
+  RefreshCw,
 } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -48,13 +44,33 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "../../shared/ui/primitives/dropdown-menu";
-import { Switch } from "../../shared/ui/primitives/switch";
 import { toast } from "../../shared/ui/primitives/elements";
 import { openAgentConfig } from "../../platform/app";
 import { cn } from "@/renderer/shared/ui/cn";
 import { flushAgentPreferences } from "../../platform/agent-preferences";
+import { subscribeProviderAuth } from "../../platform/provider-auth-state";
+import { AgentIcon } from "../agent/agent-icon";
+import { InlineLoginTerminal } from "./inline-login-terminal";
+import { ProviderConnectionDialog } from "./provider-connection-dialog";
+import {
+  connectionLabel,
+  connectionMethod,
+  rememberConnectionMethod,
+  type ConnectionMethod,
+} from "./connection-methods";
+import { subscribeProviderSettingsTab } from "./settings-navigation";
 import { SettingsSection, SettingsField } from "./settings-ui";
-import { nativeInvoke } from "../../platform/runtime";
+import { ProviderInformation } from "./provider-information";
+import { SubscriptionConnectionPanel } from "./subscription-connection-panel";
+import {
+  cancelSubscription,
+  changeSubscriptionAccount,
+  isSubscriptionProvider,
+  readSubscription,
+  subscriptionCache,
+} from "./subscription-connection";
+import { nativeInvoke, useNativeRuntime } from "../../platform/runtime";
+import { useCachedRead } from "../../state/use-cached-read";
 import { getSetting, setSetting } from "../../platform/settings";
 import {
   deleteSecret,
@@ -68,25 +84,18 @@ import {
   refreshAgents,
   useAgentsSnapshot,
 } from "../agent/agents-cache";
-import { useEnabledAgents } from "../agent/enabled-agents";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import type {
-  AccountDetails,
   AgentAgentsListMessage,
   AgentKeyValidatedMessage,
   BridgeRegistryAgent,
 } from "../../platform/bridge/messages";
-import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import {
   getProviderPrefs,
-  isApiKeyOnly,
   setProviderPrefs,
   subscribeProviderPreferences,
-  type ProviderAuthMethod,
   type ProviderPrefs,
 } from "./provider-prefs";
-import { providerConnectionStatus } from "./provider-connection-status";
-import { InlineLoginTerminal } from "./inline-login-terminal";
 
 // ──────────────────────────────────────────────────────────
 // Per-agent vendor enrichment for the API-key path. The settings
@@ -121,11 +130,7 @@ const PROVIDER_VENDOR_CONFIG: Record<string, ProviderVendorConfig> = {
     secretAccount: SECRET_ACCOUNTS.OPENAI_API_KEY,
     consoleUrl: "https://platform.openai.com/api-keys",
   },
-  // Cursor runs on the bundled @cursor/sdk and needs a CURSOR_API_KEY
-  // (Dashboard → API Keys; bills to the user's Cursor plan). The SDK is
-  // bundled with the app — there's no user CLI to sign into — so Cursor
-  // is API-key-only (isApiKeyOnly): the panel shows just the key input,
-  // no CLI-vs-API-key toggle.
+  // Cursor supports browser subscription sign-in and a manually supplied key.
   cursor: {
     vendor: "Cursor",
     envVar: "CURSOR_API_KEY",
@@ -134,42 +139,11 @@ const PROVIDER_VENDOR_CONFIG: Record<string, ProviderVendorConfig> = {
   },
 };
 
-// Providers that expose an API-key path in the panel. Claude / Codex offer it
-// alongside CLI sign-in (two tiles); Cursor is API-key-ONLY (isApiKeyOnly —
-// bundled SDK, no CLI sign-in).
+// Providers with an API-key option alongside subscription sign-in.
 const API_KEY_PROVIDERS = new Set(Object.keys(PROVIDER_VENDOR_CONFIG));
 
 // Tab ordering — Claude + Codex first (the two API-key candidates), then Cursor.
 const PROVIDER_ORDER = ["claude", "codex", "cursor"] as const;
-
-// Which subscription rows each provider's connection block shows, in order.
-// Cursor is intentionally ABSENT — it's API-key-only, so there's no
-// account/plan/org to surface (its card shows just the key input). Codex
-// omits Org (no org concept). Field values come from `agent.account`, which
-// the engine account probe fills in a later step; until then the table
-// renders its labels with a muted "—" placeholder.
-const ACCOUNT_DETAIL_FIELDS: Record<
-  string,
-  ReadonlyArray<{ key: keyof AccountDetails; label: string }>
-> = {
-  claude: [
-    { key: "provider", label: "Provider" },
-    { key: "plan", label: "Plan" },
-    { key: "org", label: "Org" },
-    { key: "email", label: "Account" },
-  ],
-  codex: [
-    { key: "provider", label: "Provider" },
-    { key: "plan", label: "Plan" },
-    { key: "email", label: "Account" },
-  ],
-};
-
-/** "max" → "Max". Plan/subscription tiers arrive raw from the engine (the
- *  SDK's enum casing); title-case the first letter for display. */
-function titleCase(s: string): string {
-  return s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s;
-}
 
 /** What an empty Executable path resolves to, per agent — mirrors each
  *  adapter's REAL resolution so the hint never implies a $PATH lookup that
@@ -326,6 +300,13 @@ export function ProvidersPanel({
     });
   }, [surfaceActive]);
 
+  useEffect(() => {
+    if (!surfaceActive) return;
+    return subscribeProviderAuth(() => {
+      void refreshAgents(listAgentsRef.current).catch(() => {});
+    });
+  }, [surfaceActive]);
+
   // Window-focus refresh — so coming back from a Terminal sign-in
   // flips the dot without a manual click. Debounced 300 ms so rapid
   // focus/blur (alt-tab churn) doesn't fan out probes. Empty deps so
@@ -394,6 +375,8 @@ export function ProvidersPanel({
     );
   }, [agents]);
 
+  useEffect(() => subscribeProviderSettingsTab(setActiveIdState), []);
+
   const active = ordered.find((a) => a.id === activeId) ?? ordered[0];
 
   // Per-provider Refresh re-runs the engine probe sweep (install / auth /
@@ -401,19 +384,6 @@ export function ProvidersPanel({
   // round-trip; the snapshot update re-renders the active card.
   const handleRefresh = useCallback(
     () => refreshAgents(listAgents),
-    [listAgents],
-  );
-
-  // Login-terminal poll: a NON-force list. The forced path above busts the
-  // engine's version + account caches and re-spawns `<cli> --version` /
-  // account-probe children for EVERY agent — fine for one explicit click,
-  // a subprocess storm on a 3s interval. A plain list re-runs just the auth
-  // probes once the engine's short freshness window lapses, which is all the
-  // login poll needs (credential-file agents self-heal via the mtime jump).
-  // maxAgeMs below the poll cadence so each tick actually reaches the engine;
-  // the engine's own ~5s listAgents freshness cache then rate-limits probes.
-  const handlePollAuth = useCallback(
-    () => loadAgents(listAgents, 2_500),
     [listAgents],
   );
 
@@ -433,11 +403,7 @@ export function ProvidersPanel({
               key={active.id}
               agent={active}
               surfaceActive={surfaceActive}
-              defaultEnabledIds={ordered
-                .filter((a) => !a.beta)
-                .map((a) => a.id)}
               onRefresh={handleRefresh}
-              onPollAuth={handlePollAuth}
             />
           )}
         </>
@@ -513,37 +479,22 @@ function ProviderTabs({
 function ProviderCard({
   agent,
   surfaceActive,
-  defaultEnabledIds,
   onRefresh,
-  onPollAuth,
 }: {
   agent: BridgeRegistryAgent;
   /** False while Settings retains this provider form off-screen. */
   surfaceActive: boolean;
-  /** Non-beta agent IDs — passed through to the enabled-agents store
-   *  as the first-run default set so toggling a beta agent on doesn't
-   *  also implicitly enable every other beta agent. */
-  defaultEnabledIds: string[];
   /** Re-runs the engine probe sweep for all providers. Wired to the
    *  per-provider Refresh button in the connection block. */
   onRefresh: () => Promise<unknown>;
-  /** Cheap auth-only re-list for the login-terminal poll — no version /
-   *  account cache busting, no per-agent probe subprocess fan-out. */
-  onPollAuth: () => Promise<unknown>;
 }) {
   // For the save-time key validation round-trip (AGENT_VALIDATE_KEY).
   const bridge = useBridge();
   const vendor = PROVIDER_VENDOR_CONFIG[agent.id];
   const supportsApiKey = API_KEY_PROVIDERS.has(agent.id);
-  // API-key-only agents (Cursor) skip the CLI-vs-API-key toggle and the
-  // Terminal sign-in: the bundled SDK has no CLI to log into, so the key
-  // is the one mandatory credential.
-  const apiKeyOnly = isApiKeyOnly(agent.id);
-  // Bundled-SDK agents (Cursor / @cursor/sdk) run in-process — no spawned
-  // CLI — so a custom Executable path is inert. Same set as the API-key-only
-  // agents (bundled runtime ⇒ no CLI sign-in ⇒ no CLI to point at), so the
-  // Executable path field is hidden for them entirely.
-  const executableInert = apiKeyOnly;
+  // Authentication capability is separate from executable customization.
+  // Cursor uses the bundled SDK host; a custom CLI path has no effect.
+  const executableInert = agent.id === "cursor";
   // Whether this agent shows a gateway base-URL override (Claude only today).
   const showGateway = agent.id === "claude" && !!vendor?.gatewayBaseUrlVar;
   // Does the "Provider config" block have at least one control? Cursor (bundled
@@ -551,28 +502,32 @@ function ProviderCard({
   // skip the wrapper entirely rather than render an empty padded container.
   const hasProviderConfig =
     !executableInert || showGateway || !!AGENT_CONFIG_FILE[agent.id];
-  // Subscription rows for this provider's connection block — undefined for
-  // Cursor, which renders no block at all. See ACCOUNT_DETAIL_FIELDS.
-  const accountFields = ACCOUNT_DETAIL_FIELDS[agent.id];
-  const { isEnabled, toggle: toggleEnabled } = useEnabledAgents();
-  const enabled = isEnabled(agent.id, agent.beta);
-
-  const [refreshing, setRefreshing] = useState(false);
-  const handleRefresh = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await onRefresh();
-      toast.success(`${agent.name} refreshed`);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Refresh failed");
-    } finally {
-      setRefreshing(false);
-    }
-  }, [onRefresh, agent.name]);
 
   const [prefs, setPrefsState] = useState<ProviderPrefs>(() =>
     getProviderPrefs(agent.id),
   );
+
+  const [connectionOpen, setConnectionOpen] = useState(false);
+  const [method, setMethod] = useState<ConnectionMethod>(() =>
+    connectionMethod(agent.id, getProviderPrefs(agent.id)),
+  );
+  const [changingMethod, setChangingMethod] = useState(false);
+  const [cliOpen, setCliOpen] = useState(false);
+  const methodInFlight = useRef(false);
+  const connectionVisible = useRef(surfaceActive && connectionOpen);
+  connectionVisible.current = surfaceActive && connectionOpen;
+  useEffect(
+    () => () => {
+      connectionVisible.current = false;
+    },
+    [],
+  );
+  useEffect(() => {
+    if (!surfaceActive) {
+      setConnectionOpen(false);
+      setCliOpen(false);
+    }
+  }, [surfaceActive]);
 
   const [apiKey, setApiKey] = useState("");
   const [apiKeyLoaded, setApiKeyLoaded] = useState(false);
@@ -581,6 +536,54 @@ function ProviderCard({
   // status). Tracked separately from `apiKey` because that holds the input's
   // live value, which diverges from the saved secret while editing.
   const [keyConfigured, setKeyConfigured] = useState(false);
+  const native = useNativeRuntime().ready;
+  const subscription = useCachedRead(
+    subscriptionCache,
+    agent.id,
+    readSubscription,
+    {
+      enabled: native && surfaceActive && isSubscriptionProvider(agent.id),
+      maxAgeMs: 15_000,
+    },
+  );
+  useEffect(() => {
+    if (!native || !surfaceActive || !isSubscriptionProvider(agent.id)) return;
+    return subscribeProviderAuth(() => subscriptionCache.invalidate(agent.id));
+  }, [agent.id, native, surfaceActive]);
+  useEffect(() => {
+    const confirmedMethod = subscription.data?.method;
+    if (
+      !surfaceActive ||
+      !confirmedMethod ||
+      methodInFlight.current ||
+      changingMethod ||
+      confirmedMethod === method
+    )
+      return;
+    rememberConnectionMethod(agent.id, confirmedMethod);
+    setMethod(confirmedMethod);
+    setCliOpen(false);
+    const current = getProviderPrefs(agent.id);
+    const authMethod = confirmedMethod === "apiKey" ? "apiKey" : "cli";
+    if (current.authMethod !== authMethod) {
+      const next: ProviderPrefs = { ...current, authMethod };
+      setProviderPrefs(agent.id, next);
+      setPrefsState(next);
+      void flushAgentPreferences().catch(() => {});
+    }
+  }, [
+    agent.id,
+    changingMethod,
+    method,
+    subscription.data?.method,
+    surfaceActive,
+  ]);
+  const connected =
+    !changingMethod &&
+    (method === "apiKey"
+      ? agent.authenticated === true && keyConfigured
+      : subscription.data?.state === "connected" &&
+        agent.authenticated === true);
 
   const [binaryPathDraft, setBinaryPathDraft] = useState(
     prefs.binaryPath ?? "",
@@ -599,6 +602,7 @@ function ProviderCard({
             : draft,
         );
         setPrefsState(next);
+        setMethod(connectionMethod(agent.id, next));
       }),
     [agent.id, prefs],
   );
@@ -640,12 +644,30 @@ function ProviderCard({
     [agent.id],
   );
 
-  const handleAuthMethod = (method: ProviderAuthMethod) => {
-    if (prefs.authMethod === method) return;
-    writePrefs({ authMethod: method });
-    void flushAgentPreferences()
-      .then(() => toast.success("Provider settings saved"))
-      .catch(() => {});
+  const handleAuthMethod = async (nextMethod: ConnectionMethod) => {
+    if (methodInFlight.current || nextMethod === method) return;
+    methodInFlight.current = true;
+    setChangingMethod(true);
+    setCliOpen(false);
+    try {
+      if (isSubscriptionProvider(agent.id)) await cancelSubscription(agent.id);
+      if (isSubscriptionProvider(agent.id))
+        await changeSubscriptionAccount({
+          provider: agent.id,
+          action: "select-method",
+          method: nextMethod,
+        });
+      rememberConnectionMethod(agent.id, nextMethod);
+      writePrefs({ authMethod: nextMethod === "apiKey" ? "apiKey" : "cli" });
+      setMethod(nextMethod);
+      await flushAgentPreferences();
+      await onRefresh();
+    } catch {
+      toast.error("Could not change the connection method. Try again.");
+    } finally {
+      methodInFlight.current = false;
+      setChangingMethod(false);
+    }
   };
 
   const handleSaveApiKey = async () => {
@@ -781,63 +803,17 @@ function ProviderCard({
 
   // ── derived UI state ───────────────────────────────────
 
-  // CLI-mode connection state for the connection block: "connected" means the
-  // CLI has credentials AND the runtime we'd spawn exists (the engine AND-s both
-  // into `authenticated`). When false, the block shows a red error badge and
-  // hides the subscription table.
-  const cliConnected = agent.authenticated === true;
-  // A missing RUNTIME is a different failure from a missing SIGN-IN, and the old
-  // two-state badge could say neither: a packaged build with no bundled Claude
-  // Code binary reported "Connected" (credentials existed) while every send
-  // failed with "AGENT RESPONSE FAILURE". Surface the engine's reason verbatim —
-  // it names the fix (set an Executable path, or reinstall).
-  const runtimeMissing = agent.runtimeUnavailableReason;
-  const connectionStatus = providerConnectionStatus(agent);
-
-  // Embedded login terminal (CLI mode, not connected): the user runs the
-  // agent's login command inline (`claude /login`, `codex login`). Naming
-  // for the Run button + the terminal header.
-  const loginBinary = agent.authBinary ?? agent.id;
-  const loginArgs = agent.loginArgs ?? [];
-  const loginLabel = `${loginBinary} ${loginArgs.join(" ")}`.trim();
-  const [loginOpen, setLoginOpen] = useState(false);
-  // Whether the terminal was opened while ALREADY connected (a re-login from
-  // the always-visible Run button). Gates the auto-close below so opening it
-  // when connected doesn't instantly snap shut.
-  const openedConnectedRef = useRef(false);
-  const openLoginTerminal = useCallback(() => {
-    openedConnectedRef.current = cliConnected;
-    setLoginOpen(true);
-  }, [cliConnected]);
-
-  // Auto-detect a successful sign-in: while the terminal is open and the CLI
-  // still reports not-connected, re-list every few seconds. Deliberately the
-  // NON-force path — the forced sweep busts the engine's version/account
-  // caches and fans out probe subprocesses per agent on every tick.
-  useEffect(() => {
-    if (!surfaceActive || !loginOpen || cliConnected) return;
-    const id = window.setInterval(
-      () => void onPollAuth().catch(() => {}),
-      3000,
-    );
-    return () => window.clearInterval(id);
-  }, [surfaceActive, loginOpen, cliConnected, onPollAuth]);
-
-  // Auto-close ONLY on a real disconnected→connected transition (login just
-  // succeeded) — detected via the poll above, a manual Refresh, or the
-  // window-focus refresh. Skipped when the terminal was opened while already
-  // connected (a re-login), so that case stays open until the user closes it.
-  useEffect(() => {
+  const warmConnection = () => {
     if (
-      surfaceActive &&
-      loginOpen &&
-      cliConnected &&
-      !openedConnectedRef.current
-    ) {
-      setLoginOpen(false);
-      toast.success(`${agent.name} connected`);
-    }
-  }, [surfaceActive, loginOpen, cliConnected, agent.name]);
+      !surfaceActive ||
+      method !== "account" ||
+      !isSubscriptionProvider(agent.id)
+    )
+      return;
+    void subscriptionCache
+      .load(agent.id, () => readSubscription(agent.id), { maxAgeMs: 15_000 })
+      .catch(() => {});
+  };
 
   return (
     <section className="flex flex-col gap-8">
@@ -899,225 +875,185 @@ function ProviderCard({
         </SettingsSection>
       )}
 
-      {/* Authentication. Claude / Codex offer a CLI-vs-API-key choice
-          (a compact segmented control). API-key-only agents (Cursor)
-          skip the toggle — the bundled SDK has no CLI sign-in, so the
-          key is the one mandatory credential and we render just its
-          input below. */}
+      {/* All current providers offer account sign-in and pasted API keys. */}
       {supportsApiKey && vendor && (
         <section className="flex flex-col gap-3">
-          {/* Title row: the "Authentication" heading and the Enabled toggle
-              (show/hide in the new-chat picker — Zeros-specific) share one
-              row, the toggle vertically centered against the heading. Same
-              shape for every provider. The toggle is self-evident on/off, so
-              no "Enabled/Disabled" text label. */}
-          <div className="flex flex-row items-center justify-between gap-4">
-            <h2 className="text-fg2 m-0 text-[14px] font-medium">
-              Authentication
-            </h2>
-            <Switch
-              checked={enabled}
-              onCheckedChange={() => {
-                toggleEnabled(agent.id, defaultEnabledIds);
-                toast.success(
-                  enabled
-                    ? `${agent.name} hidden from new-chat picker`
-                    : `${agent.name} enabled`,
-                );
-              }}
-              aria-label={`Enable ${agent.name}`}
-            />
-          </div>
-
-          {/* CLI-vs-API-key choice (Claude / Codex). Wrapped in a block so the
-              inline-flex control hugs its content rather than stretching to
-              the section width. */}
-          {!apiKeyOnly && (
-            <div>
-              <AuthMethodSegmented
-                value={prefs.authMethod}
-                onChange={handleAuthMethod}
+          <div className="flex items-center justify-between gap-4">
+            <div className="text-fg1 flex items-center gap-3 text-sm font-medium">
+              <AgentIcon
+                agentId={agent.id}
+                iconUrl={undefined}
+                className="size-5"
               />
+              {agent.name}
             </div>
+            <Button
+              variant="secondary"
+              size="lg"
+              onPointerEnter={warmConnection}
+              onFocus={warmConnection}
+              onClick={() => setConnectionOpen(true)}
+            >
+              {connectionLabel(
+                connected,
+                prefs,
+                agent.id === "claude" ? "Claude" : agent.name,
+              )}
+              {connected && (
+                <Check className="text-green-fg size-4" aria-hidden="true" />
+              )}
+            </Button>
+          </div>
+          {isSubscriptionProvider(agent.id) && (
+            <ProviderInformation provider={agent.id} connected={connected} method={method} status={subscription.data} surfaceActive={surfaceActive} />
           )}
-
-          {(apiKeyOnly || prefs.authMethod === "apiKey") && (
-            <div className="flex flex-col gap-2 py-3.5">
-              {/* Header: the key label + a "Key" button (opens the vendor
+          <ProviderConnectionDialog
+            provider={agent.id}
+            name={agent.name}
+            open={connectionOpen && surfaceActive}
+            onOpenChange={(open) => {
+              setConnectionOpen(open);
+              if (!open) setCliOpen(false);
+            }}
+            method={method}
+            onMethodChange={(next) => void handleAuthMethod(next)}
+            connected={connected}
+            busy={changingMethod || savingApiKey}
+          >
+            {method === "apiKey" ? (
+              <div className="flex flex-col gap-2 py-3.5">
+                {/* Header: the key label + a "Key" button (opens the vendor
                   console) sit together on one row; the configured/not status
                   sits below with a gap, so the button fits alongside the
                   title. No keychain hint text — the status carries it. */}
-              <div className="flex flex-col gap-1.5">
-                <div className="flex flex-row items-center gap-2.5">
-                  <label
-                    htmlFor={`api-key-${agent.id}`}
-                    className="text-fg1 text-[14px] font-medium"
-                  >
-                    {vendor.vendor} API key
-                  </label>
-                  <Button
-                    asChild
-                    variant="secondary"
-                    size="sm"
-                    className="shrink-0 gap-1.5"
-                  >
-                    <a
-                      href={vendor.consoleUrl}
-                      target="_blank"
-                      rel="noreferrer"
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex flex-row items-center gap-2.5">
+                    <label
+                      htmlFor={`api-key-${agent.id}`}
+                      className="text-fg1 text-[14px] font-medium"
                     >
-                      Key
-                      <ArrowUpRight className="size-3.5" aria-hidden="true" />
-                    </a>
-                  </Button>
-                </div>
-                <span className="text-fg2 text-xs">
-                  {keyConfigured
-                    ? `${vendor.vendor} API key configured`
-                    : `No ${vendor.vendor} API key configured`}
-                </span>
-              </div>
-              <div className="flex flex-row gap-2">
-                <Input
-                  id={`api-key-${agent.id}`}
-                  type="password"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={
-                    !apiKeyLoaded
-                      ? "Paste API key"
-                      : keyConfigured
-                        ? "•••• stored — paste a new key to replace"
-                        : "sk-..."
-                  }
-                  value={apiKey}
-                  disabled={!apiKeyLoaded}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="flex-1"
-                />
-                <Button
-                  size="lg"
-                  onClick={() => void handleSaveApiKey()}
-                  disabled={savingApiKey || !apiKeyLoaded || !apiKey.trim()}
-                >
-                  {savingApiKey ? "Saving…" : "Save"}
-                </Button>
-                {keyConfigured && (
-                  <Button
-                    variant="secondary"
-                    size="lg"
-                    onClick={() => void handleRemoveApiKey()}
-                    disabled={savingApiKey || !apiKeyLoaded}
-                  >
-                    Remove
-                  </Button>
-                )}
-              </div>
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* Connection + subscription details — Claude / Codex, and ONLY in CLI
-          mode. In API-key mode the signed-in account/plan/org/email is
-          irrelevant (you're authing with a key, not the subscription), so the
-          whole block (Connected badge + Refresh + table) is hidden. Cursor is
-          API-key-only, so it never has this block. Refresh re-runs the engine
-          probe sweep; account rows read from `agent.account` (→ "—" until the
-          probe fills them). */}
-      {accountFields && vendor && prefs.authMethod === "cli" && (
-        <section className="flex flex-col gap-3">
-          <div className="flex flex-row items-center justify-between gap-4">
-            <StatusBadge
-              label={connectionStatus.label}
-              tone={connectionStatus.tone}
-            />
-            <Tooltip label="Refresh">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => void handleRefresh()}
-                disabled={refreshing}
-                className="size-6 shrink-0 p-0"
-                aria-label={`Refresh ${agent.name} connection`}
-              >
-                {refreshing ? (
-                  <ZerosSpinner size={16} />
-                ) : (
-                  <RefreshCw className="size-3" aria-hidden="true" />
-                )}
-              </Button>
-            </Tooltip>
-          </div>
-          {/* The "Run <cli> login" button is ALWAYS offered (lets the user
-              (re)run the login flow even when connected). When connected we
-              ALSO show the subscription details above it. Opening the terminal
-              replaces both. The details list is deliberately NOT a table. */}
-          {loginOpen ? (
-            <InlineLoginTerminal
-              ownerId={agent.id}
-              binary={loginBinary}
-              args={loginArgs}
-              onClose={() => {
-                // Closing (or the process exiting) re-probes so the badge +
-                // details reflect whatever just happened in the terminal.
-                setLoginOpen(false);
-                void onRefresh().catch(() => {});
-              }}
-            />
-          ) : (
-            <>
-              {/* Runtime missing is a BUILD defect, not a sign-in problem, so it
-                  gets its own explanation instead of leaving the user to guess
-                  from a red badge why "Run <cli> /login" changes nothing. The
-                  engine's reason names the two real remedies (set an Executable
-                  path below, or reinstall). */}
-              {runtimeMissing && (
-                <p className="text-red-fg m-0 text-sm">{runtimeMissing}</p>
-              )}
-              {!runtimeMissing && connectionStatus.detail && (
-                <p className="text-yellow-fg m-0 text-sm">
-                  {connectionStatus.detail}
-                </p>
-              )}
-              {cliConnected && (
-                <dl className="border-border1 flex flex-col gap-1.5 rounded-md border px-4 py-3">
-                  {accountFields.map((field) => {
-                    // Provider is known from the vendor config today; the rest
-                    // arrive with the engine account probe. Empty → muted dash.
-                    const raw =
-                      field.key === "provider"
-                        ? (agent.account?.provider ?? vendor.vendor)
-                        : agent.account?.[field.key];
-                    const value =
-                      field.key === "plan" && raw ? titleCase(raw) : raw;
-                    return (
-                      <div
-                        key={field.key}
-                        className="flex flex-row gap-3 text-sm"
+                      {vendor.vendor} API key
+                    </label>
+                    <Button
+                      asChild
+                      variant="secondary"
+                      size="sm"
+                      className="shrink-0 gap-1.5"
+                    >
+                      <a
+                        href={vendor.consoleUrl}
+                        target="_blank"
+                        rel="noreferrer"
                       >
-                        <dt className="text-fg2 w-20 shrink-0">
-                          {field.label}
-                        </dt>
-                        <dd className="text-fg1 m-0 min-w-0 break-words">
-                          {value || <span className="text-fg2">—</span>}
-                        </dd>
-                      </div>
-                    );
-                  })}
-                </dl>
-              )}
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={openLoginTerminal}
-                className="w-fit gap-1.5"
-              >
-                <Play className="size-3" aria-hidden="true" />
-                Run {loginLabel}
-              </Button>
-            </>
-          )}
+                        Key
+                        <ArrowUpRight className="size-3.5" aria-hidden="true" />
+                      </a>
+                    </Button>
+                  </div>
+                  <span className="text-fg2 text-xs">
+                    {keyConfigured
+                      ? `${vendor.vendor} API key configured`
+                      : `No ${vendor.vendor} API key configured`}
+                  </span>
+                </div>
+                <div className="flex flex-row gap-2">
+                  <Input
+                    id={`api-key-${agent.id}`}
+                    type="password"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={
+                      !apiKeyLoaded
+                        ? "Paste API key"
+                        : keyConfigured
+                          ? "•••• stored — paste a new key to replace"
+                          : "sk-..."
+                    }
+                    value={apiKey}
+                    disabled={!apiKeyLoaded}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Button
+                    size="lg"
+                    onClick={() => void handleSaveApiKey()}
+                    disabled={savingApiKey || !apiKeyLoaded || !apiKey.trim()}
+                  >
+                    {savingApiKey ? "Saving…" : "Save"}
+                  </Button>
+                  {keyConfigured && (
+                    <Button
+                      variant="secondary"
+                      size="lg"
+                      onClick={() => void handleRemoveApiKey()}
+                      disabled={savingApiKey || !apiKeyLoaded}
+                    >
+                      Remove
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ) : method === "cli" ? (
+              <>
+                {cliOpen ? (
+                  <InlineLoginTerminal
+                    timeoutMs={5 * 60_000}
+                    loginProvider={agent.id === "claude" ? "claude" : "codex"}
+                    ownerId={agent.id}
+                    binary={agent.authBinary ?? agent.id}
+                    args={
+                      agent.id === "claude"
+                        ? ["auth", "login", "--claudeai"]
+                        : ["login"]
+                    }
+                    unsetEnv={[
+                      "ANTHROPIC_API_KEY",
+                      "ANTHROPIC_AUTH_TOKEN",
+                      "CLAUDE_CODE_OAUTH_TOKEN",
+                      "OPENAI_API_KEY",
+                      "CODEX_API_KEY",
+                    ]}
+                    onClose={() => {
+                      setCliOpen(false);
+                      subscription.refresh();
+                      void onRefresh().catch(() => {});
+                    }}
+                  />
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={changingMethod}
+                      onClick={() => setCliOpen(true)}
+                    >
+                      Open terminal
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Refresh ${agent.id === "claude" ? "Claude" : agent.name} subscription`}
+                      disabled={subscription.refreshing}
+                      onClick={() => {
+                        subscription.refresh();
+                        void onRefresh().catch(() => {});
+                      }}
+                    >
+                      <RefreshCw className="size-3.5" aria-hidden="true" />
+                    </Button>
+                  </div>
+                )}
+              </>
+            ) : isSubscriptionProvider(agent.id) ? (
+              <SubscriptionConnectionPanel
+                provider={agent.id}
+                onChanged={onRefresh}
+                surfaceActive={
+                  surfaceActive && connectionOpen && !changingMethod
+                }
+              />
+            ) : null}
+          </ProviderConnectionDialog>
         </section>
       )}
 
@@ -1206,86 +1142,5 @@ function ProviderCard({
         </div>
       )}
     </section>
-  );
-}
-
-// ──────────────────────────────────────────────────────────
-// Auth method segmented control
-// ──────────────────────────────────────────────────────────
-
-const AUTH_METHODS: ReadonlyArray<{
-  value: ProviderAuthMethod;
-  label: string;
-  Icon: LucideIcon;
-}> = [
-  { value: "cli", label: "CLI", Icon: Terminal },
-  { value: "apiKey", label: "API key", Icon: KeyRound },
-];
-
-/** Compact two-segment toggle for the CLI-vs-API-key auth preference.
- *  Each segment leads with an icon (terminal for CLI, key for API key)
- *  so the choice reads at a glance without ballooning into full cards. */
-function AuthMethodSegmented({
-  value,
-  onChange,
-}: {
-  value: ProviderAuthMethod;
-  onChange: (method: ProviderAuthMethod) => void;
-}) {
-  return (
-    <div
-      role="radiogroup"
-      aria-label="Authentication method"
-      className="border-border3 bg-bg1 inline-flex items-center rounded-md border p-0.5"
-    >
-      {AUTH_METHODS.map((method) => {
-        const active = value === method.value;
-        return (
-          <button
-            key={method.value}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => onChange(method.value)}
-            className={cn(
-              "inline-flex cursor-pointer items-center gap-1.5 rounded-sm px-3 py-1.5 text-sm font-medium transition-colors duration-150 ease-out",
-              active ? "bg-bg2-hover text-fg1" : "text-fg2 hover:text-fg1",
-            )}
-          >
-            <method.Icon className="size-4" aria-hidden="true" />
-            {method.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-// ──────────────────────────────────────────────────────────
-// Status helper
-// ──────────────────────────────────────────────────────────
-
-/** Status pill for the connection block: green when connected, yellow when a
- * check could not run, and red for confirmed error states. */
-function StatusBadge({
-  label,
-  tone,
-}: {
-  label: string;
-  tone: "success" | "warning" | "error";
-}) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center rounded-sm border px-2.5 py-1 text-xs font-medium",
-        tone === "success"
-          ? "bg-green-bg text-green-fg border-transparent"
-          : tone === "warning"
-            ? "bg-yellow-bg text-yellow-fg border-transparent"
-            : "bg-red-bg text-red-fg border-transparent",
-      )}
-    >
-      {label}
-    </span>
   );
 }

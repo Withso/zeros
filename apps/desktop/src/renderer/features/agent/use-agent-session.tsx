@@ -108,6 +108,9 @@ export interface AgentUsage {
 }
 
 export interface AgentSessionState {
+  /** The provider resumed into an empty conversation; carry visible context on
+   * the next actual send, and retain the marker across failed authentication. */
+  needsConversationReplay?: boolean;
   agentId: string | null;
   agentName: string | null;
   /** Immutable engine execution actor. Recovery must recreate Design sessions

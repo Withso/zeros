@@ -36,6 +36,8 @@ import {
 import { FileTag } from "./file-tag";
 import type { RendererContext } from "./types";
 import { DiffHoverCard } from "./diff-hover-preview";
+import { ToolIdentityIcon } from "./tool-identity-icon";
+import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 
 interface EventRowProps {
   message: AgentMessage;
@@ -86,7 +88,7 @@ const TONE_ICON_COLOR: Record<ReturnType<typeof statusTone>, string> = {
 
 export const EventRow = memo(function EventRow({
   message,
-  ctx: _ctx,
+  ctx,
   meta: metaOverride,
   detail,
   trailingNode,
@@ -109,6 +111,12 @@ export const EventRow = memo(function EventRow({
   const hasDetail = detail !== undefined && detail !== null;
   const expandable = isTool ? hasDetail : meta.expandable && hasDetail;
   const Icon = meta.Icon;
+  const surface = isTool
+    ? nativeToolSurface(message as AgentToolMessage)
+    : null;
+  const artwork = isTool
+    ? toolRecord((message as AgentToolMessage).rawInput)._zerosToolArtwork
+    : undefined;
   const iconTone = sTone ? TONE_ICON_COLOR[sTone] : "text-fg2";
   const rowTint = sTone ? TONE_ROW_TINT[sTone] : "";
 
@@ -147,7 +155,13 @@ export const EventRow = memo(function EventRow({
             expandable && "group-hover/event-row:hidden",
           )}
         >
-          <Icon className={meta.iconClassName} />
+          <ToolIdentityIcon
+            artwork={artwork}
+            appId={surface?.kind === "computer" ? surface.appId : undefined}
+            fallback={Icon}
+            active={ctx.attachmentImagesActive !== false}
+            className={cn("size-3", meta.iconClassName)}
+          />
         </span>
         {expandable && (
           <>
@@ -176,7 +190,12 @@ export const EventRow = memo(function EventRow({
           a `%` cap would resolve against the row's own shrunk width and could
           clip even a short label. A short label ("Read"/"Bash") stays its
           natural width and the command follows. */}
-      <span className="text-fg1 max-w-[60ch] shrink-0 truncate text-sm">
+      <span
+        className={cn(
+          "max-w-[60ch] shrink-0 truncate text-sm",
+          sTone === "fail" ? "text-red-primary" : "text-fg1",
+        )}
+      >
         {meta.label}
       </span>
 

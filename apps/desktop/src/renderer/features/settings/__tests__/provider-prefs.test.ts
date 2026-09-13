@@ -30,6 +30,15 @@ describe("local provider preferences", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it("accepts explicit Cursor subscription auth while preserving legacy API-key selection", async () => {
+    const prefs = await import("../provider-prefs");
+    prefs.hydrateProviderPreferences({ cursor: { auth: "cli" } });
+    expect(prefs.getProviderPrefs("cursor").authMethod).toBe("apiKey");
+    prefs.hydrateProviderPreferences({ cursor: { auth: "subscription" } });
+    expect(prefs.getProviderPrefs("cursor").authMethod).toBe("cli");
+    expect(prefs.isApiKeyOnly("cursor")).toBe(false);
+  });
+
   it("reads acknowledged auth before accessing credentials and leaves native launch configuration to TOML", async () => {
     const prefs = await import("../provider-prefs");
     const outbox = await import("../../../platform/agent-preferences");

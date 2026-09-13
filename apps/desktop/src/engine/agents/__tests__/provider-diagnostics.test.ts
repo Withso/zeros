@@ -47,6 +47,24 @@ describe("provider configuration provenance", () => {
     });
   });
 
+  it("does not let selected account sources override boundary suppression", () => {
+    const snapshot = configurationProvenanceFor("cursor", {
+      protectedTerritory: true,
+      suppressUnsafeSources: true,
+      nativeMcpRequiresImport: true,
+      nativeSettingSources: ["team"],
+    });
+    expect(
+      snapshot.sources.filter((source) => source.status === "loaded"),
+    ).toHaveLength(0);
+    expect(
+      snapshot.sources.find((source) => source.id === "team"),
+    ).toMatchObject({
+      status: "suppressed",
+      reason: "Suppressed to preserve protected workspace boundaries",
+    });
+  });
+
   it("maps Codex layers to stable labels and never returns native paths", () => {
     const snapshot = provenanceFromCodexLayers(
       [

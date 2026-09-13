@@ -63,6 +63,9 @@ Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
 });
 RuntimeClient.prototype.connect = () => Promise.resolve();
+// Native readiness can request a reconnect after mount. Keep this synthetic
+// transport connected just as the initial connection does.
+RuntimeClient.prototype.forceReconnect = () => Promise.resolve();
 RuntimeClient.prototype.on = function (type, handler) {
   if (!listeners.has(type)) listeners.set(type, new Set());
   listeners.get(type)!.add(handler);

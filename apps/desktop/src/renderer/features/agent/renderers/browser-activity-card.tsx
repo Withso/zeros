@@ -20,6 +20,7 @@ import {
 import type { AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "./types";
 import { NativeBrowserToolRow } from "./event-row-renderer";
+import { ToolIdentityIcon } from "./tool-identity-icon";
 
 const MAX_VISIBLE_ACTIONS = 24;
 
@@ -80,23 +81,21 @@ export const BrowserActivityCard = memo(function BrowserActivityCard({
         aria-label={statusLabel}
       >
         <span className="relative inline-flex size-4 shrink-0 items-center justify-center">
-          {faviconDataUrl ? (
-            <img src={faviconDataUrl} alt="" className="size-4 rounded-[3px]" />
-          ) : hasWebsiteActivity ? (
-            <Globe2
-              className={
-                failed ? "text-red-primary size-3.5" : "text-fg2 size-3.5"
-              }
-              aria-hidden="true"
-            />
-          ) : (
-            <SquareMousePointer
-              className={
-                failed ? "text-red-primary size-3.5" : "text-fg2 size-3.5"
-              }
-              aria-hidden="true"
-            />
-          )}
+          <ToolIdentityIcon
+            appId={latest?.appId}
+            faviconUrl={
+              faviconDataUrl ??
+              latest?.faviconUrl ??
+              (latest?.external && latest.url && hasWebsiteActivity
+                ? new URL("/favicon.ico", latest.url).href
+                : undefined)
+            }
+            fallback={hasWebsiteActivity ? Globe2 : SquareMousePointer}
+            active={ctx.attachmentImagesActive !== false}
+            className={
+              failed ? "text-red-primary size-3.5" : "text-fg2 size-3.5"
+            }
+          />
         </span>
         <span className="text-fg1 min-w-0 truncate text-sm">{statusLabel}</span>
         {liveTitles ? (

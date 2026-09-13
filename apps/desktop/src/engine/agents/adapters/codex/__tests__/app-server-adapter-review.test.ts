@@ -21,9 +21,10 @@ const runtime = vi.hoisted(() => ({
     }),
   ),
   interruptTurn: vi.fn(async () => {}),
-  requestTyped: vi.fn(async (method: string) =>
-    method === "skills/list" ? { data: [] } : {},
-  ),
+  requestTyped: vi.fn(async (method: string) => {
+    if (method === "config/read") return { config: {} };
+    return method === "skills/list" ? { data: [] } : {};
+  }),
 }));
 
 vi.mock("../app-server", () => ({

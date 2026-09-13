@@ -77,6 +77,13 @@ export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
   for (const m of uniqueDurableMessages(messages)) {
+    if (m.kind === "error_notice" && m.code === "mcp_startup_status") {
+      // Older engines persisted background MCP connection checks as chat
+      // warnings. Keep those records intact, but omit them before grouping
+      // so they cannot create empty system turns or inflate event counts.
+      // Actual tool failures and explicit sign-in failures stay visible.
+      continue;
+    }
     if (m.kind === "text" && m.resumeBoundary) {
       // Session-continuity notices are invisible by design (2026-07-06 user
       // spec: no resume/continuation UI, ever). Newer sessions no longer

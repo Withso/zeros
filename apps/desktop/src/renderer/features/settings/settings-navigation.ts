@@ -27,3 +27,31 @@ export function subscribeUserSettingsSection(
   window.addEventListener(SETTINGS_SECTION_EVENT, onRequest);
   return () => window.removeEventListener(SETTINGS_SECTION_EVENT, onRequest);
 }
+
+const PROVIDER_TAB_KEY = "providers:active-tab";
+const PROVIDER_TAB_EVENT = "zeros:provider-settings-requested";
+const PROVIDER_IDS = new Set(["claude", "codex", "cursor"]);
+
+/** Publish both nested selections before changing the app route. Retained and
+ * cold Settings surfaces see the same provider on their first visible paint. */
+export function requestProviderSettings(provider: string): void {
+  if (!PROVIDER_IDS.has(provider)) return;
+  setSetting(PROVIDER_TAB_KEY, provider);
+  if (typeof window !== "undefined")
+    window.dispatchEvent(
+      new CustomEvent(PROVIDER_TAB_EVENT, { detail: provider }),
+    );
+  requestUserSettingsSection("providers");
+}
+export function subscribeProviderSettingsTab(
+  listener: (provider: string) => void,
+): () => void {
+  if (typeof window === "undefined") return () => {};
+  const onRequest = (event: Event) => {
+    const provider = (event as CustomEvent<unknown>).detail;
+    if (typeof provider === "string" && PROVIDER_IDS.has(provider))
+      listener(provider);
+  };
+  window.addEventListener(PROVIDER_TAB_EVENT, onRequest);
+  return () => window.removeEventListener(PROVIDER_TAB_EVENT, onRequest);
+}

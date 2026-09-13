@@ -431,7 +431,11 @@ export async function requestClaudeOAuthRefresh(
   const timed = timeoutSignal(options.signal, REFRESH_TIMEOUT_MS);
   let response: Response;
   try {
-    response = await (options.fetchImpl ?? fetch)(CLAUDE_OAUTH_TOKEN_ENDPOINT, {
+    const request: RequestInit & {
+      cache: "no-store";
+      credentials: "omit";
+      referrerPolicy: "no-referrer";
+    } = {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -447,7 +451,8 @@ export async function requestClaudeOAuthRefresh(
       redirect: "error",
       referrerPolicy: "no-referrer",
       signal: timed.signal,
-    });
+    };
+    response = await (options.fetchImpl ?? fetch)(CLAUDE_OAUTH_TOKEN_ENDPOINT, request);
   } catch {
     timed.dispose();
     throw new Error("Claude OAuth refresh request failed");
@@ -506,6 +511,10 @@ export async function requestClaudeOAuthRefresh(
 }
 
 const CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials";
+/** Same namespace as the pinned Claude CLI, including explicit ~/.claude. */
+export function claudeCredentialKeychainService(configDir?: string): string {
+  return `${CLAUDE_KEYCHAIN_SERVICE}${configDir ? `-${createHash("sha256").update(configDir.normalize("NFC")).digest("hex").slice(0, 8)}` : ""}`;
+}
 const KEYCHAIN_TIMEOUT_MS = 5_000;
 const REFRESH_LOCK_WAIT_MS = 30_000;
 const REFRESH_LOCK_STALE_MS = 60_000;
@@ -539,6 +548,7 @@ function macAccountName(): string {
 async function readMacClaudeCredential(
   hostHome: string,
   account: string,
+  service = CLAUDE_KEYCHAIN_SERVICE,
 ): Promise<ClaudeCredentialReadResult> {
   return new Promise((resolve) => {
     execFile(
@@ -549,7 +559,7 @@ async function readMacClaudeCredential(
         account,
         "-w",
         "-s",
-        CLAUDE_KEYCHAIN_SERVICE,
+        service,
       ],
       {
         encoding: "utf8",
@@ -578,6 +588,7 @@ async function writeMacClaudeCredential(
   hostHome: string,
   account: string,
   value: string,
+  service = CLAUDE_KEYCHAIN_SERVICE,
 ): Promise<void> {
   if (
     Buffer.byteLength(value) > MAX_KEYCHAIN_COMMAND_BYTES ||
@@ -600,7 +611,7 @@ async function writeMacClaudeCredential(
         "-a",
         account,
         "-s",
-        CLAUDE_KEYCHAIN_SERVICE,
+        service,
         "-X",
         Buffer.from(value, "utf8").toString("hex"),
       ],
@@ -793,10 +804,11 @@ async function commitMacClaudeCredential(
   account: string,
   previousRaw: string,
   nextRaw: string,
+  service = CLAUDE_KEYCHAIN_SERVICE,
 ): Promise<string> {
   const previous = parseCredential(previousRaw);
   const next = parseCredential(nextRaw);
-  const currentSource = await readMacClaudeCredential(hostHome, account);
+  const currentSource = await readMacClaudeCredential(hostHome, account, service);
   if (currentSource.status !== "available") {
     throw new Error("Claude Keychain update failed");
   }
@@ -804,8 +816,8 @@ async function commitMacClaudeCredential(
   if (!sameCredentialIdentity(current, previous)) {
     return currentSource.value;
   }
-  await writeMacClaudeCredential(hostHome, account, nextRaw);
-  const verifiedSource = await readMacClaudeCredential(hostHome, account);
+  await writeMacClaudeCredential(hostHome, account, nextRaw, service);
+  const verifiedSource = await readMacClaudeCredential(hostHome, account, service);
   if (verifiedSource.status !== "available") {
     throw new Error("Claude Keychain update verification failed");
   }
@@ -824,22 +836,25 @@ async function commitMacClaudeCredential(
  * Zeros Dev processes; SDK refresh callbacks receive only the access token. */
 export function defaultMacClaudeOAuthAuthority(
   hostHome: string = homedir(),
+  configDir?: string,
 ): ClaudeOAuthAuthority | null {
   if (process.platform !== "darwin") return null;
   const account = macAccountName();
+  const service = claudeCredentialKeychainService(configDir);
   const key = createHash("sha256")
-    .update(`${hostHome}\0${account}`)
+    .update(`${hostHome}\0${account}\0${service}`)
     .digest("hex");
   const existing = defaultAuthorities.get(key);
   if (existing) return existing;
   const authority = new ClaudeOAuthAuthority({
-    readCredential: () => readMacClaudeCredential(hostHome, account),
+    readCredential: () => readMacClaudeCredential(hostHome, account, service),
     commitCredential: (previous, next) =>
-      commitMacClaudeCredential(hostHome, account, previous, next),
+      commitMacClaudeCredential(hostHome, account, previous, next, service),
     refreshToken: (refreshToken, options) =>
       requestClaudeOAuthRefresh(refreshToken, options),
     withRefreshLock: withMacClaudeRefreshLock,
   });
+  if (defaultAuthorities.size >= 64) defaultAuthorities.delete(defaultAuthorities.keys().next().value!);
   defaultAuthorities.set(key, authority);
   return authority;
 }

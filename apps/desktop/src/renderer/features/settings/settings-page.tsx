@@ -76,7 +76,6 @@ import {
 import { useCachedRead } from "../../state/use-cached-read";
 import {
   providerMemorySettingsCache,
-  providerQuotaCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
 } from "../../state/read-caches";
 import { Button, Input } from "../../shared/ui";
@@ -152,7 +151,7 @@ import {
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useEnabledAgents } from "../agent/enabled-agents";
 import { useAgentsSnapshot, loadAgents } from "../agent/agents-cache";
-import { isRunnableAgent } from "../agent/agent-runnable";
+import { isSelectableAgent } from "../agent/agent-runnable";
 import {
   agentFamily,
   displayModelLabel,
@@ -182,7 +181,6 @@ import { AgentIcon } from "../agent/agent-icon";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
 import type {
   AgentMemorySettings,
-  AgentProviderQuota,
 } from "@zeros/protocol/agent-events";
 
 type SectionId =
@@ -1105,59 +1103,6 @@ function IntegrationsPanel({
 const MODELS_SECTION_CLS =
   "bg-bg1-highlight divide-border1 rounded-lg px-3 [&>*]:py-3";
 
-function quotaResetLabel(resetsAt: number | undefined, now = Date.now()) {
-  if (resetsAt === undefined || !Number.isFinite(resetsAt)) return null;
-  const remaining = resetsAt - now;
-  if (remaining <= 0) return "reset pending";
-  if (remaining < 60 * 60 * 1_000) {
-    return `resets in ${Math.max(1, Math.ceil(remaining / 60_000))}m`;
-  }
-  if (remaining < 24 * 60 * 60 * 1_000) {
-    return `resets in ${Math.max(1, Math.ceil(remaining / 3_600_000))}h`;
-  }
-  return `resets ${new Intl.DateTimeFormat(undefined, {
-    weekday: "long",
-  }).format(new Date(resetsAt))}`;
-}
-
-function UsageLimitsBlock({ quota }: { quota: AgentProviderQuota | null }) {
-  if (!quota) return null;
-  const windowValue = (window: AgentProviderQuota["primary"]) => {
-    if (!window) return "Unavailable";
-    const reset = quotaResetLabel(window.resetsAt);
-    return `${Math.round(window.usedPercent)}% used${reset ? ` · ${reset}` : ""}`;
-  };
-  const credits = quota.credits
-    ? quota.credits.unlimited
-      ? "Unlimited"
-      : quota.credits.available
-        ? quota.credits.balance
-          ? `${quota.credits.balance} available`
-          : "Available"
-        : "Unavailable"
-    : "Unavailable";
-  return (
-    <div className="mt-4">
-      <div className="text-fg2 mb-2 px-1 text-xs font-medium">Usage limits</div>
-      <SettingsList className={MODELS_SECTION_CLS}>
-        <SettingsRow label="Primary">
-          <span className="text-fg2 text-xs tabular-nums">
-            {windowValue(quota.primary)}
-          </span>
-        </SettingsRow>
-        <SettingsRow label="Secondary">
-          <span className="text-fg2 text-xs tabular-nums">
-            {windowValue(quota.secondary)}
-          </span>
-        </SettingsRow>
-        <SettingsRow label="Credits">
-          <span className="text-fg2 text-xs tabular-nums">{credits}</span>
-        </SettingsRow>
-      </SettingsList>
-    </div>
-  );
-}
-
 function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   const sessions = useAgentSessions();
   const bridgeStatus = useBridgeStatus();
@@ -1191,19 +1136,12 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
     surfaceActive &&
     providerSettingsTab === "codex" &&
     bridgeStatus === "connected";
-  const quotaRead = useCachedRead(
-    providerQuotaCache,
-    codexDiagnosticsActive ? "codex" : null,
-    (agentId) => sessions.readProviderQuota(agentId),
-    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
-  );
   const memoryRead = useCachedRead(
     providerMemorySettingsCache,
     codexDiagnosticsActive ? "codex" : null,
     (agentId) => sessions.readMemorySettings(agentId),
     { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
   );
-  const codexQuota = quotaRead.data ?? null;
   const codexMemory = memoryRead.data ?? null;
 
   useEffect(() => {
@@ -1216,7 +1154,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   // Runnable, enabled agents whose family we have a curated catalog for
   // (claude / codex / cursor), name-sorted for a stable dropdown.
   const modelAgents = (agents ?? [])
-    .filter((a) => isEnabled(a.id, a.beta) && isRunnableAgent(a))
+    .filter((a) => isEnabled(a.id, a.beta) && isSelectableAgent(a))
     .filter((a) => agentFamily(a.id) !== "")
     .sort((a, b) => a.name.localeCompare(b.name));
 
@@ -1641,7 +1579,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                 </Button>
               </SettingsRow>
             </SettingsList>
-            <UsageLimitsBlock quota={codexQuota} />
           </TabsContent>
         </Tabs>
       </SettingsSection>

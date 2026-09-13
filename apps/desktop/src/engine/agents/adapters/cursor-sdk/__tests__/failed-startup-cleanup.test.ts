@@ -26,14 +26,14 @@ const {
   prewarmSpy,
   resumeSpy,
 } = vi.hoisted(() => ({
-    createRuntimeSpy: vi.fn(),
-    createSpy: vi.fn(),
-    disposeSpy: vi.fn(),
-    listSpy: vi.fn(),
-    modelsListSpy: vi.fn(),
-    prewarmSpy: vi.fn(),
-    resumeSpy: vi.fn(),
-  }));
+  createRuntimeSpy: vi.fn(),
+  createSpy: vi.fn(),
+  disposeSpy: vi.fn(),
+  listSpy: vi.fn(),
+  modelsListSpy: vi.fn(),
+  prewarmSpy: vi.fn(),
+  resumeSpy: vi.fn(),
+}));
 
 vi.mock("../host/host-client", () => {
   const module = {
@@ -79,8 +79,11 @@ function makeCtx(): AgentAdapterContext {
   };
 }
 
-function boundary(): PreparedBoundary {
+function boundary(
+  actor: "agent-code" | "design-agent" = "agent-code",
+): PreparedBoundary {
   return {
+    status: { actor, backend: "none" },
     privateStateDirectory: () => {
       throw new Error("host-parity Cursor must not request private state");
     },
@@ -139,6 +142,34 @@ afterEach(async () => {
 });
 
 describe("CursorSdkAdapter — failed contained startup cleanup", () => {
+  it("loads team content under a Code actor's prepared boundary", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: root,
+      env: { CURSOR_API_KEY: "key" },
+      executionBoundary: boundary(),
+    });
+    expect(createSpy.mock.calls[0][0].local.settingSources).toEqual(["team"]);
+    expect(prewarmSpy.mock.calls[0][0].local).toEqual(
+      createSpy.mock.calls[0][0].local,
+    );
+    await adapter.dispose();
+  });
+
+  it("keeps a Design actor's native extension sources scoped", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: root,
+      env: { CURSOR_API_KEY: "key" },
+      executionBoundary: boundary("design-agent"),
+    });
+    expect(createSpy.mock.calls[0][0].local.settingSources).toEqual([]);
+    expect(prewarmSpy.mock.calls[0][0].local).toEqual(
+      createSpy.mock.calls[0][0].local,
+    );
+    await adapter.dispose();
+  });
+
   it("uses and retires a dedicated contained host for provider one-shots", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
 

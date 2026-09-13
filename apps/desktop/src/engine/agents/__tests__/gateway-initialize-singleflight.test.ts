@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter, InitializeResponse } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
+import * as providerEnv from "../../settings/provider-env";
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -34,9 +35,46 @@ const gateways: AgentGateway[] = [];
 
 afterEach(async () => {
   await Promise.all(gateways.splice(0).map((gateway) => gateway.dispose()));
+  vi.restoreAllMocks();
 });
 
 describe("gateway agent initialization single-flight", () => {
+  it("invalidates populated models and pending initialization when authentication changes", async () => {
+    const config = vi
+      .spyOn(providerEnv, "applyUserProviderConfig")
+      .mockReturnValue({ env: { OPENAI_API_KEY: "fixture-a" } });
+    const old = deferred<InitializeResponse>();
+    const newModels: InitializeResponse = {
+      protocolVersion: 1,
+      _meta: { models: [{ value: "model", label: "Model", supportsFast: false }] },
+    };
+    const initialize = vi
+      .fn<() => Promise<InitializeResponse>>()
+      .mockReturnValueOnce(old.promise)
+      .mockResolvedValue(newModels);
+    const gateway = gatewayWith({
+      agentId: "codex",
+      initialize,
+      dispose: async () => {},
+    } as unknown as AgentAdapter);
+    gateways.push(gateway);
+    const a = gateway.initializeAgent("codex");
+    await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+    config.mockReturnValue({ env: { OPENAI_API_KEY: "fixture-b" } });
+    const b = gateway.initializeAgent("codex");
+    old.resolve({
+      protocolVersion: 1,
+      _meta: { models: [{ value: "model", label: "Model", supportsFast: true }] },
+    });
+    expect((await b)._meta?.models).toEqual(newModels._meta?.models);
+    await a;
+    expect((await gateway.initializeAgent("codex"))._meta?.models).toEqual(
+      newModels._meta?.models,
+    );
+    config.mockReturnValue({ env: { OPENAI_API_KEY: "fixture-c" } });
+    await gateway.initializeAgent("codex");
+    expect(initialize).toHaveBeenCalledTimes(3);
+  });
   it("shares concurrent initialization requests for one provider", async () => {
     const pending = deferred<InitializeResponse>();
     const initialize = vi.fn(() => pending.promise);

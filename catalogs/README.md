@@ -20,6 +20,16 @@ boundary.
   an exact model match, live `effortLevels` and `supportsFast` values are
   authoritative for what the installed runtime and current account can execute;
   explicit `[]` and `false` must override bundled fallback capabilities.
+- `label` is authoritative here for **every** family and is never taken from
+  live discovery. Each provider brands the same wire identifier its own way and
+  rebrands on CLI or account updates — the pinned Claude CLI reports
+  `claude-opus-5[1m]` as "Opus (1M context)", and Codex `model/list` and the
+  Cursor SDK carry their own `displayName` values. An advertised `label` is
+  advisory: it names a row only for a family with no curated entries at all.
+  `overlayLiveCapabilities` in `model-catalog.ts` enforces this with an
+  allowlist of overlayable fields, so renaming a model in the picker means
+  editing this file. A curated `description` is likewise never overwritten;
+  live copy only fills a row that leaves it unset.
 - An adapter therefore advertises a capability only when its provider actually
   answered. Omit the field when the response never addressed it — a missing
   field is "unknown" and keeps the curated fallback, while `[]`/`false` mean

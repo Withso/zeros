@@ -12,6 +12,11 @@
 // ──────────────────────────────────────────────────────────
 
 import {
+  nativeToolSurface,
+  nativeToolTitle,
+  toolRecord,
+} from "./native-tool-presentation";
+import {
   Bot,
   Brain,
   FileEdit,
@@ -353,6 +358,19 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "mcp") {
+    const nativeTitle = nativeToolTitle(tool);
+    if (
+      nativeToolSurface(tool)?.kind === "computer" ||
+      (input.server === "cua_repl" && !browserToolActivity(tool))
+    ) {
+      return {
+        Icon: SquareMousePointer,
+        label: nativeTitle ?? "Use computer",
+        target: undefined,
+        trailing: undefined,
+        expandable: hasContent(tool),
+      };
+    }
     if (isNativeCodexBrowserToolCall(tool)) {
       const args = objectRecord(input.arguments);
       const title = pickString(args.title);
@@ -369,10 +387,14 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
         expandable: false,
       };
     }
+    const app = toolRecord(input.appContext);
+    const artwork = toolRecord(input._zerosToolArtwork);
+    const appName = pickString(app.appName, artwork.name);
+    const actionName = pickString(app.actionName);
     return {
       Icon: Plug,
-      label: "MCP",
-      target: tool.title,
+      label: appName ?? "MCP",
+      target: actionName ?? tool.title,
       trailing: undefined,
       expandable: hasContent(tool),
     };
@@ -454,7 +476,9 @@ export function isNativeCodexBrowserToolCall(tool: AgentToolMessage): boolean {
   const activity = browserToolActivity(tool);
   const input = objectRecord(tool.rawInput);
   return Boolean(
-    activity && input.server === "node_repl" && input.tool === "js",
+    activity &&
+    ["node_repl", "cua_repl"].includes(String(input.server)) &&
+    input.tool === "js",
   );
 }
 

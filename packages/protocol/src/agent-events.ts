@@ -258,9 +258,10 @@ export interface SessionModelState {
 
 /** A model an adapter advertises to the renderer under `InitializeResponse.
  *  _meta.models`. This does NOT replace the curated `catalogs/models-v1.json`:
- *  the catalog drives WHICH models the picker shows, and these advertised models
- *  only OVERLAY per-model capabilities (effort ladder + fast) onto it — live for
- *  Claude/Codex/Cursor, a small constant for cold-start.
+ *  the catalog drives WHICH models the picker shows AND WHAT THEY ARE CALLED,
+ *  and these advertised models only OVERLAY per-model capabilities (effort
+ *  ladder + fast + selectability) onto it — live for Claude/Codex/Cursor, a
+ *  small constant for cold-start. `label` is advisory (see below).
  *  `effortLevels` are plain strings (the renderer's ChatEffort values) so this
  *  core type stays free of renderer types; the renderer validates/coerces them.
  *  Companion `_meta` keys: `modelEnvVar` (env var the chosen model is written
@@ -268,8 +269,16 @@ export interface SessionModelState {
  *  after a runtime boots — the gateway re-polls `initialize` until present). */
 export interface AdvertisedModel {
   value: string;
+  /** The provider's own display name. ADVISORY: it does NOT name a curated
+   *  row. Every provider brands the same wire id differently (the Claude CLI
+   *  calls `claude-opus-5[1m]` "Opus (1M context)") and rebrands on CLI/account
+   *  updates, so a curated model's name comes from `catalogs/models-v1.json`
+   *  alone. This label only surfaces for a family with NO curated entries (an
+   *  unmapped/3rd-party agent), and in `pnpm models:verify` output. */
   label: string;
   badge?: string;
+  /** Provider copy. Fills in a curated row that has no `description`; never
+   *  overwrites one the catalog defines. */
   description?: string;
   aliases?: string[];
   parameters?: AdvertisedModelParameter[];

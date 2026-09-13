@@ -23,12 +23,27 @@ import {
   evaluateAuthProbe,
   isOnPath,
   latestAuthFileMtimeMs,
+  keychainAuthModifiedAtMs,
   probeCliVersion,
   type ProbeCommandRunner,
 } from "../probes";
 import { findAgent, type AuthProbe } from "../registry";
 
 const HOUR_MS = 60 * 60_000;
+
+it("recognizes a keychain credential rewrite using only its public modification date", () => {
+  expect(
+    keychainAuthModifiedAtMs(
+      '    "mdat"<timedate>=0x00  "20260910123456Z\\000"',
+    ),
+  ).toBe(Date.UTC(2026, 8, 10, 12, 34, 56));
+  expect(
+    keychainAuthModifiedAtMs(
+      '    "cdat"<timedate>=0x00  "20260910123456Z\\000"',
+    ),
+  ).toBe(0);
+  expect(keychainAuthModifiedAtMs("unavailable")).toBe(0);
+});
 
 let dir = "";
 let credPath = "";
@@ -47,6 +62,22 @@ async function writeCreds(obj: unknown): Promise<void> {
 }
 
 describe("CLI executable discovery", () => {
+  it("notices Codex credential changes without treating the file as proof of authentication", async () => {
+    await writeCreds({});
+    const probe: AuthProbe = {
+      kind: "command",
+      binary: "codex",
+      args: ["login", "status"],
+      credentialFiles: [credPath],
+    };
+    expect(await latestAuthFileMtimeMs(probe)).toBeGreaterThan(0);
+    expect(
+      await evaluateAuthProbe(probe, {
+        cacheKey: "rejected-codex",
+        run: async () => ({ exitCode: 1, stdout: "" }),
+      }),
+    ).toBe(false);
+  });
   it("accepts an explicit absolute executable outside PATH", async () => {
     const binary = path.join(dir, "custom-provider");
     await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");

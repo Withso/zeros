@@ -109,6 +109,12 @@ describe("queuedPromptPresentation", () => {
       ),
     ).toBe(true);
     expect(
+      shouldPreserveAdmissionPromptOnFailure("auth-required", "active-turn"),
+    ).toBe(true);
+    expect(
+      shouldPreserveAdmissionPromptOnFailure("auth-required", "queued-card"),
+    ).toBe(false);
+    expect(
       shouldPreserveAdmissionPromptOnFailure(
         "provider-unavailable",
         "active-turn",
@@ -1039,6 +1045,17 @@ describe("send-time session recovery", () => {
   });
 
   it("parks any send that still needs an admission before it can dispatch", () => {
+    // A normal new message after sign-in must rebuild the execution that
+    // cached the rejected credentials, while preserving its provider thread.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "auth-required",
+        appliedChatEnvKey: "same",
+        expectedEnvKey: "same",
+      }),
+    ).toBe("session-build");
     // The invisible-first-send bug: a send into a chat whose session hadn't
     // been minted yet fell into the turn body and awaited the FULL admission
     // with the composer already cleared and no bubble anywhere — while the

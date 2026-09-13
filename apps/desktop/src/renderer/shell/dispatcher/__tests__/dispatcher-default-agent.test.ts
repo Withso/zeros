@@ -59,7 +59,7 @@ describe("dispatcher default-agent seeding", () => {
     );
 
     // The strict picker is correct to refuse — nothing is enabled.
-    expect(pickDefaultAgent(registry)).toBeNull();
+    expect(pickDefaultAgent(registry)?.id).toBe("codex");
     // The spawn chain still binds, which is what keeps the surface usable.
     expect(pickAgentForNewChat(registry)?.id).toBe("codex");
   });

@@ -48,6 +48,8 @@ import { secretsFilePath, getSecret, setSecret } from "./secret-store";
 import { githubCredentialStore } from "./github-auth-runtime";
 import { getProductAccountIdForMain } from "./ipc/commands/auth-session";
 import { githubCredentialForEngine } from "./github-engine-credential";
+import { ProviderCredentialSync } from "./provider-credential-sync";
+import { readProviderCredentialsForEngine } from "./provider-credentials";
 import {
   MCP_VAULT_ACCOUNT,
   parseVaultBlob,
@@ -463,7 +465,7 @@ function resolveZsrGitDispatchBinaryPath(): string | null {
  *  Returns nulls rather than throwing — the engine's binary-resolver has its own
  *  fallback tiers (a user's global `claude`), and a hard failure here would take
  *  down engine spawn entirely over one agent's runtime. */
-function resolveClaudeCliPaths(): {
+export function resolveClaudeCliPaths(): {
   binary: string | null;
   version: string | null;
 } {
@@ -589,7 +591,7 @@ function codexTargetTriple(
  *  depend on a user's PATH because that can select a different CLI/version than
  *  the app-server protocol bindings and live capability discovery were built
  *  against. */
-function resolveCodexCliPaths(): {
+export function resolveCodexCliPaths(): {
   binary: string | null;
   version: string | null;
   managedPackageRoot: string | null;
@@ -1631,6 +1633,7 @@ async function doSpawnEngine(
       } catch {
         controlValue = null;
       }
+      if (state.child === child && providerCredentialSync.acknowledge(child, controlValue)) return;
       void handleCloudReplicaEngineControl(
         controlValue,
         (responseLine) => {
@@ -1758,6 +1761,7 @@ async function doSpawnEngine(
   // out of the spawn environment prevents the engine's terminal and agent
   // subprocesses from inheriting a durable credential.
   void pushGithubCredentialToEngine();
+  void pushProviderCredentialsToEngine().catch(() => {});
 
   // Seed only the short-lived WorkOS bearer and public device identity. The
   // Ed25519 private key remains in Electron safeStorage; signing requests make
@@ -1931,6 +1935,39 @@ export async function pushGithubCredentialToEngine(): Promise<void> {
   } catch {
     /* engine exiting — the next spawn re-seeds over stdin */
   }
+}
+
+/** Private, synchronous projection. Reading and writing in one main turn
+ * prevents a late asynchronous read from restoring a disconnected account. */
+const providerCredentialSync = new ProviderCredentialSync();
+export async function pushProviderCredentialsToEngine(): Promise<void> {
+  const child = state.child;
+  if (!child || child.killed || !child.stdin?.writable) {
+    emitEvent("provider-auth-changed", {});
+    return;
+  }
+  let credentials;
+  try {
+    credentials = readProviderCredentialsForEngine();
+  } catch {
+    credentials = {
+      claude: null,
+      codex: null,
+      cursor: null,
+      cursorSubscription: null,
+      accountProfiles: {
+        claude: { id: "00000000-0000-4000-8000-000000000000", state: "disconnected" as const },
+        codex: { id: "00000000-0000-4000-8000-000000000000", state: "disconnected" as const },
+        cursor: { id: "00000000-0000-4000-8000-000000000000", state: "disconnected" as const },
+      },
+    };
+  }
+  await providerCredentialSync.send(child, (requestId) => {
+    if (state.child !== child || !child.stdin?.writable || child.killed)
+      throw new Error("Engine changed");
+    child.stdin.write(`${JSON.stringify({ type: "host.providerCredentials", requestId, credentials })}\n`);
+  });
+  emitEvent("provider-auth-changed", {});
 }
 
 /** Refresh/clear the engine's in-memory cloud-replica session over the private

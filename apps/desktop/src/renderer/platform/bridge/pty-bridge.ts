@@ -71,6 +71,7 @@ export async function bridgePtyCreate(
     cols: number;
     rows: number;
     ephemeral?: boolean;
+    loginProvider?: "claude" | "codex";
   },
   timeoutMs = 10_000,
 ): Promise<PtySessionInfo | null> {
@@ -83,6 +84,7 @@ export async function bridgePtyCreate(
         cols: args.cols,
         rows: args.rows,
         ...(args.ephemeral ? { ephemeral: true } : {}),
+        ...(args.loginProvider ? { loginProvider: args.loginProvider } : {}),
       } as Partial<BridgeMessage> & { type: string },
       timeoutMs,
     )) as PtyCreatedLike;

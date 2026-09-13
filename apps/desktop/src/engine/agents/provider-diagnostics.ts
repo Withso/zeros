@@ -38,24 +38,40 @@ export function configurationProvenanceFor(
   options: {
     protectedTerritory: boolean;
     suppressUnsafeSources: boolean;
+    nativeMcpRequiresImport?: boolean;
+    nativeSettingSources?: readonly string[];
   },
 ): AgentConfigurationProvenance {
   const nativeStatus: AgentConfigurationSource["status"] =
-    options.suppressUnsafeSources ? "suppressed" : "loaded";
+    options.suppressUnsafeSources || options.nativeMcpRequiresImport
+      ? "suppressed"
+      : "loaded";
   return {
     providerId,
     protectedTerritory: options.protectedTerritory,
     sources: [
-      ...CONFIGURATION_LAYERS[providerId].map((source) => ({
-        ...source,
-        status: nativeStatus,
-        ...(nativeStatus === "suppressed"
-          ? {
-              reason:
-                "Suppressed to preserve protected workspace boundaries",
-            }
-          : {}),
-      })),
+      ...CONFIGURATION_LAYERS[providerId].map((source) => {
+        const status = options.suppressUnsafeSources
+          ? "suppressed"
+          : options.nativeSettingSources
+            ? options.nativeSettingSources.includes(source.id)
+              ? "loaded"
+              : "suppressed"
+            : nativeStatus;
+        return {
+          ...source,
+          status,
+          ...(status === "suppressed"
+            ? {
+                reason: options.suppressUnsafeSources
+                  ? "Suppressed to preserve protected workspace boundaries"
+                  : options.nativeSettingSources
+                    ? "Native source is not enabled for this session; local MCP servers require import in Customize"
+                    : "Native settings include local MCP servers, which require import in Customize",
+              }
+            : {}),
+        };
+      }),
       ZEROS_CONFIGURATION_SOURCE,
     ],
   };
