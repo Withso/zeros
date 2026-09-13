@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -8,6 +7,7 @@ import {
   claudeCredentialKeychainService,
   defaultMacClaudeOAuthAuthority,
 } from "../src/engine/agents/containment/claude-oauth-authority";
+import { readBoundedUtf8File } from "../src/engine/files/bounded-read";
 import {
   normalizeClaudeUsage,
   normalizeCursorUsage,
@@ -97,8 +97,13 @@ export async function readClaudeUsageToken(
       ".credentials.json",
     );
     try {
-      if ((await stat(file)).size > MAX_CREDENTIAL_BYTES) return null;
-      raw = await readFile(file, { encoding: "utf8", signal });
+      const contents = await readBoundedUtf8File(
+        file,
+        MAX_CREDENTIAL_BYTES,
+        signal,
+      );
+      if (contents === null) return null;
+      raw = contents;
       if (Buffer.byteLength(raw) > MAX_CREDENTIAL_BYTES) return null;
     } catch {
       return null;

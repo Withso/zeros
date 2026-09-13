@@ -6,6 +6,41 @@ import * as providerEnv from "../../settings/provider-env";
 import * as credentials from "../provider-credentials";
 
 describe("provider registry authentication refresh", () => {
+  it("keeps credential change fingerprints private to one gateway lifetime", async () => {
+    vi.spyOn(providerEnv, "usesProviderApiKey").mockReturnValue(true);
+    const config = vi
+      .spyOn(providerEnv, "applyUserProviderConfig")
+      .mockReturnValue({ env: { ANTHROPIC_API_KEY: "fixture-key" } });
+    const gateways = Array.from({ length: 2 }, () =>
+      new AgentGateway({
+        projectRoot: "/tmp/zeros-registry-refresh",
+        executionBoundary: testExecutionBoundary(),
+        events: {
+          onSessionUpdate: () => {},
+          onPermissionRequest: () => {},
+          onQuestionRequest: () => {},
+          onAgentStderr: () => {},
+          onAgentExit: () => {},
+        },
+      }),
+    );
+    const fingerprint = (gateway: AgentGateway) =>
+      (gateway as unknown as {
+        providerAuthConfigFingerprint(agentId: string): string;
+      }).providerAuthConfigFingerprint("claude");
+    try {
+      const first = fingerprint(gateways[0]);
+      expect(fingerprint(gateways[0])).toBe(first);
+      expect(fingerprint(gateways[1])).not.toBe(first);
+      config.mockReturnValue({ env: { ANTHROPIC_API_KEY: "fixture-new-key" } });
+      expect(fingerprint(gateways[0])).not.toBe(first);
+      config.mockReturnValue({ env: { ANTHROPIC_API_KEY: "fixture-key" } });
+      expect(fingerprint(gateways[0])).toBe(first);
+    } finally {
+      await Promise.all(gateways.map((gateway) => gateway.dispose()));
+      vi.restoreAllMocks();
+    }
+  });
   it.each(["claude", "codex"])(
     "recovers a migrated %s device account when its CLI credentials change",
     async (provider) => {

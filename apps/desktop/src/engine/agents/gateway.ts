@@ -38,7 +38,7 @@ import {
 
 import * as fsp from "node:fs/promises";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
@@ -1662,6 +1662,9 @@ export class AgentGateway {
     string,
     { at: number; value: AccountDetails | null }
   >();
+
+  /** Private challenge for credential-keyed change signatures in this gateway. */
+  private readonly providerAuthFingerprintNonce = randomBytes(32);
 
   /** Runtime auth invalidation. When an adapter throws `auth-required`,
    *  the agent's CLI is the source of truth — even if our file/keychain
@@ -3795,17 +3798,22 @@ export class AgentGateway {
         : agentId === "codex"
           ? ["OPENAI_API_KEY"]
           : ["CURSOR_API_KEY"];
-    return createHash("sha256")
-      .update(
-        JSON.stringify([
-          usesProviderApiKey(this.projectRoot, agentId),
-          configured.cliBinary ?? null,
-          usesProviderApiKey(this.projectRoot, agentId) ? null : providerAccountProfile(agentId)?.id,
-          ...variables.map(
-            (key) => configured.env?.[key] ?? process.env[key] ?? null,
-          ),
-        ]),
-      )
+    // Credentials key a signature of a private per-gateway challenge. Neither
+    // the challenge nor these in-memory change signals are persisted or shared.
+    return createHmac(
+      "sha256",
+      JSON.stringify([
+        usesProviderApiKey(this.projectRoot, agentId),
+        configured.cliBinary ?? null,
+        usesProviderApiKey(this.projectRoot, agentId)
+          ? null
+          : providerAccountProfile(agentId)?.id,
+        ...variables.map(
+          (key) => configured.env?.[key] ?? process.env[key] ?? null,
+        ),
+      ]),
+    )
+      .update(this.providerAuthFingerprintNonce)
       .digest("hex");
   }
 

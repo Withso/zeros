@@ -1,7 +1,7 @@
 import type { McpServerStatus } from "@anthropic-ai/claude-agent-sdk";
-import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
+import { readBoundedUtf8File } from "../../../files/bounded-read";
 import { defaultMacClaudeOAuthAuthority } from "../../containment/claude-oauth-authority";
 
 type Membership = "connected" | "not-connected";
@@ -89,8 +89,9 @@ export async function readClaudeConnectorCredential(
       configDir ?? path.join(accountHome, ".claude"),
       ".credentials.json",
     );
-    if ((await stat(file)).size > MAX_CREDENTIAL_BYTES) return null;
-    raw = await readFile(file, { encoding: "utf8", signal });
+    const contents = await readBoundedUtf8File(file, MAX_CREDENTIAL_BYTES, signal);
+    if (contents === null) return null;
+    raw = contents;
   }
   signal.throwIfAborted();
   if (Buffer.byteLength(raw) > MAX_CREDENTIAL_BYTES) return null;
