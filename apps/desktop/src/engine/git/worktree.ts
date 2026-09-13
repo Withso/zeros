@@ -5,13 +5,12 @@
 // (WorkspaceService { op, params }), which validates inputs and forwards.
 // This makes the engine module trivial to unit-test against a tmpdir repo.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, constants, existsSync, fstatSync, openSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
   readdir,
   realpath,
-  readFile,
   rename,
   rm,
   writeFile,
@@ -19,6 +18,7 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
+import { readBoundedUtf8DescriptorSync } from "../files/bounded-read-sync";
 import { GitError, isGitError } from "./errors";
 import {
   DESIGN_METADATA_PROTECTED_PATHS,
@@ -2310,6 +2310,21 @@ export interface ListWorkspacesOptions {
   archived?: boolean;
 }
 
+/** Inspect and read the same metadata file, refusing symlinks and bounding
+ * growth during the read. A directory is valid only for a checkout's .git. */
+function readWorktreeGitMetadata(file: string): string | null {
+  const fd = openSync(
+    file,
+    constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
+  );
+  try {
+    if (fstatSync(fd).isDirectory()) return null;
+    return readBoundedUtf8DescriptorSync(fd, 65536).trim();
+  } finally {
+    closeSync(fd);
+  }
+}
+
 /** Presence includes usable Git metadata. A returned folder with a dangling
  * .git pointer must stay on the recovery surface. Bounded synchronous metadata
  * reads keep workspace.list an aggregate rather than a Git process per row. */
@@ -2317,22 +2332,25 @@ function stampPresence(ws: Workspace): Workspace {
   let present = false;
   try {
     const dotGit = path.join(ws.path, ".git");
-    const info = statSync(dotGit);
+    const contents = readWorktreeGitMetadata(dotGit);
     let gitdir = dotGit;
-    if (info.isFile() && info.size <= 65536) {
-      const pointer = readFileSync(dotGit, "utf8")
-        .trim()
-        .match(/^gitdir:\s*(.+)$/);
+    if (contents !== null) {
+      const pointer = contents.match(/^gitdir:\s*(.+)$/);
       if (!pointer) return { ...ws, present: false };
       gitdir = path.resolve(ws.path, pointer[1]);
-    } else if (!info.isDirectory()) return { ...ws, present: false };
+    }
     present = existsSync(path.join(gitdir, "HEAD"));
     let common = gitdir;
-    if (present && existsSync(path.join(gitdir, "commondir"))) {
-      common = path.resolve(
-        gitdir,
-        readFileSync(path.join(gitdir, "commondir"), "utf8").trim(),
-      );
+    if (present) {
+      try {
+        const relativeCommon = readWorktreeGitMetadata(
+          path.join(gitdir, "commondir"),
+        );
+        if (relativeCommon === null) return { ...ws, present: false };
+        common = path.resolve(gitdir, relativeCommon);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
     }
     present &&= existsSync(path.join(common, "objects"));
   } catch (error) {
@@ -3524,15 +3542,18 @@ export function recoverMissingWorkspace(
             message: "The saved path is not the original workspace folder.",
           });
         const dotGit = path.join(ws.path, ".git");
-        const info = await lstat(dotGit);
-        if (!info.isFile() || info.size > 65536)
+        let pointerContents: string | null;
+        try {
+          pointerContents = readWorktreeGitMetadata(dotGit);
+        } catch {
+          pointerContents = null;
+        }
+        if (pointerContents === null)
           throw new GitError({
             code: "VALIDATION_FAILED",
             message: "The returned folder has no recoverable Git pointer.",
           });
-        const pointer = (await readFile(dotGit, "utf8"))
-          .trim()
-          .match(/^gitdir:\s*(.+)$/);
+        const pointer = pointerContents.match(/^gitdir:\s*(.+)$/);
         const common = await realpath(
           (
             await runGit(ws.repoRoot, [
@@ -3597,10 +3618,16 @@ export function recoverMissingWorkspace(
             env: { GIT_INDEX_FILE: path.join(prepared, "index") },
           });
           await mkdir(registrationRoot, { recursive: true });
+          let pointerUnchanged = false;
+          try {
+            pointerUnchanged = readWorktreeGitMetadata(dotGit) === pointer![0];
+          } catch {
+            // A replaced, removed, or unreadable pointer cannot authorize repair.
+          }
           if (
             !(await lstat(registrationRoot)).isDirectory() ||
             existsSync(gitdir) ||
-            (await readFile(dotGit, "utf8")).trim() !== pointer![0]
+            !pointerUnchanged
           )
             throw new GitError({
               code: "VALIDATION_FAILED",

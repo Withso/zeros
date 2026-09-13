@@ -15,6 +15,7 @@ import {
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import { promisify } from "node:util";
 import {
   mkdtemp,
@@ -28,7 +29,7 @@ import {
   stat,
   symlink,
 } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import * as setupHooks from "../setup-hooks";
 import { opSettingsWrite } from "../../settings/ops";
 import { worktreeSeedPath } from "../../db/paths";
@@ -2727,6 +2728,56 @@ printf ran > '${sentinel}'
       .slice(8);
     await rm(gitdir, { recursive: true });
     expect(getWorkspace(created.workspaceId).present).toBe(false);
+  });
+
+  it("rejects oversized common-directory metadata during presence checks", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const gitdir = (await readFile(path.join(created.path, ".git"), "utf8"))
+      .trim()
+      .slice(8);
+    const commonFile = path.join(gitdir, "commondir");
+    const common = await readFile(commonFile, "utf8");
+    await writeFile(commonFile, common.trim() + " ".repeat(65536));
+
+    expect(getWorkspace(created.workspaceId).present).toBe(false);
+  });
+
+  it("refuses recovery when the checked Git pointer is replaced by a symlink", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const dotGit = path.join(created.path, ".git");
+    const originalPointer = await readFile(dotGit, "utf8");
+    const gitdir = originalPointer.trim().slice(8);
+    await rm(gitdir, { recursive: true });
+    await writeFile(path.join(created.path, "draft.txt"), "returned edits\n");
+
+    const originalMkdir = fs.mkdir.bind(fs);
+    let replaced = false;
+    const mkdirHook = vi
+      .spyOn(fs, "mkdir")
+      .mockImplementation(async (...args) => {
+        const result = await originalMkdir(...args);
+        if (String(args[0]) === path.dirname(gitdir) && !replaced) {
+          replaced = true;
+          const savedPointer = path.join(created.path, ".git.saved");
+          await rename(dotGit, savedPointer);
+          await symlink(savedPointer, dotGit);
+        }
+        return result;
+      });
+    syncBuiltinESMExports();
+    try {
+      await expect(
+        recoverMissingWorkspace(created.workspaceId),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(replaced).toBe(true);
+      expect(existsSync(gitdir)).toBe(false);
+      expect(await readFile(path.join(created.path, "draft.txt"), "utf8")).toBe(
+        "returned edits\n",
+      );
+    } finally {
+      mkdirHook.mockRestore();
+      syncBuiltinESMExports();
+    }
   });
 
   it("reattaches a returned folder without overwriting edits, deletions or ignored files", async () => {
