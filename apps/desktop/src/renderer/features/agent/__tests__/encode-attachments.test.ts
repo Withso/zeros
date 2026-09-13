@@ -104,8 +104,8 @@ describe("encodeAttachments — text attachments reach the agent", () => {
     readTextAttachment.mockReset();
     readTextAttachment.mockResolvedValue(null);
     writeContextAttachment.mockResolvedValue({
-      absolutePath: "/repo/.context-graph/local/attachments/att-img/shot.png",
-      relativePath: ".context-graph/local/attachments/att-img/shot.png",
+      absolutePath: "/repo/.context/local/attachments/att-img/shot.png",
+      relativePath: ".context/local/attachments/att-img/shot.png",
       mimeType: "image/png",
       bytes: 4,
     });
@@ -274,7 +274,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
         textAttachment({
           id: "att-edit-k2-2",
           text: "",
-          diskPath: ".context-graph/shared/attachments/original/notes.txt",
+          diskPath: ".context/shared/attachments/original/notes.txt",
           contextAttachmentId: "original",
         }),
       ],
@@ -284,7 +284,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
     expect(readTextAttachment).toHaveBeenCalledWith({
       cwd: "/repo",
       attachmentId: "original",
-      diskPath: ".context-graph/shared/attachments/original/notes.txt",
+      diskPath: ".context/shared/attachments/original/notes.txt",
     });
   });
 
@@ -417,8 +417,8 @@ describe("encodeAttachments — image branches still work", () => {
     writeContextAttachment.mockReset();
     readImageAttachment.mockReset();
     writeContextAttachment.mockResolvedValue({
-      absolutePath: "/repo/.context-graph/local/attachments/att-img/shot.png",
-      relativePath: ".context-graph/local/attachments/att-img/shot.png",
+      absolutePath: "/repo/.context/local/attachments/att-img/shot.png",
+      relativePath: ".context/local/attachments/att-img/shot.png",
       mimeType: "image/png",
       bytes: 4,
     });
@@ -436,7 +436,7 @@ describe("encodeAttachments — image branches still work", () => {
         name: "shot.png",
         mimeType: "image/png",
         kind: "image",
-        diskPath: ".context-graph/local/attachments/att-img/shot.png",
+        diskPath: ".context/local/attachments/att-img/shot.png",
         attachmentId: "att-img",
       },
     ]);
@@ -464,7 +464,7 @@ describe("encodeAttachments — image branches still work", () => {
     expect(writeContextAttachment).toHaveBeenCalledTimes(1);
     expect(blocks[0].type).toBe("text");
     expect(bubbleAttachments[0].diskPath).toBe(
-      ".context-graph/local/attachments/att-img/shot.png",
+      ".context/local/attachments/att-img/shot.png",
     );
   });
 
@@ -515,60 +515,62 @@ describe("encodeAttachments — image branches still work", () => {
     warn.mockRestore();
   });
 
-  it("rehydrates a disk-backed transcript image before edit-resend", async () => {
-    readImageAttachment.mockResolvedValue({
-      base64: "cmVsb2FkZWQ=",
-      mimeType: "image/png",
-      bytes: 8,
-    });
-    writeContextAttachment.mockResolvedValueOnce({
-      absolutePath: "/repo/.context-graph/local/attachments/original/shot.png",
-      relativePath: ".context-graph/local/attachments/original/shot.png",
-      mimeType: "image/png",
-      bytes: 8,
-      skipped: true,
-    });
-
-    const { blocks, bubbleAttachments, skipped } = await encodeAttachments(
-      [
-        imageAttachment({
-          id: "att-edit-new",
-          data: "",
-          size: 0,
-          diskPath: ".context-graph/local/attachments/original/shot.png",
-          contextAttachmentId: "original",
-        }),
-      ],
-      VISION,
-    );
-
-    expect(readImageAttachment).toHaveBeenCalledWith({
-      cwd: "/repo",
-      diskPath: ".context-graph/local/attachments/original/shot.png",
-      attachmentId: "original",
-      mimeType: "image/png",
-    });
-    expect(writeContextAttachment).toHaveBeenCalledWith(
-      expect.objectContaining({
-        attachmentId: "original",
+  it.each([".context", ".context-graph"])(
+    "rehydrates a %s transcript image and derives its durable id before edit-resend",
+    async (directory) => {
+      readImageAttachment.mockResolvedValue({
         base64: "cmVsb2FkZWQ=",
-      }),
-    );
-    expect(blocks).toEqual([
-      { type: "image", mimeType: "image/png", data: "cmVsb2FkZWQ=" },
-    ]);
-    expect(bubbleAttachments[0]).toMatchObject({
-      diskPath: ".context-graph/local/attachments/original/shot.png",
-      attachmentId: "original",
-    });
-    expect(skipped).toEqual([]);
-  });
+        mimeType: "image/png",
+        bytes: 8,
+      });
+      writeContextAttachment.mockResolvedValueOnce({
+        absolutePath: "/repo/.context/local/attachments/original/shot.png",
+        relativePath: ".context/local/attachments/original/shot.png",
+        mimeType: "image/png",
+        bytes: 8,
+        skipped: true,
+      });
+
+      const { blocks, bubbleAttachments, skipped } = await encodeAttachments(
+        [
+          imageAttachment({
+            id: "att-edit-new",
+            data: "",
+            size: 0,
+            diskPath: `${directory}/local/attachments/original/shot.png`,
+          }),
+        ],
+        VISION,
+      );
+
+      expect(readImageAttachment).toHaveBeenCalledWith({
+        cwd: "/repo",
+        diskPath: `${directory}/local/attachments/original/shot.png`,
+        attachmentId: undefined,
+        mimeType: "image/png",
+      });
+      expect(writeContextAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          attachmentId: "original",
+          base64: "cmVsb2FkZWQ=",
+        }),
+      );
+      expect(blocks).toEqual([
+        { type: "image", mimeType: "image/png", data: "cmVsb2FkZWQ=" },
+      ]);
+      expect(bubbleAttachments[0]).toMatchObject({
+        diskPath: ".context/local/attachments/original/shot.png",
+        attachmentId: "original",
+      });
+      expect(skipped).toEqual([]);
+    },
+  );
 
   it("gives a legacy image one durable id that later edit-resends reuse", async () => {
     writeContextAttachment.mockImplementation(
       async (args: { attachmentId: string; filename: string }) => ({
-        absolutePath: `/repo/.context-graph/local/attachments/${args.attachmentId}/${args.filename}`,
-        relativePath: `.context-graph/local/attachments/${args.attachmentId}/${args.filename}`,
+        absolutePath: `/repo/.context/local/attachments/${args.attachmentId}/${args.filename}`,
+        relativePath: `.context/local/attachments/${args.attachmentId}/${args.filename}`,
         mimeType: "image/png",
         bytes: 5,
       }),
@@ -610,8 +612,8 @@ describe("encodeAttachments — ordering", () => {
   it("preserves composer order across mixed kinds", async () => {
     writeContextAttachment.mockReset();
     writeContextAttachment.mockResolvedValue({
-      absolutePath: "/repo/.context-graph/local/attachments/b/shot.png",
-      relativePath: ".context-graph/local/attachments/b/shot.png",
+      absolutePath: "/repo/.context/local/attachments/b/shot.png",
+      relativePath: ".context/local/attachments/b/shot.png",
       mimeType: "image/png",
       bytes: 4,
     });

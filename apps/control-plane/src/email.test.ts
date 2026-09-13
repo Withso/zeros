@@ -29,6 +29,7 @@ describe("Resend delivery contract", () => {
       );
       expect(JSON.parse(String(init?.body))).toMatchObject({
         from: "Zeros <notifications@updates.zeros.build>",
+        reply_to: "hi@zeros.build",
         to: ["person@example.com"],
         subject: "Subject",
         html: "<p>Body</p>",

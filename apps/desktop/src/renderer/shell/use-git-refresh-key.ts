@@ -387,7 +387,7 @@ export function triggerGitRefresh(changedCwd?: string): void {
   publishRefresh(changedCwd);
 }
 
-// Composer attachment staging writes into `.context-graph/` over a plain IPC —
+// Composer attachment staging writes into `.context/` over a plain IPC —
 // no bridge op, no DB_CHANGED, and no turn end until the prompt is sent (if it
 // ever is). The graph's own change signal is the renderer-side substitute:
 // bridge it onto this refresh bus so the Files tab's tracked AND ignored

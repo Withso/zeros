@@ -1,9 +1,17 @@
 // ──────────────────────────────────────────────────────────
-// Workbench + menu — new File/Browser + quick open
+// Workbench + menu — new tabs and quick open
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useMemo, useState } from "react";
-import { File, Globe, Plus } from "lucide-react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { File, Globe, Plus, Terminal } from "lucide-react";
+import { addWorkbenchTerminal, openWorkbenchTerminal } from "./open-terminal";
+import { useActiveWorkspace } from "../../state/use-active-workspace";
+import { prefetchSettingsForRepo } from "../../features/settings/use-settings";
+import {
+  NEW_TAB_MENU_CHROME,
+  NewTabEnvironmentMenu,
+  NewTabEnvironmentSearchResults,
+} from "./new-tab-environment-menu";
 
 import {
   useActiveWorkbenchTabId,
@@ -15,7 +23,6 @@ import { FileTypeIcon } from "@/renderer/features/agent/composer-editor/file-typ
 import { Button } from "@/renderer/shared/ui/primitives/button";
 import {
   Command,
-  CommandEmpty,
   CommandGroup,
   CommandInput,
   CommandItem,
@@ -27,30 +34,34 @@ import {
 } from "@/renderer/shared/ui/primitives";
 import { createBrowserTab, createEmptyFilesTab } from "./tab-model";
 import { buildDirectFileOpenAction } from "./direct-file-open";
-import {
-  searchRecentBrowsers,
-  searchWorkspaceFiles,
-} from "./quick-open";
+import { searchRecentBrowsers, searchWorkspaceFiles } from "./quick-open";
 import { useChatCwd } from "../use-chat-cwd";
 import {
   loadWorkspaceFiles,
   peekWorkspaceFiles,
 } from "../workspace-files-cache";
-import {
-  looksLikeBrowserUrl,
-  normalizeBrowserUrl,
-} from "./tabs/localhost-url";
+import { looksLikeBrowserUrl, normalizeBrowserUrl } from "./tabs/localhost-url";
 
-export function WorkbenchNewTabMenu() {
+export function WorkbenchNewTabMenu({
+  terminalFolder,
+  scope,
+}: {
+  terminalFolder: string;
+  scope: string;
+}) {
   const dispatch = useWorkspaceDispatch();
   const tabs = useWorkbenchTabs();
   const activeId = useActiveWorkbenchTabId();
   const recentBrowsers = useRecentWorkbenchBrowsers();
   const cwd = useChatCwd();
+  const { workspace } = useActiveWorkspace();
+  const menuRef = useRef<HTMLDivElement | null>(null);
   // Whether the + palette is currently visible.
   const [open, setOpen] = useState(false);
-  // The user's combined file/page query.
+  // The user's combined file/page/environment query.
   const [query, setQuery] = useState("");
+  const [selection, setSelection] = useState("new-file");
+  const [environmentOpen, setEnvironmentOpen] = useState(false);
   // Async state carries its semantic owner. A reused menu fiber can switch cwd
   // before its effect runs; it must never search the previous workspace's rows.
   const [fileSnapshot, setFileSnapshot] = useState<{
@@ -119,13 +130,22 @@ export function WorkbenchNewTabMenu() {
     [recentBrowsers, query, directUrl],
   );
   const searching = query.trim().length > 0;
-  const hasSearchResults =
+  const hasFileOrBrowserResults =
     Boolean(directUrl) || browserResults.length > 0 || fileResults.length > 0;
 
-  /** Close cleanly so every reopen starts at the two requested actions. */
+  /** Close cleanly so every reopen starts at the default actions. */
   const close = () => {
     setOpen(false);
     setQuery("");
+    setSelection("new-file");
+    setEnvironmentOpen(false);
+  };
+
+  const warm = () => {
+    if (cwd) void loadWorkspaceFiles(cwd).catch(() => {});
+    prefetchSettingsForRepo(
+      workspace?.path || workspace?.repoRoot || terminalFolder,
+    );
   };
 
   /** Create an independent, closable Open file surface. */
@@ -165,12 +185,21 @@ export function WorkbenchNewTabMenu() {
     close();
   };
 
+  const openEnvironment = (terminalId: string, title: string) => {
+    openWorkbenchTerminal(terminalFolder, { terminalId, title }, scope);
+    close();
+  };
+
   return (
     <Popover
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (!next) setQuery("");
+        if (!next) {
+          setQuery("");
+          setSelection("new-file");
+          setEnvironmentOpen(false);
+        }
       }}
     >
       <Tooltip label="New tab">
@@ -179,25 +208,51 @@ export function WorkbenchNewTabMenu() {
             variant="ghost"
             size="icon-sm"
             className="shrink-0"
-            aria-label="New File or Browser tab"
+            aria-label="New File, Browser, or Terminal tab"
+            onPointerEnter={warm}
+            onFocus={warm}
           >
-            <Plus className="size-3.5" />
+            <Plus className="text-fg2 size-3.5" />
           </Button>
         </PopoverTrigger>
       </Tooltip>
       <PopoverContent
+        ref={menuRef}
+        aria-label="New tab"
         align="start"
         sideOffset={4}
-        className="w-96 overflow-hidden p-0"
+        collisionPadding={8}
+        className={`${NEW_TAB_MENU_CHROME} flex max-h-[var(--radix-popover-content-available-height)] flex-col overflow-hidden p-0`}
       >
-        <Command shouldFilter={false}>
+        <Command
+          shouldFilter={false}
+          value={selection}
+          onValueChange={(value) => {
+            setSelection(value);
+            if (value !== "environment") setEnvironmentOpen(false);
+          }}
+          className="min-h-0 rounded-none [&_[data-slot=command-input-wrapper]]:h-10 [&_[data-slot=command-input-wrapper]]:shrink-0"
+        >
           <CommandInput
             autoFocus
-            placeholder="Open any file or URL…"
+            placeholder="Search files, URLs, or actions…"
             value={query}
-            onValueChange={setQuery}
+            onValueChange={(value) => {
+              setQuery(value);
+              setEnvironmentOpen(false);
+            }}
+            onKeyDown={(event) => {
+              if (
+                event.key === "ArrowRight" &&
+                selection === "environment" &&
+                !searching
+              ) {
+                event.preventDefault();
+                setEnvironmentOpen(true);
+              }
+            }}
           />
-          <CommandList className="max-h-96">
+          <CommandList className="max-h-96 min-h-0">
             {!searching && (
               <CommandGroup>
                 <CommandItem value="new-file" onSelect={addBlankFile}>
@@ -208,6 +263,31 @@ export function WorkbenchNewTabMenu() {
                   <Globe className="size-4" />
                   <span>Browser</span>
                 </CommandItem>
+                <CommandItem
+                  value="new-terminal"
+                  onSelect={() => {
+                    addWorkbenchTerminal(terminalFolder, "tab", scope);
+                    close();
+                  }}
+                >
+                  <Terminal className="size-4" />
+                  <span>Terminal</span>
+                </CommandItem>
+                <NewTabEnvironmentMenu
+                  open={environmentOpen}
+                  onOpenChange={setEnvironmentOpen}
+                  terminalFolder={terminalFolder}
+                  cwd={cwd ?? undefined}
+                  onSelect={openEnvironment}
+                  restoreSearchFocus={() => {
+                    const input =
+                      menuRef.current?.querySelector<HTMLInputElement>(
+                        "[cmdk-input]",
+                      );
+                    if (input?.isConnected)
+                      input.focus({ preventScroll: true });
+                  }}
+                />
               </CommandGroup>
             )}
 
@@ -224,6 +304,18 @@ export function WorkbenchNewTabMenu() {
                   </div>
                 </CommandItem>
               </CommandGroup>
+            )}
+
+            {searching && (
+              <NewTabEnvironmentSearchResults
+                terminalFolder={terminalFolder}
+                cwd={cwd ?? undefined}
+                query={query}
+                onSelect={openEnvironment}
+                showEmpty={
+                  filesResolved && !filesFailed && !hasFileOrBrowserResults
+                }
+              />
             )}
 
             {searching && browserResults.length > 0 && (
@@ -275,12 +367,6 @@ export function WorkbenchNewTabMenu() {
                 Files are temporarily unavailable.
               </div>
             )}
-            {searching &&
-              filesResolved &&
-              !filesFailed &&
-              !hasSearchResults && (
-                <CommandEmpty>No matching files or pages.</CommandEmpty>
-              )}
           </CommandList>
         </Command>
       </PopoverContent>

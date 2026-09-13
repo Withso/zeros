@@ -751,8 +751,8 @@ export function ConversationHeader({
           </Tooltip>
         )}
       </div>
-      {/* The Run affordance lives at the right end of Workbench's terminal row
-          — see RunControl (run-control.tsx). Create PR moved too: it lives in
+      {/* Run controls live on action rows in the terminal sidebar.
+          Create PR lives in
           the workbench Changes tab's PR status row (ChangesWorkbenchSurface → PrStatusRow),
           the same row that becomes the PR status island once a PR exists. */}
       {nativeReady && <OpenInDropdown path={openInPath} />}

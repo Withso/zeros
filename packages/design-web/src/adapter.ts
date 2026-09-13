@@ -470,8 +470,8 @@ function applyOperation(
       inverseOperations: [inverse],
       affectedNodeIds: [],
       // Logical document metadata identity; the repository maps this to the
-      // stable directory's .zeros/design/<id>/document.json sidecar.
-      affectedFiles: ["document.json"],
+      // Design folder's design.toml manifest.
+      affectedFiles: ["design.toml"],
     };
   }
   if (operation.type === "token.set") {

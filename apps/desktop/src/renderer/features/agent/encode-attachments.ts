@@ -26,7 +26,7 @@
 // the chip being re-sent holds no bytes of its own — see the text branch.
 //
 // 2026-08-02: every valid attachment is ADDITIONALLY persisted into the
-// workspace's context graph (`.context-graph/<scope>/attachments/<id>/<file>`)
+// workspace's context graph (`.context/<scope>/attachments/<id>/<file>`)
 // — the store the Context tab canvas renders. Since attach-time staging
 // (composer-editor/context-graph-staging.ts) the graph copy normally already
 // exists by the time a send encodes; the write here is an idempotent safety
@@ -159,7 +159,7 @@ function durableAttachmentId(attachment: ComposerAttachment): string {
   }
   const match =
     typeof attachment.diskPath === "string"
-      ? /^\.context-graph\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]+)\//.exec(
+      ? /^\.context(?:-graph)?\/(?:local|shared)\/attachments\/([a-zA-Z0-9_-]+)\//.exec(
           attachment.diskPath,
         )
       : null;

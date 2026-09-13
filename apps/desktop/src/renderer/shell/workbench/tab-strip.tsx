@@ -22,10 +22,23 @@
 //   native :hover.
 
 import React from "react";
+import { closeWorkbenchTerminal } from "./open-terminal";
+import {
+  useTerminalTabIndicators,
+  terminalTabIconName,
+  type TerminalTabIndicator,
+} from "../terminal/terminal-tab-indicators";
+import { RunWave } from "../../shared/ui/loading";
+import { cn } from "../../shared/ui/cn";
+import { DynamicIcon } from "../../shared/ui/icon-registry";
 import { CircleStop, MousePointer2, X } from "lucide-react";
 import { Tooltip } from "../../shared/ui/primitives";
 import { FileTypeIcon } from "../../features/agent/composer-editor/file-type-icon";
 import { useWorkspaceDispatch } from "../../state/store";
+import {
+  useWorkspaceStore,
+  workbenchScopeKey,
+} from "../../state/workspace-store";
 import {
   TAB_TYPE_META,
   workbenchTabIconPath,
@@ -78,6 +91,8 @@ export function WorkbenchTabStrip({
   workspaceId,
 }: WorkbenchTabStripProps) {
   const dispatch = useWorkspaceDispatch();
+  const scope = useWorkspaceStore(workbenchScopeKey);
+  const terminalIndicators = useTerminalTabIndicators(folderKey);
   // The Changes pill's live All Changes net count — the same exact comparison
   // (and refresh bus) the default Changes list reads, so the two always agree.
   const refreshKey = useGitRefreshKey(folderKey, workspaceId);
@@ -96,6 +111,10 @@ export function WorkbenchTabStrip({
     browserSessionId?: string,
   ) => {
     e.stopPropagation();
+    if (tab.type === "terminal" && tab.terminalId) {
+      closeWorkbenchTerminal(folderKey, tab.id, tab.terminalId, scope);
+      return;
+    }
     if (
       tab.type === "changes" ||
       tab.type === "review" ||
@@ -135,12 +154,18 @@ export function WorkbenchTabStrip({
                 tab={tab}
                 active={tab.id === activeId}
                 canClose={
+                  tab.type === "terminal" ||
                   tab.type === "browser" ||
                   // The fixed Files home only offers ✕ while a file is open
                   // (✕ = close the file); blank, there is nothing to close.
                   (tab.type === "files" && (!tab.fixed || !!tab.filePath))
                 }
                 badge={tab.type === "changes" ? changeCount : 0}
+                terminalIndicator={
+                  tab.terminalId
+                    ? terminalIndicators[tab.terminalId]
+                    : undefined
+                }
                 onActivate={() => handleActivate(tab.id)}
                 onClose={(e, browserSessionId) =>
                   handleClose(e, tab, browserSessionId)
@@ -155,7 +180,11 @@ export function WorkbenchTabStrip({
       {/* The "+" sits OUTSIDE the scroll lane: it hugs the last tab while
           they fit, then stays put while only the tabs scroll. */}
       <div className="flex h-full shrink-0 items-center">
-        <WorkbenchNewTabMenu />
+        <WorkbenchNewTabMenu
+          key={scope}
+          terminalFolder={folderKey}
+          scope={scope}
+        />
       </div>
       <div className="min-w-0 flex-1" aria-hidden="true" />
     </div>
@@ -170,6 +199,7 @@ interface TabPillProps {
   canClose: boolean;
   /** Count rendered after the label (the Changes pill's live change count). */
   badge: number;
+  terminalIndicator?: TerminalTabIndicator;
   onActivate: () => void;
   onClose: (e: React.MouseEvent, browserSessionId?: string) => void;
   /** Registers the pill with the sticky strip (pin math + reveal). */
@@ -187,6 +217,7 @@ function TabPill({
   active,
   canClose,
   badge,
+  terminalIndicator,
   onActivate,
   onClose,
   registerRef,
@@ -260,7 +291,22 @@ function TabPill({
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       ].join(" ")}
     >
-      {browserWorking ? (
+      {tab.type === "terminal" ? (
+        terminalIndicator?.running ? (
+          <RunWave
+            size={12}
+            className={cn("shrink-0", active ? "text-fg1" : "text-fg2")}
+          />
+        ) : (
+          <DynamicIcon
+            name={terminalTabIconName(tab.terminalId, terminalIndicator?.icon)}
+            className={cn(
+              "size-3.5 shrink-0",
+              active ? "text-fg1" : "text-fg2",
+            )}
+          />
+        )
+      ) : browserWorking ? (
         <MousePointer2
           className="text-blue-fg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
           aria-hidden="true"
@@ -282,7 +328,23 @@ function TabPill({
           ].join(" ")}
         >
           {tab.title}
+          {terminalIndicator?.exited && (
+            <span className="ml-1 opacity-70">(exited)</span>
+          )}
         </span>
+      )}
+      {terminalIndicator?.dot && (
+        <span
+          aria-hidden
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            terminalIndicator.dot === "running" && "bg-yellow-primary",
+            terminalIndicator.dot === "passed" && "bg-green-primary",
+            (terminalIndicator.dot === "failed" ||
+              terminalIndicator.dot === "stopped") &&
+              "bg-red-primary",
+          )}
+        />
       )}
       {badge > 0 && (
         // Bare count — no chip bg (saves space); the pill's gap spaces it.

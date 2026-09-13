@@ -3,11 +3,12 @@
 // disposeSession (the fix for the "live hook token + session dir + server
 // child leak until app quit" finding).
 
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type { PreparedBoundary } from "../containment/types";
@@ -19,9 +20,19 @@ import {
 } from "../session-paths";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
+let fixtureRoot: string;
+beforeEach(() => {
+  fixtureRoot = realpathSync(
+    mkdtempSync(path.join(tmpdir(), "zeros-gateway-end-session-")),
+  );
+});
+afterEach(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
+
 function makeGateway() {
   return new AgentGateway({
-    projectRoot: "/tmp/zeros-test",
+    projectRoot: fixtureRoot,
     executionBoundary: testExecutionBoundary(),
     events: {
       onSessionUpdate: () => {},
@@ -305,7 +316,7 @@ describe("AgentGateway.endSession", () => {
     expect(stopAttempts).toBe(2);
 
     await expect(
-      gw.newSession("strict", { cwd: "/tmp" }),
+      gw.newSession("strict", { cwd: fixtureRoot }),
     ).resolves.toMatchObject({ executionId: expect.any(String) });
   });
 });

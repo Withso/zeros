@@ -46,14 +46,14 @@ describe("agent_attachment_write", () => {
   it("rejects an arbitrary absolute cwd before creating graph directories", async () => {
     await expect(call(args(untrustedRoot))).rejects.toThrow(/workspace/);
     await expect(
-      fs.lstat(path.join(untrustedRoot, ".context-graph")),
+      fs.lstat(path.join(untrustedRoot, ".context")),
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("accepts the active project root and reports idempotent writes", async () => {
     await expect(call(args(trustedRoot))).resolves.toMatchObject({
       relativePath: path.join(
-        ".context-graph",
+        ".context",
         "local",
         "attachments",
         "att-1",

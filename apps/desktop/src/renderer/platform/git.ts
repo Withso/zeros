@@ -21,9 +21,10 @@ import type {
 } from "@zeros/protocol/github-auth";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
-import type { WorkingDirectoriesWire } from "./bridge/workspace-bridge";
+import type { WorkingDirectoriesWire, WorkspaceFileListing } from "./bridge/workspace-bridge";
 import {
   bridgeFileTree,
+  bridgeWorkspaceFileListing,
   bridgeIgnoredEntries,
   bridgeListWorkingDirectories,
   bridgeSetWorkingDirectories,
@@ -1290,8 +1291,23 @@ export async function listWorkspaceFiles(
   cwd: string,
   limit?: number,
 ): Promise<string[]> {
-  if (!cwd) return [];
-  const listViaBridge = async (): Promise<string[]> => {
+  return (await readWorkspaceFileListing(cwd, limit, false)).files;
+}
+
+export async function listWorkspaceFileListing(
+  cwd: string,
+  limit?: number,
+): Promise<WorkspaceFileListing> {
+  return readWorkspaceFileListing(cwd, limit, true);
+}
+
+async function readWorkspaceFileListing(
+  cwd: string,
+  limit: number | undefined,
+  includeDesignDirectories: boolean,
+): Promise<WorkspaceFileListing> {
+  if (!cwd) return { files: [] };
+  const listViaBridge = async (): Promise<WorkspaceFileListing> => {
     const bridge = requireBridge("list repository files");
     let workspaceId = cwd;
     try {
@@ -1299,21 +1315,24 @@ export async function listWorkspaceFiles(
     } catch {
       /* Fall back to the local raw-root bridge path below. */
     }
-    return bridgeFileTree(bridge, workspaceId, limit);
+    return includeDesignDirectories
+      ? bridgeWorkspaceFileListing(bridge, workspaceId, limit)
+      : { files: await bridgeFileTree(bridge, workspaceId, limit) };
   };
   // Local main is outside Electron's trusted worktree roots. Browser development,
   // optional relay clients, and a renderer whose preload has not appeared yet
   // also use the bridge.
   if (isKnownProjectRoot(cwd) || !isNativeRuntime()) return listViaBridge();
   try {
-    const res = await nativeInvoke<{ files: string[] }>("git_list_files", {
+    const res = await nativeInvoke<WorkspaceFileListing>("git_list_files", {
       cwd,
       ...(limit != null ? { limit } : {}),
+      ...(includeDesignDirectories ? { includeDesignDirectories: true } : {}),
     });
     if (!Array.isArray(res?.files)) {
       throw new Error("Native file listing returned an invalid response");
     }
-    return res.files;
+    return res;
   } catch {
     return listViaBridge();
   }

@@ -8,14 +8,17 @@
 // terminal panel, seam, and Run button agree on the key (a mismatch would write
 // state under a different key than the reader looks at).
 //
-// Resolution: the active chat's cwd, else
-// the engine root (a chatless surface still gets a sensible cwd), else "~".
-// `chatCwd` is returned alongside so callers can honor the chatCwd-only gating
-// (e.g. no Run terminal on a chatless surface).
+// Resolution follows the workbench scope: the active workspace folder,
+// including its persisted boot fallback, else the engine root, else "~".
+// `chatCwd` is returned alongside so workspace-only controls stay gated when
+// the workbench has no workspace owner.
 
 import { useEffect, useState } from "react";
 
-import { useChatCwd } from "../use-chat-cwd";
+import {
+  selectActiveFolder,
+  useWorkspaceStore,
+} from "../../state/workspace-store";
 import { isElectron, nativeInvoke } from "../../platform/runtime";
 
 const FALLBACK_FOLDER = "~";
@@ -34,7 +37,7 @@ export function useWorkbenchFolder(): {
   folderKey: string;
   chatCwd: string | undefined;
 } {
-  const chatCwd = useChatCwd();
+  const chatCwd = useWorkspaceStore(selectActiveFolder) ?? undefined;
   const [engineRoot, setEngineRoot] = useState<string>("");
   // Refresh on every chat-cwd flip in case the user just opened their first
   // project.

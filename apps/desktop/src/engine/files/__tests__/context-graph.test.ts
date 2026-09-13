@@ -58,7 +58,7 @@ describe("ensureContextGraph", () => {
     // scaffold produces ZERO `git status` noise.
     expect(ignore).toContain("/local/");
     expect(ignore).toContain("/.gitignore");
-    expect(ignore).not.toContain("/shared/");
+    expect(ignore).toContain("!/shared/");
   });
 
   it("is idempotent and reports created: false the second time", async () => {
@@ -76,7 +76,7 @@ describe("ensureContextGraph", () => {
     );
   });
 
-  it("refuses when .context-graph exists as a file", async () => {
+  it("refuses when .context exists as a file", async () => {
     await fs.writeFile(path.join(root, CONTEXT_GRAPH_DIR), "not a dir");
     const res = await ensureContextGraph(root);
     expect(res.ok).toBe(false);
@@ -110,7 +110,7 @@ describe("listContextGraph", () => {
       category: "attachment",
       attachmentId: "att-1",
       kind: "markdown",
-      relPath: ".context-graph/local/attachments/att-1/notes.md",
+      relPath: ".context/local/attachments/att-1/notes.md",
       previewText: "# hello\nworld",
     });
     expect(byName["shot.png"]).toMatchObject({
@@ -254,7 +254,7 @@ describe("stageContextGraphAttachment", () => {
     expect(res.ok).toBe(true);
     expect(res.scope).toBe("local");
     expect(res.relativePath).toBe(
-      path.join(".context-graph", "local", "attachments", "att-1", "notes.txt"),
+      path.join(".context", "local", "attachments", "att-1", "notes.txt"),
     );
     expect(
       await fs.readFile(graph("local", "attachments", "att-1", "notes.txt"), "utf8"),

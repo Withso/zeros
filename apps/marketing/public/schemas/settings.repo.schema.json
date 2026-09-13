@@ -164,7 +164,7 @@
         "directory_id": {
           "type": "string",
           "pattern": "^design_[a-zA-Z0-9_-]{1,64}$",
-          "description": "Stable ID of a directory registered in this checkout's .zeros/design-dir.toml."
+          "description": "Stable ID from a Design folder's design.toml in this checkout."
         }
       }
     },

@@ -1,9 +1,64 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  searchEnvironmentTerminals,
   searchRecentBrowsers,
   searchWorkspaceFiles,
 } from "../quick-open";
+
+describe("searchEnvironmentTerminals", () => {
+  const entries = [
+    { terminalId: "setup", title: "Setup", icon: "settings" },
+    { terminalId: "run:test", title: "Test", icon: "flask-conical" },
+    { terminalId: "run:e2e", title: "Test browser", icon: "globe" },
+    { terminalId: "run:build", title: "Build café", icon: "play" },
+  ];
+
+  it("finds Setup and action names regardless of case, accents, or outer whitespace", () => {
+    expect(searchEnvironmentTerminals(entries, "  SeTuP  ")[0]).toMatchObject(
+      entries[0],
+    );
+    expect(searchEnvironmentTerminals(entries, "BUILD CAFE")[0]).toMatchObject(
+      entries[3],
+    );
+  });
+
+  it("ranks exact names before partial matches and preserves destination icons", () => {
+    expect(
+      searchEnvironmentTerminals(entries, "test").map(
+        ({ terminalId, icon }) => ({ terminalId, icon }),
+      ),
+    ).toEqual([
+      { terminalId: "run:test", icon: "flask-conical" },
+      { terminalId: "run:e2e", icon: "globe" },
+    ]);
+    expect(searchEnvironmentTerminals(entries, "tst br")[0].terminalId).toBe(
+      "run:e2e",
+    );
+  });
+
+  it("requires all query terms and does not search opaque session ids", () => {
+    expect(searchEnvironmentTerminals(entries, "test missing")).toEqual([]);
+    expect(searchEnvironmentTerminals(entries, "run:e2e")).toEqual([]);
+    expect(searchEnvironmentTerminals(entries, "  ")).toEqual([]);
+  });
+
+  it("keeps same-name destinations distinct with stable ties and a bounded list", () => {
+    const duplicates = [
+      { terminalId: "run:z", title: "Setup", icon: "play" },
+      entries[0],
+    ];
+    const forward = searchEnvironmentTerminals(duplicates, "setup");
+    const reversed = searchEnvironmentTerminals(
+      [...duplicates].reverse(),
+      "setup",
+    );
+    expect(forward).toEqual(reversed);
+    expect(forward).toHaveLength(2);
+    expect(searchEnvironmentTerminals(duplicates, "setup", 1)).toHaveLength(1);
+    expect(searchEnvironmentTerminals(duplicates, "setup", 0)).toEqual([]);
+  });
+});
 
 describe("searchWorkspaceFiles", () => {
   const files = [

@@ -20,10 +20,16 @@
 // result and resurrecting a file that was just discarded/deleted.
 // ──────────────────────────────────────────────────────────
 
-import { listWorkspaceFiles } from "@/renderer/platform/git";
+import { listWorkspaceFileListing } from "@/renderer/platform/git";
 
-type Entry = { files: string[]; at: number; stale: boolean };
-type InflightEntry = { generation: number; promise: Promise<string[]> };
+import type { WorkspaceFileListing } from "../platform/bridge/workspace-bridge";
+export type { WorkspaceFileListing } from "../platform/bridge/workspace-bridge";
+
+type Entry = { listing: WorkspaceFileListing; at: number; stale: boolean };
+type InflightEntry = {
+  generation: number;
+  promise: Promise<WorkspaceFileListing>;
+};
 
 const cache = new Map<string, Entry>();
 const inflight = new Map<string, InflightEntry>();
@@ -76,37 +82,56 @@ function pruneGenerations(): void {
  * a cold failure rejects so no consumer can mistake transport absence for an
  * authoritative empty workspace. */
 export async function loadWorkspaceFiles(cwd: string): Promise<string[]> {
+  return (await loadWorkspaceFileListing(cwd)).files;
+}
+
+/** Paths and Design ownership publish as one exact-key snapshot. */
+export async function loadWorkspaceFileListing(
+  cwd: string,
+): Promise<WorkspaceFileListing> {
   const key = workspaceCacheKey(cwd);
   const hit = cache.get(key);
   if (hit && !hit.stale && Date.now() - hit.at < FRESH_MS) {
     touchCacheEntry(key, hit);
-    return hit.files;
+    return hit.listing;
   }
 
   const generation = generations.get(key) ?? 0;
   const pending = inflight.get(key);
   if (pending?.generation === generation) return pending.promise;
 
-  const p = listWorkspaceFiles(cwd)
-    .then((files) => {
+  const p = listWorkspaceFileListing(cwd)
+    .then((listing) => {
       // An invalidation may have happened while git ls-files was running. That
       // response describes the OLD disk generation: return it to its original
       // caller, but never publish it into the shared cache.
-      if ((generations.get(key) ?? 0) !== generation) return files;
+      if ((generations.get(key) ?? 0) !== generation) return listing;
       // Preserve the published array when the listing is byte-for-byte the
       // same. @pierre/trees treats `paths` as model input; handing it a fresh
       // but equal array needlessly resets/reconciles every visible row.
-      const previous = cache.get(key)?.files;
-      const stableFiles = sameFileList(previous, files) ? previous! : files;
-      writeCacheEntry(key, {
-        files: stableFiles,
-        at: Date.now(),
-        stale: false,
-      });
-      return stableFiles;
+      const previous = cache.get(key)?.listing;
+      const files = sameFileList(previous?.files, listing.files)
+        ? previous!.files
+        : listing.files;
+      const designDirectories =
+        listing.designDirectories !== undefined &&
+        sameFileList(previous?.designDirectories, listing.designDirectories)
+          ? previous!.designDirectories
+          : listing.designDirectories;
+      const stable =
+        previous &&
+        previous.files === files &&
+        previous.designDirectories === designDirectories
+          ? previous
+          : {
+              files,
+              ...(designDirectories !== undefined ? { designDirectories } : {}),
+            };
+      writeCacheEntry(key, { listing: stable, at: Date.now(), stale: false });
+      return stable;
     })
     .catch((error: unknown) => {
-      const retained = cache.get(key)?.files;
+      const retained = cache.get(key)?.listing;
       if (retained !== undefined) return retained;
       throw error;
     })
@@ -159,9 +184,16 @@ export function resetWorkspaceFilesCacheForTests(): void {
 /** Publish a listing directly into the cache (harness/tests) — lets the real
  *  tree render in a plain browser, where the `git ls-files` IPC is absent.
  *  The sibling of `primeWorkspaceFileDiff` in workspace-file-data-cache. */
-export function primeWorkspaceFiles(cwd: string, files: string[]): void {
+export function primeWorkspaceFiles(
+  cwd: string,
+  files: string[],
+  designDirectories?: string[],
+): void {
   writeCacheEntry(workspaceCacheKey(cwd), {
-    files,
+    listing: {
+      files,
+      ...(designDirectories !== undefined ? { designDirectories } : {}),
+    },
     at: Date.now(),
     stale: false,
   });
@@ -170,11 +202,17 @@ export function primeWorkspaceFiles(cwd: string, files: string[]): void {
 /** Synchronous best-effort peek — the cached list (even if slightly stale) or
  *  null if this cwd was never loaded. Lets a click resolve without waiting. */
 export function peekWorkspaceFiles(cwd: string): string[] | null {
+  return peekWorkspaceFileListing(cwd)?.files ?? null;
+}
+
+export function peekWorkspaceFileListing(
+  cwd: string,
+): WorkspaceFileListing | null {
   const key = workspaceCacheKey(cwd);
   const entry = cache.get(key);
   if (!entry) return null;
   touchCacheEntry(key, entry);
-  return entry.files;
+  return entry.listing;
 }
 
 /** Prime the cache in the background (no await) — call when a chat / folder

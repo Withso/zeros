@@ -2,7 +2,7 @@
 // context-graph-staging — attachments hit the graph the moment they're staged
 // ──────────────────────────────────────────────────────────
 //
-// The Context tab canvas renders the workspace's `.context-graph/`, and until
+// The Context tab canvas renders the workspace's `.context/`, and until
 // 2026-08-02(2) the graph only learned about an attachment when a SEND
 // encoded it. Attach a screenshot, look at the Context tab, see nothing — the
 // canvas lagged the composer by one whole prompt. This module closes that
@@ -12,7 +12,7 @@
 // user is still typing the prompt.
 //
 // The graph is APPEND-ONLY from the app (2026-08-03(3), explicit product
-// decision): once a file lands in `.context-graph`, NO composer gesture
+// decision): once a file lands in `.context`, NO composer gesture
 // deletes it — not removing the chip (×, Backspace, select-all delete), not
 // untoggling a transcript pill, not deleting a queued message, not send's
 // clear(). The graph is the workspace's context RECORD, and the point of a
@@ -267,7 +267,7 @@ usePendingWorkspacesStore.subscribe((state, previous) => {
  *
  *  A PROVISIONING cwd is queued: the dispatcher reserves the worktree path
  *  before `git worktree add` creates it, and a stage write in that window
- *  would mkdir `.context-graph/` into the reserved path — worktree add refuses
+ *  would mkdir `.context/` into the reserved path — worktree add refuses
  *  a non-empty directory, so the write wouldn't just be early, it would fail
  *  creation itself. Holding the attachment object here (rather than relying
  *  only on a later document sweep) also survives chip removal, chat parking,

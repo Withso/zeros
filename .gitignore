@@ -90,14 +90,7 @@ temp/
 # execution; created for preview and removed afterward. Never tracked.
 HTML Previews/
 
-# Personal settings and engine state stay local. Design metadata is repo content.
-.zeros/*
-!.zeros/design-dir.toml
-!.zeros/design/
-.zeros/design/*
-!.zeros/design/design_*/
-.zeros/design/design_*/*
-!.zeros/design/design_*/document.json
+# Agent MCP configuration stays local.
 .mcp.json
 
 # Testing harness (local only)
@@ -153,3 +146,7 @@ snapshots/diff/
 # output at apps/desktop/src/engine/agents/adapters/codex/generated/ IS committed
 # so machines without a Rust toolchain can still build.
 .codex-protocol-cache/
+
+# Zeros Design metadata (managed by Zeros)
+/.zeros/
+# End Zeros Design metadata

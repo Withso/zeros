@@ -23,7 +23,7 @@ round trip to restore it. Key it by the smallest semantic owner that can vary:
 | Selection                                                        | Owner key                            |
 | ---------------------------------------------------------------- | ------------------------------------ |
 | Home destination or app-wide presentation preference             | app                                  |
-| Repository hub tab                                               | project id                           |
+| Repository hub mode and each mode's selected tab                 | project id                           |
 | Selected workspace                                               | repository root                      |
 | Active chat, workbench tabs, Changes/Review choices, terminal tab | workspace folder                    |
 | Open file and explicit viewer mode                                | workbench tab id inside the workspace |
@@ -107,6 +107,13 @@ Pointer-enter and keyboard-focus intent should warm the exact likely destination
 Reuse aggregate responses. If Changes already parsed a whole-worktree patch, publish each per-file patch to the viewer cache instead of starting a second Git process on selection.
 
 Bound speculative work. Warm a small first window during idle time and use intent for the rest; never prefetch an unbounded repository.
+
+Per-file diff intent has two concurrent prefetch slots across the renderer and
+keeps only the newest waiting target. This matters for large change sets whose
+aggregate response contains summaries without patches. Explicit file selection
+bypasses the speculative slots and shares an already-running exact-key read.
+Hidden retained file viewers subscribe to cached results without initiating
+reads, even when cold; otherwise they bypass the intent budget on every hover.
 
 ### 4. Retain expensive DOM selectively
 
@@ -204,7 +211,7 @@ A busy indicator may be delayed roughly 100–120 ms to avoid a flash for a fast
 
 - Workspace route + target: `OPEN_WORKSPACE` in `apps/desktop/src/renderer/state/workspace-store.ts`.
 - Scoped navigation memory: `lastWorkspaceByRepoRoot`,
-  `repoPageViewByProject`, `lastHomePage`, and per-worktree `WorkbenchTab` fields
+  `repoPageViewByProject`, `repoPageViewByModeByProject`, `lastHomePage`, and per-worktree `WorkbenchTab` fields
   in `apps/desktop/src/renderer/state/workspace-store.ts` / `apps/desktop/src/renderer/shell/workbench/tab-model.ts`.
 - Shared workspace/settings caches: `apps/desktop/src/renderer/state/use-projects.ts` and `apps/desktop/src/renderer/features/settings/use-settings.ts`.
 - Picker/dialog read caches (branches, PRs, workspaces, GitHub auth/owners): `apps/desktop/src/renderer/state/read-caches.ts` mounted via `apps/desktop/src/renderer/state/use-cached-read.ts`.
@@ -218,7 +225,7 @@ A busy indicator may be delayed roughly 100–120 ms to avoid a flash for a fast
 - Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
 - Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
 - Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
-- Terminal retention: the bounded folder deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`.
+- Terminal retention: the bounded folder/session deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`, with stable portal hosts across main-tab and bottom-panel placement (see `docs/terminal-workbench.md`).
 - Settings/repository retention: bounded visited-section decks in `apps/desktop/src/renderer/features/settings/settings-page.tsx` and `apps/desktop/src/renderer/features/repositories/repo-page.tsx`.
 - One-paint transition suppression: `apps/desktop/src/renderer/shared/ui/use-instant-view-switch.ts`.
 - Chat structural sharing: `apps/desktop/src/renderer/features/agent/stable-turns.ts`.

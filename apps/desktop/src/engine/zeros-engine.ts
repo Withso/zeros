@@ -61,9 +61,8 @@ import {
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
 import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
-import { readDesignProtocolResource } from "./design/protocol-resource";
 import {
-  designMetadataGitPaths,
+  DESIGN_METADATA_PROTECTED_PATHS,
   isDesignMetadataRepoPath,
 } from "./design/metadata";
 import { getWorkspaceDesignApi } from "./design/design-api";
@@ -502,6 +501,8 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   // These keep the physical project registered but can establish or rename
   // the semantic Design roots consumed by ZSR Design admission.
   "design.renameDirectory",
+  "design.removeDirectory",
+  "design.adoptDirectory",
   "gh.publishRepo",
   "git.initInPlace",
   "project.upsert",
@@ -558,7 +559,9 @@ function pathCanChangeDesignRecognition(candidate: unknown): boolean {
     normalized === ".zeros/settings.toml" ||
     normalized === ".zeros/settings.local.toml" ||
     (normalized.includes("/") &&
-      path.posix.basename(normalized) === DESIGN_CANVAS_FILE)
+      [DESIGN_CANVAS_FILE, "design.toml"].includes(
+        path.posix.basename(normalized),
+      ))
   );
 }
 
@@ -1677,12 +1680,14 @@ export class ZerosEngine {
         );
         if (!parsed) return null;
         const { workspaceId, resourcePath } = parsed;
-        const workspace = getWorkspaceById(workspaceId);
-        if (!workspace || workspace.kind !== "design") return null;
-        const resource = await readDesignProtocolResource(workspace.path, {
-          path: resourcePath,
-          sourceVersion: url.searchParams.get("v"),
-        });
+        const resource = await this.workspace.readDesignProtocolResource(
+          workspaceId,
+          {
+            path: resourcePath,
+            sourceVersion: url.searchParams.get("v"),
+          },
+        );
+        if (!resource) return null;
         return {
           status: resource.status,
           headers: resource.headers,
@@ -9033,7 +9038,7 @@ export class ZerosEngine {
       protectedRoots = [
         ...new Set([
           activeDesignDirectory,
-          ...designMetadataGitPaths(workspaceRoot).map((file) =>
+          ...DESIGN_METADATA_PROTECTED_PATHS.map((file) =>
             path.join(workspaceRoot, file),
           ),
           ...(pointer.valid

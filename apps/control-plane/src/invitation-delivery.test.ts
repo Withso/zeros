@@ -4,7 +4,7 @@ import { deliverInvitationEmail } from "./invitation-delivery.js";
 
 const email = {
   token: "test-token",
-  from: { address: "hello@zeros.build", name: "Zeros" },
+  from: { address: "hi@zeros.build", name: "Zeros" },
 };
 
 describe("invitation email ownership", () => {

@@ -99,12 +99,7 @@ export default defineConfig({
     // self-register" in worker threads — but git/detach.ts switched to pure-JS
     // chokidar in PR #111, so that native-binding constraint no longer applies.)
     pool: "forks",
-    poolOptions: {
-      forks: {
-        maxForks: 4,
-        minForks: 1,
-      },
-    },
+    maxWorkers: 4,
     // Each test spins up a temp repo; allow up to 20s for the slow
     // ones (initial `git init` + first commit can run long on cold
     // CI).

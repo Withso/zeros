@@ -28,6 +28,7 @@ import {
   type DetectedTool,
 } from "../../../src/engine/git";
 import type { CommandHandler } from "../router";
+import { listWorkspaceFilesWithDesign } from "../../../src/engine/design/file-listing";
 
 // ── Argument validation helpers ──────────────────────────
 
@@ -77,6 +78,8 @@ export const gitListFiles: CommandHandler = async (args) => {
   const cwd = requireString(args, "cwd", "git_list_files");
   const limit = optionalNumber(args, "limit");
   try {
+    if (args.includeDesignDirectories === true)
+      return await listWorkspaceFilesWithDesign(cwd, limit);
     return { files: await listWorkspaceFiles(cwd, limit) };
   } catch (err) {
     rethrow(err);

@@ -1,4 +1,10 @@
 import {
+  parseDesignManifest,
+  serializeDesignManifest,
+} from "../../design/manifest";
+import { useLegacyDesignStorage } from "../../design/__tests__/storage-fixtures";
+import {
+  commitDesignMetadata,
   designDocumentMetadataPath,
   readDesignDirectoryRegistry,
 } from "../../design/metadata";
@@ -27,6 +33,7 @@ import { opSettingsWrite } from "../../settings/ops";
 import { worktreeSeedPath } from "../../db/paths";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { ensureContextGraph } from "../../files/context-graph";
 
 import {
   archiveWorkspace,
@@ -208,7 +215,7 @@ describe("worktree lifecycle (integration)", () => {
     // because
     // seeing the real app is the point of designing in-repo.
     expect(existsSync(path.join(workspace.path, "src", "code.ts"))).toBe(true);
-    expect(existsSync(path.join(workspace.path, ".context-graph"))).toBe(true);
+    expect(existsSync(path.join(workspace.path, ".context"))).toBe(true);
     expect(existsSync(path.join(workspace.path, "README.md"))).toBe(true);
     // Files-to-copy seeded the gitignored .env like any code create.
     expect(existsSync(path.join(workspace.path, ".env"))).toBe(true);
@@ -390,7 +397,7 @@ printf ran > '${sentinel}'
         designDocumentMetadataPath(created.path, "Zeros Design"),
         "utf8",
       ),
-    ).toContain('"version": 3');
+    ).toContain("version = 3");
     await deleteWorkspace({
       workspaceId: created.workspaceId,
       includeBranch: true,
@@ -889,8 +896,20 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
-    const dirty =
-      '{"version":3,"frames":{},"frame_info":{},"foundation":{"schemaVersion":1,"parameters":[],"variants":[],"components":[]}}\n';
+    const dirty = serializeDesignManifest(
+      parseDesignManifest(await readFile(canvas, "utf8"))!.id,
+      {
+        version: 3,
+        frames: {},
+        frame_info: {},
+        foundation: {
+          schemaVersion: 1,
+          parameters: [],
+          variants: [],
+          components: [],
+        },
+      },
+    );
     const frame = path.join(created.path, designDirectory, "frame.html");
     await writeFile(canvas, dirty);
     await writeFile(frame, "<main>draft</main>\n");
@@ -999,11 +1018,12 @@ printf ran > '${sentinel}'
     ).toContain('directory_id = "design_');
     const registry = readDesignDirectoryRegistry(repoRoot)!;
     expect(Object.values(registry.directories)).toEqual([{ path: "Brand" }]);
-    // The main checkout is left clean — nothing half-staged.
+    // Design is fully committed. The generated repository ignore block is
+    // ordinary configuration, left for review through the Code Git surface.
     const dirty = await execFileAsync("git", ["status", "--porcelain"], {
       cwd: repoRoot,
     });
-    expect(dirty.stdout).toBe("");
+    expect(dirty.stdout).toBe("?? .gitignore\n");
     // A subsequent rename uses the same ID, including when the private file
     // already selects that ID instead of the legacy directory path.
     const id = Object.keys(registry.directories)[0]!;
@@ -1012,6 +1032,114 @@ printf ran > '${sentinel}'
       [id]: { path: "Product" },
     });
   });
+
+  it("renames only the chosen Design folder and retains other staged changes", async () => {
+    for (const folder of ["First Design", "Second Design"]) {
+      await mkdir(path.join(repoRoot, folder));
+      commitDesignMetadata(repoRoot, folder, '{"version":3,"frames":{}}');
+    }
+    await execFileAsync(
+      "git",
+      ["add", "First Design", "Second Design", ".gitignore"],
+      { cwd: repoRoot },
+    );
+    await execFileAsync("git", ["commit", "-m", "two Design folders"], {
+      cwd: repoRoot,
+    });
+    const before = await readFile(
+      path.join(repoRoot, "Second Design/design.toml"),
+      "utf8",
+    );
+    commitDesignMetadata(
+      repoRoot,
+      "Second Design",
+      '{"version":3,"frames":{},"extension":true}',
+    );
+    await writeFile(path.join(repoRoot, "separate-code.txt"), "keep staged");
+    await execFileAsync("git", ["add", "Second Design", "separate-code.txt"], {
+      cwd: repoRoot,
+    });
+    await renameDesignDirectory({
+      repoRoot,
+      from: "First Design",
+      to: "Renamed Design",
+    });
+    expect(
+      (
+        await execFileAsync("git", ["show", "HEAD:Second Design/design.toml"], {
+          cwd: repoRoot,
+        })
+      ).stdout,
+    ).toBe(before);
+    const staged = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: repoRoot,
+      })
+    ).stdout;
+    expect(staged).toContain("Second Design/design.toml");
+    expect(staged).toContain("separate-code.txt");
+    expect(staged).not.toContain("Renamed Design");
+    expect(
+      (
+        await execFileAsync(
+          "git",
+          ["show", "-s", "--format=%an <%ae>", "HEAD"],
+          { cwd: repoRoot },
+        )
+      ).stdout.trim(),
+    ).toBe("Zeros <zeros@localhost>");
+  });
+
+  it.each([".zeros/design-dir.toml", ".zeros/design/design-dir.toml"])(
+    "commits a %s migration together with a Settings directory rename",
+    async (legacyFile) => {
+      await mkdir(path.join(repoRoot, "Old Design"));
+      await writeFile(
+        path.join(repoRoot, "Old Design/tokens.css"),
+        "/* tokens */\n",
+      );
+      commitDesignMetadata(
+        repoRoot,
+        "Old Design",
+        '{"version":3,"frames":{}}\n',
+      );
+      const originalId = Object.keys(
+        readDesignDirectoryRegistry(repoRoot)!.directories,
+      )[0];
+      useLegacyDesignStorage(repoRoot, "Old Design", legacyFile);
+      await execFileAsync(
+        "git",
+        ["add", "-f", "Old Design", legacyFile, ".zeros/design", ".gitignore"],
+        { cwd: repoRoot },
+      );
+      await execFileAsync("git", ["commit", "-m", "legacy registry"], {
+        cwd: repoRoot,
+      });
+      await renameDesignDirectory({
+        repoRoot,
+        from: "Old Design",
+        to: "New Design",
+      });
+      expect(readDesignDirectoryRegistry(repoRoot)?.directories).toEqual({
+        [originalId]: { path: "New Design" },
+      });
+      const files = (
+        await execFileAsync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+          cwd: repoRoot,
+        })
+      ).stdout;
+      expect(files).toContain("New Design/design.toml");
+      expect(files).toContain("New Design/rules.md");
+      expect(files).not.toContain(legacyFile);
+      expect(
+        (
+          await execFileAsync("git", ["status", "--porcelain"], {
+            cwd: repoRoot,
+          })
+        ).stdout,
+      ).toBe(" M .gitignore\n");
+    },
+  );
 
   it("serializes a Design-directory rename with repository Git mutations", async () => {
     const designDir = path.join(repoRoot, "Zeros Design");
@@ -1105,7 +1233,7 @@ printf ran > '${sentinel}'
           cwd: repoRoot,
         })
       ).stdout,
-    ).toBe("");
+    ).toBe("?? .gitignore\n");
   });
 
   it("checks a literal Design folder for edits instead of a pathspec decoy", async () => {
@@ -2294,7 +2422,11 @@ printf ran > '${sentinel}'
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
     const frame = path.join(created.path, designDirectory, "draft.html");
-    await writeFile(canvas, '{"uncommitted":true}\n');
+    const draft = serializeDesignManifest(
+      parseDesignManifest(await readFile(canvas, "utf8"))!.id,
+      { version: 3, uncommitted: true },
+    );
+    await writeFile(canvas, draft);
     await writeFile(frame, "<main>archive me</main>\n");
     const headBefore = (
       await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: created.path })
@@ -2308,7 +2440,7 @@ printf ran > '${sentinel}'
     });
     const restored = await restoreWorkspace(created.workspaceId);
 
-    expect(await readFile(canvas, "utf8")).toBe('{"uncommitted":true}\n');
+    expect(await readFile(canvas, "utf8")).toBe(draft);
     expect(await readFile(frame, "utf8")).toBe("<main>archive me</main>\n");
     expect(
       (
@@ -3036,18 +3168,18 @@ printf ran > '${sentinel}'
   it("scaffolds the context graph at create without dirtying git status", async () => {
     const created = await createWorkspace({ repoRoot });
     const ignore = await readFile(
-      path.join(created.path, ".context-graph", ".gitignore"),
+      path.join(created.path, ".context", ".gitignore"),
       "utf8",
     );
     expect(ignore).toContain("/local/");
     expect(
       existsSync(
-        path.join(created.path, ".context-graph", "local", "attachments"),
+        path.join(created.path, ".context", "local", "attachments"),
       ),
     ).toBe(true);
     expect(
       existsSync(
-        path.join(created.path, ".context-graph", "shared", "attachments"),
+        path.join(created.path, ".context", "shared", "attachments"),
       ),
     ).toBe(true);
     // The scaffold is self-ignoring: a fresh workspace still reads clean.
@@ -3061,29 +3193,107 @@ printf ran > '${sentinel}'
     expect(stdout.trim()).toBe("");
   });
 
-  it("round-trips private context-graph attachments through archive/restore", async () => {
+  it.each([".context", ".context-graph"])(
+    "round-trips private %s attachments without archiving unrelated scratch",
+    async (directory) => {
+      const created = await createWorkspace({ repoRoot });
+      // A composer attachment staged into the PRIVATE (gitignored) scope — the
+      // exact material `git add -A` alone would drop from the snapshot.
+      const attachmentDir = path.join(
+        created.path,
+        directory,
+        "local",
+        "attachments",
+        "att-test-1",
+      );
+      await mkdir(attachmentDir, { recursive: true });
+      if (directory === ".context-graph") {
+        await writeFile(
+          path.join(created.path, directory, ".gitignore"),
+          "/local/\n/.gitignore\n",
+        );
+      }
+      await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
+      await writeFile(
+        path.join(created.path, ".context", "scratch.txt"),
+        "unrelated scratch",
+      );
+
+      await archiveWorkspace({
+        workspaceId: created.workspaceId,
+        stashUncommitted: true,
+      });
+      const { stdout: snapshot } = await execFileAsync("git", [
+        "-C",
+        repoRoot,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        archiveSnapshotRef(created.workspaceId),
+      ]);
+      expect(snapshot).toContain(
+        `${directory}/local/attachments/att-test-1/notes.md`,
+      );
+      expect(snapshot).not.toContain(".context/scratch.txt");
+      await restoreWorkspace(created.workspaceId);
+
+      expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
+        "# keep me\n",
+      );
+    },
+  );
+
+  it("preserves migrated root documents through repeated archive/restore without including scratch", async () => {
     const created = await createWorkspace({ repoRoot });
-    // A composer attachment staged into the PRIVATE (gitignored) scope — the
-    // exact material `git add -A` alone would drop from the snapshot.
-    const attachmentDir = path.join(
-      created.path,
-      ".context-graph",
-      "local",
-      "attachments",
-      "att-test-1",
-    );
-    await mkdir(attachmentDir, { recursive: true });
-    await writeFile(path.join(attachmentDir, "notes.md"), "# keep me\n");
-
-    await archiveWorkspace({
-      workspaceId: created.workspaceId,
-      stashUncommitted: true,
+    await mkdir(path.join(created.path, ".context-graph", "docs"), {
+      recursive: true,
     });
-    await restoreWorkspace(created.workspaceId);
-
-    expect(await readFile(path.join(attachmentDir, "notes.md"), "utf8")).toBe(
-      "# keep me\n",
+    await writeFile(
+      path.join(created.path, ".context-graph", "overview.md"),
+      "root document",
     );
+    await writeFile(
+      path.join(created.path, ".context-graph", "docs", "plan.md"),
+      "plan",
+    );
+    await mkdir(path.join(created.path, ".context", "docs"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(created.path, ".context", "docs", "scratch.md"),
+      "private scratch",
+    );
+    expect(await ensureContextGraph(created.path)).toMatchObject({ ok: true });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await archiveWorkspace({
+        workspaceId: created.workspaceId,
+        stashUncommitted: true,
+      });
+      const { stdout: snapshot } = await execFileAsync("git", [
+        "-C",
+        repoRoot,
+        "ls-tree",
+        "-r",
+        "--name-only",
+        archiveSnapshotRef(created.workspaceId),
+      ]);
+      expect(snapshot).toContain(".context/overview.md");
+      expect(snapshot).toContain(".context/docs/plan.md");
+      expect(snapshot).not.toContain("scratch.md");
+      await restoreWorkspace(created.workspaceId);
+      expect(
+        await readFile(
+          path.join(created.path, ".context", "overview.md"),
+          "utf8",
+        ),
+      ).toBe("root document");
+      expect(
+        await readFile(
+          path.join(created.path, ".context", "docs", "plan.md"),
+          "utf8",
+        ),
+      ).toBe("plan");
+    }
   });
 
   it("preserves pre-context-graph attachments until transcript migration", async () => {

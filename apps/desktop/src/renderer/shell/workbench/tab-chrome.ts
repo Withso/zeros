@@ -13,10 +13,16 @@
 //     above the strip's fades at z-10).
 
 export const WORKBENCH_TAB_PILL_BASE_CLS =
-  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-md text-xs font-medium transition-none";
+  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-lg text-xs font-medium transition-none";
 
 export const WORKBENCH_TAB_PILL_ACTIVE_CLS =
   "bg-bg2 text-fg1 sticky left-1 right-1 z-20";
 
 export const WORKBENCH_TAB_PILL_INACTIVE_CLS =
   "text-fg2 data-[hovered=true]:bg-bg2 data-[hovered=true]:text-fg1";
+
+/** Files and terminals share the same title chip and adjacent icon geometry. */
+export const WORKBENCH_TITLE_CHIP_CLS =
+  "border-border1 flex min-w-0 items-center gap-1.5 rounded-sm border px-2 py-1";
+export const WORKBENCH_TITLE_ACTION_CLS =
+  "size-6 shrink-0 [&_svg]:size-3.5";

@@ -3,7 +3,7 @@ import { paintHeroAsciiField } from '../lib/hero-ascii-field'
 import './hero-ascii-clouds.css'
 
 /**
- * Full-bleed ASCII cloud void behind the homepage hero. Paints once per
+ * Full-bleed ASCII atmosphere behind the homepage hero. Paints once per
  * size (and when Geist Mono loads); slow CSS drift is gated off under
  * prefers-reduced-motion.
  */
@@ -68,6 +68,7 @@ export function HeroAsciiClouds() {
       aria-hidden
       data-hero-ascii-clouds=""
     >
+      <div className="hero-ascii-atmosphere" />
       <canvas ref={canvasRef} className="hero-ascii-clouds-canvas" />
     </div>
   )

@@ -2,11 +2,11 @@
 // context-graph — the workspace's shareable context folder
 // ──────────────────────────────────────────────────────────
 //
-// Every workspace gets a `.context-graph/` directory (scaffolded at worktree
-// creation and lazily on first use). Unlike `.context/` — which is wholly
-// gitignored agent scratch — the graph is SPLIT by intent:
+// Every workspace uses `.context/` (scaffolded at worktree creation and lazily
+// on first use). Existing scratch and legacy transcript files coexist with
+// the graph's two scopes. `.context-graph/` migrates without overwriting files.
 //
-//   .context-graph/
+//   .context/
 //     .gitignore          ignores `local/` AND itself (zero `git status` noise
 //                         until the user deliberately shares something)
 //     local/attachments/  private: composer attachments land here by default
@@ -30,8 +30,19 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import {
+  assertContextDirectory,
+  CONTEXT_DIR,
+  exposeSharedContext,
+  LEGACY_CONTEXT_DIR,
+  migrateLegacyContextDirectory,
+} from "./context-directory";
+import {
+  CONTEXT_MIGRATION_STATE,
+  contextMigrationArchivePaths,
+} from "./context-migration-state";
 
-export const CONTEXT_GRAPH_DIR = ".context-graph";
+export const CONTEXT_GRAPH_DIR = CONTEXT_DIR;
 export const CONTEXT_GRAPH_LOCAL = "local";
 export const CONTEXT_GRAPH_SHARED = "shared";
 const ATTACHMENTS_DIR = "attachments";
@@ -42,6 +53,8 @@ const ATTACHMENTS_DIR = "attachments";
 const GITIGNORE_BODY = [
   "# Zeros context graph — `local/` stays on this machine; `shared/` is",
   "# committed so teammates can see it. Toggle items from the Context tab.",
+  "/*",
+  "!/shared/",
   "/.gitignore",
   `/${CONTEXT_GRAPH_LOCAL}/`,
   "",
@@ -84,7 +97,7 @@ export type ContextGraphCategory = "attachment" | "doc";
 export type ContextGraphKind = "image" | "markdown" | "text" | "other";
 
 export interface ContextGraphItem {
-  /** Workspace-relative POSIX path (starts with `.context-graph/`). */
+  /** Workspace-relative POSIX path (starts with `.context/` or legacy `.context-graph/`). */
   relPath: string;
   /** File basename, shown as the card title. */
   name: string;
@@ -104,7 +117,7 @@ export interface ContextGraphItem {
 }
 
 export interface ContextGraphListResult {
-  /** False when `.context-graph/` does not exist yet (canvas empty state). */
+  /** False when neither context directory exists yet (canvas empty state). */
   exists: boolean;
   items: ContextGraphItem[];
   /** True when the walk hit a bound and the canvas is showing a subset. */
@@ -126,11 +139,14 @@ export interface ContextGraphSetSharedResult {
   error?: string;
 }
 
-function graphRoot(workspaceRoot: string): string {
-  return path.join(workspaceRoot, CONTEXT_GRAPH_DIR);
+function graphRoot(
+  workspaceRoot: string,
+  directory = CONTEXT_GRAPH_DIR,
+): string {
+  return path.join(workspaceRoot, directory);
 }
 
-/** A symlinked `.context-graph` (or scope dir) must not let graph operations
+/** A symlinked context directory (or scope dir) must not let graph operations
  *  read or move files outside the workspace. Best-effort realpath containment:
  *  a not-yet-existing path passes (its parent is checked by creation calls). */
 async function isConfined(target: string, root: string): Promise<boolean> {
@@ -153,11 +169,27 @@ async function isConfined(target: string, root: string): Promise<boolean> {
 /** Create the graph skeleton (both scopes + their attachments dirs + the
  *  self-ignoring .gitignore). Idempotent and quiet: repeated calls report
  *  `created: false` so callers can skip change broadcasts. */
-export async function ensureContextGraph(
+const scaffolds = new Map<string, Promise<ContextGraphScaffoldResult>>();
+
+export function ensureContextGraph(
+  workspaceRoot: string,
+): Promise<ContextGraphScaffoldResult> {
+  const key = path.resolve(workspaceRoot);
+  const pending = scaffolds.get(key);
+  if (pending) return pending;
+  const request = scaffoldContextGraph(key).finally(() => {
+    if (scaffolds.get(key) === request) scaffolds.delete(key);
+  });
+  scaffolds.set(key, request);
+  return request;
+}
+
+async function scaffoldContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphScaffoldResult> {
   const root = graphRoot(workspaceRoot);
   try {
+    await assertContextDirectory(root, workspaceRoot);
     if (!(await isConfined(root, workspaceRoot))) {
       return { ok: false, created: false, error: "graph escapes workspace" };
     }
@@ -172,6 +204,7 @@ export async function ensureContextGraph(
     let created = false;
     for (const scope of [CONTEXT_GRAPH_LOCAL, CONTEXT_GRAPH_SHARED]) {
       const dir = path.join(root, scope, ATTACHMENTS_DIR);
+      await assertContextDirectory(dir, workspaceRoot);
       if (!(await isConfined(dir, workspaceRoot))) {
         return { ok: false, created, error: "graph scope escapes workspace" };
       }
@@ -190,6 +223,20 @@ export async function ensureContextGraph(
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
+    // A pre-existing .context/.gitignore may have arbitrary scratch rules.
+    // Keep them intact while making the newly-created private scope safe.
+    try {
+      await fs.writeFile(
+        path.join(root, CONTEXT_GRAPH_LOCAL, ".gitignore"),
+        "*\n",
+        { flag: "wx" },
+      );
+      created = true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const migration = await migrateLegacyContextDirectory(workspaceRoot);
+    created ||= migration;
     return { ok: true, created };
   } catch (err) {
     return {
@@ -282,13 +329,28 @@ async function walkScope(
   state: WalkState,
   workspaceRoot: string,
   scope: ContextGraphScope,
+  directory = CONTEXT_GRAPH_DIR,
 ): Promise<void> {
-  const scopeAbs = path.join(graphRoot(workspaceRoot), scope);
-  const scopeRel = `${CONTEXT_GRAPH_DIR}/${scope}`;
+  const scopeAbs = path.join(graphRoot(workspaceRoot, directory), scope);
+  const scopeRel = `${directory}/${scope}`;
+  try {
+    await assertContextDirectory(scopeAbs, workspaceRoot);
+  } catch {
+    return;
+  }
 
   // Attachments: exactly one level of id folders, files directly inside.
   const attachmentsAbs = path.join(scopeAbs, ATTACHMENTS_DIR);
-  for (const idEntry of await readDirBounded(attachmentsAbs)) {
+  const safeAttachments = await assertContextDirectory(
+    attachmentsAbs,
+    workspaceRoot,
+  ).then(
+    () => true,
+    () => false,
+  );
+  for (const idEntry of safeAttachments
+    ? await readDirBounded(attachmentsAbs)
+    : []) {
     if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
     const idAbs = path.join(attachmentsAbs, idEntry.name);
     for (const fileEntry of await readDirBounded(idAbs)) {
@@ -315,6 +377,13 @@ async function walkScope(
       return;
     }
     for (const entry of await readDirBounded(absDir)) {
+      if (
+        directory === CONTEXT_GRAPH_DIR &&
+        scope === CONTEXT_GRAPH_LOCAL &&
+        depth === 0 &&
+        entry.name === CONTEXT_MIGRATION_STATE
+      )
+        continue;
       if (state.items.length >= MAX_ITEMS) {
         state.truncated = true;
         return;
@@ -338,22 +407,24 @@ async function walkScope(
 export async function listContextGraph(
   workspaceRoot: string,
 ): Promise<ContextGraphListResult> {
-  const root = graphRoot(workspaceRoot);
   try {
-    if (!(await isConfined(root, workspaceRoot))) {
-      return { exists: false, items: [], truncated: false };
-    }
-    const stat = await fs.lstat(root).catch(() => null);
-    if (!stat || !stat.isDirectory()) {
-      return { exists: false, items: [], truncated: false };
-    }
     const state: WalkState = { items: [], truncated: false };
-    await walkScope(state, workspaceRoot, CONTEXT_GRAPH_LOCAL);
-    await walkScope(state, workspaceRoot, CONTEXT_GRAPH_SHARED);
+    let exists = false;
+    // Read-only compatibility also keeps unmigrated/conflicting legacy files
+    // visible. Scaffold and mutations own migration, never this read path.
+    for (const directory of [CONTEXT_GRAPH_DIR, LEGACY_CONTEXT_DIR]) {
+      const root = graphRoot(workspaceRoot, directory);
+      const stat = await fs.lstat(root).catch(() => null);
+      if (!stat?.isDirectory() || !(await isConfined(root, workspaceRoot)))
+        continue;
+      exists = true;
+      await walkScope(state, workspaceRoot, CONTEXT_GRAPH_LOCAL, directory);
+      await walkScope(state, workspaceRoot, CONTEXT_GRAPH_SHARED, directory);
+    }
     state.items.sort(
       (a, b) => a.mtimeMs - b.mtimeMs || (a.relPath < b.relPath ? -1 : 1),
     );
-    return { exists: true, items: state.items, truncated: state.truncated };
+    return { exists, items: state.items, truncated: state.truncated };
   } catch {
     return { exists: false, items: [], truncated: false };
   }
@@ -466,7 +537,9 @@ export function safeAttachmentFilename(raw: string): string {
   // basename("..") === ".." and a fully-hostile name can clean to "" — both
   // would corrupt the one-folder-one-file layout. Park such names on a
   // constant instead of failing the write.
-  return capped === "" || capped === "." || capped === ".." ? "attachment" : capped;
+  return capped === "" || capped === "." || capped === ".."
+    ? "attachment"
+    : capped;
 }
 
 /** Write one attachment's bytes into the graph — the composer's attach-time
@@ -524,8 +597,10 @@ export async function stageContextGraphAttachment(
       scope === CONTEXT_GRAPH_SHARED
         ? CONTEXT_GRAPH_LOCAL
         : CONTEXT_GRAPH_SHARED;
-    const otherAtPin = scope === CONTEXT_GRAPH_SHARED ? localAtPin : sharedAtPin;
+    const otherAtPin =
+      scope === CONTEXT_GRAPH_SHARED ? localAtPin : sharedAtPin;
     const dir = dirForScope(scope);
+    await assertContextDirectory(dir, workspaceRoot);
     if (!(await isConfined(dir, workspaceRoot))) {
       return { ok: false, error: "path escapes workspace" };
     }
@@ -538,7 +613,10 @@ export async function stageContextGraphAttachment(
     // Belt: ID_OK + safeAttachmentFilename already make this true; the check
     // protects against future regressions letting `..` through.
     if (!finalPath.startsWith(dir + path.sep)) {
-      return { ok: false, error: "refusing to write outside the attachment folder" };
+      return {
+        ok: false,
+        error: "refusing to write outside the attachment folder",
+      };
     }
     const result = {
       ok: true as const,
@@ -600,6 +678,10 @@ export async function setContextGraphAttachmentShared(
   const source = path.join(root, fromScope, ATTACHMENTS_DIR, attachmentId);
   const target = path.join(root, toScope, ATTACHMENTS_DIR, attachmentId);
   try {
+    const scaffold = await ensureContextGraph(workspaceRoot);
+    if (!scaffold.ok) return { ok: false, moved: false, error: scaffold.error };
+    await assertContextDirectory(source, workspaceRoot);
+    await assertContextDirectory(target, workspaceRoot);
     if (
       !(await isConfined(source, workspaceRoot)) ||
       !(await isConfined(target, workspaceRoot))
@@ -608,6 +690,16 @@ export async function setContextGraphAttachmentShared(
     }
     const sourceStat = await fs.lstat(source).catch(() => null);
     const targetStat = await fs.lstat(target).catch(() => null);
+    const prepareShare = async (current: string) => {
+      const entries = await fs.readdir(current, { recursive: true });
+      await exposeSharedContext(
+        workspaceRoot,
+        [target, ...entries.map((entry) => path.join(target, entry))].map(
+          (absolute) =>
+            path.relative(workspaceRoot, absolute).split(path.sep).join("/"),
+        ),
+      );
+    };
     if (targetStat) {
       // Already in the requested scope. A source ALSO existing means two
       // divergent copies — refuse rather than clobber either.
@@ -618,11 +710,13 @@ export async function setContextGraphAttachmentShared(
           error: "attachment exists in both scopes — resolve on disk",
         };
       }
+      if (shared) await prepareShare(target);
       return { ok: true, moved: false };
     }
     if (!sourceStat || !sourceStat.isDirectory()) {
       return { ok: false, moved: false, error: "attachment not found" };
     }
+    if (shared) await prepareShare(source);
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.rename(source, target);
     return { ok: true, moved: true };
@@ -641,7 +735,50 @@ export async function setContextGraphAttachmentShared(
 export async function contextGraphHasContent(
   workspaceRoot: string,
 ): Promise<boolean> {
-  const root = graphRoot(workspaceRoot);
+  return (
+    (await contextMigrationArchivePaths(workspaceRoot).catch(() => [])).length >
+      0 ||
+    (await contextRootHasContent(workspaceRoot, CONTEXT_GRAPH_DIR)) ||
+    (await contextRootHasContent(workspaceRoot, LEGACY_CONTEXT_DIR))
+  );
+}
+
+/** Archive only the graph-owned scopes. `.context/` also holds unrelated
+ * scratch and tool state that must not be swept into recovery snapshots. Old
+ * archives and workspaces can still contain the complete legacy graph root. */
+export async function contextGraphArchivePaths(
+  workspaceRoot: string,
+): Promise<string[]> {
+  const candidates = await contextMigrationArchivePaths(workspaceRoot);
+  if (
+    candidates.length > 0 ||
+    (await contextRootHasContent(workspaceRoot, CONTEXT_GRAPH_DIR))
+  ) {
+    candidates.push(
+      `${CONTEXT_GRAPH_DIR}/.gitignore`,
+      `${CONTEXT_GRAPH_DIR}/local`,
+      `${CONTEXT_GRAPH_DIR}/shared`,
+    );
+  }
+  if (await contextRootHasContent(workspaceRoot, LEGACY_CONTEXT_DIR))
+    candidates.push(LEGACY_CONTEXT_DIR);
+  const present = await Promise.all(
+    candidates.map(
+      async (relative) =>
+        await fs.lstat(path.join(workspaceRoot, relative)).then(
+          () => relative,
+          () => null,
+        ),
+    ),
+  );
+  return present.filter((relative): relative is string => relative !== null);
+}
+
+async function contextRootHasContent(
+  workspaceRoot: string,
+  directory: string,
+): Promise<boolean> {
+  const root = graphRoot(workspaceRoot, directory);
   try {
     if (!(await isConfined(root, workspaceRoot))) return false;
     const rootStat = await fs.lstat(root).catch(() => null);
@@ -651,8 +788,22 @@ export async function contextGraphHasContent(
       scope: ContextGraphScope,
     ): Promise<boolean> => {
       const scopeAbs = path.join(root, scope);
+      try {
+        await assertContextDirectory(scopeAbs, workspaceRoot);
+      } catch {
+        return false;
+      }
       const attachmentsAbs = path.join(scopeAbs, ATTACHMENTS_DIR);
-      for (const idEntry of await readDirBounded(attachmentsAbs)) {
+      const safeAttachments = await assertContextDirectory(
+        attachmentsAbs,
+        workspaceRoot,
+      ).then(
+        () => true,
+        () => false,
+      );
+      for (const idEntry of safeAttachments
+        ? await readDirBounded(attachmentsAbs)
+        : []) {
         if (!idEntry.isDirectory() || !ID_OK.test(idEntry.name)) continue;
         for (const fileEntry of await readDirBounded(
           path.join(attachmentsAbs, idEntry.name),
@@ -673,6 +824,13 @@ export async function contextGraphHasContent(
       ): Promise<boolean> => {
         if (depth > MAX_DEPTH) return false;
         for (const entry of await readDirBounded(absDir)) {
+          if (
+            directory === CONTEXT_GRAPH_DIR &&
+            scope === CONTEXT_GRAPH_LOCAL &&
+            depth === 0 &&
+            entry.name === CONTEXT_MIGRATION_STATE
+          )
+            continue;
           if (entry.name === ATTACHMENTS_DIR && depth === 0) continue;
           if (entry.isDirectory()) {
             if (

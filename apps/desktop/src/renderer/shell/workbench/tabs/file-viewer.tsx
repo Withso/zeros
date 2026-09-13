@@ -54,6 +54,7 @@ import { useInstantViewSwitch } from "@/renderer/shared/ui/use-instant-view-swit
 import { useWorkspaceDispatch } from "@/renderer/state/workspace-store";
 import { useOpenFileInWorkbench, type OpenFileOpts } from "../use-open-file";
 import type { ViewerMode } from "../tab-model";
+import { WORKBENCH_TITLE_CHIP_CLS, WORKBENCH_TITLE_ACTION_CLS } from "../tab-chrome";
 import { triggerGitRefresh } from "../../use-git-refresh-key";
 import {
   currentFileHash,
@@ -68,8 +69,6 @@ import { changeAdvanceIntent } from "./changes-open-intent";
 import {
   loadWorkspaceFileDiff,
   loadWorkspaceFileRead,
-  peekWorkspaceFileDiff,
-  peekWorkspaceFileRead,
   useWorkspaceFileDiffSnapshot,
   useWorkspaceFileReadSnapshot,
   workspaceFileReadKey,
@@ -175,7 +174,7 @@ function PathBreadcrumbs({ path }: { path: string }) {
     path.length > file.length ? path.slice(0, -(file.length + 1)) : "";
   return (
     <Tooltip label={path}>
-      <div className="border-border1 flex min-w-0 items-center gap-1.5 rounded-sm border px-2 py-1">
+      <div className={WORKBENCH_TITLE_CHIP_CLS}>
         <FileTypeIcon name={path} size={13} />
         <div className="flex min-w-0 items-center text-xs">
           {dir && (
@@ -285,11 +284,10 @@ export function FileViewer({
   // Hover/workspace-intent prefetch usually makes this a background refresh;
   // concurrent callers share the same keyed request.
   useEffect(() => {
-    if (!cwd) return;
-    // A hidden retained view already has a confirmed snapshot. Its cache was
-    // marked stale by the parent refresh coordinator; defer bridge work until
-    // it is selected again. A cold hidden intent-view still loads now.
-    if (!active && peekWorkspaceFileRead(readQuery) !== undefined) return;
+    if (!active || !cwd) return;
+    // Explicit pointer/workspace intent owns prefetch. Hidden viewers only
+    // observe those results, including on a cold mount; fetching here would
+    // bypass the speculative request bound while moving across Changes rows.
     void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(() => {});
   }, [active, cwd, readQuery, readKey, refreshKey]);
 
@@ -298,8 +296,7 @@ export function FileViewer({
   // that commit's own diff (vs its parent). Re-fetches on gitRefresh too; the
   // diff spinner shows only on a fresh file/scope (no flicker on live refresh).
   useEffect(() => {
-    if (!workspaceId) return;
-    if (!active && peekWorkspaceFileDiff(diffQuery) !== undefined) return;
+    if (!active || !workspaceId) return;
     void loadWorkspaceFileDiff(diffQuery, { maxAgeMs: 15_000 }).catch(() => {
       // The snapshot carries the error; a confirmed diff stays available.
     });
@@ -558,17 +555,11 @@ export function FileViewer({
             data-testid="file-path-actions"
             className="flex min-w-0 items-center gap-1"
           >
-            {path ? (
-              <PathBreadcrumbs path={path} />
-            ) : (
-              <span className="text-fg2 truncate text-xs font-medium">
-                No file open
-              </span>
-            )}
+            {path && <PathBreadcrumbs path={path} />}
             {canCopy && (
               <CodeBlockCopyButton
                 text={result!.content ?? ""}
-                className="size-6 shrink-0"
+                className={WORKBENCH_TITLE_ACTION_CLS}
               />
             )}
           </div>

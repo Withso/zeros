@@ -58,7 +58,7 @@ function securityEmailHtml(
   <h2 style="margin:0 0 16px;font-size:20px">${title}</h2>
   ${paragraphs.map((paragraph) => `<p style="margin:0 0 16px">${paragraph}</p>`).join("\n  ")}
   ${recoveryCode ? `<p style="margin:20px 0;padding:14px;border:1px solid #d4d4d8;border-radius:8px"><b>Recovery code:</b> <code>${recoveryCode}</code></p>` : ""}
-  <p style="margin:24px 0 0;color:#6b7280;font-size:13px">If you did not expect this change, contact <a href="mailto:hello@zeros.build">hello@zeros.build</a>.</p>
+  <p style="margin:24px 0 0;color:#6b7280;font-size:13px">If you did not expect this change, contact <a href="mailto:hi@zeros.build">hi@zeros.build</a>.</p>
 </body></html>`;
 }
 

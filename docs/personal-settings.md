@@ -117,13 +117,18 @@ into TOML or copied from native configuration by inventory reads.
 
 ## Tracked Design metadata
 
-The private settings rule applies to personal configuration, not authored
-Design state. `.zeros/design-dir.toml` records stable directory IDs and paths;
-`.zeros/design/<id>/document.json` records frame geometry, titles, kinds and the
-Foundation manifest. These files are versioned with Design source. Personal
-selection uses `[design] directory_id`; legacy `directory` remains readable.
-Each worktree resolves its ID against its own registry. A missing or conflicting
-mapping pauses Design edits instead of selecting another document. See
+Each Design folder carries a tracked `design.toml` with its stable ID, frame
+geometry, titles, kinds and Foundation metadata. Commit it together with the
+source and short `rules.md` ownership instructions. Code agents may read the
+folder but cannot mutate it through generic Code operations. `.zeros/` holds
+private state and is ignored by default.
+
+Personal selection uses `[design] directory_id`; legacy `directory` paths remain
+readable. Each checkout resolves the ID from its own folder manifests. Deleting
+`.zeros/` loses the private selection, but Design folders are still discoverable.
+Settings can also adopt an existing folder and recover metadata saved in Git.
+Older central registry/JSON layouts remain readable and migrate through the
+Design API without changing IDs or document values. See
 [Design workspace](design-workspace.md) for migration and Git behavior.
 
 ## Customize

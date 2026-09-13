@@ -11,6 +11,7 @@ describe("customer deletion notifications", () => {
     expect(content.subject).toContain("scheduled for deletion");
     expect(content.html).toContain("30 days");
     expect(content.html).toContain("ZD-ABCD-2345");
+    expect(content.html).toContain('href="mailto:hi@zeros.build"');
   });
 
   it("never reflects an invalid locator or arbitrary payload markup", () => {

@@ -24,6 +24,14 @@
 // ──────────────────────────────────────────────────────────
 
 import { create } from "zustand";
+import { isRunSessionId } from "@zeros/protocol/run-actions";
+import {
+  openTerminalTab,
+  reconcileTerminalTabs,
+  terminalTabNeighbor,
+  visibleWorkbenchTabs,
+  type OpenTerminalIntent,
+} from "../shell/workbench/terminal-tabs";
 
 import { loadAiSettings } from "../shared/lib/openai";
 import { normalizeChatPermissionMode } from "./chat-permission";
@@ -57,6 +65,7 @@ import {
   schedulePersistDrafts,
 } from "./persist-composer-drafts";
 import { loadProjects } from "./projects-store";
+import { DEFAULT_REPO_MODE_VIEWS, repoPageModeForView } from "./repo-page-mode";
 import {
   findProjectForFolder,
   folderIsOwnedByProject,
@@ -80,6 +89,7 @@ import type {
   PendingChatSubmission,
   PendingComposerAppend,
   ProjectConnection,
+  RepoPageMode,
   RepoPageView,
   WorkspacePage,
   WorkspaceState,
@@ -157,6 +167,11 @@ export type Action =
       type: "SET_REPO_PAGE_VIEW";
       projectId: string;
       view: RepoPageView;
+    }
+  | {
+      type: "SET_REPO_PAGE_MODE";
+      projectId: string;
+      mode: RepoPageMode;
     }
   | {
       type: "REMOVE_REPO_UI_STATE";
@@ -271,6 +286,14 @@ export type Action =
   | { type: "SET_NEW_AGENT_FOLDER"; folder: string | null }
   | { type: "BUMP_PROJECT_GENERATION" }
   // Workbench tabs
+  | ({ type: "OPEN_WORKBENCH_TERMINAL"; scope: string } & OpenTerminalIntent)
+  | {
+      type: "RECONCILE_WORKBENCH_TERMINALS";
+      scope: string;
+      titles: Array<[string, string]>;
+      sessionsReady: boolean;
+      actionsReady: boolean;
+    }
   | { type: "RESET_WORKBENCH_TABS" }
   | {
       type: "ADD_WORKBENCH_TAB";
@@ -481,6 +504,8 @@ const initialState: WorkspaceState = {
   // page without an id falls back to the Dashboard on read).
   activeRepoId: persistedUiState.activeRepoId ?? null,
   repoPageViewByProject: persistedUiState.repoPageViewByProject ?? {},
+  repoPageViewByModeByProject:
+    persistedUiState.repoPageViewByModeByProject ?? {},
   isLoading: false,
   aiSettings: loadAiSettings(),
   // The validated local snapshot is available before React mounts. SQLite is
@@ -582,6 +607,34 @@ export function selectRepoPageView(
   projectId: string,
 ): RepoPageView {
   return s.repoPageViewByProject[projectId] ?? "workspaces";
+}
+
+/** Keep the active destination and both mode memories in the same snapshot.
+ * The previous active view seeds mode memory for older persisted snapshots. */
+function rememberRepoPageView(
+  state: WorkspaceState,
+  projectId: string,
+  view: RepoPageView,
+): WorkspaceState {
+  if (state.repoPageViewByProject[projectId] === view) return state;
+  const previous = selectRepoPageView(state, projectId);
+  return {
+    ...state,
+    repoPageViewByProject: setBoundedRecord(
+      state.repoPageViewByProject,
+      projectId,
+      view,
+    ),
+    repoPageViewByModeByProject: setBoundedRecord(
+      state.repoPageViewByModeByProject,
+      projectId,
+      {
+        ...state.repoPageViewByModeByProject[projectId],
+        [repoPageModeForView(previous)]: previous,
+        [repoPageModeForView(view)]: view,
+      },
+    ),
+  };
 }
 
 /** Remember the last-active chat PER workspace folder so returning to a
@@ -702,6 +755,23 @@ function removeWorkbenchTabs(
   if (removed.size === 0) return cur;
 
   const tabs = cur.tabs.filter((t) => !removed.has(t.id));
+  const activeTerminalPanelId = terminalTabNeighbor(
+    tabs.filter((t) => t.terminalPlacement === "panel"),
+    cur.tabs,
+    cur.activeTerminalPanelId ?? null,
+  );
+  if (cur.tabs.some((t) => t.type === "terminal")) {
+    return {
+      ...cur,
+      tabs,
+      activeId: terminalTabNeighbor(
+        visibleWorkbenchTabs(tabs),
+        cur.tabs,
+        cur.activeId,
+      ),
+      activeTerminalPanelId,
+    };
+  }
   if (!cur.activeId || !removed.has(cur.activeId)) {
     return { ...cur, tabs, activeId: cur.activeId };
   }
@@ -935,43 +1005,39 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pendingWorkspaceValidationFolder: null,
       };
     case "OPEN_REPO_PAGE": {
-      const repoPageViewByProject = action.view
-        ? setBoundedRecord(
-            state.repoPageViewByProject,
-            action.projectId,
-            action.view,
-          )
-        : state.repoPageViewByProject;
+      const next = action.view
+        ? rememberRepoPageView(state, action.projectId, action.view)
+        : state;
       if (
         state.activePage === "repo" &&
         state.lastHomePage === "repo" &&
         state.activeRepoId === action.projectId &&
         state.pendingWorkspaceValidationFolder === null &&
-        state.repoPageViewByProject === repoPageViewByProject
+        state === next
       ) {
         return state;
       }
       return {
-        ...state,
+        ...next,
         activePage: "repo",
         lastHomePage: "repo",
         activeRepoId: action.projectId,
         pendingWorkspaceValidationFolder: null,
-        repoPageViewByProject,
       };
     }
     case "SET_REPO_PAGE_VIEW": {
-      if (state.repoPageViewByProject[action.projectId] === action.view) {
+      return rememberRepoPageView(state, action.projectId, action.view);
+    }
+    case "SET_REPO_PAGE_MODE": {
+      if (
+        repoPageModeForView(selectRepoPageView(state, action.projectId)) ===
+        action.mode
+      )
         return state;
-      }
-      return {
-        ...state,
-        repoPageViewByProject: setBoundedRecord(
-          state.repoPageViewByProject,
-          action.projectId,
-          action.view,
-        ),
-      };
+      const view =
+        state.repoPageViewByModeByProject[action.projectId]?.[action.mode] ??
+        DEFAULT_REPO_MODE_VIEWS[action.mode];
+      return rememberRepoPageView(state, action.projectId, view);
     }
     case "REMOVE_REPO_UI_STATE": {
       const removedFolders = [
@@ -1027,6 +1093,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             ? null
             : state.activeChatId,
         repoPageViewByProject,
+        repoPageViewByModeByProject: removeRecordKey(
+          state.repoPageViewByModeByProject,
+          action.projectId,
+        ),
         lastWorkspaceByRepoRoot,
         lastWorkspaceFolder,
         newAgentFolder:
@@ -1556,6 +1626,32 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     // Each case reads/writes the ACTIVE worktree's slice in workbenchByScope,
     // seeding from the per-scope default home tabs when the
     // worktree has no slice yet.
+    case "OPEN_WORKBENCH_TERMINAL":
+    case "RECONCILE_WORKBENCH_TERMINALS": {
+      const scope = workbenchScopeForFolder(action.scope);
+      const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+      const next =
+        action.type === "OPEN_WORKBENCH_TERMINAL"
+          ? openTerminalTab(cur, action)
+          : reconcileTerminalTabs(
+              cur,
+              new Map(action.titles),
+              (id) =>
+                id === "setup" ||
+                (isRunSessionId(id) || id === "run:add"
+                  ? action.actionsReady
+                  : action.sessionsReady),
+            );
+      if (next === cur) return state;
+      return {
+        ...state,
+        workbenchByScope: setWorkbenchScope(
+          state.workbenchByScope,
+          scope,
+          next,
+        ),
+      };
+    }
     case "RESET_WORKBENCH_TABS": {
       const scope = workbenchScopeKey(state);
       return {
@@ -1676,6 +1772,17 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
       if (!cur.tabs.some((t) => t.id === action.id)) return state;
+      const terminal = cur.tabs.find(
+        (t) => t.id === action.id && t.type === "terminal",
+      );
+      if (terminal?.terminalId) {
+        return reducer(state, {
+          type: "OPEN_WORKBENCH_TERMINAL",
+          scope,
+          terminalId: terminal.terminalId,
+          title: terminal.title,
+        });
+      }
       if (cur.activeId === action.id) return state;
       return {
         ...state,
@@ -2041,6 +2148,7 @@ useWorkspaceStore.subscribe((s, prev) => {
     s.lastHomePage !== prev.lastHomePage ||
     s.activeRepoId !== prev.activeRepoId ||
     s.repoPageViewByProject !== prev.repoPageViewByProject ||
+    s.repoPageViewByModeByProject !== prev.repoPageViewByModeByProject ||
     s.activeChatId !== prev.activeChatId ||
     s.newAgentFolder !== prev.newAgentFolder ||
     s.lastWorkspaceFolder !== prev.lastWorkspaceFolder ||

@@ -21,6 +21,9 @@ const TAB_BODY_MAP: Record<
   WorkbenchTabType,
   React.ComponentType<TabBodyProps>
 > = {
+  // The shared terminal deck owns these bodies in both placements, preserving
+  // xterm identity when a tab moves between the workbench and bottom panel.
+  terminal: () => null,
   changes: ChangesWorkbenchSurface,
   review: ReviewSurface,
   context: ContextSurface,

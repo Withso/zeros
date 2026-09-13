@@ -10,7 +10,7 @@
 //
 // Scaffolding rides the first load: one idempotent `context.graph.scaffold`
 // per folder per session, BEFORE the first list, so opening the Context tab
-// is what materialises `.context-graph/` for pre-existing workspaces (new
+// is what materialises `.context/` for pre-existing workspaces (new
 // worktrees get it at create time in the engine).
 // ──────────────────────────────────────────────────────────
 
@@ -26,7 +26,12 @@ import {
   type AsyncCacheSnapshot,
 } from "@/renderer/shared/lib/keyed-async-cache";
 
-const graphCache = new KeyedAsyncCache<ContextGraphListWire>(32);
+interface ContextGraphData extends ContextGraphListWire {
+  /** Preparation can fail while legacy/current files remain readable. */
+  storageError?: string;
+}
+
+const graphCache = new KeyedAsyncCache<ContextGraphData>(32);
 
 /** Folders whose scaffold ran this session — once is enough, the engine call
  *  is idempotent and re-runs on the attachment write path anyway. */
@@ -41,24 +46,28 @@ export function contextGraphKey(cwd: string): string {
   return normalizeCwd(cwd);
 }
 
-async function fetchContextGraph(cwd: string): Promise<ContextGraphListWire> {
+async function fetchContextGraph(cwd: string): Promise<ContextGraphData> {
+  let storageError: string | undefined;
   if (!scaffolded.has(cwd)) {
     // Best-effort: a client without graph writes (or a broken graph) still gets the listing;
     // the set is marked only on success so a transient failure retries.
     try {
       const res = await scaffoldContextGraph(cwd);
       if (res.ok) scaffolded.add(cwd);
-    } catch {
-      /* listing below still answers; the empty state explains the rest */
+      else storageError = res.error;
+    } catch (error) {
+      storageError =
+        error instanceof Error ? error.message : "Couldn't prepare .context";
     }
   }
-  return listContextGraph(cwd);
+  const data = await listContextGraph(cwd);
+  return storageError ? { ...data, storageError } : data;
 }
 
 /** Subscribe to one folder's graph snapshot (stable references, exact-key). */
 export function useContextGraphSnapshot(
   cwd: string,
-): AsyncCacheSnapshot<ContextGraphListWire> {
+): AsyncCacheSnapshot<ContextGraphData> {
   const key = contextGraphKey(cwd);
   const subscribe = useCallback(
     (listener: () => void) => graphCache.subscribe(key, listener),
@@ -83,7 +92,7 @@ export function useContextGraphSnapshot(
 export function loadContextGraph(
   cwd: string,
   options: { force?: boolean; maxAgeMs?: number } = {},
-): Promise<ContextGraphListWire> {
+): Promise<ContextGraphData> {
   const key = contextGraphKey(cwd);
   if (options.force) graphCache.invalidate(key);
   return graphCache.load(key, () => fetchContextGraph(key), options);

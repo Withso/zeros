@@ -1,5 +1,7 @@
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
+import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
+import { designDocumentBody, withExplicitDesignBody } from "./document-body";
 
 import type {
   DesignAuthoredKeyframes,
@@ -327,12 +329,15 @@ function inlineStyleForNode(
   nodeId: string,
 ): InlineStyleAttribute | null {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const matches = designElements(document).filter(
-    (element) =>
-      element.attrs
-        .find((attribute) => attribute.name === "data-oid")
-        ?.value.trim() === nodeId,
-  );
+  const matches =
+    nodeId === DESIGN_DOCUMENT_BODY_ID
+      ? [designDocumentBody(document)]
+      : designElements(document).filter(
+          (element) =>
+            element.attrs
+              .find((attribute) => attribute.name === "data-oid")
+              ?.value.trim() === nodeId,
+        );
   if (matches.length !== 1 || !matches[0]) {
     throw new Error(
       matches.length > 1
@@ -370,13 +375,18 @@ function mutateInlineStyles(
   nodeId: string,
   styles: ReadonlyMap<string, DesignStyleMutationValue>,
 ): string {
+  if (nodeId === DESIGN_DOCUMENT_BODY_ID)
+    source = withExplicitDesignBody(source);
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const matches = designElements(document).filter(
-    (element) =>
-      element.attrs
-        .find((attribute) => attribute.name === "data-oid")
-        ?.value.trim() === nodeId,
-  );
+  const matches =
+    nodeId === DESIGN_DOCUMENT_BODY_ID
+      ? [designDocumentBody(document)]
+      : designElements(document).filter(
+          (element) =>
+            element.attrs
+              .find((attribute) => attribute.name === "data-oid")
+              ?.value.trim() === nodeId,
+        );
   const element = matches.length === 1 ? matches[0] : undefined;
   if (!element) {
     throw new Error(
@@ -519,6 +529,7 @@ function splitSelectorList(selector: string): string[] {
 }
 
 function selectorTargetsNode(selector: string, nodeId: string): boolean {
+  if (nodeId === DESIGN_DOCUMENT_BODY_ID) return selector.trim() === "body";
   for (const part of splitSelectorList(selector)) {
     const matches = [
       ...part.matchAll(
@@ -536,6 +547,7 @@ function selectorTargetsNode(selector: string, nodeId: string): boolean {
 }
 
 function selectorExactlyTargetsNode(selector: string, nodeId: string): boolean {
+  if (nodeId === DESIGN_DOCUMENT_BODY_ID) return selector.trim() === "body";
   const parts = splitSelectorList(selector);
   if (parts.length !== 1 || !parts[0]) return false;
   const part = parts[0].trim();
@@ -934,6 +946,10 @@ export function mutateDesignNodeStyles(
         ? allRules
         : allRules.filter(
             (candidate) =>
+              // The synthetic body ID belongs to this document. A body rule
+              // in a shared stylesheet also styles other frames.
+              (input.nodeId !== DESIGN_DOCUMENT_BODY_ID ||
+                candidate.declaration.file === state.entryFile) &&
               candidate.declaration.conditions.length === 0 &&
               candidate.declaration.selector !== null &&
               selectorExactlyTargetsNode(
@@ -1009,15 +1025,17 @@ export function mutateDesignNodeStyles(
           : "inline-fallback-ambiguous-rule",
     });
   }
+  // These spans refer to the original source. Inline edits can shift them,
+  // especially when the body editor materializes omitted document tags.
+  for (const [file, edits] of stylesheetEdits) {
+    files[file] = applyEdits(files[file]!, edits);
+  }
   if (inlineMutations.size > 0) {
     files[state.entryFile] = mutateInlineStyles(
       files[state.entryFile]!,
       input.nodeId,
       inlineMutations,
     );
-  }
-  for (const [file, edits] of stylesheetEdits) {
-    files[file] = applyEdits(files[file]!, edits);
   }
   return { files, decisions };
 }

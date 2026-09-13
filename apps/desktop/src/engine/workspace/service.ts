@@ -4,7 +4,19 @@ import {
   type SessionToolsSnapshot,
   type SessionToolsInventorySnapshot,
 } from "@zeros/protocol/agent-extensions";
+import { removeDesignDirectory } from "../design/remove-directory";
+import { listWorkspaceFilesWithDesign } from "../design/file-listing";
+import { parseDesignManifest } from "../design/manifest";
+import { designMetadataIndexPaths } from "../design/metadata-git";
+import {
+  adoptExistingDesignDirectory,
+  previewExistingDesignDirectory,
+} from "../design/adopt-directory";
 import { stageDesignRegistry } from "../design/metadata-git";
+import {
+  readDesignProtocolResource as readDesignResource,
+  type DesignProtocolResource,
+} from "../design/protocol-resource";
 // ──────────────────────────────────────────────────────────
 // WorkspaceService — the Remote Workspace API over the bridge
 // ──────────────────────────────────────────────────────────
@@ -41,9 +53,9 @@ import { syncAgentPreferences } from "../settings/agent-preferences";
 import {
   designDirectoryFromSettings,
   designDocumentMetadataPath,
-  designMetadataGitPaths,
   isDesignMetadataRepoPath,
   readDesignDirectoryRegistry,
+  DESIGN_METADATA_PROTECTED_PATHS,
 } from "../design/metadata";
 import {
   effectiveZerosSkills,
@@ -256,6 +268,7 @@ import {
   validateDesignDirectoryPointerTarget,
 } from "../design/directory";
 import {
+  activeDesignDirectoryNameFor,
   DEFAULT_DESIGN_DIRECTORY_NAME,
   forgetDesignDirectoryName,
   primeDesignDirectoryName,
@@ -575,7 +588,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "file.write",
   "attachment.write",
   // These are normally reads, but a window containing a legacy transcript
-  // image copies it into `.context-graph` before returning. Register the whole
+  // image copies it into `.context` before returning. Register the whole
   // operation so archive/delete cannot move the checkout mid-migration.
   "messages.window",
   "messages.windowOlder",
@@ -596,7 +609,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.unstage",
   "design.save",
   "design.commit",
-  // Create/move files under `.context-graph/` — archive's snapshot force-adds
+  // Create/move files under `.context/` — archive's snapshot force-adds
   // that tree, so a mid-flight scaffold or share-toggle must drain first.
   "context.graph.scaffold",
   "context.graph.setShared",
@@ -714,6 +727,30 @@ const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
 const DESIGN_WORKSPACE_BLOCKED_MUTATIONS = new Set<string>([
   "workspace.setWorkingDirectories",
 ]);
+/** These handlers write the active document or its canvas context. Resolve
+ * their directory for the whole async operation, just like Design reads. */
+const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
+  "design.transaction.apply",
+  "design.history.undo",
+  "design.history.redo",
+  "design.token.update",
+  "design.selection.set",
+  "design.screenshot.set",
+  "design.runtime.audit",
+  "design.frame.create",
+  "design.frame.rename",
+  "design.frame.duplicate",
+  "design.frame.delete",
+  "design.canvas.update",
+  "design.node.styles",
+  "design.node.text",
+  "design.node.html",
+  "design.asset.insert",
+  "design.stage",
+  "design.unstage",
+  "design.save",
+  "design.commit",
+]);
 const MAX_DESIGN_DESCENDANT_SCAN_ENTRIES = 65_536;
 
 /** Recognizes design territory the way the agent boundary does: by MARKER, not
@@ -740,13 +777,13 @@ const MAX_DESIGN_DESCENDANT_SCAN_ENTRIES = 65_536;
  *  the whole repository read-only. */
 function makeDesignPathRecognizer(
   workspacePath: string,
-  pointerName: string,
+  pointerName: string | undefined,
 ): (candidate: string) => boolean {
   const registeredPaths = [
     ...Object.values(
       readDesignDirectoryRegistry(workspacePath)?.directories ?? {},
     ).map((entry) => entry.path),
-    ...designMetadataGitPaths(workspacePath),
+    ...DESIGN_METADATA_PROTECTED_PATHS,
   ];
   // One `git.stage` can carry thousands of paths that share a handful of
   // directories, so each directory is probed at most once per operation.
@@ -906,9 +943,8 @@ async function designRootsForWorkingDirectories(
   cwd: string,
 ): Promise<string[]> {
   const roots = new Set<string>();
-  roots.add(".zeros/design-dir.toml");
-  roots.add(".zeros/design");
-  const pointer = designDirectoryNameFor(cwd);
+  for (const metadata of DESIGN_METADATA_PROTECTED_PATHS) roots.add(metadata);
+  const pointer = activeDesignDirectoryNameFor(cwd);
   if (pointer) roots.add(pointer);
   try {
     const [discovered, sticky] = await Promise.all([
@@ -947,7 +983,7 @@ async function designPathsInCodeMutation(
   const workspace = getWorkspaceById(workspaceId);
   const workspacePath = workspace?.path ?? resolvedWorkspacePath;
   if (!workspacePath) return [];
-  const activeDesignRoot = designDirectoryNameFor(workspacePath);
+  const activeDesignRoot = activeDesignDirectoryNameFor(workspacePath);
   const isDesignPath = makeDesignPathRecognizer(
     workspacePath,
     activeDesignRoot,
@@ -955,11 +991,12 @@ async function designPathsInCodeMutation(
   const immediate = paths.filter(
     (candidate) =>
       isDesignMetadataRepoPath(candidate) ||
-      designMetadataGitPaths(workspacePath).some((metadata) =>
+      DESIGN_METADATA_PROTECTED_PATHS.some((metadata) =>
         repoMutationPathOverlapsDesignRoot(candidate, metadata),
       ) ||
       isDesignPath(candidate) ||
-      repoMutationPathOverlapsDesignRoot(candidate, activeDesignRoot),
+      (activeDesignRoot &&
+        repoMutationPathOverlapsDesignRoot(candidate, activeDesignRoot)),
   );
   if (immediate.length > 0) return immediate;
 
@@ -2285,6 +2322,33 @@ export class WorkspaceService {
     );
   }
 
+  /** Local custom-protocol entry point after the engine validates its capability. */
+  async readDesignProtocolResource(
+    workspaceId: string,
+    input: { path: string; sourceVersion: string | null },
+  ): Promise<DesignProtocolResource | null> {
+    try {
+      // Snapshot and frame reads resolve the active directory in a scoped
+      // lease, including on a cold engine and while Code view is selected.
+      // The native canvas must read that same draft instead of the registry's
+      // legacy default. This read never performs Design healing writes.
+      return await this.withDesignReadWorkspace(
+        workspaceId,
+        false,
+        ({ root }) => readDesignResource(root, input),
+      );
+    } catch (error) {
+      if (
+        error instanceof GitError &&
+        (error.code === "WORKSPACE_NOT_FOUND" ||
+          error.code === "VALIDATION_FAILED")
+      ) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
   private async readDesignSnapshot(
     workspace: Workspace,
     remote: boolean,
@@ -2571,6 +2635,7 @@ export class WorkspaceService {
       remote?: boolean;
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
+      designDirectoryResolved?: boolean;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
@@ -2674,6 +2739,14 @@ export class WorkspaceService {
       );
       return withWorkspaceGitMutation(workspacePath, () =>
         this.handle(op, params, { ...opts, gitMutationAdmitted: true }),
+      );
+    }
+    if (!opts.designDirectoryResolved && DESIGN_DOCUMENT_MUTATIONS.has(op)) {
+      return this.withDesignReadWorkspace(
+        reqStr(params, "workspaceId"),
+        remote,
+        () =>
+          this.handle(op, params, { ...opts, designDirectoryResolved: true }),
       );
     }
     switch (op) {
@@ -3808,9 +3881,7 @@ export class WorkspaceService {
             workspaceId,
             paths: [
               designDir,
-              ...designMetadataGitPaths(workspace.path, designDir).filter(
-                (file) => file !== ".zeros/design-dir.toml",
-              ),
+              ...(await designMetadataIndexPaths(workspace.path, designDir)),
             ],
             force: true,
           });
@@ -3827,10 +3898,11 @@ export class WorkspaceService {
             workspaceId,
             paths: [
               designDirectoryNameFor(workspace.path),
-              ...designMetadataGitPaths(
+              ...(await designMetadataIndexPaths(
                 workspace.path,
                 designDirectoryNameFor(workspace.path),
-              ).filter((file) => file !== ".zeros/design-dir.toml"),
+                true,
+              )),
             ],
           });
           await stageDesignRegistry(
@@ -3924,13 +3996,6 @@ export class WorkspaceService {
           ),
           stickyRecognizedDesignDirectories(cwd),
         ]);
-        if (!pointerState.valid)
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message:
-              pointerState.error ??
-              "Correct the invalid local Design directory setting before choosing a folder.",
-          });
         const pointer = pointerState.directory;
         let entryTarget: { directory: string; exists: boolean } | null = null;
         try {
@@ -3960,6 +4025,83 @@ export class WorkspaceService {
           active: designDirectoryNameFor(cwd),
           target: entryTarget,
         };
+      }
+
+      case "design.previewExistingDirectory":
+      case "design.adoptDirectory": {
+        if (remote)
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Design folders are managed in the desktop app.",
+          });
+        const repoRoot = reqStr(params, "repoRoot");
+        if (!isKnownRepoRoot(repoRoot))
+          throw new GitError({
+            code: "WORKSPACE_NOT_FOUND",
+            message: "Open this repository in Zeros first.",
+          });
+        const folder = reqStr(params, "folder");
+        return op === "design.previewExistingDirectory"
+          ? previewExistingDesignDirectory(repoRoot, folder)
+          : adoptExistingDesignDirectory(
+              repoRoot,
+              folder,
+              reqStr(params, "revision"),
+              (id) => {
+                // Registration must not invalidate inherited selections in older
+                // worktrees. A later "Use this folder" goes through settings.write
+                // and its complete live-territory transition once Git carries it.
+                const preview = opSettingsPreviewWrite(
+                  "repo-local",
+                  { design: { directory: null, directory_id: id } },
+                  repoRoot,
+                );
+                return listWorkspaces({ archived: false })
+                  .filter(
+                    (workspace) =>
+                      personalRepoRoot(workspace.repoRoot) ===
+                      personalRepoRoot(repoRoot),
+                  )
+                  .every((workspace) => {
+                    try {
+                      const projected = opSettingsResolveWithOverride(
+                        workspace.path,
+                        workspace.repoRoot,
+                        preview,
+                      );
+                      const next =
+                        designDirectoryFromSettings(
+                          workspace.path,
+                          projected.effective,
+                        ) ?? DEFAULT_DESIGN_DIRECTORY_NAME;
+                      return next === designDirectoryNameFor(workspace.path);
+                    } catch {
+                      return false;
+                    }
+                  });
+              },
+            );
+      }
+
+      case "design.removeDirectory": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Design folders are managed in the desktop app.",
+          });
+        }
+        const repoRoot = reqStr(params, "repoRoot");
+        if (!isKnownRepoRoot(repoRoot)) {
+          throw new GitError({
+            code: "WORKSPACE_NOT_FOUND",
+            message: "Open this repository in Zeros first.",
+          });
+        }
+        await removeDesignDirectory({
+          repoRoot,
+          directory: reqStr(params, "directory"),
+        });
+        return { removed: true };
       }
 
       // ── Design directory rename (repo settings → Design tab) ──
@@ -5358,11 +5500,26 @@ export class WorkspaceService {
         });
       case "file.tree": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        const files = await listWorkspaceFiles(cwd, optNum(params, "limit"));
+        const listing =
+          params.includeDesignDirectories === true
+            ? await listWorkspaceFilesWithDesign(cwd, optNum(params, "limit"))
+            : { files: await listWorkspaceFiles(cwd, optNum(params, "limit")) };
+        const files = remote
+          ? listing.files.filter((f) => !isSensitiveRepoPath(f))
+          : listing.files;
         // Hide credential/secret files from a remote client even if they're
         // tracked (the .gitignore-respect in ls-files only hides ignored ones).
         return {
-          files: remote ? files.filter((f) => !isSensitiveRepoPath(f)) : files,
+          ...listing,
+          files,
+          ...("designDirectories" in listing && remote
+            ? {
+                designDirectories: listing.designDirectories?.filter(
+                  (directory) =>
+                    files.some((file) => file.startsWith(`${directory}/`)),
+                ),
+              }
+            : {}),
         };
       }
       // ── Files tab: the .gitignore'd entries file.tree deliberately omits.
@@ -5409,7 +5566,10 @@ export class WorkspaceService {
         // Tag Design territory with the SAME recognizer file.write refuses by,
         // so the viewer never advertises an Edit action the write path will
         // reject. This is presentation only — the guard below is the authority.
-        return makeDesignPathRecognizer(cwd, designDirectoryNameFor(cwd))(rel)
+        return makeDesignPathRecognizer(
+          cwd,
+          activeDesignDirectoryNameFor(cwd),
+        )(rel)
           ? { ...read, designPath: true }
           : read;
       }
@@ -5423,6 +5583,20 @@ export class WorkspaceService {
             code: "VALIDATION_FAILED",
             message: "file.write requires string content",
           });
+        }
+        if (normalizeRepoMutationPath(rel)?.endsWith("/design.toml")) {
+          let claimsDesign: boolean;
+          try {
+            claimsDesign = parseDesignManifest(content) !== null;
+          } catch {
+            claimsDesign = true;
+          }
+          if (claimsDesign)
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message:
+                "Create or update Design manifests through Zeros Settings or the Design API.",
+            });
         }
         // The file editor is a code actor — design files have exactly one
         // write path (the design surface's transactional writes).

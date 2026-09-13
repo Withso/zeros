@@ -2,6 +2,8 @@ type BrandLockupProps = {
   /** Logo scale; sizes the icon mark and wordmark together. */
   size?: 'sm' | 'md' | 'lg'
   className?: string
+  /** Set false to render the four-dot mark without the "Zeros" name. */
+  wordmark?: boolean
 }
 
 const SIZE_CLASS = {
@@ -16,8 +18,12 @@ const SIZE_CLASS = {
  * Header scale matches Linear: 24px mark, ~16px name so cap-height
  * sits inside the blobs; 8px gap between mark and name.
  */
-export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
-  const { mark, wordmark } = SIZE_CLASS[size]
+export function BrandLockup({
+  size = 'md',
+  className = '',
+  wordmark = true,
+}: BrandLockupProps) {
+  const { mark, wordmark: wordmarkClass } = SIZE_CLASS[size]
   return (
     <span className={`inline-flex items-center gap-2 ${className}`}>
       <img
@@ -26,12 +32,14 @@ export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
         className={`${mark} shrink-0 object-contain invert dark:invert-0`}
         draggable={false}
       />
-      <img
-        src="/zeros-wordmark.svg"
-        alt=""
-        className={`${wordmark} w-auto invert dark:invert-0`}
-        draggable={false}
-      />
+      {wordmark ? (
+        <img
+          src="/zeros-wordmark.svg"
+          alt=""
+          className={`${wordmarkClass} w-auto invert dark:invert-0`}
+          draggable={false}
+        />
+      ) : null}
     </span>
   )
 }

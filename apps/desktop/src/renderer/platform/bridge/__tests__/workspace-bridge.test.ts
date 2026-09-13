@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   requestWorkspaceList,
   bridgeFileTree,
+  bridgeWorkspaceFileListing,
   bridgeGitStatus,
   bridgeGitChangeCounts,
   bridgeGitChangeLineCounts,
@@ -137,6 +138,29 @@ describe("requestWorkspaceList", () => {
 });
 
 describe("context-graph transition queue budgets", () => {
+  it("preserves actionable scaffold and sharing failures from the engine", async () => {
+    const bridge = {
+      request: async (message: { op?: string }) => ({
+        type: "WORKSPACE_RESPONSE",
+        op: message.op,
+        result: {
+          ok: false,
+          created: false,
+          moved: false,
+          error: "context migration conflict",
+        },
+      }),
+    } as unknown as RuntimeClient;
+    expect(await bridgeContextGraphScaffold(bridge, "ws1")).toEqual({
+      ok: false,
+      created: false,
+      error: "context migration conflict",
+    });
+    expect(
+      await bridgeContextGraphSetShared(bridge, "ws1", "id", true),
+    ).toEqual({ ok: false, moved: false, error: "context migration conflict" });
+  });
+
   it.each([
     [
       "attachment.write",
@@ -208,6 +232,28 @@ describe("workspace mode transition budget", () => {
 });
 
 describe("workspace-bridge read ops", () => {
+  it("requests files and validated Design roots together without changing the legacy file-tree API", async () => {
+    let params: unknown;
+    const listing = {
+      files: ["Brand/design.toml"],
+      designDirectories: ["Brand"],
+    };
+    const bridge = {
+      request: async (message: { params: unknown }) => {
+        params = message.params;
+        return { type: "WORKSPACE_RESPONSE", result: listing };
+      },
+    } as unknown as RuntimeClient;
+    expect(await bridgeWorkspaceFileListing(bridge, "ws1", 100)).toEqual(
+      listing,
+    );
+    expect(params).toEqual({
+      workspaceId: "ws1",
+      limit: 100,
+      includeDesignDirectories: true,
+    });
+  });
+
   it("bridgeFileTree sends file.tree and unwraps { files }", async () => {
     const seen: { op?: string } = {};
     const out = await bridgeFileTree(

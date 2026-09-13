@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+import { runPreviewCache } from "../run-preview-cache";
 import {
   clearTerminalFolders,
   useTerminalStore,
@@ -25,6 +26,16 @@ describe("terminal-store workspace activity", () => {
       activeTerminalTabByFolder: {},
     });
     useWorkspaceStore.setState({ workspaceActivityByFolder: {} });
+  });
+
+  it("reattaches a delayed run without replacing a newer terminal selection", () => {
+    const terminal = useTerminalStore.getState();
+    terminal.createSession("/run", null, undefined, "pty-run-delayed");
+    const newer = terminal.createSession("/run", null);
+    terminal.createSession("/run", null, undefined, "pty-run-delayed", false);
+    expect(useTerminalStore.getState().activeTerminalTabByFolder["/run"]).toBe(
+      newer.id,
+    );
   });
 
   it("records user-created or explicitly run terminals, not automatic seeding", () => {
@@ -240,7 +251,20 @@ describe("terminal-store syncEngineTerminals", () => {
       },
     });
 
+    const removedPreview = {
+      folderKey: "/removed/packages/app",
+      workspaceId: "removed",
+      sessionId: "run",
+      startedAt: 1,
+    };
+    const keptPreview = { ...removedPreview, folderKey: "/removed-sibling" };
+    runPreviewCache.append(removedPreview, "http://localhost:3000/\n");
+    runPreviewCache.append(keptPreview, "http://localhost:3001/\n");
+
     clearTerminalFolders(["/removed", "/removed"]);
+
+    expect(runPreviewCache.peek(removedPreview)).toBeNull();
+    expect(runPreviewCache.peek(keptPreview)).toBe("http://localhost:3001/");
 
     expect(ids("/removed/packages/app")).toEqual([]);
     expect(ids("/removed-sibling")).toEqual(["kept"]);

@@ -484,7 +484,7 @@ function bootDashboard() {
       .join("");
     return `<section class="section-stack">${heading("Profile", "Your browser account and sign-in identity.")}
       <div class="card"><div class="identity-row"><span class="avatar avatar-large">${escapeHtml(initials(displayName || state.user.email))}</span><div><strong>${escapeHtml(displayName)}</strong><p>${escapeHtml(state.user.email)}</p></div></div></div>
-      <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Name and avatar are currently provided by Hosted AuthKit. Profile editing will be available here later.</p></div><span class="badge">Provider-managed</span></div></div>
+      <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Your name and avatar come from your sign-in account. Profile editing will be available here later.</p></div><span class="badge">Sign-in profile</span></div></div>
       ${recoverable ? `<div class="card settings-card"><div class="card-title"><div><strong>Recoverable organizations</strong><p>An owner can restore these during the 30-day grace period.</p></div></div>${recoverable}</div>` : ""}
       <div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete account</strong><p>Signs out every device immediately and keeps cloud account data recoverable for 30 days. Local Personal workspaces stay on each device.</p></div><button class="button danger" type="button" data-action="delete-account">Delete account</button></div></div>
     </section>`;

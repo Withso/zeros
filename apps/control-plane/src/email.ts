@@ -8,6 +8,7 @@
 //   RESEND_API_KEY  — environment-specific, sending-only Resend API key
 //   EMAIL_FROM      — verified sender, e.g.
 //                     "Zeros <notifications@updates.zeros.build>"
+// Replies always go to the public Zeros support mailbox, hi@zeros.build.
 // Unset → dev fallback: the message is logged, never sent, and the API
 // still succeeds; callers decide whether an unsent message is acceptable.
 // ──────────────────────────────────────────────────────────
@@ -113,6 +114,7 @@ export async function sendEmailStrict(
       },
       body: JSON.stringify({
         from: config.from,
+        reply_to: "hi@zeros.build",
         to: [to],
         subject,
         html: htmlBody,

@@ -95,7 +95,7 @@ describe("friendlyAuthError", () => {
     expect(message).toContain("was deleted");
     expect(message).toContain("Your account data is preserved");
     expect(message).toContain("Signing up again won't restore access");
-    expect(message).toContain("Contact hello@zeros.build for a reviewed recovery");
+    expect(message).toContain("Contact hi@zeros.build for a reviewed recovery");
     expect(message).toContain("Recovery code: ZR-ABCD-2345");
     expect(message).not.toMatch(/check your connection|click sign in to try again/i);
   });

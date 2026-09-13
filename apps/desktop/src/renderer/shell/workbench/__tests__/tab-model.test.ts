@@ -254,25 +254,28 @@ describe("shouldMountWorkbenchTab", () => {
 });
 
 describe("defaultTabs", () => {
-  it("seeds exactly Open file, Changes, Review, Context and opens the File tab", () => {
+  it("seeds the file and review homes plus Setup and opens the File tab", () => {
     const { tabs, activeId, recentBrowsers } = defaultTabs();
     expect(tabs.map((tab) => tab.type)).toEqual([
       "files",
       "changes",
       "review",
       "context",
+      "terminal",
     ]);
     expect(tabs.map((tab) => tab.title)).toEqual([
       "Open file",
       "Changes",
       "Review",
       "Context",
+      "Setup",
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
       true,
       true,
       true,
+      false,
     ]);
     // The seeded blank File tab is THE permanent Files home.
     expect(tabs[0].fixed).toBe(true);
@@ -780,6 +783,7 @@ describe("migrateScopes", () => {
       "changes",
       "review",
       "context",
+      "terminal",
     ]);
     expect(out["/repo/feature"].tabs[0].fixed).toBe(true);
   });
@@ -826,6 +830,7 @@ describe("workbench persistence compatibility", () => {
       "changes",
       "review",
       "context",
+      "terminal",
     ]);
 
     saveScopes({ "/repo/main": scope });

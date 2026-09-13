@@ -44,7 +44,9 @@ tabs, settings sidebar tabs, workspace rows (earlier).
 - `Close chat` — `shell/conversation/chat-tabs.tsx` — chat-tab hover icon
 
 ## Workbench · terminal / browser / changes / files / review
-- `Run · {command}` — `terminal-tab.tsx:355`, `run-control.tsx:30` — run button
+- `Run Setup` / `Run {action}` — `shell/terminal/terminal-workbench-layout.tsx` — setup and action row hover controls
+- `Open {url} in Browser` / `Waiting for a local preview address` / `Stop {action}` — `shell/terminal/run-session-buttons.tsx` — live run buttons
+- `Repository environment settings` — `shell/terminal/terminal-workbench-layout.tsx` — settings button
 - `New terminal` — `terminal-tab.tsx:427` — "+" icon
 - `Back` — `browser-tab.tsx:946` · `Forward` — `:958`
 - `Loading…` / `Reload` — `browser-tab.tsx:970`
@@ -69,7 +71,7 @@ tabs, settings sidebar tabs, workspace rows (earlier).
 - `{PR title}` — `review-tab.tsx:165` — PR header (reveal)
 - `Open on GitHub` — `review-tab.tsx:178`
 - `Add to chat` — `review-tab.tsx:522`
-- `Drag to resize` — `source-panel-resizer.tsx:303`
+- `Drag to resize` — `source-panel-resizer.tsx:303`, `shell/terminal/terminal-workbench-layout.tsx` — shared resize hint
 - `Collapse panel` / `Expand panel` — `source-panel.tsx:175`
 - ⚠ `{workspace path}` — `worktree-missing-panel.tsx:83` — path reveal
 

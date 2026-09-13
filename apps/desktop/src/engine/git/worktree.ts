@@ -11,7 +11,7 @@ import path from "node:path";
 
 import { GitError, isGitError } from "./errors";
 import {
-  designMetadataGitPaths,
+  DESIGN_METADATA_PROTECTED_PATHS,
   readDesignDirectoryRegistry,
 } from "../design/metadata";
 import { recoverDesignStorageForArchive } from "../design/document";
@@ -82,8 +82,7 @@ import {
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
 import {
-  CONTEXT_GRAPH_DIR,
-  contextGraphHasContent,
+  contextGraphArchivePaths,
   ensureContextGraph,
 } from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
@@ -1734,7 +1733,7 @@ async function createWorkspaceInner(
     if (internal?.provision) {
       await internal.provision(provisionContext!);
     }
-    // Every workspace gets a `.context-graph/` skeleton (Context tab canvas +
+    // Every workspace gets a `.context/` skeleton (Context tab canvas +
     // composer-attachment store). Best-effort and quiet: the scaffold is
     // self-gitignoring, and a failure here must never roll back the worktree —
     // the attachment IPC and the Context tab both re-scaffold lazily.
@@ -2797,7 +2796,7 @@ async function archiveWorkspaceInner(
     await recoverDesignStorageForArchive(ws.path);
     const archiveIncludePaths = [
       ...new Set([
-        ...designMetadataGitPaths(ws.path),
+        ...DESIGN_METADATA_PROTECTED_PATHS,
         ...Object.values(
           readDesignDirectoryRegistry(ws.path)?.directories ?? {},
         ).map((entry) => entry.path),
@@ -2807,11 +2806,11 @@ async function archiveWorkspaceInner(
         // later archive never drops an ignored provisioned file.
         ...readProvisionPaths(ws.id),
         // The context graph survives archive — a workspace's attachments and
-        // shared docs are part of its durable record: force-add the whole
-        // tree, since `local/` is gitignored and `add -A` alone would drop it.
+        // shared docs are part of its durable record: force-add the owned
+        // scopes, since `local/` is gitignored and `add -A` alone drops it.
         // Only when it holds real content, so an empty skeleton doesn't make
         // the missing-snapshot check below stricter for clean workspaces.
-        ...((await contextGraphHasContent(ws.path)) ? [CONTEXT_GRAPH_DIR] : []),
+        ...(await contextGraphArchivePaths(ws.path)),
         // Disk-backed transcript images briefly lived under `.context/` before
         // the context graph landed. A transcript window lazily copies them into
         // the graph, but an unopened chat must survive archive until that read.
@@ -2986,7 +2985,7 @@ async function archiveWorkspaceInner(
     if (existsSync(ws.path)) {
       await recoverDesignStorageForArchive(ws.path);
       archiveIncludePaths.push(
-        ...designMetadataGitPaths(ws.path),
+        ...DESIGN_METADATA_PROTECTED_PATHS,
         ...Object.values(
           readDesignDirectoryRegistry(ws.path)?.directories ?? {},
         ).map((entry) => entry.path),

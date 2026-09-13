@@ -65,6 +65,9 @@ import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
 import { runToolsSmoke } from "./ui-smoke-tools.mjs";
 import { runNativeToolsSmoke } from "./ui-smoke-native-tools.mjs";
 import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
+import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
+import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
+import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -1608,6 +1611,7 @@ try {
   // The design surface owns a separate harness contract and deliberately has
   // no coding-agent chat mounted.
   await runDesignWorkspaceSmoke({ page, waitFor, check });
+  await runFilePrefetchSmoke({ page, check });
 
   // 4. Diff previews use a hover portal around an already-clickable row/pill.
   // Drive the real components so Slot handler composition and pointer travel
@@ -1980,6 +1984,44 @@ try {
     await page
       .getByTestId("markdown-preview-host")
       .evaluate((el) => el.scrollWidth <= el.clientWidth + 1),
+  );
+
+  // Modern manifests must use the same dedicated section as legacy documents.
+  const designFilesFixture = page.getByTestId("design-files-fixture");
+  const designSection = designFilesFixture.getByTestId("design-files-section");
+  const codeFilesTree = designFilesFixture.getByTestId("code-files-tree");
+  await designSection.waitFor({ state: "visible" });
+  check(
+    "Validated design.toml restores the Design files section",
+    await designSection.isVisible(),
+  );
+  check(
+    "Design roots leave the code tree; unrelated TOML stays there",
+    (await codeFilesTree.locator('[data-item-path="Brand/"]').count()) === 0 &&
+      (await codeFilesTree.locator('[data-item-path="Other/"]').count()) > 0,
+  );
+  await designSection.locator('[data-item-path="Brand/"]').click();
+  await designSection.locator('[data-item-path="Brand/home.html"]').click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector('[data-testid="design-file-opened"]')
+        ?.textContent === "Brand/home.html",
+  );
+  await designFilesFixture
+    .getByRole("button", { name: "Switch file workspace" })
+    .click();
+  await designSection.waitFor({ state: "detached" });
+  check(
+    "An identical filename list in another workspace cannot inherit Design ownership",
+    (await codeFilesTree.locator('[data-item-path="Brand/"]').count()) > 0,
+  );
+  await designFilesFixture
+    .getByRole("button", { name: "Switch file workspace" })
+    .click();
+  await designSection.waitFor({ state: "visible" });
+  check(
+    "Returning to the Design workspace restores its section",
+    (await codeFilesTree.locator('[data-item-path="Brand/"]').count()) === 0,
   );
 
   // The Files-tab tree (real WorkspaceFileTree over a primed listing). Park
@@ -2437,6 +2479,10 @@ try {
   await runCustomizeSmoke({ page, check });
   await runToolsSmoke({ page, check });
   await runNativeToolsSmoke({ page, check });
+  await runRepoSettingsSmoke({ page, check });
+  await runTerminalWorkbenchSmoke({ page, check });
+  // Subscription checks install a context-wide clock that survives navigation.
+  // Keep them last so layout checks retain the browser's real animation timing.
   await runSubscriptionSmoke({ page, check });
 
   // Whole-run invariant.

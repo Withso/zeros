@@ -5,8 +5,8 @@
 // Transcript rows outlive the Context tab's local/shared checkbox. The
 // checkbox moves an attachment folder, so the physical scope embedded in an
 // older `diskPath` is only a hint; the durable identity is the attachment id.
-// Reads try the persisted path first, then the same id/filename in the other
-// scope. Legacy `.context/attachments/...` paths remain exact-only until their
+// Reads try the persisted path first, then the other scope and the renamed
+// root. Legacy `.context/attachments/...` paths remain exact-only until their
 // transcript window copies them into the graph.
 // ──────────────────────────────────────────────────────────
 
@@ -14,7 +14,7 @@ import { readWorkspaceFile, type ReadFileResult } from "../../platform/files";
 
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
 const GRAPH_ATTACHMENT_PATH =
-  /^\.context-graph\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/;
+  /^(\.context(?:-graph)?)\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/;
 const LEGACY_ATTACHMENT_PATH =
   /^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/;
 
@@ -24,7 +24,7 @@ export function isAgentAttachmentDiskPath(value: string): boolean {
   );
 }
 
-/** Exact path first, then the record's other movable scope. Invalid paths get
+/** Exact path first, then the record's other movable scope and root. Invalid paths get
  * no candidates, so a forged transcript cannot turn this fallback into a
  * general workspace-file reader. */
 export function agentAttachmentPathCandidates(args: {
@@ -35,16 +35,22 @@ export function agentAttachmentPathCandidates(args: {
   if (!graph) {
     return LEGACY_ATTACHMENT_PATH.test(args.diskPath) ? [args.diskPath] : [];
   }
-  const [, scope, pathAttachmentId, filename] = graph;
+  const [, directory, scope, pathAttachmentId, filename] = graph;
   const attachmentId =
     args.attachmentId && ID_OK.test(args.attachmentId)
       ? args.attachmentId
       : pathAttachmentId;
   const otherScope = scope === "local" ? "shared" : "local";
-  const alternate = `.context-graph/${otherScope}/attachments/${attachmentId}/${filename}`;
-  return alternate === args.diskPath
-    ? [args.diskPath]
-    : [args.diskPath, alternate];
+  const otherDirectory =
+    directory === ".context" ? ".context-graph" : ".context";
+  return [
+    ...new Set([
+      args.diskPath,
+      `${directory}/${otherScope}/attachments/${attachmentId}/${filename}`,
+      `${otherDirectory}/${scope}/attachments/${attachmentId}/${filename}`,
+      `${otherDirectory}/${otherScope}/attachments/${attachmentId}/${filename}`,
+    ]),
+  ];
 }
 
 export type AgentAttachmentFileReader = (

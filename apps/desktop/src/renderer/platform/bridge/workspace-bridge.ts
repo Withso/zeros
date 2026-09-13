@@ -786,6 +786,27 @@ export async function bridgeMessageSearch(
 
 // ── Files (read) ────────────────────────────────────────────
 
+export interface WorkspaceFileListing {
+  files: string[];
+  /** Absent on older engines; an empty array is a confirmed lack of Design roots. */
+  designDirectories?: string[];
+}
+
+export async function bridgeWorkspaceFileListing(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  limit?: number,
+): Promise<WorkspaceFileListing> {
+  const result = (await workspaceOp(bridge, "file.tree", {
+    workspaceId,
+    limit,
+    includeDesignDirectories: true,
+  })) as WorkspaceFileListing;
+  if (!Array.isArray(result?.files))
+    throw new Error("Invalid workspace file listing");
+  return result;
+}
+
 /** Repo-relative file list under a workspace (gitignore-aware). The engine
  *  filters secret paths for remote clients. */
 export async function bridgeFileTree(
@@ -898,7 +919,7 @@ export async function bridgeAttachmentWrite(
 // The renderer façade (platform/context-graph.ts) short-circuits remote clients
 // before a round-trip is spent.
 
-/** Everything in the workspace's `.context-graph/`, both scopes merged. */
+/** Everything in the workspace's `.context/`, both scopes merged. */
 export async function bridgeContextGraphList(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -913,18 +934,22 @@ export async function bridgeContextGraphList(
   };
 }
 
-/** Idempotently create the `.context-graph/` skeleton for a workspace. */
+/** Idempotently create the `.context/` skeleton for a workspace. */
 export async function bridgeContextGraphScaffold(
   bridge: RuntimeClient,
   workspaceId: string,
-): Promise<{ ok: boolean; created: boolean }> {
+): Promise<{ ok: boolean; created: boolean; error?: string }> {
   const r = (await workspaceOp(
     bridge,
     "context.graph.scaffold",
     { workspaceId },
     CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
-  )) as { ok?: boolean; created?: boolean } | undefined;
-  return { ok: r?.ok === true, created: r?.created === true };
+  )) as { ok?: boolean; created?: boolean; error?: string } | undefined;
+  return {
+    ok: r?.ok === true,
+    created: r?.created === true,
+    ...(typeof r?.error === "string" ? { error: r.error } : {}),
+  };
 }
 
 /** Move one attachment folder between the private and shared scopes. */
@@ -933,7 +958,7 @@ export async function bridgeContextGraphSetShared(
   workspaceId: string,
   attachmentId: string,
   shared: boolean,
-): Promise<{ ok: boolean; moved: boolean }> {
+): Promise<{ ok: boolean; moved: boolean; error?: string }> {
   const r = (await workspaceOp(
     bridge,
     "context.graph.setShared",
@@ -943,8 +968,12 @@ export async function bridgeContextGraphSetShared(
       shared,
     },
     CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
-  )) as { ok?: boolean; moved?: boolean } | undefined;
-  return { ok: r?.ok === true, moved: r?.moved === true };
+  )) as { ok?: boolean; moved?: boolean; error?: string } | undefined;
+  return {
+    ok: r?.ok === true,
+    moved: r?.moved === true,
+    ...(typeof r?.error === "string" ? { error: r.error } : {}),
+  };
 }
 
 // ── Git (read) ──────────────────────────────────────────────

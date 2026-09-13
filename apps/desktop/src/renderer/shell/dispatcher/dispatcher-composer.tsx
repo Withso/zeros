@@ -239,7 +239,7 @@ export function DispatcherComposer({
     onSubmit: () => submitRef.current(),
     // cwd here is the PRIMARY checkout (the workspace this page creates
     // doesn't exist yet). Attach-time staging would write phantom cards into
-    // the trunk's .context-graph; the send-path safety net stages these
+    // the trunk's .context; the send-path safety net stages these
     // attachments into the NEW worktree when the first prompt goes out.
     stageIntoContextGraph: false,
   });
