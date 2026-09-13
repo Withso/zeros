@@ -514,6 +514,7 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   "workspace.archive",
   "workspace.delete",
   "workspace.restore",
+  "workspace.recover",
 ]);
 
 /** Generic file/index operations that can alter the repository evidence from
@@ -2628,10 +2629,9 @@ export class ZerosEngine {
       /* best-effort — never block startup on seed migration */
     }
 
-    // 1b.3. Retention janitor: drop orphan archive snapshots and branch-
-    // ownership proofs left by a hard-delete or a crash after lifecycle
-    // publication but before ref cleanup. Runs AFTER seedFromDisk so workspace
-    // rows + journals are authoritative.
+    // 1b.3. Repin surviving recovery snapshots without pruning shared archive
+    // refs, then clean up stale branch-ownership proofs. Runs after seedFromDisk
+    // so this instance's workspace rows and lifecycle journals are available.
     try {
       const {
         pruneOrphanArchiveSnapshots,
@@ -8081,7 +8081,8 @@ export class ZerosEngine {
         if (
           op !== "workspace.archive" &&
           op !== "workspace.delete" &&
-          op !== "workspace.restore"
+          op !== "workspace.restore" &&
+          op !== "workspace.recover"
         ) {
           return null;
         }

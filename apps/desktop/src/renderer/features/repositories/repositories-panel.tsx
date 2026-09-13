@@ -142,6 +142,7 @@ import { forgetChangesSnapshots } from "../../shell/workbench/tabs/changes-snaps
 import { clearTerminalFolders } from "../../shell/terminal/terminal-store";
 import { clearChatPaneFolders } from "../../state/chat-panes-store";
 import { clearDashboardRepoFilter } from "../dashboard/preferences";
+import { forgetRepositoryVisibility } from "../dashboard/workspace-visibility";
 import { folderIsOwnedByProject } from "../../state/workspace-resolution";
 import {
   isInheritedSource,
@@ -2010,6 +2011,7 @@ function RemoveRepositorySection({ project }: { project: Project }) {
       clearTerminalFolders([...removedFolders], project.id);
       clearChatPaneFolders([...removedFolders], project.id);
       clearDashboardRepoFilter(project.repoSlug);
+      forgetRepositoryVisibility(project.repoSlug);
       dispatch({
         type: "REMOVE_REPO_UI_STATE",
         projectId: project.id,

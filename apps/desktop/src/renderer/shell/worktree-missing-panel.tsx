@@ -1,32 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// Worktree-missing placeholder
-// ──────────────────────────────────────────────────────────
-//
-// Rendered in place of the two-column workspace body (beneath the global top
-// bar) when the active workspace's `present` flag is false — the database still
-// has the workspace row, but its worktree folder is no longer on disk (deleted
-// out-of-band, e.g. `rm -rf`, Finder trash, or a parallel tool wiping it). When
-// this happens every downstream surface (terminal, file actions, agent spawn,
-// and chat content) is dead weight; we hide the workspace body and show this
-// card so the user cannot keep acting on a missing path. The top bar stays
-// available as the escape route.
-//
-// Deliberately minimal — a dead-end screen should offer exactly one way out
-// and one way to inspect what broke:
-//   - Delete workspace → drop the DB row + branch-keep (irreversible).
-//   - The path, with a copy button at its end.
-//   - NO description, NO Refresh button: the panel re-stats the folder on a
-//     timer (see PRESENCE_POLL_MS) and the normal columns return on their own
-//     the instant the worktree reappears (`git worktree add`, Finder un-trash,
-//     or a branch/tool recreating it) — the user never has to poke it.
-//
-// "Browse workspaces" was removed — deleting the workspace already routes the
-// user to Local main of the same project, which is the canonical "browse"
-// surface anyway.
-// ──────────────────────────────────────────────────────────
+// Recovery surface for an absent checkout or a returned folder with broken Git metadata.
+// The durable workspace and conversations remain intact. Only the visible panel
+// polls for an intact folder returning; explicit recovery reconnects metadata
+// or restores the last verified snapshot.
 
 import React, { useEffect, useRef, useState } from "react";
-import { Check, Copy, FolderX, Trash2 } from "lucide-react";
+import { Check, Copy, FolderX, RotateCcw } from "lucide-react";
 
 import { Button } from "../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -34,14 +12,14 @@ import { isElementActuallyVisible } from "@/renderer/shared/lib/element-visibili
 import type { Workspace } from "../platform/git";
 
 /** How often to re-stat the worktree while this placeholder is shown. Cheap (a
- *  single scoped workspace-list refetch → one `existsSync` per row) and only
+ *  single scoped workspace-list refetch with bounded Git metadata reads) and only
  *  ever runs while the user is staring at a missing worktree, so a tight-ish
  *  cadence keeps the self-heal feeling instant without any real cost. */
 const PRESENCE_POLL_MS = 2500;
 
 export interface WorktreeMissingPanelProps {
   workspace: Workspace;
-  onDelete: () => void | Promise<void>;
+  onRecover: () => void | Promise<void>;
   /** Re-fetch the workspace list, which re-runs the on-disk presence check.
    *  Polled automatically while this panel is mounted; never a button. */
   onRefresh: () => void | Promise<void>;
@@ -99,10 +77,10 @@ function CopyPathButton({ path }: { path: string }) {
 
 export function WorktreeMissingPanel({
   workspace,
-  onDelete,
+  onRecover,
   onRefresh,
 }: WorktreeMissingPanelProps) {
-  const [deleting, setDeleting] = useState(false);
+  const [recovering, setRecovering] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-detect the worktree returning. Keep the latest onRefresh in a ref so
@@ -114,7 +92,7 @@ export function WorktreeMissingPanel({
     refreshRef.current = onRefresh;
   }, [onRefresh]);
   useEffect(() => {
-    if (deleting) return; // stop probing once the user commits to deleting
+    if (recovering) return;
     const id = window.setInterval(() => {
       // "While the user is staring at it" is the premise of this tight
       // cadence — but retained decks keep this panel mounted while hidden,
@@ -126,15 +104,15 @@ export function WorktreeMissingPanel({
       void refreshRef.current();
     }, PRESENCE_POLL_MS);
     return () => window.clearInterval(id);
-  }, [deleting]);
+  }, [recovering]);
 
-  const handleDelete = async () => {
-    if (deleting) return;
-    setDeleting(true);
+  const handleRecover = async () => {
+    if (recovering) return;
+    setRecovering(true);
     try {
-      await onDelete();
+      await onRecover();
     } finally {
-      setDeleting(false);
+      setRecovering(false);
     }
   };
 
@@ -151,7 +129,15 @@ export function WorktreeMissingPanel({
             aria-hidden="true"
           />
         </div>
-        <h3 className="text-fg1 text-sm font-medium">Worktree missing</h3>
+        <h3 className="text-fg1 text-sm font-medium">
+          Workspace needs recovery
+        </h3>
+        <p className="text-fg2 text-xs">
+          Return the original folder to this path to reconnect it. Your chats
+          and workspace history are kept. Recovery reconnects returned files or
+          restores the latest saved snapshot; changes made after that snapshot
+          may be unavailable.
+        </p>
         <div className="border-border1 bg-bg2 text-fg2 flex w-full items-center gap-2 rounded-md border px-3 py-2 text-xs">
           <span className="text-muted-fg shrink-0">Path</span>
           <Tooltip label={workspace.path}>
@@ -162,13 +148,13 @@ export function WorktreeMissingPanel({
           <CopyPathButton path={workspace.path} />
         </div>
         <Button
-          variant="destructive"
+          variant="secondary"
           size="sm"
-          onClick={handleDelete}
-          disabled={deleting}
+          onClick={handleRecover}
+          disabled={recovering}
         >
-          <Trash2 size={14} aria-hidden="true" />
-          {deleting ? "Deleting…" : "Delete workspace"}
+          <RotateCcw size={14} aria-hidden="true" />
+          {recovering ? "Recovering…" : "Recover workspace"}
         </Button>
       </div>
     </div>

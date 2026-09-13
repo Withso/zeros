@@ -11,6 +11,7 @@ export const personalPreferencesSchema = z
         .default({}),
     }),
     experimental: z.record(z.string(), z.boolean()),
+    show_hidden_workspaces: z.boolean(),
     internal: z.record(z.string(), z.boolean()),
     enabled_agents: z.object({ ids: z.array(z.string()).max(128) }),
     terminal_agents: z
@@ -39,6 +40,7 @@ export const PERSONAL_PREFERENCE_STORAGE: Readonly<
 > = {
   appearance: "zeros.appearance.v2",
   experimental: "zeros.experimentalFeatures",
+  show_hidden_workspaces: "zeros:dashboard-show-hidden:v1",
   internal: "zeros.internalFeatures",
   enabled_agents: "zeros.agent.enabledAgents",
   terminal_agents: "zeros-terminal-agents:catalog",

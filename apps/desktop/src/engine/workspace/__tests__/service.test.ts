@@ -105,6 +105,18 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
+  it("keeps recovery and snapshot disposal local and validates the archive date", async () => {
+    for (const op of ["workspace.recover", "workspace.deleteSnapshot"]) {
+      expect(svc.isRemoteAllowed(op)).toBe(false);
+    }
+    await expect(
+      svc.handle("workspace.deleteSnapshot", {
+        archiveSnapshot: "a".repeat(40),
+        archivedAt: "yesterday",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("accepts explicit device-Personal detachment only over the local bridge", async () => {
     const op = "workspace.reassignLocalOrganization";
     const params = {

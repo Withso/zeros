@@ -116,6 +116,10 @@ import { BrowserUsePanel } from "./browser-use-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
 import { GitDefaultsSection } from "./git-defaults-section";
 import { useExperimentalFeature } from "./experimental-features";
+import {
+  setShowHiddenWorkspaces,
+  useShowHiddenWorkspaces,
+} from "./dashboard-settings";
 import { useInternalFeature, useIsInternalUser } from "./internal-features";
 import {
   UserEnvironmentPanel,
@@ -142,12 +146,7 @@ import {
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { ensureSettingsTomlMigrated } from "./migrate-legacy";
 import { subscribeUserSettingsSection } from "./settings-navigation";
-import {
-  SettingsEmpty,
-  SettingsList,
-  SettingsRow,
-  SettingsSection,
-} from "./settings-ui";
+import { SettingsList, SettingsRow, SettingsSection } from "./settings-ui";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useEnabledAgents } from "../agent/enabled-agents";
 import { useAgentsSnapshot, loadAgents } from "../agent/agents-cache";
@@ -853,18 +852,21 @@ function SectionNavButton({
 // ── General ─────────────────────────────────────────────
 
 function GeneralPanel() {
-  // Home for general user preferences (the "General" tab — labelled
-  // "Preferences" until 2026-08-08; the id has always been `general`, so
-  // persisted selections are unaffected). Currently empty —
-  // the old archived-chats toggle that lived here was removed as dead
-  // pre-revamp wiring. Kept as the landing section; new general
-  // preferences slot in as <SettingsSection>s alongside this empty state.
+  const showHidden = useShowHiddenWorkspaces();
   return (
     <div className="flex flex-col gap-8">
-      <SettingsEmpty
-        title="No preferences yet"
-        hint="General preferences will appear here."
-      />
+      <SettingsList>
+        <SettingsRow
+          label="Show hidden workspaces in dashboard"
+          hint="Includes hidden workspaces in the Archived list. You can still unarchive them."
+        >
+          <Switch
+            checked={showHidden}
+            onCheckedChange={setShowHiddenWorkspaces}
+            aria-label="Show hidden workspaces in dashboard"
+          />
+        </SettingsRow>
+      </SettingsList>
     </div>
   );
 }
@@ -1640,6 +1642,9 @@ function ExperimentalPanel() {
     useExperimentalFeature("terminalAgents");
   const [workInLocalMain, setWorkInLocalMain] =
     useExperimentalFeature("workInLocalMain");
+  const [hideArchived, setHideArchived] = useExperimentalFeature(
+    "hideArchivedWorkspacesAfter15Days",
+  );
   return (
     <div className="flex flex-col gap-6">
       <p className={HINT_CLS}>
@@ -1665,6 +1670,16 @@ function ExperimentalPanel() {
             checked={workInLocalMain}
             onCheckedChange={setWorkInLocalMain}
             aria-label="Show the main workspace in the top bar"
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Hide the archived workspace after 15 days"
+          hint="Automatically hides workspaces archived for 15 consecutive days. Unarchiving starts a fresh period the next time you archive. Chats and snapshots are kept."
+        >
+          <Switch
+            checked={hideArchived}
+            onCheckedChange={setHideArchived}
+            aria-label="Hide the archived workspace after 15 days"
           />
         </SettingsRow>
       </SettingsList>

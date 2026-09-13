@@ -209,6 +209,9 @@
             "type": "boolean"
           }
         },
+        "show_hidden_workspaces": {
+          "type": "boolean"
+        },
         "internal": {
           "type": "object",
           "propertyNames": {

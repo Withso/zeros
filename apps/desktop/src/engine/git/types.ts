@@ -114,7 +114,8 @@ export interface Workspace {
    *  tracked + untracked-not-ignored — captured at archive time into
    *  `refs/zeros/archive/<id>`). Restore overlays it to bring back uncommitted +
    *  untracked work without `git stash`. Null for never-archived rows and pre-v17
-   *  (stash-based) archives, which restore via `stashRef`. */
+   *  (stash-based) archives, which restore via `stashRef`. The latest verified
+   *  snapshot and its archivedHead anchor remain after unarchive for recovery. */
   archiveSnapshot?: string | null;
   prNumber: number | null;
   prState: PrState | null;
@@ -124,7 +125,7 @@ export interface Workspace {
   /** Background setup-script state (see SetupState). Null when no setup is
    *  configured / it never ran. Surfaced in the Setup tab. */
   setupState?: SetupState | null;
-  /** Does the worktree folder at `path` still exist on disk? Stamped
+  /** Does the worktree folder at `path` have usable Git metadata? Stamped
    *  at list/get time so the renderer can swap in the "Worktree
    *  missing" placeholder when a user has removed the folder out-of-
    *  band (rm -rf, finder trash, parallel tool wiping it). Always

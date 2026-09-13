@@ -80,6 +80,8 @@ import {
   bridgeWorkspaceSetStatus,
   bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceRestore,
+  bridgeWorkspaceRecover,
+  bridgeWorkspaceDeleteSnapshot,
   bridgeWorkspaceContinueOnNewBranch,
   bridgeWorkspaceAdoptExisting,
   bridgeWorkspaceCreateFromBranch,
@@ -850,6 +852,23 @@ export async function workspaceDelete(args: {
   includeBranch: boolean;
 }): Promise<void> {
   await bridgeWorkspaceDelete(requireBridge("delete the workspace"), args);
+}
+
+export async function workspaceRecover(args: {
+  workspaceId: string;
+}): Promise<RestoreResult> {
+  return bridgeWorkspaceRecover(requireBridge("recover the workspace"), args);
+}
+
+export async function workspaceDeleteSnapshot(args: {
+  workspaceId: string;
+  archiveSnapshot: string;
+  archivedAt: number;
+}): Promise<Workspace> {
+  return bridgeWorkspaceDeleteSnapshot(
+    requireBridge("delete the saved snapshot"),
+    args,
+  );
 }
 
 export interface ArchiveResult {

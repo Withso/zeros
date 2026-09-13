@@ -198,6 +198,10 @@ import {
   type ResetMode,
   type DetectedTool,
 } from "../git";
+import {
+  deleteWorkspaceSnapshot,
+  recoverMissingWorkspace,
+} from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
 import {
@@ -6532,6 +6536,25 @@ export class WorkspaceService {
         const workspaceId = reqStr(params, "workspaceId");
         const restored = await restoreWorkspace(workspaceId);
         return restored;
+      }
+      case "workspace.recover":
+        return recoverMissingWorkspace(reqStr(params, "workspaceId"));
+      case "workspace.deleteSnapshot": {
+        const archivedAt = params.archivedAt;
+        if (
+          typeof archivedAt !== "number" ||
+          !Number.isFinite(archivedAt) ||
+          archivedAt < 0
+        )
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "An exact archive date is required.",
+          });
+        return deleteWorkspaceSnapshot({
+          workspaceId: reqStr(params, "workspaceId"),
+          archiveSnapshot: reqStr(params, "archiveSnapshot"),
+          archivedAt,
+        });
       }
       case "workspace.delete": {
         const workspaceId = reqStr(params, "workspaceId");

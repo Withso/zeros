@@ -28,6 +28,8 @@ import {
   bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceLifecycleStatus,
   bridgeWorkspaceRestore,
+  bridgeWorkspaceRecover,
+  bridgeWorkspaceDeleteSnapshot,
   bridgeWorkspaceSetMode,
   bridgeAttachmentWrite,
   bridgeContextGraphScaffold,
@@ -50,6 +52,26 @@ function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
 }
 
 describe("requestWorkspaceList", () => {
+  it("binds snapshot disposal to the reviewed archive and routes recovery separately", async () => {
+    const calls: unknown[] = [];
+    const bridge = {
+      request: async (message: { op: string }) => {
+        calls.push(message);
+        return { type: "WORKSPACE_RESPONSE", op: message.op, result: {} };
+      },
+    } as unknown as RuntimeClient;
+    const args = {
+      workspaceId: "workspace-a",
+      archiveSnapshot: "a".repeat(40),
+      archivedAt: 123,
+    };
+    await bridgeWorkspaceDeleteSnapshot(bridge, args);
+    await bridgeWorkspaceRecover(bridge, { workspaceId: "workspace-a" });
+    expect(calls).toMatchObject([
+      { op: "workspace.deleteSnapshot", params: args },
+      { op: "workspace.recover", params: { workspaceId: "workspace-a" } },
+    ]);
+  });
   it("sends explicit null when detaching a legacy Personal owner", async () => {
     let captured: unknown;
     const bridge = {

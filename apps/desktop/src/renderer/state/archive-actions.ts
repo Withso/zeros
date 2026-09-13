@@ -23,6 +23,7 @@ import {
   workspaceGet,
   workspaceLifecycleStatus,
   workspaceRestore,
+  workspaceRecover,
   type RestoreResult,
   type Workspace,
   type WorkspaceLifecycleStatus,
@@ -76,6 +77,7 @@ import type { WorkspaceTabActivity } from "./workspace-list-filter";
 import { getActiveOrganizationSnapshot } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { dedupePendingCreates } from "./live-workspace-selectors";
+import { forgetWorkspaceVisibility } from "../features/dashboard/workspace-visibility";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -276,6 +278,7 @@ function commitConfirmedDeletion(
   dispatch: Dispatch,
 ): void {
   unstable_batchedUpdates(() => {
+    forgetWorkspaceVisibility(workspace.id);
     repointViewIfActive(workspace, dispatch);
     // Choose from the same activity ordering the user saw before detaching the
     // departing agent sessions (detaching first could silently reorder it).
@@ -428,29 +431,18 @@ export async function deleteWorkspacePermanently(
  *  WORKTREE_MISSING; see archiveWorkspace): checkpointing/removing a missing folder
  *  is a no-op and a later restore would fabricate a phantom worktree with the
  *  same name — the "unarchive made a new worktree" bug. Surface that as a
- *  persistent error toast naming the workspace, offering the only safe recovery:
- *  permanent deletion. */
-function showCorruptedWorkspaceToast(
-  workspace: Workspace,
-  dispatch: Dispatch,
-): void {
+ *  persistent recovery guidance without deleting its durable owner. */
+function showCorruptedWorkspaceToast(workspace: Workspace): void {
   // Match the tab's label (strip the branch-name prefix).
   const label = branchDisplayName(workspace.branch);
-  toast.error(
-    "Archiving failed. This workspace might be corrupted. Delete permanently?",
-    {
-      description: `${workspace.repoSlug} · ${label}`,
-      // Persist until acted on — this is a decision, not a status blip.
-      duration: Infinity,
-      // One slot per workspace: repeated archive clicks replace rather than
-      // stack identical infinite toasts.
-      id: `archive-corrupt-${workspace.id}`,
-      action: {
-        label: "Delete permanently",
-        onClick: () => void deleteWorkspacePermanently(workspace, dispatch),
-      },
-    },
-  );
+  toast.error("The workspace folder is missing", {
+    description: `${label}: restore the folder to its original path, or open the workspace to recover its saved state. Chats and history are kept.`,
+    // Persist until acted on — this is a decision, not a status blip.
+    duration: Infinity,
+    // One slot per workspace: repeated archive clicks replace rather than
+    // stack identical infinite toasts.
+    id: `archive-corrupt-${workspace.id}`,
+  });
 }
 
 interface ArchiveFeedbackOptions {
@@ -643,7 +635,7 @@ export async function archiveWorkspaceWithFeedback(
     // an authoritative miss, never on a flag that lagged the folder coming back.
     if (isGitErrorShape(err) && err.code === "WORKTREE_MISSING") {
       clearWorkspaceArchiving(workspace.id);
-      showCorruptedWorkspaceToast(workspace, dispatch);
+      showCorruptedWorkspaceToast(workspace);
       return;
     }
     // A client timeout does not mean the engine transaction failed. Keep the row
@@ -708,6 +700,7 @@ function commitConfirmedRestore(
 ): void {
   const restored = result.workspace;
   unstable_batchedUpdates(() => {
+    forgetWorkspaceVisibility(original.id, original.archivedAt);
     if (restored.path !== original.path) {
       moveChatPaneFolder(original.path, restored.path, original.repoRoot);
       useWorkspaceStore.getState().dispatch({
@@ -792,6 +785,7 @@ function watchTimedOutWorkspaceRestore(
   };
   const accept = (current: Workspace): boolean => {
     if (current.archivedAt != null) return false;
+    if (workspace.archivedAt == null && current.present === false) return false;
     const result = inferredRestoreResult(workspace, current);
     trackGitOp({ op: "workspace_restore", outcome: "ok" });
     if (current.present === false) {
@@ -800,7 +794,7 @@ function watchTimedOutWorkspaceRestore(
       commitConfirmedRestore(workspace, result);
       toast.error(`Restored "${label}", but its folder is missing`, {
         description:
-          "The workspace metadata is live. Restore the folder or delete the workspace safely.",
+          "The workspace metadata is live. Return the original folder or recover its saved snapshot.",
       });
     } else {
       commitConfirmedRestore(workspace, result, opts);
@@ -884,7 +878,9 @@ export async function restoreWorkspaceWithFeedback(
   const label = opts?.label ?? workspace.branch;
   let settlementDeferred = false;
   try {
-    const res = await workspaceRestore({ workspaceId: workspace.id });
+    const res = await (
+      workspace.archivedAt == null ? workspaceRecover : workspaceRestore
+    )({ workspaceId: workspace.id });
     const restoredWorkspace: Workspace = res.workspace ?? {
       ...workspace,
       path: res.path,

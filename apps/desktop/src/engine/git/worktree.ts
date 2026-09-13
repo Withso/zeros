@@ -5,8 +5,18 @@
 // (WorkspaceService { op, params }), which validates inputs and forwards.
 // This makes the engine module trivial to unit-test against a tmpdir repo.
 
-import { existsSync } from "node:fs";
-import { mkdir, readdir, realpath } from "node:fs/promises";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  realpath,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+  lstat,
+} from "node:fs/promises";
 import path from "node:path";
 
 import { GitError, isGitError } from "./errors";
@@ -116,7 +126,6 @@ import {
   snapshotWorkingTree,
   restoreWorktreeFromSnapshot,
   deleteArchiveSnapshotRef,
-  listArchiveSnapshotWorkspaceIds,
 } from "./turns-git";
 import { listTurnsForWorkspace } from "../db/turns";
 import type {
@@ -138,6 +147,32 @@ const LEGACY_ATTACHMENT_ARCHIVE_PATHS = [
   ".context/.gitignore",
   ".context/attachments",
 ] as const;
+
+function pendingArchiveSnapshotRef(workspaceId: string): string {
+  return archiveSnapshotRef(workspaceId).replace(
+    "refs/zeros/archive/",
+    "refs/zeros/archive-pending/",
+  );
+}
+
+async function publishArchiveSnapshot(
+  ws: Workspace,
+  snapshot: string | null,
+): Promise<void> {
+  if (!snapshot) return;
+  await runGit(ws.repoRoot, [
+    "update-ref",
+    archiveSnapshotRef(ws.id),
+    snapshot,
+  ]);
+  // A failure here only retains one extra recovery pin; publication succeeded.
+  await runGit(ws.repoRoot, [
+    "update-ref",
+    "-d",
+    pendingArchiveSnapshotRef(ws.id),
+    snapshot,
+  ]).catch(() => {});
+}
 
 /** A repo with no commits (unborn HEAD — e.g. freshly `git init`'d) can't host
  *  a worktree: there's no base commit to fork from, and resolveWorktreeBase
@@ -199,9 +234,11 @@ function readProvisionPaths(workspaceId: string): string[] {
 
 type WorkspaceLifecycleFlight = {
   operation: WorkspaceLifecycleOperation;
+  kind: string;
   promise: Promise<unknown>;
 };
 const workspaceLifecycleFlights = new Map<string, WorkspaceLifecycleFlight>();
+const snapshotMaintenance = new Map<string, Promise<void>>();
 
 /** Engine-side single flight is the authority across every renderer/device.
  * Same-operation repeats share one result. Conflicts fail before racing Git,
@@ -211,10 +248,16 @@ function withWorkspaceLifecycleFlight<T>(
   workspaceId: string,
   operation: WorkspaceLifecycleFlight["operation"],
   run: () => Promise<T>,
+  kind: string = operation,
 ): Promise<T> {
+  const maintenance = snapshotMaintenance.get(workspaceId);
+  if (maintenance)
+    return maintenance.then(() =>
+      withWorkspaceLifecycleFlight(workspaceId, operation, run, kind),
+    );
   const active = workspaceLifecycleFlights.get(workspaceId);
   if (active) {
-    if (active.operation === operation) return active.promise as Promise<T>;
+    if (active.kind === kind) return active.promise as Promise<T>;
     // A prepared workspace is visible and actionable before its checkout
     // finishes. Archive/delete requested during that narrow window should mean
     // "finish constructing this exact owner, then remove it"—not a transient
@@ -226,7 +269,7 @@ function withWorkspaceLifecycleFlight<T>(
       (operation === "archive" || operation === "delete")
     ) {
       return active.promise.then(() =>
-        withWorkspaceLifecycleFlight(workspaceId, operation, run),
+        withWorkspaceLifecycleFlight(workspaceId, operation, run, kind),
       ) as Promise<T>;
     }
     return Promise.reject(
@@ -242,7 +285,7 @@ function withWorkspaceLifecycleFlight<T>(
       workspaceLifecycleFlights.delete(workspaceId);
     }
   });
-  workspaceLifecycleFlights.set(workspaceId, { operation, promise });
+  workspaceLifecycleFlights.set(workspaceId, { operation, kind, promise });
   return promise;
 }
 
@@ -1947,10 +1990,21 @@ export async function reconcileInterruptedWorkspaceLifecycles(
           await restoreWorkspaceInner(row.id);
           break;
         case "delete":
-          await deleteWorkspaceInner({
-            workspaceId: row.id,
-            includeBranch: entry.includeBranch,
-          });
+          if (
+            entry.payload.snapshotOnly === true &&
+            row.archiveSnapshot &&
+            row.archivedAt != null
+          ) {
+            await deleteWorkspaceSnapshot({
+              workspaceId: row.id,
+              archiveSnapshot: row.archiveSnapshot,
+              archivedAt: row.archivedAt,
+            });
+          } else
+            await deleteWorkspaceInner({
+              workspaceId: row.id,
+              includeBranch: entry.includeBranch,
+            });
           break;
       }
       recovered++;
@@ -1966,66 +2020,52 @@ export async function reconcileInterruptedWorkspaceLifecycles(
   return { recovered, failed };
 }
 
-/** Boot janitor: drop archive snapshot refs that no longer
- *  back a live archive. `refs/zeros/archive/<id>` should exist ONLY while a
- *  workspace row is in the `archived` state; any other ref — the workspace was
- *  hard-deleted out-of-band, or restored without its ref being dropped (a crash
- *  between the two) — is an orphan pinning a commit forever. We only visit repos
- *  the registry knows about, and only delete refs whose id is NOT a
- *  currently-archived row. Best-effort + idempotent. Returns the count dropped. */
+/** Compatibility entrypoint for archive maintenance. Refs share the repository
+ * across independent instance databases, so absence from this DB is never
+ * permission to delete one. Retain recovery snapshots after restore as well.
+ * Repin surviving objects from our durable records, without replacing an
+ * existing ref (which may belong to an in-flight archive). Explicit deletion
+ * owns removal. The legacy return value counts removals and is always zero. */
 export async function pruneOrphanArchiveSnapshots(): Promise<number> {
   let workspaces: Workspace[];
+  let lifecycles: WorkspaceLifecycleJournal[];
   try {
     workspaces = listWorkspacesFromDb();
+    lifecycles = listWorkspaceLifecycles();
   } catch {
     return 0;
   }
-  // Ids that legitimately keep an archive ref: currently-archived workspaces
-  // plus journaled archive/restore operations. The latter closes the exact crash
-  // seam where a live row's folder was gone but its not-yet-committed snapshot
-  // was incorrectly pruned as an orphan.
-  const archivedIds = new Set(
-    workspaces.filter((w) => w.archivedAt != null).map((w) => w.id),
+  const pending = new Map(
+    lifecycles.map((entry) => [entry.workspaceId, entry]),
   );
-  try {
-    for (const entry of listWorkspaceLifecycles()) {
-      if (entry.operation === "archive" || entry.operation === "restore") {
-        archivedIds.add(entry.workspaceId);
-      }
-    }
-  } catch {
-    // If journal visibility fails, fail closed: skip pruning altogether rather
-    // than risk deleting a recovery ref.
-    return 0;
-  }
-  // The archive refs live in each host repo's shared object store.
-  const repoRoots = [
-    ...new Set([
-      ...workspaces.map((w) => w.repoRoot).filter(Boolean),
-      // The last workspace row in a registered project can be deleted
-      // out-of-band while its archive ref survives. The project registry is
-      // then the only remaining route to that shared object store.
-      ...listKnownRepoRoots(),
-    ]),
-  ];
-  let dropped = 0;
-  for (const repoRoot of repoRoots) {
-    let ids: string[];
-    try {
-      ids = await listArchiveSnapshotWorkspaceIds(repoRoot);
-    } catch {
+  for (const workspace of workspaces) {
+    if (
+      workspaceLifecycleFlights.has(workspace.id) ||
+      snapshotMaintenance.has(workspace.id)
+    )
       continue;
-    }
-    for (const id of ids) {
-      if (archivedIds.has(id)) continue;
-      await deleteArchiveSnapshotRef(repoRoot, id);
-      dropped++;
-    }
+    const journal = pending.get(workspace.id);
+    if (journal?.operation === "delete") continue;
+    const snapshot = journal?.archiveSnapshot ?? workspace.archiveSnapshot;
+    if (!snapshot) continue;
+    // compare-and-create: an existing pin always wins over a stale DB read.
+    const pin = runGit(workspace.repoRoot, [
+      "update-ref",
+      archiveSnapshotRef(workspace.id),
+      snapshot,
+      "",
+    ])
+      .then(
+        () => {},
+        () => {},
+      )
+      .finally(() => {
+        snapshotMaintenance.delete(workspace.id);
+      });
+    snapshotMaintenance.set(workspace.id, pin);
+    await pin;
   }
-  if (dropped > 0) {
-    console.log(`[zeros] pruned ${dropped} orphan archive snapshot ref(s)`);
-  }
-  return dropped;
+  return 0;
 }
 
 /** Drop stale branch-ownership proofs left by a crash after the workspace row
@@ -2270,15 +2310,36 @@ export interface ListWorkspacesOptions {
   archived?: boolean;
 }
 
-/** Stamp the `present` flag on a workspace by stat-ing its worktree
- *  path. Synchronous fs check because every call site already runs in
- *  a sync engine context (the DB reads above are sync too) and the
- *  signal is needed before the caller hands the record to the renderer.
- *  ENOENT is the only non-present outcome we care about; permission
- *  errors fall through to `true` so a transient PEBKAC doesn't make
- *  every workspace look gone. */
+/** Presence includes usable Git metadata. A returned folder with a dangling
+ * .git pointer must stay on the recovery surface. Bounded synchronous metadata
+ * reads keep workspace.list an aggregate rather than a Git process per row. */
 function stampPresence(ws: Workspace): Workspace {
-  return { ...ws, present: existsSync(ws.path) };
+  let present = false;
+  try {
+    const dotGit = path.join(ws.path, ".git");
+    const info = statSync(dotGit);
+    let gitdir = dotGit;
+    if (info.isFile() && info.size <= 65536) {
+      const pointer = readFileSync(dotGit, "utf8")
+        .trim()
+        .match(/^gitdir:\s*(.+)$/);
+      if (!pointer) return { ...ws, present: false };
+      gitdir = path.resolve(ws.path, pointer[1]);
+    } else if (!info.isDirectory()) return { ...ws, present: false };
+    present = existsSync(path.join(gitdir, "HEAD"));
+    let common = gitdir;
+    if (present && existsSync(path.join(gitdir, "commondir"))) {
+      common = path.resolve(
+        gitdir,
+        readFileSync(path.join(gitdir, "commondir"), "utf8").trim(),
+      );
+    }
+    present &&= existsSync(path.join(common, "objects"));
+  } catch (error) {
+    // Permission failures are surfaced by the operation that needs access.
+    present = (error as NodeJS.ErrnoException).code === "EACCES";
+  }
+  return { ...ws, present };
 }
 
 export function listWorkspaces(opts: ListWorkspacesOptions = {}): Workspace[] {
@@ -2697,23 +2758,15 @@ async function archiveWorkspaceInner(
       remediation: "Remove it from Zeros instead — the worktree stays on disk.",
     });
   }
-  // Refuse to archive a worktree whose FOLDER is gone from disk (deleted
-  // out-of-band via `rm -rf`, Finder, or a parallel tool). Archiving checkpoints
-  // uncommitted work then removes the folder — but there's nothing here to
-  // checkpoint or remove, and marking the row archived would let a later restore
-  // fabricate a PHANTOM worktree from the branch anchor: a fresh checkout with
-  // the same name, NOT the user's lost work. That's the exact "unarchive
-  // created a new worktree" bug. The record is corrupted; the only safe
-  // recovery is permanent deletion, which the renderer offers on this error.
-  // (An already-archived row short-circuits above, so restore's own
-  // missing-folder handling is untouched.)
+  // A missing folder cannot produce a new checkpoint. Keep the owner and its
+  // last saved snapshot so returning the folder or explicit recovery can heal it.
   if (!journal && !existsSync(ws.path)) {
     throw new GitError({
       code: "WORKTREE_MISSING",
       message:
         "This workspace's worktree folder is missing from disk, so it can't be archived.",
       remediation:
-        "The workspace record is corrupted — delete it permanently to clean it up.",
+        "Restore the original folder to its saved path, or recover the latest saved snapshot. Chats and workspace history were kept.",
       context: { workspaceId: ws.id, path: ws.path },
     });
   }
@@ -2824,7 +2877,7 @@ async function archiveWorkspaceInner(
     backupWorkspaceSettings(ws.id, ws.path);
     const archiveSnapshot = await snapshotWorkingTree(
       ws.path,
-      archiveSnapshotRef(ws.id),
+      pendingArchiveSnapshotRef(ws.id),
       {
         ...(archivedHead ? { parent: archivedHead } : {}),
         forceAddPaths: archiveIncludePaths,
@@ -2887,21 +2940,19 @@ async function archiveWorkspaceInner(
       includeBranch: false,
       startedAt: Date.now(),
     };
-    try {
-      beginWorkspaceLifecycle(journal, {
-        stashRef: null,
-        archivedHead,
-        archiveSnapshot,
-      });
-    } catch (err) {
-      if (!getWorkspaceLifecycle(ws.id)) {
-        await deleteArchiveSnapshotRef(ws.repoRoot, ws.id);
-      }
-      throw err;
-    }
+    // Keep the previous verified archive pinned until the new checkpoint has a
+    // durable owner. A database failure retains both the live files and the
+    // previous recovery point; the pending ref also protects the new capture.
+    beginWorkspaceLifecycle(journal, {
+      stashRef: null,
+      archivedHead,
+      archiveSnapshot,
+    });
     ws = getWorkspace(ws.id);
     checkpointMs += Date.now() - checkpointStartedAt;
   }
+
+  await publishArchiveSnapshot(ws, journal.archiveSnapshot);
 
   // Run the workspace's effective `scripts.archive` in the worktree while
   // it's still intact (after the snapshot, before eviction/removal). Non-fatal:
@@ -2994,7 +3045,7 @@ async function archiveWorkspaceInner(
     backupWorkspaceSettings(ws.id, ws.path);
     const sealedSnapshot = await snapshotWorkingTree(
       ws.path,
-      archiveSnapshotRef(ws.id),
+      pendingArchiveSnapshotRef(ws.id),
       {
         ...(finalHead ? { parent: finalHead } : {}),
         forceAddPaths: archiveIncludePaths,
@@ -3025,6 +3076,7 @@ async function archiveWorkspaceInner(
       archiveSnapshot: finalSnapshot,
       archivedHead: finalHead,
     });
+    await publishArchiveSnapshot(ws, finalSnapshot);
     journal = {
       ...journal,
       phase: "archive-script-finished",
@@ -3428,17 +3480,180 @@ export function restoreWorkspace(workspaceId: string): Promise<RestoreResult> {
   });
 }
 
-async function restoreWorkspaceInner(
+/** Recover a live workspace without deleting its durable owner. Returned files
+ * are authoritative: rebuild only missing Git metadata and never overlay a
+ * snapshot on them. A still-missing checkout requires a verified saved snapshot. */
+export function recoverMissingWorkspace(
   workspaceId: string,
 ): Promise<RestoreResult> {
+  return withWorkspaceLifecycleFlight(
+    workspaceId,
+    "restore",
+    async () => {
+      const ws = getWorkspace(workspaceId);
+      if (
+        ws.archivedAt != null ||
+        isAdoptedWorkspace(ws.id) ||
+        !isManagedWorktreePath(ws.path)
+      ) {
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: "Only a missing Zeros workspace can be recovered here.",
+        });
+      }
+      if (!existsSync(ws.path)) {
+        if (!ws.archiveSnapshot)
+          throw new GitError({
+            code: "WORKTREE_MISSING",
+            message:
+              "No saved snapshot is available. Restore the original folder from Trash or a backup. Your chats and workspace record were kept.",
+          });
+        return restoreWorkspaceInner(workspaceId, true);
+      }
+      if (getWorkspaceLifecycle(ws.id))
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message:
+            "Finish the interrupted workspace operation before repairing this folder.",
+        });
+      const adaptations: string[] = [];
+      if (!(await managedCheckoutIdentityMatches(ws))) {
+        if (!(await lstat(ws.path)).isDirectory())
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "The saved path is not the original workspace folder.",
+          });
+        const dotGit = path.join(ws.path, ".git");
+        const info = await lstat(dotGit);
+        if (!info.isFile() || info.size > 65536)
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "The returned folder has no recoverable Git pointer.",
+          });
+        const pointer = (await readFile(dotGit, "utf8"))
+          .trim()
+          .match(/^gitdir:\s*(.+)$/);
+        const common = await realpath(
+          (
+            await runGit(ws.repoRoot, [
+              "rev-parse",
+              "--path-format=absolute",
+              "--git-common-dir",
+            ])
+          ).stdout.trim(),
+        );
+        const gitdir = pointer ? path.resolve(ws.path, pointer[1]) : "";
+        const registrationRoot = path.join(common, "worktrees");
+        let parent = gitdir
+          ? await realpath(path.dirname(gitdir)).catch(() => "")
+          : "";
+        // Git removes worktrees/ itself when pruning its last registration.
+        // Resolve its surviving common-directory parent before recreating it.
+        if (
+          !parent &&
+          gitdir &&
+          path.basename(path.dirname(gitdir)) === "worktrees"
+        ) {
+          const parentCommon = await realpath(
+            path.dirname(path.dirname(gitdir)),
+          ).catch(() => "");
+          if (parentCommon === common) parent = registrationRoot;
+        }
+        if (parent !== registrationRoot || existsSync(gitdir)) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "The returned folder's Git metadata does not match a missing registration in this repository. Its files were preserved.",
+          });
+        }
+        if (await branchCheckedOutElsewhere(ws.repoRoot, ws.branch))
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "This branch is in use by another worktree. Its files were preserved.",
+          });
+        const head = await revParseCommitOrNull(
+          ws.repoRoot,
+          `refs/heads/${ws.branch}`,
+        );
+        if (!head)
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "The original branch is missing. Restore that branch before reconnecting this folder.",
+          });
+        // Build the admin entry outside worktrees/ and publish it atomically.
+        // read-tree reconstructs the index only: deleted, untracked and ignored
+        // working files remain byte-for-byte untouched, unlike a file overlay.
+        const prepared = await mkdtemp(path.join(common, "zeros-recovery-"));
+        try {
+          await writeFile(path.join(prepared, "commondir"), `${common}\n`);
+          await writeFile(path.join(prepared, "gitdir"), `${dotGit}\n`);
+          await writeFile(
+            path.join(prepared, "HEAD"),
+            `ref: refs/heads/${ws.branch}\n`,
+          );
+          await runGit(ws.repoRoot, ["read-tree", head], {
+            env: { GIT_INDEX_FILE: path.join(prepared, "index") },
+          });
+          await mkdir(registrationRoot, { recursive: true });
+          if (
+            !(await lstat(registrationRoot)).isDirectory() ||
+            existsSync(gitdir) ||
+            (await readFile(dotGit, "utf8")).trim() !== pointer![0]
+          )
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message:
+                "The folder changed during recovery. Its files were preserved; retry recovery.",
+            });
+          await rename(
+            prepared,
+            path.join(registrationRoot, path.basename(gitdir)),
+          );
+        } finally {
+          await rm(prepared, { recursive: true, force: true });
+        }
+        if (!(await managedCheckoutIdentityMatches(ws)))
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "The Git connection could not be verified. Your files were preserved.",
+          });
+        adaptations.push(
+          "The returned folder was reconnected to Git without changing its files. Previously staged edits are now unstaged.",
+        );
+      }
+      const restoredAt = Date.now();
+      updateWorkspace(ws.id, { lastActiveAt: restoredAt });
+      const workspace = getWorkspace(ws.id);
+      writeWorktreeSeed(workspace);
+      return {
+        restoredAt,
+        conflicts: [],
+        path: ws.path,
+        branch: ws.branch,
+        adaptations,
+        workspace,
+      };
+    },
+    "recover",
+  );
+}
+
+async function restoreWorkspaceInner(
+  workspaceId: string,
+  recoverMissing = false,
+): Promise<RestoreResult> {
   const ws = getWorkspace(workspaceId);
-  if (ws.archivedAt == null) {
+  let journal = getWorkspaceLifecycle(workspaceId);
+  recoverMissing ||= journal?.payload.recoverMissing === true;
+  if (ws.archivedAt == null && !recoverMissing) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: `Workspace ${workspaceId} is not archived`,
     });
   }
-  let journal = getWorkspaceLifecycle(workspaceId);
   if (journal && journal.operation !== "restore") {
     throw new GitError({
       code: "VALIDATION_FAILED",
@@ -3447,6 +3662,18 @@ async function restoreWorkspaceInner(
     });
   }
   const adaptations: string[] = journal ? [...journal.adaptations] : [];
+  const savedSnapshot = journal?.archiveSnapshot ?? ws.archiveSnapshot;
+  if (
+    savedSnapshot &&
+    !(await revParseCommitOrNull(ws.repoRoot, savedSnapshot))
+  ) {
+    throw new GitError({
+      code: "STASH_FAILED",
+      message: "The saved workspace snapshot is unavailable.",
+      remediation:
+        "Restore the original folder or repository backup. The workspace record and chats were kept; no replacement checkout was created.",
+    });
+  }
 
   // Drop only this workspace's exact stale admin entry first. Repository-wide
   // `git worktree prune` can erase missing registrations owned by another
@@ -3507,7 +3734,7 @@ async function restoreWorkspaceInner(
       archiveSnapshot: ws.archiveSnapshot ?? null,
       archivedHead: ws.archivedHead ?? null,
       adaptations,
-      payload: {},
+      payload: { recoverMissing },
       includeBranch: false,
       startedAt: Date.now(),
     };
@@ -3784,6 +4011,10 @@ async function restoreWorkspaceInner(
           legacyStashApplied = true;
         }
       }
+    } else if (getWorkspaceMeta(ws.id, "archive.snapshot-deleted.v1")) {
+      adaptations.push(
+        "The saved snapshot was deleted. Only committed files were restored; chats and messages were kept.",
+      );
     } else {
       const recovered = await recoverFromLatestTurnSnapshot(ws, targetPath);
       if (recovered) {
@@ -3835,8 +4066,8 @@ async function restoreWorkspaceInner(
       // un-archives it (back onto the Dashboard, out of History).
       archivedAt: null,
       stashRef: null,
-      archivedHead: null,
-      archiveSnapshot: null,
+      archivedHead: journal.archivedHead ?? ws.archivedHead ?? null,
+      archiveSnapshot: journal.archiveSnapshot ?? ws.archiveSnapshot ?? null,
       lastActiveAt: restoredAt,
       ...(targetPath !== ws.path ? { path: targetPath } : {}),
       ...(targetBranch !== ws.branch ? { branch: targetBranch } : {}),
@@ -3850,10 +4081,8 @@ async function restoreWorkspaceInner(
     workspaceId,
     "restore",
   );
-  // Recovery refs are cleanup, never part of the commit. Deleting them only
-  // after the DB is live closes the old crash seam that left an archived row
-  // with neither a worktree nor its saved snapshot.
-  await deleteArchiveSnapshotRef(ws.repoRoot, ws.id);
+  // Keep the latest archive as a recovery point even while the checkout is
+  // live. The next verified archive replaces it; only explicit deletion drops it.
   if (ws.stashRef && legacyStashApplied && conflicts.length === 0) {
     try {
       await withStashLock(ws.repoRoot, async () => {
@@ -3915,6 +4144,90 @@ export function deleteWorkspace(
   });
 }
 
+/** Explicit snapshot disposal retains the workspace owner, conversations,
+ * branch and history. Bind the destructive intent to the reviewed archive so
+ * a delayed dialog cannot discard a newer snapshot. Journal before dropping
+ * the ref; startup recovery can finish the same exact intent after a crash. */
+export function deleteWorkspaceSnapshot(args: {
+  workspaceId: string;
+  archiveSnapshot: string;
+  archivedAt: number;
+}): Promise<Workspace> {
+  return withWorkspaceLifecycleFlight(
+    args.workspaceId,
+    "delete",
+    async () => {
+      const ws = getWorkspace(args.workspaceId);
+      const journal = getWorkspaceLifecycle(ws.id);
+      if (
+        journal &&
+        (journal.operation !== "delete" ||
+          journal.payload.snapshotOnly !== true)
+      )
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: "Another workspace operation needs to finish first.",
+        });
+      if (
+        ws.archivedAt !== args.archivedAt ||
+        ws.archiveSnapshot !== args.archiveSnapshot ||
+        ws.archivedAt == null
+      )
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message:
+            "This archive has changed. Review the current snapshot before deleting it.",
+        });
+      if (!journal)
+        beginWorkspaceLifecycle({
+          workspaceId: ws.id,
+          operation: "delete",
+          phase: "prepared",
+          sourcePath: ws.path,
+          targetPath: null,
+          sourceBranch: ws.branch,
+          targetBranch: null,
+          createFrom: null,
+          archiveSnapshot: ws.archiveSnapshot,
+          archivedHead: ws.archivedHead ?? null,
+          adaptations: [],
+          payload: { snapshotOnly: true },
+          includeBranch: false,
+          startedAt: Date.now(),
+        });
+      const ref = archiveSnapshotRef(ws.id);
+      const pinned = (
+        await runGit(ws.repoRoot, [
+          "for-each-ref",
+          "--format=%(objectname)",
+          ref,
+        ])
+      ).stdout.trim();
+      if (pinned)
+        await runGit(ws.repoRoot, [
+          "update-ref",
+          "-d",
+          ref,
+          args.archiveSnapshot,
+        ]);
+      finishWorkspaceLifecycle(
+        ws.id,
+        { archiveSnapshot: null, stashRef: null },
+        () =>
+          setWorkspaceMeta(
+            ws.id,
+            "archive.snapshot-deleted.v1",
+            String(Date.now()),
+          ),
+      );
+      const workspace = getWorkspace(ws.id);
+      writeWorktreeSeed(workspace);
+      return workspace;
+    },
+    "delete-snapshot",
+  );
+}
+
 async function deleteWorkspaceInner(
   opts: DeleteOptions,
   beforeCheckoutEviction?: (
@@ -3926,6 +4239,12 @@ async function deleteWorkspaceInner(
   const repoRoot = ws.repoRoot;
   let stagedWorktree: PreparedDirectoryEviction | null = null;
   let journal = getWorkspaceLifecycle(ws.id);
+  if (journal?.payload.snapshotOnly === true)
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message:
+        "Finish deleting the saved snapshot before deleting this workspace.",
+    });
   if (isAdoptedWorkspace(ws.id)) {
     // Adoption is registry-only regardless of where the external tool happened
     // to place its worktree. A path under Zeros' root is not ownership proof.

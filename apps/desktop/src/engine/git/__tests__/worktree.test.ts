@@ -24,6 +24,7 @@ import {
   rm,
   writeFile,
   readFile,
+  rename,
   stat,
   symlink,
 } from "node:fs/promises";
@@ -64,6 +65,7 @@ import {
   migrateWorktreesToNewRoot,
 } from "..";
 import { upsertRepoByRoot } from "../../db/projects";
+import { upsertChatMessage, windowChatMessages } from "../../db/messages";
 import {
   upsertChat,
   getChat,
@@ -86,6 +88,8 @@ import { DESIGN_MODE_TRANSITION_META_KEY } from "../design-mode";
 import { withWorkspaceGitMutation } from "../mutation-lock";
 import {
   pruneOrphanArchiveSnapshots,
+  recoverMissingWorkspace,
+  deleteWorkspaceSnapshot,
   pruneOrphanWorkspaceBranchOwnershipRefs,
   resolveNewBranchPrefix,
 } from "../worktree";
@@ -2691,12 +2695,12 @@ printf ran > '${sentinel}'
     const readme = await readFile(path.join(created.path, "README.md"), "utf8");
     expect(readme).toBe("# changed\n");
 
-    // DB state reset; archive ref + snapshot OID cleared. Restore is the inverse
+    // DB state reset; the latest snapshot remains a recovery point. Restore is the inverse
     // of archive: `archivedAt` clears and `status` is preserved (was in-progress).
     const ws = getWorkspace(created.workspaceId);
     expect(ws.status).toBe("in-progress");
     expect(ws.stashRef).toBeNull();
-    expect(ws.archiveSnapshot).toBeNull();
+    expect(ws.archiveSnapshot).toBe(archived.archiveSnapshot);
     expect(ws.archivedAt).toBeNull();
     const refGone = await execFileAsync("git", [
       "-C",
@@ -2708,7 +2712,92 @@ printf ran > '${sentinel}'
     ])
       .then(() => false)
       .catch(() => true);
-    expect(refGone).toBe(true);
+    expect(refGone).toBe(false);
+  });
+
+  it("recognizes a returned folder only when its Git metadata is usable", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const rescued = `${created.path}.returned`;
+    await rename(created.path, rescued);
+    expect(getWorkspace(created.workspaceId).present).toBe(false);
+    await rename(rescued, created.path);
+    expect(getWorkspace(created.workspaceId).present).toBe(true);
+    const gitdir = (await readFile(path.join(created.path, ".git"), "utf8"))
+      .trim()
+      .slice(8);
+    await rm(gitdir, { recursive: true });
+    expect(getWorkspace(created.workspaceId).present).toBe(false);
+  });
+
+  it("reattaches a returned folder without overwriting edits, deletions or ignored files", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await rm(path.join(created.path, "README.md"));
+    await writeFile(path.join(created.path, "draft.txt"), "returned WIP\n");
+    await writeFile(path.join(created.path, ".gitignore"), "private.txt\n");
+    await writeFile(path.join(created.path, "private.txt"), "keep this\n");
+    const gitdir = (await readFile(path.join(created.path, ".git"), "utf8"))
+      .trim()
+      .slice(8);
+    await rm(gitdir, { recursive: true });
+    const result = await recoverMissingWorkspace(created.workspaceId);
+    expect(result.workspace.present).toBe(true);
+    expect(result.path).toBe(created.path);
+    expect(existsSync(path.join(created.path, "README.md"))).toBe(false);
+    expect(await readFile(path.join(created.path, "draft.txt"), "utf8")).toBe(
+      "returned WIP\n",
+    );
+    expect(await readFile(path.join(created.path, "private.txt"), "utf8")).toBe(
+      "keep this\n",
+    );
+    expect(
+      (
+        await execFileAsync("git", [
+          "-C",
+          created.path,
+          "status",
+          "--porcelain",
+        ])
+      ).stdout,
+    ).toContain(" D README.md");
+  });
+
+  it("recovers a missing live checkout from its retained archive snapshot", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(path.join(created.path, "saved.txt"), "saved WIP\n");
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+    await rm(created.path, { recursive: true });
+    const result = await recoverMissingWorkspace(created.workspaceId);
+    expect(result.workspace.id).toBe(created.workspaceId);
+    expect(result.workspace.archivedAt).toBeNull();
+    expect(await readFile(path.join(result.path, "saved.txt"), "utf8")).toBe(
+      "saved WIP\n",
+    );
+    expect(result.workspace.archiveSnapshot).toBeTruthy();
+  });
+
+  it("reconnects a returned folder after Git prunes the last worktree registration", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(path.join(created.path, "draft.txt"), "returned edits\n");
+    const returnedPath = `${created.path}.returned`;
+    await rename(created.path, returnedPath);
+    await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "worktree",
+      "prune",
+      "--expire=now",
+    ]);
+    expect(existsSync(path.join(repoRoot, ".git", "worktrees"))).toBe(false);
+    await rename(returnedPath, created.path);
+    const result = await recoverMissingWorkspace(created.workspaceId);
+    expect(result.workspace.present).toBe(true);
+    expect(await readFile(path.join(created.path, "draft.txt"), "utf8")).toBe(
+      "returned edits\n",
+    );
   });
 
   it("restores a workspace whose folders are hidden by Working folders, without deleting them", async () => {
@@ -2841,7 +2930,7 @@ printf ran > '${sentinel}'
     );
   });
 
-  it("retains the archived row, checkout, and journal when its snapshot cannot be applied", async () => {
+  it("retains the archived row without creating a checkout when its snapshot is missing", async () => {
     const created = await createWorkspace({ repoRoot });
     await writeFile(path.join(created.path, "WIP.txt"), "must not vanish\n");
     await archiveWorkspace({
@@ -2859,11 +2948,11 @@ printf ran > '${sentinel}'
     });
     const retained = getWorkspace(created.workspaceId);
     expect(retained.archivedAt).not.toBeNull();
-    expect(existsSync(retained.path)).toBe(true);
+    expect(existsSync(retained.path)).toBe(false);
     expect(getWorkspaceLifecycleStatus(retained.id)).toMatchObject({
       active: false,
-      operation: "restore",
-      phase: "worktree-created",
+      operation: null,
+      phase: null,
     });
     expect(
       (
@@ -3538,7 +3627,7 @@ printf ran > '${sentinel}'
     expect(refGone).toBe(true);
   });
 
-  it("pruneOrphanArchiveSnapshots drops a ref whose workspace row is gone", async () => {
+  it("retains an archive ref whose workspace is absent from this instance's DB", async () => {
     const a = await createWorkspace({ repoRoot });
     const row = getWorkspace(a.workspaceId);
     upsertRepoByRoot({ repoRoot, repoSlug: row.repoSlug });
@@ -3551,7 +3640,7 @@ printf ran > '${sentinel}'
     deleteWorkspaceRow(a.workspaceId);
 
     const dropped = await pruneOrphanArchiveSnapshots();
-    expect(dropped).toBeGreaterThanOrEqual(1);
+    expect(dropped).toBe(0);
     const refAfter = await execFileAsync("git", [
       "-C",
       repoRoot,
@@ -3562,7 +3651,216 @@ printf ran > '${sentinel}'
     ])
       .then(() => "present")
       .catch(() => "");
-    expect(refAfter).toBe("");
+    expect(refAfter).toBe("present");
+  });
+
+  it("keeps the latest archive snapshot after unarchive and startup cleanup", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(path.join(created.path, "saved.txt"), "recovery copy\n");
+    const archived = await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const anchor = getWorkspace(created.workspaceId).archivedHead;
+    await restoreWorkspace(created.workspaceId);
+    await pruneOrphanArchiveSnapshots();
+
+    expect(getWorkspace(created.workspaceId)).toMatchObject({
+      archivedAt: null,
+      archiveSnapshot: archived.archiveSnapshot,
+      archivedHead: anchor,
+    });
+    expect(
+      (
+        await execFileAsync("git", [
+          "-C",
+          repoRoot,
+          "rev-parse",
+          archiveSnapshotRef(created.workspaceId),
+        ])
+      ).stdout.trim(),
+    ).toBe(archived.archiveSnapshot);
+  });
+
+  it("repins a saved snapshot when its ref is missing and the object survives", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(path.join(created.path, "saved.txt"), "recovery copy\n");
+    const archived = await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "update-ref",
+      "-d",
+      archiveSnapshotRef(created.workspaceId),
+    ]);
+    await pruneOrphanArchiveSnapshots();
+    expect(
+      (
+        await execFileAsync("git", [
+          "-C",
+          repoRoot,
+          "rev-parse",
+          archiveSnapshotRef(created.workspaceId),
+        ])
+      ).stdout.trim(),
+    ).toBe(archived.archiveSnapshot);
+  });
+
+  it("preserves the previous recovery ref when a new archive cannot persist its journal", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(
+      path.join(created.path, "saved.txt"),
+      "previous snapshot\n",
+    );
+    const archived = await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+    await writeFile(path.join(created.path, "saved.txt"), "new edits\n");
+    const state = await import("../state");
+    const failedWrite = vi
+      .spyOn(state, "beginWorkspaceLifecycle")
+      .mockImplementationOnce(() => {
+        throw new Error("simulated database failure");
+      });
+    try {
+      await expect(
+        archiveWorkspace({
+          workspaceId: created.workspaceId,
+          stashUncommitted: true,
+        }),
+      ).rejects.toThrow("simulated database failure");
+    } finally {
+      failedWrite.mockRestore();
+    }
+    expect(
+      (
+        await execFileAsync("git", [
+          "-C",
+          repoRoot,
+          "rev-parse",
+          archiveSnapshotRef(created.workspaceId),
+        ])
+      ).stdout.trim(),
+    ).toBe(archived.archiveSnapshot);
+    expect(await readFile(path.join(created.path, "saved.txt"), "utf8")).toBe(
+      "new edits\n",
+    );
+  });
+
+  it("deletes only the reviewed snapshot, retaining its workspace, chat and branch", async () => {
+    const created = await createWorkspace({ repoRoot });
+    const chat: ChatRow = {
+      id: "retained-chat",
+      folder: created.path,
+      agentId: "test",
+      agentName: "Test",
+      model: null,
+      effort: "",
+      permissionMode: "default",
+      lastModeId: null,
+      prePlanModeId: null,
+      fast: false,
+      additionalDirectories: [],
+      title: "Keep this conversation",
+      createdAt: 1,
+      updatedAt: 1,
+      sessionId: null,
+      pinned: false,
+      archived: false,
+      sourceChatId: null,
+      kind: "chat",
+    };
+    upsertChat(chat);
+    upsertChatMessage(chat.id, {
+      msgId: "message-1",
+      kind: "text",
+      payload: JSON.stringify({ text: "Keep this message", role: "user" }),
+      createdAt: 1,
+    });
+    const messages = windowChatMessages(chat.id, 100);
+    await writeFile(
+      path.join(created.path, "scratch.txt"),
+      "discard this snapshot\n",
+    );
+    const archived = await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const args = {
+      workspaceId: created.workspaceId,
+      archiveSnapshot: archived.archiveSnapshot!,
+      archivedAt: archived.archivedAt,
+    };
+    await expect(
+      deleteWorkspaceSnapshot({ ...args, archivedAt: args.archivedAt - 1 }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    const kept = await deleteWorkspaceSnapshot(args);
+    expect(kept.archivedAt).toBe(archived.archivedAt);
+    expect(kept.archiveSnapshot).toBeNull();
+    expect(windowChatMessages(chat.id, 100)).toEqual(messages);
+    expect(getChat(chat.id)?.title).toBe(chat.title);
+    await pruneOrphanArchiveSnapshots();
+    expect(
+      (
+        await execFileAsync("git", [
+          "-C",
+          repoRoot,
+          "for-each-ref",
+          "--format=%(refname)",
+          archiveSnapshotRef(created.workspaceId),
+        ])
+      ).stdout,
+    ).toBe("");
+    const restored = await restoreWorkspace(created.workspaceId);
+    expect(restored.branch).toBe(created.branch);
+    expect(existsSync(path.join(restored.path, "scratch.txt"))).toBe(false);
+    expect(restored.adaptations.join(" ")).toContain("Only committed files");
+    expect(getChat(chat.id)?.title).toBe(chat.title);
+  });
+
+  it("finishes interrupted snapshot disposal without deleting the workspace", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(path.join(created.path, "scratch.txt"), "saved\n");
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const ws = getWorkspace(created.workspaceId);
+    beginWorkspaceLifecycle({
+      workspaceId: ws.id,
+      operation: "delete",
+      phase: "prepared",
+      sourcePath: ws.path,
+      targetPath: null,
+      sourceBranch: ws.branch,
+      targetBranch: null,
+      createFrom: null,
+      archiveSnapshot: ws.archiveSnapshot ?? null,
+      archivedHead: ws.archivedHead ?? null,
+      adaptations: [],
+      payload: { snapshotOnly: true },
+      includeBranch: false,
+      startedAt: Date.now(),
+    });
+    await execFileAsync("git", [
+      "-C",
+      repoRoot,
+      "update-ref",
+      "-d",
+      archiveSnapshotRef(ws.id),
+    ]);
+    expect(await reconcileInterruptedWorkspaceLifecycles()).toEqual({
+      recovered: 1,
+      failed: 0,
+    });
+    expect(getWorkspace(ws.id).archiveSnapshot).toBeNull();
+    expect(getWorkspace(ws.id).archivedAt).toBe(ws.archivedAt);
+    expect(getWorkspaceLifecycle(ws.id)).toBeNull();
   });
 
   it("prunes stale create/restore branch ownership proofs after publication", async () => {
