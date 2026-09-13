@@ -209,10 +209,14 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   // chats as well as the workspace row or they keep spawning against the old
   // missing cwd.
   if (op === "workspace.restore") return ["workspaces", "chats"];
-  // Renames the committed design folder AND the committed `[design] directory`
-  // pointer in the repo's main checkout — git state and settings provenance
-  // both change, so both collections re-read.
-  if (op === "design.renameDirectory") return ["workspaces", "settings"];
+  // Design registration changes affect main-checkout Git state and private
+  // selection, so both collections re-read.
+  if (
+    op === "design.renameDirectory" ||
+    op === "design.adoptDirectory" ||
+    op === "design.removeDirectory"
+  )
+    return ["workspaces", "settings"];
   // The periodic PR detector is a read until it actually finds and persists a
   // PR. Avoid turning a once-per-minute null probe into a global Git refresh.
   if (op === "gh.prSync" && result == null) return null;

@@ -19,26 +19,10 @@
 // constraints, and the two trees share one cached listing, so the split costs
 // no extra IPC.
 //
-// WHICH FOLDER. The engine's rule is the one authority, so this mirrors it
-// exactly rather than inventing a second one: a design directory is any
-// directory at depth ≥ 1 holding a `.zeros-canvas.json` marker, sanitized the
-// way the registry sanitizes a configured name (engine/design/directory.ts
-// `markerDirectories` + directory-registry.ts `sanitizeDesignDirectoryName`).
-//
-// The name is NOT a constant — it is per-repository ("Zeros Design" by default,
-// renameable through repo settings, and possibly nested). Deriving it from the
-// marker means:
-//
-//   • no extra IPC — the marker is already in the tracked listing the tree
-//     holds (`git ls-files`), so the section costs one pass over an array;
-//   • it works on cloud/remote workspaces, where `design.listDirectories` is
-//     off the allowlist and throws REMOTE_RESTRICTED; and
-//   • a renamed folder needs no invalidation — the marker moved with it.
-//
-// The trade is that an UNCOMMITTED design folder is invisible to this rule. That
-// is the same folder the engine refuses to treat as a design document ("not a
-// committed Design document"), so a section that skips it is consistent with
-// every other surface rather than optimistic.
+// The engine includes validated Design directories alongside the same file
+// listing used by both trees. This supports portable design.toml manifests and
+// legacy central metadata without treating an unrelated TOML filename as proof.
+// Older engines omit that field; only then do we fall back to canvas markers.
 //
 // Every function here is pure and total: the tree feeds it a listing that a
 // worktree is actively being written to, so nothing may throw on a shape it
@@ -107,8 +91,17 @@ export function sectionedDesignDirectories(
 
 /** The root-level design directories a listing evidences — the ones the Files
  *  tab gives a section. Empty means no section, and an unfiltered code tree. */
-export function designSectionDirectories(paths: readonly string[]): string[] {
-  return sectionedDesignDirectories(designDirectoriesIn(paths));
+export function designSectionDirectories(
+  paths: readonly string[],
+  recognizedDirectories?: readonly string[],
+): string[] {
+  return sectionedDesignDirectories(
+    recognizedDirectories === undefined
+      ? designDirectoriesIn(paths)
+      : recognizedDirectories.filter(
+          (directory) => sanitizeDesignDirectoryName(directory) === directory,
+        ),
+  );
 }
 
 /** True when a listing entry IS one of the design directories or sits inside

@@ -1,4 +1,7 @@
-import { designMetadataGitPaths } from "../design/metadata";
+import {
+  DESIGN_METADATA_PROTECTED_PATHS,
+  DESIGN_METADATA_ROOT,
+} from "../design/metadata";
 // ──────────────────────────────────────────────────────────
 // AgentGateway — orchestrator for per-agent adapters
 // ──────────────────────────────────────────────────────────
@@ -1073,12 +1076,12 @@ async function buildCodeAgentTerritory(opts: {
   ];
   const deniedPaths = [
     ...protectedDesignDirectories,
-    ...designMetadataGitPaths(workspaceRoot).map((file) =>
+    ...DESIGN_METADATA_PROTECTED_PATHS.map((file) =>
       path.join(workspaceRoot, file),
     ),
   ];
   designRecognitionPaths.push(
-    ...designMetadataGitPaths(workspaceRoot).map((file) =>
+    ...DESIGN_METADATA_PROTECTED_PATHS.map((file) =>
       path.join(workspaceRoot, file),
     ),
   );
@@ -1234,7 +1237,10 @@ async function resolveNativeCodeContextTerritory(opts: {
   ) {
     protectedNames.add(registeredName);
   }
-  if (protectedNames.size === 0) {
+  if (
+    protectedNames.size === 0 &&
+    !existsSync(path.join(workspaceRoot, DESIGN_METADATA_ROOT))
+  ) {
     return { diagnostics };
   }
 
@@ -1248,7 +1254,9 @@ async function resolveNativeCodeContextTerritory(opts: {
         ? registeredName
         : sortedNames.length === 1
           ? sortedNames[0]
-          : undefined) ?? sortedNames[0]!;
+          : undefined) ??
+    sortedNames[0] ??
+    registeredName;
   if (
     !pointer?.configured &&
     !sortedNames.includes(registeredName) &&
@@ -1262,16 +1270,9 @@ async function resolveNativeCodeContextTerritory(opts: {
   const protectedDesignDirectories = sortedNames.map((name) =>
     path.join(workspaceRoot, ...name.split("/")),
   );
-  let metadataPaths: string[] = [];
-  try {
-    metadataPaths = designMetadataGitPaths(workspaceRoot).map((file) =>
-      path.join(workspaceRoot, file),
-    );
-  } catch (error) {
-    diagnostics.push(
-      `Design metadata could not be read: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  const metadataPaths = DESIGN_METADATA_PROTECTED_PATHS.map((file) =>
+    path.join(workspaceRoot, file),
+  );
   return {
     diagnostics,
     territory: {

@@ -22,6 +22,8 @@ async function main() {
     await import("../shell/workspace-file-data-cache");
   const { WorkspaceFileTree } =
     await import("../shell/workbench/tabs/workspace-file-tree");
+  const { DesignFilesPane, useHasDesignSection } =
+    await import("../shell/workbench/tabs/design-files-pane");
   const { FilesSearchSidebar } =
     await import("../shell/workbench/tabs/files-search-sidebar");
   const { primeWorkspaceFiles } =
@@ -75,6 +77,56 @@ async function main() {
     "lib/readme.md",
     "package.json",
   ]);
+
+  const designCwd = "/design-files-smoke";
+  const ordinaryCwd = "/ordinary-files-smoke";
+  const designFiles = [
+    "Brand/design.toml",
+    "Brand/home.html",
+    "Other/design.toml",
+    "src/app.ts",
+  ];
+  primeWorkspaceFiles(designCwd, designFiles, ["Brand"]);
+  primeWorkspaceFiles(ordinaryCwd, designFiles, []);
+  function DesignFilesFixture() {
+    const [cwd, setCwd] = React.useState(designCwd);
+    const [opened, setOpened] = React.useState("");
+    const hasDesign = useHasDesignSection(cwd, 0, true);
+    return (
+      <div data-testid="design-files-fixture">
+        <button
+          type="button"
+          onClick={() =>
+            setCwd((current) =>
+              current === designCwd ? ordinaryCwd : designCwd,
+            )
+          }
+        >
+          Switch file workspace
+        </button>
+        <output data-testid="design-file-opened">{opened}</output>
+        <div className="flex h-[400px] w-[280px] flex-col">
+          <div data-testid="code-files-tree" className="min-h-0 flex-1">
+            <WorkspaceFileTree
+              cwd={cwd}
+              designFilter="exclude-design"
+              onOpenFile={setOpened}
+              className="h-full"
+            />
+          </div>
+          {hasDesign && (
+            <DesignFilesPane
+              cwd={cwd}
+              active
+              reloadKey={0}
+              scrollMemoryKey={`${cwd}:design-tree`}
+              onOpenFile={setOpened}
+            />
+          )}
+        </div>
+      </div>
+    );
+  }
 
   const ctx = { editBaselines: new Map() } as never;
   const edit = {
@@ -276,6 +328,7 @@ async function main() {
             />
           </div>
           <SearchSidebarFixture />
+          <DesignFilesFixture />
           <div
             data-testid="markdown-preview-host"
             className="h-[180px] w-[450px] overflow-x-hidden overflow-y-auto"

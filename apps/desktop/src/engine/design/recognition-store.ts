@@ -139,6 +139,32 @@ export async function stickyRecognizedDesignDirectories(
 
 let writeTail: Promise<void> = Promise.resolve();
 
+/** Only the explicit Settings unregister operation may forget an existing root. */
+export async function forgetRecognizedDesignDirectory(
+  workspaceRoot: string,
+  directory: string,
+): Promise<void> {
+  const operation = writeTail.then(async () => {
+    const store = await readStore();
+    const key = workspaceKey(workspaceRoot);
+    const previous = store.workspaces[key];
+    if (!previous?.names.includes(directory)) return;
+    const names = previous.names.filter((name) => name !== directory);
+    if (names.length) store.workspaces[key] = { ...previous, names };
+    else delete store.workspaces[key];
+    const target = designRecognitionStorePath();
+    const temporary = `${target}.${process.pid.toString()}.tmp`;
+    await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+    await writeFile(temporary, `${JSON.stringify(store)}\n`, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    await rename(temporary, target);
+  });
+  writeTail = operation.catch(() => undefined);
+  await operation;
+}
+
 /** Record the Design folders an admission actually protected.
  *
  * Serialized in-process and written through a temp file + rename so a crash

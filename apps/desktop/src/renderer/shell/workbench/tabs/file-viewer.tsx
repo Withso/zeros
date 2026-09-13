@@ -68,8 +68,6 @@ import { changeAdvanceIntent } from "./changes-open-intent";
 import {
   loadWorkspaceFileDiff,
   loadWorkspaceFileRead,
-  peekWorkspaceFileDiff,
-  peekWorkspaceFileRead,
   useWorkspaceFileDiffSnapshot,
   useWorkspaceFileReadSnapshot,
   workspaceFileReadKey,
@@ -285,11 +283,10 @@ export function FileViewer({
   // Hover/workspace-intent prefetch usually makes this a background refresh;
   // concurrent callers share the same keyed request.
   useEffect(() => {
-    if (!cwd) return;
-    // A hidden retained view already has a confirmed snapshot. Its cache was
-    // marked stale by the parent refresh coordinator; defer bridge work until
-    // it is selected again. A cold hidden intent-view still loads now.
-    if (!active && peekWorkspaceFileRead(readQuery) !== undefined) return;
+    if (!active || !cwd) return;
+    // Explicit pointer/workspace intent owns prefetch. Hidden viewers only
+    // observe those results, including on a cold mount; fetching here would
+    // bypass the speculative request bound while moving across Changes rows.
     void loadWorkspaceFileRead(readQuery, { maxAgeMs: 15_000 }).catch(() => {});
   }, [active, cwd, readQuery, readKey, refreshKey]);
 
@@ -298,8 +295,7 @@ export function FileViewer({
   // that commit's own diff (vs its parent). Re-fetches on gitRefresh too; the
   // diff spinner shows only on a fresh file/scope (no flicker on live refresh).
   useEffect(() => {
-    if (!workspaceId) return;
-    if (!active && peekWorkspaceFileDiff(diffQuery) !== undefined) return;
+    if (!active || !workspaceId) return;
     void loadWorkspaceFileDiff(diffQuery, { maxAgeMs: 15_000 }).catch(() => {
       // The snapshot carries the error; a confirmed diff stays available.
     });

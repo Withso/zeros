@@ -38,6 +38,26 @@
   box-shadow: none;
 }
 
+/* Geometry has a consistent surface even when its value is inherited. This
+ * recipe belongs only to Layout; the other editor sections retain their tiers. */
+.zd-design-layout-field {
+  background-color: var(--bg2);
+  border-radius: var(--radius-md);
+}
+
+.zd-design-layout-field:hover {
+  background-color: var(--bg2-hover);
+}
+
+.zd-design-layout-field:focus-within {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-layout-field input {
+  font-family: var(--font-sans);
+}
+
 .zd-design-control-quiet:hover {
   border-color: transparent;
   background-color: var(--bg1-hover);

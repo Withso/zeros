@@ -368,9 +368,14 @@ describe("code-agent territory resolution", () => {
     // writable; sticky recognition covers de-registration (see policy.ts).
     expect(territory!.designRecognitionPaths).toEqual([
       path.join(root, ".zeros"),
+      path.join(root, ".zeros/design"),
+      path.join(root, ".zeros/design-dir.toml"),
       path.join(design, ".zeros-canvas.json"),
     ]);
-    for (const entry of territory!.designRecognitionPaths) {
+    for (const entry of [
+      path.join(root, ".zeros"),
+      path.join(design, ".zeros-canvas.json"),
+    ]) {
       expect(territory!.writeCapabilities.deniedPaths).not.toContain(entry);
     }
   });
@@ -668,6 +673,8 @@ describe("code-agent territory resolution", () => {
       expect.arrayContaining([
         path.join(root, "Product Design"),
         path.join(root, "Zeros Design"),
+        path.join(root, ".zeros/design"),
+        path.join(root, ".zeros/design-dir.toml"),
       ]),
     );
     // The ignored nested draft is intentionally absent from the policy list:
@@ -830,6 +837,8 @@ describe("code-agent territory resolution", () => {
       ]),
     );
     expect(territory!.writeCapabilities.deniedPaths).toEqual([
+      path.join(canonicalWorktree, ".zeros/design"),
+      path.join(canonicalWorktree, ".zeros/design-dir.toml"),
       path.join(canonicalWorktree, "Zeros Design"),
     ]);
   });
@@ -1298,7 +1307,11 @@ describe("code-agent territory resolution", () => {
           workspaceRoot: primary,
           protectedDesignDirectories: [attachedDesign],
           writeCapabilities: expect.objectContaining({
-            deniedPaths: [attachedDesign],
+            deniedPaths: [
+              path.join(attached, ".zeros/design"),
+              path.join(attached, ".zeros/design-dir.toml"),
+              attachedDesign,
+            ],
           }),
         }),
       }),

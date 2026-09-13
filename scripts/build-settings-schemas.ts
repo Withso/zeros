@@ -19,6 +19,7 @@ import {
   SCHEMA_URL_USER,
   userSettingsSchema,
 } from "../apps/desktop/src/engine/settings/schema";
+import { designManifestSchema } from "../apps/desktop/src/engine/design/manifest";
 import { designDirectoryRegistrySchema } from "../apps/desktop/src/engine/design/metadata";
 
 // `import.meta.dir` is bun-only; derive the script dir portably so this runs
@@ -74,10 +75,20 @@ emit(
   "Private overrides for this checkout (.zeros/settings.toml; settings.local.toml if the branch tracks the old shared filename). Unset values inherit repository and user defaults. Never commit this file.",
 );
 
+// Keep the published schema URL stable for existing editor integrations even
+// though new Design folders carry their own design.toml.
 emit(
   "design-dir.schema.json",
   designDirectoryRegistrySchema,
   "https://zeros.build/schemas/design-dir.schema.json",
   "Zeros Design directory registry",
-  "Tracked .zeros/design-dir.toml: stable Design directory IDs and canonical repository-relative paths. Entries must be unique, non-overlapping, and use real, unlinked files and directories. Private selections belong in local settings; frame metadata lives under .zeros/design/<id>/document.json.",
+  "Legacy central Design directory registry. New Design folders carry their own design.toml manifest with stable identity and document metadata. Entries must remain unique and non-overlapping during migration.",
+);
+
+emit(
+  "design.schema.json",
+  designManifestSchema,
+  "https://zeros.build/schemas/design.schema.json",
+  "Zeros Design folder manifest",
+  "Each Design folder carries design.toml: format zeros-design, envelope version 1, a stable ID and the complete document metadata. Optional nulls are JSON pointers into document for lossless TOML encoding. Commit this file with the Design source; .zeros contains private state.",
 );

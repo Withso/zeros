@@ -8,6 +8,7 @@ import {
 
 import {
   connectDesignFrameRuntime,
+  designFrameRuntime,
   DesignFrameRuntimeError,
 } from "../design-frame-runtime";
 
@@ -65,6 +66,60 @@ function snapshot(
 }
 
 describe("design frame runtime client", () => {
+  it("publishes only ready connections and keeps the painted runtime during replacement", async () => {
+    const host = { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() };
+    const source = { postMessage: vi.fn() };
+    const connect = (version: string) =>
+      connectDesignFrameRuntime(
+        "ready-workspace",
+        "home.html",
+        version,
+        { contentWindow: source } as unknown as HTMLIFrameElement,
+        {},
+        host,
+      );
+    const ready = (version: string) => {
+      const port = source.postMessage.mock.lastCall?.[1]
+        ?.transfer?.[0] as MessagePort;
+      port.postMessage({
+        protocol: DESIGN_RUNTIME_PROTOCOL,
+        version: DESIGN_RUNTIME_VERSION,
+        type: "event",
+        event: "ready",
+        payload: {
+          sourceVersion: version,
+          capabilities,
+          snapshot: snapshot(1, version),
+        },
+      });
+      return port;
+    };
+    const first = connect(SOURCE_VERSION);
+    let next: ReturnType<typeof connect> | null = null;
+    try {
+      expect(designFrameRuntime("ready-workspace", "home.html")).toBeNull();
+      ready(SOURCE_VERSION);
+      await vi.waitFor(() =>
+        expect(designFrameRuntime("ready-workspace", "home.html")).toBe(
+          first,
+        ),
+      );
+      next = connect(NEXT_SOURCE_VERSION);
+      expect(designFrameRuntime("ready-workspace", "home.html")).toBe(first);
+      expect(designFrameRuntime("another-workspace", "home.html")).toBeNull();
+      ready(NEXT_SOURCE_VERSION);
+      await vi.waitFor(() =>
+        expect(designFrameRuntime("ready-workspace", "home.html")).toBe(next),
+      );
+      first.destroy();
+      expect(designFrameRuntime("ready-workspace", "home.html")).toBe(next);
+    } finally {
+      first.destroy();
+      next?.destroy();
+    }
+    expect(designFrameRuntime("ready-workspace", "home.html")).toBeNull();
+  });
+
   it("routes exact-source responses and versioned snapshot events", async () => {
     const source = { postMessage: vi.fn() };
     const host = {

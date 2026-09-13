@@ -1,3 +1,4 @@
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 // gateway.prompt — working-directory hint injection. An agent that doesn't
 // tell its own model the cwd (one NOT in CWD_SELF_AWARE_AGENTS) starts a turn
 // blind: the model guesses a path on its first write, hits the wrong (often
@@ -9,11 +10,18 @@
 import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter, ContentBlock, PromptResponse } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
+
+const fixtureRoot = realpathSync(
+  mkdtempSync(path.join(os.tmpdir(), "zeros-gateway-cwd-")),
+);
+afterAll(() => {
+  rmSync(fixtureRoot, { recursive: true, force: true });
+});
 
 function makeGateway() {
   return new AgentGateway({
@@ -274,7 +282,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
 
     // A real existing dir so resolveAgentCwd accepts the cwd.
     const loaded = await gw.loadSession("claude", "fresh-1", {
-      cwd: os.tmpdir(),
+      cwd: fixtureRoot,
     });
     const executionId = loaded.executionId!;
     // A degraded resume must NOT be pre-marked instructed (the fresh thread has
@@ -286,7 +294,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     const head = sink[0]![0] as { text: string };
     expect(head.text).toContain("<system_instruction>");
     expect(head.text).toContain("working inside Zeros");
-    expect(head.text).toContain(os.tmpdir());
+    expect(head.text).toContain(fixtureRoot);
     expect(sink[0]![sink[0]!.length - 1]).toEqual(text("hi"));
   });
 
@@ -297,7 +305,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     gwi.adapters.set("codex", resumingAdapter("codex", sink, false));
 
     const loaded = await gw.loadSession("codex", "true-1", {
-      cwd: os.tmpdir(),
+      cwd: fixtureRoot,
     });
     const executionId = loaded.executionId!;
     expect(executionId).not.toBe("true-1");
@@ -312,7 +320,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     const gwi = gw as unknown as GwInternals;
     const sink: ContentBlock[][] = [];
     gwi.adapters.set("claude", resumingAdapter("claude", sink, false));
-    const designDirectory = path.join(os.tmpdir(), "Zeros Design");
+    const designDirectory = path.join(fixtureRoot, "Zeros Design");
 
     // Unit seam: territory preparation is covered independently; this locks
     // the resumed-transcript behavior without requiring a live OS sandbox.
@@ -332,18 +340,18 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
       }
     ).prepareCodeAgentTerritory = async () => ({
       agentRole: "code",
-      workspaceRoot: os.tmpdir(),
+      workspaceRoot: fixtureRoot,
       designDirectory,
       protectedDesignDirectories: [designDirectory],
-      designRecognitionPaths: [path.join(os.tmpdir(), ".zeros")],
+      designRecognitionPaths: [path.join(fixtureRoot, ".zeros")],
       writeCapabilities: {
         workspace: "write",
-        deniedPaths: [designDirectory, path.join(os.tmpdir(), ".zeros")],
+        deniedPaths: [designDirectory, path.join(fixtureRoot, ".zeros")],
       },
     });
 
     const loaded = await gw.loadSession("claude", "true-territory", {
-      cwd: os.tmpdir(),
+      cwd: fixtureRoot,
     });
     const executionId = loaded.executionId!;
     expect(executionId).not.toBe("true-territory");

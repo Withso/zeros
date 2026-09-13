@@ -6,7 +6,11 @@ import {
 } from "parse5";
 import postcss from "postcss";
 
-import { designNodeIdSchema } from "@zeros/design-core";
+import {
+  DESIGN_DOCUMENT_BODY_ID,
+  designNodeIdSchema,
+} from "@zeros/design-core";
+import { designDocumentBody, withExplicitDesignBody } from "./document-body";
 
 import { normalizeDesignCssProperty, validateDesignCssValue } from "./css";
 
@@ -587,7 +591,17 @@ export function mutateDesignNodeHtmlSource(
   mode: "append" | "replace-inner" = "replace-inner",
 ): string {
   assertSafeDesignHtmlFragment(html);
-  const element = elementForMutation(source, nodeId);
+  if (nodeId === DESIGN_DOCUMENT_BODY_ID) {
+    if (mode !== "append")
+      throw new Error(
+        "Document content can only be appended through this target.",
+      );
+    source = withExplicitDesignBody(source);
+  }
+  const element =
+    nodeId === DESIGN_DOCUMENT_BODY_ID
+      ? designDocumentBody(parse(source, { sourceCodeLocationInfo: true }))
+      : elementForMutation(source, nodeId);
   const location = element.sourceCodeLocation;
   if (!location?.startTag || !location.endTag) {
     throw new Error(`Design element cannot contain HTML: ${nodeId}`);

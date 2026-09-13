@@ -122,8 +122,8 @@ export const CHAT_STRIP_SHELL_CLS =
 /** Column-owned strip slots. 2026-09-01: Code's conversation column dropped its
  * own h-10 name/mode row, so the mode toggle became this strip's fixed leading
  * control and the collapsed-workbench expand button its fixed trailing one.
- * Each slot owns only the window-edge gutter — the neighbouring control's own
- * `pl-2`/`pr-2` supplies the gap between them. Exported so the no-workspace
+ * Each slot owns only the window-edge gutter; the tab lane's 4px left inset
+ * matches its inter-tab gap after the toggle. Exported so the no-workspace
  * placeholder band in conversation/pane-layout.tsx seats them identically.
  *
  * `relative z-40` lifts both slots ABOVE the host pane's inactive-window veil
@@ -139,7 +139,7 @@ export const CHAT_STRIP_SHELL_CLS =
  * mid-drag. The pane's bg0 window fill still shows behind them (a ~1% shift
  * against bg1), so the surrounding strip keeps reading as recessed. */
 export const CHAT_STRIP_LEADING_CLS =
-  "relative z-40 flex h-full shrink-0 items-center pl-2 pr-1";
+  "relative z-40 flex h-full shrink-0 items-center pl-2";
 export const CHAT_STRIP_TRAILING_CLS =
   "relative z-40 flex h-full shrink-0 items-center pr-2";
 
@@ -148,9 +148,7 @@ export const CHAT_STRIP_TRAILING_CLS =
  *
  * 2026-09-01: history moved from the strip's left edge to its right end, so it
  * dropped the left gutter it used to own there — it now abuts the "⋯" menu, and
- * the two 24px icon buttons' own internal padding is the separation. The leading
- * slot picked up `pr-1` in exchange: with history gone from between them, the
- * mode toggle would otherwise sit 4px from the first tab pill. */
+ * the two 24px icon buttons' own internal padding is the separation. */
 const HISTORY_CONTROL_CLS = "flex h-full shrink-0 items-center";
 const PLUS_CONTROL_CLS = "flex h-full shrink-0 items-center";
 /** Both menu controls are pinned at the far right, after the flexible filler,
@@ -171,7 +169,7 @@ const TAB_ROW_CLS = "relative flex h-full w-max items-center gap-1 px-1";
  *  has no resting fill; hover and the ACTIVE tab both fill bg-bg2. Selection
  *  reads from the persistent fill + fg1 text. */
 const TAB_BASE_CLS =
-  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-sm px-2 text-left text-xs font-medium text-fg2 transition-none focus-within:bg-bg2 focus-within:text-fg2 data-[hovered=true]:bg-bg2 data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:text-fg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:text-fg1";
+  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-pointer select-none items-center gap-2 overflow-hidden rounded-lg px-2 text-left text-xs font-medium text-fg2 transition-none focus-within:bg-bg2 focus-within:text-fg2 data-[hovered=true]:bg-bg2 data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-bg2 data-[active=true]:text-fg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:text-fg1";
 
 const TAB_LABEL_CLS = "min-w-0 truncate text-xs font-medium leading-none";
 
@@ -189,7 +187,7 @@ const TITLE_INPUT_CLS =
 /** Synthetic "Untitled" tab — rendered while the workspace has zero
  *  visible chats (the selection keeper is mid-spawn). */
 const TAB_UNTITLED_CLS =
-  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-sm bg-bg2 px-2 text-xs font-medium text-fg1";
+  "group/tab relative flex h-7 min-w-[70px] max-w-[140px] shrink-0 cursor-default select-none items-center gap-2 overflow-hidden rounded-lg bg-bg2 px-2 text-xs font-medium text-fg1";
 
 const PANE_MENU_BTN_CLS =
   "size-7 shrink-0 rounded-sm text-fg2 hover:bg-bg2-hover/40 hover:text-fg1 transition-[background-color,color] duration-120 ease-out";

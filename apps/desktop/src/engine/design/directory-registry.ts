@@ -52,7 +52,7 @@ export function primeDesignDirectoryName(
   name: string | null | undefined,
 ): void {
   const sanitized = sanitizeDesignDirectoryName(name);
-  if (!sanitized || sanitized === DEFAULT_DESIGN_DIRECTORY_NAME) {
+  if (!sanitized) {
     names.delete(keyFor(workspacePath));
     return;
   }
@@ -63,12 +63,19 @@ export function primeDesignDirectoryName(
  *  possibly nested ("apps/web/designs"). Defaults to "Zeros Design" until the
  *  engine primes something else. */
 export function designDirectoryNameFor(workspacePath: string): string {
-  const key = keyFor(workspacePath);
   return (
-    readLeaseStorage.getStore()?.get(key) ??
-    names.get(key) ??
-    DEFAULT_DESIGN_DIRECTORY_NAME
+    activeDesignDirectoryNameFor(workspacePath) ?? DEFAULT_DESIGN_DIRECTORY_NAME
   );
+}
+
+/** An explicitly primed or leased directory, without the legacy read fallback.
+ * Path guards must not reserve an ordinary "Zeros Design" folder merely
+ * because no Design directory is active (including after unregistering it). */
+export function activeDesignDirectoryNameFor(
+  workspacePath: string,
+): string | undefined {
+  const key = keyFor(workspacePath);
+  return readLeaseStorage.getStore()?.get(key) ?? names.get(key);
 }
 
 /** Temporarily teach synchronous Design readers which directory an immutable

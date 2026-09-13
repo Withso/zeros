@@ -2,15 +2,18 @@
 //
 // Serves the real DesignWorkspaceColumn with a warm aggregate snapshot so
 // browser QA can inspect layout and local interactions without an Electron
-// preload or engine. Mutations intentionally remain disabled by the absent
-// bridge; rendering, selection memory, code view, and viewport controls are the
-// production components.
+// preload or engine. An in-memory bridge persists fixture mutations while
+// rendering, selection, and editing use the production components.
 
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
 import "../../../../../styles/globals.css";
 
-import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
+import {
+  DESIGN_RUNTIME_SOURCE,
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
+} from "@zeros/protocol/design-runtime";
+import type { DesignFoundationOpenWire } from "../platform/git";
 
 const HOME_SOURCE_VERSION = "aaaaaaaaaaaaaaaaaaaaaaaa";
 const PRICING_SOURCE_VERSION = "bbbbbbbbbbbbbbbbbbbbbbbb";
@@ -27,7 +30,22 @@ function withDesignRuntime(source: string, sourceVersion: string): string {
   return source.replace(/<\/body>/i, () => `${runtime}</body>`);
 }
 
-const homeSource = `<!doctype html>
+const homeSource = new URLSearchParams(window.location.search).has(
+  "authoredFrame",
+)
+  ? `<!doctype html><html><head><style>* { box-sizing:border-box; }</style></head>
+    <body style="margin:0;display:block;position:relative;height:100vh;background:white">
+      <main data-oid="home-main" style="display:block;position:absolute;left:0;top:400px;width:100%;height:64px;background:red;rotate:180deg">
+        <div data-oid="red-child" style="display:block;position:absolute;left:40px;top:10px;width:100px;height:30px"></div>
+      </main>
+    </body></html>`
+  : new URLSearchParams(window.location.search).has("emptyFrame")
+    ? `<!doctype html><html><head><style>
+      * { box-sizing:border-box; }
+      body { margin:0; background:white; }
+      body [data-oid] { display:block; position:relative; margin:0; }
+    </style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;position:relative;height:100vh;"></main></body></html>`
+    : `<!doctype html>
 <html data-oid="home-html">
   <head>
     <style>
@@ -44,7 +62,7 @@ const homeSource = `<!doctype html>
     </style>
   </head>
   <body data-oid="home-body">
-    <main data-oid="home-main">
+    <main data-oid="home-main" data-zeros-frame-root>
       <nav data-oid="home-nav"><span data-oid="home-mark" class="mark">NORTH/ONE</span><span data-oid="home-season">Summer 2026</span></nav>
       <div data-oid="home-hero" class="hero">
         <h1 data-oid="home-heading">Make the next move unmistakable.</h1>
@@ -78,7 +96,7 @@ const pricingSource = `<!doctype html>
     </style>
   </head>
   <body data-oid="pricing-body">
-    <main data-oid="pricing-main">
+    <main data-oid="pricing-main" data-zeros-frame-root>
       <header data-oid="pricing-header"><h1 data-oid="pricing-heading">Simple plans for serious momentum.</h1><span data-oid="pricing-cancel">Cancel anytime</span></header>
       <div data-oid="pricing-plans" class="plans">
         <article data-oid="pricing-start"><strong data-oid="pricing-start-name">Start</strong><p data-oid="pricing-start-copy">For one focused product team.</p><b data-oid="pricing-start-price">$24</b></article>
@@ -128,6 +146,7 @@ async function main() {
   const React = await import("react");
   const { createRoot } = await import("react-dom/client");
   const { TooltipProvider } = await import("../shared/ui/primitives/tooltip");
+  const { Toaster } = await import("../shared/ui/primitives/elements/toast");
   const { DesignWorkspaceColumn } =
     await import("../features/design-workspace/design-workspace");
   const { DesignWorkspaceSidebar } =
@@ -226,47 +245,81 @@ async function main() {
       healedOids: 0,
     },
   });
+  // Keep server replies independent of the renderer cache so a slow/cold read
+  // exercises the same state as an engine-backed document.
+  const foundationReplies = new Map<string, DesignFoundationOpenWire>();
+  let foundationReadsHeld = new URLSearchParams(window.location.search).has(
+    "coldFoundation",
+  );
+  let releaseFoundationReads: () => void = () => {};
+  const foundationReadGate = foundationReadsHeld
+    ? new Promise<void>((resolve) => {
+        releaseFoundationReads = () => {
+          foundationReadsHeld = false;
+          resolve();
+        };
+      })
+    : Promise.resolve();
+  const foundationControl = {
+    reads: [] as Array<{ frame: string; sourceVersion: string | undefined }>,
+    transactions: [] as Array<{
+      frame: string;
+      documentId: string;
+      baseRevision: string;
+      nodeIds: string[];
+    }>,
+    release: releaseFoundationReads,
+  };
+  (
+    window as Window & {
+      __zerosHarnessFoundation?: typeof foundationControl;
+    }
+  ).__zerosHarnessFoundation = foundationControl;
+  const publishFoundation = (
+    key: string,
+    foundation: DesignFoundationOpenWire,
+  ) => {
+    foundationReplies.set(key, foundation);
+    if (!foundationReadsHeld) designFoundationCache.setData(key, foundation);
+  };
   for (const [file, sourceVersion, nodeCount] of [
     ["home.html", HOME_SOURCE_VERSION, 12],
     ["pricing.html", PRICING_SOURCE_VERSION, 18],
   ] as const) {
-    designFoundationCache.setData(
-      designFoundationKey(workspaceId, file, sourceVersion),
-      {
-        summary: {
-          apiVersion: 1,
-          documentId: `harness:${file}`,
+    publishFoundation(designFoundationKey(workspaceId, file, sourceVersion), {
+      summary: {
+        apiVersion: 1,
+        documentId: `harness:${file}`,
+        revision: `harness:${sourceVersion}`,
+        entryFile: file,
+        fileCount: 1,
+        nodeCount,
+        valid: true,
+        diagnostics: [],
+        lastValidRevision: `harness:${sourceVersion}`,
+        history: {
+          canUndo: false,
+          canRedo: false,
+          undoDepth: 0,
+          redoDepth: 0,
+          retainedBytes: 0,
+          retainedReceiptBytes: 0,
           revision: `harness:${sourceVersion}`,
-          entryFile: file,
-          fileCount: 1,
-          nodeCount,
-          valid: true,
-          diagnostics: [],
-          lastValidRevision: `harness:${sourceVersion}`,
-          history: {
-            canUndo: false,
-            canRedo: false,
-            undoDepth: 0,
-            redoDepth: 0,
-            retainedBytes: 0,
-            retainedReceiptBytes: 0,
-            revision: `harness:${sourceVersion}`,
-            lastReconciliationReason: null,
-          },
+          lastReconciliationReason: null,
         },
-        foundation: {
-          documentId: `harness:${file}`,
-          revision: `harness:${sourceVersion}`,
-          manifest: {
-            schemaVersion: 1,
-            parameters: [],
-            variants: [],
-            components: [],
-          },
-          keyframes: [],
+      },
+      foundation: {
+        documentId: `harness:${file}`,
+        revision: `harness:${sourceVersion}`,
+        manifest: {
+          schemaVersion: 1,
+          parameters: [],
+          variants: [],
+          components: [],
         },
-      } as never,
-    );
+        keyframes: [],
+      },
+    } as never);
   }
   designFrameDocumentCache.setData(
     designFrameDocumentKey(workspaceId, "home.html", HOME_SOURCE_VERSION),
@@ -491,6 +544,23 @@ async function main() {
         }
         designShortcutOperations.push("style:start");
         styleMutationSources.push(requestedSourceVersion);
+        const parsed = new DOMParser().parseFromString(
+          currentHomeSource,
+          "text/html",
+        );
+        const target =
+          message.params?.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID
+            ? parsed.body
+            : parsed.querySelector<HTMLElement>(
+                `[data-oid="${CSS.escape(String(message.params?.nodeId ?? ""))}"]`,
+              );
+        if (!target) throw new Error("The style target is unavailable.");
+        for (const [property, value] of Object.entries(
+          (message.params?.styles ?? {}) as Record<string, string | null>,
+        )) {
+          target.style.setProperty(property, value ?? "");
+        }
+        currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
         const nextSourceVersion = nextStyleSourceVersion();
         const nextWorkspaceSnapshot = {
           ...currentWorkspaceSnapshot,
@@ -517,11 +587,11 @@ async function main() {
             tree: [],
           },
         );
-        const previousFoundation = designFoundationCache.getSnapshot(
+        const previousFoundation = foundationReplies.get(
           designFoundationKey(workspaceId, "home.html", requestedSourceVersion),
-        ).data;
+        );
         if (previousFoundation) {
-          designFoundationCache.setData(
+          publishFoundation(
             designFoundationKey(workspaceId, "home.html", nextSourceVersion),
             {
               ...previousFoundation,
@@ -568,44 +638,99 @@ async function main() {
           | {
               transactionId?: string;
               documentId?: string;
+              baseRevision?: string;
               operations?: Array<{
                 operationId?: string;
                 type?: string;
                 nodeId?: string;
                 text?: string;
+                html?: string;
+                mode?: string;
                 styles?: Record<string, string>;
+                frame?: string;
+                geometry?: {
+                  x: number;
+                  y: number;
+                  width: number;
+                  height: number;
+                  z: number;
+                };
               }>;
             }
           | undefined;
         const textOperation = transaction?.operations?.find(
           (operation) => operation.type === "node.set-text",
         );
-        if (textOperation) {
+        if (
+          textOperation ||
+          transaction?.operations?.some(
+            (operation) =>
+              operation.type === "node.set-styles" ||
+              operation.type === "node.set-html",
+          )
+        ) {
           const frameFile = String(message.params?.frame ?? "");
           const currentFrame = currentWorkspaceSnapshot.frames.find(
             (frame) => frame.file === frameFile,
           );
-          if (!currentFrame || !textOperation.nodeId) {
+          if (!currentFrame) {
             throw new Error("The text transaction target is unavailable.");
           }
           const beforeRevision = `harness:${currentFrame.sourceVersion}`;
+          if (
+            transaction?.documentId !== `harness:${frameFile}` ||
+            transaction.baseRevision !== beforeRevision
+          ) {
+            throw new Error("The transaction document or revision is stale.");
+          }
+          foundationControl.transactions.push({
+            frame: frameFile,
+            documentId: transaction.documentId,
+            baseRevision: transaction.baseRevision,
+            nodeIds: (transaction.operations ?? []).flatMap((operation) =>
+              operation.nodeId ? [operation.nodeId] : [],
+            ),
+          });
           const parsed = new DOMParser().parseFromString(
             currentHomeSource,
             "text/html",
           );
-          const target = parsed.querySelector<HTMLElement>(
-            `[data-oid="${CSS.escape(textOperation.nodeId)}"]`,
-          );
-          if (!target) {
-            throw new Error("The text transaction node is unavailable.");
+          if (textOperation?.nodeId) {
+            const target = parsed.querySelector<HTMLElement>(
+              `[data-oid="${CSS.escape(textOperation.nodeId)}"]`,
+            );
+            if (!target)
+              throw new Error("The text transaction node is unavailable.");
+            target.textContent = String(textOperation.text ?? "");
           }
-          target.textContent = String(textOperation.text ?? "");
           for (const operation of transaction?.operations ?? []) {
-            if (operation.type !== "node.set-styles") continue;
+            if (operation.type === "node.set-html" && operation.nodeId) {
+              const target =
+                operation.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID
+                  ? parsed.body
+                  : parsed.querySelector<HTMLElement>(
+                      `[data-oid="${CSS.escape(operation.nodeId)}"]`,
+                    );
+              if (!target)
+                throw new Error("The insertion target is unavailable.");
+              if (operation.mode === "append")
+                target.insertAdjacentHTML("beforeend", operation.html ?? "");
+              else target.innerHTML = operation.html ?? "";
+            }
+            if (operation.type !== "node.set-styles" || !operation.nodeId)
+              continue;
+            const target =
+              operation.nodeId === DESIGN_RUNTIME_DOCUMENT_BODY_ID
+                ? parsed.body
+                : parsed.querySelector<HTMLElement>(
+                    `[data-oid="${CSS.escape(operation.nodeId)}"]`,
+                  );
+            if (!target)
+              throw new Error("The style transaction node is unavailable.");
             for (const [property, value] of Object.entries(
               operation.styles ?? {},
             )) {
-              target.style.setProperty(property, value);
+              target.style.setProperty(property, value ?? "");
             }
           }
           currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
@@ -620,6 +745,11 @@ async function main() {
               frame.file === frameFile
                 ? {
                     ...frame,
+                    ...transaction?.operations?.find(
+                      (operation) =>
+                        operation.type === "frame.set-geometry" &&
+                        operation.frame === frame.file,
+                    )?.geometry,
                     sourceVersion: nextSourceVersion,
                     modifiedAt: frame.modifiedAt + 1,
                   }
@@ -639,15 +769,15 @@ async function main() {
               tree: [],
             },
           );
-          const previousFoundation = designFoundationCache.getSnapshot(
+          const previousFoundation = foundationReplies.get(
             designFoundationKey(
               workspaceId,
               frameFile,
               currentFrame.sourceVersion,
             ),
-          ).data;
+          );
           if (previousFoundation) {
-            designFoundationCache.setData(
+            publishFoundation(
               designFoundationKey(workspaceId, frameFile, nextSourceVersion),
               {
                 ...previousFoundation,
@@ -718,11 +848,11 @@ async function main() {
             tree: [],
           },
         );
-        const previousFoundation = designFoundationCache.getSnapshot(
+        const previousFoundation = foundationReplies.get(
           designFoundationKey(workspaceId, "home.html", previousSourceVersion),
-        ).data;
+        );
         if (previousFoundation) {
-          designFoundationCache.setData(
+          publishFoundation(
             designFoundationKey(workspaceId, "home.html", nextSourceVersion),
             {
               ...previousFoundation,
@@ -810,11 +940,11 @@ async function main() {
             tree: [],
           },
         );
-        const previousFoundation = designFoundationCache.getSnapshot(
+        const previousFoundation = foundationReplies.get(
           designFoundationKey(workspaceId, frameFile, previousSourceVersion),
-        ).data;
+        );
         if (previousFoundation) {
-          designFoundationCache.setData(
+          publishFoundation(
             designFoundationKey(workspaceId, frameFile, nextSourceVersion),
             {
               ...previousFoundation,
@@ -897,7 +1027,7 @@ async function main() {
             tree: [],
           },
         );
-        designFoundationCache.setData(
+        publishFoundation(
           designFoundationKey(workspaceId, file, sourceVersion),
           {
             summary: {
@@ -941,13 +1071,20 @@ async function main() {
       }
       if (message.op === "design.foundation.open") {
         const frameFile = String(message.params?.frame ?? "");
+        foundationControl.reads.push({
+          frame: frameFile,
+          sourceVersion: currentWorkspaceSnapshot.frames.find(
+            (frame) => frame.file === frameFile,
+          )?.sourceVersion,
+        });
+        await foundationReadGate;
         const sourceVersion = currentWorkspaceSnapshot.frames.find(
           (frame) => frame.file === frameFile,
         )?.sourceVersion;
         const foundation = sourceVersion
-          ? designFoundationCache.getSnapshot(
+          ? foundationReplies.get(
               designFoundationKey(workspaceId, frameFile, sourceVersion),
-            ).data
+            )
           : null;
         if (!foundation) {
           throw new Error("The harness foundation is unavailable.");
@@ -1188,6 +1325,7 @@ async function main() {
             surfaceActive
           />
         </main>
+        <Toaster />
       </TooltipProvider>
     );
   }

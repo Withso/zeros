@@ -8,7 +8,6 @@ import React, { useState } from "react";
 import {
   ChevronDown,
   Diamond,
-  Layers3,
   Play,
   RotateCw,
   Sparkles,
@@ -38,6 +37,14 @@ import {
   DesignShadowControl,
   DesignTransformControl,
 } from "./design-effect-editor";
+import { DesignLayoutControls } from "./design-layout-controls";
+import { designLayoutChildrenSummary } from "./design-layout-children";
+import {
+  designLayoutMode,
+  designLayoutModeStyles,
+  type DesignLayoutAction,
+  type DesignLayoutFieldOptions,
+} from "./design-layout-values";
 import { DesignFillEditor } from "./design-fill-editor";
 import { readDesignComputedStyle } from "./design-style-values";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
@@ -55,7 +62,11 @@ interface DesignStyleEditorProps {
     label: string,
     property: string,
     value: string,
+    options?: DesignLayoutFieldOptions,
   ) => React.ReactNode;
+  onLayoutAction: (action: DesignLayoutAction) => Promise<void>;
+  frameSelected?: boolean;
+  layoutParents?: readonly DesignRuntimeNodeDetails[];
   onPreviewStyles?: (styles: Record<string, string | null>) => Promise<void>;
   onCancelStylePreview?: () => Promise<void>;
   onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
@@ -108,15 +119,26 @@ function StyleSection({
   icon,
   defaultOpen = false,
   summary,
+  fixed = false,
   children,
 }: {
   title: string;
-  icon: React.ReactNode;
+  icon?: React.ReactNode;
+  fixed?: boolean;
   defaultOpen?: boolean;
   summary?: string;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  if (fixed)
+    return (
+      <section data-design-layout-section className="border-border1 border-b">
+        <h3 className="text-fg1 flex h-9 items-center px-3 text-xs font-medium">
+          {title}
+        </h3>
+        <div className="flex flex-col gap-2 px-3 pb-3">{children}</div>
+      </section>
+    );
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
       <section className="border-border1 border-b">
@@ -437,6 +459,9 @@ export function DesignStyleEditor({
   onPreviewStyles,
   onCancelStylePreview,
   onCommitStyles,
+  onLayoutAction,
+  frameSelected,
+  layoutParents,
   motionTimelineOpen = false,
   motionProperties = [],
   onOpenMotionTimeline,
@@ -467,41 +492,28 @@ export function DesignStyleEditor({
 
   return (
     <div data-design-style-editor className="flex flex-col">
-      <StyleSection
-        title="Layout"
-        icon={<Layers3 />}
-        defaultOpen
-        summary={`${Math.round(details.rect.width)} × ${Math.round(details.rect.height)} · ${display}`}
-      >
-        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Position &amp; size
-        </span>
-        <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "X",
-            "left",
-            styleValue(details, "left", `${Math.round(details.rect.x)}px`),
+      <StyleSection title="Layout" fixed>
+        <DesignLayoutControls
+          details={details}
+          renderField={renderField}
+          disabled={disabled}
+          frameSelected={frameSelected}
+          childrenLayout={
+            layoutParents
+              ? designLayoutChildrenSummary(layoutParents)
+              : details.childrenLayout
+          }
+          canDistribute={layoutParents?.some(
+            (parent) => (parent.childrenLayout?.nodeIds.length ?? 0) >= 3,
           )}
-          {renderField(
-            "Y",
-            "top",
-            styleValue(details, "top", `${Math.round(details.rect.y)}px`),
-          )}
-          {renderField(
-            "W",
-            "width",
-            styleValue(details, "width", `${Math.round(details.rect.width)}px`),
-          )}
-          {renderField(
-            "H",
-            "height",
-            styleValue(
-              details,
-              "height",
-              `${Math.round(details.rect.height)}px`,
-            ),
-          )}
-        </div>
+          onAction={(action) => {
+            void onLayoutAction(action).catch((error) =>
+              toast.error("Couldn't update layout", {
+                description: errorMessage(error),
+              }),
+            );
+          }}
+        />
         {OBJECT_FIT_TAGS.has(details.tag) ? (
           <>
             <PropertySelect
@@ -526,43 +538,6 @@ export function DesignStyleEditor({
             )}
           </>
         ) : null}
-        <PropertySelect
-          label="Position"
-          value={styleValue(details, "position", "static")}
-          disabled={disabled}
-          options={[
-            { value: "static", label: "Static" },
-            { value: "relative", label: "Relative" },
-            { value: "absolute", label: "Absolute" },
-            { value: "fixed", label: "Fixed" },
-            { value: "sticky", label: "Sticky" },
-          ]}
-          onChange={(value) => commit({ position: value }, "position")}
-        />
-        {renderField("Z", "z-index", styleValue(details, "z-index", "auto"))}
-        <PropertySelect
-          label="Box sizing"
-          value={styleValue(details, "box-sizing", "border-box")}
-          disabled={disabled}
-          options={[
-            { value: "border-box", label: "Border box" },
-            { value: "content-box", label: "Content box" },
-          ]}
-          onChange={(value) => commit({ "box-sizing": value }, "box sizing")}
-        />
-        <PropertySelect
-          label="Overflow"
-          value={styleValue(details, "overflow", "visible")}
-          disabled={disabled}
-          options={[
-            { value: "visible", label: "Visible" },
-            { value: "hidden", label: "Hidden" },
-            { value: "clip", label: "Clip" },
-            { value: "auto", label: "Auto" },
-            { value: "scroll", label: "Scroll" },
-          ]}
-          onChange={(value) => commit({ overflow: value }, "overflow")}
-        />
         <Button
           type="button"
           variant="ghost"
@@ -607,93 +582,19 @@ export function DesignStyleEditor({
                 "aspect-ratio",
                 styleValue(details, "aspect-ratio", "auto"),
               )}
-              {renderField(
-                "Right",
-                "right",
-                styleValue(details, "right", "auto"),
-              )}
-              {renderField(
-                "Bottom",
-                "bottom",
-                styleValue(details, "bottom", "auto"),
-              )}
-              {renderField(
-                "Float",
-                "float",
-                styleValue(details, "float", "none"),
-              )}
-              {renderField(
-                "Clear",
-                "clear",
-                styleValue(details, "clear", "none"),
-              )}
             </div>
-            <PropertySelect
-              label="Visibility"
-              value={styleValue(details, "visibility", "visible")}
-              disabled={disabled}
-              options={[
-                { value: "visible", label: "Visible" },
-                { value: "hidden", label: "Hidden" },
-                { value: "collapse", label: "Collapse" },
-              ]}
-              onChange={(value) => commit({ visibility: value }, "visibility")}
-            />
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Overflow X",
-                "overflow-x",
-                styleValue(details, "overflow-x", "visible"),
-              )}
-              {renderField(
-                "Overflow Y",
-                "overflow-y",
-                styleValue(details, "overflow-y", "visible"),
-              )}
-            </div>
-            <PropertySelect
-              label="Pointer"
-              value={styleValue(details, "pointer-events", "auto")}
-              disabled={disabled}
-              options={[
-                { value: "auto", label: "Auto" },
-                { value: "none", label: "None" },
-              ]}
-              onChange={(value) =>
-                commit({ "pointer-events": value }, "pointer events")
-              }
-            />
-            <PropertySelect
-              label="Cursor"
-              value={styleValue(details, "cursor", "auto")}
-              disabled={disabled}
-              options={[
-                { value: "auto", label: "Auto" },
-                { value: "default", label: "Default" },
-                { value: "pointer", label: "Pointer" },
-                { value: "text", label: "Text" },
-                { value: "move", label: "Move" },
-                { value: "grab", label: "Grab" },
-                { value: "not-allowed", label: "Not allowed" },
-              ]}
-              onChange={(value) => commit({ cursor: value }, "cursor")}
-            />
           </>
         ) : null}
-        <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
-          Layout mode
-        </span>
         <ChoiceGroup
-          label="Display"
-          value={display}
+          label="Auto layout"
+          value={designLayoutMode(display)}
           disabled={disabled}
           options={[
-            { value: "block", label: "Block" },
-            { value: "flex", label: "Flex" },
-            { value: "grid", label: "Grid" },
             { value: "none", label: "None" },
+            { value: "flex", label: "Stack" },
+            { value: "grid", label: "Grid" },
           ]}
-          onChange={(value) => commit({ display: value }, "display")}
+          onChange={(value) => commit(designLayoutModeStyles(value), "layout")}
         />
         {flexLayout ? (
           <>
@@ -867,115 +768,121 @@ export function DesignStyleEditor({
             />
           </>
         ) : null}
-        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Padding
-        </span>
-        <div className="grid grid-cols-2 gap-1.5">
-          {renderField(
-            "T",
-            "padding-top",
-            styleValue(details, "padding-top", "0px"),
-          )}
-          {renderField(
-            "R",
-            "padding-right",
-            styleValue(details, "padding-right", "0px"),
-          )}
-          {renderField(
-            "B",
-            "padding-bottom",
-            styleValue(details, "padding-bottom", "0px"),
-          )}
-          {renderField(
-            "L",
-            "padding-left",
-            styleValue(details, "padding-left", "0px"),
-          )}
-        </div>
-        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Margin
-        </span>
-        <div className="grid grid-cols-2 gap-1.5">
-          {renderField(
-            "T",
-            "margin-top",
-            styleValue(details, "margin-top", "0px"),
-          )}
-          {renderField(
-            "R",
-            "margin-right",
-            styleValue(details, "margin-right", "0px"),
-          )}
-          {renderField(
-            "B",
-            "margin-bottom",
-            styleValue(details, "margin-bottom", "0px"),
-          )}
-          {renderField(
-            "L",
-            "margin-left",
-            styleValue(details, "margin-left", "0px"),
-          )}
-        </div>
-        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Child layout
-        </span>
-        <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "Grow",
-            "flex-grow",
-            styleValue(details, "flex-grow", "0"),
-          )}
-          {renderField(
-            "Shrink",
-            "flex-shrink",
-            styleValue(details, "flex-shrink", "1"),
-          )}
-          {renderField(
-            "Basis",
-            "flex-basis",
-            styleValue(details, "flex-basis", "auto"),
-          )}
-          {renderField("Order", "order", styleValue(details, "order", "0"))}
-          <PropertySelect
-            label="Self"
-            value={styleValue(details, "align-self", "auto")}
-            disabled={disabled}
-            options={[
-              { value: "auto", label: "Auto" },
-              { value: "flex-start", label: "Start" },
-              { value: "center", label: "Center" },
-              { value: "flex-end", label: "End" },
-              { value: "stretch", label: "Stretch" },
-            ]}
-            onChange={(value) => commit({ "align-self": value }, "align self")}
-          />
-          {renderField(
-            "Grid col",
-            "grid-column",
-            styleValue(details, "grid-column", "auto"),
-          )}
-          {renderField(
-            "Grid row",
-            "grid-row",
-            styleValue(details, "grid-row", "auto"),
-          )}
-        </div>
-        <PropertySelect
-          label="Justify self"
-          value={styleValue(details, "justify-self", "auto")}
-          disabled={disabled}
-          options={[
-            { value: "auto", label: "Auto" },
-            { value: "start", label: "Start" },
-            { value: "center", label: "Center" },
-            { value: "end", label: "End" },
-            { value: "stretch", label: "Stretch" },
-          ]}
-          onChange={(value) =>
-            commit({ "justify-self": value }, "justify self")
-          }
-        />
+        {flexLayout || gridLayout || showAdvancedLayout ? (
+          <>
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Padding
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {renderField(
+                "T",
+                "padding-top",
+                styleValue(details, "padding-top", "0px"),
+              )}
+              {renderField(
+                "R",
+                "padding-right",
+                styleValue(details, "padding-right", "0px"),
+              )}
+              {renderField(
+                "B",
+                "padding-bottom",
+                styleValue(details, "padding-bottom", "0px"),
+              )}
+              {renderField(
+                "L",
+                "padding-left",
+                styleValue(details, "padding-left", "0px"),
+              )}
+            </div>
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Margin
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {renderField(
+                "T",
+                "margin-top",
+                styleValue(details, "margin-top", "0px"),
+              )}
+              {renderField(
+                "R",
+                "margin-right",
+                styleValue(details, "margin-right", "0px"),
+              )}
+              {renderField(
+                "B",
+                "margin-bottom",
+                styleValue(details, "margin-bottom", "0px"),
+              )}
+              {renderField(
+                "L",
+                "margin-left",
+                styleValue(details, "margin-left", "0px"),
+              )}
+            </div>
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Child layout
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Grow",
+                "flex-grow",
+                styleValue(details, "flex-grow", "0"),
+              )}
+              {renderField(
+                "Shrink",
+                "flex-shrink",
+                styleValue(details, "flex-shrink", "1"),
+              )}
+              {renderField(
+                "Basis",
+                "flex-basis",
+                styleValue(details, "flex-basis", "auto"),
+              )}
+              {renderField("Order", "order", styleValue(details, "order", "0"))}
+              <PropertySelect
+                label="Self"
+                value={styleValue(details, "align-self", "auto")}
+                disabled={disabled}
+                options={[
+                  { value: "auto", label: "Auto" },
+                  { value: "flex-start", label: "Start" },
+                  { value: "center", label: "Center" },
+                  { value: "flex-end", label: "End" },
+                  { value: "stretch", label: "Stretch" },
+                ]}
+                onChange={(value) =>
+                  commit({ "align-self": value }, "align self")
+                }
+              />
+              {renderField(
+                "Grid col",
+                "grid-column",
+                styleValue(details, "grid-column", "auto"),
+              )}
+              {renderField(
+                "Grid row",
+                "grid-row",
+                styleValue(details, "grid-row", "auto"),
+              )}
+            </div>
+            <PropertySelect
+              label="Justify self"
+              value={styleValue(details, "justify-self", "auto")}
+              disabled={disabled}
+              options={[
+                { value: "auto", label: "Auto" },
+                { value: "start", label: "Start" },
+                { value: "center", label: "Center" },
+                { value: "end", label: "End" },
+                { value: "stretch", label: "Stretch" },
+              ]}
+              onChange={(value) =>
+                commit({ "justify-self": value }, "justify self")
+              }
+            />
+          </>
+        ) : null}
       </StyleSection>
 
       <StyleSection

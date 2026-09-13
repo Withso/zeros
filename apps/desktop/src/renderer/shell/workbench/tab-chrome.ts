@@ -13,7 +13,7 @@
 //     above the strip's fades at z-10).
 
 export const WORKBENCH_TAB_PILL_BASE_CLS =
-  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-md text-xs font-medium transition-none";
+  "relative flex h-7 shrink-0 cursor-pointer items-center overflow-hidden rounded-lg text-xs font-medium transition-none";
 
 export const WORKBENCH_TAB_PILL_ACTIVE_CLS =
   "bg-bg2 text-fg1 sticky left-1 right-1 z-20";

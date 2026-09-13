@@ -1,3 +1,4 @@
+import { invalidateDesignManifestDiscovery } from "../design/metadata";
 // ──────────────────────────────────────────────────────────
 // Workspace + Git watcher — terminal / agent / external-edit detection
 // ──────────────────────────────────────────────────────────
@@ -413,6 +414,7 @@ export function startGitWatcher(
     if (target) pendingWorktreeTargets.set(target.root, target);
     else pendingWorktreeCoarse = true;
     if (designRecognitionChanged) {
+      if (target) invalidateDesignManifestDiscovery(target.root);
       if (target) pendingRecognitionTargets.add(target.root);
       else pendingRecognitionCoarse = true;
     }
@@ -503,7 +505,10 @@ export function startGitWatcher(
       // retaining the exact workspace/coarse identity.
       scheduleWorktreeChange(
         changed ?? entry.target,
-        basename(filePath) === DESIGN_CANVAS_FILE ||
+        _event === "addDir" ||
+          _event === "unlinkDir" ||
+          basename(filePath) === "design.toml" ||
+          basename(filePath) === DESIGN_CANVAS_FILE ||
           /(?:^|[\\/])\.zeros[\\/](?:design-dir\.toml|design[\\/])/.test(
             filePath,
           ) ||

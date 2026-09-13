@@ -1270,9 +1270,7 @@ export async function insertDesignAssetCached(
   );
 }
 
-export async function saveDesigns(
-  workspaceId: string,
-): Promise<{ ok: true }> {
+export async function saveDesigns(workspaceId: string): Promise<{ ok: true }> {
   return runLocalDesignMutation(workspaceId, async () => {
     const result = await designSave(workspaceId);
     invalidateDesignWorkspaceSnapshot(workspaceId);
@@ -1443,12 +1441,56 @@ export async function updateDesignFrameGeometryCached(
   });
 }
 
-export async function applyDesignTransactionCached(
+/** Capture an edit's owner/operations immediately, then join its exact document
+ * read inside the mutation lane. A ready runtime does not imply the inspector's
+ * Foundation hook has rendered yet; loading metadata must neither reject the
+ * edit nor let later writes or Undo overtake it. */
+export function applyDesignEditCached(
+  workspaceId: string,
+  {
+    file,
+    sourceVersion,
+  }: Pick<DesignFrameDocumentWire, "file" | "sourceVersion">,
+  intent: Omit<DesignTransaction, "documentId" | "baseRevision">,
+): Promise<DesignApiMutationReplyWire> {
+  return applyPreparedDesignTransactionCached(workspaceId, file, async () => {
+    const key = designFoundationKey(
+      workspaceId,
+      file,
+      resolveLocalFrameSourceVersion(workspaceId, file, sourceVersion),
+    );
+    const foundation = await designFoundationCache.load(
+      key,
+      () => fetchDesignFoundation(key),
+      { maxAgeMs: Number.POSITIVE_INFINITY },
+    );
+    return {
+      ...intent,
+      documentId: foundation.summary.documentId,
+      baseRevision: foundation.summary.revision,
+    };
+  });
+}
+
+export function applyDesignTransactionCached(
   workspaceId: string,
   frame: string,
   transaction: DesignTransaction,
 ): Promise<DesignApiMutationReplyWire> {
+  return applyPreparedDesignTransactionCached(
+    workspaceId,
+    frame,
+    async () => transaction,
+  );
+}
+
+async function applyPreparedDesignTransactionCached(
+  workspaceId: string,
+  frame: string,
+  prepare: () => Promise<DesignTransaction>,
+): Promise<DesignApiMutationReplyWire> {
   return runLocalDesignMutation(workspaceId, async () => {
+    const transaction = await prepare();
     const revisionKey = frameMutationKey(workspaceId, frame);
     const execute = async () => {
       const baseRevision = await resolveFoundationBaseRevision(
@@ -1628,14 +1670,26 @@ async function adoptDesignStyleGeneration(
     const updatedNodeIds = new Set(
       adopted.details.map((details) => details.oid),
     );
-    const refreshNodeIds = patch
-      ? (
-          runtimeStore.byWorkspace[workspaceId]?.frames[frame]?.detailOrder ??
-          []
-        )
-          .filter((nodeId) => !updatedNodeIds.has(nodeId))
-          .slice(-64)
-      : [];
+    const cachedFrame = runtimeStore.byWorkspace[workspaceId]?.frames[frame];
+    const affectedParents = new Set(
+      adopted.details
+        .map((details) => details.layout?.parentId)
+        .filter(Boolean),
+    );
+    // Container geometry can stay identical while its children's constraints
+    // change. Refresh those retained aggregates before promoting the generation;
+    // rebasing their old values would make them look like confirmed new data.
+    const refreshNodeIds = (cachedFrame?.detailOrder ?? [])
+      .filter(
+        (nodeId) =>
+          !updatedNodeIds.has(nodeId) &&
+          (patch ||
+            affectedParents.has(nodeId) ||
+            cachedFrame?.detailsByNode[nodeId]?.childrenLayout?.nodeIds.some(
+              (childId) => updatedNodeIds.has(childId),
+            )),
+      )
+      .slice(-64);
     const refreshedDetails = (
       await Promise.all(
         refreshNodeIds.map((nodeId) =>

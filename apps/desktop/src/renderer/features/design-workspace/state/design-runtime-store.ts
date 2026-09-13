@@ -181,6 +181,27 @@ function sameNodeDetails(
     // Rotating a square leaves its bounding box identical, so orientation has
     // to be compared or the canvas keeps painting the previous angle.
     sameNodeBox(left.box, right.box) &&
+    left.childCoordinateSpace?.length === right.childCoordinateSpace?.length &&
+    (left.childCoordinateSpace?.every(
+      (value, index) => value === right.childCoordinateSpace?.[index],
+    ) ??
+      true) &&
+    left.layout?.x === right.layout?.x &&
+    left.layout?.y === right.layout?.y &&
+    left.layout?.parentId === right.layout?.parentId &&
+    left.layout?.parentWidth === right.layout?.parentWidth &&
+    left.layout?.parentHeight === right.layout?.parentHeight &&
+    left.layout?.parentDisplay === right.layout?.parentDisplay &&
+    left.layout?.parentPosition === right.layout?.parentPosition &&
+    left.layout?.isContainingBlock === right.layout?.isContainingBlock &&
+    left.childrenLayout?.count === right.childrenLayout?.count &&
+    left.childrenLayout?.x === right.childrenLayout?.x &&
+    left.childrenLayout?.y === right.childrenLayout?.y &&
+    left.childrenLayout?.truncated === right.childrenLayout?.truncated &&
+    sameStringArray(
+      left.childrenLayout?.nodeIds,
+      right.childrenLayout?.nodeIds,
+    ) &&
     sameStringArray(left.breadcrumb, right.breadcrumb) &&
     sameStringArray(
       left.authoredStyleProperties,

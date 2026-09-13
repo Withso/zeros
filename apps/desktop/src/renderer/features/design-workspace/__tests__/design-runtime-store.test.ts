@@ -30,6 +30,125 @@ function details(): DesignRuntimeNodeDetails {
 describe("design runtime store", () => {
   beforeEach(() => resetDesignRuntimeStoreForTests());
 
+  it("publishes child membership and pin changes while retaining identical exact-key readbacks", () => {
+    const store = useDesignRuntimeStore.getState();
+    const initial: DesignRuntimeNodeDetails = {
+      ...details(),
+      childCoordinateSpace: [1, 0, 0, 1, 0, 0],
+      childrenLayout: {
+        count: 1,
+        nodeIds: ["child"],
+        x: "start",
+        y: "start",
+        truncated: false,
+      },
+    };
+    const publish = (node: DesignRuntimeNodeDetails) =>
+      store.publishNodeDetails(
+        "workspace-a",
+        "/design/a",
+        "home.html",
+        node,
+        SOURCE_VERSION,
+      );
+    publish(initial);
+    publish({
+      ...initial,
+      childCoordinateSpace: [...initial.childCoordinateSpace!],
+      childrenLayout: { ...initial.childrenLayout!, nodeIds: ["child"] },
+    });
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+        .heading,
+    ).toBe(initial);
+    const scrolled: DesignRuntimeNodeDetails = {
+      ...initial,
+      childCoordinateSpace: [1, 0, 0, 1, -10, 0],
+    };
+    publish(scrolled);
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+        .heading,
+    ).toBe(scrolled);
+    const pinned: DesignRuntimeNodeDetails = {
+      ...initial,
+      childrenLayout: { ...initial.childrenLayout!, x: "end" },
+    };
+    publish(pinned);
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+        .heading,
+    ).toBe(pinned);
+    const replaced = {
+      ...pinned,
+      childrenLayout: { ...pinned.childrenLayout!, nodeIds: ["other-child"] },
+    };
+    publish(replaced);
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+        .heading,
+    ).toBe(replaced);
+    const empty = {
+      ...replaced,
+      childrenLayout: { ...replaced.childrenLayout!, count: 0, nodeIds: [] },
+    };
+    publish(empty);
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+        .heading,
+    ).toBe(empty);
+    store.publishNodeDetails(
+      "workspace-b",
+      "/design/b",
+      "home.html",
+      initial,
+      SOURCE_VERSION,
+    );
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode
+        .heading,
+    ).toBe(empty);
+  });
+
+  it("publishes parent layout changes even when the child's painted box stays still", () => {
+    const store = useDesignRuntimeStore.getState();
+    const initial = {
+      ...details(),
+      layout: {
+        x: 10,
+        y: 20,
+        parentId: "parent",
+        parentWidth: 400,
+        parentHeight: 300,
+        parentDisplay: "block",
+        parentPosition: "relative",
+        isContainingBlock: true,
+      },
+    };
+    store.publishNodeDetails(
+      "workspace-a",
+      "/design/a",
+      "home.html",
+      initial,
+      SOURCE_VERSION,
+    );
+    const resized = {
+      ...initial,
+      layout: { ...initial.layout, parentWidth: 600 },
+    };
+    store.publishNodeDetails(
+      "workspace-a",
+      "/design/a",
+      "home.html",
+      resized,
+      SOURCE_VERSION,
+    );
+    expect(
+      designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode.heading
+        ?.layout?.parentWidth,
+    ).toBe(600);
+  });
+
   it("does not notify subscribers for an identical runtime snapshot", () => {
     const currentDetails = details();
     const snapshot = {

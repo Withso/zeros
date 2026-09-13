@@ -11,7 +11,7 @@ import path from "node:path";
 
 import { GitError, isGitError } from "./errors";
 import {
-  designMetadataGitPaths,
+  DESIGN_METADATA_PROTECTED_PATHS,
   readDesignDirectoryRegistry,
 } from "../design/metadata";
 import { recoverDesignStorageForArchive } from "../design/document";
@@ -2797,7 +2797,7 @@ async function archiveWorkspaceInner(
     await recoverDesignStorageForArchive(ws.path);
     const archiveIncludePaths = [
       ...new Set([
-        ...designMetadataGitPaths(ws.path),
+        ...DESIGN_METADATA_PROTECTED_PATHS,
         ...Object.values(
           readDesignDirectoryRegistry(ws.path)?.directories ?? {},
         ).map((entry) => entry.path),
@@ -2986,7 +2986,7 @@ async function archiveWorkspaceInner(
     if (existsSync(ws.path)) {
       await recoverDesignStorageForArchive(ws.path);
       archiveIncludePaths.push(
-        ...designMetadataGitPaths(ws.path),
+        ...DESIGN_METADATA_PROTECTED_PATHS,
         ...Object.values(
           readDesignDirectoryRegistry(ws.path)?.directories ?? {},
         ).map((entry) => entry.path),

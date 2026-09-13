@@ -1,9 +1,10 @@
 import React, { useCallback, useMemo, type ReactNode } from "react";
-import { Code2, FolderPlus, PenTool, type LucideIcon } from "lucide-react";
+import { Code2, PenTool, Plus, type LucideIcon } from "lucide-react";
 
 import { workspaceSetMode, type Workspace } from "../../platform/git";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
+import { resolveWorkspacePresentationKind } from "../../state/workspace-resolution";
 import {
   beginWorkspaceModeSwitch,
   finishWorkspaceModeSwitch,
@@ -43,8 +44,8 @@ const WORKSPACE_MODES: ReadonlyArray<{
 ];
 
 /** Offered in place of the direct Design switch when the checkout has no
- *  design directory yet: choosing Design opens a one-item menu naming the
- *  folder the switch will create, and the switch runs only on that pick. */
+ *  design directory yet: choosing Design opens a one-item creation menu,
+ *  and the switch runs only on that pick. */
 export type CreateDesignDirectoryOption =
   | {
       /** The first exact-key preview has not settled yet. Keep Design behind a
@@ -65,6 +66,7 @@ export interface WorkspaceModeToggleViewProps {
   disabled: boolean;
   switching: boolean;
   onModeChange: (mode: WorkspaceMode) => void;
+  ariaLabel?: string;
   /** When set (and the current mode is Code), the Design choice confirms the
    *  folder creation through a menu instead of switching immediately. */
   createDesignDirectory?: CreateDesignDirectoryOption | null;
@@ -74,21 +76,23 @@ export interface WorkspaceModeToggleViewProps {
  * strip seats it directly as the strip's fixed leading control; Design's Layers
  * sidebar still gets it inside {@link WorkspaceModeHeaderView}'s row. The mode
  * labels remain accessible and available as tooltips, while the compact control
- * itself contains icons only. */
+ * itself contains icons only. Tooltips open below to avoid the native macOS
+ * window controls above the workspace's first row. */
 export function WorkspaceModeToggleView({
   mode,
   disabled,
   switching,
   onModeChange,
+  ariaLabel = "Workspace mode",
   createDesignDirectory = null,
 }: WorkspaceModeToggleViewProps) {
   return (
     <div
       data-workspace-mode-toggle=""
       role="group"
-      aria-label="Workspace mode"
+      aria-label={ariaLabel}
       aria-busy={switching || undefined}
-      className="border-border2/50 bg-bg2/40 inline-flex shrink-0 items-center gap-2 rounded-md border p-1"
+      className="bg-bg2 inline-flex h-7 shrink-0 items-center gap-1 rounded-lg p-0.5"
     >
       {WORKSPACE_MODES.map((option) => {
         const active = mode === option.mode;
@@ -102,8 +106,10 @@ export function WorkspaceModeToggleView({
             aria-pressed={active}
             disabled={disabled}
             className={cn(
-              "size-4 rounded-sm p-0 transition-none",
-              active ? "text-fg1" : "text-fg3",
+              "rounded-md p-0 transition-none",
+              active
+                ? "bg-bg1-highlight text-blue-fg hover:bg-bg1-highlight hover:text-blue-fg"
+                : "text-fg3 hover:bg-bg1-highlight/80 hover:text-fg3",
             )}
           >
             <option.Icon
@@ -120,18 +126,14 @@ export function WorkspaceModeToggleView({
           const creationReady = createDesignDirectory.state === "ready";
           return (
             <DropdownMenu key={option.mode}>
-              <Tooltip label={`${option.label} mode`}>
+              <Tooltip label={`${option.label} mode`} side="bottom">
                 <DropdownMenuTrigger asChild>
                   {React.cloneElement(button, {
                     "data-workspace-mode-create": "",
                   })}
                 </DropdownMenuTrigger>
               </Tooltip>
-              <DropdownMenuContent
-                align="start"
-                sideOffset={6}
-                className="min-w-[240px]"
-              >
+              <DropdownMenuContent align="start" sideOffset={6}>
                 <DropdownMenuItem
                   data-workspace-mode-create-item=""
                   disabled={!creationReady}
@@ -139,18 +141,15 @@ export function WorkspaceModeToggleView({
                     if (creationReady) createDesignDirectory.onConfirm();
                   }}
                 >
-                  <FolderPlus className="text-fg2" strokeWidth={1.5} />
-                  <span className="flex min-w-0 flex-col gap-0.5">
-                    <span>
-                      {creationReady
-                        ? CREATE_DESIGN_DIRECTORY_LABEL
-                        : "Checking design directory…"}
-                    </span>
-                    {creationReady ? (
-                      <span className="text-fg3 truncate font-mono text-[11px]">
-                        {createDesignDirectory.directory}
-                      </span>
-                    ) : null}
+                  <Plus
+                    className="text-fg2"
+                    strokeWidth={1.5}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {creationReady
+                      ? CREATE_DESIGN_DIRECTORY_LABEL
+                      : "Checking design directory…"}
                   </span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -158,7 +157,11 @@ export function WorkspaceModeToggleView({
           );
         }
         return (
-          <Tooltip key={option.mode} label={`${option.label} mode`}>
+          <Tooltip
+            key={option.mode}
+            label={`${option.label} mode`}
+            side="bottom"
+          >
             {React.cloneElement(button, {
               onClick: () => onModeChange(option.mode),
             })}
@@ -230,7 +233,13 @@ function useWorkspaceModeSwitch(workspace: Workspace) {
   const pendingMode = usePendingWorkspaceMode(workspace.id);
   const archiving = useWorkspaceArchiving(workspace.id);
   const switching = pendingMode !== null;
-  const mode = pendingMode ?? workspace.kind ?? "code";
+  // The selected icon must describe the same confirmed surface as AppShell.
+  // Pending intent owns only the busy state until the engine publishes its row.
+  const mode = resolveWorkspacePresentationKind({
+    confirmedKind: workspace.kind,
+    requestedKind: pendingMode,
+    folder: workspace.path,
+  });
   const canSwitch = !isLocalMainWorkspace(workspace);
 
   const setMode = useCallback(
@@ -247,8 +256,8 @@ function useWorkspaceModeSwitch(workspace: Workspace) {
       void workspaceSetMode({ workspaceId: workspace.id, mode: nextMode })
         .then((result) => {
           // Seed Design (when supplied) and publish the confirmed kind before
-          // removing the immediate presentation intent. No render can observe
-          // the requested surface falling back to the old confirmed row.
+          // clearing the busy state. The surface and selected icon advance
+          // together from the same confirmed workspace row.
           commitWorkspaceMode({
             workspaceId: workspace.id,
             repoSlug: workspace.repoSlug,
@@ -333,9 +342,10 @@ function OwnedWorkspaceModeHeader({
     setMode,
   });
   const designDirectoryTarget = useDesignDirectoryTarget(
-    mode === "design"
-      ? designDirectoryTargetKeyForWorkspace(workspace.id)
-      : null,
+    // The Design header remains visible until the engine confirms Code mode.
+    // Pause reads during the switch without dropping this owner's known name.
+    designDirectoryTargetKeyForWorkspace(workspace.id),
+    { enabled: mode === "design" && !switching },
   );
   const designDirectoryName =
     designDirectoryTarget.data?.directory ?? "Design directory";

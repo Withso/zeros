@@ -1,4 +1,4 @@
-import { designMetadataGitPaths } from "../design/metadata";
+import { DESIGN_METADATA_PROTECTED_PATHS } from "../design/metadata";
 // Detach mode — run one workspace's changes inside the root checkout.
 //
 // Goal: the user keeps `pnpm electron:dev` running in their primary clone
@@ -150,7 +150,7 @@ async function detachDesignRoots(
       ...(pointer.configured ? [pointer.directory] : []),
       ...discovered,
       ...sticky,
-      ...designMetadataGitPaths(workspacePath),
+      ...DESIGN_METADATA_PROTECTED_PATHS,
     ]),
   ];
 }

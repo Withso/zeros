@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   requestWorkspaceList,
   bridgeFileTree,
+  bridgeWorkspaceFileListing,
   bridgeGitStatus,
   bridgeGitChangeCounts,
   bridgeGitChangeLineCounts,
@@ -208,6 +209,28 @@ describe("workspace mode transition budget", () => {
 });
 
 describe("workspace-bridge read ops", () => {
+  it("requests files and validated Design roots together without changing the legacy file-tree API", async () => {
+    let params: unknown;
+    const listing = {
+      files: ["Brand/design.toml"],
+      designDirectories: ["Brand"],
+    };
+    const bridge = {
+      request: async (message: { params: unknown }) => {
+        params = message.params;
+        return { type: "WORKSPACE_RESPONSE", result: listing };
+      },
+    } as unknown as RuntimeClient;
+    expect(await bridgeWorkspaceFileListing(bridge, "ws1", 100)).toEqual(
+      listing,
+    );
+    expect(params).toEqual({
+      workspaceId: "ws1",
+      limit: 100,
+      includeDesignDirectories: true,
+    });
+  });
+
   it("bridgeFileTree sends file.tree and unwraps { files }", async () => {
     const seen: { op?: string } = {};
     const out = await bridgeFileTree(
