@@ -11,7 +11,15 @@
 //
 // These lock the fix: the moment the desired shape changes, the build starts.
 
-import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 const {
   createSpy,
@@ -119,6 +127,7 @@ beforeEach(() => {
   usageSpy.mockReset().mockResolvedValue(EMPTY_AGENT_USAGE);
   runSeq = 0;
 });
+afterEach(() => vi.unstubAllEnvs());
 
 async function startSession(): Promise<{
   adapter: CursorSdkAdapter;
@@ -133,6 +142,39 @@ async function startSession(): Promise<{
 }
 
 describe("Cursor executor prewarm across a mode change", () => {
+  it("reports team content separately from suppressed local MCP sources", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const provenance =
+      await adapter.capabilityPorts.configuration.readProvenance({
+        cwd: "/tmp",
+      });
+    expect(
+      provenance.sources.filter((source) => source.status === "loaded"),
+    ).toEqual([{ id: "team", label: "Team", status: "loaded" }]);
+    expect(
+      provenance.sources
+        .filter((source) => source.status === "suppressed")
+        .every((source) => source.reason?.includes("MCP")),
+    ).toBe(true);
+    await adapter.dispose();
+  });
+
+  it("keeps native MCP and plugin sources out of background title helpers", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.generateText({
+      model: "auto",
+      systemPrompt: "Name this chat.",
+      prompt: "Work on the repository",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+    expect(localOf(createSpy.mock.calls[0])).toMatchObject({
+      settingSources: [],
+    });
+    expect(createSpy.mock.calls[0][0].mcpServers).toBeUndefined();
+    expect(createSpy.mock.calls[0][0].tools).toEqual([]);
+    await adapter.dispose();
+  });
+
   it("warms the born-default Auto shape at session start", async () => {
     await startSession();
     expect(prewarmSpy).toHaveBeenCalledTimes(1);
@@ -169,17 +211,89 @@ describe("Cursor executor prewarm across a mode change", () => {
     expect(warmed.apiKey).toBe("key_test");
   });
 
-  it("drops the personal Cursor settings layers that carry native MCP", async () => {
-    await startSession();
-    // Native MCP pass-through is off, and Cursor exposes no MCP-only lever —
-    // only settingSources, which is all-or-nothing across MCP AND rules. So
-    // `user` + `plugins` (the personal "installed it once, now it is
-    // everywhere" sources) go, while `project` keeps repo rules and
-    // `team`/`mdm` keep administered org policy.
+  it("loads team rules and managed skills without local MCP at creation and prewarm", async () => {
+    const { adapter } = await startSession();
+    // The team source has its own rules/managed-skills path. MCP discovery
+    // requires project/user/plugins, which must still remain excluded.
     expect(
       (localOf(prewarmSpy.mock.calls[0]) as { settingSources?: unknown })
         .settingSources,
-    ).toEqual(["project", "team", "mdm"]);
+    ).toEqual(["team"]);
+    expect(localOf(createSpy.mock.calls[0])).toEqual(
+      localOf(prewarmSpy.mock.calls[0]),
+    );
+    expect(createSpy.mock.calls[0][0].mcpServers).toBeUndefined();
+    await adapter.dispose();
+  });
+
+  it.each([false, true])(
+    "preserves team content and imported MCP when reopening (missing agent: %s)",
+    async (missingAgent) => {
+      if (missingAgent)
+        resumeSpy.mockRejectedValueOnce(new Error("Agent agent-old not found"));
+      const adapter = new CursorSdkAdapter(makeCtx());
+      const imported = {
+        name: "imported-server",
+        transport: "http" as const,
+        url: "https://example.com/mcp",
+      };
+      await adapter.loadSession({
+        sessionId: "agent-old",
+        cwd: "/tmp/proj/wt",
+        env: { CURSOR_API_KEY: "key_test" },
+        mcpServers: [imported],
+      });
+      const warmed = prewarmSpy.mock.calls[0][0];
+      expect(warmed.local.settingSources).toEqual(["team"]);
+      expect(warmed.mcpServers).toEqual({
+        "imported-server": { url: imported.url },
+      });
+      expect(resumeSpy.mock.calls[0][1]).toMatchObject({
+        local: warmed.local,
+        mcpServers: warmed.mcpServers,
+      });
+      if (missingAgent)
+        expect(createSpy.mock.calls[0][0]).toMatchObject({
+          local: warmed.local,
+          mcpServers: warmed.mcpServers,
+        });
+      await adapter.dispose();
+    },
+  );
+
+  it("keeps the host account opt-out across mode rebuilds", async () => {
+    vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0");
+    const { adapter, sessionId } = await startSession();
+    expect(localOf(createSpy.mock.calls[0])).toMatchObject({
+      settingSources: [],
+    });
+    vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "1");
+    await adapter.setMode({ sessionId, modeId: "agent" });
+    await adapter.prompt({ sessionId, prompt: TEXT });
+    expect(localOf(resumeSpy.mock.calls[0], 1)).toMatchObject({
+      settingSources: [],
+    });
+    expect(localOf(prewarmSpy.mock.calls.at(-1)!)).toEqual(
+      localOf(resumeSpy.mock.calls[0], 1),
+    );
+    await adapter.dispose();
+  });
+
+  it("preserves admitted extension sources when rebuilding for a mode change", async () => {
+    const { adapter, sessionId } = await startSession();
+    const admitted = localOf(createSpy.mock.calls[0]) as {
+      settingSources: string[];
+    };
+    vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0");
+    await adapter.setMode({ sessionId, modeId: "agent" });
+    await adapter.prompt({ sessionId, prompt: TEXT });
+    expect(localOf(resumeSpy.mock.calls[0], 1)).toMatchObject({
+      settingSources: admitted.settingSources,
+    });
+    expect(localOf(prewarmSpy.mock.calls.at(-1)!)).toEqual(
+      localOf(resumeSpy.mock.calls[0], 1),
+    );
+    await adapter.dispose();
   });
 
   it("does not queue a second build while the first is still in flight", async () => {

@@ -23,6 +23,9 @@
 // ──────────────────────────────────────────────────────────
 
 import { Fragment, memo, useState } from "react";
+import { ToolIdentityIcon } from "./tool-identity-icon";
+import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
+import { safeToolImageSource } from "@zeros/protocol/tool-artwork";
 import {
   ChevronDown,
   ChevronRight,
@@ -37,6 +40,7 @@ import {
   countEventSummary,
   formatEventSummary,
   summaryIcons,
+  iconForToolKind,
 } from "./tool-summary";
 import { MessageView } from "./message-view";
 import {
@@ -153,7 +157,11 @@ export const EventStripe = memo(function EventStripe({
           {/* Activity icons at the END, after the text: deduped tool kinds +
               Bot (any sub-agent) + Brain (any
               reasoning), capped at 5, visible. */}
-          <StripeIcons events={events} chatId={ctx.chatId} />
+          <StripeIcons
+            events={events}
+            chatId={ctx.chatId}
+            active={ctx.attachmentImagesActive !== false}
+          />
         </button>
       )}
       {expanded && (
@@ -201,9 +209,11 @@ export const EventStripe = memo(function EventStripe({
 function StripeIcons({
   events,
   chatId,
+  active,
 }: {
   events: AgentMessage[];
   chatId: string | null;
+  active: boolean;
 }) {
   const session = useConversationBrowserActivity(chatId ?? undefined);
   const {
@@ -230,24 +240,61 @@ function StripeIcons({
   const hasWebsiteActivity = browserActions.some(
     browserActivityUsesWebsiteIcon,
   );
-  const icons = summaryIcons(hasBrowser ? otherEvents : events).slice(
+  const latestBrowserUrl = [...browserActions]
+    .reverse()
+    .find((action) => action.url)?.url;
+  const identityIcons = new Map<string, AgentToolMessage>();
+  const genericEvents = (hasBrowser ? otherEvents : events).filter((event) => {
+    if (event.kind !== "tool") return true;
+    const surface = nativeToolSurface(event);
+    const artwork = toolRecord(toolRecord(event.rawInput)._zerosToolArtwork);
+    const identity = surface?.appId ?? safeToolImageSource(artwork.icon);
+    if (!identity) return true;
+    if (!identityIcons.has(identity)) identityIcons.set(identity, event);
+    return false;
+  });
+  const nativeTools = [...identityIcons.values()].slice(0, hasBrowser ? 4 : 5);
+  const icons = summaryIcons(genericEvents).slice(
     0,
-    hasBrowser ? 4 : 5,
+    Math.max(0, (hasBrowser ? 4 : 5) - nativeTools.length),
   );
-  if (!hasBrowser && icons.length === 0) return null;
+  if (!hasBrowser && icons.length === 0 && nativeTools.length === 0)
+    return null;
   return (
     <div className="flex shrink-0 items-center gap-1" aria-hidden="true">
       {hasBrowser ? (
         <span className="text-fg2 inline-flex size-3 items-center justify-center">
-          {browserFavicon ? (
-            <img src={browserFavicon} alt="" className="size-3 rounded-[2px]" />
-          ) : hasWebsiteActivity ? (
-            <Globe2 className="size-3" />
-          ) : (
-            <SquareMousePointer className="size-3" />
-          )}
+          <ToolIdentityIcon
+            appId={browserActions.at(-1)?.appId}
+            faviconUrl={
+              browserFavicon ??
+              browserActions.at(-1)?.faviconUrl ??
+              (hasWebsiteActivity &&
+              browserActions.at(-1)?.external &&
+              latestBrowserUrl
+                ? new URL("/favicon.ico", latestBrowserUrl).href
+                : undefined)
+            }
+            fallback={hasWebsiteActivity ? Globe2 : SquareMousePointer}
+            active={active}
+            className="size-3"
+          />
         </span>
       ) : null}
+      {nativeTools.map((tool) => (
+        <ToolIdentityIcon
+          key={tool.id}
+          artwork={toolRecord(tool.rawInput)._zerosToolArtwork}
+          appId={nativeToolSurface(tool)?.appId}
+          fallback={
+            nativeToolSurface(tool)
+              ? SquareMousePointer
+              : iconForToolKind(tool.toolKind)
+          }
+          active={active}
+          className="size-3"
+        />
+      ))}
       {icons.map((Icon, i) => (
         <span
           key={i}

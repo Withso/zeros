@@ -62,6 +62,9 @@ import net from "node:net";
 import { runDesignWorkspaceSmoke } from "./ui-smoke-design-workspace.mjs";
 import { runPersonalOrganizationSmoke } from "./ui-smoke-personal.mjs";
 import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
+import { runToolsSmoke } from "./ui-smoke-tools.mjs";
+import { runNativeToolsSmoke } from "./ui-smoke-native-tools.mjs";
+import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -642,15 +645,17 @@ try {
     ((await catalogRow("Opus 5").textContent()) ?? "").includes("High"),
   );
   const claudeGroup = catalog().getByRole("group", { name: "Claude Code" });
-  const claudeMarkBox = await claudeGroup
-    .locator('[data-model-section-heading="agent"] > span:first-child')
-    .boundingBox();
-  const claudeHeadingBox = await claudeGroup
-    .locator("[data-model-section-title]")
-    .boundingBox();
-  const opusNameBox = await catalogRow("Opus 5")
-    .getByText("Opus 5", { exact: true })
-    .boundingBox();
+  // Read related geometry in one browser frame. Three separate boundingBox
+  // calls can straddle the sidecar's entrance animation on a busy machine,
+  // reporting different absolute positions for correctly aligned siblings.
+  const { claudeMarkBox, claudeHeadingBox, opusNameBox } = await claudeGroup.evaluate((group) => {
+    const box = (element) => element?.getBoundingClientRect().toJSON() ?? null;
+    return {
+      claudeMarkBox: box(group.querySelector('[data-model-section-heading="agent"] > span:first-child')),
+      claudeHeadingBox: box(group.querySelector('[data-model-section-title]')),
+      opusNameBox: box([...group.querySelectorAll('span')].find((span) => span.textContent === 'Opus 5')),
+    };
+  });
   check(
     "agent brand marks and model names share the same left edge",
     !!claudeMarkBox &&
@@ -2430,6 +2435,9 @@ try {
 
   await runPersonalOrganizationSmoke({ page, check });
   await runCustomizeSmoke({ page, check });
+  await runToolsSmoke({ page, check });
+  await runNativeToolsSmoke({ page, check });
+  await runSubscriptionSmoke({ page, check });
 
   // Whole-run invariant.
   check(

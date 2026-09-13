@@ -152,6 +152,12 @@ import {
   ComposerConcealedContext,
 } from "./composer-pills";
 import { ContextGauge } from "./context-gauge";
+import { ComposerTools } from "./composer-tools";
+import {
+  sessionToolsResource,
+  warmPreparedSessionTools,
+} from "./session-tools-cache";
+import { useBridge } from "../../platform/bridge/use-bridge";
 import { BoundaryPortsPill } from "./boundary-ports";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
@@ -211,11 +217,13 @@ import {
   useAgentsSnapshot,
 } from "./agents-cache";
 import { isRunnableAgent } from "./agent-runnable";
+import { requestProviderSettings } from "../settings/settings-navigation";
+import { isSubscriptionProvider } from "../settings/subscription-connection";
+import { AuthenticationNotice } from "./authentication-notice";
 import {
-  startBackgroundSignIn,
-  supportsBackgroundSignIn,
-  useBackgroundSignIn,
-} from "./background-signin";
+  authenticationTurnState,
+  authenticationTurnOutput,
+} from "./auth-prompt-recovery";
 import { useAgentSessions } from "./sessions-hooks";
 import { useStickyBottom, nextTextMessageTarget } from "./use-sticky-bottom";
 import {
@@ -353,8 +361,6 @@ export function AgentChat({
     () => pickActiveWorkflow(workflows),
     [workflows],
   );
-  // Hidden CLI authentication is deliberately local-only. Relay/browser
-  // sessions keep the status pill static and direct users to Providers.
   const nativeReady = useNativeRuntime().ready;
   // Per-chat draft seeding: pull once when this chat joins the retained view
   // deck, so each transcript/editor starts from its own persisted draft.
@@ -828,6 +834,78 @@ export function AgentChat({
   // first render. The original declaration here was removed.)
   const agentsList = useAgentsSnapshot();
   const agentSessions = useAgentSessions();
+  const capabilitiesBridge = useBridge();
+  const preparationOwner = JSON.stringify([
+    chatId,
+    session.agentId ?? chatThread?.agentId,
+    chatThread?.folder,
+    surfaceActive,
+  ]);
+  const preparationOwnerRef = useRef<string | null>(preparationOwner);
+  preparationOwnerRef.current = preparationOwner;
+  useEffect(() => {
+    preparationOwnerRef.current = preparationOwner;
+    return () => { preparationOwnerRef.current = null; };
+  }, [preparationOwner]);
+  const prepareSessionTools = useCallback(async () => {
+    const agentId = session.agentId ?? chatThread?.agentId;
+    if (!chatId || !agentId || workspaceProvisioning || !surfaceActive) return;
+    // The normal admission path owns auth, boundaries, env and single-flight
+    // startup. Opening Tools prepares that same chat without adding a prompt.
+    await agentSessions
+      .ensureSession(chatId, agentId, {
+        cwd: session.cwd ?? chatThread?.folder ?? undefined,
+        env: chatThread ? envForChat(chatThread, session.initialize) : undefined,
+      })
+      .catch(() => {
+        // Admission publishes its failure on the chat's session state.
+      });
+  }, [
+    agentSessions,
+    chatId,
+    chatThread,
+    session.agentId,
+    session.cwd,
+    session.initialize,
+    workspaceProvisioning,
+    surfaceActive,
+  ]);
+  const prepareSessionCommands = useCallback(() => {
+    const agentId = session.agentId ?? chatThread?.agentId;
+    if (
+      !chatId || agentId !== "claude" || !surfaceActive ||
+      workspaceProvisioning || capabilitiesBridge?.status !== "connected"
+    ) return;
+    void warmPreparedSessionTools(
+      sessionToolsResource(capabilitiesBridge),
+      prepareSessionTools,
+      () => {
+        if (preparationOwnerRef.current !== preparationOwner) return null;
+        const current = useSessionsStore.getState().sessions[chatId];
+        if (
+          current?.agentId !== agentId || !current.executionId || !current.cwd ||
+          !["ready", "streaming"].includes(current.status)
+        ) return null;
+        return {
+          agentId,
+          sessionId: current.executionId,
+          workspaceId: current.cwd,
+        };
+      },
+    ).catch(() => {
+      // Admission failures are already in session state. Keep confirmed
+      // commands; another picker open or Tools refresh can retry discovery.
+    });
+  }, [
+    chatId,
+    session.agentId,
+    chatThread?.agentId,
+    surfaceActive,
+    workspaceProvisioning,
+    capabilitiesBridge,
+    prepareSessionTools,
+    preparationOwner,
+  ]);
 
   // Tier 3 — background auth verification after interactive startup. Trigger
   // the cache's normal load path so Codex's active `login status` command and
@@ -870,36 +948,12 @@ export function AgentChat({
 
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
-  // Background CLI sign-in for auth-required failures (Claude/Codex). One
-  // click on the footer's Sign in button drives the CLI login in a hidden
-  // PTY and opens the browser; on success the session is rebuilt in place
-  // so the user can just resend.
   const signInAgentId = session.agentId ?? chatThread?.agentId ?? null;
-  const signInState = useBackgroundSignIn(signInAgentId);
   const handleSignIn = useCallback(() => {
-    if (
-      !nativeReady ||
-      !signInAgentId ||
-      !supportsBackgroundSignIn(signInAgentId)
-    )
-      return;
-    const agentId = signInAgentId;
-    void startBackgroundSignIn(agentId).then(async (res) => {
-      if (res.ok) {
-        // Rebuild the live session now that credentials exist — clears the
-        // auth-required state without waiting for the next explicit send.
-        try {
-          await session.startSession(agentId);
-        } catch {
-          /* a failed rebuild falls back to the send-again path */
-        }
-      } else {
-        toast.error("Sign in failed", {
-          description: `${res.error ?? "Unknown error."} You can also sign in from Settings → Agents.`,
-        });
-      }
-    });
-  }, [nativeReady, signInAgentId, session]);
+    if (!surfaceActive || !isSubscriptionProvider(signInAgentId)) return;
+    requestProviderSettings(signInAgentId);
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
+  }, [dispatch, signInAgentId, surfaceActive]);
   // Keep the ref the chat file-open closure reads in sync with the chat's
   // workspace owner. The session cwd is only a pre-hydration fallback: if an
   // engine ever reports a nested cwd, its file link still belongs to the
@@ -1597,12 +1651,16 @@ export function AgentChat({
   // bare-command submit path in handleSend.
   const openTerminalCommand = useCallback(
     (name: string): boolean => {
+      if (name === "login" && isSubscriptionProvider(terminalAgentId)) {
+        handleSignIn();
+        return true;
+      }
       if (slashCommandKind(terminalAgentId, name) !== "terminal") return false;
       if (!terminalCwd) return false;
       setTerminalCommand(name);
       return true;
     },
-    [terminalAgentId, terminalCwd],
+    [terminalAgentId, terminalCwd, handleSignIn],
   );
 
   // ── Queued-messages card state (2026-07-06 queue redesign) ──
@@ -1655,6 +1713,7 @@ export function AgentChat({
     onArrowDown: () => queueKeysRef.current.arrowDown(),
     onDeleteKey: () => queueKeysRef.current.deleteKey(),
     onSlashCommand: runInlineSlashCommand,
+    onSlashOpen: prepareSessionCommands,
     onTerminalCommand: openTerminalCommand,
     onChange: () => {
       // Typing hands the virtual focus back to the composer.
@@ -2876,16 +2935,8 @@ export function AgentChat({
     // WHICH agent errored. Full detail stays greppable here + in the engine
     // log for support/diagnosis.
     if (detail) console.warn(`[agent] ${agentLabel} failure: ${detail}`);
-    // One indication per failure, not two (type-2 pill vs type-4 toast): a
-    // PROMPT-stage failure already surfaces inside the chat as the turn
-    // footer's full-stop pill (AGENT EXITED / SESSION EXPIRED / SIGN IN
-    // REQUIRED / …) directly under the message that failed — a toast on top
-    // double-signals the same event. Toasts are reserved for failures with
-    // NO in-chat surface (initialize / newSession / loadSession — the chat
-    // has no turn to pin a pill on). Exceptions: auth-required keeps its
-    // toast at every stage, and so does any failure carrying `advice` (e.g.
-    // the cursor host crash-loop guard) — both name the one actionable next
-    // step, which the pill's generic label can't.
+    // Authentication uses the product notice. Other prompt failures have a
+    // turn footer; initialization failures and actionable advice use a toast.
     const isAuth =
       session.status === "auth-required" ||
       session.failure?.kind === "auth-required";
@@ -2894,14 +2945,12 @@ export function AgentChat({
     const advice = session.failure?.advice;
     const pillAlreadyShows =
       session.failure?.stage === "prompt" && !isAuth && !advice;
-    if (!pillAlreadyShows) {
+    if (!pillAlreadyShows && !isAuth) {
       toast.error(`${agentLabel}: ${label}`, {
         // De-dup: repeats of the same chat's error REPLACE the toast
         // instead of stacking identical copies.
         id: `agent-error-${chatId ?? agentLabel}`,
-        description: isAuth
-          ? `Open Settings → Agents to sign in to ${agentLabel}.`
-          : advice,
+        description: advice,
       });
     }
     // Auth probe is a heuristic (file-existence on ~/.codex/auth.json and
@@ -3480,11 +3529,8 @@ export function AgentChat({
       }
       return;
     }
-    // Pre-flight auth check. The agent's registry snapshot already
-    // tracks installed + authenticated; we read it here so a not-yet-
-    // signed-in agent never reaches sendPrompt and produces a confusing
-    // "no events" error. Skipped when the snapshot hasn't loaded yet
-    // (agentsList === null) so a cold start can't false-positive.
+    // Check availability here; sendPrompt owns authentication so it can retain
+    // the original message and attachments for explicit continuation.
     if (agentsList) {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
       const targetAgent = targetAgentId
@@ -3501,20 +3547,18 @@ export function AgentChat({
         });
         return;
       }
-      if (targetAgent && !isRunnableAgent(targetAgent)) {
-        const agentLabel = targetAgent.name ?? targetAgent.id;
-        if (!targetAgent.installed) {
-          toast.error(`${agentLabel}: Not installed`, {
-            description: `Open Settings → Agents to install ${agentLabel}.`,
-          });
-        } else {
-          toast.error(`${agentLabel}: Sign in required`, {
-            description: `Open Settings → Agents to sign in to ${agentLabel}.`,
-          });
-        }
+      if (
+        targetAgent &&
+        !targetAgent.installed &&
+        !isRunnableAgent(targetAgent)
+      ) {
+        toast.error(`${targetAgent.name}: Not installed`, {
+          description: `Open Settings → Providers to install ${targetAgent.name}.`,
+        });
         return;
       }
     }
+
     // A validated prompt is a deliberate workspace action. Record it before
     // any admission/attachment await so a slow send cannot jump ahead of work
     // the user performs elsewhere in the meantime. Provisioning sends record
@@ -3547,7 +3591,10 @@ export function AgentChat({
     // sees the synchronous `warming` flip and parks the message as the active
     // turn. The composer clears and the elapsed timer starts at once; only a
     // real follow-up uses the queued card.
-    const recoveryMode = sendSessionRecoveryMode(session.status);
+    const recoveryMode =
+      session.status === "auth-required"
+        ? null
+        : sendSessionRecoveryMode(session.status);
     if (recoveryMode === "park") {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
       if (!targetAgentId) return;
@@ -4349,6 +4396,18 @@ export function AgentChat({
                 pendingLocalTurn: turnIsPendingLocal,
                 hasEvents: turn.events.length > 0,
               });
+              const authState = authenticationTurnState({
+                userPrompt: turn.userPrompt,
+                events: turn.events,
+                failureKind: session.failure?.kind,
+                isTail: isVisualTail,
+                inFlight: turnInFlight,
+              });
+              const authRequired = authState === "sign-in";
+              const authStopped = authState === "stopped";
+              const visibleEvents = authState
+                ? authenticationTurnOutput(turn.events)
+                : turn.events;
               return (
                 <React.Fragment key={turnKey(turn)}>
                   <TurnContainer turn={turn} isActive={isVisualTail}>
@@ -4448,83 +4507,92 @@ export function AgentChat({
                     the first event arrived. Keyed on the pending TURN, never on
                     session status: reopening a chat warms the session too, and
                     that is how a stopped turn used to come back to life. */}
-                    <TurnEventList
-                      events={turn.events}
-                      isActive={isActiveProviderSegment}
-                      isStreaming={turnInFlight}
-                      showActivity={isVisualTail}
-                      activityEvents={turn.providerEvents}
-                      activityStartedAt={
-                        isVisualTail
-                          ? (session.activeTurnStartedAt ??
-                            turn.recordedStartedAt)
-                          : turn.recordedStartedAt
-                      }
-                      workflow={activeWorkflow}
-                      onStopWorkflow={session.stopBackgroundTask}
-                      ctx={messageCtx}
-                      footer={
-                        turn.userPrompt && chatId && ownsProviderFooter ? (
-                          <TurnFooter
-                            chatId={chatId}
-                            turnId={turn.recordedTurnId ?? turn.userPrompt.id}
-                            events={turn.providerEvents}
-                            startedAt={turn.recordedStartedAt}
-                            live={isVisualTail && turnInFlight}
-                            fallbackStopReason={
-                              isVisualTail && session.status !== "streaming"
-                                ? session.lastStopReason
-                                : null
-                            }
-                            fallbackStatusLabel={
-                              isVisualTail && session.status !== "streaming"
-                                ? turnFooterFailureLabel(session.failure)
-                                : null
-                            }
-                            // "An auto-rebuild is re-running THIS turn" — which
-                            // only happens while this renderer's own send owns
-                            // it (rebuildAndRetry / the resume-and-retry hop).
-                            // It used to read session status, so merely
-                            // REOPENING a chat suppressed a genuinely failed
-                            // turn's AGENT STOPPED pill until the resume landed.
-                            retrying={isVisualTail && turnIsPendingLocal}
-                            isLastTurn={isVisualTail}
-                            // One-click resume after a token-cap /
-                            // budget stop: functionally the user typing
-                            // "Continue" and hitting send (same session, full
-                            // context). The stop pill / budget card stays on
-                            // this turn as history.
-                            onContinue={() => void handleSend("Continue")}
-                            onFork={() =>
-                              forkToNewTab(
-                                turn.userPrompt!.id,
-                                turn.userPrompt!.text,
-                              )
-                            }
-                            onForkIntent={() =>
-                              warmForkToNewTab(
-                                turn.userPrompt!.id,
-                                turn.userPrompt!.text,
-                              )
-                            }
-                            // Auth-required + Claude/Codex: the SIGN IN
-                            // REQUIRED pill becomes a live Sign-in button
-                            // (background CLI login → browser).
-                            signInPhase={
-                              isVisualTail &&
-                              nativeReady &&
-                              session.status !== "streaming" &&
-                              supportsBackgroundSignIn(signInAgentId) &&
-                              turnFooterFailureLabel(session.failure) ===
-                                "SIGN IN REQUIRED"
-                                ? signInState.phase
-                                : null
-                            }
-                            onSignIn={nativeReady ? handleSignIn : undefined}
-                          />
-                        ) : null
-                      }
-                    />
+                    {(!authRequired || visibleEvents.length > 0) && (
+                      <TurnEventList
+                        events={visibleEvents}
+                        isActive={isActiveProviderSegment}
+                        isStreaming={turnInFlight && !authStopped}
+                        showActivity={isVisualTail}
+                        activityEvents={turn.providerEvents}
+                        activityStartedAt={
+                          isVisualTail
+                            ? (session.activeTurnStartedAt ??
+                              turn.recordedStartedAt)
+                            : turn.recordedStartedAt
+                        }
+                        workflow={activeWorkflow}
+                        onStopWorkflow={session.stopBackgroundTask}
+                        ctx={messageCtx}
+                        footer={
+                          !authRequired &&
+                          turn.userPrompt &&
+                          chatId &&
+                          ownsProviderFooter ? (
+                            <TurnFooter
+                              chatId={chatId}
+                              turnId={turn.recordedTurnId ?? turn.userPrompt.id}
+                              events={
+                                authStopped
+                                  ? visibleEvents
+                                  : turn.providerEvents
+                              }
+                              startedAt={turn.recordedStartedAt}
+                              live={isVisualTail && turnInFlight}
+                              fallbackStopReason={
+                                isVisualTail && session.status !== "streaming"
+                                  ? session.lastStopReason
+                                  : null
+                              }
+                              fallbackStatusLabel={
+                                authStopped
+                                  ? "AGENT STOPPED"
+                                  : isVisualTail &&
+                                      session.status !== "streaming"
+                                    ? turnFooterFailureLabel(session.failure)
+                                    : null
+                              }
+                              // "An auto-rebuild is re-running THIS turn" — which
+                              // only happens while this renderer's own send owns
+                              // it (rebuildAndRetry / the resume-and-retry hop).
+                              // It used to read session status, so merely
+                              // REOPENING a chat suppressed a genuinely failed
+                              // turn's AGENT STOPPED pill until the resume landed.
+                              retrying={isVisualTail && turnIsPendingLocal}
+                              isLastTurn={isVisualTail}
+                              // One-click resume after a token-cap /
+                              // budget stop: functionally the user typing
+                              // "Continue" and hitting send (same session, full
+                              // context). The stop pill / budget card stays on
+                              // this turn as history.
+                              onContinue={() => void handleSend("Continue")}
+                              onFork={() =>
+                                forkToNewTab(
+                                  turn.userPrompt!.id,
+                                  turn.userPrompt!.text,
+                                )
+                              }
+                              onForkIntent={() =>
+                                warmForkToNewTab(
+                                  turn.userPrompt!.id,
+                                  turn.userPrompt!.text,
+                                )
+                              }
+                            />
+                          ) : null
+                        }
+                      />
+                    )}
+                    {authRequired && (
+                      <AuthenticationNotice
+                        name={
+                          session.agentName ??
+                          chatThread?.agentName ??
+                          signInAgentId ??
+                          "Agent"
+                        }
+                        onSignIn={handleSignIn}
+                      />
+                    )}
                   </TurnContainer>
                 </React.Fragment>
               );
@@ -4903,6 +4971,24 @@ export function AgentChat({
                       ALWAYS present: empty ring + "Send a message to see
                       context usage." before the first turn, disabled ring +
                       honest note for Cursor (no usage in its SDK). */}
+                      <ComposerTools
+                        ownerId={chatId}
+                        agentId={session.agentId ?? chatThread?.agentId ?? null}
+                        sessionId={session.executionId}
+                        workspaceId={session.cwd ?? chatThread?.folder ?? null}
+                        concealed={composerConcealed || !surfaceActive}
+                        onPrepare={prepareSessionTools}
+                        preparing={
+                          workspaceProvisioning || session.status === "warming"
+                        }
+                        preparationError={
+                          session.status === "auth-required"
+                            ? "Sign in to this agent in Settings, then refresh tools."
+                            : session.status === "failed"
+                              ? "The agent could not start. Refresh tools to retry."
+                              : undefined
+                        }
+                      />
                       <ContextGauge
                         usage={session.usage}
                         unavailableReason={contextUnavailableReason}
@@ -4999,10 +5085,10 @@ export function AgentChat({
           the composer's chip row. Same component the EmptyComposer
           uses; the hook scopes its open/close state per surface. */}
       {imagePreviewOverlay}
+
       {/* `/add-dir` + "+" → "Link workspaces": pick a worktree or browse a
           folder to grant Claude extra access. Controlled modal; gated on a
-          live chat so cwd / linked dirs are available. */}
-      {chatThread && (
+          live chat so cwd / linked dirs are available. */}      {chatThread && (
         <WorkspaceDirectoryPicker
           open={workspacePickerOpen}
           onOpenChange={setWorkspacePickerOpen}

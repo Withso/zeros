@@ -123,8 +123,9 @@ export function ModelPill({
   /** Optional brand-logo URL fallback. Usually unset — AgentIcon prefers
    *  the bundled SVG keyed by agentId (claude/codex/cursor/…). */
   iconUrl?: string | null;
-  /** When provided, the pill prefers the agent's advertised model
-   *  catalog (initialize._meta.models) over the curated fallback. */
+  /** When provided, the agent's advertised capabilities
+   *  (initialize._meta.models) refine the curated rows' effort/Fast/selectable
+   *  state. Names stay curated — see model-catalog's overlayLiveCapabilities. */
   initialize: InitializeResponse | null;
   value: string | null;
   effort: ChatEffort;
@@ -148,9 +149,11 @@ export function ModelPill({
     if (concealed && open) setOpen(false);
   }, [concealed, open]);
 
-  // Models come straight from the agent's advertised `_meta.models` (via the
-  // `initialize` prop) or the cold-start floor — both reactive to prop changes,
-  // so no manual catalog warm/refresh is needed (the remote system is gone).
+  // Curated rows, capability-overlaid from the agent's advertised
+  // `_meta.models` (via the `initialize` prop) or the cold-start floor — both
+  // reactive to prop changes, so no manual catalog warm/refresh is needed (the
+  // remote system is gone). The label the pill prints is curated either way, so
+  // it does not shift when live discovery lands mid-session.
   const models = catalogModelsForAgent(agentId, initialize);
   // A null model means "the agent's global default". resolveModelOption is the
   // ONE place that chain lives, and the Effort/Fast capability gates plus the

@@ -1,3 +1,9 @@
+import {
+  sessionToolQuerySchema,
+  sessionToolAuthSchema,
+  type SessionToolsSnapshot,
+  type SessionToolsInventorySnapshot,
+} from "@zeros/protocol/agent-extensions";
 import { stageDesignRegistry } from "../design/metadata-git";
 // ──────────────────────────────────────────────────────────
 // WorkspaceService — the Remote Workspace API over the bridge
@@ -29,6 +35,7 @@ import {
   type ExtensionQuery,
 } from "@zeros/protocol/agent-extensions";
 import { nativeExtensionInventory } from "../agents/native-extensions";
+import { collectExtensionInventory } from "../agents/extension-inventory";
 import { syncPersonalPreferences } from "../settings/preferences";
 import { syncAgentPreferences } from "../settings/agent-preferences";
 import {
@@ -1082,6 +1089,8 @@ const REMOTE_READABLE = new Set<string>([
   // bearer credentials. It is required for cloud MCP parity.
   "mcp.resolveComposed",
   "mcp.gateway.status",
+  "tools.session.list",
+  "tools.session.inventory",
 ]);
 
 /** Chat/transcript LIST mutations a remote client may issue without host
@@ -1623,6 +1632,29 @@ export class WorkspaceService {
   ): void {
     this.nativeExtensionReader = reader;
   }
+  private sessionToolAccess: {
+    inventory?(
+      agentId: string,
+      sessionId: string,
+      cwd: string,
+    ): Promise<SessionToolsInventorySnapshot>;
+    list(
+      agentId: string,
+      sessionId: string,
+      cwd: string,
+    ): Promise<SessionToolsSnapshot>;
+    authenticate(
+      agentId: string,
+      sessionId: string,
+      cwd: string,
+      toolId: string,
+    ): Promise<{ authorizationUrl: string }>;
+  } | null = null;
+  setSessionToolAccess(
+    access: NonNullable<WorkspaceService["sessionToolAccess"]>,
+  ): void {
+    this.sessionToolAccess = access;
+  }
   setGatewayAccessor(fn: () => McpGateway | null): void {
     this.gatewayAccessor = fn;
   }
@@ -2105,6 +2137,16 @@ export class WorkspaceService {
       if (!remote && isKnownRepoRoot(workspaceId)) return workspaceId;
       throw err;
     }
+  }
+
+  /** Tools are scoped again by the gateway to the exact live execution/cwd.
+   * Local chats include worktree subdirectories and plain folders, so their
+   * cwd is not a workspace database id. This grants no generic filesystem read.
+   * Remote callers continue to address only authorized opaque workspace ids. */
+  private resolveSessionToolCwd(workspaceId: string, remote: boolean): string {
+    if (!remote && nodePath.isAbsolute(workspaceId))
+      return nodePath.resolve(workspaceId);
+    return this.resolveReadCwd(workspaceId, remote);
   }
 
   /** Engine lifecycle classification shares Git's exact patch parser with the
@@ -4531,22 +4573,11 @@ export class WorkspaceService {
           return { ok: true };
         }
         const query = extensionQuerySchema.parse({ ...params, repoRoot });
-        let runtimeWarning: string | undefined;
-        if (this.nativeExtensionReader) {
-          try {
-            const result = await this.nativeExtensionReader(query);
-            if (result) return result;
-          } catch {
-            runtimeWarning =
-              "The native inventory is unavailable. Showing local declarations; use Refresh to retry.";
-          }
-        }
-        const result = nativeExtensionInventory(query);
-        if (runtimeWarning) {
-          result.warnings.push(runtimeWarning);
-          result.partial = true;
-        }
-        return result;
+        return collectExtensionInventory(
+          query,
+          () => nativeExtensionInventory(query),
+          this.nativeExtensionReader ?? undefined,
+        );
       }
       case "settings.read": {
         const layer = reqStr(params, "layer");
@@ -4952,6 +4983,59 @@ export class WorkspaceService {
         return { servers: [...direct, ...gateway], warnings: r.warnings };
       }
       // Gateway status is credential-free and shared with qualified cloud UI.
+      case "tools.session.list":
+      case "tools.session.inventory": {
+        const query = sessionToolQuerySchema.parse(params);
+        const cwd = this.resolveSessionToolCwd(query.workspaceId, remote);
+        if (!this.sessionToolAccess)
+          throw new Error("Session tools are unavailable.");
+        const read =
+          op === "tools.session.inventory"
+            ? this.sessionToolAccess.inventory ?? this.sessionToolAccess.list
+            : this.sessionToolAccess.list;
+        const result: SessionToolsInventorySnapshot = await read.call(
+          this.sessionToolAccess,
+          query.agentId,
+          query.sessionId,
+          cwd,
+        );
+        return remote || !hostLocalResources
+          ? {
+              ...result,
+              entries: result.entries.map((entry) => ({
+                ...entry,
+                canAuthenticate: false,
+              })),
+              ...(result.groups
+                ? {
+                    groups: result.groups.map((group) => ({
+                      ...group,
+                      entries: group.entries.map((entry) => ({
+                        ...entry,
+                        canAuthenticate: false,
+                      })),
+                    })),
+                  }
+                : {}),
+            }
+          : result;
+      }
+      case "tools.session.authenticate": {
+        if (remote || !hostLocalResources)
+          throw new Error(
+            "Provider tool sign-in is available on the workspace host.",
+          );
+        const query = sessionToolAuthSchema.parse(params);
+        const cwd = this.resolveSessionToolCwd(query.workspaceId, false);
+        if (!this.sessionToolAccess)
+          throw new Error("Session tools are unavailable.");
+        return this.sessionToolAccess.authenticate(
+          query.agentId,
+          query.sessionId,
+          cwd,
+          query.toolId,
+        );
+      }
       case "mcp.gateway.status": {
         const gw = this.gatewayForScope();
         return {

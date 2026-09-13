@@ -27,6 +27,7 @@ import {
   legacyInstanceBundleDir,
   pruneStaleBundles,
   discardBundle,
+  patchPlist,
 } from "../dev-electron-bundle.cjs";
 
 // A realistic pair: the slug carries the uniqueness hash, the name never does.
@@ -55,6 +56,47 @@ afterEach(() => {
   for (const dir of tmpdirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+describe("dev automation permissions", () => {
+  it.each([false, true])(
+    "declares why the app requests Apple Events (existing description: %s)",
+    (existingDescription) => {
+      const dir = tmp();
+      const base = path.join(dir, "base.plist");
+      const clone = path.join(dir, "clone.plist");
+      const original = `<?xml version="1.0"?>
+<plist version="1.0"><dict>
+<key>CFBundleName</key><string>Electron</string>
+<key>CFBundleExecutable</key><string>Electron</string>
+<key>CFBundleIdentifier</key><string>com.github.Electron</string>
+${existingDescription ? "<key>NSAppleEventsUsageDescription</key><string>Old description</string>" : ""}
+</dict></plist>`;
+      fs.writeFileSync(base, original);
+      fs.linkSync(base, clone);
+      const identity = {
+        name: NAME,
+        exec: NAME,
+        bundleId: `com.zeros.dev.${SLUG}`,
+      };
+
+      expect(patchPlist(clone, identity)).toBe(true);
+
+      const patched = fs.readFileSync(clone, "utf8");
+      expect(patched).toMatch(
+        /<key>NSAppleEventsUsageDescription<\/key>\s*<string>[^<]*Zeros[^<]*<\/string>/,
+      );
+      expect(patched).not.toContain("Old description");
+      expect(
+        patched.match(/<key>NSAppleEventsUsageDescription<\/key>/g),
+      ).toHaveLength(1);
+      // Instance bundles share inodes with Electron; permission metadata must
+      // never rewrite the base bundle or another instance through a hardlink.
+      expect(fs.readFileSync(base, "utf8")).toBe(original);
+      expect(patchPlist(clone, identity)).toBe(false);
+      expect(fs.readFileSync(clone, "utf8")).toBe(patched);
+    },
+  );
 });
 
 describe("instanceBundleDir", () => {

@@ -7,6 +7,7 @@ import type {
   AgentMessage,
   AgentToolMessage,
 } from "../agent/use-agent-session";
+import { nativeToolSurface } from "../agent/renderers/native-tool-presentation";
 
 export interface BrowserToolActivity {
   id: string;
@@ -17,6 +18,10 @@ export interface BrowserToolActivity {
   url?: string;
   detail?: string;
   status: AgentToolMessage["status"];
+  surfaceScope?: string;
+  external?: boolean;
+  appId?: string;
+  faviconUrl?: string;
 }
 
 export type GroupedBrowserActivity =
@@ -104,25 +109,36 @@ function nativeCodexBrowserActivity(
   tool: AgentToolMessage,
   assumeActiveBrowserBatch = false,
 ): BrowserToolActivity | null {
-  if (!isCodexNodeReplJsToolCall(tool)) return null;
   const input = record(tool.rawInput);
+  const unified =
+    input.server === "cua_repl" &&
+    input.tool === "js" &&
+    tool.toolKind === "mcp";
+  if (!unified && !isCodexNodeReplJsToolCall(tool)) return null;
+  const surface = nativeToolSurface(tool);
+  if (surface?.kind === "computer") return null;
   const args = record(input.arguments);
   const code = typeof args.code === "string" ? args.code : "";
   const nativeMetadata = nativeBrowserOutputCandidates(tool).some(
     (candidate) => record(candidate._meta)["codex/browserUse"] === true,
   );
   if (
+    surface?.kind !== "browser" &&
     !nativeMetadata &&
     !assumeActiveBrowserBatch &&
     !/\b(?:setupBrowserRuntime|agent\.browsers|iab|playwright|dom_cua|claimTab|browserTab|crawlTab|tabs\.finalize)\b/.test(
       code,
     ) &&
-    !/\.goto\s*\(/.test(code)
+    !/\.goto\s*\(/.test(code) &&
+    !(
+      unified && /\bcua\.(?:getTab|getBrowser|createBrowserTab)\s*\(/.test(code)
+    )
   ) {
     return null;
   }
   const handoff = /\btabs\.finalize\s*\(/.test(code);
   const connectionOperation =
+    (unified && /\bcua\.(?:getState|getBrowser|listTabs)\s*\(/.test(code)) ||
     /\b(?:setupBrowserRuntime|agent\.browsers|browsers\.get|claimTab|openTabs)\b/.test(
       code,
     );
@@ -142,7 +158,8 @@ function nativeCodexBrowserActivity(
         : phase === "connect"
           ? "Connect to the in-app browser"
           : "Use the browser";
-  const url = nativeBrowserResultUrl(tool) ?? firstBrowserUrlInCode(code);
+  const url =
+    surface?.url ?? nativeBrowserResultUrl(tool) ?? firstBrowserUrlInCode(code);
   const host = hostname(url);
   const inferredTool: BrowserToolName = handoff
     ? "close"
@@ -165,6 +182,16 @@ function nativeCodexBrowserActivity(
     ...(url ? { url } : {}),
     ...(host ? { target: host } : {}),
     status: tool.status,
+    ...(surface
+      ? {
+          surfaceScope: surface.scope,
+          external: surface.external,
+          appId: surface.appId,
+          faviconUrl: surface.faviconUrl,
+        }
+      : unified
+        ? { surfaceScope: "cua_repl:unknown", external: true }
+        : {}),
   };
 }
 
@@ -356,6 +383,8 @@ export function resolveBrowserActivityPresentation(
     }
   }
   const actionHost = hostname(latestActionUrl);
+  const external = actions.some((action) => action.external);
+  if (external) session = null;
   const liveHost = hostname(session?.url);
   const actionOrigin = origin(latestActionUrl);
   const liveOrigin = origin(session?.url);
@@ -530,6 +559,13 @@ export function groupBrowserToolActivity(
       current = null;
       grouped.push({ kind: "event", id: event.id, event });
       continue;
+    }
+    if (
+      current &&
+      current.actions.at(-1)?.surfaceScope !== action.surfaceScope
+    ) {
+      current.closed = true;
+      current = null;
     }
     if (!current) {
       current = {

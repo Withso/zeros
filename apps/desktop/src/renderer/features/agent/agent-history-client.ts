@@ -41,6 +41,7 @@ import {
   bridgeMessageClear,
   bridgeMessageTruncateFrom,
   bridgeDbHead,
+  workspaceOp,
   bridgeDbPull,
   bridgeChatSummaries,
   type MessageSearchHit,
@@ -85,6 +86,28 @@ export function fromPersistedMessage(
     );
     return null;
   }
+}
+
+/** Persist a user prompt blocked before provider admission, without inventing
+ * agent output or a tool call. Uses the engine's existing message upsert. */
+export async function persistAuthenticationPrompt(
+  bridge: import("../../platform/bridge/ws-client").RuntimeClient,
+  chatId: string,
+  message: import("./use-agent-session").AgentTextMessage,
+): Promise<void> {
+  const result = (await workspaceOp(bridge, "messages.import", {
+    chatId,
+    messages: [
+      {
+        msgId: message.id,
+        kind: message.kind,
+        payload: JSON.stringify(message),
+        createdAt: message.createdAt,
+      },
+    ],
+  })) as { imported?: number };
+  if (result.imported !== 1)
+    throw new Error("Could not save the message waiting for sign-in.");
 }
 
 /** Vestigial: the engine persists transcripts on emit (persist-on-emit +
@@ -285,12 +308,9 @@ export async function dbPull(since: number): Promise<DbPullResult> {
 export async function truncateMessagesFrom(
   chatId: string,
   fromMsgId: string,
+  bridge = requireBridge("truncate the chat transcript"),
 ): Promise<number> {
-  await bridgeMessageTruncateFrom(
-    requireBridge("truncate the chat transcript"),
-    chatId,
-    fromMsgId,
-  );
+  await bridgeMessageTruncateFrom(bridge, chatId, fromMsgId);
   return 0;
 }
 

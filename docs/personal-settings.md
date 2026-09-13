@@ -128,42 +128,115 @@ mapping pauses Design edits instead of selecting another document. See
 
 ## Customize
 
-| Category | Provider tabs                | Creation in Zeros |
-| -------- | ---------------------------- | ----------------- |
-| MCP      | Zeros, Claude, Codex, Cursor | Zeros only        |
-| Skills   | Zeros, Claude, Codex, Cursor | Zeros only        |
-| Plugins  | Claude, Codex, Cursor        | None              |
-| Apps     | Claude, Codex, Cursor        | None              |
+Customize currently shows only **Zeros-managed MCP servers and skills**, at
+user and repository scopes. Provider tabs and Apps/Plugins inventory views are
+deferred. Stored provider selections are bounded to a supported Zeros category
+before rendering, so they cannot trigger hidden native discovery.
 
-Native inventory is read-only and preserves source ownership:
+The backend retains read-only provider inventory with source ownership:
 
 - Codex uses `plugin/installed` for local and remote marketplace installations,
   `app/list` for accessible account apps, and `app/installed` for enabled/callable
-  runtime state. These reads start no conversation. Available apps have callable
+  runtime state. `skills/list` reads effective skills; `config/read` and bounded
+  `plugin/read` calls read native and installed plugin MCP declarations.
+  These reads start no conversation. Available apps have callable
   tools; disabled, unverified, and unavailable entries remain distinguishable.
   Normal chats preserve the native `codex_apps` bridge. Tool-free title threads
   still disable it. Provider auth, tool policies, and Zeros approvals remain in
   force; this change does not force-enable native-disabled apps.
-- Claude account connectors are read through `query.mcpServerStatus()` on an
-  existing session, including explicit needs-auth status. Browsing inventory
-  never starts a query or widens its settings. There is no standalone account
-  inventory here: automatic cloud connectors can remain excluded by the current
-  strict MCP policy. Local installation records show downloaded marketplace
-  plugins, including components, without executing them.
+- Claude uses a disposable SDK query inside the provider utility boundary, with
+  no prompt, no transcript persistence, no model turn, no tools, and hooks
+  disabled. `mcpServerStatus`, `reloadSkills`, and `reloadPlugins` report that
+  query's inventory. MCP discovery may connect configured native servers so the
+  provider can report account connectors. Skill/plugin reads retain strict MCP
+  scoping. Organization policy and native configuration remain authoritative;
+  the SDK has no separate inventory of every cloud-only Claude extension.
 - Cursor exposes no separate cloud app/plugin inventory through the integrated
   SDK. Local declarations and materialized plugin packages are shown with that
   limitation. Cache discoveries are **Found on disk**, never proof of active
-  installation. Features confined to a native app are not advertised as callable.
+  installation. This includes `plugins/local` development packages and declared
+  plugin component paths within their package. Features confined to a native
+  app are not advertised as callable.
 
-Native MCP outside the Codex account bridge retains its existing adapter scope.
-Inventory visibility does not enable a plugin, import native permissions,
-change hooks, copy credentials, or mutate native configuration. Claude/Cursor
-settings sources are unchanged. This is not a blanket isolation of preexisting
-native policy: a provider's enforced restrictions can still apply.
+Local MCP requires **Customize → MCP → Import**, including local HTTP
+configuration and MCP contributed by local plugin packages. Supported account
+connections load automatically under provider policy: Codex retains account
+plugins and `codex_apps`; Claude retains subscription-connector discovery.
+Claude/Cursor SDK settings-source switches also exclude coupled local
+settings/rules/plugins. Cursor dashboard connections require Cursor-hosted
+execution. The composer **Tools** popover reports actual session connections;
+Cursor's SDK cannot verify MCP status or launch MCP OAuth, and Claude exposes
+status but no SDK OAuth launcher. Codex offers its supported browser action.
+See [extension-discovery.md](extension-discovery.md) for source selection,
+status/auth boundaries, remote limitations, and the host opt-out.
+Inventory reads themselves do not change native configuration or permissions.
 
-Provider failures fall back to local declarations. Partial refreshes retain
-previous exact-scope entries, label retained availability as unverified, and
-show the provider warning. A later complete inventory can remove stale entries.
+Local declarations and provider results are composed, even when a provider
+returns a complete empty list. Source completeness is explicit: unavailable
+account enumeration never means the account has no extensions. Partial refreshes
+retain only entries from the failed source and a verified matching identity;
+confirmed local deletions still disappear when an account lookup fails. A new
+provider runtime has a new identity, so its failed lookup cannot resurrect old
+account entries. Authentication changes also advance the renderer cache owner.
+
+Claude and Codex offer **Account**, **CLI**, and **API** in the **Configure Claude/Codex**
+dialog in Settings → Providers. **Custom Providers (Coming soon)** is disabled.
+Cursor offers Account and API. Account and CLI both use subscription credentials;
+API uses only the selected saved API key. The connection row reports
+**Connected via subscription**, **Connected via API**, or an existing gateway's
+name. Choosing a method cancels any pending browser ceremony and closes the
+inline login terminal before applying the new authentication preference.
+
+Account opens the device-owned browser flow. Claude uses the bundled Code
+runtime's `auth login --claudeai`; **Use a sign-in code** reveals its optional
+manual callback fallback. Codex uses an authentication-only app-server connection
+(`account/login/start` with `type: "chatgpt"`). Neither creates a chat nor sends a
+model prompt. Selecting CLI reveals **Open terminal**; only that button starts
+the inline terminal. Browser ceremonies and provider login
+terminals expire after five minutes; bounded renderer IPC waits also recover if a
+native response is lost. New accounts use separate native credential profiles. **Add account** keeps the
+current selection until sign-in succeeds; the account picker selects one saved
+account. CLI uses the separately managed device login. Existing device logins are
+retained as a **Device account** for compatibility. Their existing `auth = "cli"`
+setting remains the serialized subscription selection. The native encrypted
+account store owns Account versus CLI selection; the device-local
+`providers:subscription-entry:<provider>` key supplies a synchronous UI fallback.
+See [provider accounts](provider-accounts.md) for isolation and switching details.
+
+A chat authentication failure renders a product notice outside agent output and
+turn footers. **Sign in** publishes Settings → Providers and the exact provider
+tab before navigation; it never starts authentication from chat. The notice does
+not infer successful sign-in from credential presence or offer a special retry
+button. After signing in, the user sends a new message or types “Continue” in the
+normal composer. The earlier prompt stays in the same chat and becomes **Agent
+stopped** with its normal footer as soon as the new message appears. A blocked
+user message carries optional `authRecovery.text` metadata so its expanded prompt
+survives reload; attachment bytes remain in the context graph. Consecutive blocked
+prompts (including older transcripts identified by their authentication failure)
+and their available attachments accompany the next normal send as prior
+context, because a prompt blocked before dispatch may not exist in provider
+history. Subsequent sends do not replay them again.
+This is an additive JSON transcript field under the existing message payload;
+older clients ignore it, so it does not require a protocol-version bump.
+The new send has its own turn ID. Admission restarts the ephemeral execution with
+the selected credentials and resumes the existing provider conversation without
+resetting files or deleting the earlier prompt. If the provider starts an empty
+session, the next send includes a bounded replay of the prior conversation.
+Queued messages are excluded from that replay. No prompt is sent automatically
+after login. Registry refreshes preserve actual authentication rejections until
+the selected credentials change or a prompt succeeds; a presence-only probe
+cannot erase a provider rejection just because Settings refreshed.
+
+Cursor uses the bundled SDK's browser login. Its resulting expiring credential is stored in Electron's encrypted
+store, in the main-only `provider-accounts-cursor` account. The legacy
+`cursor-subscription` credential remains readable for existing device accounts. Status responses expose
+identity metadata, never that credential. The engine receives provider
+credentials over private stdin at boot and after changes; user/managed auth
+settings select the credential at each launch, including local headless work.
+Cursor persists the explicit new choice as `auth = "subscription"`; legacy
+Cursor `cli` values continue to select the prior API-key behavior. Disconnect
+and expiry cannot silently select a different API key. No desktop credential
+is automatically sent to a cloud workspace.
 
 Zeros skills live in `<user-settings-dir>/skills/<name>/SKILL.md` or the main
 checkout's locally excluded `.zeros/skills/<name>/SKILL.md`. Repository skills
@@ -173,6 +246,9 @@ skill when relevant using its existing tools and permissions. New sessions
 discover changes; skill edits compare full-file revisions before saving or
 removing, and removal retains supporting files.
 
-Customize reads share a bounded cache by connection, scope, category, and
-provider. Refresh keeps confirmed results, provider/category intent warms the
+Customize reads share a bounded cache by connection, authentication revision,
+scope, category, and provider. Refresh keeps confirmed results, category intent warms the
 destination, and a form's scope identity prevents drafts moving between repos.
+
+See [extension discovery](extension-discovery.md) for provider capabilities,
+research sources, and the distinction between discovery and cloud execution.

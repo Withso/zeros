@@ -45,7 +45,14 @@ import { createCursorSdkAdapter } from "./adapters/cursor-sdk";
 export type AuthProbe =
   | { kind: "file"; paths: string[] }
   | { kind: "keychain"; service: string }
-  | { kind: "command"; binary: string; args: string[] }
+  | {
+      kind: "command";
+      binary: string;
+      args: string[];
+      /** Modification-only signal for retiring an earlier runtime rejection.
+       * File presence never replaces the command's authentication verdict. */
+      credentialFiles?: string[];
+    }
   | { kind: "any-of"; probes: AuthProbe[] }
   /** "File" + content-aware expiry check. Reads a JSON file, walks
    *  `expiryFieldPath` to extract a timestamp, and returns false when
@@ -264,6 +271,9 @@ export const AGENT_MANIFEST: AgentManifestEntry[] = [
       kind: "command",
       binary: "codex",
       args: ["login", "status"],
+      credentialFiles: [
+        path.join(process.env.CODEX_HOME || "~/.codex", "auth.json"),
+      ],
     },
     loginCommand: { binary: "codex", args: ["login"] },
     // 2026-05-24 — bumped from 0.8.0 (legacy `codex exec resume`) to
@@ -279,7 +289,7 @@ export const AGENT_MANIFEST: AgentManifestEntry[] = [
   {
     id: "cursor",
     name: "Cursor Agent",
-    description: "Cursor's coding agent (bundled @cursor/sdk, API key).",
+    description: "Cursor's coding agent (account sign-in or API key).",
     // `cliBinary` is retained only for the install-hint label + the displayed
     // `--version` probe. The RUNTIME is the bundled @cursor/sdk (an npm dep),
     // NOT this CLI — `bundledRuntime: true` skips the PATH probe entirely.
@@ -289,10 +299,9 @@ export const AGENT_MANIFEST: AgentManifestEntry[] = [
       command: AGENT_INSTALL_COMMANDS.cursor,
       docsUrl: "https://cursor.com/docs/cli",
     },
-    // API-key only. The @cursor/sdk reads CURSOR_API_KEY (pasted in
-    // Settings → Providers → Cursor, stored in the app's encrypted secret
-    // store). There is no `cursor-agent login` session in the run path, so the
-    // file/command probes are gone — key presence is the whole signal.
+    // Retained as the pasted-key change signal. The gateway checks the
+    // selected private credential (including browser-login expiry) for
+    // Cursor's authoritative authentication result; no CLI probe runs.
     authProbe: { kind: "secret-account", account: "cursor-api-key" },
     loginCommand: { binary: "cursor-agent", args: ["login"] },
     // Cursor runs EXCLUSIVELY through the bundled @cursor/sdk (in-process
@@ -302,7 +311,7 @@ export const AGENT_MANIFEST: AgentManifestEntry[] = [
     // so `installed` is always true. Trade-off: the SDK is HTTP/2-only (no
     // HTTP/1.1 fallback), so on HTTP/2-constrained networks a prompt can fail
     // with a TLS/HTTP-2 error — the adapter surfaces that as an actionable
-    // message. Auth is the Cursor API key.
+    // message. The credential comes from browser sign-in or a pasted API key.
     bundledRuntime: true,
     createAdapter: (ctx) => createCursorSdkAdapter(ctx),
   },

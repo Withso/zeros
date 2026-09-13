@@ -44,6 +44,11 @@ vi.mock("../app-server", () => ({
     respondToPermission: () => {},
     respondToUserInput: () => {},
     onNotification: () => () => {},
+    requestTyped: vi.fn(async (method: string) =>
+      method === "config/read"
+        ? { config: { mcp_servers: {} } }
+        : { marketplaces: [], marketplaceLoadErrors: [] },
+    ),
     request: vi.fn(async () => ({})),
     dispose: async () => {
       rt.disposeCalls += 1;

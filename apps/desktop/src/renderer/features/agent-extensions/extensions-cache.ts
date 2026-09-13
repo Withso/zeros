@@ -7,6 +7,7 @@ import { KeyedAsyncCache } from "../../shared/lib/keyed-async-cache";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
 import type { RuntimeClient } from "../../platform/bridge/ws-client";
+import { providerAuthRevision } from "../../platform/provider-auth-state";
 
 let nextOwner = 0;
 export function createExtensionResource(
@@ -23,18 +24,25 @@ export function createExtensionResource(
     key: (query: ExtensionQuery) =>
       JSON.stringify([
         owner,
+        query.provider === "zeros" ? 0 : providerAuthRevision(),
         query.repoRoot ?? null,
         query.category,
         query.provider,
       ]),
     fetch: (key: string) => {
-      const [keyOwner, root, category, provider] = JSON.parse(key) as [
+      const [keyOwner, revision, root, category, provider] = JSON.parse(
+        key,
+      ) as [
+        number,
         number,
         string | null,
         ExtensionQuery["category"],
         ExtensionQuery["provider"],
       ];
-      if (keyOwner !== owner)
+      if (
+        keyOwner !== owner ||
+        (provider !== "zeros" && revision !== providerAuthRevision())
+      )
         return Promise.reject(
           new Error("The customization connection changed. Refresh to retry."),
         );
@@ -46,18 +54,36 @@ export function createExtensionResource(
       }).then((result) => {
         if (!result.partial || !previous?.entries.length) return result;
         const entries = new Map<string, ExtensionEntry>(
-          previous.entries.map((entry) => [
-            entry.id,
-            {
-              ...entry,
-              status:
-                entry.status === "available"
-                  ? ("configured" as const)
-                  : entry.status,
-              statusDetail:
-                "Last reported by the provider. Current availability could not be checked.",
-            },
-          ]),
+          previous.entries
+            .filter((entry) => {
+              if (!result.sources && !previous.sources)
+                return (
+                  provider === "zeros" ||
+                  /^(?:\/|[a-z]:[\\/])/i.test(entry.sourcePath)
+                );
+              const source = result.sources?.find(
+                (item) => item.id === entry.sourceId,
+              );
+              if (source?.state !== "partial") return false;
+              return (
+                source.kind === "local" ||
+                Boolean(
+                  result.identity && result.identity === previous.identity,
+                )
+              );
+            })
+            .map((entry) => [
+              entry.id,
+              {
+                ...entry,
+                status:
+                  entry.status === "available"
+                    ? ("configured" as const)
+                    : entry.status,
+                statusDetail:
+                  "Last reported by the provider. Current availability could not be checked.",
+              },
+            ]),
         );
         for (const entry of result.entries)
           entries.set(entry.id, {

@@ -20,6 +20,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { isNativeRuntime, nativeInvoke } from "./runtime";
+import { providerAuthChanged } from "./provider-auth-state";
 
 // Ephemeral, session-scoped fallback for the non-native dev harness.
 // Never persisted — see the header note on clear-text-at-rest.
@@ -31,6 +32,8 @@ export async function setSecret(account: string, value: string): Promise<void> {
     return;
   }
   await nativeInvoke<void>("keychain_set", { account, value });
+  if (Object.values(SECRET_ACCOUNTS).some((value) => value === account))
+    providerAuthChanged();
 }
 
 export async function getSecret(account: string): Promise<string | null> {
@@ -60,6 +63,8 @@ export async function deleteSecret(account: string): Promise<void> {
     return;
   }
   await nativeInvoke<void>("keychain_delete", { account });
+  if (Object.values(SECRET_ACCOUNTS).some((value) => value === account))
+    providerAuthChanged();
 }
 
 // ── Well-known account names ────────────────────────────────

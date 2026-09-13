@@ -40,6 +40,10 @@ const agents = [
     authenticated: true,
   },
 ];
+const disconnected =
+  new URLSearchParams(location.search).get("disconnected")?.split(",") ?? [];
+for (const agent of agents)
+  if (disconnected.includes(agent.id)) agent.authenticated = false;
 localStorage.setItem(
   "zeros.agent.registrySnapshot",
   JSON.stringify({ agents, at: Date.now() }),

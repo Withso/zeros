@@ -55,6 +55,12 @@ const SOURCES: readonly SourceDef[] = [
 
 /** Per-repo native configs, scanned relative to each repo root (not home). */
 const REPO_SOURCES: readonly SourceDef[] = [
+  {
+    source: "codex-project",
+    label: "Codex (project)",
+    rel: ".codex/config.toml",
+    format: "toml",
+  },
   { source: "cursor-project", label: "Cursor (project)", rel: ".cursor/mcp.json", format: "json" },
   { source: "project", label: "Project (.mcp.json)", rel: ".mcp.json", format: "json" },
 ];
@@ -181,13 +187,17 @@ function scanSource(baseDir: string, def: SourceDef): DiscoveredMcpSource {
 
 /** Scan every known native MCP config and return what each declares — the
  *  home-level configs (Cursor / Claude Code / Codex / Factory / Claude Desktop)
- *  plus, for each given repo root, that repo's `.cursor/mcp.json` + `.mcp.json`
+ *  plus each given repo's `.cursor/mcp.json`, `.codex/config.toml` and `.mcp.json`
  *  (only repos that actually have one are surfaced). */
 export function scanNativeMcpConfigs(
   homeDir: string = os.homedir(),
   repoRoots: readonly string[] = [],
 ): DiscoveredMcpSource[] {
-  const home = SOURCES.map((def) => scanSource(homeDir, def));
+  const home = SOURCES.map((def) =>
+    def.source === "codex" && process.env.CODEX_HOME?.trim()
+      ? scanSource(process.env.CODEX_HOME.trim(), { ...def, rel: "config.toml" })
+      : scanSource(homeDir, def),
+  );
   const codexPlugins = scanCodexPluginMcp(homeDir);
   if (codexPlugins.servers.length > 0) home.push(codexPlugins);
   const perRepo: DiscoveredMcpSource[] = [];

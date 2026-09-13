@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { ClipboardPaste, X } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { Button } from "../../shared/ui";
@@ -67,27 +67,54 @@ export function InlineLoginTerminal({
   binary,
   args,
   unsetEnv,
+  timeoutMs,
+  loginProvider,
   onClose,
 }: {
   ownerId: string;
   binary: string;
   args: string[];
   unsetEnv?: readonly string[];
+  timeoutMs?: number;
+  loginProvider?: "claude" | "codex";
   onClose: () => void;
 }) {
+  const terminalRef = useRef<{
+    paste(text: string): void;
+    focus(): void;
+  } | null>(null);
+  const [pasteError, setPasteError] = useState<string | null>(null);
   const [binaryPath, setBinaryPath] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const sessionIdRef = useRef(makeLoginSessionId(ownerId));
   const sessionId = sessionIdRef.current;
 
   useEffect(() => {
+    if (loginProvider) return;
     let cancelled = false;
-    void resolveAgentBinary(binary).then((path) => {
-      if (!cancelled) setBinaryPath(path);
-    });
+    void resolveAgentBinary(binary)
+      .then((path) => {
+        if (!cancelled) setBinaryPath(path);
+      })
+      .catch(() => {
+        if (!cancelled)
+          setError(
+            "Could not open the sign-in terminal. Close it and try again.",
+          );
+      });
     return () => {
       cancelled = true;
     };
-  }, [binary]);
+  }, [binary, loginProvider]);
+
+  useEffect(() => {
+    if (!timeoutMs) return;
+    const timer = setTimeout(() => {
+      setError("Sign-in timed out. Close the terminal and try again.");
+      void ptyKill({ sessionId });
+    }, timeoutMs);
+    return () => clearTimeout(timer);
+  }, [sessionId, timeoutMs]);
 
   useEffect(
     () => () => {
@@ -96,18 +123,52 @@ export function InlineLoginTerminal({
     [sessionId],
   );
 
-  const label = `${binary} ${args.join(" ")}`.trim();
+  const label = loginProvider
+    ? `${loginProvider} ${loginProvider === "claude" ? "auth login" : "login"}`
+    : `${binary} ${args.join(" ")}`.trim();
   const command = binaryPath
     ? buildInlineLoginCommand(binaryPath, args, unsetEnv)
     : null;
 
   return (
-    <div className="border-border1 bg-bg1 flex flex-col overflow-hidden rounded-lg border">
+    <div className="border-border1 bg-bg1 flex min-w-0 flex-col overflow-hidden rounded-lg border">
       <div className="border-border1 flex items-center gap-2 border-b px-3.5 py-2">
-        <ZerosSpinner size={14} />
+        {!error && <ZerosSpinner size={14} />}
         <span className="text-fg2 min-w-0 flex-1 truncate text-sm">
-          Running <span className="text-fg1">{label}</span>.
+          {error ? (
+            "Sign-in stopped"
+          ) : (
+            <>
+              Running <span className="text-fg1">{label}</span>.
+            </>
+          )}
         </span>
+        {loginProvider && (
+          <Tooltip label="Paste into terminal">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Paste into terminal"
+              onClick={() => {
+                void navigator.clipboard
+                  .readText()
+                  .then((text) => {
+                    terminalRef.current?.focus();
+                    terminalRef.current?.paste(text);
+                    setPasteError(null);
+                  })
+                  .catch(() =>
+                    setPasteError(
+                      "Click inside the terminal and use Paste from the Edit menu.",
+                    ),
+                  );
+              }}
+            >
+              <ClipboardPaste className="size-3.5" aria-hidden="true" />
+            </Button>
+          </Tooltip>
+        )}
         <Tooltip label="Close terminal">
           <Button
             type="button"
@@ -121,14 +182,27 @@ export function InlineLoginTerminal({
           </Button>
         </Tooltip>
       </div>
-      <div className="h-[300px] min-h-0 w-full">
-        {command ? (
+      {pasteError && (
+        <p className="text-fg2 px-3 pt-2 text-xs" role="alert">
+          {pasteError}
+        </p>
+      )}
+      <div className="h-[300px] min-h-0 w-full min-w-0 p-3">
+        {error ? (
+          <p className="text-fg2 p-4 text-sm" role="alert">
+            {error}
+          </p>
+        ) : command || loginProvider ? (
           <TerminalSessionView
             sessionId={sessionId}
             cwd=""
             visible
             ephemeral
             initialCommand={command}
+            loginProvider={loginProvider}
+            onTerminalReady={(terminal) => {
+              terminalRef.current = terminal;
+            }}
             onExit={onClose}
           />
         ) : (

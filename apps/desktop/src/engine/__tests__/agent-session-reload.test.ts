@@ -5,9 +5,12 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type {
+  ContentBlock,
   LoadSessionResponse,
   RequestPermissionRequest,
 } from "@zeros/protocol/agent-events";
+import type { AgentMessage } from "@zeros/protocol/agent-messages";
+import type { AgentPromptBubble } from "@zeros/protocol/messages";
 import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { MessageRouter } from "../transport/router";
@@ -19,7 +22,7 @@ import {
   upsertChat,
   type ChatRow,
 } from "../db/chats";
-import { windowChatMessages } from "../db/messages";
+import { upsertChatMessagesBulk, windowChatMessages } from "../db/messages";
 import { listTurnsForChat } from "../db/turns";
 import { AgentFailureError } from "../agents/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
@@ -35,6 +38,14 @@ interface ActivePromptRecord {
 }
 
 interface TestEngineInternals {
+  sessionMessages: Map<string, AgentMessage[]>;
+  persistUserPrompt(
+    sessionId: string,
+    prompt: ContentBlock[],
+    bubble?: AgentPromptBubble,
+    userMessageId?: string,
+    startedAt?: number,
+  ): void;
   router: MessageRouter;
   agents: {
     cancel(agentId: string, sessionId: string): Promise<void>;
@@ -140,6 +151,83 @@ function internals(engine: ZerosEngine): TestEngineInternals {
 }
 
 describe("agent session continuity across a local renderer reload", () => {
+  it.each([true, false])("retains empty-session replay across reload only until a successful prompt: %s", async (succeeds) => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "codex");
+    state.sessionLoadResponses.set("session-1", { resumedFresh: true });
+    const prompt = vi.spyOn(state.agents, "prompt");
+    if (succeeds) prompt.mockResolvedValue({ stopReason: "end_turn" });
+    else prompt.mockRejectedValue(new Error("Sign in required"));
+    await state.handleMessage({ type: "AGENT_PROMPT", id: "replay-once", source: "browser", timestamp: 1, agentId: "codex", sessionId: "session-1", prompt: [{ type: "text", text: "hi" }] } as EngineMessage, client);
+    expect(messages.some(message => message.type === (succeeds ? "AGENT_PROMPT_COMPLETE" : "AGENT_PROMPT_FAILED"))).toBe(true);
+    expect(state.sessionLoadResponses.get("session-1")?.resumedFresh).toBe(!succeeds);
+  });
+  it.each(["Original message", ""])(
+    "continues a saved authentication prompt in place without duplicating its text: %j",
+    (text) => {
+      const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-auth-retry-"));
+      setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+      try {
+        upsertChat(persistedChat("chat-auth-retry", { folder: dbDir }));
+        const engine = new ZerosEngine({ root: dbDir, port: 29_904 });
+        const state = internals(engine);
+        const prompt: AgentMessage = {
+          id: "original-turn",
+          kind: "text",
+          role: "user",
+          text,
+          createdAt: 1000,
+          authRecovery: { text: "expanded original" },
+        };
+        const attachment = {
+          name: "reference.png",
+          kind: "image" as const,
+          mimeType: "image/png",
+          diskPath: ".context-graph/fixture/reference.png",
+        };
+        state.sessionChat.set("execution-auth-retry", "chat-auth-retry");
+        state.sessionMessages.set("execution-auth-retry", [prompt]);
+        upsertChatMessagesBulk("chat-auth-retry", [
+          {
+            msgId: prompt.id,
+            kind: prompt.kind,
+            payload: JSON.stringify(prompt),
+            createdAt: prompt.createdAt,
+          },
+        ]);
+
+        state.persistUserPrompt(
+          "execution-auth-retry",
+          [{ type: "text", text: "expanded original" }],
+          { displayText: text, attachments: [attachment] },
+          prompt.id,
+          prompt.createdAt,
+        );
+
+        const saved = windowChatMessages("chat-auth-retry", 10);
+        expect(saved).toHaveLength(1);
+        expect(state.sessionMessages.get("execution-auth-retry")).toHaveLength(
+          1,
+        );
+        const message = JSON.parse(saved[0].payload);
+        expect(message).toMatchObject({
+          id: prompt.id,
+          text,
+          createdAt: 1000,
+          attachments: [attachment],
+        });
+        expect(message.authRecovery).toBeUndefined();
+      } finally {
+        closeZerosDb();
+        setZerosDbPathForTesting(null);
+        fs.rmSync(dbDir, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("persists admission time on both the user bubble and completed turn", async () => {
     const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-prompt-time-"));
     const workDir = path.join(dbDir, "worktree");

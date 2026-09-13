@@ -1178,6 +1178,8 @@ export interface PtyCreateMessage extends BaseMessage {
    *  leaves no "(exited)" tab behind. The owning client disposes it explicitly
    *  (PTY_KILL) or it auto-disposes when its shell exits. */
   ephemeral?: boolean;
+  /** Local, provider-owned one-shot sign-in. No renderer-supplied command. */
+  loginProvider?: "claude" | "codex";
 }
 export interface PtyCreatedMessage extends BaseMessage {
   type: "PTY_CREATED";

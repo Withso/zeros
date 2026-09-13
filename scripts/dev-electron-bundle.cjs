@@ -93,6 +93,8 @@ function patchPlist(plistPath, { name, exec, bundleId }) {
     // (which dev Electron is), so it must carry the branding too.
     CFBundleExecutable: exec,
     CFBundleIdentifier: bundleId,
+    NSAppleEventsUsageDescription:
+      "Zeros needs permission to interact with other apps for computer and browser tasks you request.",
   };
   for (const [key, value] of Object.entries(targets)) {
     const re = new RegExp(`(<key>${key}</key>\\s*<string>)([^<]*)(</string>)`);
@@ -102,11 +104,16 @@ function patchPlist(plistPath, { name, exec, bundleId }) {
         plist = plist.replace(re, `$1${value}$3`);
         changed = true;
       }
-    } else if (key === "CFBundleDisplayName") {
-      // Electron's stock plist sometimes omits the display-name key.
+    } else if (
+      key === "CFBundleDisplayName" ||
+      key === "NSAppleEventsUsageDescription"
+    ) {
+      // Electron's stock plist can omit either key. Dev builds need the same
+      // Automation consent explanation as packaged builds. This metadata does
+      // not change the responsible app when a launcher owns the TCC request.
       plist = plist.replace(
         /(<key>CFBundleName<\/key>\s*<string>[^<]*<\/string>)/,
-        `$1\n\t<key>CFBundleDisplayName</key>\n\t<string>${value}</string>`,
+        `$1\n\t<key>${key}</key>\n\t<string>${value}</string>`,
       );
       changed = true;
     }
@@ -417,9 +424,10 @@ module.exports = {
   prepareInstanceBundle,
   // Internals, exported for scripts/__tests__/dev-electron-bundle.test.ts —
   // prepareInstanceBundle() itself is darwin-only, so the layout + cleanup rules
-  // are what CI can actually pin.
+  // and atomic plist edits are what CI can actually pin.
   instanceBundleDir,
   legacyInstanceBundleDir,
   pruneStaleBundles,
   discardBundle,
+  patchPlist,
 };

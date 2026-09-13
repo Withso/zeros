@@ -112,6 +112,7 @@ export async function ptyCreate(args: {
    *  multiplayer registry, so it never shows in another device's terminal list
    *  and leaves no "(exited)" tab. The caller disposes it explicitly. */
   ephemeral?: boolean;
+  loginProvider?: "claude" | "codex";
 }): Promise<PtySessionInfo | null> {
   // The engine resolves the workspace from `cwd` (an id OR a real path)
   // server-side, so we pass the folder unchanged — no renderer-side id mapping.

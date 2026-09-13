@@ -8,6 +8,7 @@ import {
   isTailProviderTurnSegment,
   turnKey,
 } from "../turn-grouping";
+import { stabilizeTurns } from "../stable-turns";
 
 function user(
   id: string,
@@ -36,6 +37,77 @@ function event(id: string): AgentMessage {
     updatedAt: 1,
   } as AgentMessage;
 }
+
+function startupWarning(id: string): AgentMessage {
+  return {
+    id,
+    kind: "error_notice",
+    code: "mcp_startup_status",
+    severity: "warning",
+    message: "cloudflare-api MCP is failed.",
+    recoverable: true,
+    createdAt: 1,
+  };
+}
+
+describe("groupMessagesIntoTurns — background MCP status", () => {
+  it("does not create a system turn for startup notices restored from older builds", () => {
+    expect(
+      groupMessagesIntoTurns([
+        startupWarning("status-1"),
+        startupWarning("status-2"),
+      ]),
+    ).toEqual([]);
+  });
+
+  it("hides only startup notices while retaining tool errors, sign-in failures and other warnings", () => {
+    const failedTool: AgentMessage = {
+      ...event("mcp-call"),
+      kind: "tool",
+      toolKind: "mcp",
+      status: "failed",
+      rawOutput: { message: "Authentication required" },
+    } as AgentMessage;
+    const signInFailure = {
+      ...startupWarning("oauth"),
+      code: "mcp_oauth_failed",
+    };
+    const unrelatedWarning = { ...startupWarning("warning"), code: undefined };
+    const messages = [
+      startupWarning("before-prompt"),
+      user("u1", "List workers"),
+      startupWarning("during-prompt"),
+      failedTool,
+      signInFailure,
+      unrelatedWarning,
+      startupWarning("after-prompt"),
+    ];
+    const original = [...messages];
+    const turns = groupMessagesIntoTurns(messages);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0].userPrompt?.id).toBe("u1");
+    expect(turns[0].events).toEqual([
+      failedTool,
+      signInFailure,
+      unrelatedWarning,
+    ]);
+    expect(turns[0].providerEvents).toBe(turns[0].events);
+    expect(turns[0].events[0]).toBe(failedTool);
+    expect(messages).toEqual(original);
+  });
+
+  it("retains visible turn references when an older engine sends more startup notices", () => {
+    const messages = [user("u1", "Hello"), event("result")];
+    const previous = groupMessagesIntoTurns(messages);
+    const refreshed = groupMessagesIntoTurns([
+      ...messages,
+      startupWarning("refresh"),
+    ]);
+
+    expect(stabilizeTurns(previous, refreshed)).toBe(previous);
+  });
+});
 
 describe("groupMessagesIntoTurns — mid-turn steering", () => {
   it("coalesces duplicate durable ids before producing React turn keys", () => {

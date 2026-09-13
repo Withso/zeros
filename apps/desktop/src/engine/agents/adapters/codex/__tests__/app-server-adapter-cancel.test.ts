@@ -25,7 +25,10 @@ const rt = vi.hoisted(() => ({
   interruptCalls: [] as Array<{ threadId: string; turnId: string }>,
   runTurnImpl: null as
     | null
-    | ((params: unknown, opts: { onTurnStarted?: (id: string) => void }) => Promise<unknown>),
+    | ((
+        params: unknown,
+        opts: { onTurnStarted?: (id: string) => void },
+      ) => Promise<unknown>),
   fire(method: string, params: unknown): void {
     for (const h of rt.notificationHandlers.get(method) ?? []) h(params);
   },
@@ -49,7 +52,10 @@ vi.mock("../app-server", () => ({
       sandbox: { type: "workspaceWrite" },
       raw: {},
     }),
-    resumeThread: async (p: { threadId: string }) => ({ threadId: p.threadId, raw: {} }),
+    resumeThread: async (p: { threadId: string }) => ({
+      threadId: p.threadId,
+      raw: {},
+    }),
     runTurn: async (
       params: unknown,
       o: { onTurnStarted?: (id: string) => void },
@@ -71,6 +77,11 @@ vi.mock("../app-server", () => ({
       set.add(handler);
       return () => set?.delete(handler);
     },
+    requestTyped: vi.fn(async (method: string) =>
+      method === "config/read"
+        ? { config: { mcp_servers: {} } }
+        : { marketplaces: [], marketplaceLoadErrors: [] },
+    ),
     request: vi.fn(async () => ({})),
     dispose: async () => {},
   })),
@@ -90,7 +101,9 @@ vi.mock("../../session-paths", () => ({
 // Import AFTER the mocks are registered (vi.mock is hoisted above imports).
 import { CodexAppServerAdapter } from "../app-server-adapter";
 
-const TEXT = (t: string): ContentBlock[] => [{ type: "text", text: t } as never];
+const TEXT = (t: string): ContentBlock[] => [
+  { type: "text", text: t } as never,
+];
 
 /** Drain enough microtasks for prompt() to reach runTurn (buildUserInput and
  *  the JSON-RPC fakes each cost an await). Fake timers don't affect these. */
@@ -162,11 +175,17 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick(); // let runTurnImpl fire turn/started
 
     // A collab subagent thread starts its own turn inside the same child.
-    rt.fire("turn/started", { threadId: "sub-thread-1", turn: { id: "sub-turn-1" } });
+    rt.fire("turn/started", {
+      threadId: "sub-thread-1",
+      turn: { id: "sub-turn-1" },
+    });
 
     await adapter.cancel({ sessionId: session.sessionId });
 
@@ -187,7 +206,10 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     // Only the subagent's ITEM stream is observed (it demonstrably renders
@@ -231,7 +253,10 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
       return result;
     };
 
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     // Stop lands while the ack is still in flight — no turn id to target yet.
@@ -256,7 +281,10 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     await adapter.cancel({ sessionId: session.sessionId });
@@ -267,7 +295,9 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     // A finishing child wakes the parent: codex starts a FRESH parent turn
     // even though the user just stopped. Must be interrupted on sight.
     rt.fire("turn/started", { threadId: "thread-1", turn: { id: "turn-2" } });
-    expect(rt.interruptCalls).toEqual([{ threadId: "thread-1", turnId: "turn-2" }]);
+    expect(rt.interruptCalls).toEqual([
+      { threadId: "thread-1", turnId: "turn-2" },
+    ]);
   });
 
   it("does not interrupt a genuinely new prompt sent right after cancel", async () => {
@@ -275,7 +305,10 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
     await adapter.cancel({ sessionId: session.sessionId });
     turn.settleInterrupted();
@@ -283,7 +316,10 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     rt.interruptCalls = [];
 
     const turn2 = pendingTurn("turn-3");
-    const prompt2 = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("again") });
+    const prompt2 = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("again"),
+    });
     await tick();
 
     expect(rt.interruptCalls).toEqual([]);
@@ -297,10 +333,16 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
-    rt.fire("turn/started", { threadId: "sub-thread-3", turn: { id: "sub-turn-3" } });
+    rt.fire("turn/started", {
+      threadId: "sub-thread-3",
+      turn: { id: "sub-turn-3" },
+    });
     rt.fire("turn/completed", {
       threadId: "sub-thread-3",
       turn: { id: "sub-turn-3", status: "completed" },
@@ -308,7 +350,9 @@ describe("codex cancel interrupts every live turn (parent + collab subagents)", 
 
     await adapter.cancel({ sessionId: session.sessionId });
 
-    expect(rt.interruptCalls).toEqual([{ threadId: "thread-1", turnId: "turn-1" }]);
+    expect(rt.interruptCalls).toEqual([
+      { threadId: "thread-1", turnId: "turn-1" },
+    ]);
 
     turn.settleInterrupted();
     await prompt;
@@ -331,7 +375,10 @@ describe("prompt holds open while collab subagent turns still run", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     turn.settleCompleted();
@@ -345,7 +392,10 @@ describe("prompt holds open while collab subagent turns still run", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     // A collab subagent thread is mid-flight when the parent turn ends.
@@ -377,7 +427,10 @@ describe("prompt holds open while collab subagent turns still run", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     rt.fire("turn/started", { threadId: "sub-1", turn: { id: "sub-turn-1" } });
@@ -493,7 +546,10 @@ describe("prompt holds open while collab subagent turns still run", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     rt.fire("turn/started", { threadId: "sub-1", turn: { id: "sub-turn-1" } });
@@ -519,7 +575,10 @@ describe("prompt holds open while collab subagent turns still run", () => {
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
 
     const turn = pendingTurn("turn-1");
-    const prompt = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("go") });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT("go"),
+    });
     await tick();
 
     rt.fire("turn/started", { threadId: "sub-1", turn: { id: "sub-turn-1" } });

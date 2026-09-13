@@ -76,7 +76,7 @@ export function synthesizeReplayPrompt(messages: AgentMessage[]): ReplayResult {
   const textOnly = messages.filter((m): m is AgentTextMessage => {
     if (m.kind !== "text") return false;
     if (m.role !== "user" && m.role !== "agent") return false;
-    if (m.redacted) return false;
+    if (m.redacted || m.queued) return false;
     return m.text.trim().length > 0;
   });
 

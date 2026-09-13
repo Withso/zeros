@@ -1,3 +1,13 @@
+import {
+  AccountModelDiscovery,
+  type AccountModelState,
+} from "../shared/account-model-discovery";
+import { readClaudeSessionTools, claudeSessionPluginGroup } from "./session-tools";
+import type { SessionToolsInventorySnapshot, SessionToolGroup } from "@zeros/protocol/agent-extensions";
+import {
+  createClaudeConnectorMembershipReader,
+  type ClaudeConnectorMembershipReader,
+} from "./connector-membership";
 // ──────────────────────────────────────────────────────────
 // ClaudeSdkAdapter — Claude Code via the official Agent SDK
 // ──────────────────────────────────────────────────────────
@@ -40,7 +50,7 @@ import * as fsp from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { personalRepoRoot } from "../../../settings/personal-repo";
-import { readClaudeConnectors } from "./extensions";
+import { readClaudeConnectors, readClaudeDiscovery } from "./extensions";
 import { homedir } from "node:os";
 
 import {
@@ -661,6 +671,7 @@ function safeChromePermissionHost(value: string): string | null {
 }
 
 interface SdkSession {
+  readonly modelState: AccountModelState;
   /** Zeros-side ephemeral routing id (returned to the renderer; never durable). */
   readonly zerosSessionId: string;
   cwd: string;
@@ -783,8 +794,14 @@ interface SdkSession {
    *  `supportedCommands()` list with no per-entry flag, but carries the skill
    *  NAME subset separately on the init message (`init.skills: string[]`), so
    *  we intersect by name to tag each emitted command as kind:"skill" vs
-   *  "command". Empty until the first init lands. */
+   *  "command". Bundled skills can be read on the control channel before init. */
   skillNames: Set<string>;
+  commandRevision: number;
+  commandsReadyQuery: Query | null;
+  commandDiscovery: { query: Query; promise: Promise<void> } | null;
+  skillRefresh: { query: Query; promise: Promise<Set<string> | null> } | null;
+  queryAccountConnectorsEnabled: boolean;
+  queryConnectorMembership: ClaudeConnectorMembershipReader | undefined;
 }
 
 const SDK_SESSION_FILE = "claude-sdk.json";
@@ -792,11 +809,32 @@ const SDK_SESSION_FILE = "claude-sdk.json";
 export class ClaudeSdkAdapter implements AgentAdapter {
   readonly agentId = "claude";
   readonly capabilityPorts = {
+    sessionTools: {
+      list: ({ sessionId }) => this.readSessionTools(sessionId),
+      inventory: ({ sessionId }) => this.readSessionTools(sessionId, true),
+    },
     extensions: {
       list: async (opts) => {
-        if (opts.category !== "apps") return null;
-        const state = [...this.sessions.values()].reverse().find(session => session.query && (opts.scope === "user" || personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)));
-        return readClaudeConnectors(state?.query ?? null);
+        if (opts.executionBoundary) return this.discoverExtensions(opts);
+        if (opts.category !== "apps" && opts.category !== "mcp") return null;
+        const state = [...this.sessions.values()]
+          .reverse()
+          .find(
+            (session) =>
+              session.query &&
+              (opts.scope === "user" ||
+                personalRepoRoot(session.cwd) === personalRepoRoot(opts.cwd)),
+          );
+        const query = state?.query ?? null;
+        const result = await readClaudeConnectors(
+          query,
+          opts.category,
+          state?.queryConnectorMembership,
+        );
+        if (state && (this.sessions.get(state.zerosSessionId) !== state || state.query !== query))
+          throw new Error("The chat connection changed. Refresh to retry.");
+        if (state) result.identity = state.zerosSessionId;
+        return result;
       },
     },
     browser: { nativeSession: true },
@@ -805,6 +843,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         configurationProvenanceFor("claude", {
           protectedTerritory: Boolean(opts.territory),
           suppressUnsafeSources: false,
+          nativeMcpRequiresImport: true,
         }),
     },
   } satisfies AgentCapabilityPorts;
@@ -815,6 +854,114 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, SdkSession>();
+  private readonly queryPlugins = new WeakMap<Query, SessionToolGroup>();
+
+  private async readSessionTools(
+    sessionId: string,
+    includeInventory = false,
+  ): Promise<SessionToolsInventorySnapshot> {
+    const state = this.sessions.get(sessionId);
+    if (!state) throw new Error("This chat session ended.");
+    // Prepare the control connection without sending a prompt or rebuilding a
+    // live query whose settings may have staged changes.
+    if (!state.query) this.ensureQuery(state);
+    const query = state.query!;
+    void this.emitSupportedCommands(state, true);
+    try {
+      const result = await readClaudeSessionTools(query, {
+        accountConnectorsEnabled: state.queryAccountConnectorsEnabled,
+        readConnectorMembership: state.queryConnectorMembership,
+        includeInventory,
+        plugins: this.queryPlugins.get(query),
+      });
+      if (this.sessions.get(sessionId) !== state || state.query !== query)
+        throw new Error("The chat connection changed. Refresh to retry.");
+      // A system/init receipt may arrive during connector discovery.
+      if (includeInventory && this.queryPlugins.has(query))
+        result.groups = result.groups?.map((group) =>
+          group.kind === "plugins" ? this.queryPlugins.get(query)! : group,
+        );
+      return result;
+    } finally {
+      if (state.query === query) this.refreshIdleTeardown(state);
+    }
+  }
+
+  private async discoverExtensions(
+    opts: Parameters<
+      NonNullable<AgentCapabilityPorts["extensions"]>["list"]
+    >[0],
+  ) {
+    const input = new InputQueue<SDKUserMessage>();
+    const abort = new AbortController();
+    const processes = new Set<ContainedClaudeProcess>();
+    let query: Query | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const cli = resolveClaudeCli({ override: opts.cliBinary });
+      if (!cli.path) throw new Error("Claude runtime unavailable");
+      query = this.queryFn({
+        prompt: input,
+        options: {
+          cwd: opts.cwd,
+          env: stripEngineAuthorityEnv({ ...(opts.env ?? {}) }),
+          pathToClaudeCodeExecutable: cli.path,
+          abortController: abort,
+          persistSession: false,
+          tools: [],
+          permissionMode: "dontAsk",
+          settingSources:
+            opts.scope === "user" ? ["user"] : ["user", "project", "local"],
+          settings: { disableAllHooks: true },
+          strictMcpConfig:
+            opts.category === "skills" || opts.category === "plugins",
+          spawnClaudeCodeProcess: (spawnOptions) =>
+            spawnContainedClaudeProcess(
+              spawnOptions,
+              {
+                onSpawn: (tracked) => processes.add(tracked),
+                onStderr: () => {},
+              },
+              opts.executionBoundary!,
+            ),
+        },
+      });
+      const result = await Promise.race([
+        Promise.all([
+          readClaudeDiscovery(query, opts.category,
+            this.connectorMembershipReaderFactory(opts.env ?? {}, abort.signal)),
+          query.accountInfo().catch(() => null),
+        ]).then(([inventory, account]) => {
+          if (account?.email) inventory.account = { label: account.email };
+          return inventory;
+        }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            abort.abort();
+            reject(new Error("Claude discovery timed out"));
+          }, 15_000);
+        }),
+      ]);
+      // A new discovery session is a new identity. A later failed lookup must
+      // never revive extensions from an earlier login or policy snapshot.
+      result.identity = randomUUID();
+      return result;
+    } finally {
+      if (timer) clearTimeout(timer);
+      input.end();
+      abort.abort();
+      try {
+        query?.close();
+      } catch {
+        /* Already closed. */
+      }
+      await Promise.all(
+        [...processes].map((process) =>
+          terminateContainedClaudeProcess(process),
+        ),
+      );
+    }
+  }
   /** ADAPTER-LEVEL index of parked questions: questionId → the SdkSession
    *  object whose map holds it. respondToQuestion resolves through this
    *  FIRST — the session-map scan alone misses a question parked on a state
@@ -824,17 +971,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  only until its question settles. */
   private readonly questionIndex = new Map<string, SdkSession>();
   private cachedInitialize: InitializeResponse | null = null;
-  /** Single-flight guard for Claude's model/list equivalent
-   *  (query.supportedModels()). One adapter instance serves ALL sessions, so a
-   *  burst of concurrent first-prompts would otherwise each fire the SDK call;
-   *  this memo collapses them onto one in-flight discovery. Reset to null on
-   *  failure or an empty result so a later turn retries. Mirrors
-   *  CursorSdkAdapter.modelDiscovery. */
-  private modelDiscovery: Promise<void> | null = null;
+  private readonly modelDiscovery = new AccountModelDiscovery(
+    () => this.ctx.authenticationContext?.() ?? "default",
+  );
   /** Injectable so tests can drive the lifecycle with a scripted query
    *  without spawning a real `claude` process. Defaults to the SDK's. */
   private readonly queryFn: typeof query;
   private readonly oauthTokenProvider: ClaudeOAuthTokenProvider | undefined;
+  private readonly connectorMembershipReaderFactory: typeof createClaudeConnectorMembershipReader;
   /** Test-only millisecond override; production always uses the bounded env. */
   private readonly idleTimeoutOverrideMs: number | undefined;
 
@@ -844,11 +988,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       queryFn?: typeof query;
       idleTimeoutMs?: number;
       oauthTokenProvider?: ClaudeOAuthTokenProvider;
+      connectorMembershipReaderFactory?: typeof createClaudeConnectorMembershipReader;
     },
   ) {
     this.ctx = ctx;
     this.queryFn = opts?.queryFn ?? query;
     this.idleTimeoutOverrideMs = opts?.idleTimeoutMs;
+    this.connectorMembershipReaderFactory = opts?.connectorMembershipReaderFactory ?? createClaudeConnectorMembershipReader;
     const oauthAuthority = defaultMacClaudeOAuthAuthority(homedir());
     this.oauthTokenProvider =
       opts?.oauthTokenProvider ??
@@ -896,70 +1042,67 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         },
       };
     }
+    const models = this.modelDiscovery.current().models;
+    if (this.cachedInitialize._meta?.models !== models) {
+      const { models: _previous, ...meta } = this.cachedInitialize._meta ?? {};
+      this.cachedInitialize = {
+        ...this.cachedInitialize,
+        _meta: { ...meta, ...(models ? { models } : {}) },
+      };
+    }
     return advertiseAgentCapabilities(this, this.cachedInitialize);
   }
 
   /** Surface Claude's live model catalog onto the cached InitializeResponse's
    *  `_meta.models` from the SDK's `query.supportedModels()`. The SDK is the
-   *  source of truth — it returns whatever the pinned claude-code CLI knows,
-   *  plus per-model effort/fast capabilities — so this replaces the bundled
-   *  catalog. Needs a live query, so it runs once after the first prompt creates
+   *  source of truth for CAPABILITIES — it returns per-model effort/fast for
+   *  whatever the pinned claude-code CLI knows. It does NOT name the picker's
+   *  rows: `displayName` travels as advisory `label` and the renderer keeps the
+   *  curated name (see AdvertisedModel.label / model-catalog.ts
+   *  `overlayLiveCapabilities`), so a CLI rebrand can't rename a model
+   *  mid-release. Needs a live query, so it runs once after the first prompt creates
    *  one (best-effort; the gateway re-poll then surfaces the live list to the
    *  empty composer + subsequent chats). `ultracode` is OUR setting-layer tier
    *  (xhigh + dynamic workflows) which the SDK's effort enum (capped at "max")
    *  doesn't list, so we append it wherever the model supports xhigh — keeping
    *  the 7th pill tier. */
   private async discoverModels(state: SdkSession): Promise<void> {
-    if (this.modelDiscovery) return this.modelDiscovery;
     // Capture the live query ONCE — don't re-read state.query after the await
     // (a concurrent dispose/restart could null it mid-flight). With no live
     // query there's nothing to ask yet; do NOT memoize that case so the next
     // prompt (which creates the query) retries.
     const q = state.query;
     if (!q) return Promise.resolve();
-    this.modelDiscovery = (async () => {
-      try {
-        const infos = await q.supportedModels();
-        const models: AdvertisedModel[] = (infos ?? []).map((mi) => {
-          const base = Array.isArray(mi.supportedEffortLevels)
-            ? (mi.supportedEffortLevels as string[])
-            : undefined;
-          const effortLevels =
-            mi.supportsEffort === false
-              ? []
-              : base
-                ? base.includes("xhigh")
-                  ? [...base, "ultracode"]
-                  : base
-                : undefined;
-          return {
-            // supportedModels may expose a stable selector (`opus`) plus the
-            // exact wire model it currently resolves to. Capability overlays
-            // must key by that canonical id; a local alias table can lag a new
-            // generation and attach Opus 5 capabilities to Opus 4.8.
-            value: mi.resolvedModel?.trim() || mi.value,
-            label: mi.displayName || mi.value,
-            ...(effortLevels !== undefined ? { effortLevels } : {}),
-            ...(typeof mi.supportsFastMode === "boolean"
-              ? { supportsFast: mi.supportsFastMode }
-              : {}),
-          };
-        });
-        if (models.length === 0) {
-          // Nothing usable yet — reset so a later turn retries.
-          this.modelDiscovery = null;
-          return;
-        }
-        const base = await this.initialize();
-        const meta = base._meta ?? {};
-        this.cachedInitialize = { ...base, _meta: { ...meta, models } };
-      } catch {
-        // Best-effort — the cold-start floor / catalog fallback still applies.
-        // Reset the memo so a later turn can retry.
-        this.modelDiscovery = null;
-      }
-    })();
-    return this.modelDiscovery;
+    return this.modelDiscovery.discover(state.modelState, async () => {
+      const infos = await q.supportedModels();
+      const models: AdvertisedModel[] = (infos ?? []).map((mi) => {
+        const base = Array.isArray(mi.supportedEffortLevels)
+          ? (mi.supportedEffortLevels as string[])
+          : undefined;
+        const effortLevels =
+          mi.supportsEffort === false
+            ? []
+            : base
+              ? base.includes("xhigh")
+                ? [...base, "ultracode"]
+                : base
+              : undefined;
+        return {
+          // supportedModels may expose a stable selector (`opus`) plus the
+          // exact wire model it currently resolves to. Capability overlays
+          // must key by that canonical id; a local alias table can lag a new
+          // generation and attach Opus 5 capabilities to Opus 4.8.
+          value: mi.resolvedModel?.trim() || mi.value,
+          // Advisory only — the curated catalog names every claude row.
+          label: mi.displayName || mi.value,
+          ...(effortLevels !== undefined ? { effortLevels } : {}),
+          ...(typeof mi.supportsFastMode === "boolean"
+            ? { supportsFast: mi.supportsFastMode }
+            : {}),
+        };
+      });
+      return models;
+    });
   }
 
   /** Background one-shot text generation (the AI chat-title call). A
@@ -1016,9 +1159,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             : {}),
           model: opts.model,
           maxTurns: 1,
+          tools: [],
           allowedTools: [],
           includePartialMessages: false,
           settingSources: [],
+          strictMcpConfig: true,
+          settings: { disableAllHooks: true },
+          persistSession: false,
           systemPrompt: opts.systemPrompt,
           abortController: abort,
         },
@@ -1048,6 +1195,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   // ── newSession / loadSession ──────────────────────────
 
   async newSession(opts: {
+    authenticationContext?: string;
     executionId?: string;
     cwd: string;
     env?: Record<string, string>;
@@ -1058,6 +1206,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     executionBoundary?: PreparedBoundary;
     browserUse?: AgentBrowserUse;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
+    const modelState = this.modelDiscovery.capture(opts.authenticationContext);
     const initialize = await this.initialize();
     const zerosSessionId = opts.executionId ?? randomUUID();
     await ensureSessionDir(zerosSessionId);
@@ -1067,7 +1216,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       pid: process.pid,
       createdAt: Date.now(),
     });
-    const state = this.makeState(zerosSessionId, opts);
+    const state = this.makeState(zerosSessionId, opts, modelState);
     this.sessions.set(zerosSessionId, state);
     const session: NewSessionResponse = {
       executionId: zerosSessionId,
@@ -1084,6 +1233,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }
 
   async loadSession(opts: {
+    authenticationContext?: string;
     executionId?: string;
     providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
     sessionId?: string;
@@ -1096,6 +1246,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     executionBoundary?: PreparedBoundary;
     browserUse?: AgentBrowserUse;
   }): Promise<LoadSessionResponse> {
+    const modelState = this.modelDiscovery.capture(opts.authenticationContext);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const existing = this.sessions.get(executionId);
     if (existing) {
@@ -1112,7 +1263,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         existing.systemInstruction !== opts.systemInstruction;
       const boundaryChanged =
         existing.executionBoundary !== opts.executionBoundary;
-      if (territoryChanged || instructionChanged || boundaryChanged) {
+      if (
+        territoryChanged ||
+        instructionChanged ||
+        boundaryChanged ||
+        existing.modelState !== modelState
+      ) {
         // Authority is creation-time state. Never retarget a live query that
         // may own scheduled/background work under the old sandbox.
         this.sessions.delete(executionId);
@@ -1137,7 +1293,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
     }
     await ensureSessionDir(executionId);
-    const state = this.makeState(executionId, opts);
+    const state = this.makeState(executionId, opts, modelState);
     // Re-attach the SDK session id so the next prompt resumes the real
     // conversation (the renderer hydrates the transcript from its own
     // SQLite — we never re-replay Claude's JSONL). Survives engine restart.
@@ -1200,8 +1356,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       executionBoundary?: PreparedBoundary;
       browserUse?: AgentBrowserUse;
     },
+    modelState: AccountModelState,
   ): SdkSession {
     return {
+      modelState,
       zerosSessionId,
       cwd: opts.cwd,
       env: opts.env,
@@ -1256,6 +1414,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       pendingRestart: false,
       queryAllowsBypass: false,
       skillNames: new Set(),
+      commandRevision: 0,
+      commandsReadyQuery: null,
+      commandDiscovery: null,
+      skillRefresh: null,
+      queryAccountConnectorsEnabled: false,
+      queryConnectorMembership: undefined,
     };
   }
 
@@ -1286,14 +1450,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   /** Rechecked both when arming and when the callback fires. In particular,
    * wake-ups, queued input, provider-owned work, and approval/question gates
-   * keep the process alive. A known SDK session id is mandatory so teardown
-   * can never discard an unborn conversation that cannot be resumed. */
+   * keep the process alive. A conversation needs a resumable SDK id; an empty
+   * control connection opened by Tools can be discarded without losing input. */
   private canDetachIdleQuery(state: SdkSession): boolean {
     return Boolean(
       !state.disposed &&
       state.query &&
       !state.input.closed &&
-      state.claudeSessionId &&
+      (state.claudeSessionId || !state.sawFirstTurnOutput) &&
       state.turn === null &&
       state.turnIdle === null &&
       state.pendingPromptCalls === 0 &&
@@ -1347,6 +1511,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     this.clearIdleTeardown(state);
     state.idleSince = null;
     state.query = null;
+    this.clearCommandDiscovery(state);
     state.consumer = null;
     state.queryAllowsBypass = false;
     state.input.end();
@@ -1571,16 +1736,28 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     state.sawFirstTurnOutput = false;
     state.input = new InputQueue<SDKUserMessage>();
     state.abort = new AbortController();
+    state.skillNames = new Set();
+    state.commandsReadyQuery = null;
     try {
+      const options = this.buildOptions(state);
+      state.queryAccountConnectorsEnabled = options.strictMcpConfig !== true;
+      state.queryConnectorMembership = state.queryAccountConnectorsEnabled
+        ? this.connectorMembershipReaderFactory({
+            ...(options.env ?? process.env),
+            ...(state.executionBoundary?.providerHomePath
+              ? { HOME: state.executionBoundary.providerHomePath } : {}),
+          }, state.abort.signal)
+        : undefined;
       state.query = this.queryFn({
         prompt: state.input,
-        options: this.buildOptions(state),
+        options,
       });
       // Mirrors buildOptions' flag decision: the query just built carries
       // allowDangerouslySkipPermissions iff it was created in bypass.
       state.queryAllowsBypass = state.permissionMode === "bypass";
     } catch (err) {
       state.query = null;
+      this.clearCommandDiscovery(state);
       throw new AgentFailureError({
         kind: "protocol-error",
         message: `claude SDK failed to start: ${err instanceof Error ? err.message : String(err)}`,
@@ -1592,6 +1769,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // A live query now exists → pull the SDK's real model catalog into
     // `_meta.models` (once per process; best-effort, non-blocking).
     void this.discoverModels(state);
+    // The control handshake exposes bundled commands/skills before the first
+    // prompt. system/init is a streamed turn event and is too late for a cold
+    // composer. Preserve the native settings policy while reading capabilities.
+    void this.emitSupportedCommands(state, true);
   }
 
   /** Run a real context compaction through Claude. The Agent
@@ -1744,9 +1925,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           subtype?: string;
           session_id?: string;
           skills?: unknown;
+          plugins?: unknown;
         };
 
         if (m.type === "system" && m.subtype === "init") {
+          this.queryPlugins.set(q, claudeSessionPluginGroup(m.plugins));
           if (
             typeof m.session_id === "string" &&
             state.claudeSessionId !== m.session_id
@@ -1892,6 +2075,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             // the dead query so the renderer's recovery re-establishes, and
             // surface session-expired (recoverable self-heal).
             state.query = null;
+            this.clearCommandDiscovery(state);
             state.input.end();
             turn.reject(
               new AgentFailureError({
@@ -2046,6 +2230,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.providerRunActive = false;
         state.turnlessRunsPending = 0;
         state.query = null;
+        this.clearCommandDiscovery(state);
         state.consumer = null;
       }
     }
@@ -2053,20 +2238,94 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   // ── slash-command discovery ───────────────────────────
 
+  private clearCommandDiscovery(state: SdkSession): void {
+    state.commandRevision += 1;
+    state.commandsReadyQuery = null;
+    state.commandDiscovery = null;
+    state.skillRefresh = null;
+  }
+
   /** Ask the live query for its supported slash commands and emit them to
    *  the UI. Best-effort: never throws into the consumer loop. */
-  private async emitSupportedCommands(state: SdkSession): Promise<void> {
+  private async emitSupportedCommands(
+    state: SdkSession,
+    refreshSkills = false,
+  ): Promise<void> {
     const q = state.query;
     if (!q) return;
+    if (refreshSkills) {
+      if (state.commandsReadyQuery === q) return;
+      if (state.commandDiscovery?.query === q)
+        return state.commandDiscovery.promise;
+    }
+    const revision = ++state.commandRevision;
+    const promise = this.readAndEmitSupportedCommands(
+      state, q, revision, refreshSkills,
+    ).finally(() => {
+      if (state.commandDiscovery?.promise === promise)
+        state.commandDiscovery = null;
+    });
+    state.commandDiscovery = { query: q, promise };
+    return promise;
+  }
+
+  private async readAndEmitSupportedCommands(
+    state: SdkSession,
+    q: Query,
+    revision: number,
+    refreshSkills: boolean,
+  ): Promise<void> {
     try {
       const cmds = await q.supportedCommands();
-      if (Array.isArray(cmds) && !state.disposed)
-        this.emitCommands(state, cmds);
-    } catch (err) {
-      console.warn(
-        `[agents] claude-sdk supportedCommands failed: ${String(err)}`,
-      );
+      if (!Array.isArray(cmds) || !this.commandReadCurrent(state, q, revision))
+        return;
+      const skills = refreshSkills ? await this.readSkillNames(state, q) : null;
+      if (!this.commandReadCurrent(state, q, revision)) return;
+      if (skills) state.skillNames = skills;
+      if (!refreshSkills || skills || typeof q.reloadSkills !== "function")
+        state.commandsReadyQuery = q;
+      this.emitCommands(state, cmds);
+    } catch {
+      // Best-effort metadata; provider errors can contain account information.
     }
+  }
+
+  private commandReadCurrent(
+    state: SdkSession,
+    query: Query,
+    revision: number,
+  ): boolean {
+    return !state.disposed && state.query === query &&
+      state.commandRevision === revision;
+  }
+
+  private readSkillNames(
+    state: SdkSession,
+    query: Query,
+  ): Promise<Set<string> | null> {
+    if (state.skillRefresh?.query === query) return state.skillRefresh.promise;
+    // A reload may itself produce commands_changed. Share this control read
+    // with that push so discovery cannot create a recursive reload loop.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const promise = Promise.race([
+      Promise.resolve().then(async () => {
+        if (typeof query.reloadSkills !== "function") return null;
+        const result = await query.reloadSkills();
+        return Array.isArray(result?.skills)
+          ? new Set(result.skills
+              .map((s) => s.name)
+              .filter((name) => typeof name === "string"))
+          : null;
+      }).catch(() => null),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), 1_000);
+      }),
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+      if (state.skillRefresh?.promise === promise) state.skillRefresh = null;
+    });
+    state.skillRefresh = { query, promise };
+    return promise;
   }
 
   /** Map the SDK's SlashCommand[] → our AvailableCommand[] and emit an
@@ -2090,24 +2349,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     state: SdkSession,
     cmds: SlashCommand[],
   ): Promise<void> {
-    try {
-      const q = state.query as unknown as {
-        reloadSkills?: () => Promise<{ skills?: Array<{ name?: unknown }> }>;
-      } | null;
-      if (q && typeof q.reloadSkills === "function") {
-        const res = await q.reloadSkills();
-        if (res && Array.isArray(res.skills)) {
-          state.skillNames = new Set(
-            res.skills
-              .map((s) => s?.name)
-              .filter((n): n is string => typeof n === "string"),
-          );
-        }
-      }
-    } catch {
-      /* best-effort — keep the last known skill set */
-    }
-    if (!state.disposed) this.emitCommands(state, cmds);
+    const q = state.query;
+    if (!q) return;
+    const revision = ++state.commandRevision;
+    const skills = await this.readSkillNames(state, q);
+    if (!this.commandReadCurrent(state, q, revision)) return;
+    if (skills) state.skillNames = skills;
+    if (skills || typeof q.reloadSkills !== "function")
+      state.commandsReadyQuery = q;
+    this.emitCommands(state, cmds);
   }
 
   // ── cancel / setMode ──────────────────────────────────
@@ -3473,6 +3723,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // throwing is benign only because teardown still proves that group gone.
     }
     state.query = null;
+    this.clearCommandDiscovery(state);
     const processResults = await Promise.allSettled(
       [...state.containedProcesses].map((tracked) =>
         terminateContainedClaudeProcess(tracked),
@@ -3726,7 +3977,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               ),
           }
         : {}),
-      ...(this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env)
+      ...(this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env) &&
+        (!state.env?.CLAUDE_CONFIG_DIR || state.env.CLAUDE_CONFIG_DIR === process.env.CLAUDE_CONFIG_DIR)
         ? {
             // The pinned CLI emits this control request only when it needs an
             // OAuth refresh. The trusted engine serializes the rotating
@@ -3821,17 +4073,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // a live typing animation (streamPartials) and de-dupes against the
       // final full message.
       includePartialMessages: true,
-      settingSources: ["user", "project", "local"],
-      // Native MCP pass-through is OFF: Settings → Customize → MCP is the whole
-      // set an agent gets (adapters/shared/mcp-passthrough.ts). Without this,
-      // `settingSources` above would ALSO pull in ~/.claude.json, project
-      // `.mcp.json`, plugin and agent-frontmatter MCP — servers Zeros never
-      // shows and the user cannot manage from here.
-      //
-      // `strictMcpConfig` is the precise lever: it scopes only MCP discovery,
-      // so `settingSources` keeps doing its real job of loading CLAUDE.md and
-      // repo rules.
-      ...(nativeMcpPassthroughEnabled() ? {} : { strictMcpConfig: true }),
+      // Local MCP declarations are opt-in through Customize → Import. The
+      // SDK couples disk settings and MCP sources, so do not load those layers.
+      // claude.ai connectors have their own subscription discovery path; strict
+      // mode would disable that too, and is reserved for restricted actors.
+      settingSources: [],
+      ...(nativeMcpPassthroughEnabled(undefined, state.executionBoundary)
+        ? {}
+        : { strictMcpConfig: true }),
       extraArgs: claudeNativeBrowserExtraArgs(state.browserUse),
       ...(mcpServers ? { mcpServers } : {}),
       abortController: state.abort,
@@ -4027,8 +4276,8 @@ function mapSlashCommands(
     const cmd: AvailableCommand = {
       name: c.name,
       description: typeof c.description === "string" ? c.description : "",
-      // The SDK merges skills + commands into one list; `init.skills` is the
-      // only signal of which names are skills (see SdkSession.skillNames).
+      // The SDK merges skills + commands into one list. Use the skill-name
+      // subset from init or reloadSkills to classify entries.
       kind: skillNames?.has(c.name) ? "skill" : "command",
     };
     const hint =

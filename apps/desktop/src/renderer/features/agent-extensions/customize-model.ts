@@ -10,31 +10,26 @@
 // ──────────────────────────────────────────────────────────
 
 import { asString, type RawServer } from "./mcp-server-model";
-import {
-  EXTENSION_CATEGORIES,
-  extensionProviders,
-  type ExtensionCategory,
-  type ExtensionProvider,
-} from "@zeros/protocol/agent-extensions";
+// The backend retains provider inventories for future surfaces. Customize
+// currently exposes only the capabilities Zeros itself owns and can edit.
+export const CUSTOMIZE_CATEGORIES = ["mcp", "skills"] as const;
+export type CustomizeCategory = (typeof CUSTOMIZE_CATEGORIES)[number];
 
 export interface CustomizeSelection {
-  category: ExtensionCategory;
-  provider: ExtensionProvider;
+  category: CustomizeCategory;
+  provider: "zeros";
 }
 export function decodeCustomizeSelection(raw: unknown): CustomizeSelection {
   const input =
     raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const category = EXTENSION_CATEGORIES.includes(
-    input.category as ExtensionCategory,
+  const category = CUSTOMIZE_CATEGORIES.includes(
+    input.category as CustomizeCategory,
   )
-    ? (input.category as ExtensionCategory)
+    ? (input.category as CustomizeCategory)
     : "mcp";
-  const providers = extensionProviders(category);
   return {
     category,
-    provider: providers.includes(input.provider as ExtensionProvider)
-      ? (input.provider as ExtensionProvider)
-      : providers[0]!,
+    provider: "zeros",
   };
 }
 

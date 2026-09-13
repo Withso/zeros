@@ -39,6 +39,15 @@ export const MessageView = memo(
   (prev, next) => {
     if (prev.message !== next.message) return false;
     if (prev.registry !== next.registry) return false;
+    // Images and native artwork belong to the visible conversation/host.
+    // Retained tool rows must receive deactivation even if their events did
+    // not change, so hidden transcripts release decoded screenshots.
+    if (
+      prev.ctx.attachmentImagesActive !== next.ctx.attachmentImagesActive ||
+      prev.ctx.attachmentCwd !== next.ctx.attachmentCwd ||
+      prev.ctx.chatId !== next.ctx.chatId
+    )
+      return false;
     if (prev.message.kind === "tool") {
       const id = prev.message.toolCallId;
       // Re-render when this card's inline permission cluster

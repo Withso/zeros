@@ -1,3 +1,10 @@
+import {
+  sessionToolsSnapshotSchema,
+  sessionToolsInventorySnapshotSchema,
+  sessionToolGroups,
+  type SessionToolsInventorySnapshot,
+  type SessionToolsSnapshot,
+} from "@zeros/protocol/agent-extensions";
 import { designMetadataGitPaths } from "../design/metadata";
 // ──────────────────────────────────────────────────────────
 // AgentGateway — orchestrator for per-agent adapters
@@ -28,7 +35,7 @@ import { designMetadataGitPaths } from "../design/metadata";
 
 import * as fsp from "node:fs/promises";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { tmpdir } from "node:os";
 
@@ -46,7 +53,10 @@ import {
 import { listKnownRepoRoots } from "../db/projects";
 import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
-import { applyUserProviderConfig } from "../settings/provider-env";
+import {
+  applyUserProviderConfig,
+  usesProviderApiKey,
+} from "../settings/provider-env";
 import {
   assertSafeProspectiveDesignDirectory,
   discoverDesignDirectories,
@@ -155,6 +165,7 @@ import {
   WarmSessionBoundaryPool,
   warmSessionBoundariesEnabled,
 } from "./containment/warm-session-boundary-pool";
+import { providerAccountProfile } from "./provider-credentials";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
 import {
   localPreviewGatewayFactory,
@@ -1477,6 +1488,7 @@ export class AgentGateway {
   private readonly mcpServersView: McpServerRegistration[] = [];
   private readonly adapters = new Map<string, AgentAdapter>();
   private readonly executionToAgent = new Map<string, string>();
+  private readonly executionAuthFingerprint = new Map<string, string>();
   /** Actor identity is fixed at admission and independent of workspace view. */
   private readonly executionToActor = new Map<
     string,
@@ -1605,6 +1617,7 @@ export class AgentGateway {
     }
   >();
   private readonly agentInitializes = new Map<string, InitializeResponse>();
+  private readonly agentInitializeIdentities = new Map<string, string>();
   /** Renderer boot, reconnect, and focus warmups are independent triggers and
    * may arrive together. Share the provider's initialization while it is in
    * flight so duplicate bridge clients cannot multiply cold SDK/auth work. */
@@ -1618,6 +1631,8 @@ export class AgentGateway {
    *  fires listAgents 5-10×/sec on session-state churn, which used
    *  to balloon the engine to 200+ live `--version` subprocesses. */
   private listAgentsInFlight: Promise<EnrichedRegistryAgent[]> | null = null;
+  private registryGeneration = 0;
+  private listAgentsInFlightGeneration = 0;
   /** Short freshness cache for listAgents. Bursts of render-churn
    *  calls within LIST_AGENTS_FRESHNESS_MS share the prior result
    *  instead of re-spawning probes. Force-refresh (via
@@ -1659,7 +1674,7 @@ export class AgentGateway {
    *  so a long-running app doesn't get stuck. */
   private readonly runtimeAuthFailed = new Map<
     string,
-    { at: number; secretFingerprint: string | null }
+    { at: number; secretFingerprint: string | null; configFingerprint: string }
   >();
   /** Last provider-owned auth verdict. A utility-boundary outage is not an auth
    * event, so revalidation retains this per-provider snapshot instead of
@@ -1670,8 +1685,15 @@ export class AgentGateway {
   /** Called by adapters whenever a prompt fails with auth-required.
    *  Drives the green-dot back to gray on the next listAgents fetch. */
   markAuthFailed(agentId: string): void {
+    this.registryGeneration++;
+    this.cachedAgents = null;
+    this.cachedAgentsAt = null;
     this.lastConfirmedAuthentication.set(agentId, false);
-    const entry = { at: Date.now(), secretFingerprint: null as string | null };
+    const entry = {
+      at: Date.now(),
+      secretFingerprint: null as string | null,
+      configFingerprint: this.providerAuthConfigFingerprint(agentId),
+    };
     this.runtimeAuthFailed.set(agentId, entry);
     // Snapshot the credential blob AT failure time (secret-account probes
     // only — null for every other kind) so isAuthRuntimeInvalidated can
@@ -3696,6 +3718,9 @@ export class AgentGateway {
   markAuthOk(agentId: string): void {
     this.runtimeAuthFailed.delete(agentId);
     this.lastConfirmedAuthentication.set(agentId, true);
+    this.registryGeneration++;
+    this.cachedAgents = null;
+    this.cachedAgentsAt = null;
   }
 
   /** Should the runtime "auth-failed" marker still block this agent's
@@ -3721,10 +3746,22 @@ export class AgentGateway {
   ): Promise<boolean> {
     const entry = this.runtimeAuthFailed.get(agentId);
     if (entry === undefined) return false;
-    if (Date.now() - entry.at > AgentGateway.AUTH_FAIL_TTL_MS) {
+    if (
+      Date.now() - entry.at > AgentGateway.AUTH_FAIL_TTL_MS ||
+      entry.configFingerprint !== this.providerAuthConfigFingerprint(agentId)
+    ) {
       this.runtimeAuthFailed.delete(agentId);
       return false;
     }
+    // Device entries follow their native CLI credentials. Only isolated roots
+    // (and Cursor's privately projected credential) must ignore device probes.
+    const profile = providerAccountProfile(agentId);
+    if (
+      !usesProviderApiKey(this.projectRoot, agentId) &&
+      profile &&
+      (profile.configDir || agentId === "cursor")
+    )
+      return true;
     const mtimeMs = await latestAuthFileMtimeMs(probe);
     if (mtimeMs > entry.at) {
       this.runtimeAuthFailed.delete(agentId);
@@ -3738,6 +3775,37 @@ export class AgentGateway {
       }
     }
     return true;
+  }
+
+  /** Private credential/config change signal, never returned or logged. Saving
+   * an unrelated provider or merely refreshing must not revive rejected auth. */
+  private providerAuthConfigFingerprint(agentId: string): string {
+    const configured = applyUserProviderConfig(this.projectRoot, agentId, {
+      env: {},
+    });
+    const variables =
+      agentId === "claude"
+        ? [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+          ]
+        : agentId === "codex"
+          ? ["OPENAI_API_KEY"]
+          : ["CURSOR_API_KEY"];
+    return createHash("sha256")
+      .update(
+        JSON.stringify([
+          usesProviderApiKey(this.projectRoot, agentId),
+          configured.cliBinary ?? null,
+          usesProviderApiKey(this.projectRoot, agentId) ? null : providerAccountProfile(agentId)?.id,
+          ...variables.map(
+            (key) => configured.env?.[key] ?? process.env[key] ?? null,
+          ),
+        ]),
+      )
+      .digest("hex");
   }
 
   constructor(opts: AgentGatewayOptions) {
@@ -3948,7 +4016,14 @@ export class AgentGateway {
   async listAgents(): Promise<EnrichedRegistryAgent[]> {
     // Concurrent calls share the same in-flight promise so we never
     // fan out N×(call count) subprocesses on render-loop churn.
-    if (this.listAgentsInFlight) return this.listAgentsInFlight;
+    if (this.listAgentsInFlight) {
+      if (this.listAgentsInFlightGeneration === this.registryGeneration)
+        return this.listAgentsInFlight;
+      // A credential changed while these probes were running. Serialize the
+      // replacement sweep, but never adopt the obsolete auth result.
+      await this.listAgentsInFlight.catch(() => undefined);
+      return this.listAgents();
+    }
     // Short freshness cache. Without this, back-to-back calls (e.g. a
     // settings panel that re-fetches on every focus + a chat-mount
     // effect on the same tick) re-spawn every probe — one install
@@ -3964,16 +4039,21 @@ export class AgentGateway {
     ) {
       return this.cachedAgents;
     }
-    this.listAgentsInFlight = this.listAgentsImpl()
+    const generation = this.registryGeneration;
+    this.listAgentsInFlightGeneration = generation;
+    const flight = this.listAgentsImpl()
       .then((result) => {
-        this.cachedAgents = result;
-        this.cachedAgentsAt = Date.now();
+        if (generation === this.registryGeneration) {
+          this.cachedAgents = result;
+          this.cachedAgentsAt = Date.now();
+        }
         return result;
       })
       .finally(() => {
-        this.listAgentsInFlight = null;
+        if (this.listAgentsInFlight === flight) this.listAgentsInFlight = null;
       });
-    return this.listAgentsInFlight;
+    this.listAgentsInFlight = flight;
+    return flight;
   }
 
   private async listAgentsImpl(): Promise<EnrichedRegistryAgent[]> {
@@ -4004,10 +4084,26 @@ export class AgentGateway {
               return;
             }
             try {
-              const confirmed = await evaluateAuthProbe(
-                m.authProbe,
-                this.providerProbeRunner(m.id),
-              );
+              const keyVar =
+                m.id === "claude"
+                  ? "ANTHROPIC_API_KEY"
+                  : m.id === "codex"
+                    ? "OPENAI_API_KEY"
+                    : "CURSOR_API_KEY";
+              const profile = !usesProviderApiKey(this.projectRoot, m.id) ? providerAccountProfile(m.id) : null;
+              const confirmed = profile
+                ? profile.state === "connected"
+                : m.id === "cursor" ||
+                usesProviderApiKey(this.projectRoot, m.id)
+                  ? Boolean(
+                      applyUserProviderConfig(this.projectRoot, m.id, {
+                        env: {},
+                      }).env?.[keyVar] ?? process.env[keyVar],
+                    )
+                  : await evaluateAuthProbe(
+                      m.authProbe,
+                      this.providerProbeRunner(m.id),
+                    );
               this.lastConfirmedAuthentication.set(m.id, confirmed);
               if (confirmed) {
                 authenticated.add(m.id);
@@ -4367,16 +4463,12 @@ export class AgentGateway {
    *  Invalidates the listAgents freshness cache so the next call
    *  actually re-runs probes. */
   async refreshRegistry(): Promise<EnrichedRegistryAgent[]> {
+    this.registryGeneration++;
     this.cachedAgents = null;
     this.cachedAgentsAt = null;
-    // A force-refresh is the user explicitly re-checking auth (the Providers
-    // panel fires it, including right after saving a provider key). Drop the
-    // runtime auth-failed overrides so a corrected agent's fresh probe wins
-    // again. File-credential agents already self-heal via the mtime-jump
-    // path, but env-key agents (e.g. Cursor's CURSOR_API_KEY pasted in
-    // Settings) have no credential-file mtime to trip that — without this
-    // their dot stayed gray until the next prompt or the 30-min TTL.
-    this.runtimeAuthFailed.clear();
+    // Refresh is only a read. A credential-presence probe must not erase an
+    // actual provider rejection. Credential changes and successful prompts
+    // retire their own failure markers in isAuthRuntimeInvalidated/markAuthOk.
     // Bust the `<cli> --version` probe cache (5-min TTL) so a just-updated
     // global CLI (cursor) shows its new version immediately on
     // a user-triggered Refresh instead of waiting out the TTL.
@@ -4388,11 +4480,19 @@ export class AgentGateway {
   }
 
   async initializeAgent(agentId: string): Promise<InitializeResponse> {
+    const identity = this.providerAuthConfigFingerprint(agentId);
+    if (this.agentInitializeIdentities.get(agentId) !== identity) {
+      this.agentInitializeIdentities.set(agentId, identity);
+      this.agentInitializes.delete(agentId);
+      this.agentInitializeFlights.delete(agentId);
+    }
     const existing = this.agentInitializeFlights.get(agentId);
     if (existing) return existing;
 
     const initialize = (async () => {
       const adapter = await this.adapterFor(agentId);
+      if (identity !== this.providerAuthConfigFingerprint(agentId))
+        return this.initializeAgent(agentId);
       const cached = this.agentInitializes.get(agentId);
       // Serve the cache UNLESS it's a dynamic-models adapter (Cursor) whose
       // first initialize was model-less because the catalog is discovered only
@@ -4406,6 +4506,8 @@ export class AgentGateway {
         adapter,
         await adapter.initialize(),
       );
+      if (identity !== this.providerAuthConfigFingerprint(agentId))
+        return this.initializeAgent(agentId);
       if (!this.disposed) this.agentInitializes.set(agentId, init);
       return init;
     })();
@@ -4586,6 +4688,7 @@ export class AgentGateway {
     },
   ): Promise<{ title: string | null; error?: string }> {
     try {
+      this.assertSelectedAccountConnected(agentId);
       const adapter = await this.adapterFor(agentId);
       const generateText =
         resolveAgentCapabilityPorts(adapter).textGeneration?.generateText;
@@ -4695,7 +4798,9 @@ export class AgentGateway {
     opts: NewAgentSessionOptions,
     profile: SessionExecutionProfile,
   ): Promise<NewSessionResponse> {
+    this.assertSelectedAccountConnected(agentId);
     const sessionStartedAt = Date.now();
+    const authFingerprint = this.providerAuthConfigFingerprint(agentId);
     const actor = profile.actor;
     const adapter = await this.adapterFor(agentId);
     // The prior silent fallback
@@ -4891,6 +4996,7 @@ export class AgentGateway {
     const providerStartedAt = Date.now();
     try {
       const startup = adapter.newSession({
+        authenticationContext: authFingerprint,
         executionId,
         cwd,
         env: providerEnv,
@@ -4951,6 +5057,7 @@ export class AgentGateway {
     // Optional benchmark mode only: pre-admit the next spare of this shape.
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(session.executionId, agentId);
+    this.executionAuthFingerprint.set(session.executionId, authFingerprint);
     this.executionToActor.set(session.executionId, actor);
     this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
@@ -5012,7 +5119,9 @@ export class AgentGateway {
       admissionSignal?: AbortSignal;
     } = {},
   ): Promise<LoadSessionResponse> {
+    this.assertSelectedAccountConnected(agentId);
     const sessionStartedAt = Date.now();
+    const authFingerprint = this.providerAuthConfigFingerprint(agentId);
     const providerBinding =
       typeof bindingOrLegacyId === "string"
         ? legacyProviderBinding(agentId, bindingOrLegacyId)
@@ -5168,6 +5277,7 @@ export class AgentGateway {
     const providerStartedAt = Date.now();
     try {
       const startup = adapter.loadSession({
+        authenticationContext: authFingerprint,
         executionId,
         providerBinding,
         // Compatibility for adapters/tests that have not yet adopted bindings.
@@ -5232,6 +5342,7 @@ export class AgentGateway {
     // either path.
     this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(executionId, agentId);
+    this.executionAuthFingerprint.set(executionId, authFingerprint);
     this.executionToActor.set(executionId, "agent-code");
     this.settleAdapterStartup(executionId);
     this.executionToCwd.set(executionId, cwd);
@@ -5497,6 +5608,7 @@ export class AgentGateway {
       this.settleAdapterStartup(executionId);
       this.boundaryAttestations.delete(executionId);
       this.executionToAgent.delete(executionId);
+      this.executionAuthFingerprint.delete(executionId);
       this.executionToActor.delete(executionId);
       this.executionToWorkspace.delete(executionId);
       this.executionToCwd.delete(executionId);
@@ -5575,6 +5687,7 @@ export class AgentGateway {
       return { ...rest, state: "revoked", checkedAt: Date.now() };
     });
     this.executionToAgent.delete(sessionId);
+    this.executionAuthFingerprint.delete(sessionId);
     this.executionToActor.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
@@ -5859,6 +5972,13 @@ export class AgentGateway {
     if (flight) await flight.promise;
   }
 
+  private assertSelectedAccountConnected(agentId: string): void {
+    const profile = usesProviderApiKey(this.projectRoot, agentId) ? null : providerAccountProfile(agentId);
+    if (profile && profile.state !== "connected") {
+      throw new AgentFailureError({ kind: "auth-required", stage: "prompt", message: "Sign in to this account in Settings before continuing." });
+    }
+  }
+
   async prompt(
     agentId: string,
     sessionId: string,
@@ -5866,6 +5986,15 @@ export class AgentGateway {
     turnId?: string,
   ): Promise<PromptResponse> {
     await this.awaitAdapterStartupSettled(sessionId);
+    const authFingerprint = this.executionAuthFingerprint.get(sessionId);
+    if (authFingerprint && authFingerprint !== this.providerAuthConfigFingerprint(agentId)) {
+      await this.endSession(agentId, sessionId, { failClosed: true });
+      throw new AgentFailureError({
+        kind: "session-expired", stage: "prompt",
+        message: "The provider connection changed. Reconnect this session before sending.",
+      });
+    }
+    this.assertSelectedAccountConnected(agentId);
     this.assertBoundaryAttestationHealthy(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
@@ -5926,7 +6055,7 @@ export class AgentGateway {
       // A clean prompt is the strongest possible signal that auth is
       // good — clear any prior failed-auth marker so the green dot
       // re-illuminates the moment the user resolves their login.
-      this.markAuthOk(adapter.agentId);
+      if (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId)) this.markAuthOk(adapter.agentId);
       return response;
     } catch (err) {
       // Mark the agent auth-failed ONLY on an explicit `auth-required`
@@ -5951,7 +6080,7 @@ export class AgentGateway {
           failure?: { kind?: string; stage?: string };
         }
       ).failure;
-      if (failure?.kind === "auth-required") {
+      if (failure?.kind === "auth-required" && (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId))) {
         this.markAuthFailed(adapter.agentId);
       }
       throw err;
@@ -6117,12 +6246,13 @@ export class AgentGateway {
 
   async readExtensionInventory(
     agentId: string,
-    category: "apps" | "plugins",
+    category: import("@zeros/protocol/agent-extensions").ExtensionCategory,
     cwd?: string,
   ) {
     return this.runProviderOneShot({
       agentId,
-      cwd,
+      cwd:
+        cwd ?? (await this.providerProbeRoot(`extension-inventory-${agentId}`)),
       executionPrefix: "extension-inventory",
       operation: ({
         adapter,
@@ -6212,6 +6342,92 @@ export class AgentGateway {
         await memory.reset({ cwd, env, cliBinary, executionBoundary });
       },
     });
+  }
+
+  /** Only an already-admitted execution can report tools or begin provider
+   * OAuth. Neither operation may create a probe session or select another cwd. */
+  private sessionToolsPort(agentId: string, sessionId: string, cwd: string) {
+    if (
+      this.executionToAgent.get(sessionId) !== agentId ||
+      path.resolve(this.executionToCwd.get(sessionId) ?? "/") !==
+        path.resolve(cwd)
+    )
+      throw new Error(
+        "This chat session is no longer available in this workspace.",
+      );
+    const adapter = this.adapterForSession(sessionId, agentId, {
+      requireLiveRoute: true,
+    });
+    return { adapter, port: resolveAgentCapabilityPorts(adapter).sessionTools };
+  }
+
+  async readSessionTools(
+    agentId: string,
+    sessionId: string,
+    cwd: string,
+  ): Promise<SessionToolsSnapshot> {
+    const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
+    if (!port)
+      return {
+        state: "unsupported",
+        entries: [],
+        detail: "This agent does not report tool connections.",
+      };
+    try {
+      const result = await port.list({ sessionId });
+      if (this.sessionToolsPort(agentId, sessionId, cwd).adapter !== adapter)
+        throw new Error("Session changed");
+      return sessionToolsSnapshotSchema.parse(result);
+    } catch {
+      throw new Error(
+        "Could not read this chat's tool connections. Refresh to retry.",
+      );
+    }
+  }
+
+  async readSessionToolInventory(
+    agentId: string,
+    sessionId: string,
+    cwd: string,
+  ): Promise<SessionToolsInventorySnapshot> {
+    const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
+    if (!port?.inventory) {
+      const result = await this.readSessionTools(agentId, sessionId, cwd);
+      return { ...result, groups: sessionToolGroups(result) };
+    }
+    try {
+      const result = await port.inventory({ sessionId });
+      if (this.sessionToolsPort(agentId, sessionId, cwd).adapter !== adapter)
+        throw new Error("Session changed");
+      return sessionToolsInventorySnapshotSchema.parse(result);
+    } catch {
+      throw new Error(
+        "Could not read this chat’s tool inventory. Refresh to retry.",
+      );
+    }
+  }
+
+  async authenticateSessionTool(
+    agentId: string,
+    sessionId: string,
+    cwd: string,
+    toolId: string,
+  ) {
+    const { adapter, port } = this.sessionToolsPort(agentId, sessionId, cwd);
+    if (!port?.authenticate)
+      throw new Error(
+        "This provider does not support tool authentication here.",
+      );
+    try {
+      const result = await port.authenticate({ sessionId, toolId });
+      if (this.sessionToolsPort(agentId, sessionId, cwd).adapter !== adapter)
+        throw new Error("Session changed");
+      return result;
+    } catch {
+      throw new Error(
+        "Could not start tool authentication. Refresh the tool list and retry.",
+      );
+    }
   }
 
   async getGoal(agentId: string, sessionId: string) {
@@ -6378,6 +6594,7 @@ export class AgentGateway {
     this.failedBoundaryRetirements.clear();
     this.adapters.clear();
     this.executionToAgent.clear();
+    this.executionAuthFingerprint.clear();
     this.executionToActor.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();
@@ -6394,9 +6611,11 @@ export class AgentGateway {
     this.sessionsCwdHinted.clear();
     this.sessionsInstructed.clear();
     this.agentInitializes.clear();
+    this.agentInitializeIdentities.clear();
     this.agentInitializeFlights.clear();
     this.runtimeAuthFailed.clear();
     this.lastConfirmedAuthentication.clear();
+    this.registryGeneration++;
     this.cachedAgents = null;
     this.cachedAgentsAt = null;
     if (failures.length > 0) {
@@ -6433,6 +6652,7 @@ export class AgentGateway {
 
     const ctx: AgentAdapterContext = {
       projectRoot: this.projectRoot,
+      authenticationContext: () => this.providerAuthConfigFingerprint(agentId),
       // Hand the shared, deduplicated registry view (mutated in place by
       // setMcpServers). Adapters read ctx.mcpServers lazily per session, so a
       // settings edit reaches each agent's next session live. Dedup (collapse

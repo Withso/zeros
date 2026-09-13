@@ -30,12 +30,15 @@
 //   turn/diff/updated, turn/plan/updated → known aggregate no-ops
 //   error                      → terminal unless willRetry; emits notice row
 //   warning / deprecationNotice / configWarning → notice row (info-tier)
+//   mcpServer/startupStatus/updated → known no-op; connection state lives in Tools
 //   account/updated            → captured externally by the adapter (not a UI event here)
 //   account/rateLimits/updated → ditto
 //
 // ──────────────────────────────────────────────────────────
 
 import { randomUUID } from "node:crypto";
+import type { ToolArtwork } from "@zeros/protocol/tool-artwork";
+import type { CodexToolIdentity } from "./tool-artwork";
 
 import type { ToolCallContent } from "@zeros/protocol/agent-events";
 
@@ -73,6 +76,9 @@ export interface CodexAppServerTranslatorOptions {
   /** Called for any notification we don't have a mapping for — useful
    *  for diagnostics when codex ships a new event type. */
   onUnknown?: (method: string, params: unknown) => void;
+  resolveArtwork?: (
+    item: CodexToolIdentity,
+  ) => Promise<ToolArtwork | undefined>;
 }
 
 /** Stateful translator — one instance per Zeros session. Holds the
@@ -82,6 +88,8 @@ export class CodexAppServerTranslator {
   private readonly sessionId: string;
   private readonly emit: Emit;
   private readonly onUnknown?: (method: string, params: unknown) => void;
+  private readonly resolveArtwork?: CodexAppServerTranslatorOptions["resolveArtwork"];
+  private readonly artworkRequests = new Map<string, symbol>();
 
   /** Codex item.id → Zeros tool call id. One tool per item.id so we
    *  can correlate item/completed back to the originating tool_call. */
@@ -204,6 +212,7 @@ export class CodexAppServerTranslator {
     this.sessionId = opts.sessionId;
     this.emit = opts.emit;
     this.onUnknown = opts.onUnknown;
+    this.resolveArtwork = opts.resolveArtwork;
   }
 
   // ── Public accessors ────────────────────────────────────
@@ -304,6 +313,7 @@ export class CodexAppServerTranslator {
    *  thread id is not reset — it persists across turns. */
   startTurn(): void {
     this.turnPrefix = randomUUID();
+    this.artworkRequests.clear();
     this.toolCallIds.clear();
     this.emittedToolCallIds.clear();
     this.completedItemIds.clear();
@@ -412,7 +422,10 @@ export class CodexAppServerTranslator {
         this.onMcpOauthCompleted(params);
         break;
       case "mcpServer/startupStatus/updated":
-        this.onMcpStartupStatus(params);
+        // Startup/reconnect notifications are background connection state,
+        // including during a turn. Tools reads the same thread's status via
+        // mcpServerStatus/list. Only item events describe an agent tool call
+        // and carry its failure into the transcript.
         break;
       case "item/autoApprovalReview/started":
         this.onSafetyReview(params, false);
@@ -638,6 +651,7 @@ export class CodexAppServerTranslator {
           rawInput: parsed?.rawInput ?? toolInput(item),
           ...(mergeKey ? { mergeKey } : {}),
         });
+        if (item.type === "mcpToolCall") this.enrichArtwork(item, toolCallId);
         return;
       }
 
@@ -734,7 +748,11 @@ export class CodexAppServerTranslator {
               ? output
               : "";
         const dynamicContent =
-          item.type === "dynamicToolCall" ? dynamicToolContent(item) : null;
+          item.type === "dynamicToolCall"
+            ? dynamicToolContent(item)
+            : item.type === "mcpToolCall"
+              ? mcpToolContent(item)
+              : null;
         this.emit({
           sessionId: this.sessionId,
           update: {
@@ -742,6 +760,9 @@ export class CodexAppServerTranslator {
             toolCallId,
             status,
             rawOutput: output,
+            ...(item.type === "mcpToolCall"
+              ? { rawInput: toolInput(item) }
+              : {}),
             content: dynamicContent
               ? dynamicContent
               : contentText.length > 0
@@ -757,6 +778,7 @@ export class CodexAppServerTranslator {
                 : null,
           },
         });
+        if (item.type === "mcpToolCall") this.enrichArtwork(item, toolCallId);
         this.toolCallIds.delete(item.id);
         return;
       }
@@ -1079,29 +1101,6 @@ export class CodexAppServerTranslator {
     });
   }
 
-  private onMcpStartupStatus(params: unknown): void {
-    const p = params as { name?: string; status?: string };
-    if (
-      typeof p.name !== "string" ||
-      typeof p.status !== "string" ||
-      p.status === "ready" ||
-      p.status === "starting"
-    ) {
-      return;
-    }
-    this.emit({
-      sessionId: this.sessionId,
-      update: {
-        sessionUpdate: "error_notice",
-        noticeId: `${this.turnPrefix}-mcp-status-${this.noticeSeq++}`,
-        severity: "warning",
-        recoverable: true,
-        code: "mcp_startup_status",
-        message: `${truncate(p.name, 120)} MCP is ${truncate(p.status, 80)}.`,
-      },
-    });
-  }
-
   private onSafetyReview(params: unknown, completed: boolean): void {
     const p = params as {
       reviewId?: string;
@@ -1255,6 +1254,38 @@ export class CodexAppServerTranslator {
 
   // ── Helpers ─────────────────────────────────────────────
 
+  private enrichArtwork(
+    item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
+    toolCallId: string,
+  ): void {
+    if (!this.resolveArtwork) return;
+    const request = Symbol();
+    this.artworkRequests.set(toolCallId, request);
+    while (this.artworkRequests.size > 1024)
+      this.artworkRequests.delete(this.artworkRequests.keys().next().value!);
+    void this.resolveArtwork(item)
+      .then((artwork) => {
+        if (this.artworkRequests.get(toolCallId) !== request) return;
+        this.artworkRequests.delete(toolCallId);
+        if (!artwork) return;
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "tool_call_update",
+            toolCallId,
+            rawInput: {
+              ...recordValue(toolInput(item)),
+              _zerosToolArtwork: artwork,
+            },
+          },
+        });
+      })
+      .catch(() => {
+        if (this.artworkRequests.get(toolCallId) === request)
+          this.artworkRequests.delete(toolCallId);
+      });
+  }
+
   private ensureToolCallId(itemId: string): string {
     const cached = this.toolCallIds.get(itemId);
     if (cached) return cached;
@@ -1381,6 +1412,12 @@ type ThreadItemUnion =
       server: string;
       tool: string;
       arguments?: unknown;
+      pluginId?: string | null;
+      appContext?: {
+        connectorId?: string;
+        appName?: string | null;
+        actionName?: string | null;
+      } | null;
       result?: unknown;
       error?: unknown;
       status?: string;
@@ -1499,7 +1536,8 @@ function describeItem(item: ThreadItemUnion): string {
 function nativeNodeReplTitle(
   item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
 ): string | null {
-  if (item.server !== "node_repl" || item.tool !== "js") return null;
+  if (!["node_repl", "cua_repl"].includes(item.server) || item.tool !== "js")
+    return null;
   const args =
     item.arguments &&
     typeof item.arguments === "object" &&
@@ -1628,7 +1666,11 @@ function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
     return item.status === "failed" ? "failed" : "completed";
   }
   if (item.type === "mcpToolCall") {
-    return item.error || item.status === "failed" || nodeReplTimedOut(item)
+    return item.error ||
+      item.status === "failed" ||
+      recordValue(item.result).isError === true ||
+      recordValue(recordValue(item.result).raw).isError === true ||
+      nodeReplTimedOut(item)
       ? "failed"
       : "completed";
   }
@@ -1651,7 +1693,8 @@ function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
 function nodeReplTimedOut(
   item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
 ): boolean {
-  if (item.server !== "node_repl" || item.tool !== "js") return false;
+  if (!["node_repl", "cua_repl"].includes(item.server) || item.tool !== "js")
+    return false;
   const result = recordValue(item.result);
   const raw = recordValue(result.raw);
   for (const envelope of [result, raw]) {
@@ -1688,6 +1731,21 @@ function toolInput(item: ThreadItemUnion): unknown {
         server: item.server,
         tool: item.tool,
         arguments: item.arguments,
+        ...(typeof item.pluginId === "string"
+          ? { pluginId: item.pluginId.slice(0, 512) }
+          : {}),
+        ...(item.appContext
+          ? {
+              appContext: Object.fromEntries(
+                ["connectorId", "appName", "actionName"].flatMap((key) => {
+                  const value = recordValue(item.appContext)[key];
+                  return typeof value === "string"
+                    ? [[key, value.slice(0, 512)]]
+                    : [];
+                }),
+              ),
+            }
+          : {}),
       };
     case "dynamicToolCall":
       return {
@@ -1735,6 +1793,23 @@ function toolOutput(item: ThreadItemUnion): unknown {
     return item.result;
   }
   return null;
+}
+
+/** MCP image results are canonical content, not a base64 JSON disclosure. */
+function mcpToolContent(item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>): ToolCallContent[] | null {
+  const result = recordValue(item.result);
+  const content = result.content ?? recordValue(result.raw).content;
+  if (!Array.isArray(content)) return null;
+  const blocks: ToolCallContent[] = [];
+  for (const candidate of content.slice(0, 128)) {
+    const value = recordValue(candidate);
+    if (value.type === "text" && typeof value.text === "string") {
+      blocks.push({ type: "content", content: { type: "text", text: value.text } });
+    } else if (value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string" && /^image\/(?:png|jpeg|webp|gif)$/.test(value.mimeType) && value.data.length <= 16 * 1024 * 1024 && /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)) {
+      blocks.push({ type: "content", content: { type: "image", mimeType: value.mimeType, data: value.data } });
+    }
+  }
+  return blocks.length ? blocks : null;
 }
 
 /** Convert Responses-compatible dynamic-tool output into Zeros-owned content

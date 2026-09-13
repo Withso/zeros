@@ -139,6 +139,8 @@ function makeScriptedQuery(
       aliases?: string[];
     }>;
     mcpServerStatuses?: import("@anthropic-ai/claude-agent-sdk").McpServerStatus[];
+    supportedCommandsImpl?: (queryNo: number) => Promise<import("@anthropic-ai/claude-agent-sdk").SlashCommand[]>;
+    reloadSkillsImpl?: (queryNo: number) => Promise<{ skills: import("@anthropic-ai/claude-agent-sdk").SlashCommand[] }>;
     /** Model list query.supportedModels() resolves to (default []). */
     supportedModels?: unknown[];
     /** Per-call override; receives the 1-based call number (lets a test
@@ -221,6 +223,7 @@ function makeScriptedQuery(
     }
     const msgs = batches[call] ?? [];
     call += 1;
+    const queryNo = call;
     let release!: () => void;
     const gate = new Promise<void>((r) => {
       release = r;
@@ -265,7 +268,8 @@ function makeScriptedQuery(
     };
     q.mcpServerStatus = async () => opts?.mcpServerStatuses ?? [];
     q.supportedModels = supportedModels;
-    q.supportedCommands = async () => opts?.commands ?? [];
+    q.supportedCommands = async () => opts?.supportedCommandsImpl?.(queryNo) ?? opts?.commands ?? [];
+    if (opts?.reloadSkillsImpl) q.reloadSkills = () => opts.reloadSkillsImpl!(queryNo);
     if (opts?.contextUsage) {
       q.getContextUsage = async () => opts.contextUsage;
     }
@@ -285,6 +289,330 @@ function makeScriptedQuery(
 }
 
 describe("Claude cloud connector inventory", () => {
+  it("rejects connector membership from a query that ended during discovery", async () => {
+    const snapshot = { memberships: new Map([["calendar", "connected"] as const]), complete: true };
+    let release!: (value: typeof snapshot) => void;
+    const gate = new Promise<typeof snapshot>((resolve) => { release = resolve; });
+    const readMembership = vi.fn().mockResolvedValueOnce(snapshot).mockReturnValueOnce(gate);
+    const { queryFn } = makeScriptedQuery([[]], {
+      mcpServerStatuses: [{ name: "Calendar", status: "connected", scope: "claudeai", config: { type: "claudeai-proxy", id: "calendar", url: "https://example.com/mcp" } }],
+    });
+    const factory = vi.fn(() => readMembership);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn, connectorMembershipReaderFactory: factory,
+    });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
+      const pending = adapter.capabilityPorts.extensions.list({ category: "apps", cwd: "/tmp", scope: "user" });
+      const rejected = expect(pending).rejects.toThrow("chat connection changed");
+      await tick();
+      expect(readMembership).toHaveBeenCalledTimes(2);
+      expect(factory).toHaveBeenCalledOnce();
+      await adapter.dispose();
+      release(snapshot);
+      await rejected;
+    } finally {
+      release(snapshot);
+      await adapter.dispose();
+    }
+  });
+
+  it("publishes bundled skills before any input or streamed init event", async () => {
+    const emitted: SessionNotification[] = [];
+    const simplify = { name: "simplify", description: "Simplify code", argumentHint: "" };
+    const reloadSkills = vi.fn().mockResolvedValue({ skills: [simplify] });
+    const { queryFn, inputsSeen, captured } = makeScriptedQuery([[]], {
+      commands: [simplify, { name: "compact", description: "Compact context", argumentHint: "" }],
+      reloadSkillsImpl: reloadSkills,
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
+      await tick();
+      expect(cmdUpdates(emitted).at(-1)?.update).toMatchObject({
+        availableCommands: expect.arrayContaining([
+          expect.objectContaining({ name: "simplify", kind: "skill" }),
+          expect.objectContaining({ name: "compact", kind: "command" }),
+        ]),
+      });
+      await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
+      expect(reloadSkills).toHaveBeenCalledTimes(1);
+      expect(captured[0]?.settingSources).toEqual([]);
+      expect(captured[0]?.strictMcpConfig).toBeUndefined();
+      expect(inputsSeen).toEqual([]);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it("ignores command and skill discovery from an expired query", async () => {
+    vi.useFakeTimers();
+    let release!: (value: { skills: import("@anthropic-ai/claude-agent-sdk").SlashCommand[] }) => void;
+    const oldSkills = new Promise<{ skills: import("@anthropic-ai/claude-agent-sdk").SlashCommand[] }>((resolve) => { release = resolve; });
+    const emitted: SessionNotification[] = [];
+    const old = { name: "old-skill", description: "Old", argumentHint: "" };
+    const fresh = { name: "new-skill", description: "New", argumentHint: "" };
+    const { queryFn } = makeScriptedQuery([[], []], {
+      supportedCommandsImpl: async (queryNo) => [queryNo === 1 ? old : fresh],
+      reloadSkillsImpl: async (queryNo) => queryNo === 1 ? oldSkills : { skills: [fresh] },
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn, idleTimeoutMs: 100 });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const query = { sessionId: session.executionId };
+      await adapter.capabilityPorts.sessionTools.list(query);
+      await vi.advanceTimersByTimeAsync(100);
+      await adapter.capabilityPorts.sessionTools.list(query);
+      await vi.advanceTimersByTimeAsync(0);
+      release({ skills: [old] });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(cmdUpdates(emitted).at(-1)?.update).toMatchObject({
+        availableCommands: [expect.objectContaining({ name: "new-skill", kind: "skill" })],
+      });
+      expect(cmdUpdates(emitted).some((n) => cmdNames(n).includes("old-skill"))).toBe(false);
+    } finally {
+      release({ skills: [old] });
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a newer commands_changed push when initialization discovery finishes late", async () => {
+    let release!: (commands: import("@anthropic-ai/claude-agent-sdk").SlashCommand[]) => void;
+    const gate = new Promise<import("@anthropic-ai/claude-agent-sdk").SlashCommand[]>((resolve) => { release = resolve; });
+    const emitted: SessionNotification[] = [];
+    const fresh = { name: "fresh-skill", description: "Newly available", argumentHint: "" };
+    const { queryFn } = makeScriptedQuery([[initMsg("commands-race"), commandsChanged([fresh])]], {
+      supportedCommandsImpl: () => gate,
+      reloadSkillsImpl: async () => ({ skills: [fresh] }),
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.capabilityPorts.sessionTools.list({ sessionId: session.executionId });
+      await tick();
+      release([{ name: "old", description: "Old", argumentHint: "" }]);
+      await tick();
+      expect(cmdUpdates(emitted).at(-1)?.update).toMatchObject({
+        availableCommands: [expect.objectContaining({ name: "fresh-skill", kind: "skill" })],
+      });
+      expect(cmdUpdates(emitted).some((n) => cmdNames(n).includes("old"))).toBe(false);
+    } finally {
+      release([]);
+      await adapter.dispose();
+    }
+  });
+
+  it("retries failed command discovery on refresh without restarting the chat", async () => {
+    const emitted: SessionNotification[] = [];
+    const simplify = { name: "simplify", description: "Simplify code", argumentHint: "" };
+    const supportedCommands = vi.fn().mockRejectedValueOnce(new Error("Temporary failure")).mockResolvedValue([simplify]);
+    const reloadSkills = vi.fn().mockResolvedValue({ skills: [simplify] });
+    const { queryFn, captured, inputsSeen } = makeScriptedQuery([[]], {
+      supportedCommandsImpl: supportedCommands,
+      reloadSkillsImpl: reloadSkills,
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const query = { sessionId: session.executionId };
+      await adapter.capabilityPorts.sessionTools.list(query);
+      await tick();
+      expect(cmdUpdates(emitted)).toHaveLength(0);
+      await adapter.capabilityPorts.sessionTools.list(query);
+      await tick();
+      expect(cmdUpdates(emitted).at(-1)?.update).toMatchObject({
+        availableCommands: [expect.objectContaining({ name: "simplify", kind: "skill" })],
+      });
+      await adapter.capabilityPorts.sessionTools.list(query);
+      expect(supportedCommands).toHaveBeenCalledTimes(2);
+      expect(reloadSkills).toHaveBeenCalledTimes(1);
+      expect(captured).toHaveLength(1);
+      expect(inputsSeen).toEqual([]);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("starts the session control connection on Tools open without sending a message", async () => {
+    const { queryFn, captured, inputsSeen } = makeScriptedQuery(
+      [[initMsg("tools-session")]],
+      { mcpServerStatuses: [{ name: "account-notes", status: "connected", scope: "claudeai" }] },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      expect(captured).toHaveLength(0);
+      const query = { sessionId: session.executionId };
+      await expect(adapter.capabilityPorts.sessionTools.list(query)).resolves.toMatchObject({
+        state: "ready",
+        entries: [{ name: "account-notes", status: "connected" }],
+      });
+      await adapter.capabilityPorts.sessionTools.list(query);
+      expect(captured).toHaveLength(1);
+      expect(inputsSeen).toHaveLength(0);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it("reports disk settings as suppressed when MCP requires import", async () => {
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []));
+    const provenance = await adapter.capabilityPorts.configuration.readProvenance({
+      cwd: "/tmp",
+    });
+    expect(
+      provenance.sources.filter((source) => source.status === "loaded"),
+    ).toHaveLength(0);
+    expect(
+      provenance.sources
+        .filter((source) => source.status === "suppressed")
+        .every((source) => source.reason?.includes("MCP")),
+    ).toBe(true);
+    await adapter.dispose();
+  });
+
+  it("releases an unused Tools connection and reopens it on the next status request", async () => {
+    vi.useFakeTimers();
+    const { queryFn, captured, control, inputsSeen } = makeScriptedQuery([[], []]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn, idleTimeoutMs: 1_000 });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const query = { sessionId: session.executionId };
+      await adapter.capabilityPorts.sessionTools.list(query);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(control.closes).toBe(1);
+      await adapter.capabilityPorts.sessionTools.list(query);
+      expect(captured).toHaveLength(2);
+      expect(inputsSeen).toHaveLength(0);
+    } finally {
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("binds loaded plugin receipts to the live query and does not carry them across idle recreation", async () => {
+    vi.useFakeTimers();
+    const { queryFn, captured, inputsSeen } = makeScriptedQuery([
+      [{ ...initMsg("plugins-session"), plugins: [{ name: "Notes", path: "/private/plugin" }] }],
+      [],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn, idleTimeoutMs: 1_000 });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const query = { sessionId: session.executionId };
+      await adapter.capabilityPorts.sessionTools.inventory(query);
+      const first = await adapter.capabilityPorts.sessionTools.inventory(query);
+      expect(first.groups!.find((group) => group.kind === "plugins")).toMatchObject({
+        state: "ready", entries: [{ name: "Notes", status: "loaded" }],
+      });
+      expect(JSON.stringify(first)).not.toContain("/private/plugin");
+      // Legacy readers keep their strict connection-only contract.
+      expect(await adapter.capabilityPorts.sessionTools.list(query)).not.toHaveProperty("groups");
+      await vi.advanceTimersByTimeAsync(1_000);
+      const recreated = await adapter.capabilityPorts.sessionTools.inventory(query);
+      expect(recreated.groups!.find((group) => group.kind === "plugins")).toMatchObject({
+        state: "unsupported", entries: [],
+      });
+      expect(captured).toHaveLength(2);
+      expect(inputsSeen).toEqual([]);
+    } finally {
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps native account MCP out of a Design actor's scoped tool grant", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("design-session"), resultOk("design-session")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/design-scope",
+      executionBoundary: {
+        status: { actor: "design-agent", backend: "zeros-srt" },
+      } as never,
+      mcpServers: [
+        {
+          name: "design",
+          transport: "http",
+          url: "https://example.test/design",
+        },
+      ],
+    });
+    await adapter.prompt({
+      sessionId: session.executionId,
+      prompt: [{ type: "text", text: "Hi" }],
+    });
+    expect(captured[0]).toMatchObject({
+      strictMcpConfig: true,
+      mcpServers: { design: { url: "https://example.test/design" } },
+    });
+    await adapter.dispose();
+  });
+
+  it("keeps background title generation free of native connectors, plugins, and tools", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [resultOk("title-session")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    await adapter.generateText({
+      model: "claude-haiku-4-5",
+      systemPrompt: "Name this chat.",
+      prompt: "Work on the repository",
+    });
+    expect(captured[0]).toMatchObject({
+      tools: [],
+      strictMcpConfig: true,
+      settingSources: [],
+      settings: { disableAllHooks: true },
+      persistSession: false,
+    });
+    await adapter.dispose();
+  });
+
+  it("discovers connectors in a disposable contained query with no prompt, hooks, or transcript", async () => {
+    const close = vi.fn();
+    const status = vi
+      .fn()
+      .mockResolvedValue([
+        { name: "Calendar", scope: "claudeai", status: "connected" },
+      ]);
+    const queryFn = vi.fn().mockReturnValue({
+      mcpServerStatus: status,
+      close,
+      accountInfo: vi.fn().mockResolvedValue({ email: "user@example.test" }),
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn: queryFn as never,
+    });
+    const result = await adapter.capabilityPorts.extensions.list({
+      category: "apps",
+      cwd: "/tmp/discovery",
+      scope: "user",
+      executionBoundary: {
+        status: { actor: "agent-code", backend: "none" },
+      } as never,
+    });
+    expect(queryFn).toHaveBeenCalledOnce();
+    const call = queryFn.mock.calls[0][0];
+    expect(call.options).toMatchObject({
+      cwd: "/tmp/discovery",
+      tools: [],
+      persistSession: false,
+      permissionMode: "dontAsk",
+      settingSources: ["user"],
+      settings: { disableAllHooks: true },
+      strictMcpConfig: false,
+    });
+    expect(call.options.spawnClaudeCodeProcess).toBeTypeOf("function");
+    expect(call.prompt.pendingCount).toBe(0);
+    expect(call.prompt.closed).toBe(true);
+    expect(close).toHaveBeenCalledOnce();
+    expect(result?.entries).toMatchObject([
+      { name: "Calendar", status: "configured" },
+    ]);
+  });
   it("does not launch a session just to browse account connectors", async () => {
     const { queryFn, captured } = makeScriptedQuery([]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
@@ -314,12 +642,19 @@ describe("Claude cloud connector inventory", () => {
               url: "https://example.com/?token=SECRET",
             },
           },
-          { name: "Notes", status: "needs-auth", scope: "claudeai" },
+          { name: "Notes", status: "needs-auth", scope: "claudeai", config: { type: "claudeai-proxy", id: "notes", url: "https://example.com/mcp" } },
+          { name: "Unconnected", status: "needs-auth", scope: "claudeai", config: { type: "claudeai-proxy", id: "unconnected", url: "https://example.com/mcp" } },
           { name: "Local", status: "connected", scope: "user" },
         ],
       },
     );
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const readMembership = vi.fn().mockResolvedValue({
+      memberships: new Map([["calendar", "connected"], ["notes", "connected"], ["unconnected", "not-connected"]]),
+      complete: true,
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn, connectorMembershipReaderFactory: () => readMembership,
+    });
     const { session } = await adapter.newSession({ cwd: "/tmp/cloud-repo" });
     try {
       await adapter.prompt({
@@ -339,7 +674,7 @@ describe("Claude cloud connector inventory", () => {
       ]);
       expect(JSON.stringify(result)).not.toContain("SECRET");
       expect(captured).toHaveLength(1);
-      expect(captured[0]?.strictMcpConfig).toBe(true);
+      expect(captured[0]?.strictMcpConfig).not.toBe(true);
       const other = await adapter.capabilityPorts.extensions.list({
         category: "apps",
         cwd: "/tmp/other",
@@ -945,6 +1280,7 @@ describe("ClaudeSdkAdapter", () => {
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CONFIG_DIR",
   ])("does not override an explicit %s credential", async (credentialName) => {
     const { queryFn, captured } = makeScriptedQuery([
       [
@@ -2872,7 +3208,9 @@ describe("ClaudeSdkAdapter", () => {
       territory: codeTerritory(),
       // The host boundary owns process lifecycle only. It is deliberately not
       // a Code filesystem sandbox.
-      executionBoundary: { status: { backend: "none" } } as never,
+      executionBoundary: {
+        status: { actor: "agent-code", backend: "none" },
+      } as never,
     });
     await adapter.setMode({
       sessionId: session.sessionId,
@@ -2897,10 +3235,10 @@ describe("ClaudeSdkAdapter", () => {
     expect(captured[0]?.permissionMode).toBe("bypassPermissions");
     expect(captured[0]?.allowDangerouslySkipPermissions).toBe(true);
     expect(captured[0]?.sandbox).toBeUndefined();
-    expect(captured[0]?.settingSources).toEqual(["user", "project", "local"]);
-    // settingSources stays whole so CLAUDE.md and repo rules keep loading;
-    // strictMcpConfig is what scopes MCP to the Zeros registry.
-    expect(captured[0]?.strictMcpConfig).toBe(true);
+    expect(captured[0]?.settingSources).toEqual([]);
+    // Native settings also carry installed plugins and subscription connectors.
+    // Normal chats must let Claude resolve those alongside the Zeros registry.
+    expect(captured[0]?.strictMcpConfig).not.toBe(true);
     expect(settings.disableAllHooks).toBeUndefined();
     await adapter.dispose();
   });
@@ -2919,7 +3257,9 @@ describe("ClaudeSdkAdapter", () => {
         ZEROS_ISOLATION_CONTEXT_DIRS: JSON.stringify([contextRoot]),
       },
       territory: codeTerritory(workspaceRoot),
-      executionBoundary: { status: { backend: "none" } } as never,
+      executionBoundary: {
+        status: { actor: "agent-code", backend: "none" },
+      } as never,
     });
 
     await expect(
@@ -3208,6 +3548,59 @@ describe("ClaudeSdkAdapter", () => {
     expect(control.interrupts).toBe(0);
     expect(captured.length).toBe(1); // same query still running
     await adapter.dispose();
+  });
+
+  it("discards the old account's pending models and discovers a new account", async () => {
+    let account = "account-a";
+    let finishOld!: (models: unknown[]) => void;
+    const q = makeScriptedQuery(
+      [
+        [initMsg("sdk-a"), resultOk("sdk-a")],
+        [initMsg("sdk-b"), resultOk("sdk-b")],
+      ],
+      {
+        supportedModelsImpl: (call) =>
+          call === 1
+            ? new Promise((resolve) => {
+                finishOld = resolve;
+              })
+            : Promise.resolve([
+                { value: "claude-opus-5", supportsFastMode: false },
+              ]),
+      },
+    );
+    const adapter = new ClaudeSdkAdapter(
+      { ...makeCtx([], []), authenticationContext: () => account },
+      { queryFn: q.queryFn },
+    );
+    try {
+      const a = await adapter.newSession({
+        cwd: "/tmp",
+        env: { CLAUDE_CONFIG_DIR: "/profiles/a" },
+      });
+      await adapter.prompt({
+        sessionId: a.session.sessionId,
+        prompt: [textBlock("a")] as never,
+      });
+      account = "account-b";
+      const b = await adapter.newSession({
+        cwd: "/tmp",
+        env: { CLAUDE_CONFIG_DIR: "/profiles/b" },
+      });
+      await adapter.prompt({
+        sessionId: b.session.sessionId,
+        prompt: [textBlock("b")] as never,
+      });
+      await tick();
+      finishOld([{ value: "claude-opus-5", supportsFastMode: true }]);
+      await tick();
+      expect((await adapter.initialize())._meta?.models).toMatchObject([
+        { supportsFast: false },
+      ]);
+      expect(q.control.supportedModelsCalls).toBe(2);
+    } finally {
+      await adapter.dispose();
+    }
   });
 
   it("discoverModels is single-flight: two concurrent first prompts call supportedModels once", async () => {

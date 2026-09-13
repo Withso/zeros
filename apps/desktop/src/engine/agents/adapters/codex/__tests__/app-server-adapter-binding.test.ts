@@ -58,6 +58,7 @@ vi.mock("../app-server", () => ({
     rt.handlers[runtime] = handlers;
     const requestTyped = vi.fn(async (method: string, params: unknown) => {
       rt.requests.push({ runtime, method, params });
+      if (method === "config/read") return { config: {} };
       if (method === "model/list" || method === "skills/list") {
         return { data: [] };
       }
@@ -252,8 +253,7 @@ describe("Codex opaque provider bindings", () => {
     });
 
     // The resume path carries the same thread config a fresh start does: the
-    // browser gate, plus the native-MCP disables that make Customize the whole
-    // set (adapters/shared/mcp-passthrough.ts).
+    // browser gate, while native MCP remains under provider configuration.
     expect(rt.resumeParams).toContainEqual(
       expect.objectContaining({
         threadId: "thread-source",
@@ -299,7 +299,9 @@ describe("Codex opaque provider bindings", () => {
     const started = await adapter.newSession({
       executionId: "execution-browser-contained",
       cwd: "/tmp/proj",
-      executionBoundary: {} as never,
+      executionBoundary: {
+        status: { actor: "agent-code", backend: "zeros-srt", state: "ready" },
+      } as never,
       browserUse: {
         kind: "codex-app-server",
         browserSessionId: "browser_contained",

@@ -15,6 +15,54 @@ describe("native extension declarations", () => {
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify(doc));
   };
+  it("discovers Cursor local development plugins and their skills and MCP declarations", () => {
+    const plugin = path.join(home, ".cursor/plugins/local/example");
+    write(path.join(plugin, ".cursor-plugin/plugin.json"), { name: "example" });
+    write(path.join(plugin, ".mcp.json"), {
+      mcpServers: { notes: { command: "do-not-run" } },
+    });
+    mkdirSync(path.join(plugin, "skills/review"), { recursive: true });
+    writeFileSync(
+      path.join(plugin, "skills/review/SKILL.md"),
+      "---\nname: review\ndescription: Review changes\n---\nReview.",
+    );
+    for (const category of ["plugins", "skills", "mcp"] as const) {
+      const result = nativeExtensionInventory(
+        { provider: "cursor", category },
+        { home, env: {} },
+      );
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0].status).toBe("found");
+    }
+  });
+  it("reads plugin-declared component paths and inline MCP without following escaping paths", () => {
+    const plugin = path.join(home, ".cursor/plugins/local/custom");
+    write(path.join(plugin, ".cursor-plugin/plugin.json"), {
+      name: "custom",
+      mcpServers: ["./config/tools.json", "../../outside.json"],
+      skills: ["./workflows"],
+    });
+    write(path.join(plugin, "config/tools.json"), {
+      mcpServers: { tools: { command: "do-not-run" } },
+    });
+    mkdirSync(path.join(plugin, "workflows/review"), { recursive: true });
+    writeFileSync(
+      path.join(plugin, "workflows/review/SKILL.md"),
+      "---\nname: review\ndescription: Review\n---\nReview.",
+    );
+    const mcp = nativeExtensionInventory(
+      { provider: "cursor", category: "mcp" },
+      { home, env: {} },
+    );
+    expect(mcp.entries.map((entry) => entry.name)).toEqual(["custom / tools"]);
+    expect(mcp.partial).toBe(true);
+    expect(
+      nativeExtensionInventory(
+        { provider: "cursor", category: "skills" },
+        { home, env: {} },
+      ).entries,
+    ).toHaveLength(1);
+  });
   it.each([
     {
       provider: "claude",

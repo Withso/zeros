@@ -27,7 +27,11 @@ import {
 } from "../design/directory-path";
 
 export const RUN_MODES = ["concurrent", "nonconcurrent"] as const;
-export const PROVIDER_AUTH_METHODS = ["cli", "api-key"] as const;
+export const PROVIDER_AUTH_METHODS = [
+  "cli",
+  "api-key",
+  "subscription",
+] as const;
 /** How a new workspace's branch name is prefixed (Settings → Git). "zeros" is
  *  the historical value and stays the FALLBACK PREFIX: every workspace created
  *  before this setting existed is on a `zeros/` branch, and that prefix is

@@ -15,6 +15,7 @@
 import { getSetting, setSetting } from "../../platform/settings";
 import { getSecret, SECRET_ACCOUNTS } from "../../platform/secrets";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import { providerAuthChanged } from "../../platform/provider-auth-state";
 import {
   flushAgentPreferences,
   queueAgentPreferenceChanges,
@@ -27,6 +28,8 @@ export interface ProviderPrefs {
    *  vendor's env var (ANTHROPIC_API_KEY / OPENAI_API_KEY) read from
    *  the keychain at spawn time. Defaults to "cli". */
   authMethod: ProviderAuthMethod;
+  /** Distinguishes explicit SDK browser login from Cursor's old ignored CLI choice. */
+  cursorSubscription?: true;
   /** Optional absolute path or alternate command name for the CLI
    *  binary. Empty/undefined = use the registry default from $PATH. */
   binaryPath?: string;
@@ -44,9 +47,14 @@ export function subscribeProviderPreferences(listener: () => void): () => void {
     listeners.delete(listener);
   };
 }
-function providerTable(prefs: ProviderPrefs) {
+function providerTable(prefs: ProviderPrefs, agentId: string) {
   return {
-    auth: prefs.authMethod === "apiKey" ? "api-key" : "cli",
+    auth:
+      prefs.authMethod === "apiKey"
+        ? "api-key"
+        : agentId === "cursor"
+          ? "subscription"
+          : "cli",
     executable_path: prefs.binaryPath?.trim() || null,
     base_url: prefs.gatewayBaseUrl?.trim() || null,
   };
@@ -70,10 +78,11 @@ export function legacyProviderPreferences(): Record<string, unknown> {
   return Object.fromEntries(
     providerIds()
       .filter((id) => getSetting(KEY_PREFIX + id, null) !== null)
-      .map((id) => [id, providerTable(getProviderPrefs(id))]),
+      .map((id) => [id, providerTable(getProviderPrefs(id), id)]),
   );
 }
 export function hydrateProviderPreferences(value: unknown): void {
+  let authChanged = false;
   const providers =
     value && typeof value === "object"
       ? (value as Record<string, Record<string, unknown>>)
@@ -82,8 +91,14 @@ export function hydrateProviderPreferences(value: unknown): void {
     if (["__proto__", "prototype", "constructor"].includes(id)) continue;
     const cfg = providers[id];
     const prefs: ProviderPrefs = {
-      authMethod:
-        isApiKeyOnly(id) || cfg?.auth === "api-key" ? "apiKey" : "cli",
+      authMethod: (
+        id === "cursor" ? cfg?.auth !== "subscription" : cfg?.auth === "api-key"
+      )
+        ? "apiKey"
+        : "cli",
+      ...(id === "cursor" && cfg?.auth === "subscription"
+        ? { cursorSubscription: true as const }
+        : {}),
       ...(typeof cfg?.executable_path === "string"
         ? { binaryPath: cfg.executable_path }
         : {}),
@@ -91,9 +106,17 @@ export function hydrateProviderPreferences(value: unknown): void {
         ? { gatewayBaseUrl: cfg.base_url }
         : {}),
     };
+    const previous = getProviderPrefs(id);
+    if (
+      previous.authMethod !== prefs.authMethod ||
+      previous.gatewayBaseUrl !== prefs.gatewayBaseUrl ||
+      previous.binaryPath !== prefs.binaryPath
+    )
+      authChanged = true;
     hydrated.set(id, prefs);
     setSetting(KEY_PREFIX + id, prefs);
   }
+  if (authChanged) providerAuthChanged();
   for (const listener of listeners) listener();
 }
 
@@ -101,13 +124,9 @@ export const DEFAULT_PREFS: ProviderPrefs = {
   authMethod: "cli",
 };
 
-// Agents whose runtime is a bundled SDK (no user-installed CLI to sign
-// into), so the provider API key is the ONE mandatory credential — there
-// is no CLI-vs-API-key choice. Cursor (@cursor/sdk) is the first such
-// agent. Consumed by the Providers panel (renders API-key-only, no
-// toggle) and the runnable predicate (authenticated:false ⇒ no key ⇒ not
-// ready), which must stay in lockstep.
-const API_KEY_ONLY_AGENT_IDS = new Set<string>(["cursor"]);
+// Authentication UI capability, independent of whether a runtime is bundled.
+// All current providers support an interactive account connection.
+const API_KEY_ONLY_AGENT_IDS = new Set<string>();
 
 /** True when the agent authenticates solely via its provider API key —
  *  a bundled-SDK runtime with no CLI sign-in path. */
@@ -116,20 +135,21 @@ export function isApiKeyOnly(agentId: string): boolean {
 }
 
 export function getProviderPrefs(agentId: string): ProviderPrefs {
-  // API-key-only agents (Cursor/@cursor/sdk) authenticate via their
-  // provider key, so default them to API-key mode (the CLI/OAuth path is
-  // a hidden fallback). Every other agent defaults to CLI sign-in.
-  const fallback: ProviderPrefs = isApiKeyOnly(agentId)
-    ? { authMethod: "apiKey" }
-    : { ...DEFAULT_PREFS };
+  // Preserve Cursor's pre-browser-login default for existing installations.
+  const fallback: ProviderPrefs =
+    agentId === "cursor" || isApiKeyOnly(agentId)
+      ? { authMethod: "apiKey" }
+      : { ...DEFAULT_PREFS };
   const prefs =
     hydrated.get(agentId) ??
     getSetting<ProviderPrefs>(KEY_PREFIX + agentId, fallback);
-  // Coerce a stale persisted "cli" choice back to apiKey for API-key-only
-  // agents — a leftover toggle from before they went key-only must not
-  // withhold the env var the SDK needs at spawn (deriveProviderEnv only
-  // injects it in apiKey mode).
-  if (isApiKeyOnly(agentId) && prefs.authMethod !== "apiKey") {
+  // Old Cursor "cli" choices were ignored. Only the explicit new subscription
+  // marker can switch those users away from their existing API key.
+  if (
+    (isApiKeyOnly(agentId) ||
+      (agentId === "cursor" && !prefs.cursorSubscription)) &&
+    prefs.authMethod !== "apiKey"
+  ) {
     return { ...prefs, authMethod: "apiKey" };
   }
   return prefs;
@@ -137,11 +157,22 @@ export function getProviderPrefs(agentId: string): ProviderPrefs {
 
 export function setProviderPrefs(agentId: string, prefs: ProviderPrefs): void {
   const previous = getProviderPrefs(agentId);
+  if (agentId === "cursor")
+    prefs = {
+      ...prefs,
+      cursorSubscription: prefs.authMethod === "cli" ? true : undefined,
+    };
+  if (
+    previous.authMethod !== prefs.authMethod ||
+    previous.gatewayBaseUrl !== prefs.gatewayBaseUrl ||
+    previous.binaryPath !== prefs.binaryPath
+  )
+    providerAuthChanged();
   hydrated.set(agentId, prefs);
   setSetting(KEY_PREFIX + agentId, prefs);
   queueAgentPreferenceChanges(
-    { providers: { [agentId]: providerTable(prefs) } },
-    { providers: { [agentId]: providerTable(previous) } },
+    { providers: { [agentId]: providerTable(prefs, agentId) } },
+    { providers: { [agentId]: providerTable(previous, agentId) } },
   );
   for (const listener of listeners) listener();
 }
@@ -178,12 +209,8 @@ const PROVIDER_ENV_CONFIG: Record<string, ProviderEnvConfig> = {
     envVar: "OPENAI_API_KEY",
     secretAccount: SECRET_ACCOUNTS.OPENAI_API_KEY,
   },
-  // Cursor authenticates via CURSOR_API_KEY (bills to the user's Cursor
-  // plan). BOTH backends honour it: the @cursor/sdk reads it at spawn, and
-  // the cursor-agent CLI (now the default) reads CURSOR_API_KEY directly
-  // ("can also use CURSOR_API_KEY env var" per `cursor-agent --help`). So a
-  // user who pasted an API key works on either backend with no re-login;
-  // users who'd rather `cursor-agent login` just leave the key unset.
+  // Pasted-key mode only. The engine privately receives browser credentials
+  // from main and selects them from user settings in subscription mode.
   cursor: {
     envVar: "CURSOR_API_KEY",
     secretAccount: SECRET_ACCOUNTS.CURSOR_API_KEY,

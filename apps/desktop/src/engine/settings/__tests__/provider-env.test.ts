@@ -2,7 +2,8 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { applyUserProviderConfig } from "../provider-env";
+import { applyUserProviderConfig, usesProviderApiKey } from "../provider-env";
+import { seedProviderCredentials } from "../../agents/provider-credentials";
 
 let dir: string; // cwd = repoRoot for the resolver
 let userDir: string;
@@ -13,6 +14,12 @@ beforeEach(() => {
   process.env.ZEROS_USER_SETTINGS_DIR = userDir;
 });
 afterEach(() => {
+  seedProviderCredentials({
+    claude: null,
+    codex: null,
+    cursor: null,
+    cursorSubscription: null,
+  });
   delete process.env.ZEROS_USER_SETTINGS_DIR;
   rmSync(dir, { recursive: true, force: true });
   rmSync(userDir, { recursive: true, force: true });
@@ -31,6 +38,57 @@ function writeRepo(body: string) {
 const REAL_BIN = process.execPath;
 
 describe("applyUserProviderConfig — user-layer spawn fallback", () => {
+  it("reads the selected auth method only from trusted personal settings", () => {
+    writeRepo('[providers.claude]\nauth = "api-key"\n');
+    expect(usesProviderApiKey(dir, "claude")).toBe(false);
+    writeUser('[providers.claude]\nauth = "api-key"\n');
+    expect(usesProviderApiKey(dir, "claude")).toBe(true);
+    expect(usesProviderApiKey(dir, "codex")).toBe(false);
+    writeUser('[providers.claude]\nauth = "cli"\n');
+    expect(usesProviderApiKey(dir, "claude")).toBe(false);
+  });
+  it.each([
+    ["claude", "ANTHROPIC_API_KEY"],
+    ["codex", "OPENAI_API_KEY"],
+  ])(
+    "honors an explicit %s subscription selection over an inherited API key",
+    (provider, envVar) => {
+      writeUser(`[providers.${provider}]\nauth = "cli"\n`);
+      expect(
+        applyUserProviderConfig(dir, provider, {
+          env: { [envVar]: "wrong-account" },
+        }).env?.[envVar],
+      ).toBe("");
+    },
+  );
+  it("couriers a subscription credential for headless launches and never falls back after expiry", () => {
+    writeUser('[providers.cursor]\nauth = "subscription"\n');
+    seedProviderCredentials({
+      claude: null,
+      codex: null,
+      cursor: { apiKey: "manual" },
+      cursorSubscription: {
+        apiKey: "subscription",
+        expiresAtMs: Date.now() + 10_000,
+      },
+    });
+    expect(
+      applyUserProviderConfig(dir, "cursor", {
+        env: { CURSOR_API_KEY: "inherited" },
+      }).env?.CURSOR_API_KEY,
+    ).toBe("subscription");
+    seedProviderCredentials({
+      claude: null,
+      codex: null,
+      cursor: { apiKey: "manual" },
+      cursorSubscription: null,
+    });
+    expect(
+      applyUserProviderConfig(dir, "cursor", {
+        env: { CURSOR_API_KEY: "inherited" },
+      }).env?.CURSOR_API_KEY,
+    ).toBe("");
+  });
   it("fills ANTHROPIC_BASE_URL from the user base_url when not couriered", () => {
     writeUser(`[providers.claude]\nbase_url = "https://gw.user.example"\n`);
     expect(applyUserProviderConfig(dir, "claude", { env: {} }).env).toEqual({
@@ -73,7 +131,9 @@ describe("applyUserProviderConfig — user-layer spawn fallback", () => {
       applyUserProviderConfig(dir, "claude", { env: {} }).cliBinary,
     ).toBeUndefined();
 
-    writeUser(`[providers.claude]\nexecutable_path = "/opt/does-not-exist-zzz"\n`);
+    writeUser(
+      `[providers.claude]\nexecutable_path = "/opt/does-not-exist-zzz"\n`,
+    );
     expect(
       applyUserProviderConfig(dir, "claude", { env: {} }).cliBinary,
     ).toBeUndefined();
@@ -101,9 +161,11 @@ describe("applyUserProviderConfig — user-layer spawn fallback", () => {
 
   it("no providers / unknown agent → base unchanged; never throws on bad TOML", () => {
     writeUser(`[git]\nbase_branch = "main"\n`);
-    expect(applyUserProviderConfig(dir, "claude", { env: { A: "1" } })).toEqual({
-      env: { A: "1" },
-    });
+    expect(applyUserProviderConfig(dir, "claude", { env: { A: "1" } })).toEqual(
+      {
+        env: { A: "1" },
+      },
+    );
     writeUser(`this is [not toml`);
     expect(() =>
       applyUserProviderConfig(dir, "claude", { env: {} }),

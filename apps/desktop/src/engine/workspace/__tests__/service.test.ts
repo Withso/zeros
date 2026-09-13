@@ -4087,6 +4087,77 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it.each(["claude", "codex", "cursor"])(
+    "routes %s tools for the exact local chat cwd instead of interpreting it as a workspace id",
+    async (agentId) => {
+      const cwd = path.join(dir, "worktree", "project");
+      const list = vi.fn().mockResolvedValue({ state: "ready", entries: [] });
+      const authenticate = vi.fn().mockResolvedValue({
+        authorizationUrl: "https://auth.example/authorize",
+      });
+      svc.setSessionToolAccess({ list, authenticate });
+      const query = { workspaceId: cwd, sessionId: "session-a", agentId };
+      await expect(svc.handle("tools.session.list", query)).resolves.toEqual({
+        state: "ready", entries: [],
+      });
+      expect(list).toHaveBeenCalledWith(agentId, "session-a", cwd);
+      await svc.handle("tools.session.authenticate", { ...query, toolId: "tool" });
+      expect(authenticate).toHaveBeenCalledWith(agentId, "session-a", cwd, "tool");
+      list.mockClear();
+      await expect(
+        svc.handle("tools.session.list", query, { remote: true }),
+      ).rejects.toThrow();
+      expect(list).not.toHaveBeenCalled();
+    },
+  );
+
+  it("exposes credential-free session tools remotely without offering a host-loopback OAuth flow", async () => {
+    const list = vi.fn().mockResolvedValue({
+      state: "ready",
+      entries: [
+        {
+          id: "tool",
+          name: "Tool",
+          status: "needs-auth",
+          canAuthenticate: true,
+        },
+      ],
+    });
+    const authenticate = vi.fn();
+    svc.setSessionToolAccess({ list, authenticate });
+    vi.spyOn(svc, "resolveReadCwd").mockReturnValue("/fixture/a");
+    expect(svc.isRemoteAllowed("tools.session.list")).toBe(true);
+    expect(svc.isRemoteAllowed("tools.session.authenticate")).toBe(false);
+    const result = await svc.handle(
+      "tools.session.list",
+      { workspaceId: "a", sessionId: "session-a", agentId: "codex" },
+      { remote: true },
+    );
+    expect(result).toMatchObject({ entries: [{ canAuthenticate: false }] });
+    expect(list).toHaveBeenCalledWith("codex", "session-a", "/fixture/a");
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+
+  it("opts into grouped inventory while retaining the legacy list and removing remote authentication actions", async () => {
+    const list = vi.fn().mockResolvedValue({ state: "ready", entries: [] });
+    const inventory = vi.fn().mockResolvedValue({
+      state: "ready", entries: [{ id: "tool", name: "Tool", status: "needs-auth", canAuthenticate: true }],
+      groups: [{ kind: "mcp", state: "ready", entries: [{ id: "tool", name: "Tool", status: "needs-auth", canAuthenticate: true }] }],
+    });
+    svc.setSessionToolAccess({ list, inventory, authenticate: vi.fn() });
+    vi.spyOn(svc, "resolveReadCwd").mockReturnValue("/fixture/a");
+    const query = { workspaceId: "a", sessionId: "session-a", agentId: "codex" };
+    expect(svc.isRemoteAllowed("tools.session.inventory")).toBe(true);
+    await expect(svc.handle("tools.session.list", query, { remote: true })).resolves.toEqual({ state: "ready", entries: [] });
+    expect(inventory).not.toHaveBeenCalled();
+    const result = await svc.handle("tools.session.inventory", query, { remote: true });
+    expect(result).toMatchObject({
+      entries: [{ canAuthenticate: false }],
+      groups: [{ entries: [{ canAuthenticate: false }] }],
+    });
+    expect(inventory).toHaveBeenCalledWith("codex", "session-a", "/fixture/a");
+  });
+
   it("uses the headless MCP credential flow for a qualified cloud client", async () => {
     const calls: string[] = [];
     const connected = {

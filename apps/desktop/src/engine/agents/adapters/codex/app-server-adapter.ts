@@ -1,3 +1,11 @@
+import {
+  AccountModelDiscovery,
+  type AccountModelState,
+} from "../shared/account-model-discovery";
+import {
+  readCodexSessionTools,
+  authenticateCodexSessionTool,
+} from "./session-tools";
 // ──────────────────────────────────────────────────────────
 // Codex app-server adapter — AgentAdapter implementation.
 // ──────────────────────────────────────────────────────────
@@ -36,7 +44,12 @@
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
-import { readCodexExtensions } from "./extensions";
+import { readCodexSessionInventory } from "./session-inventory";
+import { createCodexToolArtworkResolver } from "./tool-artwork";
+import {
+  boundedCodexInventoryRuntime,
+  readCodexExtensions,
+} from "./extensions";
 import {
   coerceProviderBinding,
   providerBindingForResume,
@@ -304,6 +317,7 @@ export interface PendingApproval {
 }
 
 export interface CodexSession {
+  readonly modelState: AccountModelState;
   zerosSessionId: string;
   cwd: string;
   env?: Record<string, string>;
@@ -316,6 +330,11 @@ export interface CodexSession {
   translator: CodexAppServerTranslator;
   /** Codex threadId — captured from thread/start (new) or thread/resume (load). */
   threadId: string;
+  excludedMcpServers: Set<string>;
+  /** Account inventory follows the scope admitted with this thread. */
+  accountExtensionsEnabled?: boolean;
+  /** An imported local namesake is not the provider's account app bridge. */
+  accountAppBridgeEnabled?: boolean;
   /** Codex session-tree identity. Forked threads retain this root id; it is
    * descriptive provider scope and never a Zeros execution route. */
   providerSessionId: string;
@@ -445,8 +464,103 @@ export interface CodexSession {
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
   readonly capabilityPorts = {
+    sessionTools: {
+      inventory: async ({ sessionId }) => {
+        const session = this.requireSession(sessionId);
+        const result = await readCodexSessionInventory(
+          session.runtime,
+          session.threadId,
+          {
+            cwd: session.cwd,
+            excludedMcpServers: session.excludedMcpServers,
+            accountExtensionsEnabled: session.accountExtensionsEnabled === true,
+            accountAppBridgeEnabled: session.accountAppBridgeEnabled === true,
+          },
+        );
+        if (this.sessions.get(sessionId) !== session)
+          throw new Error("This chat session ended.");
+        return result;
+      },
+      list: async ({ sessionId }) => {
+        const session = this.requireSession(sessionId);
+        const result = await readCodexSessionTools(
+          session.runtime,
+          session.threadId,
+        );
+        if (this.sessions.get(sessionId) !== session)
+          throw new Error("This chat session ended.");
+        return {
+          ...result,
+          entries: result.entries.filter(
+            (entry) => !session.excludedMcpServers.has(entry.id),
+          ),
+        };
+      },
+      authenticate: async ({ sessionId, toolId }) => {
+        const session = this.requireSession(sessionId);
+        if (session.excludedMcpServers.has(toolId))
+          throw new Error("This tool is not connected to the chat.");
+        const key = JSON.stringify([sessionId, toolId]);
+        const existing = this.toolAuthFlights.get(key);
+        if (existing) return existing;
+        const flight = authenticateCodexSessionTool(
+          session.runtime,
+          session.threadId,
+          toolId,
+        )
+          .then((result) => {
+            if (this.sessions.get(sessionId) !== session)
+              throw new Error("This chat session ended.");
+            return result;
+          })
+          .finally(() => {
+            if (this.toolAuthFlights.get(key) === flight)
+              this.toolAuthFlights.delete(key);
+          });
+        this.toolAuthFlights.set(key, flight);
+        return flight;
+      },
+    },
     extensions: {
-      list: (opts) => this.withMemoryRuntime(opts, (runtime) => readCodexExtensions(runtime, opts.category, opts.cwd)),
+      list: (opts) =>
+        this.withMemoryRuntime(opts, async (runtime) => {
+          const inventoryRuntime = boundedCodexInventoryRuntime(runtime);
+          const before = await inventoryRuntime.requestTyped<
+            "account/read",
+            GetAccountResponse
+          >("account/read", { refreshToken: false });
+          const result = await readCodexExtensions(
+            inventoryRuntime,
+            opts.category,
+            opts.cwd,
+          );
+          const after = await runtime.requestTyped<
+            "account/read",
+            GetAccountResponse
+          >("account/read", { refreshToken: false }, { timeoutMs: 3_000 });
+          if (JSON.stringify(before) !== JSON.stringify(after)) {
+            return {
+              entries: [],
+              warnings: [
+                "The Codex account changed during discovery. Refresh to retry.",
+              ],
+              partial: true,
+              sources: [
+                {
+                  id: "account",
+                  kind: "account" as const,
+                  state: "partial" as const,
+                },
+              ],
+            };
+          }
+          // Each app-server is a fresh policy/account snapshot. Its source must
+          // not be retained across a failed read in another runtime.
+          result.identity = randomUUID();
+          if (before.account?.type === "chatgpt" && before.account.email)
+            result.account = { label: before.account.email };
+          return result;
+        }),
     },
     browser: { nativeSession: true },
     account: {
@@ -480,6 +594,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, CodexSession>();
+  private readonly toolAuthFlights = new Map<
+    string,
+    Promise<{ authorizationUrl: string }>
+  >();
   /** Last confirmed account snapshot shared across live runtimes and one-shot
    * settings reads. Rolling notifications merge into this value. */
   private latestRateLimitSnapshot: CodexRateLimitSnapshotLike | null = null;
@@ -496,9 +614,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  model/list discovery (discoverModels) populates `_meta.models`. The
    *  gateway re-polls initialize (modelsDynamic) until that lands. */
   private cachedInitialize: InitializeResponse | null = null;
-  /** model/list runs once per process — the account's catalog is stable for
-   *  the app's lifetime, so we don't re-query it per session. */
-  private modelsDiscovered = false;
+  private readonly modelDiscovery = new AccountModelDiscovery(
+    () => this.ctx.authenticationContext?.() ?? "default",
+  );
 
   constructor(ctx: AgentAdapterContext) {
     this.ctx = ctx;
@@ -802,15 +920,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!this.cachedInitialize) {
       this.cachedInitialize = buildInitializeResponse();
     }
+    const models = this.modelDiscovery.current().models;
+    if (this.cachedInitialize._meta?.models !== models) {
+      const { models: _previous, ...meta } = this.cachedInitialize._meta ?? {};
+      this.cachedInitialize = {
+        ...this.cachedInitialize,
+        _meta: { ...meta, ...(models ? { models } : {}) },
+      };
+    }
     return this.cachedInitialize;
   }
 
   /** Pull Codex's live model catalog (+ per-model reasoning-effort ladder) from
    *  the booted app-server via `model/list`, and surface it on the cached
-   *  InitializeResponse `_meta.models` — replacing the bundled-catalog fallback
-   *  with the account's REAL models. Best-effort + once per process (the catalog
-   *  is account-stable). The Codex ReasoningEffort vocabulary
-   *  ladder is normalized into Zeros' existing composer tokens in the
+   *  InitializeResponse `_meta.models` — replacing the bundled-catalog
+   *  CAPABILITY fallback with this account's real answers. Row names stay
+   *  curated: `displayName` travels as advisory `label` only (see
+   *  AdvertisedModel.label). Best-effort + shared within the selected account.
+   *  The Codex ReasoningEffort ladder is normalized into Zeros' composer tokens in the
    *  server's intended order (`ultra` → `ultracode`; none/minimal dropped).
    *
    *  Both capabilities follow the AdvertisedModel contract: a field the
@@ -820,8 +947,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  Collapsing those two cases would let an older/leaner `model/list` payload
    *  silently strip the effort and Fast controls off every model. */
   private async discoverModels(session: CodexSession): Promise<void> {
-    if (this.modelsDiscovered) return;
-    try {
+    return this.modelDiscovery.discover(session.modelState, async () => {
       const resp = await session.runtime.requestTyped<
         "model/list",
         {
@@ -863,23 +989,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
             : undefined;
         models.push({
           value: m.id,
+          // Advisory only — the curated catalog names every codex row.
           label: m.displayName || m.id,
           ...(effortLevels !== undefined ? { effortLevels } : {}),
           ...(supportsFast !== undefined ? { supportsFast } : {}),
         });
       }
-      if (models.length > 0) {
-        this.modelsDiscovered = true;
-        const base = this.initializeResponse();
-        const meta = base._meta ?? {};
-        this.cachedInitialize = { ...base, _meta: { ...meta, models } };
-      }
-    } catch {
-      /* best-effort — the bundled-catalog fallback still applies */
-    }
+      return models;
+    });
   }
 
   async newSession(opts: {
+    authenticationContext?: string;
     executionId?: string;
     cwd: string;
     env?: Record<string, string>;
@@ -891,6 +1012,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const { session } = await this.bootSession({
+      authenticationContext: opts.authenticationContext,
       cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary,
@@ -904,7 +1026,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     });
     // Surface Codex's real model catalog (+ effort ladder) onto the cached
     // initialize BEFORE returning, so the session's picker reflects the live
-    // models immediately (not the bundled fallback). Once-per-process + bounded
+    // models immediately (not the bundled fallback). Shared per account + bounded
     // by model/list's own timeout; never throws.
     await this.discoverModels(session);
     return {
@@ -928,6 +1050,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async loadSession(opts: {
+    authenticationContext?: string;
     executionId?: string;
     providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
     sessionId?: string;
@@ -955,6 +1078,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       await this.disposeSession(executionId);
     }
     const { session, resumedFresh } = await this.bootSession({
+      authenticationContext: opts.authenticationContext,
       cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary,
@@ -1888,13 +2012,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       ]);
       const { approvalPolicy, sandboxMode, sandboxPolicy } =
         modePolicyFor("read-only");
-      // Best-effort: a title is worth no MCP servers, but it is also not worth
-      // failing over. If the reads error or time out we start the thread the
-      // old way rather than lose the title.
+      // The caller can retain its fallback title if configuration is unreadable.
+      // Starting an unrestricted thread here would reconnect unimported MCP.
       const nativeMcp = await readNativeMcpSurface(
         runtime,
         this.ctx.projectRoot,
-      ).catch(() => ({ serverNames: [] }));
+        { requireConfig: true, codexHome: opts.env?.CODEX_HOME },
+      );
       // Raced like boot/runTurn: a server that boots but wedges on
       // thread/start must not suspend this call forever (the finally below
       // only runs once the try block settles — an unraced hang would leak
@@ -2053,6 +2177,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   /** Shared boot path for `newSession` and `loadSession`. */
   private async bootSession(opts: {
+    authenticationContext?: string;
     cwd: string;
     env?: Record<string, string>;
     cliBinary?: string;
@@ -2074,6 +2199,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
      *  through listSessions). For kind === "new", a fresh UUID. */
     zerosSessionId?: string;
   }): Promise<{ session: CodexSession; resumedFresh: boolean }> {
+    const modelState = this.modelDiscovery.capture(opts.authenticationContext);
     const zerosSessionId = opts.zerosSessionId ?? randomUUID();
     try {
       await ensureSessionDir(zerosSessionId);
@@ -2186,20 +2312,42 @@ export class CodexAppServerAdapter implements AgentAdapter {
       );
     }
 
-    // Keep the account app bridge: Customize reads Codex's account and callable
-    // inventories, while Codex owns connector authentication and tool policy.
-    // Other native MCP remains explicitly scoped; Zeros-injected names survive
-    // collisions in the same table. Tool-free helper threads disable all MCP.
-    const nativeMcpConfig = nativeMcpPassthroughEnabled()
-      ? {}
-      : mcpDisabledThreadConfig(
-          scopeNativeMcpSurface(
-            await readNativeMcpSurface(runtime, opts.cwd).catch(() => ({
-              serverNames: [],
-            })),
-            { serverNames: ["codex_apps", ...mcpServers.map((server) => server.name)] },
-          ),
-        );
+    // Disk MCP declarations (stdio AND HTTP) require Customize → Import.
+    // Keep provider-installed plugins and the account app bridge in normal
+    // chats; restricted actors retain only their explicitly admitted registry.
+    const cloudExtensions = nativeMcpPassthroughEnabled(
+      undefined,
+      opts.executionBoundary,
+    );
+    let nativeMcpConfig: ReturnType<typeof mcpDisabledThreadConfig>;
+    let accountAppBridgeEnabled = false;
+    try {
+      const nativeMcp = await readNativeMcpSurface(runtime, opts.cwd, {
+        codexHome: opts.env?.CODEX_HOME,
+        includePlugins: !cloudExtensions,
+        requireConfig: true,
+      });
+      accountAppBridgeEnabled =
+        cloudExtensions &&
+        !nativeMcp.shadowedAccountServerNames?.includes("codex_apps") &&
+        !mcpServers.some((server) => server.name === "codex_apps");
+      nativeMcpConfig = mcpDisabledThreadConfig(
+        scopeNativeMcpSurface(nativeMcp, {
+          serverNames: [
+            ...(cloudExtensions
+              ? ["codex_apps"].filter(
+                  (name) => !nativeMcp.shadowedAccountServerNames?.includes(name),
+                )
+              : []),
+            ...mcpServers.map((server) => server.name),
+          ],
+        }),
+      );
+    } catch (error) {
+      await runtime.dispose().catch(() => {});
+      await removeSessionDir(zerosSessionId).catch(() => {});
+      throw error;
+    }
 
     let threadId: string;
     let providerSessionId: string;
@@ -2326,8 +2474,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
     }
 
+    const resolveArtwork = createCodexToolArtworkResolver(runtime, threadId, opts.cwd, opts.env?.CODEX_HOME);
     const translator = new CodexAppServerTranslator({
       sessionId: zerosSessionId,
+      resolveArtwork: async (item) => {
+        const artwork = await resolveArtwork(item);
+        return this.sessions.get(zerosSessionId) === session ? artwork : undefined;
+      },
       emit: (notification: SessionNotification) =>
         this.ctx.emit.onSessionUpdate(this.agentId, notification),
       onUnknown: (method, _params) => {
@@ -2341,6 +2494,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     });
 
     session = {
+      modelState,
+      accountExtensionsEnabled: cloudExtensions,
+      accountAppBridgeEnabled,
+      excludedMcpServers: new Set(
+        Object.keys((nativeMcpConfig.mcp_servers ?? {}) as object),
+      ),
       zerosSessionId,
       cwd: opts.cwd,
       env: opts.env,

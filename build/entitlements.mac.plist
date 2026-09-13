@@ -23,8 +23,13 @@
       refuse to load them → workspace creation + terminal + Cursor all break in
       the shipped app.
 
-  These are the standard four for an Electron app that loads native modules and
-  spawns Node helpers. We intentionally do NOT request App Sandbox entitlements
+    automation.apple-events
+      Agent shell tools and native computer/browser helper clients send Apple
+      events to other apps. macOS can attribute those child-process requests to
+      Zeros. The hardened app needs this entitlement to request user consent;
+      it does not grant Accessibility, Screen Recording, or Automation access.
+
+  We intentionally do NOT request App Sandbox entitlements
   (network.client, files.user-selected, etc.) — Developer ID distribution is
   not sandboxed, and adding them would impose sandbox restrictions we don't want.
 -->
@@ -37,6 +42,8 @@
     <key>com.apple.security.cs.allow-dyld-environment-variables</key>
     <true/>
     <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.automation.apple-events</key>
     <true/>
   </dict>
 </plist>

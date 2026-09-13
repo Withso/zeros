@@ -9,16 +9,25 @@
 //
 // Live agent discovery (Claude `query.supportedModels()`, Codex `model/list`,
 // Cursor's SDK model list, surfaced via `initialize._meta.models`) does NOT
-// drive the displayed list — it only OVERLAYS each curated model's CAPABILITIES
-// (effort ladder + fast support) when we can match it, and powers
-// `pnpm models:verify`. So the picker is complete, stable, and controllable,
-// while per-model effort/fast stay accurate to what the live agent supports.
+// drive the displayed list and does NOT NAME anything — it only OVERLAYS each
+// curated model's CAPABILITIES (effort ladder + fast support + selectability)
+// when we can match it, and powers `pnpm models:verify`. So the picker is
+// complete, stable, and controllable, while per-model effort/fast stay accurate
+// to what the live agent supports.
+//
+// MODEL NAMES ARE CURATED, FOR EVERY AGENT. Each provider ships its own
+// marketing name for the same wire id (the Claude CLI calls `claude-opus-5[1m]`
+// "Opus (1M context)"; Codex and Cursor rename their own ids too), and those
+// names change under us on any CLI/account update. `overlayLiveCapabilities`
+// enforces the split via an allowlist of overlayable fields; `label` is not on
+// it, so only `catalogs/models-v1.json` can rename a row.
 //
 // Resolution per agent family:
-//   1. CURATED_FAMILIES[family]                         (drives DISPLAY)
-//      └─ overlaid with live _meta.models capabilities  (effort + fast)
+//   1. CURATED_FAMILIES[family]                         (drives DISPLAY + NAMES)
+//      └─ overlaid with live _meta.models capabilities  (effort + fast, never names)
 //   2. If a family has no curated entries → fall back to whatever the agent
-//      advertised live (so an unmapped/3rd-party agent still shows something).
+//      advertised live (so an unmapped/3rd-party agent still shows something —
+//      there is no curated name to protect for a model we never listed).
 //
 // Adding a model: run `pnpm models:list <agent>` to copy the exact real id,
 // add it to `catalogs/models-v1.json`, then `pnpm models:verify`.
@@ -629,11 +638,13 @@ export function agentSupportsFast(
   return false;
 }
 
-/** The label shown in the model picker. Drops a redundant brand prefix (the
+/** The label shown in the model picker. The input is always the CURATED label
+ *  (see {@link overlayLiveCapabilities} — provider names never get here), and
+ *  this only trims it for the surface: it drops a redundant brand prefix (the
  *  agent is already implied by the dropdown heading / composer context) and
  *  normalizes a "(1M)"-style context suffix to a bare "1M". Examples (claude
- *  family): "Claude Opus 4.8 (1M)" → "Opus 4.8 1M"; "Claude Sonnet 4.6" →
- *  "Sonnet 4.6". Other families keep their labels ("GPT-5.5"); the brand is
+ *  family): "Claude Opus 5" → "Opus 5"; "Claude Opus 4.8 (1M)" →
+ *  "Opus 4.8 1M". Other families keep their labels ("GPT-5.5"); the brand is
  *  only stripped for the claude family, so e.g. Cursor's "Claude Opus 4.8"
  *  (Cursor running a Claude model) keeps its brand. */
 export function displayModelLabel(
@@ -1070,12 +1081,73 @@ export function resolveModelOption(
   );
 }
 
+// ── Curated-name invariant ───────────────────────────────
+
+/** The ONLY `ModelOption` fields live provider discovery is allowed to write
+ *  onto a curated row. Everything absent from this list — `value`, `label`,
+ *  `badge`, `liveRequired`, `minCliVersion` — stays exactly as curated.
+ *
+ *  This is an allowlist, not a denylist, on purpose: a new display field added
+ *  to {@link ModelOption} must be opted IN here to ever come from a provider,
+ *  so no future field can leak provider copy into the picker by accident. */
+export const LIVE_OVERLAYABLE_FIELDS = [
+  "aliases",
+  "parameters",
+  "variants",
+  "selectable",
+  "effortLevels",
+  "supportsFast",
+] as const satisfies readonly (keyof ModelOption)[];
+
+/** Merge a curated row with the SAME model's live discovery record.
+ *
+ *  MODEL NAMES ARE NEVER FETCHED. `label` is curated-only, full stop — the
+ *  picker, the composer pill, Settings → Models, and the transcript cards all
+ *  read this one label, and every provider ships its own marketing name for the
+ *  same wire id: the Claude CLI calls `claude-opus-5[1m]` "Opus (1M context)",
+ *  Codex's `model/list` renames `gpt-5.6-sol`, Cursor renames its own ids. Any
+ *  of those silently rewrote the curated name — and worse, an id that
+ *  alias-normalizes onto a NEIGHBOURING curated row (the CLI's floating `opus`
+ *  selector) put one model's name on another's row. Provider renames now change
+ *  nothing a user sees; only `catalogs/models-v1.json` does.
+ *
+ *  `description` is curated-owned too, with live allowed to FILL IN a row the
+ *  catalog left blank (extra provider detail is additive; overwriting our copy
+ *  is not).
+ *
+ *  Capabilities go the other way: a field the live record CARRIES is
+ *  authoritative for this account/runtime even when it answers "none" (`[]`,
+ *  `false`), because keeping a bundled full ladder would offer controls the
+ *  provider rejects. A field the live record OMITS leaves the curated fallback
+ *  standing. */
+export function overlayLiveCapabilities(
+  curated: ModelOption,
+  live: ModelOption,
+): ModelOption {
+  const out: ModelOption = { ...curated };
+  if (curated.description === undefined && live.description !== undefined) {
+    out.description = live.description;
+  }
+  for (const field of LIVE_OVERLAYABLE_FIELDS) {
+    if (live[field] === undefined) continue;
+    // Widened through `unknown`: the loop assigns field-by-field from the same
+    // key on both sides, which TS can't narrow across a union of keys.
+    (out as Record<string, unknown>)[field] = live[field];
+  }
+  return out;
+}
+
 // ── Public API ────────────────────────────────────────────
 
 /** Resolve the model list the picker DISPLAYS for the given agent. The curated
- *  catalog drives WHICH models show; live `initialize._meta.models` discovery
- *  only OVERLAYS per-model capabilities (effort ladder + fast). Families with no
- *  curated entries fall back to whatever the agent advertised live.
+ *  catalog drives WHICH models show AND what each is NAMED; live
+ *  `initialize._meta.models` discovery only OVERLAYS per-model capabilities
+ *  (effort ladder + fast + selectability). Families with no curated entries
+ *  fall back to whatever the agent advertised live — there is no curated name
+ *  to protect for a model we never listed.
+ *
+ *  Display copy (`label`, and `description` when curated) is NEVER taken from
+ *  the provider: see {@link overlayLiveCapabilities}.
  *
  *  Note: a model's `minCliVersion` is checked at BUILD time by
  *  `pnpm models:verify` (and the catalog vitest), NOT gated here at runtime — a
@@ -1093,10 +1165,9 @@ export function modelsForAgent(
   if (curated.length === 0) return advertised ?? [];
   if (!advertised) return curated.filter((model) => !model.liveRequired);
 
-  // The bundled catalog owns WHICH models are displayed. Exact live metadata
-  // owns what this installed runtime/account can actually execute. In
-  // particular, [] and false are meaningful authoritative answers; preserving
-  // a bundled true/full ladder would expose controls that the provider rejects.
+  // The bundled catalog owns WHICH models are displayed AND WHAT THEY ARE
+  // CALLED. Exact live metadata owns what this installed runtime/account can
+  // actually execute.
   const liveBySlug = new Map<string, ModelOption>();
   for (const m of advertised)
     liveBySlug.set(normalizeModelSlug(family, m.value), m);
@@ -1105,29 +1176,7 @@ export function modelsForAgent(
     if (live?.selectable === false) return [];
     if (c.liveRequired && (!live || live.selectable !== true)) return [];
     if (!live) return [c];
-    return [
-      {
-        ...c,
-        label: live.label || c.label,
-        ...(live.description !== undefined
-          ? { description: live.description }
-          : {}),
-        ...(live.aliases !== undefined ? { aliases: live.aliases } : {}),
-        ...(live.parameters !== undefined
-          ? { parameters: live.parameters }
-          : {}),
-        ...(live.variants !== undefined ? { variants: live.variants } : {}),
-        ...(live.selectable !== undefined
-          ? { selectable: live.selectable }
-          : {}),
-        ...(live.effortLevels !== undefined
-          ? { effortLevels: live.effortLevels }
-          : {}),
-        ...(typeof live.supportsFast === "boolean"
-          ? { supportsFast: live.supportsFast }
-          : {}),
-      },
-    ];
+    return [overlayLiveCapabilities(c, live)];
   });
 }
 

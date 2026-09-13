@@ -77,6 +77,7 @@ import {
   appendMessages as persistAppendMessages,
   clearChat as persistClearChat,
   windowMessages as persistWindowMessages,
+  persistAuthenticationPrompt,
 } from "./agent-history-client";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import {
@@ -113,6 +114,15 @@ import { legacyProviderBinding } from "@zeros/protocol/identities";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
+import {
+  AuthPromptRecovery,
+  lastUserPrompt,
+  pendingAuthenticationPrompts,
+} from "./auth-prompt-recovery";
+import { getAgentsSnapshot } from "./agents-cache";
+import { isRunnableAgent } from "./agent-runnable";
+import { messageToEditorContent } from "./composer-editor/reconstruct";
+import { encodeAttachments } from "./encode-attachments";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
 import { nativeInvoke } from "../../platform/runtime";
@@ -1195,6 +1205,28 @@ export function AgentSessionsProvider({
   /** Self-ref so sendPrompt's turn-completion flush can re-invoke it for the
    *  next queued send (a useCallback can't reference itself in its body). */
   const sendPromptRef = useRef<SessionsActions["sendPrompt"] | null>(null);
+  const authPromptsRef = useRef(new AuthPromptRecovery());
+  const authPersistenceRef = useRef(new Map<string, Promise<void>>());
+  const persistAuthPrompt = useCallback(
+    (chatId: string, message: AgentTextMessage) => {
+      if (!bridge) return;
+      const previous =
+        authPersistenceRef.current.get(chatId) ?? Promise.resolve();
+      const saving = previous
+        .catch(() => {})
+        .then(() => persistAuthenticationPrompt(bridge, chatId, message));
+      authPersistenceRef.current.set(chatId, saving);
+      void saving
+        .catch(() =>
+          toast.error("Could not save the message waiting for sign-in."),
+        )
+        .finally(() => {
+          if (authPersistenceRef.current.get(chatId) === saving)
+            authPersistenceRef.current.delete(chatId);
+        });
+    },
+    [bridge],
+  );
   /** Per-chat FIFO of sends waiting for admission or an earlier live turn.
    * Flushed one at a time, so the engine only ever sees one turn. The first
    * admission-waiting entry is presented as active; later entries are the
@@ -1407,6 +1439,19 @@ export function AgentSessionsProvider({
       const dropped = queued.filter(
         (entry) => !preservedIds.has(entry.bubbleId),
       );
+      for (const entry of queued) {
+        if (
+          preservedIds.has(entry.bubbleId) &&
+          settled?.failure?.kind === "auth-required" &&
+          settled.agentId
+        )
+          authPromptsRef.current.remember(
+            chatId,
+            settled.agentId,
+            entry.bubbleId,
+            entry.args,
+          );
+      }
       sendQueueRef.current.delete(chatId);
       if (settled) {
         getStore().patchSession(chatId, {
@@ -1421,11 +1466,26 @@ export function AgentSessionsProvider({
                 queued: false,
                 queuedPresentation: undefined,
                 queuedEditable: undefined,
+                ...(settled.failure?.kind === "auth-required"
+                  ? {
+                      authRecovery: {
+                        text: queued.find(
+                          (entry) => entry.bubbleId === message.id,
+                        )!.args[1],
+                      },
+                    }
+                  : {}),
               },
             ];
           }),
           ...(hadActiveTurn ? { activeTurnStartedAt: null } : {}),
         });
+      }
+      if (settled?.failure?.kind === "auth-required") {
+        for (const message of getStore().sessions[chatId]?.messages ?? []) {
+          if (message.kind === "text" && preservedIds.has(message.id))
+            persistAuthPrompt(chatId, message);
+        }
       }
       if (hadActiveTurn) {
         getStore().setPendingLocalTurn(chatId, null);
@@ -1476,7 +1536,7 @@ export function AgentSessionsProvider({
         );
       }
     },
-    [getStore, drainNextQueued],
+    [getStore, drainNextQueued, persistAuthPrompt],
   );
   releaseQueueRef.current = drainOrDropQueue;
 
@@ -1789,6 +1849,7 @@ export function AgentSessionsProvider({
               boundary: resp.session.boundary ?? null,
               boundaryPorts: resp.session.boundaryPorts ?? null,
               session: resp.session,
+              needsConversationReplay: !!existing?.messages.length,
               initialize: resp.initialize,
               availableModes: resp.session.modes?.availableModes ?? [],
               currentModeId: resp.session.modes?.currentModeId ?? null,
@@ -1958,6 +2019,69 @@ export function AgentSessionsProvider({
       // we bail before committing a live bubble.
       const flushBubbleId = flushBubbleRef.current.get(chatId);
       if (flushBubbleId) flushBubbleRef.current.delete(chatId);
+      const entrySlot = getStore().sessions[chatId];
+      const registryAgent = getAgentsSnapshot()?.find(
+        (agent) => agent.id === entrySlot?.agentId,
+      );
+      if (
+        entrySlot?.agentId &&
+        entrySlot.status !== "auth-required" &&
+        pendingAuthenticationPrompts(entrySlot.messages, flushBubbleId)
+          .length === 0 &&
+        registryAgent?.installed &&
+        !isRunnableAgent(registryAgent) &&
+        !sendingChatsRef.current.has(chatId) &&
+        entrySlot.status !== "streaming"
+      ) {
+        const message: AgentTextMessage = {
+          id: flushBubbleId ?? `user-${crypto.randomUUID()}`,
+          kind: "text",
+          role: "user",
+          text: displayText ?? text,
+          createdAt: Date.now(),
+          authRecovery: { text },
+          ...(bubbleAttachments?.length
+            ? { attachments: bubbleAttachments }
+            : {}),
+          ...(segments?.length ? { segments } : {}),
+          ...(autoAction ? { autoAction } : {}),
+        };
+        authPromptsRef.current.remember(chatId, entrySlot.agentId, message.id, [
+          chatId,
+          text,
+          displayText,
+          attachments,
+          bubbleAttachments,
+          segments,
+          autoAction,
+        ]);
+        getStore().patchSession(chatId, {
+          status: "auth-required",
+          failure: {
+            kind: "auth-required",
+            stage: "prompt",
+            agentId: entrySlot.agentId,
+            message: `Connect ${registryAgent.name} in Settings to continue.`,
+          },
+          error: null,
+          activeTurnStartedAt: null,
+          messages: flushBubbleId
+            ? promoteToEnd(
+                entrySlot.messages,
+                flushBubbleId,
+                message,
+                entrySlot.historyExpanded,
+              )
+            : capUserAppend(
+                entrySlot.messages,
+                message,
+                entrySlot.historyExpanded,
+              ),
+        });
+        persistAuthPrompt(chatId, message);
+        getStore().setPendingLocalTurn(chatId, null);
+        return;
+      }
       const entryStatus = getStore().sessions[chatId]?.status ?? "idle";
       const queueFacts = {
         hasLocalSend: sendingChatsRef.current.has(chatId),
@@ -2157,7 +2281,9 @@ export function AgentSessionsProvider({
               cwd: slot.cwd ?? undefined,
               env: expectedEnv,
               ...executionActorForRecovery(slot),
-              ...(park === "drift-respawn" ? { force: true } : {}),
+              ...(park === "drift-respawn" || slot.status === "auth-required"
+                ? { force: true }
+                : {}),
             })
             .catch(() => {});
           return;
@@ -2307,7 +2433,7 @@ export function AgentSessionsProvider({
             )
           : undefined;
         const userMessage: AgentTextMessage = {
-          id: admissionPlaceholder?.id ?? `user-${Date.now()}`,
+          id: admissionPlaceholder?.id ?? `user-${crypto.randomUUID()}`,
           kind: "text",
           role: "user",
           text: displayText ?? text,
@@ -2323,6 +2449,20 @@ export function AgentSessionsProvider({
           ...(segments && segments.length > 0 ? { segments } : {}),
           ...(autoAction ? { autoAction } : {}),
         };
+        authPromptsRef.current.remember(
+          chatId,
+          current.agentId!,
+          userMessage.id,
+          [
+            chatId,
+            text,
+            displayText,
+            attachments,
+            bubbleAttachments,
+            segments,
+            autoAction,
+          ],
+        );
         // Mid-chat /add-dir awareness. The gateway's first-turn preamble already
         // names the dirs present when the chat started (and a resumed chat has
         // them in its transcript); here we tell the agent about a dir ADDED LATER,
@@ -2344,6 +2484,10 @@ export function AgentSessionsProvider({
             for (const d of fresh) announced.add(d);
           }
         }
+        const pendingAuth = pendingAuthenticationPrompts(
+          current.messages,
+          flushBubbleId,
+        );
         const prompt: ContentBlock[] = [
           { type: "text", text: prependSystemInstruction(dirNotice, text) },
           ...(attachments ?? []),
@@ -2362,13 +2506,15 @@ export function AgentSessionsProvider({
         // on reopen. When a notice is present we carry the clean text (the
         // mention/import displayText if any, else `text`) so the engine persists
         // THAT, not the notice. The live optimistic bubble is already clean.
-        const bubbleDisplayText = displayText ?? (dirNotice ? text : null);
+        const bubbleDisplayText =
+          displayText ?? (dirNotice || pendingAuth.length ? text : null);
         const bubble: AgentPromptBubble | undefined =
           (segments && segments.length > 0) ||
           (bubbleAttachments && bubbleAttachments.length > 0) ||
           (bubbleDisplayText != null && bubbleDisplayText !== text) ||
           autoAction != null ||
-          dirNotice !== ""
+          dirNotice !== "" ||
+          pendingAuth.length > 0
             ? {
                 ...(bubbleDisplayText != null
                   ? { displayText: bubbleDisplayText }
@@ -2416,6 +2562,57 @@ export function AgentSessionsProvider({
         // pendingLocalTurns / tailTurnInFlight.
         getStore().setPendingLocalTurn(chatId, userMessage.id);
 
+        if (pendingAuth.length) {
+          // The old prompts stay stopped in the transcript. Carry them only
+          // as context for THIS new user message; never re-dispatch an old turn
+          // or trigger work just because a connection status changed.
+          await authPersistenceRef.current.get(chatId)?.catch(() => {});
+          const context: ContentBlock[] = [
+            {
+              type: "text",
+              text: "These earlier user messages were interrupted by sign-in. Use them as context for my new message.\n<previous_user_messages>",
+            },
+          ];
+          for (const previous of pendingAuth) {
+            const cached = authPromptsRef.current.read(
+              chatId,
+              current.agentId!,
+              previous.id,
+            );
+            const restored = cached
+              ? { blocks: cached[3] ?? [], skipped: [] }
+              : await encodeAttachments(
+                  messageToEditorContent(previous).attachments,
+                  {
+                    supportsImage:
+                      current.initialize?.agentCapabilities?.promptCapabilities
+                        ?.image !== false,
+                    cwd: current.cwd,
+                    chatId,
+                    agentId: current.agentId!,
+                  },
+                );
+            context.push(
+              { type: "text", text: previous.authRecovery!.text },
+              ...restored.blocks,
+            );
+            if (restored.skipped.length)
+              context.push({
+                type: "text",
+                text: "Some attachments from this earlier message are unavailable. Ask me to reattach them if needed.",
+              });
+          }
+          context.push({
+            type: "text",
+            text: "</previous_user_messages>\nMy new message follows.",
+          });
+          prompt.unshift(...context);
+          if (stoppedByUser()) {
+            settleStoppedSend();
+            return;
+          }
+        }
+
         // Minted before runPrompt so the AGENT_PROMPT wire payload and local
         // telemetry share one durable correlation id across rebuild/retry.
         const promptId = newPromptDiagnosticId();
@@ -2430,6 +2627,15 @@ export function AgentSessionsProvider({
           promptToSend: ContentBlock[],
         ): Promise<AgentPromptCompleteMessage | AgentPromptFailedMessage> =>
           new Promise((resolve, reject) => {
+            const pendingIds = new Set(pendingAuth.map((message) => message.id));
+            const replay = getStore().sessions[chatId]?.needsConversationReplay
+              ? synthesizeReplayPrompt(current.messages.filter((message) =>
+                  message.id !== userMessage.id && !pendingIds.has(message.id)
+                ))
+              : null;
+            const outgoing = replay?.text
+              ? [{ type: "text" as const, text: replay.text }, ...promptToSend]
+              : promptToSend;
             const controller = new AbortController();
             let timer: ReturnType<typeof setTimeout> | null = null;
             let absoluteTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2453,6 +2659,10 @@ export function AgentSessionsProvider({
               value: AgentPromptCompleteMessage | AgentPromptFailedMessage,
             ) => {
               if (settled) return;
+              if (value.type === "AGENT_PROMPT_COMPLETE" &&
+                  getStore().sessions[chatId]?.sessionId === sessionId) {
+                getStore().patchSession(chatId, { needsConversationReplay: false });
+              }
               cleanup();
               resolve(value);
             };
@@ -2490,7 +2700,7 @@ export function AgentSessionsProvider({
                   agentId: current.agentId!,
                   executionId: sessionId,
                   sessionId,
-                  prompt: promptToSend,
+                  prompt: outgoing,
                   // Keep elapsed time continuous across the admission/provider
                   // startup that happened after the optimistic bubble appeared.
                   startedAt: userMessage.createdAt,
@@ -2499,7 +2709,7 @@ export function AgentSessionsProvider({
                   userMessageId: userMessage.id,
                   // Durable correlation for PostHog/logs across renderer reload.
                   promptId,
-                  ...(bubble ? { bubble } : {}),
+                  ...(replay?.text ? { bubble: { ...bubble, displayText: userMessage.text } } : bubble ? { bubble } : {}),
                 },
                 { timeoutMs: 0, signal: controller.signal },
               )
@@ -2603,6 +2813,7 @@ export function AgentSessionsProvider({
             // no longer receive prompts, cancellation, or lifecycle events.
             getStore().patchSession(chatId, {
               ...recovered,
+              needsConversationReplay: loaded.response.resumedFresh === true,
               ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
             });
             clearPrebindGoalSnapshotsForChat(
@@ -2775,17 +2986,11 @@ export function AgentSessionsProvider({
           // true-resume fast path above couldn't restore the session
           // (genuine --resume rejection), so replaying is the correct
           // fallback to avoid agent amnesia.
-          let promptToSend: ContentBlock[] = prompt;
+          const promptToSend: ContentBlock[] = prompt;
           let messagesAfterRebuild = rebuilt.messages;
           const userMsgIndex = rebuilt.messages.findIndex(
             (m) => m.id === userMessage.id,
           );
-          if (opts?.replayHistory && hasPriorContext) {
-            const replay = synthesizeReplayPrompt(rebuilt.messages);
-            if (replay.text) {
-              promptToSend = [{ type: "text", text: replay.text }, ...prompt];
-            }
-          }
           if (userMsgIndex < 0) {
             // Defensive fallback — userMessage was somehow pruned from
             // the slot (it's normally already there via capUserAppend
@@ -2803,6 +3008,7 @@ export function AgentSessionsProvider({
             failure: null,
             lastStopReason: null,
             messages: messagesAfterRebuild,
+            needsConversationReplay: rebuilt.needsConversationReplay || !!(opts?.replayHistory && hasPriorContext),
           });
           promptRetryCount += 1;
           return runPrompt(rebuilt.sessionId, promptToSend);
@@ -3190,6 +3396,32 @@ export function AgentSessionsProvider({
           });
         }
       } finally {
+        const terminalSlot = getStore().sessions[chatId];
+        const terminalPrompt =
+          terminalSlot && lastUserPrompt(terminalSlot.messages);
+        if (
+          terminalSlot?.failure?.kind === "auth-required" &&
+          terminalPrompt &&
+          terminalSlot.agentId
+        ) {
+          const args = authPromptsRef.current.read(
+            chatId,
+            terminalSlot.agentId,
+            terminalPrompt.id,
+          );
+          if (args) {
+            const blocked = {
+              ...terminalPrompt,
+              authRecovery: { text: args[1] },
+            };
+            getStore().patchSession(chatId, {
+              messages: terminalSlot.messages.map((m) =>
+                m.id === blocked.id ? blocked : m,
+              ),
+            });
+            persistAuthPrompt(chatId, blocked);
+          }
+        }
         const lifecycleCancelled = stoppedByUser();
         // This turn is no longer in flight, however it ended (sent, aborted by a
         // stop, bailed before dispatch). Unconditional and first: leaving it set
@@ -3231,6 +3463,8 @@ export function AgentSessionsProvider({
               (healthy ? null : terminal?.failure),
           });
         }
+        if (getStore().sessions[chatId]?.status === "ready")
+          authPromptsRef.current.delete(chatId);
         sendingChatsRef.current.delete(chatId);
         // Drop a STRANDED plan-review card. A plan gate BLOCKS its turn, so in
         // the happy path Approve / a typed follow-up cleared pendingPermission
@@ -3303,6 +3537,7 @@ export function AgentSessionsProvider({
       drainNextQueued,
       drainOrDropQueue,
       evictUnretainedTranscripts,
+      persistAuthPrompt,
     ],
   );
   sendPromptRef.current = sendPrompt;
@@ -4164,6 +4399,7 @@ export function AgentSessionsProvider({
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
+      authPromptsRef.current.delete(chatId);
       turnProducedOutputRef.current.delete(chatId);
       announcedDirsRef.current.delete(chatId);
       promptActivityRef.current.delete(chatId);
@@ -4746,6 +4982,7 @@ export function AgentSessionsProvider({
           executionId,
           sessionId: executionId,
           providerBinding: resolvedProviderBinding,
+          needsConversationReplay: resp.response.resumedFresh === true || existing?.needsConversationReplay === true,
           providerMetadata:
             resp.response.providerMetadata ??
             existing?.providerMetadata ??
@@ -5081,6 +5318,7 @@ export function AgentSessionsProvider({
     capabilityRefreshInFlightRef.current.clear();
     loadFlightAdoptOnlyRef.current.clear();
     persistedMessageRefsRef.current.clear();
+    authPromptsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
     // when the in-memory sessionIds become stale but the user still
@@ -5108,6 +5346,7 @@ export function AgentSessionsProvider({
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
+      authPromptsRef.current.delete(chatId);
       turnProducedOutputRef.current.delete(chatId);
       announcedDirsRef.current.delete(chatId);
       promptActivityRef.current.delete(chatId);

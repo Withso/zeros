@@ -971,12 +971,12 @@ describe("CodexAppServerTranslator", () => {
       expect(update?.update).toMatchObject({ status: "failed" });
     });
 
-    it("uses the official node_repl title for native Browser tool calls", () => {
+    it.each(["node_repl", "cua_repl"])("uses the official %s title for native tool calls", (server) => {
       env.t.handle("item/started", {
         item: {
           type: "mcpToolCall",
           id: "browser-1",
-          server: "node_repl",
+          server,
           tool: "js",
           arguments: {
             title: "Browse nammatn.in",
@@ -996,7 +996,7 @@ describe("CodexAppServerTranslator", () => {
         title: "Browse nammatn.in",
         kind: "mcp",
         rawInput: {
-          server: "node_repl",
+          server,
           tool: "js",
         },
       });
@@ -1050,6 +1050,26 @@ describe("CodexAppServerTranslator", () => {
           },
         },
       });
+    });
+
+    it("retains native connector identity for app artwork and human titles", () => {
+      env.t.handle("item/started", { item: {
+        type: "mcpToolCall", id: "native-app", server: "codex_apps", tool: "workos.query",
+        arguments: {}, pluginId: "workos@remote",
+        appContext: { connectorId: "workos", appName: "WorkOS", actionName: "Query", linkId: "private-link", resourceUri: "private-resource" },
+      }, threadId: "t1", turnId: "u1" });
+      const update = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call")?.update;
+      expect(update).toMatchObject({ rawInput: { pluginId: "workos@remote", appContext: { connectorId: "workos", appName: "WorkOS", actionName: "Query" } } });
+      expect(JSON.stringify(update)).not.toContain("private-link");
+      expect(JSON.stringify(update)).not.toContain("private-resource");
+    });
+
+    it("renders native computer screenshots and text while retaining the target metadata", () => {
+      const item = { type: "mcpToolCall", id: "computer-state", server: "cua_repl", tool: "js", arguments: { title: "Inspect Calculator", code: "await calculator.getAXStateAndScreenshot()" }, status: "completed", result: { content: [{ type: "text", text: "Calculator window" }, { type: "image", mimeType: "image/png", data: "cGl4ZWw=" }], _meta: { "codex/toolSurface": { kind: "computerUse", app: { kind: "appId", appId: "com.apple.Calculator" } } } } };
+      env.t.handle("item/started", { item, threadId: "t1", turnId: "u1" });
+      env.t.handle("item/completed", { item, threadId: "t1", turnId: "u1" });
+      const update = env.out.emitted.find((n) => n.update.sessionUpdate === "tool_call_update")?.update;
+      expect(update).toMatchObject({ content: [{ type: "content", content: { type: "text", text: "Calculator window" } }, { type: "content", content: { type: "image", mimeType: "image/png", data: "cGl4ZWw=" } }], rawOutput: { _meta: item.result._meta } });
     });
 
     it("unknown item type still emits a generic tool_call so the UI shows it", () => {
@@ -1900,7 +1920,80 @@ describe("CodexAppServerTranslator", () => {
       expect(serialized).not.toContain("sensitive failure");
     });
 
-    it("does not project native MCP diagnostic strings into chat", () => {
+    it.each(["starting", "ready", "failed", "cancelled"])(
+      "keeps repeated MCP %s startup notifications out of chat throughout the session",
+      (status) => {
+        const refresh = () => {
+          for (const threadId of [null, "t1", "t1"]) {
+            env.t.handle("mcpServer/startupStatus/updated", {
+              threadId,
+              name: "cloudflare-api",
+              status,
+              error: "Provider startup diagnostic",
+              failureReason:
+                status === "failed" ? "reauthenticationRequired" : null,
+            });
+          }
+        };
+        refresh(); // Opening Tools before the first prompt.
+        env.t.startTurn();
+        refresh(); // Revalidation while a prompt is running.
+        expect(env.t.sawTurnTerminal).toBe(false);
+        expect(env.t.authQuotaFailure).toBeNull();
+        env.t.handle("turn/completed", {
+          threadId: "t1",
+          turn: { id: "u1", status: "completed" },
+        });
+        refresh(); // Revalidation after the turn has finished.
+
+        expect(env.out.emitted).toEqual([]);
+        expect(env.out.unknown).toEqual([]);
+        expect(env.t.stopReason).toBe("end_turn");
+      },
+    );
+
+    it("retains actual MCP tool failures when startup failures arrive during the call", () => {
+      env.t.startTurn();
+      const item = {
+        type: "mcpToolCall",
+        id: "cloudflare-call",
+        server: "cloudflare-api",
+        tool: "list_workers",
+        arguments: {},
+      };
+      env.t.handle("item/started", {
+        threadId: "t1",
+        turnId: "u1",
+        item,
+      });
+      env.t.handle("mcpServer/startupStatus/updated", {
+        threadId: "t1",
+        name: "cloudflare-api",
+        status: "failed",
+      });
+      env.t.handle("item/completed", {
+        threadId: "t1",
+        turnId: "u1",
+        item: {
+          ...item,
+          status: "failed",
+          error: { code: "unauthorized", message: "Authentication required" },
+        },
+      });
+
+      expect(env.out.emitted).toHaveLength(2);
+      expect(env.out.emitted[0].update).toMatchObject({
+        sessionUpdate: "tool_call",
+        kind: "mcp",
+      });
+      expect(env.out.emitted[1].update).toMatchObject({
+        sessionUpdate: "tool_call_update",
+        status: "failed",
+        rawOutput: { code: "unauthorized", message: "Authentication required" },
+      });
+    });
+
+    it("retains explicit MCP sign-in failures without projecting native diagnostics into chat", () => {
       env.t.handle("mcpServer/oauthLogin/completed", {
         name: "docs",
         success: false,
@@ -1912,8 +2005,9 @@ describe("CodexAppServerTranslator", () => {
         error: "API_KEY=secret at /private/server",
       });
       const serialized = JSON.stringify(env.out.emitted);
+      expect(env.out.emitted).toHaveLength(1);
       expect(serialized).toContain("docs MCP sign-in failed");
-      expect(serialized).toContain("repo MCP is failed");
+      expect(serialized).not.toContain("repo MCP is failed");
       expect(serialized).not.toContain("token=secret");
       expect(serialized).not.toContain("API_KEY=secret");
       expect(serialized).not.toContain("/private/");

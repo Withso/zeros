@@ -587,6 +587,8 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");
       if (env.cols !== undefined && !isUint(env.cols)) bad("cols");
       if (env.rows !== undefined && !isUint(env.rows)) bad("rows");
+      if (env.loginProvider !== undefined &&
+          (env.ephemeral !== true || !["claude", "codex"].includes(env.loginProvider as string))) bad("loginProvider");
       break;
     case "PTY_WRITE":
       if (!isNonEmptyStr(env.sessionId)) bad("sessionId");

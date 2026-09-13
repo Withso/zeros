@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useState, useSyncExternalStore } from "react";
 import type {
   ExtensionEntry,
   ExtensionQuery,
@@ -10,6 +10,10 @@ import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { workspaceOp } from "../../platform/bridge/workspace-bridge";
 import { useCachedRead } from "../../state/use-cached-read";
 import { createExtensionResource, extensionResource } from "./extensions-cache";
+import {
+  providerAuthRevision,
+  subscribeProviderAuth,
+} from "../../platform/provider-auth-state";
 
 const disconnectedResource = createExtensionResource(() =>
   Promise.reject(
@@ -161,6 +165,11 @@ export function CustomizeExtensionsSection({
   const status = useBridgeStatus();
   const isLocal = bridge?.executionIdentity.kind !== "cloud";
   const resource = bridge ? extensionResource(bridge) : disconnectedResource;
+  useSyncExternalStore(
+    subscribeProviderAuth,
+    providerAuthRevision,
+    providerAuthRevision,
+  );
   const key = resource.key(query);
   const read = useCachedRead(
     resource.cache,
@@ -253,6 +262,32 @@ export function CustomizeExtensionsSection({
         </Button>
       </div>
       {read.data?.note && <p className="text-fg2 text-sm">{read.data.note}</p>}
+      {read.data?.account && (
+        <p className="text-fg2 text-xs">
+          {query.provider === "codex" ? "Codex" : "Claude"} account:{" "}
+          {read.data.account.label}
+        </p>
+      )}
+      {read.data?.sources?.map((source) => (
+        <p key={source.id} className="text-fg2 text-xs">
+          {source.kind === "local"
+            ? "This machine"
+            : source.kind === "account"
+              ? "Provider account"
+              : "Provider session"}
+          :{" "}
+          {source.state === "complete"
+            ? "Checked"
+            : source.state === "partial"
+              ? "Incomplete"
+              : source.state === "unsupported"
+                ? "Account listing unavailable"
+                : source.state === "needs-auth"
+                  ? "Sign-in required"
+                  : "Start a session to check"}
+          .{source.detail ? ` ${source.detail}` : ""}
+        </p>
+      ))}
       {(error || read.error) && (
         <p role="alert" className="text-danger-fg text-sm">
           {error || read.error?.message}
@@ -298,6 +333,13 @@ export function CustomizeExtensionsSection({
             </p>
           ) : null}
           <p className="text-fg3 text-xs break-all">{entry.sourcePath}</p>
+          {entry.sourceId && (
+            <p className="text-fg3 text-xs">
+              {entry.sourceId === "local"
+                ? "This machine"
+                : "Reported by the provider"}
+            </p>
+          )}
           {editable && (
             <div className="flex items-center gap-2">
               {removing === entry.id ? (

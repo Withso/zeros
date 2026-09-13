@@ -76,6 +76,11 @@ vi.mock("../app-server", () => ({
         handlers.add(handler);
         return () => handlers?.delete(handler);
       },
+      requestTyped: vi.fn(async (method: string) =>
+        method === "config/read"
+          ? { config: { mcp_servers: {} } }
+          : { marketplaces: [], marketplaceLoadErrors: [] },
+      ),
       request: vi.fn(async () => ({})),
       dispose: async () => {},
     };
@@ -291,11 +296,10 @@ describe("codex permission settlement receipts", () => {
     };
     await adapter.newSession({ cwd: "/tmp/proj", territory });
 
-    raiseApproval(
-      "permission-design",
-      "item/fileChange/requestApproval",
-      { itemId: "item-design", grantRoot: designDirectory },
-    );
+    raiseApproval("permission-design", "item/fileChange/requestApproval", {
+      itemId: "item-design",
+      grantRoot: designDirectory,
+    });
 
     expect(rt.respondCalls).toEqual([]);
     expect(emit.onPermissionRequest).toHaveBeenCalledTimes(1);

@@ -12,9 +12,15 @@
 // binding is the crash vector this command avoids.
 // ──────────────────────────────────────────────────────────
 
-import { deleteSecret, getSecret, hasSecret, setSecret } from "../../secret-store";
+import {
+  deleteSecret,
+  getSecret,
+  hasSecret,
+  setSecret,
+} from "../../secret-store";
 import { isRendererKeychainAccount } from "../../keychain-accounts";
 import type { CommandHandler } from "../router";
+import { pushProviderCredentialsToEngine } from "../../sidecar";
 
 /** Reject any account the renderer doesn't legitimately own (see
  *  keychain-accounts.ts). Keeps a renderer compromise from reaching main-only
@@ -22,7 +28,9 @@ import type { CommandHandler } from "../router";
 function assertAllowed(account: string, op: string): void {
   if (!isRendererKeychainAccount(account)) {
     // Don't echo the account back to a (possibly hostile) caller; log for us.
-    console.warn(`[keychain] denied ${op} for non-allowlisted account "${account}"`);
+    console.warn(
+      `[keychain] denied ${op} for non-allowlisted account "${account}"`,
+    );
     throw new Error(`keychain ${op} failed: account not permitted`);
   }
 }
@@ -34,6 +42,12 @@ export const keychainSet: CommandHandler = async (args) => {
   assertAllowed(account, "set");
   try {
     setSecret(account, value);
+    if (
+      ["openai-api-key", "anthropic-api-key", "cursor-api-key"].includes(
+        account,
+      )
+    )
+      void pushProviderCredentialsToEngine().catch(() => {});
   } catch (err) {
     throw new Error(
       `keychain set failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -79,6 +93,12 @@ export const keychainDelete: CommandHandler = async (args) => {
   assertAllowed(account, "delete");
   try {
     deleteSecret(account);
+    if (
+      ["openai-api-key", "anthropic-api-key", "cursor-api-key"].includes(
+        account,
+      )
+    )
+      void pushProviderCredentialsToEngine().catch(() => {});
   } catch (err) {
     throw new Error(
       `keychain delete failed: ${err instanceof Error ? err.message : String(err)}`,

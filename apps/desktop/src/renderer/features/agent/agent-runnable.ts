@@ -7,41 +7,13 @@
 // EmptyComposer's auto-pick, the Conversation pane "+" menu's submenu, and
 // spawn-default-chat's resolve.
 //
-// Definition: an agent is runnable when ANY of:
-//   - it reports `authenticated === true` (CLI probe succeeded), OR
-//   - it is installed and its auth probe is temporarily unavailable, OR
-//   - the user has selected API-key mode for it AND the install probe
-//     found it (apiKey agents don't need CLI sign-in; the env-injected
-//     key carries auth at spawn time), OR
-//   - it doesn't require sign-in at all (`authBinary` falsy) AND the
-//     install probe found it.
-//
-// Why trust authentication over the install probe? Packaged Electron
-// inherits a stripped PATH that often misses Homebrew / asdf / fnm /
-// volta shims — `which claude` returns nothing even though the user
-// has a working install. If the engine's auth check succeeded, the
-// binary exists somewhere reachable, so we let the user proceed.
-// The CLI will surface a clear error if it actually can't spawn.
-//
-// Why not also require a non-empty keychain secret for apiKey mode?
-// Providers panel uses the same rule (installed + apiKey ⇒ Connected)
-// — the two surfaces have to agree, otherwise the panel shows green
-// while the composer says "Sign in required". The keychain miss is
-// surfaced at spawn time (deriveProviderEnv leaves the env var unset,
-// AuthModal appears).
-//
-// Exception: API-key-only agents (Cursor) — their auth probe reads the
-// key store directly, so `authenticated` already reflects key presence.
-// For these the key IS mandatory, so we gate on `authenticated` (above)
-// and the Providers panel matches by showing "API key required" when it's
-// false. Both surfaces still agree.
+// Readiness follows the engine's effective credential verdict for the selected
+// connection method. An installed runtime alone cannot establish authentication.
+// An unavailable probe still permits admission to report the actual runtime
+// problem. Auth-free adapters only require installation.
 
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
-import {
-  getProviderPrefs,
-  isApiKeyOnly,
-  supportsApiKey,
-} from "../settings/provider-prefs";
+import { isApiKeyOnly } from "../settings/provider-prefs";
 
 export function isRunnableAgent(a: BridgeRegistryAgent): boolean {
   if (a.authenticated === true) return true;
@@ -52,18 +24,20 @@ export function isRunnableAgent(a: BridgeRegistryAgent): boolean {
   // unactionable "Sign in required" flow. This must precede Cursor's
   // API-key-only branch: its key probe can be unavailable for the same reason.
   if (a.installed === true && a.authenticationUnavailableReason) return true;
-  // API-key-only agents (Cursor/@cursor/sdk): the engine's auth probe reads
-  // the actual key store (secret-account), so `authenticated` already means
-  // "key saved". Don't fall through to the installed+apiKey shortcut below —
-  // the key is mandatory, so authenticated:false means no key ⇒ not ready.
-  // Keeps this in lockstep with the Providers panel, which shows the same
-  // agents amber "API key required" in that state.
-  if (isApiKeyOnly(a.id)) return false;
-  if (a.installed === true && supportsApiKey(a.id)) {
-    if (getProviderPrefs(a.id).authMethod === "apiKey") return true;
-  }
+  // Cursor's runtime is always bundled. Installation alone cannot establish
+  // readiness: both its browser login and pasted-key modes need a credential.
+  if (a.id === "cursor" || isApiKeyOnly(a.id)) return false;
   if (!a.authBinary && a.installed === true) return true;
   return false;
+}
+
+/** Composer/default choices require confirmed credentials for product agents.
+ * An unavailable runtime probe may still be admitted for an existing chat, but
+ * cannot make an unconfirmed provider selectable in a new chat. */
+export function isSelectableAgent(agent: BridgeRegistryAgent): boolean {
+  return ["claude", "codex", "cursor"].includes(agent.id)
+    ? agent.authenticated === true
+    : isRunnableAgent(agent);
 }
 
 // Adapters REMOVED from the product. A chat bound to one of these can't

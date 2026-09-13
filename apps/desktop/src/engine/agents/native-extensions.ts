@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parse as parseToml } from "smol-toml";
@@ -42,6 +42,14 @@ export function nativeExtensionInventory(
             ? path.join(env.XDG_CONFIG_HOME, "cursor")
             : path.join(home, ".cursor"));
   const root = repoRoot ? path.join(repoRoot, `.${provider}`) : nativeRoot;
+  const incomplete = (warning: string) => {
+    result.partial = true;
+    if (!result.warnings.includes(warning)) result.warnings.push(warning);
+  };
+  const skills = (dir: string) =>
+    listSkillDirectory(dir, () =>
+      incomplete(`Some skills in ${dir} could not be read.`),
+    );
   const read = (file: string): Doc => {
     try {
       const text = readBoundedUtf8FileSync(file, 4 * 1024 * 1024);
@@ -58,6 +66,8 @@ export function nativeExtensionInventory(
     }
   };
   const add = (entry: ExtensionEntry) => {
+    if (result.entries.length >= 512)
+      incomplete("The local extension inventory was truncated.");
     if (
       result.entries.length < 512 &&
       !result.entries.some((item) => item.id === entry.id)
@@ -142,7 +152,7 @@ export function nativeExtensionInventory(
         .map((value) => string(object(value).path)),
     );
     for (const skillRoot of roots)
-      for (const entry of listSkillDirectory(skillRoot)) {
+      for (const entry of skills(skillRoot)) {
         add({
           ...entry,
           body: undefined,
@@ -246,7 +256,12 @@ export function nativeExtensionInventory(
   // Keep their source paths and label them "found", never "installed/active".
   if (!repoRoot && provider !== "claude") {
     const walk = (dir: string, depth: number): void => {
-      if (depth > 3 || pluginRoots.length >= 128) return;
+      if (depth > 3 || pluginRoots.length >= 128) {
+        incomplete(
+          "Some local plugin directories were beyond the discovery limit.",
+        );
+        return;
+      }
       try {
         const manifests = [
           path.join(dir, `.${provider}-plugin`, "plugin.json"),
@@ -262,24 +277,62 @@ export function nativeExtensionInventory(
           });
           return;
         }
-        for (const entry of readdirSync(dir, { withFileTypes: true }).slice(
-          0,
-          128,
-        ))
+        const children = readdirSync(dir, { withFileTypes: true }).sort(
+          (a, b) => a.name.localeCompare(b.name),
+        );
+        if (children.length > 128)
+          incomplete(
+            "Some local plugin directories were beyond the discovery limit.",
+          );
+        for (const entry of children.slice(0, 128))
           if (entry.isDirectory()) walk(path.join(dir, entry.name), depth + 1);
-      } catch {
-        /* no plugin cache */
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+          incomplete(`Could not read plugin directory ${dir}.`);
       }
     };
     walk(path.join(nativeRoot, "plugins", "cache"), 0);
+    if (provider === "cursor")
+      walk(path.join(nativeRoot, "plugins", "local"), 0);
   }
   for (const plugin of pluginRoots) {
+    const manifestPath = [
+      path.join(plugin.root, `.${provider}-plugin`, "plugin.json"),
+      path.join(plugin.root, "plugin.json"),
+    ].find((file) => existsSync(file));
+    const manifest = manifestPath ? read(manifestPath) : {};
+    const declaredPaths = (value: unknown): string[] => {
+      const values =
+        typeof value === "string" ? [value] : Array.isArray(value) ? value : [];
+      return values.flatMap((item) => {
+        if (typeof item !== "string") return [];
+        const target = path.resolve(plugin.root, item);
+        const inside = (base: string, candidate: string) => {
+          const relative = path.relative(base, candidate);
+          return (
+            !path.isAbsolute(relative) &&
+            relative !== ".." &&
+            !relative.startsWith(`..${path.sep}`)
+          );
+        };
+        try {
+          if (
+            !inside(plugin.root, target) ||
+            !inside(realpathSync(plugin.root), realpathSync(target))
+          ) {
+            incomplete(
+              "A plugin component path outside its package was skipped.",
+            );
+            return [];
+          }
+        } catch {
+          incomplete("A declared plugin component path could not be read.");
+          return [];
+        }
+        return [target];
+      });
+    };
     if (category === "plugins") {
-      const manifestPath = [
-        path.join(plugin.root, `.${provider}-plugin`, "plugin.json"),
-        path.join(plugin.root, "plugin.json"),
-      ].find((file) => existsSync(file));
-      const manifest = manifestPath ? read(manifestPath) : {};
       const components = [
         "skills",
         "agents",
@@ -292,6 +345,7 @@ export function nativeExtensionInventory(
           existsSync(path.join(plugin.root, name)),
       );
       if (
+        manifest.mcpServers !== undefined ||
         [".mcp.json", "mcp.json"].some((name) =>
           existsSync(path.join(plugin.root, name)),
         )
@@ -310,20 +364,34 @@ export function nativeExtensionInventory(
         components,
       });
     } else if (category === "skills") {
-      for (const skill of listSkillDirectory(path.join(plugin.root, "skills")))
-        add({
-          ...skill,
-          body: undefined,
-          revision: undefined,
-          id: skill.sourcePath,
-          name: `${plugin.id}:${skill.name}`,
-          status: plugin.status,
-        });
+      for (const skillRoot of new Set([
+        path.join(plugin.root, "skills"),
+        ...declaredPaths(manifest.skills),
+      ]))
+        for (const skill of skills(skillRoot))
+          add({
+            ...skill,
+            body: undefined,
+            revision: undefined,
+            id: skill.sourcePath,
+            name: `${plugin.id}:${skill.name}`,
+            status: plugin.status,
+          });
     } else if (category === "mcp") {
-      for (const name of [".mcp.json", "mcp.json"]) {
-        const file = path.join(plugin.root, name);
+      for (const file of new Set([
+        path.join(plugin.root, ".mcp.json"),
+        path.join(plugin.root, "mcp.json"),
+        ...declaredPaths(manifest.mcpServers),
+      ])) {
         addServers(read(file).mcpServers, file, plugin.id, plugin.status);
       }
+      const inline = object(manifest.mcpServers);
+      addServers(
+        inline.mcpServers ?? inline,
+        manifestPath ?? plugin.root,
+        plugin.id,
+        plugin.status,
+      );
     }
   }
   if (category === "plugins")

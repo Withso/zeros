@@ -1,13 +1,17 @@
-// Native MCP pass-through is off for Codex: Settings → Customize → MCP is the
-// whole set (adapters/shared/mcp-passthrough.ts). Enforcing that means
-// disabling native servers by name on every thread the adapter starts.
-//
-// Real chat sessions and the throwaway title runtime differ in one way that
-// matters: a chat must keep the servers Zeros itself injects, because they
-// share the `mcp_servers` namespace with the native ones and a same-name
-// disable would kill them. A title thread calls no tools and keeps nothing.
+// Native extensions load in ordinary chats. The legacy host opt-out retains
+// selective disabling without colliding with Zeros-injected server names.
+// Throwaway title threads always disable native MCP, including account apps.
 
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,6 +23,13 @@ const rt = vi.hoisted(() => ({
   mcpServers: {} as Record<string, unknown>,
   /** Set to make the surface reads fail, the way a timeout or old CLI would. */
   configReadError: null as null | Error,
+  plugins: [] as {
+    name: string;
+    installed: boolean;
+    enabled: boolean;
+    source: { type: string };
+    remotePluginId: string | null;
+  }[],
   startThreadParams: [] as unknown[],
   /** Method order, to prove the read happens before the thread starts. */
   methodOrder: [] as string[],
@@ -64,6 +75,32 @@ vi.mock("../app-server", () => ({
       if (rt.configReadError) throw rt.configReadError;
       if (method === "config/read")
         return { config: { mcp_servers: rt.mcpServers }, origins: {} };
+      if (method === "plugin/installed")
+        return {
+          marketplaces: [
+            { name: "fixture", path: "/fixture", plugins: rt.plugins },
+          ],
+          marketplaceLoadErrors: [],
+        };
+      if (method === "plugin/read")
+        return { plugin: { mcpServers: ["local_plugin_mcp"] } };
+      if (method === "mcpServerStatus/list")
+        return {
+          data: [{ name: "codex_apps", runtimeStatus: "connected" }],
+          nextCursor: null,
+        };
+      if (method === "app/installed")
+        return {
+          apps: [
+            {
+              id: "notes",
+              runtimeName: "Notes",
+              enabled: true,
+              callable: true,
+            },
+          ],
+        };
+      if (method === "app/read") return { apps: [], missingAppIds: [] };
       return {};
     }),
     dispose: vi.fn(async () => {}),
@@ -100,6 +137,7 @@ function makeAdapter() {
   rt.startThreadParams = [];
   rt.methodOrder = [];
   rt.configReadError = null;
+  rt.plugins = [];
   rt.mcpServers = {};
   const ctx = {
     projectRoot: "/tmp/proj",
@@ -164,19 +202,132 @@ describe("CodexAppServerAdapter.generateText — native MCP stays out of a title
     });
   });
 
-  it("still produces a title when the surface reads fail", async () => {
+  it("does not start native MCP for a title when its configuration cannot be read", async () => {
     const adapter = makeAdapter();
-    rt.mcpServers = { node_repl: { command: "node" } };
     rt.configReadError = new Error("config/read timed out");
-
-    // A title is worth no MCP servers, but it is not worth failing over —
-    // an unreadable config falls back to a plain thread rather than throwing.
-    await expect(generateTitle(adapter)).resolves.toBe("");
-    expect(rt.startThreadParams[0]).toMatchObject({ config: {} });
+    await expect(generateTitle(adapter)).rejects.toThrow("MCP configuration");
+    expect(rt.startThreadParams).toHaveLength(0);
   });
 });
 
-describe("CodexAppServerAdapter session threads — Customize is the whole set", () => {
+describe("CodexAppServerAdapter native extension loading", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each(["account", "local", "imported"] as const)(
+    "carries admitted %s bridge provenance into the session inventory",
+    async (source) => {
+      vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", undefined);
+      const adapter = makeAdapter();
+      if (source === "local")
+        rt.mcpServers = { codex_apps: { command: "local-apps" } };
+      try {
+        const { session } = await adapter.newSession({
+          cwd: "/tmp/proj",
+          mcpServers:
+            source === "imported"
+              ? [
+                  {
+                    name: "codex_apps",
+                    transport: "stdio",
+                    command: "imported-apps",
+                  },
+                ]
+              : [],
+        });
+        const inventory = await adapter.capabilityPorts.sessionTools.inventory({
+          sessionId: session.executionId,
+        });
+        const apps = inventory.groups!.find((group) => group.kind === "apps")!;
+        expect(apps.entries[0].status).toBe(
+          source === "account" ? "available" : "unavailable",
+        );
+      } finally {
+        await adapter.dispose();
+      }
+    },
+  );
+
+  it("requires import for MCP from a local plugin without disabling account plugins", async () => {
+    const adapter = makeAdapter();
+    rt.plugins = [
+      {
+        name: "local-plugin",
+        installed: true,
+        enabled: true,
+        source: { type: "local" },
+        remotePluginId: null,
+      },
+      {
+        name: "account-plugin",
+        installed: true,
+        enabled: true,
+        source: { type: "remote" },
+        remotePluginId: "remote",
+      },
+    ];
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    expect(configOfThreadStart().mcp_servers).toMatchObject({
+      local_plugin_mcp: {
+        enabled: false,
+        command: "zeros-disabled-mcp-server",
+      },
+    });
+    expect(
+      rt.methodOrder.filter((method) => method === "plugin/read"),
+    ).toHaveLength(1);
+  });
+
+  it("excludes unimported local configs, including HTTP, while preserving account apps and Zeros", async () => {
+    vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", undefined);
+    const adapter = makeAdapter();
+    rt.mcpServers = {
+      local_notes: { command: "notes-server" },
+      cloud_notes: { url: "https://notes.example/mcp" },
+      disabled_notes: { enabled: false, command: "disabled-server" },
+    };
+    const injected = {
+      name: "zeros",
+      transport: "stdio" as const,
+      command: "zeros-mcp",
+    };
+    await adapter.newSession({ cwd: "/tmp/proj", mcpServers: [injected] });
+    expect(configOfThreadStart().mcp_servers).toEqual({
+      local_notes: { enabled: false, command: "zeros-disabled-mcp-server" },
+      cloud_notes: { enabled: false, url: "https://notes.example/mcp" },
+    });
+    const { bootCodexAppServerRuntime } = await import("../app-server");
+    expect(bootCodexAppServerRuntime).toHaveBeenLastCalledWith(
+      expect.objectContaining({ mcpServers: [injected] }),
+    );
+    await adapter.dispose();
+  });
+
+  it.each([
+    { command: "local-apps" },
+    { url: "https://local-config.example/mcp" },
+  ])(
+    "requires import for a local MCP named codex_apps (%j)",
+    async (transport) => {
+      vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", undefined);
+      const adapter = makeAdapter();
+      rt.mcpServers = { codex_apps: transport };
+      await adapter.newSession({ cwd: "/tmp/proj" });
+      expect(configOfThreadStart().mcp_servers).toEqual({
+        codex_apps: {
+          enabled: false,
+          ...("url" in transport
+            ? transport
+            : { command: "zeros-disabled-mcp-server" }),
+        },
+      });
+      await adapter.dispose();
+    },
+  );
+});
+
+describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
+  beforeEach(() => vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0"));
+  afterEach(() => vi.unstubAllEnvs());
   it.each(["chat", "title"] as const)(
     "preserves a disabled HTTP transport when a plugin claims its name on a %s thread",
     async (kind) => {
@@ -190,7 +341,9 @@ describe("CodexAppServerAdapter session threads — Customize is the whole set",
         mkdirSync(path.dirname(manifest), { recursive: true });
         writeFileSync(
           manifest,
-          JSON.stringify({ mcpServers: { notes: { command: "plugin-notes" } } }),
+          JSON.stringify({
+            mcpServers: { notes: { command: "plugin-notes" } },
+          }),
         );
         process.env.CODEX_HOME = codexHome;
         const adapter = makeAdapter();
@@ -217,11 +370,17 @@ describe("CodexAppServerAdapter session threads — Customize is the whole set",
     },
   );
 
-  it("preserves the native account app bridge without enabling unrelated native servers", async () => {
+  it("honors the explicit host opt-out for account apps as well as local servers", async () => {
     const adapter = makeAdapter();
-    rt.mcpServers = { directus: { command: "npx" }, codex_apps: { url: "https://example.com/bridge" } };
+    rt.mcpServers = {
+      directus: { command: "npx" },
+      codex_apps: { url: "https://example.com/bridge" },
+    };
     await adapter.newSession({ cwd: "/tmp/proj" });
-    expect(configOfThreadStart().mcp_servers).toEqual({ directus: { enabled: false, command: "zeros-disabled-mcp-server" } });
+    expect(configOfThreadStart().mcp_servers).toEqual({
+      directus: { enabled: false, command: "zeros-disabled-mcp-server" },
+      codex_apps: { enabled: false, url: "https://example.com/bridge" },
+    });
   });
 
   it("disables native config servers on a new session", async () => {
@@ -298,6 +457,7 @@ describe("CodexAppServerAdapter session threads — Customize is the whole set",
     const config = configOfThreadStart();
     expect(config.mcp_servers).toEqual({
       directus: { enabled: false, command: "zeros-disabled-mcp-server" },
+      codex_apps: { enabled: false, command: "zeros-disabled-mcp-server" },
     });
   });
 
@@ -314,15 +474,14 @@ describe("CodexAppServerAdapter session threads — Customize is the whole set",
     expect(config["plugins.browser@openai-bundled.enabled"]).toBe(false);
   });
 
-  it("starts the session normally when the surface reads fail", async () => {
+  it("does not start a chat with unimported local MCP when its configuration cannot be read", async () => {
     const adapter = makeAdapter();
     rt.mcpServers = { directus: {} };
     rt.configReadError = new Error("config/read timed out");
 
-    // MCP hygiene must never be the reason a user cannot open a chat.
-    await expect(
-      adapter.newSession({ cwd: "/tmp/proj" }),
-    ).resolves.toBeDefined();
-    expect(configOfThreadStart().mcp_servers).toBeUndefined();
+    await expect(adapter.newSession({ cwd: "/tmp/proj" })).rejects.toThrow(
+      "MCP configuration",
+    );
+    expect(rt.startThreadParams).toHaveLength(0);
   });
 });

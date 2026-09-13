@@ -22,6 +22,7 @@ vi.mock("../app-server", () => ({
     const request = vi.fn(
       async (method: string, params: Record<string, unknown>) => {
         rt.requests.push({ method, params });
+        if (method === "config/read") return { config: {} };
         if (method === "skills/list") return { data: [] };
         if (method === "turn/steer") return { turnId: "turn-active" };
         return {};

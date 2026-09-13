@@ -10,7 +10,12 @@ import type { McpServerRegistration } from "../../../types";
 describe("buildMcpServerOverrides — Codex -c MCP config", () => {
   it("emits url + http_headers for an http server (no `type` field)", () => {
     const args = buildMcpServerOverrides([
-      { name: "tracker", transport: "http", url: "https://mcp.tracker.example/mcp", headers: { "X-Org": "acme" } },
+      {
+        name: "tracker",
+        transport: "http",
+        url: "https://mcp.tracker.example/mcp",
+        headers: { "X-Org": "acme" },
+      },
     ]);
     expect(args).toEqual([
       "-c",
@@ -41,21 +46,43 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
 
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
-      { name: "ctx7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"], env: { DEBUG: "1" }, startupTimeoutSec: 120 },
+      {
+        name: "ctx7",
+        transport: "stdio",
+        command: "npx",
+        args: ["-y", "@upstash/context7-mcp"],
+        env: { DEBUG: "1" },
+        startupTimeoutSec: 120,
+      },
     ]);
     expect(args).toContain('mcp_servers.ctx7.command="npx"');
-    expect(args).toContain('mcp_servers.ctx7.args=["-y", "@upstash/context7-mcp"]');
+    expect(args).toContain(
+      'mcp_servers.ctx7.args=["-y", "@upstash/context7-mcp"]',
+    );
     expect(args).toContain('mcp_servers.ctx7.env={ "DEBUG" = "1" }');
     expect(args).toContain("mcp_servers.ctx7.startup_timeout_sec=120");
   });
 
   it("skips a server whose name isn't TOML-key-safe (no injection)", () => {
-    expect(buildMcpServerOverrides([{ name: "a.b evil", transport: "http", url: "https://x" } as McpServerRegistration])).toEqual([]);
+    expect(
+      buildMcpServerOverrides([
+        {
+          name: "a.b evil",
+          transport: "http",
+          url: "https://x",
+        } as McpServerRegistration,
+      ]),
+    ).toEqual([]);
   });
 
   it("escapes control characters in values → valid TOML (no raw CR/NUL breaking the parse)", () => {
     const args = buildMcpServerOverrides([
-      { name: "x", transport: "http", url: "https://x", headers: { K: "a\r\nb\tc\x00d\x08e" } },
+      {
+        name: "x",
+        transport: "http",
+        url: "https://x",
+        headers: { K: "a\r\nb\tc\x00d\x08e" },
+      },
     ]);
     const joined = args.join(" ");
     // No raw control characters survive into the emitted -c string.
@@ -128,7 +155,9 @@ describe("native MCP scoping — the Zeros registry is the whole set", () => {
   it("retains the transport of disabled HTTP servers for plugin name collisions", async () => {
     await expect(
       readNativeMcpSurface(
-        runtime({ notes: { enabled: false, url: "https://notes.example/mcp" } }),
+        runtime({
+          notes: { enabled: false, url: "https://notes.example/mcp" },
+        }),
         undefined,
         noPlugins,
       ),
@@ -143,6 +172,26 @@ describe("native MCP scoping — the Zeros registry is the whole set", () => {
       readNativeMcpSurface(runtime({}, true), undefined, noPlugins),
     ).resolves.toEqual({ serverNames: ["codex_apps"] });
   });
+
+  it.each([
+    {},
+    { config: null },
+    { config: [] },
+    { config: { mcp_servers: [] } },
+  ])(
+    "rejects malformed config metadata when a thread requires local MCP exclusion (%j)",
+    async (response) => {
+      const rt = {
+        requestTyped: async () => response,
+      } as unknown as Parameters<typeof readNativeMcpSurface>[0];
+      await expect(
+        readNativeMcpSurface(rt, "/repo/app", {
+          ...noPlugins,
+          requireConfig: true,
+        }),
+      ).rejects.toThrow("MCP configuration");
+    },
+  );
 
   it("still covers codex's internal servers when the user has none", async () => {
     // `codex_apps` appears in no config layer and no plugin manifest, so an
@@ -171,6 +220,26 @@ describe("native MCP scoping — the Zeros registry is the whole set", () => {
     ).resolves.toEqual({
       serverNames: ["directus", "local", "codex_apps"],
       httpServerUrls: { directus: "https://directus.example.com/mcp" },
+    });
+  });
+
+  it("disables prototype-like server names and preserves their HTTP transport", async () => {
+    const surface = await readNativeMcpSurface(
+      runtime({
+        ["__proto__"]: { url: "https://notes.example/mcp" },
+        constructor: { command: "local-server" },
+      }),
+      undefined,
+      noPlugins,
+    );
+    const override = mcpDisabledThreadConfig(
+      scopeNativeMcpSurface(surface, { serverNames: ["codex_apps"] }),
+    );
+    expect(JSON.parse(JSON.stringify(override))).toEqual({
+      mcp_servers: {
+        ["__proto__"]: { enabled: false, url: "https://notes.example/mcp" },
+        constructor: { enabled: false, command: "zeros-disabled-mcp-server" },
+      },
     });
   });
 

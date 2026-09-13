@@ -19,7 +19,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { getSetting, setSetting } from "../../platform/settings";
-import { isRunnableAgent } from "../agent/agent-runnable";
+import { isRunnableAgent, isSelectableAgent } from "../agent/agent-runnable";
 import { isAgentEnabled } from "../agent/enabled-agents";
 import { agentFamily } from "../agent/model-catalog";
 import {
@@ -63,14 +63,14 @@ function pickByPreference(
  *
  *  Priority:
  *    1. The user's default agent (picked in Settings → Models) — if
- *       it's still enabled and runnable on this machine.
+ *       it has a confirmed connection on this machine.
  *    2. Product provider order: Codex, then Claude, then Cursor. This makes
  *       every connected-provider combination deterministic and intentionally
  *       prefers Codex when both Codex and Claude are available.
- *    3. First enabled, runnable agent in the registry — last-resort fallback
+ *    3. First selectable agent in the registry — last-resort fallback
  *       so a machine that's missing claude still gets *some* agent
  *       (e.g. someone with only Codex installed).
- *    4. null — only if zero enabled agents are runnable. Callers must handle.
+ *    4. null — only if zero agents are selectable. Callers must handle.
  *
  *  Deliberately omit a "sticky last-used" step: an unset preference resolves
  *  to the stable fallback rather than whichever agent was last used in another
@@ -80,7 +80,7 @@ export function pickDefaultAgentId(
   starredId: string | null = getDefaultAgentId(),
 ): string | null {
   const runnable = agents.filter(
-    (agent) => isAgentEnabled(agent.id, agent.beta) && isRunnableAgent(agent),
+    (agent) => isAgentEnabled(agent.id, agent.beta) && isSelectableAgent(agent),
   );
   return pickByPreference(runnable, starredId)?.id ?? null;
 }
@@ -121,6 +121,7 @@ export function pickAgentForNewChat(
 ): BridgeRegistryAgent | null {
   const enabled = agents.filter((agent) => isEnabled(agent.id, agent.beta));
   return (
+    pickByPreference(enabled.filter(isSelectableAgent), starredId) ??
     pickByPreference(enabled.filter(isRunnableAgent), starredId) ??
     pickByPreference(
       enabled.filter((agent) => agent.installed === true),

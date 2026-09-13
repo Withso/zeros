@@ -78,8 +78,8 @@ import {
 import { claimShortcutPriority } from "./shortcut-priority";
 import { AgentIcon } from "./agent-icon";
 import { useAgentsSnapshot } from "./agents-cache";
+import { isSelectableAgent } from "./agent-runnable";
 import { useEnabledAgents } from "./enabled-agents";
-import { isRunnableAgent } from "./agent-runnable";
 import { pickDefaultAgent } from "../settings/default-agent";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
 import type { InitializeResponse } from "../../platform/bridge/agent-events";
@@ -200,12 +200,11 @@ export function AgentModelMenu({
 
   const registry = agentsProp !== undefined ? agentsProp : snapshot;
 
-  // Runnable, enabled agents with a curated catalog, in group order. When the
-  // registry hasn't loaded yet, degrade to the CURRENT agent alone (from
-  // `value`) so the menu still lists its family's models pre-cache.
+  // Only confirmed connections supply selectable models. The chat's persisted
+  // identity stays on the trigger while its provider needs configuration.
   const groups = useMemo<AgentGroup[]>(() => {
     const fromRegistry = (registry ?? [])
-      .filter((a) => isEnabled(a.id, a.beta) && isRunnableAgent(a))
+      .filter((a) => isEnabled(a.id, a.beta) && isSelectableAgent(a))
       .map((agent) => ({
         agent,
         family: agentFamily(agent.id),
@@ -218,21 +217,7 @@ export function AgentModelMenu({
       .sort(
         (a, b) => (FAMILY_ORDER[a.family] ?? 9) - (FAMILY_ORDER[b.family] ?? 9),
       );
-    if (fromRegistry.length > 0) return fromRegistry;
-    if (value?.agentId) {
-      const family = agentFamily(value.agentId);
-      const models = modelsForAgent(value.agentId, initialize);
-      if (family && models.length > 0) {
-        return [
-          {
-            agent: { id: value.agentId, name: "" } as BridgeRegistryAgent,
-            family,
-            models,
-          },
-        ];
-      }
-    }
-    return [];
+    return fromRegistry;
   }, [registry, isEnabled, value?.agentId, initialize]);
 
   const currentFamily = agentFamily(value?.agentId ?? null);
@@ -320,26 +305,22 @@ export function AgentModelMenu({
     value?.model ??
     (value?.agentId ? effectiveFavoriteModel(value.agentId) : null);
 
-  // The collapsed row must survive a cold registry and catalog retirement.
-  // Prefer the curated row, but synthesize one from the persisted exact model
-  // when it no longer appears in today's catalog so the picker never renders
-  // an empty Model section for a still-running chat.
+  // Retain a retired model only for a confirmed connected provider. A signed-
+  // out chat keeps its identity on the pill, with other connected providers
+  // available through the catalog and search.
   const activeRow: Row | null = (() => {
     if (!value?.agentId || !activeModel) return null;
     const group =
       groups.find((candidate) => candidate.agent.id === value.agentId) ??
       groups.find((candidate) => candidate.family === currentFamily);
-    const model = group?.models.find(
-      (option) => option.value === activeModel,
-    ) ??
+    if (!group) return null;
+    const model = group.models.find((option) => option.value === activeModel) ??
       resolveModelOption(value.agentId, activeModel, initialize) ?? {
         value: activeModel,
         label: activeModel,
       };
     return {
-      agent:
-        group?.agent ??
-        ({ id: value.agentId, name: value.agentId } as BridgeRegistryAgent),
+      agent: group.agent,
       family: currentFamily,
       model,
     };
@@ -579,7 +560,7 @@ export function AgentModelMenu({
                 );
               })}
             </CommandList>
-          ) : activeRow && activeConfiguration ? (
+          ) : groups.length > 0 ? (
             <Popover
               open={catalogOpen}
               onOpenChange={(nextOpen) => {
@@ -592,10 +573,11 @@ export function AgentModelMenu({
                   ref={catalogTriggerRef}
                   type="button"
                   data-testid="selected-model-browser"
-                  aria-label={`Browse models; selected ${displayModelLabel(
-                    activeRow.agent.id,
-                    activeRow.model.label,
-                  )}`}
+                  aria-label={
+                    activeRow
+                      ? `Browse models; selected ${displayModelLabel(activeRow.agent.id, activeRow.model.label)}`
+                      : "Browse models"
+                  }
                   aria-expanded={catalogOpen}
                   className={cn(
                     "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1 my-1 flex w-[calc(100%_-_0.5rem)] items-center gap-2 rounded-sm px-2 text-left outline-none",
@@ -620,15 +602,19 @@ export function AgentModelMenu({
                     setCatalogOpen(true);
                   }}
                 >
-                  <ModelRowDetails
-                    row={activeRow}
-                    configuration={activeConfiguration}
-                    className="flex-1"
-                    isFavorite={
-                      defaultFamily === activeRow.family &&
-                      defaultModel === activeRow.model.value
-                    }
-                  />
+                  {activeRow && activeConfiguration ? (
+                    <ModelRowDetails
+                      row={activeRow}
+                      configuration={activeConfiguration}
+                      className="flex-1"
+                      isFavorite={
+                        defaultFamily === activeRow.family &&
+                        defaultModel === activeRow.model.value
+                      }
+                    />
+                  ) : (
+                    <span className="flex-1 text-xs">Choose a model</span>
+                  )}
                   <ChevronRight className="text-fg2 size-4 shrink-0" />
                 </button>
               </PopoverTrigger>
@@ -739,7 +725,9 @@ export function AgentModelMenu({
               </PopoverContent>
             </Popover>
           ) : (
-            <div className="text-fg2 px-3 pb-3 text-xs">No model selected.</div>
+            <div className="text-fg2 px-3 pb-3 text-xs">
+              No connected agents.
+            </div>
           )}
         </Command>
       </PopoverContent>

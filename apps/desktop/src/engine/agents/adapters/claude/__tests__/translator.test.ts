@@ -2746,6 +2746,24 @@ describe("ClaudeStreamTranslator distinct stop reasons", () => {
 });
 
 describe("ClaudeStreamTranslator overload fallback", () => {
+  it.each([
+    { model: "<synthetic>", error: undefined },
+    { model: "claude-sonnet-5", error: "authentication_failed" },
+  ])("does not claim an error message is a fallback: %s", ({ model, error }) => {
+    const { t, updates } = collect();
+    t.armFallbackDetection("claude-fable-5", true);
+    t.feed({
+      type: "assistant",
+      error,
+      message: {
+        role: "assistant",
+        model,
+        content: [{ type: "text", text: "Failed to authenticate: OAuth session expired" }],
+      },
+    });
+    expect(updates.some((u) => (u.update as { kind?: string }).kind === "model_switch")).toBe(false);
+  });
+
   it("emits ONE 'Model switched' tool call when a top-level assistant answers on a different model", () => {
     const { t, updates } = collect();
     t.armFallbackDetection("claude-fable-5[1m]", true);

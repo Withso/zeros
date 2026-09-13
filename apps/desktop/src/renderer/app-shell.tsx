@@ -213,13 +213,6 @@ function PreWarmAgents() {
         snapshot && hasConfirmedAgents()
           ? snapshot
           : await loadAgents((force) => sessions.listAgents(force));
-      const persisted = readEnabledAgentIds();
-      // Mirror useEnabledAgents.isEnabled — first-run defaults exclude
-      // beta agents so the warmup loop doesn't fire AGENT_INIT_AGENT
-      // for an agent we hide from the picker.
-      const isEnabled = (id: string, isBeta?: boolean) =>
-        persisted === null ? !isBeta : persisted.includes(id);
-
       // Build the set of currently-known agent IDs ONCE so the filter
       // below is O(1). Chat rows persist across registry changes —
       // user might have an old chat whose `agentId` was removed (e.g.
@@ -245,7 +238,7 @@ function PreWarmAgents() {
         }
       }
       for (const a of registry) {
-        if (isEnabled(a.id, a.beta) && !order.includes(a.id)) order.push(a.id);
+        if (a.authenticated === true && !order.includes(a.id)) order.push(a.id);
       }
 
       // Skip agents the engine already confirmed alive — `warmAgentIds`
@@ -309,25 +302,6 @@ function PreWarmAgents() {
     return () => window.removeEventListener("focus", onFocus);
   }, [engineReady, warmAll]);
 
-  return null;
-}
-
-/** Read the persisted enabled-agents list synchronously so PreWarmAgents
- *  can decide which agents are visible without mounting the hook. Returns
- *  null on first run; callers (and useEnabledAgents) treat null as
- *  "enable all non-beta agents" — beta agents stay off until the user
- *  flips them in Settings. */
-function readEnabledAgentIds(): string[] | null {
-  try {
-    const raw = localStorage.getItem("zeros.agent.enabledAgents");
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as { ids?: unknown };
-    if (Array.isArray(parsed?.ids)) {
-      return parsed.ids.filter((x): x is string => typeof x === "string");
-    }
-  } catch {
-    /* corrupt localStorage — fall through to default-on */
-  }
   return null;
 }
 

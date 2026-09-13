@@ -127,6 +127,8 @@ interface TerminalSessionViewProps {
    *  (e.g. `'/abs/claude' /mcp`). Takes priority over `agentId`. Written with a
    *  leading space so HIST_IGNORE_SPACE keeps it out of the user's history. */
   initialCommand?: string | null;
+  loginProvider?: "claude" | "codex";
+  onTerminalReady?: (terminal: Pick<XTerm, "paste" | "focus"> | null) => void;
   /** Called when the PTY exits. When provided (ephemeral mode) the view does
    *  NOT show the "press any key to restart" hint — the parent unmounts. */
   onExit?: () => void;
@@ -171,6 +173,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   agentId,
   ephemeral,
   initialCommand,
+  loginProvider,
+  onTerminalReady,
   onExit,
   restartOnKey = true,
   attachOnly = false,
@@ -257,6 +261,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+    onTerminalReady?.(term);
+    if (loginProvider) term.textarea?.setAttribute("aria-label", "Sign-in terminal");
     xtermRef.current = term;
     fitRef.current = fit;
     // Renderer choice — DOM (xterm's built-in default). See the
@@ -520,6 +526,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       window.clearTimeout(fallbackTimer);
       stopSpawnObserver();
       host.removeEventListener("wheel", onWheelCapture, { capture: true });
+      onTerminalReady?.(null);
       term.dispose();
       xtermRef.current = null;
       fitRef.current = null;
@@ -567,7 +574,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         return;
       }
     }
-    const info = await ptyCreate({ sessionId, cwd, cols, rows, ephemeral });
+    const info = await ptyCreate({ sessionId, cwd, cols, rows, ephemeral, loginProvider });
     if (!info) {
       // No-bridge fallback only. An optional connected relay client gets a real
       // host shell; ptyCreate returns null when there is no engine connection.
@@ -577,6 +584,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
       return;
     }
     createdRef.current = true;
+    if (loginProvider) term.focus();
     // A fresh/reattached PTY is live again — clear the exited latch so
     // keystrokes flow to the shell instead of triggering another
     // restart (matters on the restart path; harmless on first spawn).
@@ -614,7 +622,7 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     if (info.reattached) {
       agentLaunchedRef.current = true;
     }
-    if (!agentLaunchedRef.current) {
+    if (!agentLaunchedRef.current && !loginProvider) {
       const explicit = initialCommand?.trim();
       const agent = !explicit && agentId ? resolveTerminalAgent(agentId) : null;
       const line = explicit || (agent ? buildLaunchLine({ agent }) : "");

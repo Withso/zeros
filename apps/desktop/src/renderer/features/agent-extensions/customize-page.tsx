@@ -4,17 +4,10 @@
 //
 // PAGE: CustomizePage
 // ROUTE: activePage === "customize" (Home rail row below Dashboard)
-// PURPOSE: Personal MCP/Skills editing and read-only native inventories for
-// MCP, Skills, Plugins, and Apps. Scope and provider selections are durable;
+// PURPOSE: Personal Zeros MCP/Skills editing. Scope and category are durable;
 // form identity includes the scope so drafts cannot move between repositories.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import {
-  EXTENSION_CATEGORIES,
-  extensionProviders,
-  type ExtensionCategory,
-  type ExtensionProvider,
-} from "@zeros/protocol/agent-extensions";
 import { Check, ChevronDown, CircleUser } from "lucide-react";
 
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
@@ -37,6 +30,8 @@ import {
   decodeCustomizeScope,
   decodeCustomizeSelection,
   encodeCustomizeScope,
+  CUSTOMIZE_CATEGORIES,
+  type CustomizeCategory,
   type CustomizeScope,
 } from "./customize-model";
 import { CustomizeMcpSection } from "./customize-mcp";
@@ -46,19 +41,11 @@ import { prefetchExtensions } from "./extensions-cache";
 
 // ── Category model ───────────────────────────────────────
 //
-// The provider row is constrained by the selected category.
+// Provider-native discovery remains a backend capability for a later UI.
 
 const CATEGORY_LABELS = {
   mcp: "MCP",
   skills: "Skills",
-  plugins: "Plugins",
-  apps: "Apps",
-};
-const PROVIDER_LABELS = {
-  zeros: "Zeros",
-  claude: "Claude",
-  codex: "Codex",
-  cursor: "Cursor",
 };
 const SELECTION_SETTING_KEY = "customize:selection";
 
@@ -222,10 +209,9 @@ export function CustomizePage({
     decodeCustomizeSelection(getSetting(SELECTION_SETTING_KEY, null)),
   );
   const { category, provider } = selection;
-  const select = (nextCategory: ExtensionCategory, nextProvider = provider) => {
+  const select = (nextCategory: CustomizeCategory) => {
     const next = decodeCustomizeSelection({
       category: nextCategory,
-      provider: nextProvider,
     });
     setSelection(next);
     setSetting(SELECTION_SETTING_KEY, next);
@@ -242,16 +228,12 @@ export function CustomizePage({
     provider,
     ...(scope.kind === "repo" ? { repoRoot: scope.project.repoRoot } : {}),
   };
-  const warm = (
-    nextCategory: ExtensionCategory,
-    nextProvider: ExtensionProvider,
-  ) => {
+  const warm = (nextCategory: CustomizeCategory) => {
     if (!surfaceActive) return;
     prefetchExtensions({
       ...query,
       ...decodeCustomizeSelection({
         category: nextCategory,
-        provider: nextProvider,
       }),
     });
   };
@@ -286,8 +268,7 @@ export function CustomizePage({
                     Customize
                   </h1>
                   <p className="text-fg2 m-0 text-sm">
-                    Extend your agents with MCP servers, skills, plugins, and
-                    apps.
+                    Manage your Zeros MCP servers and skills.
                   </p>
                 </div>
 
@@ -306,16 +287,16 @@ export function CustomizePage({
                   />
                   <Tabs
                     value={category}
-                    onValueChange={(v) => select(v as ExtensionCategory)}
+                    onValueChange={(v) => select(v as CustomizeCategory)}
                   >
                     <TabsList className="h-8">
-                      {EXTENSION_CATEGORIES.map((id) => (
+                      {CUSTOMIZE_CATEGORIES.map((id) => (
                         <TabsTrigger
                           key={id}
                           value={id}
                           className="text-xs"
-                          onPointerEnter={() => warm(id, provider)}
-                          onFocus={() => warm(id, provider)}
+                          onPointerEnter={() => warm(id)}
+                          onFocus={() => warm(id)}
                         >
                           {CATEGORY_LABELS[id]}
                         </TabsTrigger>
@@ -323,26 +304,6 @@ export function CustomizePage({
                     </TabsList>
                   </Tabs>
                 </div>
-                <Tabs
-                  value={provider}
-                  onValueChange={(value) =>
-                    select(category, value as ExtensionProvider)
-                  }
-                >
-                  <TabsList className="h-8" aria-label="Agent provider">
-                    {extensionProviders(category).map((id) => (
-                      <TabsTrigger
-                        key={id}
-                        value={id}
-                        className="text-xs"
-                        onPointerEnter={() => warm(category, id)}
-                        onFocus={() => warm(category, id)}
-                      >
-                        {PROVIDER_LABELS[id]}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                </Tabs>
               </div>
 
               <div className="w-full pt-8">

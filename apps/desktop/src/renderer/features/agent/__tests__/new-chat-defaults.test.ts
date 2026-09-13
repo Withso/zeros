@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   getDefaultAgentId,
   pickDefaultAgentId,
+  pickAgentForNewChat,
   setDefaultAgentId,
 } from "../../settings/default-agent";
 import {
@@ -799,7 +800,13 @@ describe("default agent — deterministic connected-provider preference", () => 
     expect(pickDefaultAgentId([agent("claude")])).toBe("claude");
   });
 
-  it("applies provider priority only across agents enabled for chat", () => {
+  it("prefers a confirmed connection over an unavailable auth probe", () => {
+    const uncertain = { ...agent("codex"), installed: true, authenticated: undefined, authenticationUnavailableReason: "Probe unavailable" };
+    expect(pickDefaultAgentId([uncertain, agent("claude")])).toBe("claude");
+    expect(pickAgentForNewChat([uncertain, agent("claude")])?.id).toBe("claude");
+  });
+
+  it("ignores legacy enable preferences when choosing connected agents", () => {
     localStorage.setItem(
       "zeros.agent.enabledAgents",
       JSON.stringify({ ids: ["cursor"] }),
@@ -807,7 +814,7 @@ describe("default agent — deterministic connected-provider preference", () => 
 
     expect(
       pickDefaultAgentId([agent("codex"), agent("claude"), agent("cursor")]),
-    ).toBe("cursor");
+    ).toBe("codex");
   });
 
   it("honors an explicit default over provider priority", () => {
