@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import crypto, { randomUUID } from "node:crypto";
+import { syncBuiltinESMExports } from "node:module";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ensureUser } from "./auth.js";
 import { withSystemTx } from "./db.js";
@@ -383,14 +384,40 @@ async function seedOrganization(pool: pg.Pool, suffix: string) {
   return { organizationId, userId: user.id, workosUserId: subject };
 }
 
+const deletionCodeAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ23456789";
+let deletionCodeSequence = 0;
+
 function deletionPublicCode(): string {
-  const suffix = randomUUID()
-    .replaceAll("-", "")
-    .replace(/[01]/g, "A")
-    .slice(0, 4)
-    .toUpperCase();
+  // Fixtures share this suite's database; short random prefixes can collide.
+  let value = deletionCodeSequence++;
+  let suffix = "";
+  for (let digit = 0; digit < 4; digit++) {
+    suffix =
+      deletionCodeAlphabet[value % deletionCodeAlphabet.length] + suffix;
+    value = Math.floor(value / deletionCodeAlphabet.length);
+  }
+  if (value !== 0) throw new Error("Deletion fixture codes exhausted.");
   return `ZD-AUTH-${suffix}`;
 }
+
+describe("WorkOS outbox fixture codes", () => {
+  it("allocates distinct valid codes even when UUID prefixes collide", () => {
+    const uuid = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValue("aa8a2222-2222-4222-8222-222222222222");
+    syncBuiltinESMExports();
+    try {
+      const codes = Array.from({ length: 1024 }, () => deletionPublicCode());
+      expect(new Set(codes).size).toBe(codes.length);
+      expect(
+        codes.every((code) => /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(code)),
+      ).toBe(true);
+    } finally {
+      uuid.mockRestore();
+      syncBuiltinESMExports();
+    }
+  });
+});
 
 async function stageAccountPurge(
   pool: pg.Pool,

@@ -4,12 +4,12 @@ import type { Workspace } from "../../platform/git";
  *  workspace's git + PR REALITY (and disk presence), NOT its kanban column —
  *  the card button mirrors the workspace header's own state machine.
  *
- *  Ordering matters: `delete` is checked FIRST because a missing worktree
+ *  Ordering matters: `recover` is checked FIRST because a missing worktree
  *  (`present === false`) makes every PR/commit/merge action meaningless — the
- *  folder is gone, so the only thing left to do is drop the orphaned row. */
+ *  folder needs recovery while the workspace owner and history remain. */
 export type CardActionKind =
-  /** Worktree folder deleted on disk (orphaned row) → remove it (branch kept). */
-  | "delete"
+  /** Missing or broken worktree → open its recovery surface. */
+  | "recover"
   /** PR merged or closed → archive the finished workspace. */
   | "archive"
   /** Open PR with uncommitted local work → Commit & Push (opens the workspace). */
@@ -39,7 +39,7 @@ export function resolveCardActionKind(
 ): CardActionKind {
   // Worktree gone (folder deleted out-of-band, row un-archived). Takes priority
   // over any PR/change state — the workspace can't be opened or worked on.
-  if (w.present === false) return "delete";
+  if (w.present === false) return "recover";
   if (w.prState === "merged" || w.prState === "closed") return "archive";
   // Change probe unresolved → show nothing rather than guess. Critically this
   // prevents an open, non-draft PR whose dirtiness is unknown from offering

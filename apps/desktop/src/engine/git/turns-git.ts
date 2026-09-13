@@ -343,7 +343,7 @@ export async function pruneResetSnapshots(
 
 // ── Archive snapshot (durable, per-workspace; backs archive/restore) ─────────
 
-/** Delete a workspace's archive snapshot ref (on restore / hard-delete), so its
+/** Delete a workspace's archive snapshot ref (on explicit deletion), so its
  *  snapshot commit becomes gc-able. Best-effort. */
 export async function deleteArchiveSnapshotRef(
   cwd: string,
@@ -357,8 +357,8 @@ export async function deleteArchiveSnapshotRef(
 }
 
 /** The workspace ids that currently have an archive snapshot ref in `cwd`'s repo
- *  (ref suffix == id — see archiveSnapshotRef). Best-effort; used by the boot
- *  janitor to drop refs whose workspace row is gone. */
+ *  (ref suffix == id — see archiveSnapshotRef). Best-effort diagnostics;
+ *  an unknown id can belong to another instance's database. */
 export async function listArchiveSnapshotWorkspaceIds(
   cwd: string,
 ): Promise<string[]> {

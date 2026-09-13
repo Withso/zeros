@@ -17,6 +17,9 @@ import {
   Archive as ArchiveIcon,
   ArrowUp,
   ExternalLink,
+  Eye,
+  EyeOff,
+  Ellipsis,
   FolderX,
   GitMerge,
   GitPullRequestArrow,
@@ -31,9 +34,34 @@ import { WorkspaceContextMenu } from "../../shared/ui/workspace-context-menu";
 import { Switch } from "../../shared/ui/primitives/switch";
 import { LIFECYCLE_STATUSES } from "../../shared/lib/workspace-status";
 import { resolveCardActionKind } from "../../shared/lib/workspace-card-action";
-import { useChats, useWorkspaceDispatch } from "../../state/store";
+import { useActivePage, useChats } from "../../state/store";
+import { Button } from "../../shared/ui/primitives/button";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "../../shared/ui/primitives/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from "../../shared/ui/primitives/dialog";
+import { useExperimentalFeature } from "../settings/experimental-features";
+import { useShowHiddenWorkspaces } from "../settings/dashboard-settings";
+import {
+  AUTO_HIDE_ARCHIVE_MS,
+  hideExpiredWorkspaces,
+  setWorkspaceHidden,
+  useWorkspaceVisibility,
+  workspaceIsHidden,
+} from "./workspace-visibility";
 import {
   notifyWorkspacesChanged,
+  commitWorkspaceArchived,
   useArchivedWorkspaces,
   useLiveWorkspaces,
   useProjects,
@@ -51,14 +79,18 @@ import { useWorkspaceHasChanges } from "../../shell/pr/use-workspace-has-changes
 import { useOpenWorkspace } from "../../state/use-open-workspace";
 import { saveDashboardRepoFilter, useDashboardRepoFilter } from "./preferences";
 import {
-  deleteWorkspacePermanently,
   restoreWorkspaceWithFeedback,
   useArchiveWorkspace,
 } from "../../state/archive-actions";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import { formatCompactAge } from "../agent/format-age";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
-import { ghPrMerge, ghPrSync, type Workspace } from "../../platform/git";
+import {
+  ghPrMerge,
+  ghPrSync,
+  workspaceDeleteSnapshot,
+  type Workspace,
+} from "../../platform/git";
 import { useActiveOrganization } from "../team/team-store";
 import { filterRowsForOrganization } from "../team/organization-capabilities";
 import {
@@ -74,11 +106,6 @@ const REPO_CHIP_CLS =
 // with the card's surface (matches the secondary button family).
 const CARD_ACTION_CLS =
   "inline-flex items-center gap-1.5 rounded-sm border border-border3 bg-transparent px-2 py-1 text-xs font-medium text-fg1 transition-colors hover:bg-bg2-hover disabled:pointer-events-none disabled:opacity-60";
-
-// Same footprint as CARD_ACTION_CLS, tinted destructive — the ONLY action on a
-// worktree-missing card is to drop its stale row (irreversible; branch kept).
-const CARD_DELETE_CLS =
-  "inline-flex items-center gap-1.5 rounded-sm border border-border3 bg-transparent px-2 py-1 text-xs font-medium text-red-fg transition-colors hover:bg-red-bg disabled:pointer-events-none disabled:opacity-60";
 
 // The "Archived" toggle persists across reloads (the Archived column is heavy,
 // so remember the user's choice) — localStorage, best-effort.
@@ -108,6 +135,7 @@ interface BoardRow {
   /** Owning-chat title if present, else the (prefix-stripped) branch. */
   title: string;
   branch: string;
+  hidden?: boolean;
 }
 
 export function DashboardPage() {
@@ -131,6 +159,43 @@ export function DashboardPage() {
     [activeOrganization, rawPending],
   );
   const { workspaces: rawArchivedWorkspaces } = useArchivedWorkspaces();
+  const visibility = useWorkspaceVisibility();
+  const showHidden = useShowHiddenWorkspaces();
+  const [autoHide] = useExperimentalFeature(
+    "hideArchivedWorkspacesAfter15Days",
+  );
+  const activePage = useActivePage();
+  const [now, setNow] = useState(Date.now);
+  // One deadline for the aggregate; no per-card polling. Re-evaluate on app
+  // resume, and detach timers/listeners while the retained page is inactive.
+  useEffect(() => {
+    if (!autoHide || activePage !== "dashboard") return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      clearTimeout(timer);
+      if (document.visibilityState === "hidden") return;
+      const time = Date.now();
+      setNow(time);
+      hideExpiredWorkspaces(rawArchivedWorkspaces, time);
+      const next = rawArchivedWorkspaces.reduce((deadline, workspace) => {
+        if (
+          workspace.archivedAt == null ||
+          visibility.entries[workspace.id]?.archivedAt === workspace.archivedAt
+        )
+          return deadline;
+        const due = workspace.archivedAt + AUTO_HIDE_ARCHIVE_MS;
+        return due > time ? Math.min(deadline, due) : deadline;
+      }, Infinity);
+      if (Number.isFinite(next))
+        timer = setTimeout(refresh, Math.min(next - time, 2_147_483_647));
+    };
+    refresh();
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [autoHide, activePage, rawArchivedWorkspaces, visibility]);
   const archivedWorkspaces = useMemo(
     () => filterRowsForOrganization(rawArchivedWorkspaces, activeOrganization),
     [activeOrganization, rawArchivedWorkspaces],
@@ -233,12 +298,29 @@ export function DashboardPage() {
   const archivedRows = useMemo(
     () =>
       archivedWorkspaces
-        .map(toRow)
+        .map((workspace) => ({
+          ...toRow(workspace),
+          hidden: workspaceIsHidden(
+            workspace,
+            visibility,
+            autoHide,
+            activePage === "dashboard" ? Math.max(now, Date.now()) : now,
+          ),
+        }))
+        .filter((row) => showHidden || !row.hidden)
         .sort(
           (a, b) =>
             (b.workspace.archivedAt ?? 0) - (a.workspace.archivedAt ?? 0),
         ),
-    [archivedWorkspaces, toRow],
+    [
+      archivedWorkspaces,
+      toRow,
+      visibility,
+      autoHide,
+      now,
+      showHidden,
+      activePage,
+    ],
   );
 
   const filtered = useMemo(
@@ -321,6 +403,7 @@ export function DashboardPage() {
             <ArchivedColumn
               rows={filteredArchived}
               showRepoChip={showRepoChip}
+              active={activePage === "dashboard"}
             />
           )}
           {LIFECYCLE_STATUSES.map((s) => {
@@ -426,9 +509,11 @@ function DashboardRepositoryIcon({
 function ArchivedColumn({
   rows,
   showRepoChip,
+  active,
 }: {
   rows: BoardRow[];
   showRepoChip: boolean;
+  active: boolean;
 }) {
   // A dotted outline (no fill) sets the Archived column apart — archived isn't a
   // status, so it reads as a different kind of column without adding weight.
@@ -447,6 +532,7 @@ function ArchivedColumn({
             key={row.workspace.id}
             row={row}
             showRepoChip={showRepoChip}
+            active={active}
           />
         ))}
       </div>
@@ -457,15 +543,54 @@ function ArchivedColumn({
 function ArchivedCard({
   row,
   showRepoChip,
+  active,
 }: {
   row: BoardRow;
   showRepoChip: boolean;
+  active: boolean;
 }) {
   const w = row.workspace;
   const [restoring, setRestoring] = useState(false);
+  const [snapshotToDelete, setSnapshotToDelete] = useState<{
+    archiveSnapshot: string;
+    archivedAt: number;
+  } | null>(null);
+  const [deletingSnapshot, setDeletingSnapshot] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    if (active) return;
+    setMenuOpen(false);
+    setSnapshotToDelete(null);
+  }, [active]);
   const openWorkspace = useOpenWorkspace();
+  const deleteSnapshot = async () => {
+    if (!snapshotToDelete || deletingSnapshot) return;
+    setDeletingSnapshot(true);
+    try {
+      const workspace = await workspaceDeleteSnapshot({
+        workspaceId: w.id,
+        ...snapshotToDelete,
+      });
+      commitWorkspaceArchived(workspace);
+      setSnapshotToDelete(null);
+      toast.success("Saved snapshot deleted", {
+        description:
+          "Chats, messages, branch, and workspace history were kept.",
+      });
+    } catch (error) {
+      toast.error("Couldn't delete the saved snapshot", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "Refresh the workspace and retry.",
+      });
+    } finally {
+      setDeletingSnapshot(false);
+      notifyWorkspacesChanged(w.repoSlug);
+    }
+  };
   const unarchive = () => {
-    if (restoring) return;
+    if (restoring || deletingSnapshot) return;
     setRestoring(true);
     // Serialized per-id across surfaces; surfaces restore's path/branch
     // adaptations + conflicts. onSettled clears the spinner in every path.
@@ -496,20 +621,100 @@ function ArchivedCard({
       </div>
       <div className="mt-2.5 flex items-center gap-2">
         <Tooltip label="Unarchive">
-          <button
-            type="button"
-            className={CARD_ACTION_CLS}
+          <Button
+            variant="secondary"
+            size="sm"
             onClick={unarchive}
-            disabled={restoring}
+            disabled={restoring || deletingSnapshot}
           >
             {restoring && <ZerosSpinner size={14} />}
             <span>{restoring ? "Restoring…" : "Unarchive"}</span>
-          </button>
+          </Button>
         </Tooltip>
+        {row.hidden && (
+          <Tooltip label="Hidden workspace">
+            <span
+              className="text-muted-fg inline-flex"
+              role="img"
+              aria-label="Hidden workspace"
+            >
+              <EyeOff size={14} aria-hidden="true" />
+            </span>
+          </Tooltip>
+        )}
+        <DropdownMenu open={active && menuOpen} onOpenChange={setMenuOpen}>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              aria-label={`Options for ${row.title}`}
+              disabled={restoring || deletingSnapshot}
+            >
+              <Ellipsis size={14} aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start">
+            <DropdownMenuItem
+              onSelect={() => setWorkspaceHidden(w, !row.hidden)}
+            >
+              {row.hidden ? <Eye /> : <EyeOff />}
+              {row.hidden ? "Unhide" : "Hide"}
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              className="text-red-primary focus:text-red-primary"
+              disabled={!w.archiveSnapshot}
+              onSelect={() => {
+                if (w.archiveSnapshot && w.archivedAt != null)
+                  setSnapshotToDelete({
+                    archiveSnapshot: w.archiveSnapshot,
+                    archivedAt: w.archivedAt,
+                  });
+              }}
+            >
+              <Trash2 />
+              Delete saved snapshot…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
         <span className="text-fg2 ml-auto text-xs tabular-nums">
           {formatCompactAge(w.archivedAt ?? w.createdAt)}
         </span>
       </div>
+      <Dialog
+        open={active && snapshotToDelete !== null}
+        onOpenChange={(open) => {
+          if (!open && !deletingSnapshot) setSnapshotToDelete(null);
+        }}
+      >
+        <DialogContent showCloseButton={!deletingSnapshot}>
+          <DialogHeader>
+            <DialogTitle>
+              Delete the saved snapshot for “{row.title}”?
+            </DialogTitle>
+            <DialogDescription>
+              Files stored only in this snapshot, including uncommitted files
+              and attachments, will no longer be restorable from this archive.
+              Chats, messages, the branch, and workspace history will be kept.
+              Unarchiving afterward restores committed files only.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              disabled={deletingSnapshot}
+              onClick={() => setSnapshotToDelete(null)}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={deletingSnapshot}
+              onClick={() => void deleteSnapshot()}
+            >
+              {deletingSnapshot ? "Deleting…" : "Delete saved snapshot"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
@@ -563,21 +768,13 @@ function DashboardCard({
 }) {
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
-  const dispatch = useWorkspaceDispatch();
   const mutating = useWorkspaceArchiving(w.id);
   const [busy, setBusy] = useState<null | "merge">(null);
   // Lazy, tri-state dirtiness probe (replaces the removed heavy withChanges list
   // column). `undefined` until the first probe resolves → resolveCardActionKind
   // shows NO button rather than a possibly-wrong destructive Merge.
   const hasChanges = useWorkspaceHasChanges(w, true, { probeWithPr: true });
-  // Its worktree folder was deleted on disk while the row lives on, un-archived —
-  // an ORPHANED workspace (e.g. `rm -rf`, Finder trash, or a parallel tool wiping
-  // it). It can't be opened or worked on, so the board must NOT dress it up as a
-  // normal card: mark it "Worktree missing" and offer the one safe action — drop
-  // the stale row (branch kept). Mirrors the WorktreeMissingPanel + the directory
-  // picker's `present === false` handling; the synthetic Local main is stripped
-  // before the Dashboard sees the list, and archived rows aren't in it, so here
-  // `present === false` uniquely means "orphaned live workspace".
+  // Missing or broken Git metadata keeps the workspace reachable for recovery.
   const missing = w.present === false;
 
   const merge = async () => {
@@ -605,18 +802,6 @@ function DashboardCard({
     await archiveWorkspace(w, { label: row.title, onArchived });
   };
 
-  const del = async () => {
-    if (mutating) return;
-    const result = await deleteWorkspacePermanently(w, dispatch);
-    if (result === "deleted") {
-      toast.success(`Deleted "${row.title}"`);
-    } else if (result === "failed") {
-      toast.error(`Couldn't delete "${row.title}"`, {
-        description: "The workspace is still here — try again.",
-      });
-    }
-  };
-
   // The card's action mirrors the workspace's OWN state machine — resolved by the
   // pure, unit-tested `resolveCardActionKind` (git + PR reality + disk presence,
   // NOT the kanban column) — then mapped here to a label/icon/handler. Prompt-
@@ -627,18 +812,16 @@ function DashboardCard({
     label: string;
     icon: typeof GitMerge;
     run: () => void;
-    busyKey: "archive" | "delete" | "merge" | null;
+    busyKey: "archive" | "merge" | null;
   };
   let action: CardAction | null;
   switch (resolveCardActionKind(w, hasChanges)) {
-    case "delete":
-      // Worktree gone → the only action is to remove the orphaned row. Opening it
-      // only reaches the WorktreeMissingPanel, whose sole button is this delete.
+    case "recover":
       action = {
-        label: "Delete",
-        icon: Trash2,
-        run: () => void del(),
-        busyKey: "delete",
+        label: "Recover",
+        icon: FolderX,
+        run: onOpen,
+        busyKey: null,
       };
       break;
     case "archive":
@@ -686,7 +869,7 @@ function DashboardCard({
       action = null; // nothing done → no button (matches the workspace header)
   }
   const spinning =
-    action?.busyKey === "archive" || action?.busyKey === "delete"
+    action?.busyKey === "archive"
       ? mutating
       : action?.busyKey != null && busy === action.busyKey;
   const ActionIcon = action?.icon;
@@ -751,7 +934,7 @@ function DashboardCard({
             <Tooltip label={action.label}>
               <button
                 type="button"
-                className={missing ? CARD_DELETE_CLS : CARD_ACTION_CLS}
+                className={CARD_ACTION_CLS}
                 onClick={(e) => {
                   stop(e);
                   action?.run();
@@ -766,9 +949,7 @@ function DashboardCard({
                 <span>
                   {mutating && action.busyKey === "archive"
                     ? "Archiving…"
-                    : mutating && action.busyKey === "delete"
-                      ? "Deleting…"
-                      : action.label}
+                    : action.label}
                 </span>
               </button>
             </Tooltip>

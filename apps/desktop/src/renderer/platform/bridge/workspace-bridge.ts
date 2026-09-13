@@ -1975,6 +1975,30 @@ export async function bridgeWorkspaceRestore(
   };
 }
 
+export async function bridgeWorkspaceRecover(
+  bridge: RuntimeClient,
+  args: { workspaceId: string },
+): Promise<Awaited<ReturnType<typeof bridgeWorkspaceRestore>>> {
+  return (await workspaceOp(
+    bridge,
+    "workspace.recover",
+    { ...args },
+    60_000,
+  )) as Awaited<ReturnType<typeof bridgeWorkspaceRestore>>;
+}
+
+export async function bridgeWorkspaceDeleteSnapshot(
+  bridge: RuntimeClient,
+  args: { workspaceId: string; archiveSnapshot: string; archivedAt: number },
+): Promise<Workspace> {
+  return (await workspaceOp(
+    bridge,
+    "workspace.deleteSnapshot",
+    { ...args },
+    60_000,
+  )) as Workspace;
+}
+
 export async function bridgeWorkspaceCreateFromBranch(
   bridge: RuntimeClient,
   args: {

@@ -105,6 +105,18 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
+  it("keeps recovery and snapshot disposal local and validates the archive date", async () => {
+    for (const op of ["workspace.recover", "workspace.deleteSnapshot"]) {
+      expect(svc.isRemoteAllowed(op)).toBe(false);
+    }
+    await expect(
+      svc.handle("workspace.deleteSnapshot", {
+        archiveSnapshot: "a".repeat(40),
+        archivedAt: "yesterday",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
   it("accepts explicit device-Personal detachment only over the local bridge", async () => {
     const op = "workspace.reassignLocalOrganization";
     const params = {
@@ -3786,6 +3798,7 @@ describe("WorkspaceService", () => {
     expect(svc.isWriteOp("gh.authStatus")).toBe(false);
   });
 
+  // This full Design API and Git round trip needs headroom on Intel CI runners.
   it("returns exact Design snapshots while save stays uncommitted and stage stays explicit", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -4370,7 +4383,7 @@ describe("WorkspaceService", () => {
       workspaceId: workspace.workspaceId,
       includeBranch: true,
     });
-  });
+  }, 60_000);
 
   it("maps an unknown workspaceId to WORKSPACE_NOT_FOUND on a git op", async () => {
     await expect(

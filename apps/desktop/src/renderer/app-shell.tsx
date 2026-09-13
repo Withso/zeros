@@ -88,7 +88,7 @@ import {
 } from "./state/pending-workspaces";
 import { resolveWorkspacePresentationKind } from "./state/workspace-resolution";
 import { notifyWorkspacesChanged, useProjects } from "./state/use-projects";
-import { deleteWorkspacePermanently } from "./state/archive-actions";
+import { restoreWorkspaceWithFeedback } from "./state/archive-actions";
 import { SettingsPage } from "./features/settings/settings-page";
 import { DashboardPage } from "./features/dashboard/dashboard-page";
 import { CustomizePage } from "./features/agent-extensions/customize-page";
@@ -138,7 +138,7 @@ import { AnalyticsBoot } from "./platform/observability/analytics/boot";
 import { AppearanceProvider } from "./shared/theme/provider";
 import { getVariant, setPrefs } from "./shared/theme/store";
 import { AuthProvider, AuthGate } from "./features/auth";
-import { Toaster, toast } from "./shared/ui/primitives/elements";
+import { Toaster } from "./shared/ui/primitives/elements";
 import { TooltipProvider } from "./shared/ui/primitives/tooltip";
 import { useInstantViewSwitch } from "./shared/ui/use-instant-view-switch";
 import {
@@ -1012,7 +1012,6 @@ function MainShellBody({
   // the active workspace has no recorded prNumber, detect + backfill it so the
   // Workbench PR-status island appears and the header "Create PR" button hides.
   useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
-  const dispatch = useWorkspaceDispatch();
   const { projects } = useProjects();
   useWarmAutomaticRepositoryIcons(projects);
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
@@ -1125,24 +1124,13 @@ function MainShellBody({
   // sub-pages have no active worktree content to lose, so they render normally
   // even while the selected workspace's folder is gone.
   if (worktreeMissing && activeWorkspace && activePage === "workspace") {
-    // Drop the DB row + worktree folder (branch kept), scrub every renderer
-    // surface keyed on it, and repoint to the project's Local main so the open
-    // chat isn't stranded. Shared with the corrupted-workspace archive-failure
-    // toast (deleteWorkspacePermanently) so both delete paths are identical.
-    const handleDelete = async () => {
-      const result = await deleteWorkspacePermanently(
-        activeWorkspace,
-        dispatch,
-      );
-      if (result === "failed") {
-        toast.error("Couldn't delete workspace", {
-          description: "The workspace is still here — try again.",
-        });
-      }
+    // Recover under the same stable workspace identity and retain its chats.
+    const handleRecover = async () => {
+      await restoreWorkspaceWithFeedback(activeWorkspace);
     };
 
     // The placeholder polls this on a timer to auto-detect the worktree
-    // returning: re-fetching the workspace list re-runs existsSync() on every
+    // returning: re-fetching the workspace list rechecks Git metadata on every
     // row, so a `git worktree add` (or Finder un-trash) that recreated the
     // folder flips `present` back to true and the columns reappear — no button.
     const handleRefresh = () => {
@@ -1160,7 +1148,7 @@ function MainShellBody({
             <div className="bg-bg1 flex min-h-0 min-w-0 flex-1 overflow-hidden">
               <WorktreeMissingPanel
                 workspace={activeWorkspace}
-                onDelete={handleDelete}
+                onRecover={handleRecover}
                 onRefresh={handleRefresh}
               />
             </div>

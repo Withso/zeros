@@ -111,31 +111,31 @@ describe("resolveCardActionKind", () => {
   });
 
   // A worktree deleted out-of-band (present:false, row still live + un-archived)
-  // is an ORPHAN. It must resolve to "delete" regardless of PR/change state —
+  // needs recovery. It must resolve to "recover" regardless of PR/change state —
   // the folder is gone, so nothing else is actionable (the phantom-card bug).
   describe("orphaned workspace (present === false)", () => {
-    it("plain orphan → delete", () => {
-      expect(resolveCardActionKind(makeWorkspace({ present: false }), false)).toBe(
-        "delete",
-      );
+    it("plain orphan → recover", () => {
+      expect(
+        resolveCardActionKind(makeWorkspace({ present: false }), false),
+      ).toBe("recover");
     });
 
-    it("delete takes priority over a merged PR", () => {
+    it("recovery takes priority over a merged PR", () => {
       expect(
         resolveCardActionKind(
           makeWorkspace({ present: false, prNumber: 7, prState: "merged" }),
           undefined,
         ),
-      ).toBe("delete");
+      ).toBe("recover");
     });
 
-    it("delete takes priority over an open PR with local changes", () => {
+    it("recovery takes priority over an open PR with local changes", () => {
       expect(
         resolveCardActionKind(
           makeWorkspace({ present: false, prNumber: 7, prState: "ready" }),
           true,
         ),
-      ).toBe("delete");
+      ).toBe("recover");
     });
   });
 
