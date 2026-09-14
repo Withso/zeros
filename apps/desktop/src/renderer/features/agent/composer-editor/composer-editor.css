@@ -46,3 +46,30 @@
 .composer-pm [data-attachment-pill] {
   white-space: nowrap;
 }
+
+/* Chromium otherwise paints the caret at the next wrapped, noneditable atom
+   while inserting text at the end of the preceding line. Give both edges an
+   inline text boundary. Generated content stays out of the document, clipboard,
+   history, and serialized prompt; real zero-width text would pollute them. */
+.composer-pm .node-attachment::before,
+.composer-pm .node-attachment::after,
+.composer-pm .node-mention::before,
+.composer-pm .node-mention::after {
+  content: "\200B";
+}
+
+/* Both glyphs occupy one fixed slot, so hover never shifts the filename or
+   changes wrapping. Keep the button tabbable and reveal X on keyboard focus. */
+.composer-pill-remove .lucide-x {
+  opacity: 0;
+}
+
+.composer-pill:hover .composer-pill-remove [data-composer-pill-icon],
+.composer-pill-remove:focus-visible [data-composer-pill-icon] {
+  opacity: 0;
+}
+
+.composer-pill:hover .composer-pill-remove .lucide-x,
+.composer-pill-remove:focus-visible .lucide-x {
+  opacity: 1;
+}
