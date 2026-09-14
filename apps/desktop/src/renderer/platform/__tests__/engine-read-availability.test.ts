@@ -6,6 +6,7 @@ import {
   gitStage,
   gitStatus,
   listWorkspaceFiles,
+  listWorkspaceMentionPaths,
   workspaceList,
   type Workspace,
 } from "../git";
@@ -50,6 +51,9 @@ describe("engine-backed native façades", () => {
       /not connected to the Zeros engine/i,
     );
     await expect(
+      listWorkspaceMentionPaths("/worktree-a", "rollout"),
+    ).rejects.toThrow(/not connected to the Zeros engine/i);
+    await expect(
       readWorkspaceFile("/worktree-a", "src/app.ts"),
     ).rejects.toThrow(/not connected to the Zeros engine/i);
     await expect(windowMessages("chat-a", 100)).rejects.toThrow(
@@ -77,6 +81,62 @@ describe("engine-backed native façades", () => {
     await expect(dbReplaceAllChats([])).rejects.toThrow(
       /not connected to the Zeros engine/i,
     );
+  });
+
+  it("requests inclusive, query-filtered mentions over the local bridge", async () => {
+    const request = vi.fn().mockImplementation(async (message) => ({
+      type: "WORKSPACE_RESPONSE",
+      result:
+        message.op === "workspace.list"
+          ? { workspaces: [] }
+          : {
+              files: [".context/rollout.jsonl", ".empty/"],
+            },
+    }));
+    setActiveBridge({ request } as unknown as RuntimeClient);
+    expect(
+      await listWorkspaceMentionPaths(
+        "/mention-local",
+        "rollout",
+        "mention-revision",
+      ),
+    ).toEqual([".context/rollout.jsonl", ".empty/"]);
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        op: "file.tree",
+        params: {
+          workspaceId: "/mention-local",
+          limit: 64,
+          query: "rollout",
+          includeIgnored: true,
+          mentionRevision: "mention-revision",
+        },
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it("keeps ordinary mentions available when a remote engine refuses ignored-path access", async () => {
+    const request = vi.fn().mockImplementation(async (message) => {
+      if (message.params?.includeIgnored)
+        return {
+          type: "WORKSPACE_ERROR",
+          op: "file.tree",
+          code: "REMOTE_RESTRICTED",
+          message: "local only",
+        };
+      return {
+        type: "WORKSPACE_RESPONSE",
+        result:
+          message.op === "workspace.list"
+            ? { workspaces: [] }
+            : { files: ["src/remote.ts"] },
+      };
+    });
+    setActiveBridge({ request } as unknown as RuntimeClient);
+    expect(
+      await listWorkspaceMentionPaths("/mention-remote", "remote"),
+    ).toEqual(["src/remote.ts"]);
   });
 
   it("does not turn a failed terminal registry read into zero terminals", async () => {

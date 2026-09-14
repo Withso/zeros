@@ -23,6 +23,7 @@ import Suggestion, {
   type SuggestionProps,
 } from "@tiptap/suggestion";
 import { PluginKey } from "@tiptap/pm/state";
+import { shallow } from "zustand/shallow";
 
 import type { MentionItem } from "../mentions";
 import type { AvailableCommand } from "../../../platform/bridge/agent-events";
@@ -31,6 +32,12 @@ import type { PrPickerItem } from "../pr-picker";
 export type SuggestionTrigger = "@" | "/" | "#";
 
 export type SuggestionItem = MentionItem | AvailableCommand | PrPickerItem;
+
+function suggestionIdentity(item: SuggestionItem): string {
+  if ("id" in item) return item.id;
+  if ("number" in item) return `pr:${item.number}`;
+  return `command:${item.kind ?? "command"}:${item.name}`;
+}
 
 /** Slash-picker category tabs. */
 export type SlashTab = "all" | "commands" | "skills";
@@ -135,16 +142,36 @@ export class SuggestionStore {
    *  without the user having to type another character. */
   setData(props: { items: SuggestionItem[]; status: SuggestionStatus }): void {
     if (!this.state.open) return;
-    this.set({ items: props.items, status: props.status, selectedIndex: 0 });
+    const items =
+      props.items.length === this.state.items.length &&
+      props.items.every((item, i) => shallow(item, this.state.items[i]))
+        ? this.state.items
+        : props.items;
+    if (items === this.state.items && props.status === this.state.status)
+      return;
+    const selected = this.slashVisible()[this.state.selectedIndex];
+    const visible = this.slashVisible(items);
+    const index = selected
+      ? visible.findIndex(
+          (item) => suggestionIdentity(item) === suggestionIdentity(selected),
+        )
+      : -1;
+    // Background reads keep the user's choice, even if ranking moves it. Only
+    // a changed query (update) or a newly opened menu resets to the first row.
+    const selectedIndex =
+      index >= 0
+        ? index
+        : Math.max(0, Math.min(this.state.selectedIndex, visible.length - 1));
+    this.set({ items, status: props.status, selectedIndex });
   }
 
   /** The items actually visible given the active "/" tab. Navigation + choose
    *  operate on THIS list so `selectedIndex` always indexes what's rendered
    *  (the picker filters the same way via matchesSlashTab). */
-  private slashVisible(): SuggestionItem[] {
+  private slashVisible(items = this.state.items): SuggestionItem[] {
     const s = this.state;
-    if (s.trigger !== "/" || s.slashTab === "all") return s.items;
-    return s.items.filter((it) =>
+    if (s.trigger !== "/" || s.slashTab === "all") return items;
+    return items.filter((it) =>
       matchesSlashTab(it as AvailableCommand, s.slashTab),
     );
   }
@@ -263,9 +290,8 @@ export interface ComposerSuggestionsOptions {
   getPrItems: (query: string) => PrPickerItem[];
   /** Load state of the active trigger's data source (drives loading/error UI). */
   getStatus: (trigger: SuggestionTrigger) => SuggestionStatus;
-  /** Called when the @ menu opens — forces a fresh workspace file read so a
-   *  file the agent just created (composer never blurred → no focus refresh)
-   *  is mentionable. The async landing re-pushes results into the open menu. */
+  /** Called when @ opens to revalidate stale results. File-change signals
+   * invalidate the shared exact-key cache; async results refresh the open menu. */
   onMentionOpen: () => void;
   /** Prepare native session commands without submitting the draft. */
   onSlashOpen: () => void;

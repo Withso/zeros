@@ -68,11 +68,10 @@ import {
 import {
   buildPathMentions,
   collectMentions,
-  deriveWorkspaceEntries,
   filterMentions,
   type MentionItem,
-  type WorkspaceEntry,
 } from "../mentions";
+import { MentionFileSearch } from "../mention-files-cache";
 import { filterSlashCommands } from "../slash-command-filter";
 import { filterPrs, type PrPickerItem } from "../pr-picker";
 import {
@@ -80,7 +79,7 @@ import {
   mergeCommands,
 } from "../../../platform/bridge/agent-events";
 import type { AvailableCommand } from "../../../platform/bridge/agent-events";
-import { ghPrList, listWorkspaceFiles } from "../../../platform/git";
+import { ghPrList } from "../../../platform/git";
 import { listSkills } from "../../../platform/app";
 import { useBrowserPickerSelection } from "../../../state/workspace-store";
 import { useWorkspaceProvisioning } from "../../../state/pending-workspaces";
@@ -365,22 +364,19 @@ export function useComposerEditor(
     executeGraphSync(cwd, plan);
   }, []);
 
-  const workspaceEntriesRef = useRef<WorkspaceEntry[]>([]);
   const prsRef = useRef<PrPickerItem[]>([]);
   // Load state for the @-file list and #-PR fetch, so the pickers can show a
   // real "Loading…" / "Couldn't load…" message instead of silently empty.
-  const filesStatusRef = useRef<SuggestionStatus>("ready");
   const prsStatusRef = useRef<SuggestionStatus>("ready");
-  // Guards for the @-file load: a generation token discards stale landings when
-  // the cwd changes mid-fetch; an in-flight flag + last-load stamp throttle the
-  // refresh-on-focus so repeated focuses don't hammer the engine.
-  const filesGenRef = useRef(0);
-  const filesInFlightRef = useRef(false);
-  const filesLastLoadRef = useRef(0);
   // Re-pushes fresh items into the open picker when an async load lands.
   // Assigned below once the item getters exist; called indirectly through this
   // ref to sidestep the getPrItems → ensurePrsLoaded → refresh declaration cycle.
   const refreshRef = useRef<() => void>(() => {});
+  const filesSearch = useMemo(
+    () => new MentionFileSearch(() => refreshRef.current()),
+    [],
+  );
+  const filesQueryRef = useRef("");
   const browserSelection = useBrowserPickerSelection();
   const browserSelectionRef = useRef(browserSelection);
   browserSelectionRef.current = browserSelection;
@@ -447,51 +443,31 @@ export function useComposerEditor(
   const originUrlRef = useRef(originUrl);
   originUrlRef.current = originUrl;
 
-  // ── @-files: load into the ref the suggestion reads. Loaded once per cwd
-  // AND refreshed on composer focus, so files created/deleted mid-session show
-  // up (the engine's file list was previously a one-shot read per cwd). ──
-  const loadWorkspaceFiles = useCallback((force = false) => {
-    const dir = optsRef.current.cwd;
-    if (!dir) {
-      workspaceEntriesRef.current = [];
-      filesStatusRef.current = "ready";
-      return;
-    }
-    if (filesInFlightRef.current) return;
-    const now = Date.now();
-    if (!force && now - filesLastLoadRef.current < 2000) return;
-    filesLastLoadRef.current = now;
-    filesInFlightRef.current = true;
-    const gen = filesGenRef.current;
-    // Only flip to "loading" when there's nothing to show yet; a refresh over an
-    // existing list keeps the current results visible underneath.
-    if (workspaceEntriesRef.current.length === 0)
-      filesStatusRef.current = "loading";
-    void listWorkspaceFiles(dir)
-      .then((files) => {
-        if (gen !== filesGenRef.current) return; // cwd changed mid-fetch
-        workspaceEntriesRef.current = deriveWorkspaceEntries(files);
-        filesStatusRef.current = "ready";
-      })
-      .catch(() => {
-        if (gen !== filesGenRef.current) return;
-        filesStatusRef.current = "error";
-      })
-      .finally(() => {
-        filesInFlightRef.current = false;
-        if (gen === filesGenRef.current) refreshRef.current();
-      });
-  }, []);
+  // Pointer/focus intent warms the shared filesystem index. Typing filters
+  // known paths immediately and asks the warm engine index for the full rank.
+  const loadWorkspaceFiles = useCallback(() => {
+    if (optsRef.current.attachmentImagesActive === false) return;
+    const state = store.getSnapshot();
+    filesSearch.refresh(
+      optsRef.current.cwd,
+      state.open && state.trigger === "@" ? state.query : "",
+    );
+  }, [filesSearch, store]);
 
-  useEffect(() => {
-    // New cwd → invalidate any in-flight load, drop the stale list, load fresh.
-    filesGenRef.current += 1;
-    filesInFlightRef.current = false;
-    workspaceEntriesRef.current = [];
-    filesLastLoadRef.current = 0;
-    filesStatusRef.current = cwd ? "loading" : "ready";
-    loadWorkspaceFiles(true);
-  }, [cwd, loadWorkspaceFiles]);
+  useLayoutEffect(() => {
+    filesSearch.clear();
+    refreshRef.current();
+    return () => filesSearch.clear();
+  }, [cwd, opts.attachmentImagesActive, filesSearch]);
+
+  useEffect(
+    () =>
+      store.subscribe(() => {
+        const state = store.getSnapshot();
+        if (!state.open || state.trigger !== "@") filesSearch.clear();
+      }),
+    [filesSearch, store],
+  );
 
   // ── #-PRs: lazy-load once per origin when first queried ──
   const prsLoadedForUrl = useRef<string | null>(null);
@@ -519,14 +495,22 @@ export function useComposerEditor(
   }, []);
 
   // ── stable suggestion data + pick handlers (read refs) ──
-  const getMentionItems = useCallback((query: string): MentionItem[] => {
-    const sel = filterMentions(
-      collectMentions(browserSelectionRef.current),
-      query,
-    );
-    const paths = buildPathMentions(workspaceEntriesRef.current, query, 8);
-    return [...sel, ...paths].slice(0, 10);
-  }, []);
+  const getMentionItems = useCallback(
+    (query: string): MentionItem[] => {
+      const dir = optsRef.current.cwd;
+      if (optsRef.current.attachmentImagesActive === false) return [];
+      filesQueryRef.current = query;
+      filesSearch.search(dir, query);
+      const sel = filterMentions(
+        collectMentions(browserSelectionRef.current),
+        query,
+      );
+      const entries = dir ? (filesSearch.snapshot(dir, query).data ?? []) : [];
+      const paths = buildPathMentions(entries, query, 8);
+      return [...sel, ...paths].slice(0, 10);
+    },
+    [filesSearch],
+  );
 
   const getSlashItems = useCallback(
     (query: string): AvailableCommand[] =>
@@ -545,14 +529,21 @@ export function useComposerEditor(
   const prEnabled = useCallback(() => !!originUrlRef.current, []);
 
   // Load state the Suggestion plugins read when (re)opening a menu.
+  const getFilesStatus = useCallback((): SuggestionStatus => {
+    const dir = optsRef.current.cwd;
+    if (!dir) return "ready";
+    const snapshot = filesSearch.snapshot(dir, filesQueryRef.current);
+    if (snapshot.data !== undefined) return "ready";
+    return snapshot.error ? "error" : "loading";
+  }, [filesSearch]);
   const getStatus = useCallback(
     (trigger: SuggestionTrigger): SuggestionStatus =>
       trigger === "@"
-        ? filesStatusRef.current
+        ? getFilesStatus()
         : trigger === "#"
           ? prsStatusRef.current
           : "ready",
-    [],
+    [getFilesStatus],
   );
 
   // Recompute the open picker's items + status after an async load lands, so
@@ -564,9 +555,12 @@ export function useComposerEditor(
     const s = store.getSnapshot();
     if (!s.open) return;
     if (s.trigger === "@") {
+      // TipTap asks for new items before publishing its new query to the
+      // popup. A synchronous cache notification must not restart the old query.
+      if (s.query !== filesQueryRef.current) return;
       store.setData({
         items: getMentionItems(s.query),
-        status: filesStatusRef.current,
+        status: getFilesStatus(),
       });
     } else if (s.trigger === "#") {
       store.setData({
@@ -578,7 +572,7 @@ export function useComposerEditor(
       // "/" menu so they appear without the user re-typing.
       store.setData({ items: getSlashItems(s.query), status: "ready" });
     }
-  }, [store, getMentionItems, getSlashItems]);
+  }, [store, getMentionItems, getSlashItems, getFilesStatus]);
   refreshRef.current = refreshActiveSuggestion;
 
   const onPickMention = useCallback(
@@ -681,11 +675,10 @@ export function useComposerEditor(
         getSlashItems,
         getPrItems,
         getStatus,
-        // Opening @ forces a fresh file read (bypassing the focus throttle) so a
-        // file the agent just created shows up even when the composer never
-        // blurred. loadWorkspaceFiles is stable (useCallback []), and its
-        // .finally re-pushes results into the already-open menu via refreshRef.
-        onMentionOpen: () => loadWorkspaceFiles(true),
+        onMentionOpen: () => {
+          if (optsRef.current.attachmentImagesActive !== false)
+            filesSearch.refresh(optsRef.current.cwd, filesQueryRef.current);
+        },
         onSlashOpen: () => optsRef.current.onSlashOpen?.(),
         prEnabled,
         onPickMention,
@@ -1133,7 +1126,11 @@ export function useComposerEditor(
         // The wrapper fits the contenteditable (two-line min-height + 200px
         // cap + scroll all live on .composer-pm, see EDITOR_CLASS); pb-1 is
         // the 4px breathing room above the toolbar.
-        <EditorContent editor={editor} className="pb-1" />
+        <EditorContent
+          editor={editor}
+          className="pb-1"
+          onPointerEnter={loadWorkspaceFiles}
+        />
       ) : (
         <div style={{ minHeight: COMPOSER_FALLBACK_MIN_HEIGHT }} />
       )}
