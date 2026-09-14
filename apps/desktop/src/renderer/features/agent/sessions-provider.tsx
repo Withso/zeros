@@ -97,6 +97,7 @@ import { providerQuotaCache } from "../../state/read-caches";
 import { requestUserSettingsSection } from "../settings/settings-navigation";
 import { shellOpenUrl } from "../../platform/app";
 import { externalUrlsForQuestionResponse } from "./question-external-actions";
+import { deliverOptionalAnswer } from "./optional-answer-delivery";
 import {
   AGENT_NEW_SESSION_TIMEOUT_MS,
   shouldCancelStalledSessionAdmission,
@@ -1205,6 +1206,7 @@ export function AgentSessionsProvider({
   /** Self-ref so sendPrompt's turn-completion flush can re-invoke it for the
    *  next queued send (a useCallback can't reference itself in its body). */
   const sendPromptRef = useRef<SessionsActions["sendPrompt"] | null>(null);
+  const steerQueuedRef = useRef<SessionsActions["steerQueued"] | null>(null);
   const authPromptsRef = useRef(new AuthPromptRecovery());
   const authPersistenceRef = useRef(new Map<string, Promise<void>>());
   const persistAuthPrompt = useCallback(
@@ -3707,6 +3709,17 @@ export function AgentSessionsProvider({
       const current = getStore().sessions[chatId];
       const head = current?.pendingQuestions?.[0];
       if (!head) return;
+      if (!head.request.blocking && response.outcome.outcome === "answered") {
+        // Async asks have no native RPC resolver. Persist the reply through
+        // the ordinary prompt queue, then steer only the entry it created.
+        const answer = questionFallbackPrompt(head.request, response.outcome);
+        void deliverOptionalAnswer({
+          queued: () => sendQueueRef.current.get(chatId) ?? [],
+          send: () => { void sendPromptRef.current?.(chatId, answer); },
+          steer: (bubbleId) => steerQueuedRef.current?.(chatId, bubbleId),
+          drain: () => drainNextQueued(chatId),
+        });
+      }
       // URL/OAuth elicitation is a trusted UI action. Perform it from the
       // renderer that received the user's explicit choice, never from the
       // contained provider or a headless/cloud engine. shellOpenUrl validates
@@ -3838,7 +3851,7 @@ export function AgentSessionsProvider({
       };
       armWatchdog();
     },
-    [bridge, getStore, cancel],
+    [bridge, getStore, cancel, drainNextQueued],
   );
 
   const stopBrowserUse = useCallback<SessionsActions["stopBrowserUse"]>(
@@ -4387,6 +4400,8 @@ export function AgentSessionsProvider({
     },
     [bridge, getStore],
   );
+
+  steerQueuedRef.current = steerQueued;
 
   const reset = useCallback<SessionsActions["reset"]>(
     (chatId) => {

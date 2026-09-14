@@ -39,6 +39,28 @@ function userChunk(text: string, messageId?: string): SessionNotification {
 }
 
 describe("applyUpdate — shared agent-message coalescer", () => {
+  it("updates an exact message in place across concurrent tools and keeps replacements durable", () => {
+    let messages = applyUpdate([], agentChunk("Draft", "reply"));
+    messages = applyUpdate(messages, { sessionId: "s", update: { sessionUpdate: "tool_call", toolCallId: "concurrent", title: "Read" } });
+    const tool = messages[1];
+    messages = applyUpdate(messages, agentChunk(" text", "reply"));
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toBe(tool);
+    const corrected: SessionNotification = { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", messageId: "reply", content: { type: "text", text: "Final" }, textMode: "replace", phase: "final_answer" } };
+    messages = applyUpdate(messages, corrected);
+    expect(messages[0]).toMatchObject({ text: "Final", phase: "final_answer" });
+    expect(applyUpdate(messages, corrected)).toBe(messages);
+    expect(messages[1]).toBe(tool);
+  });
+
+  it("preserves durable ids when replacing legacy interleaved fragments", () => {
+    const first = applyUpdate([], agentChunk("old ", "reply"))[0];
+    const second = { ...first, id: "fragment", text: "fragment" } as AgentTextMessage;
+    const result = applyUpdate([first, second], { sessionId: "s", update: { sessionUpdate: "agent_message_chunk", messageId: "reply", content: { type: "text", text: "Corrected" }, textMode: "replace" } });
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ id: first.id, text: "Corrected" });
+    expect(result[1]).toMatchObject({ id: "fragment", text: "" });
+  });
   it("merges streaming chunks with the same messageId into one growing message", () => {
     let msgs: AgentMessage[] = [];
     msgs = applyUpdate(msgs, agentChunk("Hel", "m1"));

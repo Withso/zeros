@@ -5557,7 +5557,7 @@ export class ZerosEngine {
             if (!promptOwner || promptOwner === activePrompt) {
               this.promptSessions.delete(msg.sessionId);
               this.cancelRequested.delete(msg.sessionId);
-              this.clearPendingAgentInteractions(msg.sessionId);
+              this.clearPendingAgentInteractions(msg.sessionId, false);
             }
             if (this.exitedAgentExecutions.has(msg.sessionId)) {
               this.clearAgentExecutionRoute(msg.sessionId);
@@ -8626,12 +8626,12 @@ export class ZerosEngine {
       if (pending.request.sessionId === sessionId) return true;
     }
     for (const pending of this.pendingQuestionRequests.values()) {
-      if (pending.request.sessionId === sessionId) return true;
+      if (pending.request.sessionId === sessionId && pending.request.blocking) return true;
     }
     return false;
   }
 
-  private clearPendingAgentInteractions(sessionId: string): void {
+  private clearPendingAgentInteractions(sessionId: string, includeAsync = true): void {
     for (const [permissionId, pending] of this.pendingPermissionRequests) {
       if (pending.request.sessionId !== sessionId) continue;
       this.pendingPermissionRequests.delete(permissionId);
@@ -8639,6 +8639,7 @@ export class ZerosEngine {
     }
     for (const [questionId, pending] of this.pendingQuestionRequests) {
       if (pending.request.sessionId !== sessionId) continue;
+      if (!includeAsync && !pending.request.blocking) continue;
       this.pendingQuestionRequests.delete(questionId);
       this.questionOwner.delete(questionId);
     }

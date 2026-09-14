@@ -225,8 +225,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       targetFile: !!path,
       targetKind: "file",
       trailing: undefined,
-      // Image reads aren't expandable — the bytes don't reach canonical content,
-      // so there's nothing to open (user confirmed: leave it non-expandable).
+      // The shared row also exposes the input path when image bytes are absent.
       expandable: image ? false : hasContent(tool),
     };
   }
@@ -302,11 +301,15 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "web_search") {
-    const query = pickString(input.query, input.q);
+    const action = toolRecord(input.action);
+    const queries = Array.isArray(action.queries) ? action.queries.filter((q) => typeof q === "string").join("; ") : undefined;
+    const query = pickString(input.query, input.q, action.query, queries);
+    const url = pickString(action.url);
+    const pattern = pickString(action.pattern);
     return {
       Icon: Globe,
-      label: "Web search",
-      target: query ? `"${truncate(query, 60)}"` : tool.title,
+      label: action.type === "open_page" ? "Open page" : action.type === "find_in_page" ? "Find in page" : "Web search",
+      target: action.type === "find_in_page" ? [pattern, url].filter(Boolean).join(" · ") : url ?? (query ? `"${truncate(query, 60)}"` : tool.title),
       trailing: undefined,
       expandable: hasContent(tool),
     };

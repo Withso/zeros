@@ -99,6 +99,7 @@ vi.mock("../../../session-paths", () => ({
 }));
 
 import { CodexAppServerAdapter } from "../app-server-adapter";
+import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 
 const TEXT: ContentBlock[] = [{ type: "text", text: "go" } as never];
 
@@ -577,5 +578,64 @@ describe("codex permission settlement receipts", () => {
       session.sessionId,
       { outcome: "dismissed" },
     );
+  });
+
+  it("retains async questions after completion and receipts an answer across later turns exactly once", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    rt.runTurnImpl = async () => {
+      for (const handler of rt.notificationHandlers.get("item/completed") ?? []) {
+        handler({ threadId: "thread-1", item: { type: "agentMessage", id: "async-question", delivery: "async", text: "Pick a format", questions: [{ title: "Which format?", options: ["JSON", "CSV"] }] } });
+      }
+      return { turnId: "turn-1", status: "completed", raw: {} };
+    };
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    expect(emit.onQuestionRequest).toHaveBeenCalledTimes(1);
+    const request = emit.onQuestionRequest.mock.calls[0][2];
+    expect(request).toMatchObject({ blocking: false });
+    expect(emit.onQuestionSettled).not.toHaveBeenCalled();
+    rt.runTurnImpl = null;
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    const response = { outcome: { outcome: "answered" as const, answers: [{ questionId: "q0", selectedOptionIds: ["option-1"] }] } };
+    expect(adapter.respondToQuestion({ questionId: request.questionId, response })).toBe(true);
+    expect(adapter.respondToQuestion({ questionId: request.questionId, response })).toBe(false);
+    expect(rt.userInputCalls).toEqual([]);
+    expect(emit.onQuestionSettled).toHaveBeenCalledTimes(1);
+    expect(emit.onSessionUpdate.mock.calls.some(([, event]) => event.update.sessionUpdate === "tool_call_update" && event.update.toolCallId === request.toolCallId && event.update.rawOutput?.zerosQuestion?.outcome === "answered")).toBe(true);
+  });
+
+  it("dismisses an optional question on explicit cancellation", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    for (const handler of rt.notificationHandlers.get("item/completed") ?? []) {
+      handler({ threadId: "thread-1", item: { type: "agentMessage", id: "async-question", delivery: "async", text: "Pick a format", questions: [{ title: "Which format?" }] } });
+    }
+    const request = emit.onQuestionRequest.mock.calls[0][2];
+    await adapter.cancel({ sessionId: session.sessionId });
+    expect(emit.onQuestionSettled).toHaveBeenCalledWith("codex", request.questionId, session.sessionId, { outcome: "dismissed" });
+    expect(rt.userInputCalls).toEqual([]);
+  });
+
+  it("keeps a child question and its settlement under the spawning tool", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    for (const handler of rt.notificationHandlers.get("item/completed") ?? []) {
+      handler({ threadId: "thread-1", item: { type: "collabAgentToolCall", id: "spawn", tool: "spawnAgent", status: "completed", receiverThreadIds: ["child"] } });
+    }
+    rt.bootOptions?.onUserInputRequest?.({ questionId: "child-question", rpcRequestId: "child-rpc", method: "item/tool/requestUserInput", params: {
+      threadId: "child", itemId: "child-item", questions: [{ id: "choice", question: "Child format?", options: [] }],
+    } });
+    adapter.respondToQuestion({ questionId: "child-question", response: { outcome: { outcome: "dismissed" } } });
+    const messages = emit.onSessionUpdate.mock.calls.reduce((current, [, event]) => applyUpdate(current, event), [] as AgentMessage[]);
+    const spawn = messages.find((message) => message.kind === "tool" && message.nativeToolCallId === "spawn");
+    expect(spawn?.kind).toBe("tool");
+    expect(messages.find((message) => message.kind === "tool" && message.toolKind === "question")).toMatchObject({
+      parentToolId: spawn?.kind === "tool" ? spawn.toolCallId : "missing",
+      rawOutput: { zerosQuestion: { outcome: "skipped" } },
+    });
+    const question = messages.find((message) => message.kind === "tool" && message.toolKind === "question");
+    // The renderer must receive the exact row id: another thread may reuse
+    // the same native item id and must never receive this optimistic stamp.
+    expect(emit.onQuestionRequest.mock.calls[0][2].toolCallId).toBe(question?.kind === "tool" ? question.toolCallId : "missing");
   });
 });

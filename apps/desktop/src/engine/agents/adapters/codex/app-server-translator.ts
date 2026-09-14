@@ -43,7 +43,10 @@ import type { CodexToolIdentity } from "./tool-artwork";
 import type { ToolCallContent } from "@zeros/protocol/agent-events";
 
 import { isDevRuntime } from "../../../runtime";
-import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
+import type { ContentBlock, QuestionRequest, SessionNotification, TurnUsage } from "../../types";
+import type { AsyncUserInputQuestion } from "./generated/v2/AsyncUserInputQuestion";
+import type { WebSearchAction } from "./generated/WebSearchAction";
+import type { ImageGenerationItem } from "./generated/ImageGenerationItem";
 
 type Emit = (notification: SessionNotification) => void;
 type ToolKind =
@@ -73,6 +76,7 @@ const MAX_STREAMED_TOOL_OUTPUT_CHARS = 20_001;
 export interface CodexAppServerTranslatorOptions {
   sessionId: string;
   emit: Emit;
+  onAsyncQuestion?: (request: QuestionRequest) => void;
   /** Called for any notification we don't have a mapping for — useful
    *  for diagnostics when codex ships a new event type. */
   onUnknown?: (method: string, params: unknown) => void;
@@ -88,6 +92,8 @@ export class CodexAppServerTranslator {
   private readonly sessionId: string;
   private readonly emit: Emit;
   private readonly onUnknown?: (method: string, params: unknown) => void;
+  private readonly onAsyncQuestion?: CodexAppServerTranslatorOptions["onAsyncQuestion"];
+  private readonly asyncQuestionItems = new Set<string>();
   private readonly resolveArtwork?: CodexAppServerTranslatorOptions["resolveArtwork"];
   private readonly artworkRequests = new Map<string, symbol>();
 
@@ -95,6 +101,8 @@ export class CodexAppServerTranslator {
    *  can correlate item/completed back to the originating tool_call. */
   private readonly toolCallIds = new Map<string, string>();
   private readonly emittedToolCallIds = new Set<string>();
+  private parentToolId: string | undefined;
+  private readonly unparentedIds = new Set<string>();
   private readonly completedItemIds = new Set<string>();
   private readonly safetyReviewToolCalls = new Map<string, string>();
   private readonly completedSafetyReviewIds = new Set<string>();
@@ -163,6 +171,7 @@ export class CodexAppServerTranslator {
    *  events carry only the diff; the lifecycle events sometimes
    *  carry the full accumulated text.) */
   private readonly emittedMessageText = new Map<string, string>();
+  private readonly reasoningParts = new Map<string, { summary: Map<number, string>; content: Map<number, string> }>();
   /** Agent-message deltas carry only itemId + text. Retain the phase announced
    * by item/started so streamed chunks keep Codex's commentary/final
    * distinction all the way to the renderer. */
@@ -209,10 +218,62 @@ export class CodexAppServerTranslator {
   private lastTurnUsage: TurnUsage | undefined;
 
   constructor(opts: CodexAppServerTranslatorOptions) {
+    this.onAsyncQuestion = opts.onAsyncQuestion;
     this.sessionId = opts.sessionId;
-    this.emit = opts.emit;
+    this.emit = (event) => {
+      const update = event.update;
+      const key =
+        "toolCallId" in update
+          ? update.toolCallId
+          : "messageId" in update
+            ? update.messageId
+            : update.sessionUpdate === "error_notice"
+              ? `notice-${update.noticeId}`
+              : undefined;
+      if (key && !this.parentToolId) this.unparentedIds.add(key);
+      if (this.unparentedIds.size > 10_000)
+        this.unparentedIds.delete(this.unparentedIds.values().next().value!);
+      const parentable =
+        update.sessionUpdate === "agent_message_chunk" ||
+        update.sessionUpdate === "agent_thought_chunk" ||
+        update.sessionUpdate === "tool_call" ||
+        update.sessionUpdate === "error_notice";
+      opts.emit(
+        this.parentToolId && parentable
+          ? { ...event, update: { ...update, parentToolId: this.parentToolId } }
+          : event,
+      );
+    };
     this.onUnknown = opts.onUnknown;
     this.resolveArtwork = opts.resolveArtwork;
+  }
+
+  /** Independent native-thread state sharing only the canonical event sink. */
+  childTranslator(): CodexAppServerTranslator {
+    return new CodexAppServerTranslator({
+      sessionId: this.sessionId,
+      resolveArtwork: this.resolveArtwork,
+      onUnknown: this.onUnknown,
+      onAsyncQuestion: this.onAsyncQuestion,
+      emit: (event) => {
+        if (event.update.sessionUpdate !== "usage_update") this.emit(event);
+      },
+    });
+  }
+
+  setParentToolId(toolCallId: string): void {
+    if (this.parentToolId === toolCallId) return;
+    this.parentToolId = toolCallId;
+    if (this.unparentedIds.size)
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "message_parent_update",
+          messageIds: [...this.unparentedIds],
+          parentToolId: toolCallId,
+        },
+      });
+    this.unparentedIds.clear();
   }
 
   // ── Public accessors ────────────────────────────────────
@@ -317,7 +378,9 @@ export class CodexAppServerTranslator {
     this.toolCallIds.clear();
     this.emittedToolCallIds.clear();
     this.completedItemIds.clear();
+    this.asyncQuestionItems.clear();
     this.emittedMessageText.clear();
+    this.reasoningParts.clear();
     this.messagePhases.clear();
     this.emittedMessagePhases.clear();
     this.emittedToolOutput.clear();
@@ -376,7 +439,11 @@ export class CodexAppServerTranslator {
         break;
       case "item/reasoning/textDelta":
       case "item/reasoning/summaryTextDelta":
-        this.onReasoningDelta(params);
+      case "item/reasoning/summaryPartAdded":
+        this.onReasoningDelta(params, method);
+        break;
+      case "item/plan/delta":
+        this.onAgentMessageDelta(params, "commentary");
         break;
       case "item/commandExecution/outputDelta":
       case "item/fileChange/outputDelta":
@@ -571,27 +638,35 @@ export class CodexAppServerTranslator {
     const p = params as { item?: ThreadItemUnion };
     const item = p?.item;
     if (!item || typeof item.type !== "string") return;
+    if (this.completedItemIds.has(item.id)) return;
 
     switch (item.type) {
       case "agentMessage":
-      case "reasoning":
       case "plan":
       case "userMessage":
         // Message-shaped items — we wait for delta events to stream
         // text. Just remember the id for later delta correlation.
+        if (item.type === "agentMessage" && asyncQuestions(item).length) {
+          this.asyncQuestionItems.add(item.id);
+          return;
+        }
         if (item.type === "agentMessage" && item.phase) {
-          this.messagePhases.set(item.id, item.phase);
+          this.messagePhases.set(item.id, item.delivery === "async" ? "commentary" : item.phase);
         }
         if (typeof (item as { text?: string }).text === "string") {
           this.emitMessageDelta(
             item.id,
-            item.type === "reasoning",
+            false,
             (item as { text: string }).text,
             item.type === "agentMessage"
-              ? (item.phase ?? undefined)
-              : undefined,
+              ? (item.delivery === "async" ? "commentary" : item.phase ?? undefined)
+              : item.type === "plan" ? "commentary" : undefined,
           );
         }
+        return;
+
+      case "reasoning":
+        this.onReasoningSnapshot(item);
         return;
 
       case "enteredReviewMode":
@@ -694,14 +769,25 @@ export class CodexAppServerTranslator {
 
   private onItemCompleted(params: unknown): void {
     const p = params as { item?: ThreadItemUnion };
-    const item = p?.item;
+    let item = p?.item;
     if (!item || typeof item.type !== "string") return;
+    if (this.completedItemIds.has(item.id)) return;
+    // Reconnect/replay may deliver only the authoritative completed item.
+    // Materialize its row before settling it, using the same native identity.
+    if (!this.toolCallIds.has(item.id)) this.onItemStarted(params);
+    const streamedOutput = this.emittedToolOutput.get(item.id);
+    if (item.type === "commandExecution" && item.aggregatedOutput == null) {
+      item = {
+        ...item,
+        aggregatedOutput: streamedOutput ?? item.aggregatedOutput,
+      };
+    }
     this.completedItemIds.add(item.id);
     this.emittedToolOutput.delete(item.id);
+    if (item.type === "agentMessage" && this.emitAsyncQuestion(item)) return;
 
     switch (item.type) {
       case "agentMessage":
-      case "reasoning":
       case "plan":
       case "userMessage":
         if (item.type === "agentMessage" && item.phase) {
@@ -710,16 +796,22 @@ export class CodexAppServerTranslator {
         if (typeof (item as { text?: string }).text === "string") {
           this.emitMessageDelta(
             item.id,
-            item.type === "reasoning",
+            false,
             (item as { text: string }).text,
             item.type === "agentMessage"
-              ? (item.phase ?? this.messagePhases.get(item.id))
-              : undefined,
+              ? item.delivery === "async"
+                ? "commentary"
+                : (item.phase ?? this.messagePhases.get(item.id))
+              : item.type === "plan"
+                ? "commentary"
+                : undefined,
           );
         }
-        this.emittedMessageText.delete(item.id);
-        this.messagePhases.delete(item.id);
-        this.emittedMessagePhases.delete(item.id);
+        return;
+
+      case "reasoning":
+        this.onReasoningSnapshot(item);
+        this.reasoningParts.delete(item.id);
         return;
 
       case "enteredReviewMode":
@@ -731,11 +823,13 @@ export class CodexAppServerTranslator {
       case "mcpToolCall":
       case "dynamicToolCall":
       case "collabAgentToolCall":
+      case "imageView":
+      case "imageGeneration":
       case "webSearch": {
         const toolCallId = this.toolCallIds.get(item.id);
         if (!toolCallId) return;
         const status = computeStatus(item);
-        const output = toolOutput(item);
+        const output = toolOutput(item, streamedOutput);
         // Surface the command's plain text output as a content block (not just
         // the `{exitCode, output}` rawOutput object). This lets the renderer
         // show clean output in the detail body AND derive the "N lines" count
@@ -744,15 +838,23 @@ export class CodexAppServerTranslator {
           item.type === "commandExecution" &&
           typeof item.aggregatedOutput === "string"
             ? item.aggregatedOutput
-            : typeof output === "string"
-              ? output
-              : "";
+            : item.type === "fileChange"
+              ? streamedOutput ?? ""
+              : typeof output === "string"
+                ? output
+                : "";
         const dynamicContent =
           item.type === "dynamicToolCall"
             ? dynamicToolContent(item)
             : item.type === "mcpToolCall"
               ? mcpToolContent(item)
-              : null;
+              : item.type === "imageGeneration"
+                ? imageGenerationContent(item)
+                : null;
+        const parsed =
+          item.type === "commandExecution"
+            ? summarizeCommandActions(item)
+            : null;
         this.emit({
           sessionId: this.sessionId,
           update: {
@@ -760,9 +862,12 @@ export class CodexAppServerTranslator {
             toolCallId,
             status,
             rawOutput: output,
-            ...(item.type === "mcpToolCall"
-              ? { rawInput: toolInput(item) }
-              : {}),
+            title:
+              parsed?.title ??
+              (item.type === "collabAgentToolCall"
+                ? describeCollabTool(item).title
+                : describeItem(item)),
+            rawInput: parsed?.rawInput ?? toolInput(item),
             content: dynamicContent
               ? dynamicContent
               : contentText.length > 0
@@ -779,7 +884,6 @@ export class CodexAppServerTranslator {
           },
         });
         if (item.type === "mcpToolCall") this.enrichArtwork(item, toolCallId);
-        this.toolCallIds.delete(item.id);
         return;
       }
 
@@ -797,46 +901,147 @@ export class CodexAppServerTranslator {
             status: "completed",
           },
         });
-        this.toolCallIds.delete(item.id);
         return;
       }
 
       default: {
-        const toolCallId = this.toolCallIds.get(item.id);
+        const toolCallId = this.toolCallIds.get((item as { id: string }).id);
         if (!toolCallId) return;
         this.emit({
           sessionId: this.sessionId,
           update: {
             sessionUpdate: "tool_call_update",
             toolCallId,
-            status: "completed",
+            status: computeStatus(item),
+            rawOutput: item,
           },
         });
-        this.toolCallIds.delete(item.id);
       }
     }
   }
 
-  private onAgentMessageDelta(params: unknown): void {
+  private onAgentMessageDelta(params: unknown, phase?: "commentary"): void {
     const p = params as { itemId?: string; delta?: string };
     if (typeof p?.itemId !== "string" || typeof p?.delta !== "string") return;
+    if (this.completedItemIds.has(p.itemId)) return;
+    if (this.asyncQuestionItems.has(p.itemId)) return;
     this.emitMessageDelta(
       p.itemId,
       false,
       this.appendDelta(p.itemId, p.delta),
-      this.messagePhases.get(p.itemId),
+      phase ?? this.messagePhases.get(p.itemId),
     );
   }
 
-  private onReasoningDelta(params: unknown): void {
-    const p = params as { itemId?: string; delta?: string };
-    if (typeof p?.itemId !== "string" || typeof p?.delta !== "string") return;
-    this.emitMessageDelta(p.itemId, true, this.appendDelta(p.itemId, p.delta));
+  private onReasoningDelta(params: unknown, method: string): void {
+    const p = params as {
+      itemId?: string;
+      delta?: string;
+      summaryIndex?: number;
+      contentIndex?: number;
+    };
+    if (typeof p?.itemId !== "string" || this.completedItemIds.has(p.itemId))
+      return;
+    const parts = this.reasoningParts.get(p.itemId) ?? {
+      summary: new Map<number, string>(),
+      content: new Map<number, string>(),
+    };
+    const summary = method !== "item/reasoning/textDelta";
+    const index = (summary ? p.summaryIndex : p.contentIndex) ?? 0;
+    if (!Number.isInteger(index) || index < 0 || index > 1024) return;
+    const target = summary ? parts.summary : parts.content;
+    if (typeof p.delta === "string")
+      target.set(index, (target.get(index) ?? "") + p.delta);
+    this.reasoningParts.set(p.itemId, parts);
+    const readable = [...parts.summary.values()].some((value) => value.length > 0)
+      ? parts.summary
+      : parts.content;
+    const text = [...readable]
+      .sort(([a], [b]) => a - b)
+      .map(([, value]) => value)
+      .join("\n\n");
+    this.emitMessageDelta(p.itemId, true, text);
+  }
+
+  private emitAsyncQuestion(
+    item: Extract<ThreadItemUnion, { type: "agentMessage" }>,
+  ): boolean {
+    const questions = asyncQuestions(item);
+    if (!questions.length) return false;
+    const toolCallId = this.ensureToolCallId(item.id);
+    this.emitToolCallUpsert(toolCallId, {
+      nativeToolCallId: item.id,
+      title: "request_user_input",
+      kind: "question",
+      status: "completed",
+      rawInput: {
+        delivery: "async",
+        text: item.text,
+        questions: questions.map((q) => ({
+          question: q.title,
+          options: q.options,
+        })),
+      },
+    });
+    // Some builds disclose delivery/questions only in the final snapshot.
+    // Retire any provisional duplicate prose while keeping its durable id.
+    if (this.emittedMessageText.has(item.id))
+      this.emitMessageDelta(item.id, false, "", "commentary");
+    this.onAsyncQuestion?.({
+      sessionId: this.sessionId,
+      questionId: toolCallId,
+      nativeRequestId: `async:${this.turnPrefix}:${item.id}`,
+      toolCallId,
+      source: "native_dialog",
+      blocking: false,
+      questions: questions.map((question, index) => ({
+        id: `q${index}`,
+        prompt: question.title,
+        multiSelect: false,
+        allowOther: true,
+        options: (question.options ?? []).map((label, option) => ({
+          id: `option-${option}`,
+          label,
+        })),
+        ...(question.options?.length ? { defaultOptionIds: ["option-0"] } : {}),
+      })),
+    });
+    return true;
+  }
+
+  private onReasoningSnapshot(
+    item: Extract<ThreadItemUnion, { type: "reasoning" }>,
+  ): void {
+    const summary = item.summary?.filter((part) => typeof part === "string");
+    const content = item.content
+      ?.filter((part) => typeof part === "string")
+      .join("\n\n");
+    const text =
+      (summary?.some((part) => part.length > 0) ? summary.join("\n\n") : "") ||
+      content ||
+      item.text;
+    if (!text) return;
+    // A replay can start with a populated snapshot. Subsequent deltas extend
+    // those same indexed parts rather than replacing them with only the tail.
+    this.reasoningParts.set(item.id, {
+      summary: new Map(
+        Array.from((item.summary ?? []).entries()).filter(
+          ([, value]) => typeof value === "string",
+        ),
+      ),
+      content: new Map(
+        Array.from(
+          (item.content ?? (item.text ? [item.text] : [])).entries(),
+        ).filter(([, value]) => typeof value === "string"),
+      ),
+    });
+    this.emitMessageDelta(item.id, true, text);
   }
 
   private onToolOutputDelta(params: unknown, method: string): void {
     const p = params as { itemId?: string; delta?: string; output?: string };
     if (typeof p?.itemId !== "string") return;
+    if (this.completedItemIds.has(p.itemId)) return;
     const toolCallId = this.toolCallIds.get(p.itemId);
     if (!toolCallId) return;
     // terminalInteraction reports what Codex wrote to stdin, not command
@@ -876,17 +1081,24 @@ export class CodexAppServerTranslator {
   }
 
   private onFilePatchUpdated(params: unknown): void {
-    const p = params as { itemId?: string };
+    const p = params as {
+      itemId?: string;
+      changes?: Extract<ThreadItemUnion, { type: "fileChange" }>["changes"];
+    };
     if (typeof p?.itemId !== "string") return;
+    if (this.completedItemIds.has(p.itemId)) return;
+    if (!Array.isArray(p.changes)) return;
     const toolCallId = this.toolCallIds.get(p.itemId);
     if (!toolCallId) return;
+    const item = { type: "fileChange" as const, id: p.itemId, changes: p.changes };
     this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "tool_call_update",
         toolCallId,
         status: "in_progress",
-        rawOutput: params ?? null,
+        title: describeItem(item),
+        rawInput: toolInput(item),
       },
     });
   }
@@ -1317,7 +1529,7 @@ export class CodexAppServerTranslator {
     phase?: "commentary" | "final_answer",
   ): void {
     const already = this.emittedMessageText.get(itemId) ?? "";
-    if (fullText.length <= already.length) {
+    if (fullText === already) {
       if (
         !isThought &&
         already.length > 0 &&
@@ -1337,8 +1549,9 @@ export class CodexAppServerTranslator {
       }
       return;
     }
-    const delta = fullText.slice(already.length);
-    if (!delta) return;
+    const replace = !fullText.startsWith(already);
+    const delta = replace ? fullText : fullText.slice(already.length);
+    if (!delta && !replace) return;
     this.emittedMessageText.set(itemId, fullText);
     if (!isThought && phase) this.emittedMessagePhases.set(itemId, phase);
     this.emit({
@@ -1350,12 +1563,13 @@ export class CodexAppServerTranslator {
         content: { type: "text", text: delta } as ContentBlock,
         messageId: `${this.turnPrefix}-${itemId}`,
         ...(!isThought && phase ? { phase } : {}),
+        ...(replace ? { textMode: "replace" as const } : {}),
       },
     });
   }
 
   /** For delta events, accumulate the running total before re-emitting
-   *  through emitMessageDelta (which dedups by length). */
+   *  through emitMessageDelta (which reconciles the full text snapshot). */
   private appendDelta(itemId: string, delta: string): string {
     const prev = this.emittedMessageText.get(itemId) ?? "";
     return prev + delta;
@@ -1387,8 +1601,10 @@ type ThreadItemUnion =
       id: string;
       text: string;
       phase?: "commentary" | "final_answer" | null;
+      delivery?: "async" | null;
+      questions?: AsyncUserInputQuestion[] | null;
     }
-  | { type: "reasoning"; id: string; text?: string }
+  | { type: "reasoning"; id: string; text?: string; summary?: string[]; content?: string[] }
   | { type: "plan"; id: string; text: string }
   | {
       type: "commandExecution";
@@ -1398,6 +1614,7 @@ type ThreadItemUnion =
       status?: string;
       exitCode?: number | null;
       aggregatedOutput?: string | null;
+      durationMs?: number | null;
       commandActions?: CommandActionLite[];
     }
   | {
@@ -1433,12 +1650,20 @@ type ThreadItemUnion =
       status?: string;
     }
   | CollabItem
-  | { type: "webSearch"; id: string; query?: string }
+  | { type: "webSearch"; id: string; query?: string; action?: WebSearchAction | null; results?: unknown[] | null }
   | { type: "imageView"; id: string; path?: string }
-  | { type: "imageGeneration"; id: string; status?: string; result?: string }
+  | ({ type: "imageGeneration"; id: string } & Partial<ImageGenerationItem>)
   | { type: "enteredReviewMode"; id: string; review: string }
   | { type: "exitedReviewMode"; id: string; review: string }
   | { type: "contextCompaction"; id: string };
+
+function asyncQuestions(item: Extract<ThreadItemUnion, { type: "agentMessage" }>): AsyncUserInputQuestion[] {
+  if (item.delivery !== "async" || !Array.isArray(item.questions)) return [];
+  return item.questions.filter((question) => typeof question?.title === "string" && question.title.trim()).map((question) => ({
+    title: question.title,
+    options: Array.isArray(question.options) ? question.options.filter((option) => typeof option === "string" && option.trim()) : null,
+  }));
+}
 
 /** Generated `collabAgentToolCall` ThreadItem — one row per collab-tool
  *  invocation (including spawn, messaging, wait, resume, interrupt, and
@@ -1519,7 +1744,11 @@ function describeItem(item: ThreadItemUnion): string {
         ? `${item.namespace}/${item.tool || "tool"}`
         : item.tool || "tool";
     case "webSearch":
-      return `Searching ${truncate(item.query ?? "web", 40)}`;
+      return item.action?.type === "open_page"
+        ? "Open web page"
+        : item.action?.type === "find_in_page"
+          ? "Find in web page"
+          : `Searching ${truncate(item.query || "web", 40)}`;
     case "imageView":
       return "Read image";
     case "imageGeneration":
@@ -1565,6 +1794,8 @@ function summarizeCommandActions(
   if (actions.some((a) => !a || a.type === "unknown")) return null;
   const types = new Set(actions.map((a) => a.type));
   if (types.size !== 1) return null;
+  if (actions.length > 1 && actions.every((action) => action.type === "read") &&
+      new Set(actions.map((action) => action.path ?? action.name)).size > 1) return null;
 
   const cmd = item.command ?? "";
   const first = actions[0];
@@ -1572,11 +1803,11 @@ function summarizeCommandActions(
     case "read": {
       // codex's `name` is the display basename ("README.md"); `path` is the
       // absolute fallback (the renderer shortens it).
-      const name = pickStr(first.name, first.path);
+      const name = pickStr(first.path, first.name);
       return {
         kind: "read",
         title: name ? `Read ${name}` : "Read",
-        rawInput: { file_path: name ?? "", command: cmd },
+        rawInput: { ...recordValue(toolInput(item)), file_path: name ?? "", command: cmd },
       };
     }
     case "search": {
@@ -1586,7 +1817,7 @@ function summarizeCommandActions(
       return {
         kind: "search",
         title: query ? `Grep ${query}` : "Grep",
-        rawInput: { query: query ?? "", path: path ?? "", command: cmd },
+        rawInput: { ...recordValue(toolInput(item)), query: query ?? "", path: path ?? "", command: cmd },
       };
     }
     case "listFiles": {
@@ -1594,7 +1825,7 @@ function summarizeCommandActions(
       return {
         kind: "list",
         title: path ? `List ${path}` : "List files",
-        rawInput: { path: path ?? "", command: cmd },
+        rawInput: { ...recordValue(toolInput(item)), path: path ?? "", command: cmd },
       };
     }
     default:
@@ -1655,6 +1886,8 @@ function fileChangePaths(
 }
 
 function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
+  if (["failed", "declined", "cancelled", "interrupted"].includes(String(recordValue(item).status))) return "failed";
+  if (item.type === "imageGeneration" && item.failure) return "failed";
   if (item.type === "commandExecution") {
     if (typeof item.exitCode === "number" && item.exitCode !== 0)
       return "failed";
@@ -1723,7 +1956,11 @@ function recordValue(value: unknown): Record<string, unknown> {
 function toolInput(item: ThreadItemUnion): unknown {
   switch (item.type) {
     case "commandExecution":
-      return { command: item.command, cwd: item.cwd };
+      return {
+        command: item.command,
+        cwd: item.cwd,
+        commandActions: item.commandActions,
+      };
     case "fileChange":
       return { changes: item.changes };
     case "mcpToolCall":
@@ -1765,19 +2002,27 @@ function toolInput(item: ThreadItemUnion): unknown {
         reasoningEffort: item.reasoningEffort ?? undefined,
       };
     case "webSearch":
-      return { query: item.query };
+      return { query: item.query, action: item.action };
     case "imageView":
       return { path: item.path };
     case "imageGeneration":
-      return { status: item.status };
+      return {
+        revisedPrompt: item.revisedPrompt,
+        transparentBackground: item.transparentBackground,
+      };
     default:
       return item;
   }
 }
 
-function toolOutput(item: ThreadItemUnion): unknown {
+function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
   if (item.type === "commandExecution") {
-    return { exitCode: item.exitCode, output: item.aggregatedOutput };
+    return {
+      exitCode: item.exitCode,
+      output: item.aggregatedOutput,
+      status: item.status,
+      durationMs: item.durationMs,
+    };
   }
   if (item.type === "mcpToolCall") {
     return item.result ?? item.error ?? null;
@@ -1789,14 +2034,38 @@ function toolOutput(item: ThreadItemUnion): unknown {
     // Last known state of the target agent(s) — status + final message.
     return item.agentsStates ?? null;
   }
-  if (item.type === "imageGeneration" && typeof item.result === "string") {
-    return item.result;
-  }
+  if (item.type === "imageGeneration")
+    return {
+      status: item.status,
+      failure: item.failure,
+      savedPath: item.savedPath,
+    };
+  if (item.type === "webSearch") return { results: item.results ?? null };
+  if (item.type === "fileChange")
+    return {
+      status: item.status,
+      ...(streamedOutput !== undefined ? { output: streamedOutput } : {}),
+    };
   return null;
 }
 
-/** MCP image results are canonical content, not a base64 JSON disclosure. */
-function mcpToolContent(item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>): ToolCallContent[] | null {
+function imageGenerationContent(
+  item: Extract<ThreadItemUnion, { type: "imageGeneration" }>,
+): ToolCallContent[] | null {
+  const result = item.result;
+  if (!result || result.length > 16 * 1024 * 1024) return null;
+  // Native image generation supplies PNG base64; data URLs and links use the
+  // same validated media conversion as dynamic tools. Never dump binary JSON.
+  const content = /^[A-Za-z0-9+/]+={0,2}$/.test(result)
+    ? { type: "image" as const, mimeType: "image/png", data: result }
+    : dynamicMediaContent(result, "image");
+  return content ? [{ type: "content", content }] : null;
+}
+
+/** Preserve MCP's readable and media content in the shared transcript contract. */
+function mcpToolContent(
+  item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
+): ToolCallContent[] | null {
   const result = recordValue(item.result);
   const content = result.content ?? recordValue(result.raw).content;
   if (!Array.isArray(content)) return null;
@@ -1804,9 +2073,78 @@ function mcpToolContent(item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>)
   for (const candidate of content.slice(0, 128)) {
     const value = recordValue(candidate);
     if (value.type === "text" && typeof value.text === "string") {
-      blocks.push({ type: "content", content: { type: "text", text: value.text } });
-    } else if (value.type === "image" && typeof value.data === "string" && typeof value.mimeType === "string" && /^image\/(?:png|jpeg|webp|gif)$/.test(value.mimeType) && value.data.length <= 16 * 1024 * 1024 && /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)) {
-      blocks.push({ type: "content", content: { type: "image", mimeType: value.mimeType, data: value.data } });
+      blocks.push({
+        type: "content",
+        content: { type: "text", text: value.text },
+      });
+    } else if (
+      (value.type === "image" || value.type === "audio") &&
+      typeof value.data === "string" &&
+      typeof value.mimeType === "string" &&
+      value.mimeType.startsWith(`${value.type}/`) &&
+      value.data.length <= 16 * 1024 * 1024 &&
+      /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)
+    ) {
+      blocks.push({
+        type: "content",
+        content: {
+          type: value.type,
+          mimeType: value.mimeType,
+          data: value.data,
+        },
+      });
+    } else if (
+      value.type === "resource_link" &&
+      typeof value.uri === "string"
+    ) {
+      blocks.push({
+        type: "content",
+        content: {
+          type: "resource_link",
+          uri: value.uri,
+          name: typeof value.name === "string" ? value.name : value.uri,
+          ...(typeof value.description === "string"
+            ? { description: value.description }
+            : {}),
+          ...(typeof value.title === "string" ? { title: value.title } : {}),
+          ...(typeof value.mimeType === "string"
+            ? { mimeType: value.mimeType }
+            : {}),
+          ...(typeof value.size === "number" ? { size: value.size } : {}),
+        },
+      });
+    } else if (value.type === "resource") {
+      const resource = recordValue(value.resource);
+      if (typeof resource.uri !== "string") continue;
+      if (typeof resource.text === "string") {
+        blocks.push({
+          type: "content",
+          content: {
+            type: "resource",
+            resource: {
+              uri: resource.uri,
+              text: resource.text,
+              ...(typeof resource.mimeType === "string"
+                ? { mimeType: resource.mimeType }
+                : {}),
+            },
+          },
+        });
+      } else {
+        // Binary resources remain inspectable by identity without copying their
+        // bytes into another durable presentation field.
+        blocks.push({
+          type: "content",
+          content: {
+            type: "resource_link",
+            uri: resource.uri,
+            name: resource.uri,
+            ...(typeof resource.mimeType === "string"
+              ? { mimeType: resource.mimeType }
+              : {}),
+          },
+        });
+      }
     }
   }
   return blocks.length ? blocks : null;

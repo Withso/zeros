@@ -6,9 +6,8 @@
 // narration, sub-agents — renders as ONE group:
 //
 //   • While the turn is LIVE: fully EXPANDED with NO header chip. The top-level
-//     caller supplies an append-only projection of completed/failed tools and
-//     immutable records, so unfinished calls and provisional prose never mount
-//     here. Each completed action lands as one compact row.
+//     caller supplies narration and tool activity in source order. Running
+//     calls can be expanded before their final result arrives.
 //
 //   • Once the turn settles (live=false): ordinary work
 //     COLLAPSES into one chip —
@@ -36,6 +35,7 @@ import {
 import { cn } from "@/renderer/shared/ui/cn";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "./types";
+import { isVisibleTranscriptEvent } from "../turn-partition";
 import {
   countEventSummary,
   formatEventSummary,
@@ -60,8 +60,7 @@ interface EventStripeProps {
   events: AgentMessage[];
   ctx: RendererContext;
   /** True while the turn is actively streaming. A live group renders fully
-   *  expanded with no header chip; TurnEventList has already reduced top-level
-   *  events to committed rows. Once the turn finishes (live=false), the full
+   *  expanded with no header chip. Once the turn finishes (live=false), the full
    *  history collapses into one summary chip. */
   live: boolean;
   /** Sub-agent bodies pass this: always render the (dimmed) children, never
@@ -89,6 +88,7 @@ export const EventStripe = memo(function EventStripe({
   browserTailClosed = false,
 }: EventStripeProps) {
   const [userExpanded, setUserExpanded] = useState(false);
+  events = events.filter(isVisibleTranscriptEvent);
 
   // Force the group open while it holds a pending permission, so the gated
   // row (e.g. Claude's "Plan ready for review") is never hidden inside a
