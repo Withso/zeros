@@ -34,13 +34,12 @@ const ALLOWLIST = new Set([
   // xterm.js theme object — the terminal emulator takes raw hex
   // strings in a JS object, cannot consume CSS custom properties.
   "apps/desktop/src/renderer/shell/terminal/terminal-session-view.tsx",
-  // @pierre/trees glyph palette — an explicit RULES.md library boundary. These
-  // hexes are @pierre's OWN "complete" light-dark() icon colors (mirrored
-  // from the package), reproduced so the @-mention pill matches the Files
-  // tab EXACTLY in both themes. @pierre colors the tree's icons on `:host`
-  // in its shadow root, so they can't be recolored from our tokens — the
-  // pill mirrors @pierre's values directly (see file header).
-  "apps/desktop/src/renderer/features/agent/composer-editor/file-type-icon.tsx",
+  // File-type icon sprite + its light-dark() palette. The glyphs render inside
+  // @pierre/trees' shadow root AND in the light DOM (@-mention pills), and a
+  // <use>'d symbol can only be colored through custom properties defined on
+  // its host — so the palette lives with the sprite, not in zeros-tokens.css
+  // (see file header).
+  "apps/desktop/src/renderer/shared/theme/file-icons.ts",
   // Portable design-document boundary. This module emits an authored
   // `Zeros Design/tokens.css` seed whose palette cannot consume app-chrome
   // custom properties (the resulting files also render outside Zeros).
