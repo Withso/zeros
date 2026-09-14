@@ -70,6 +70,7 @@ import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
 import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
 import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
+import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
 import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2487,6 +2488,7 @@ try {
   await runRepoSettingsSmoke({ page, check });
   await runTerminalWorkbenchSmoke({ page, check });
   await runWorkspaceArchivesSmoke({ page, check });
+  await runPrActionsSmoke({ page, check });
   // Subscription checks install a context-wide clock that survives navigation.
   // Keep them last so layout checks retain the browser's real animation timing.
   await runSubscriptionSmoke({ page, check });

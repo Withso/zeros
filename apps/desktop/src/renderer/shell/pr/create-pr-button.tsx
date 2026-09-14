@@ -127,7 +127,7 @@ export function CreatePrButton({
   disabled,
   disabledReason,
 }: CreatePrButtonProps) {
-  const sendToChat = useSendToActiveChat();
+  const sendToChat = useSendToActiveChat(workspace.path);
   const dispatch = useWorkspaceDispatch();
   const busy = usePrCreateActionClaimed(workspace.id);
   const directOnly = workspace.kind === "design";
