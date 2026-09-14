@@ -1286,8 +1286,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         q.request.nativeRequestId === request.nativeRequestId,
     );
     if (dupe) return;
+    const next = [...existing, { agentId, questionId, request }];
+    // Preserve FIFO within each class; an optional question cannot conceal a
+    // parked provider request that the running turn needs answered.
+    next.sort((a, b) => Number(b.request.blocking) - Number(a.request.blocking));
     get().patchSession(chatId, {
-      pendingQuestions: [...existing, { agentId, questionId, request }],
+      pendingQuestions: next,
     });
   },
 
@@ -1764,7 +1768,7 @@ export function useChatStreaming(chatId: string | null | undefined): boolean {
 export type ChatAwaitingKind = "plan" | "input" | null;
 
 function awaitingKindOfSlot(slot: AgentSessionState): ChatAwaitingKind {
-  if ((slot.pendingQuestions?.length ?? 0) > 0) return "input";
+  if (slot.pendingQuestions?.some((entry) => entry.request.blocking)) return "input";
   const p = slot.pendingPermission;
   if (!p) return null;
   return isPlanReviewRequest(p.request) ? "plan" : "input";

@@ -5507,6 +5507,23 @@ export class WorkspaceService {
           branchName: reqStr(params, "branchName"),
         });
       case "file.tree": {
+        if (params.includeIgnored === true) {
+          // Inclusive mention search has the same local-only boundary as
+          // file.ignored: ignored folders may contain other private worktrees.
+          if (remote)
+            throw new GitError({
+              code: "REMOTE_RESTRICTED",
+              message: "Ignored files can only be listed from the desktop app.",
+            });
+          const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+          return {
+            files: await listWorkspaceFiles(cwd, optNum(params, "limit"), {
+              includeIgnored: true,
+              query: optStr(params, "query"),
+              mentionRevision: optStr(params, "mentionRevision"),
+            }),
+          };
+        }
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         const listing =
           params.includeDesignDirectories === true
@@ -5531,9 +5548,8 @@ export class WorkspaceService {
         };
       }
       // ── Files tab: the .gitignore'd entries file.tree deliberately omits.
-      // A separate op rather than a flag on file.tree, because that list also
-      // feeds the @-mention picker and quick-open — neither of which should
-      // start offering node_modules paths. LAZY: no `dir` returns the collapsed
+      // Separate from the inclusive mention search: the tree expands ignored
+      // directories on demand. LAZY: no `dir` returns the collapsed
       // ignored roots (~8 rows), `dir` returns one level inside one of them.
       //
       // LOCAL-ONLY, and not by omission — by an explicit refusal, because the

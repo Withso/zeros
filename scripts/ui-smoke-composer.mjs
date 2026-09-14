@@ -64,12 +64,14 @@ import { runPersonalOrganizationSmoke } from "./ui-smoke-personal.mjs";
 import { runCustomizeSmoke } from "./ui-smoke-customize.mjs";
 import { runToolsSmoke } from "./ui-smoke-tools.mjs";
 import { runNativeToolsSmoke } from "./ui-smoke-native-tools.mjs";
+import { runCodexTranscriptSmoke } from "./ui-smoke-codex-transcript.mjs";
 import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
 import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
 import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runComposerEditorSmoke } from "./ui-smoke-composer-editor.mjs";
+import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -2480,9 +2482,11 @@ try {
   );
 
   await runPersonalOrganizationSmoke({ page, check });
+  await runMentionsSmoke({ page, check });
   await runCustomizeSmoke({ page, check });
   await runToolsSmoke({ page, check });
   await runNativeToolsSmoke({ page, check });
+  await runCodexTranscriptSmoke({ page, check });
   await runRepoSettingsSmoke({ page, check });
   await runTerminalWorkbenchSmoke({ page, check });
   await runWorkspaceArchivesSmoke({ page, check });

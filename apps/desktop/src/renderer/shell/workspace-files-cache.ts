@@ -21,6 +21,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { listWorkspaceFileListing } from "@/renderer/platform/git";
+import { invalidateMentionFiles } from "../features/agent/mention-files-cache";
 
 import type { WorkspaceFileListing } from "../platform/bridge/workspace-bridge";
 export type { WorkspaceFileListing } from "../platform/bridge/workspace-bridge";
@@ -150,6 +151,7 @@ export async function loadWorkspaceFileListing(
  * before consumers render with their new refresh key. */
 export function invalidateWorkspaceFiles(cwd: string | undefined): void {
   if (!cwd) return;
+  invalidateMentionFiles(cwd);
   const key = workspaceCacheKey(cwd);
   generations.set(key, (generations.get(key) ?? 0) + 1);
   const retained = cache.get(key);
@@ -161,6 +163,7 @@ export function invalidateWorkspaceFiles(cwd: string | undefined): void {
  * every bounded file-list entry so a background worktree edit cannot remain
  * stale when the user switches back to it within the normal TTL. */
 export function invalidateAllWorkspaceFiles(): void {
+  invalidateMentionFiles();
   const cwds = new Set([
     ...cache.keys(),
     ...inflight.keys(),

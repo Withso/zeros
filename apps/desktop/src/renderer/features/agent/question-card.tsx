@@ -323,6 +323,9 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
       // keys — digits must not toggle options in every pane at once.
       if (!isInFocusedPane(rootRef.current)) return;
       const el = document.activeElement;
+      // Optional questions coexist with the composer. Their preselection must
+      // never submit from a global Enter/Escape outside the question itself.
+      if (!request.blocking && !rootRef.current?.contains(el)) return;
       const inCardInput = el === inputRef.current;
       const aimedElsewhere =
         !inCardInput &&
@@ -374,7 +377,7 @@ function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [chooseOther, dismiss, submit, toggleOption]);
+  }, [chooseOther, dismiss, submit, toggleOption, request.blocking]);
 
   return (
     <div ref={rootRef} className="flex w-full min-w-0 flex-col gap-1.5">

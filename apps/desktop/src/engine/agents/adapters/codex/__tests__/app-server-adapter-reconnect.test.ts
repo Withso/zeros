@@ -576,7 +576,9 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     expect(emit.onQuestionRequest).toHaveBeenCalledTimes(1);
     const [, , request] = emit.onQuestionRequest.mock.calls[0];
     expect(request.sessionId).toBe(session.sessionId);
-    expect(request.toolCallId).toBe("ask-1");
+    expect(emit.onSessionUpdate.mock.calls.map(([, event]) => event.update)).toContainEqual(
+      expect.objectContaining({ sessionUpdate: "tool_call", nativeToolCallId: "ask-1", toolCallId: request.toolCallId }),
+    );
     expect(request.questions[0]).toMatchObject({
       id: "q0",
       prompt: "How much validation do you want?",

@@ -35,6 +35,7 @@ import {
 import { CodeWithGutter, HighlightedCode } from "./highlighted-code";
 import { parseReadBody } from "./read-lines";
 import { asDisplayString } from "./raw-output";
+import { toolRecord } from "./native-tool-presentation";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -98,7 +99,7 @@ function readToolText(tool: AgentToolMessage): string | null {
     }
     if (parts.length > 0) return parts.join("\n");
   }
-  const out = asDisplayString(tool.rawOutput);
+  const out = asDisplayString(capturedOutput(tool));
   return out || null;
 }
 
@@ -304,128 +305,11 @@ export function NativeBrowserToolRow({
  *  User-feedback driven: "max height ~7-8 lines is enough." */
 const DETAIL_MAX_H = "max-h-[200px]";
 
-function renderDetail(
+export function renderDetail(
   message: AgentMessage,
   ctx: RendererContext,
 ): React.ReactNode {
-  if (message.kind === "tool") {
-    const tool = message as AgentToolMessage;
-
-    // READ of a text file → a line-numbered, syntax-highlighted code view with
-    // the ACTUAL lines read (e.g. 1222–1280, not 1–60). Image reads fall through
-    // to the generic content handler below (which renders the <img>).
-    if (tool.toolKind === "read" && !isImagePath(readPathOf(tool))) {
-      const text = readToolText(tool);
-      if (text && text.length > 0) {
-        const { code, startLine } = parseReadBody(text, tool.rawInput);
-        return (
-          <CodeWithGutter
-            code={code}
-            lang={langForTool(tool)}
-            startLine={startLine}
-          />
-        );
-      }
-    }
-
-    if (tool.content && tool.content.length > 0) {
-      const texts: string[] = [];
-      const images: string[] = [];
-      for (const block of tool.content) {
-        const b = block as any;
-        if (b.type === "content") {
-          const c = b.content;
-          if (c?.type === "text" && typeof c.text === "string") {
-            texts.push(c.text);
-          } else if (
-            c?.type === "image" &&
-            typeof c.data === "string" &&
-            typeof c.mimeType === "string"
-          ) {
-            // A tool returning an image (screenshot, MCP image result).
-            images.push(`data:${c.mimeType};base64,${c.data}`);
-          } else if (c?.type === "image" && typeof c.uri === "string") {
-            images.push(c.uri);
-          } else if (c?.type === "resource_link" && typeof c.uri === "string") {
-            texts.push(`@${c.uri.replace(/^file:\/\//, "")}`);
-          } else if (c?.type === "resource" && c.resource) {
-            // Embedded resource — show its inline text or a path marker.
-            if (typeof c.resource.text === "string")
-              texts.push(c.resource.text);
-            else if (typeof c.resource.uri === "string")
-              texts.push(
-                `@${String(c.resource.uri).replace(/^file:\/\//, "")}`,
-              );
-          }
-        } else if (b.type === "text" && typeof b.text === "string") {
-          // Defensive: a FLAT (un-wrapped) text block from a non-conformant
-          // adapter. The per-agent translators normalize these, but native/edge
-          // shapes can still land here — never drop them silently.
-          texts.push(b.text);
-        } else if (b.type === "diff" && typeof b.newText === "string") {
-          // A diff block on a NON-edit tool (EditCard owns the `edit` kind).
-          // Surface the new content so it isn't invisible.
-          const header = typeof b.path === "string" ? `--- ${b.path}\n` : "";
-          texts.push(header + b.newText);
-        }
-        // `terminal` blocks carry no inline text here — the rawOutput
-        // fallback below covers shell/terminal output.
-      }
-      if (texts.length > 0 || images.length > 0) {
-        return (
-          <div className={`${DETAIL_MAX_H} overflow-y-auto`}>
-            {ctx.attachmentImagesActive !== false &&
-              images.map((src, i) => (
-                <img
-                  key={i}
-                  src={src}
-                  alt="tool output"
-                  className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
-                />
-              ))}
-            {texts.length > 0 && (
-              <HighlightedCode
-                code={texts.join("\n")}
-                lang={langForTool(tool)}
-                className={OUTPUT_CLASS}
-              />
-            )}
-          </div>
-        );
-      }
-    }
-    // Fall back to captured OUTPUT before raw input — fixes adapters that
-    // populate `rawOutput` (or emit only a terminal block) instead of
-    // canonical content blocks. The renderer never read rawOutput before,
-    // so shell/terminal output silently vanished for some agents.
-    const outStr = asDisplayString(tool.rawOutput);
-    if (outStr) {
-      return (
-        <HighlightedCode
-          code={outStr}
-          lang={langForTool(tool)}
-          className={`${DETAIL_MAX_H} overflow-y-auto ${OUTPUT_CLASS}`}
-        />
-      );
-    }
-    // Tools with no output (input-only, or pending) — fall back to a JSON
-    // view of the raw input so the user can ALWAYS inspect. Highlighted as JSON.
-    if (tool.rawInput) {
-      return (
-        <HighlightedCode
-          code={JSON.stringify(tool.rawInput, null, 2)}
-          lang="json"
-          className={`${DETAIL_MAX_H} bg-bg2/60 text-fg1 overflow-y-auto rounded-md p-2 font-mono text-xs leading-relaxed [&_pre]:break-words [&_pre]:whitespace-pre-wrap`}
-        />
-      );
-    }
-    // Last resort: show a stub so the row is still inspectable. Never
-    // returns null for a tool — `expandable` in EventRow then drives
-    // the +/- affordance off `detail !== undefined`.
-    return (
-      <div className="text-muted-fg text-xs italic">(no captured output)</div>
-    );
-  }
+  if (message.kind === "tool") return <ToolDetail tool={message} ctx={ctx} />;
   if (message.kind === "text" && (message as any).role === "thought") {
     const text = (message as any).text as string;
     if (!text) return null;
@@ -444,6 +328,235 @@ function renderDetail(
     if (!m.message) return null;
     return (
       <div className="text-fg2 text-sm whitespace-pre-wrap">{m.message}</div>
+    );
+  }
+  return null;
+}
+
+function capturedOutput(tool: AgentToolMessage): unknown {
+  const output = toolRecord(tool.rawOutput);
+  if ("exitCode" in output)
+    return (
+      output.output ??
+      [output.stdout, output.stderr]
+        .filter((v) => typeof v === "string")
+        .join("\n")
+    );
+  if (tool.toolKind === "web_search" && "results" in output)
+    return output.results;
+  return tool.rawOutput;
+}
+
+/** Mounted only while the existing row is expanded. Input remains visible
+ * beside output so an empty result can never conceal the operation itself. */
+function ToolDetail({
+  tool,
+  ctx,
+}: {
+  tool: AgentToolMessage;
+  ctx: RendererContext;
+}) {
+  const input = asDisplayString(tool.rawInput);
+  const output = toolRecord(tool.rawOutput);
+  const status =
+    typeof output.status === "string" &&
+    ["declined", "cancelled", "interrupted"].includes(output.status)
+      ? output.status
+      : tool.status;
+  const label =
+    {
+      completed: "Completed",
+      failed: "Failed",
+      in_progress: "Running",
+      pending: "Pending",
+      declined: "Declined",
+      cancelled: "Cancelled",
+      interrupted: "Interrupted",
+    }[status] ?? status;
+  const body = renderToolOutput(tool, ctx);
+  const extra =
+    (tool.content?.length || capturedOutput(tool) !== tool.rawOutput) &&
+    asDisplayString(
+      Object.fromEntries(
+        Object.entries(output).filter(
+          ([key]) =>
+            ![
+              "exitCode",
+              "status",
+              "durationMs",
+              "output",
+              "stdout",
+              "stderr",
+              "content",
+              "results",
+              "zerosQuestion",
+            ].includes(key),
+        ),
+      ),
+    );
+  return (
+    <div className={`${DETAIL_MAX_H} space-y-2 overflow-y-auto`}>
+      <div className="text-fg2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <span>{label}</span>
+        {typeof output.exitCode === "number" && (
+          <span>{`Exit code: ${output.exitCode}`}</span>
+        )}
+        {typeof output.durationMs === "number" && (
+          <span>{`Duration: ${output.durationMs} ms`}</span>
+        )}
+      </div>
+      {input && (
+        <div>
+          <div className="text-fg2 mb-1 text-xs">Input</div>
+          <HighlightedCode code={input} lang="text" className={OUTPUT_CLASS} />
+        </div>
+      )}
+      <div>
+        <div className="text-fg2 mb-1 text-xs">Output</div>
+        {body ?? (
+          <div className="text-fg2 text-xs italic">
+            {tool.status === "pending" || tool.status === "in_progress"
+              ? "Waiting for output."
+              : tool.toolKind === "web_search"
+                ? Array.isArray(output.results)
+                  ? "No search results were returned."
+                  : "results" in output
+                    ? "The provider did not include search results."
+                    : "No search results were captured for this call."
+                : "No output was captured."}
+          </div>
+        )}
+      </div>
+      {body && extra && (
+        <HighlightedCode code={extra} lang="text" className={OUTPUT_CLASS} />
+      )}
+    </div>
+  );
+}
+
+function renderToolOutput(
+  tool: AgentToolMessage,
+  ctx: RendererContext,
+): React.ReactNode {
+  // READ of a text file → a line-numbered, syntax-highlighted code view with
+  // the ACTUAL lines read (e.g. 1222–1280, not 1–60). Image reads fall through
+  // to the generic content handler below (which renders the <img>).
+  if (tool.toolKind === "read" && !isImagePath(readPathOf(tool))) {
+    const text = readToolText(tool);
+    if (text && text.length > 0) {
+      const { code, startLine } = parseReadBody(text, tool.rawInput);
+      return (
+        <CodeWithGutter
+          code={code}
+          lang={langForTool(tool)}
+          startLine={startLine}
+        />
+      );
+    }
+  }
+
+  if (tool.content && tool.content.length > 0) {
+    const texts: string[] = [];
+    const images: string[] = [];
+    const audio: string[] = [];
+    for (const block of tool.content) {
+      const b = block as any;
+      if (b.type === "content") {
+        const c = b.content;
+        if (c?.type === "text" && typeof c.text === "string") {
+          texts.push(c.text);
+        } else if (
+          c?.type === "image" &&
+          typeof c.data === "string" &&
+          typeof c.mimeType === "string"
+        ) {
+          // A tool returning an image (screenshot, MCP image result).
+          images.push(`data:${c.mimeType};base64,${c.data}`);
+        } else if (c?.type === "image" && typeof c.uri === "string") {
+          images.push(c.uri);
+        } else if (
+          c?.type === "audio" &&
+          typeof c.data === "string" &&
+          typeof c.mimeType === "string" &&
+          c.mimeType.startsWith("audio/")
+        ) {
+          audio.push(`data:${c.mimeType};base64,${c.data}`);
+        } else if (c?.type === "resource_link" && typeof c.uri === "string") {
+          texts.push(
+            [
+              c.title ?? c.name,
+              c.description,
+              `@${c.uri.replace(/^file:\/\//, "")}`,
+            ]
+              .filter((value) => typeof value === "string" && value)
+              .join("\n"),
+          );
+        } else if (c?.type === "resource" && c.resource) {
+          // Embedded resource — show its inline text or a path marker.
+          if (typeof c.resource.text === "string") texts.push(c.resource.text);
+          else if (typeof c.resource.uri === "string")
+            texts.push(`@${String(c.resource.uri).replace(/^file:\/\//, "")}`);
+        }
+      } else if (b.type === "text" && typeof b.text === "string") {
+        // Defensive: a FLAT (un-wrapped) text block from a non-conformant
+        // adapter. The per-agent translators normalize these, but native/edge
+        // shapes can still land here — never drop them silently.
+        texts.push(b.text);
+      } else if (b.type === "diff" && typeof b.newText === "string") {
+        // A diff block on a NON-edit tool (EditCard owns the `edit` kind).
+        // Surface the new content so it isn't invisible.
+        const header = typeof b.path === "string" ? `--- ${b.path}\n` : "";
+        texts.push(header + b.newText);
+      }
+      // `terminal` blocks carry no inline text here — the rawOutput
+      // fallback below covers shell/terminal output.
+    }
+    if (texts.length > 0 || images.length > 0 || audio.length > 0) {
+      return (
+        <div className={`${DETAIL_MAX_H} overflow-y-auto`}>
+          {ctx.attachmentImagesActive !== false &&
+            images.map((src, i) => (
+              <img
+                key={i}
+                src={src}
+                alt="tool output"
+                className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
+              />
+            ))}
+          {ctx.attachmentImagesActive !== false &&
+            audio.map((src, index) => (
+              <audio
+                key={index}
+                controls
+                preload="none"
+                src={src}
+                aria-label="Tool audio output"
+                className="mb-2 max-w-full"
+              />
+            ))}
+          {texts.length > 0 && (
+            <HighlightedCode
+              code={texts.join("\n")}
+              lang={langForTool(tool)}
+              className={OUTPUT_CLASS}
+            />
+          )}
+        </div>
+      );
+    }
+  }
+  // Fall back to captured OUTPUT before raw input — fixes adapters that
+  // populate `rawOutput` (or emit only a terminal block) instead of
+  // canonical content blocks. The renderer never read rawOutput before,
+  // so shell/terminal output silently vanished for some agents.
+  const outStr = asDisplayString(capturedOutput(tool));
+  if (outStr) {
+    return (
+      <HighlightedCode
+        code={outStr}
+        lang={langForTool(tool)}
+        className={`${DETAIL_MAX_H} overflow-y-auto ${OUTPUT_CLASS}`}
+      />
     );
   }
   return null;

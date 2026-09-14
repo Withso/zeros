@@ -65,6 +65,13 @@ describe("applyBridgeQuestionRequest — queue semantics", () => {
     expect(s?.pendingQuestions.map((q) => q.questionId)).toEqual(["q-1"]);
   });
 
+  it("puts blocking questions ahead of optional async questions without losing either", () => {
+    const store = useSessionsStore.getState();
+    store.applyBridgeQuestionRequest("codex", "async", req("sidA", { blocking: false, questionId: "async", nativeRequestId: "async-native" }));
+    store.applyBridgeQuestionRequest("codex", "blocking", req("sidA", { questionId: "blocking", nativeRequestId: "blocking-native" }));
+    expect(useSessionsStore.getState().sessions.chatA.pendingQuestions.map((entry) => entry.questionId)).toEqual(["blocking", "async"]);
+  });
+
   it("appends a SECOND distinct question (no clobber, arrival order)", () => {
     const store = useSessionsStore.getState();
     store.applyBridgeQuestionRequest("claude", "q-1", req("sidA"));

@@ -2,13 +2,11 @@
 // Workspace file listing — backs the composer's @-mention picker
 // ──────────────────────────────────────────────────────────
 //
-// The renderer can't touch the filesystem, so the @-mention picker
-// asks the engine for the workspace's file list (once per cwd; the
-// renderer caches + fuzzy-filters in-memory per keystroke).
+// The renderer asks for a Git-aware file list for Files/quick-open, or an
+// inclusive, query-filtered filesystem search for the @-mention picker.
 //
-// We prefer `git ls-files` because it gives .gitignore-respect for
-// free — node_modules / dist / build / .git never surface — and it's
-// fast even on large monorepos. `-c` lists tracked files, `-o` adds
+// The default listing uses `git ls-files` to respect standard ignores while
+// staying fast on large monorepos. `-c` lists tracked files, `-o` adds
 // untracked-but-not-ignored ones (so brand-new files the user just
 // created are mentionable), `--exclude-standard` honours .gitignore +
 // .git/info/exclude + the global excludesfile, and `-z` is NUL-delimited
@@ -28,6 +26,8 @@
 //
 // When cwd isn't a git repo (fresh folder, no `git init` yet) we fall
 // back to a bounded recursive walk that skips the usual heavy dirs.
+// Mentions explicitly opt into includeIgnored, which searches the filesystem
+// (including hidden paths and empty directories) before capping ranked results.
 // ──────────────────────────────────────────────────────────
 
 import * as fsp from "node:fs/promises";
@@ -35,6 +35,7 @@ import * as path from "node:path";
 
 import { runGit } from "./git-exec";
 import { isInside } from "../files/read-file";
+import { listMentionPaths } from "../files/mention-paths";
 
 /** Hard cap on returned paths — keeps the IPC payload + the renderer's
  *  in-memory filter bounded on huge monorepos. */
@@ -60,12 +61,16 @@ const SKIP_DIRS = new Set([
 
 /** Repo-relative POSIX paths of every tracked + untracked-not-ignored
  *  file under `cwd`, capped at `limit`. Returns `[]` on any failure so
- *  the picker degrades gracefully to selection-only. */
+ *  the ordinary tree degrades gracefully. includeIgnored opts into the local
+ *  mention search instead: directories end in / and failed root reads reject. */
 export async function listWorkspaceFiles(
   cwd: string,
   limit: number = DEFAULT_LIMIT,
+  options: { includeIgnored?: boolean; query?: string; mentionRevision?: string } = {},
 ): Promise<string[]> {
   if (!cwd || limit <= 0) return [];
+  if (options.includeIgnored)
+    return listMentionPaths(cwd, options.query ?? "", limit, options.mentionRevision);
   try {
     const [{ stdout }, { stdout: deletedStdout }, sparse] = await Promise.all([
       runGit(cwd, ["ls-files", "-co", "--exclude-standard", "-z"]),
@@ -156,10 +161,9 @@ export function collectSkipWorktree(tagged: string): Set<string> {
 // Ignored entries — what the listing above deliberately omits
 // ──────────────────────────────────────────────────────────
 //
-// `--exclude-standard` above hides every .gitignore'd path, which is right for
-// the @-mention picker (nobody wants to @-mention node_modules/.pnpm/…) but
-// wrong for the Files tab: `node_modules`, `dist/`, `.env` are REAL files the
-// user's setup script and agents just created, and a file browser that can't
+// `--exclude-standard` above hides every .gitignore'd path. These entries are
+// loaded separately for the Files tab: `node_modules`, `dist/`, `.env` can hold
+// files the user's setup script and agents just created, and a file browser that can't
 // show them is lying about the worktree.
 //
 // The catch is volume — 60,888 ignored files in this repo alone. So this is

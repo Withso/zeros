@@ -4,9 +4,8 @@
 //
 // Two mention families share the @-picker:
 //   • selection — the live Design-mode browser selection (sync, 0/1 item).
-//   • file/folder — workspace paths from the engine's git_list_files
-//     (async; the renderer fetches once per cwd and fuzzy-filters
-//     in-memory per keystroke via buildPathMentions).
+//   • file/folder — inclusive filesystem search through git_list_files/file.tree
+//     (async, shared per cwd/query; ignored and hidden paths are mentionable).
 //
 // Picking a file/folder inserts a backtick-wrapped relative path into the
 // prompt (e.g. `src/foo.ts`). That's deliberately agent-agnostic: every
@@ -17,6 +16,13 @@
 // ──────────────────────────────────────────────────────────
 
 import type { BrowserPickerSelection } from "../../state/store";
+import {
+  compareWorkspaceEntries,
+  normalizeWorkspacePathQuery,
+  workspacePathScore,
+  type WorkspaceEntry,
+} from "@zeros/protocol/workspace-paths";
+export type { WorkspaceEntry } from "@zeros/protocol/workspace-paths";
 
 export type MentionKind = "selection" | "file" | "folder";
 
@@ -78,16 +84,11 @@ export function filterMentions(
 
 // ── File / folder mentions ────────────────────────────────
 
-export interface WorkspaceEntry {
-  /** Repo-relative POSIX path. Folders carry no trailing slash here. */
-  path: string;
-  kind: "file" | "folder";
-}
-
-/** Turn the engine's flat file list into searchable entries: every file
+/** Turn the engine's flat path list into searchable entries: every file,
+ *  explicit directory (trailing slash, including empty directories),
  *  plus every unique directory prefix (so `@comp` can match the
  *  `components/` folder too, like the reference picker). Computed once
- *  per file list (memoize at the call site) — not per keystroke.
+ *  per confirmed search result — not per keystroke.
  *
  *  Files are emitted BEFORE folders on purpose: for a non-empty query the
  *  buildPathMentions sort is fully deterministic regardless of input order,
@@ -98,7 +99,10 @@ export interface WorkspaceEntry {
  *  nothing but directories). */
 export function deriveWorkspaceEntries(files: string[]): WorkspaceEntry[] {
   const folders = new Set<string>();
+  const filePaths = new Set<string>();
   for (const f of files) {
+    if (!f) continue;
+    if (!f.endsWith("/")) filePaths.add(f);
     let slash = f.indexOf("/");
     while (slash !== -1) {
       folders.add(f.slice(0, slash));
@@ -106,7 +110,7 @@ export function deriveWorkspaceEntries(files: string[]): WorkspaceEntry[] {
     }
   }
   const entries: WorkspaceEntry[] = [];
-  for (const f of files) entries.push({ path: f, kind: "file" });
+  for (const f of filePaths) entries.push({ path: f, kind: "file" });
   for (const dir of folders) entries.push({ path: dir, kind: "folder" });
   return entries;
 }
@@ -121,33 +125,6 @@ function dirname(p: string): string {
   return i === -1 ? "" : p.slice(0, i);
 }
 
-/** Subsequence test — every char of `q` appears in `s` in order. */
-function isSubsequence(q: string, s: string): boolean {
-  if (!q) return true;
-  let i = 0;
-  for (let j = 0; j < s.length && i < q.length; j++) {
-    if (s[j] === q[i]) i++;
-  }
-  return i === q.length;
-}
-
-/** Lower = better. null = no match. Basename hits rank above path hits;
- *  exact substrings rank above fuzzy subsequence matches. */
-function pathScore(q: string, entry: WorkspaceEntry): number | null {
-  const base = basename(entry.path).toLowerCase();
-  const full = entry.path.toLowerCase();
-  if (!q) return 0;
-
-  if (base.startsWith(q)) return base.length === q.length ? 0 : 1;
-  const bi = base.indexOf(q);
-  if (bi >= 0) return 10 + bi;
-  const fi = full.indexOf(q);
-  if (fi >= 0) return 60 + fi;
-  if (isSubsequence(q, base)) return 200;
-  if (isSubsequence(q, full)) return 400;
-  return null;
-}
-
 /** Build ranked @-mention items for files + folders matching `query`.
  *  Empty query → first `limit` files (immediate feedback after typing @). */
 export function buildPathMentions(
@@ -155,11 +132,11 @@ export function buildPathMentions(
   query: string,
   limit = 8,
 ): MentionItem[] {
-  const q = query.trim().toLowerCase();
+  const q = normalizeWorkspacePathQuery(query);
 
   const scored: Array<{ entry: WorkspaceEntry; score: number }> = [];
   for (const entry of entries) {
-    const score = pathScore(q, entry);
+    const score = workspacePathScore(q, entry);
     if (score === null) continue;
     scored.push({ entry, score });
     // Cheap early-out for the empty-query case: no need to score the
@@ -167,16 +144,7 @@ export function buildPathMentions(
     if (!q && scored.length >= limit * 3) break;
   }
 
-  scored.sort((a, b) => {
-    if (a.score !== b.score) return a.score - b.score;
-    // Tie-break: shallower path, then shorter, then alphabetical.
-    const ad = a.entry.path.split("/").length;
-    const bd = b.entry.path.split("/").length;
-    if (ad !== bd) return ad - bd;
-    if (a.entry.path.length !== b.entry.path.length)
-      return a.entry.path.length - b.entry.path.length;
-    return a.entry.path.localeCompare(b.entry.path);
-  });
+  scored.sort(compareWorkspaceEntries);
 
   return scored.slice(0, limit).map(({ entry }) => {
     const dir = dirname(entry.path);

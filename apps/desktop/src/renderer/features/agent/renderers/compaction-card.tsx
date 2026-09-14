@@ -26,6 +26,7 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
 import { EventRow, type EventMeta } from "./event-row";
+import { renderDetail } from "./event-row-renderer";
 
 /** Leading indicator for the live compaction row — the Orbit shimmer at
  *  the row-icon size (12px), slotted through EventMeta's Icon. Compaction
@@ -45,7 +46,7 @@ function DoneChip() {
 }
 
 /** Optional detail: adapters may stamp rawInput with {trigger, preTokens}
- *  (Claude's compact_boundary carries both). Absent → not expandable. */
+ *  (Claude's compact_boundary carries both). Absent → generic tool details. */
 function readDetail(
   input: unknown,
 ): { trigger?: string; preTokens?: number } | null {
@@ -126,7 +127,7 @@ export const CompactionRecordCard: Renderer<AgentToolMessage> = memo(
         message={message}
         ctx={ctx}
         meta={meta}
-        detail={detail}
+        detail={detail ?? renderDetail(message, ctx)}
         trailingNode={running || failed ? null : <DoneChip />}
         // Never tint red: a failed compaction costs nothing — the row label
         // + detail carry the reason.

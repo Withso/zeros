@@ -755,9 +755,8 @@ export function AgentChat({
     (url: string) => openPrUrlRef.current(url),
     [],
   );
-  // toolCallIds of queued blocking questions — the transcript question card
-  // renders AWAITING RESPONSE (non-expandable) for these, and the tail
-  // shimmer/timer hide while the agent is parked on the user.
+  // Keep pending records inspectable; only blocking asks pause live activity.
+  const hasBlockingQuestion = session.pendingQuestions.some((question) => question.request.blocking);
   const pendingQuestionToolCallIds = useMemo(() => {
     return collectPendingQuestionToolCallIds(
       session.pendingQuestions,
@@ -781,6 +780,7 @@ export function AgentChat({
       editBaselines,
       respondToQuestion,
       pendingQuestionToolCallIds,
+      hasBlockingQuestion,
       pendingPermission: session.pendingPermission,
       respondToPermission,
       retrySafetyReview: retrySafetyReviewThroughRef,
@@ -803,6 +803,7 @@ export function AgentChat({
       editBaselines,
       respondToQuestion,
       pendingQuestionToolCallIds,
+      hasBlockingQuestion,
       session.pendingPermission,
       respondToPermission,
       retrySafetyReviewThroughRef,
@@ -3107,11 +3108,11 @@ export function AgentChat({
     [browserConfirmation, browserPermissionCardActive, session],
   );
 
-  // Blocking user-input question at the queue head. Precedence: a permission
-  // (harder gate) shows first; the question surfaces once it's answered. Like
-  // the permission card, an active question REPLACES the composer.
+  // Permissions take priority over questions. A blocking ask takes the
+  // composer slot; an optional ask sits above the usable composer.
   const pendingQuestion = session.pendingQuestions?.[0] ?? null;
   const questionCardActive = !!pendingQuestion && !permissionCardActive;
+  const blockingQuestionActive = questionCardActive && pendingQuestion?.request.blocking === true;
 
   // While either card holds the composer's slot, the composer card below is
   // display:none — NOT unmounted, so the typed draft + inline attachment
@@ -3122,7 +3123,7 @@ export function AgentChat({
   // local ComposerAttachmentMenu and ModelPill both derive closed from this
   // value in the same render.
   const composerConcealed =
-    !surfaceActive || permissionCardActive || questionCardActive;
+    !surfaceActive || permissionCardActive || blockingQuestionActive;
   // Live mirror for the always-focus guardian's document listener, so it can
   // read the current concealment without re-subscribing on every card toggle.
   const composerConcealedRef = useRef(composerConcealed);
@@ -3262,7 +3263,7 @@ export function AgentChat({
     session.transcriptState === "resident" &&
     !composerStreaming &&
     !permissionCardActive &&
-    !questionCardActive &&
+    !blockingQuestionActive &&
     !composerEmpty;
 
   // Image attachments are universal —
@@ -4777,10 +4778,8 @@ export function AgentChat({
               cwd={session.cwd ?? chatThread?.folder ?? null}
             />
           )}
-          {/* Blocking user-input question — takes the composer slot (below is
-            hidden). The interactive ONE card; answering resolves the parked
-            engine turn (no queued next-turn prompt). Serialized after any
-            pending permission via questionCardActive. */}
+          {/* Shared question card. Blocking asks resolve a parked turn;
+            optional answers follow the ordinary prompt/steering path. */}
           {questionCardActive && pendingQuestion && (
             <QuestionCard
               key={pendingQuestion.questionId}

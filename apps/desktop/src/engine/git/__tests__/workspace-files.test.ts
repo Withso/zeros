@@ -1,13 +1,11 @@
-// Tests for the composer @-mention file lister. It's on the hot path for
-// every @ open (the `git_list_files` IPC) and degrades to `[]` on failure,
-// so a regression would be SILENT (empty picker, no error). These pin the
-// two branches: the `git ls-files -co --exclude-standard` repo path (which
-// gives .gitignore-respect for free) and the bounded non-git fallback walk.
+// Default Git-aware file listing and inclusive @-mention searches. The default
+// keeps its Git and non-Git compatibility behavior; inclusive mentions search
+// actual files/directories, including ignored paths, before capping results.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, mkdir, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -182,6 +180,119 @@ describe("listWorkspaceFiles", () => {
       await writeFile(path.join(plain, "a", "b", "deep.ts"), "x");
       const files = await listWorkspaceFiles(plain);
       expect(files).toContain("a/b/deep.ts");
+    });
+  });
+
+  describe("inclusive mention listing", () => {
+    it.each([true, false])(
+      "includes ignored paths, dotfiles and empty folders (git: %s)",
+      async (git) => {
+        if (git) await initRepo(workdir);
+        await writeFile(path.join(workdir, ".gitignore"), "*\n");
+        const files = [
+          ".context/attachments/assets/id/Screenshot at 7.31 AM.png",
+          ".context/rollout.jsonl",
+          ".context-graph/local/attachments/pasted-text.txt",
+          ".hidden/.nested/.file",
+          ".env",
+          "node_modules/pkg/index.js",
+          "dist/output.js",
+        ];
+        for (const file of files) {
+          await mkdir(path.dirname(path.join(workdir, file)), {
+            recursive: true,
+          });
+          await writeFile(path.join(workdir, file), "fixture");
+        }
+        await mkdir(path.join(workdir, ".empty", "nested"), {
+          recursive: true,
+        });
+
+        const entries = await listWorkspaceFiles(workdir, 200, {
+          includeIgnored: true,
+        });
+        expect(entries).toEqual(
+          expect.arrayContaining([
+            ...files,
+            ".context/",
+            ".empty/",
+            ".empty/nested/",
+          ]),
+        );
+        expect(new Set(entries).size).toBe(entries.length);
+        if (git) expect(entries).toContain(".git/HEAD");
+      },
+    );
+
+    it("matches before capping so deep attachments survive a large unrelated tree", async () => {
+      await initRepo(workdir);
+      await writeFile(path.join(workdir, ".gitignore"), ".context/\n");
+      for (let i = 0; i < 20; i++) {
+        await writeFile(path.join(workdir, `noise-${i}.ts`), "fixture");
+      }
+      await mkdir(path.join(workdir, ".context/attachments/deep"), {
+        recursive: true,
+      });
+      await writeFile(
+        path.join(workdir, ".context/attachments/deep/rollout.jsonl"),
+        "fixture",
+      );
+
+      expect(
+        await listWorkspaceFiles(workdir, 1, {
+          includeIgnored: true,
+          query: "rollout",
+        }),
+      ).toEqual([".context/attachments/deep/rollout.jsonl"]);
+    });
+
+    it("ranks exact basenames ahead of earlier fuzzy matches at the cap", async () => {
+      await mkdir(path.join(workdir, ".context/deep"), { recursive: true });
+      await writeFile(path.join(workdir, ".context/deep/rollout"), "fixture");
+      for (let i = 0; i < 10; i++) {
+        await writeFile(path.join(workdir, `a-roll-out-${i}`), "fixture");
+      }
+      expect(
+        await listWorkspaceFiles(workdir, 1, {
+          includeIgnored: true,
+          query: "rollout",
+        }),
+      ).toEqual([".context/deep/rollout"]);
+    });
+
+    it("lists symlinks without traversing cycles or outside-workspace targets", async () => {
+      const root = path.join(workdir, "root");
+      const outside = path.join(workdir, "outside");
+      await mkdir(root);
+      await mkdir(outside);
+      await writeFile(path.join(outside, "private.txt"), "fixture");
+      await writeFile(path.join(root, "visible.txt"), "fixture");
+      await symlink(outside, path.join(root, "external"), "dir");
+      await symlink(root, path.join(root, "cycle"), "dir");
+      await symlink("missing", path.join(root, "broken"));
+      expect(
+        await listWorkspaceFiles(root, 200, { includeIgnored: true }),
+      ).toEqual(["broken", "visible.txt", "cycle/", "external/"]);
+    });
+
+    it("preserves unusual filenames and observes creates and deletes", async () => {
+      const filename = "白 space\nback\\tick`.png";
+      await writeFile(path.join(workdir, filename), "fixture");
+      expect(
+        await listWorkspaceFiles(workdir, 200, { includeIgnored: true }),
+      ).toEqual([filename]);
+      await rm(path.join(workdir, filename));
+      expect(
+        await listWorkspaceFiles(workdir, 200, { includeIgnored: true }),
+      ).toEqual([]);
+    });
+
+    it("reports an unavailable root instead of a successful empty search", async () => {
+      await expect(
+        listWorkspaceFiles(path.join(workdir, "missing"), 10, {
+          includeIgnored: true,
+        }),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     });
   });
 });

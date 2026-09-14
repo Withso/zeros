@@ -1301,7 +1301,7 @@ export async function setWorkingDirectories(
   );
 }
 
-/** Repo-relative file paths under `cwd`, for Files and the composer @ picker.
+/** Repo-relative file paths under `cwd`, for Files and quick-open.
  * Gitignore-respecting (tracked + untracked-not-ignored). Native IPC remains
  * the fast path for a desktop worktree, but a missing/late preload or IPC fault
  * falls through to the engine instead of becoming an authoritative empty list. */
@@ -1310,6 +1310,36 @@ export async function listWorkspaceFiles(
   limit?: number,
 ): Promise<string[]> {
   return (await readWorkspaceFileListing(cwd, limit, false)).files;
+}
+
+/** Inclusive, query-filtered file/folder names for @ mentions. Directories end
+ * in /. The engine refuses this opt-in for remote clients, like file.ignored. */
+export async function listWorkspaceMentionPaths(
+  cwd: string,
+  query: string,
+  mentionRevision?: string,
+): Promise<string[]> {
+  try {
+    return (
+      await readWorkspaceFileListing(cwd, 64, false, {
+        includeIgnored: true,
+        query,
+        ...(mentionRevision ? { mentionRevision } : {}),
+      })
+    ).files;
+  } catch (error) {
+    // Relay clients retain their existing filtered mentions. Only an explicit
+    // remote restriction warrants this fallback; transport/read failures must
+    // remain errors so the cache retains the last confirmed inclusive result.
+    if (
+      error &&
+      typeof error === "object" &&
+      "code" in error &&
+      error.code === "REMOTE_RESTRICTED"
+    )
+      return listWorkspaceFiles(cwd);
+    throw error;
+  }
 }
 
 export async function listWorkspaceFileListing(
@@ -1323,6 +1353,7 @@ async function readWorkspaceFileListing(
   cwd: string,
   limit: number | undefined,
   includeDesignDirectories: boolean,
+  options: { includeIgnored?: boolean; query?: string; mentionRevision?: string } = {},
 ): Promise<WorkspaceFileListing> {
   if (!cwd) return { files: [] };
   const listViaBridge = async (): Promise<WorkspaceFileListing> => {
@@ -1335,7 +1366,7 @@ async function readWorkspaceFileListing(
     }
     return includeDesignDirectories
       ? bridgeWorkspaceFileListing(bridge, workspaceId, limit)
-      : { files: await bridgeFileTree(bridge, workspaceId, limit) };
+      : { files: await bridgeFileTree(bridge, workspaceId, limit, options) };
   };
   // Local main is outside Electron's trusted worktree roots. Browser development,
   // optional relay clients, and a renderer whose preload has not appeared yet
@@ -1346,6 +1377,7 @@ async function readWorkspaceFileListing(
       cwd,
       ...(limit != null ? { limit } : {}),
       ...(includeDesignDirectories ? { includeDesignDirectories: true } : {}),
+      ...options,
     });
     if (!Array.isArray(res?.files)) {
       throw new Error("Native file listing returned an invalid response");

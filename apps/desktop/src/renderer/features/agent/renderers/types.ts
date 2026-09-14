@@ -67,12 +67,11 @@ export interface RendererContext {
    *  Match by `pendingPermission.request.toolCall.toolCallId ===
    *  message.toolCallId`. Null when no permission is pending. */
   pendingPermission: import("../use-agent-session").PendingPermission | null;
-  /** toolCallIds of the chat's QUEUED blocking questions (2026-07-04). The
-   *  question tool card matches its own toolCallId here to render the
-   *  AWAITING RESPONSE state (non-expandable) while the composer-slot card is
-   *  up, and TurnEventList suppresses the tail shimmer + timer while the
-   *  agent is parked on the user. Empty set when nothing is pending. */
+  /** Queued question ids for the read-only transcript's awaiting-answer state. */
   pendingQuestionToolCallIds: Set<string>;
+  /** Optional questions do not park the running agent or suppress activity.
+   * Legacy callers can omit this and retain the blocking-question default. */
+  hasBlockingQuestion?: boolean;
   /** Submit handler that pairs with pendingPermission. Calls back
    *  through the bridge to AGENT_PERMISSION_RESPONSE; clears the
    *  pendingPermission slot on the store. */

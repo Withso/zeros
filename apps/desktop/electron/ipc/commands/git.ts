@@ -78,6 +78,14 @@ export const gitListFiles: CommandHandler = async (args) => {
   const cwd = requireString(args, "cwd", "git_list_files");
   const limit = optionalNumber(args, "limit");
   try {
+    if (args.includeIgnored === true)
+      return {
+        files: await listWorkspaceFiles(cwd, limit, {
+          includeIgnored: true,
+          query: optionalString(args, "query"),
+          mentionRevision: optionalString(args, "mentionRevision"),
+        }),
+      };
     if (args.includeDesignDirectories === true)
       return await listWorkspaceFilesWithDesign(cwd, limit);
     return { files: await listWorkspaceFiles(cwd, limit) };

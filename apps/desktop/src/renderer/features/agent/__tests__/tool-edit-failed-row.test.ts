@@ -46,6 +46,27 @@ const render = (message: AgentToolMessage): string =>
   renderToStaticMarkup(createElement(EditCard as never, { message, ctx }));
 
 describe("EditCard — failed edits stay collapsed", () => {
+  it("shows renamed destinations and does not omit files with missing diff bodies", () => {
+    const html = render(editTool({ rawInput: { changes: [
+      { path: "/src/old.ts", kind: { type: "update", move_path: "/src/new.ts" }, diff: "" },
+      { path: "/src/missing.ts", kind: { type: "update" } },
+    ] } }));
+    expect(html).toContain("new.ts");
+    expect(html).toContain("missing.ts");
+    expect(html.match(/aria-expanded="false"/g)).toHaveLength(2);
+  });
+  it("renders a separate existing Edit row and file pill for each file in a native call", () => {
+    const html = render(editTool({ rawInput: { changes: [
+      { path: "/src/a.ts", kind: { type: "update" }, diff: "@@ -1 +1 @@\n-old\n+new" },
+      { path: "/src/b.ts", kind: { type: "update" }, diff: "@@ -1 +1,2 @@\n-old\n+new\n+extra" },
+    ] } }));
+    expect(html.match(/aria-expanded="false"/g)).toHaveLength(2);
+    expect(html).toContain("a.ts");
+    expect(html).toContain("b.ts");
+    expect(html).not.toContain("Edit 2 files");
+    expect(html).toContain("+1");
+    expect(html).toContain("+2");
+  });
   const failed = editTool({
     status: "failed",
     content: [

@@ -5,18 +5,14 @@
 // 2026-06-18. A turn splits into two parts (see turn-partition.ts):
 //
 //   • the WORKING group — tools, thinking, in-between narration,
-//     sub-agents — handed to one EventStripe. While live, its visible
-//     projection contains only completed/failed tools and immutable records;
-//     prose, reasoning, and unfinished calls stay unmounted. Once the turn
-//     settles, the full work history collapses to a single summary chip
+//     sub-agents — handed to one EventStripe in source order. Live narration,
+//     readable reasoning, and running calls remain visible. Once the turn
+//     settles, the work history collapses to a single summary chip
 //     ("<N> tool calls, <M> messages, <K> agents"). Browser actions are nested
 //     inside that same group and reappear when it is expanded.
 //
-//   • the FINAL OUTPUT — the trailing agent text — mounted brightly below the
-//     group only after the terminal turn boundary.
-//
-// The shape is deliberate: completed actions arrive one by one, then the work
-// folds away and the complete answer appears at once.
+//   • the FINAL OUTPUT — provider-declared final answers, or the settled
+//     trailing text of providers without phases — rendered brightly below it.
 // ──────────────────────────────────────────────────────────
 
 import { memo, useMemo, type ReactNode } from "react";
@@ -82,25 +78,22 @@ export const TurnEventList = memo(function TurnEventList({
   // final answer (finalOutput) is what remains bright.
   const live = isActive && !!isStreaming;
 
-  // Pass `live` so partitionTurn withholds provisional prose and unfinished
-  // calls. The terminal boundary switches directly from the append-only tool
-  // completion feed to collapsed history + the complete final output.
+  // Phase-less prose stays in the working feed while live. Explicit final
+  // answers keep their output position even if bookkeeping arrives later.
   const { working, finalOutput } = useMemo(
     () => partitionTurn(events, { live }),
     [events, live],
   );
 
-  // The tail shimmer + TIMER always runs while the turn is live, including
-  // while an unfinished tool/subagent row is intentionally withheld. It is the
-  // single stable working cue between completed rows and carries the one elapsed
-  // timer for the turn.
+  // One tail shimmer and elapsed timer cover the live turn, including pauses
+  // between tool events. Optional questions do not pause that activity.
   //
   // The shimmer and the workflow row answer different questions and so have
   // different gates — see tail-indicators.ts for why they must not be folded
   // together. `pickActiveWorkflow` already restricts `workflow` to
   // running/paused runs, so nothing settled can linger in this row.
   const awaitingUserInput =
-    ctx.pendingQuestionToolCallIds.size > 0 || !!ctx.pendingPermission;
+    (ctx.hasBlockingQuestion ?? ctx.pendingQuestionToolCallIds.size > 0) || !!ctx.pendingPermission;
   const tail = tailIndicators({ live, showActivity, awaitingUserInput });
   const showShimmer = tail.shimmer;
   const workflowRow =

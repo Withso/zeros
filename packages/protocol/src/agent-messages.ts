@@ -318,6 +318,7 @@ export interface AgentSubagentMessage {
  *  level errors (Codex API rejections, transport hiccups, etc.)
  *  that don't belong inside a tool card. */
 export interface AgentErrorNoticeMessage {
+  parentToolId?: string;
   id: string;
   kind: "error_notice";
   severity: "warning" | "error";
@@ -503,6 +504,7 @@ export function applyUpdate(
         upd.parentToolId ?? undefined,
         undefined,
         upd.phase ?? undefined,
+        upd.textMode,
       );
     case "agent_thought_chunk":
       return appendText(
@@ -513,6 +515,8 @@ export function applyUpdate(
         upd.redacted ?? undefined,
         upd.parentToolId ?? undefined,
         upd.durationMs ?? undefined,
+        undefined,
+        upd.textMode,
       );
     case "tool_call": {
       const tc = upd as unknown as ToolCall & { sessionUpdate: "tool_call" };
@@ -565,6 +569,18 @@ export function applyUpdate(
         };
       });
     }
+    case "message_parent_update": {
+      const ids = new Set(upd.messageIds);
+      let changed = false;
+      const next = messages.map((message) => {
+        const key = message.kind === "tool" ? message.toolCallId
+          : message.kind === "text" ? message.messageId : message.id;
+        if (!key || !ids.has(key) || ("parentToolId" in message && message.parentToolId === upd.parentToolId)) return message;
+        changed = true;
+        return { ...message, parentToolId: upd.parentToolId };
+      });
+      return changed ? next : messages;
+    }
     // Mode / commands updates are handled at the provider level
     // (they change session slots other than `messages`), so skip here.
     case "current_mode_update":
@@ -604,6 +620,7 @@ export function applyUpdate(
         message: n.message,
         recoverable: n.recoverable === true,
         code: n.code,
+        ...(n.parentToolId ? { parentToolId: n.parentToolId } : {}),
         createdAt: typeof n.at === "number" ? n.at : Date.now(),
       };
       return [...messages, notice];
@@ -622,11 +639,36 @@ function appendText(
   parentToolId?: string,
   durationMs?: number,
   phase?: AgentMessagePhase,
+  textMode?: "replace",
 ): AgentMessage[] {
   if (!content || content.type !== "text" || typeof content.text !== "string") {
     return messages;
   }
   const chunkText = content.text;
+
+  // A provider's completed item can correct or shorten earlier deltas. Match
+  // the exact owner/id, even when a concurrent tool split it into fragments.
+  // Keep the first row's identity and leave unrelated rows referentially stable.
+  if (textMode === "replace" && messageId) {
+    let found = false;
+    let changed = false;
+    const next = messages.flatMap((message) => {
+      if (message.kind !== "text" || message.role !== role ||
+          message.messageId !== messageId || message.parentToolId !== parentToolId) return [message];
+      // Persistence upserts changed rows. Blank an obsolete legacy fragment
+      // under its original id so reopening cannot resurrect the stale text.
+      if (found) {
+        if (!message.text) return [message];
+        changed = true;
+        return [{ ...message, text: "" }];
+      }
+      found = true;
+      if (message.text === chunkText && (!phase || message.phase === phase)) return [message];
+      changed = true;
+      return [{ ...message, text: chunkText, ...(phase ? { phase } : {}) }];
+    });
+    if (found) return changed ? next : messages;
+  }
 
   // Completion notifications can carry metadata without text (thinking
   // duration, or a Codex phase disclosed only by item/completed). They may
@@ -640,6 +682,7 @@ function appendText(
       if (
         message.kind === "text" &&
         message.role === role &&
+        message.parentToolId === parentToolId &&
         sameMessageId(message.messageId, messageId)
       ) {
         targetIndex = index;
@@ -660,25 +703,22 @@ function appendText(
     return next;
   }
 
-  // Coalesce into the trailing text message ONLY if it's from the same
-  // role AND carries the same engine-side messageId. Without the id
-  // check, two consecutive turns' agent replies would merge into one
-  // growing bubble. With it, streaming deltas of one message still
-  // coalesce (the streaming use case), but a fresh message starts
-  // a new bubble (the new-turn use case).
-  //
-  // If either side has no messageId we fall back to the role-only
-  // merge — preserves the streaming behavior for adapters that
-  // don't (yet) emit messageIds.
-  const last = messages[messages.length - 1];
+  // Keyed deltas update their exact role/id/parent even across interleaved
+  // tools. A fresh id starts a new row. Legacy unkeyed deltas coalesce only
+  // with another unkeyed trailing row of the same role and parent.
+  const targetIndex = messageId
+    ? messages.findIndex((message) => message.kind === "text" && message.role === role && message.messageId === messageId && message.parentToolId === parentToolId)
+    : messages.length - 1;
+  const last = messages[targetIndex];
   if (
     last &&
     last.kind === "text" &&
     last.role === role &&
+    last.parentToolId === parentToolId &&
     sameMessageId(last.messageId, messageId)
   ) {
     return [
-      ...messages.slice(0, -1),
+      ...messages.slice(0, targetIndex),
       {
         ...last,
         text: last.text + chunkText,
@@ -692,6 +732,7 @@ function appendText(
           : {}),
         ...(phase ? { phase } : {}),
       },
+      ...messages.slice(targetIndex + 1),
     ];
   }
 

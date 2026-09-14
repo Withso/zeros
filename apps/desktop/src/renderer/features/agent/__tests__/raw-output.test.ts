@@ -8,6 +8,17 @@ import { describe, expect, it } from "vitest";
 import { asDisplayString } from "../renderers/raw-output";
 
 describe("asDisplayString", () => {
+  it("bounds traversal of wide repeated structures before serialization", () => {
+    let reads = 0;
+    const branch = (depth: number): object => Object.fromEntries(Array.from({ length: 8 }, (_, index) => [String(index), depth ? branch(depth - 1) : "leaf"]));
+    const visit = (value: object): object => new Proxy(value, { get(target, property, receiver) {
+      reads += 1;
+      const child = Reflect.get(target, property, receiver);
+      return child && typeof child === "object" ? visit(child) : child;
+    } });
+    expect(asDisplayString(visit(branch(3)))).toContain("leaf");
+    expect(reads).toBeLessThan(2_000);
+  });
   it("passes a non-empty string through", () => {
     expect(asDisplayString("hello stdout")).toBe("hello stdout");
   });
@@ -55,8 +66,16 @@ describe("asDisplayString", () => {
     expect(asDisplayString({ data: "B".repeat(500) })).toBeNull();
   });
 
-  it("returns null for an oversized object envelope", () => {
-    expect(asDisplayString({ junk: "x".repeat(30000) })).toBeNull();
+  it("retains a bounded preview of oversized output instead of hiding it", () => {
+    const text = asDisplayString({ output: "x".repeat(30000) });
+    expect(text).toContain("xxx");
+    expect(text?.length).toBeLessThanOrEqual(20_001);
+    expect(text).toMatch(/…$/);
+  });
+
+  it("keeps readable fields next to binary and structured result arrays", () => {
+    expect(asDisplayString({ text: "Screenshot saved", data: "B".repeat(500) })).toContain("Screenshot saved");
+    expect(asDisplayString([{ title: "Example", url: "https://example.com" }])).toContain("https://example.com");
   });
 
   it("returns null for empty object", () => {

@@ -503,6 +503,7 @@ export type SessionUpdate =
   | AgentThoughtChunkUpdate
   | ToolCallStartUpdate
   | ToolCallChangeUpdate
+  | MessageParentUpdate
   | AvailableCommandsUpdate
   | AvailableSubagentsUpdate
   | BackgroundTasksUpdate
@@ -564,6 +565,9 @@ export interface AgentMessageChunkUpdate {
   sessionUpdate: "agent_message_chunk";
   content: ContentBlock;
   messageId?: string | null;
+  /** Authoritative replacement for this exact message id. Omitted updates
+   * remain append-only, preserving older providers and persisted streams. */
+  textMode?: "replace";
   /** Provider-declared role for assistant prose. Codex emits commentary while
    * working and a final_answer when the turn concludes. Absent preserves the
    * legacy behavior for providers that do not classify message phases. */
@@ -578,6 +582,8 @@ export interface AgentThoughtChunkUpdate {
   sessionUpdate: "agent_thought_chunk";
   content: ContentBlock;
   messageId?: string | null;
+  /** Same exact-message snapshot semantics as AgentMessageChunkUpdate. */
+  textMode?: "replace";
   /** Provider-reported reasoning duration. Adapters normally attach this to
    * the final chunk (or emit an empty final chunk with the same messageId), so
    * the shared reducer can enrich one existing Thinking row without creating
@@ -680,6 +686,7 @@ export interface ModeSwitchUpdate {
 export interface ErrorNoticeUpdate {
   sessionUpdate: "error_notice";
   noticeId: string;
+  parentToolId?: string;
   severity: "warning" | "error";
   message: string;
   /** True for transient/retryable notices where the active turn is expected
@@ -690,6 +697,14 @@ export interface ErrorNoticeUpdate {
   /** Wallclock ms — replay carries the original time; live omits and the
    *  reducer stamps Date.now(). */
   at?: number;
+}
+
+/** Late native correlation may identify a subagent's parent after its first
+ * output. Reparent exact existing records without replaying their contents. */
+export interface MessageParentUpdate {
+  sessionUpdate: "message_parent_update";
+  messageIds: string[];
+  parentToolId: string;
 }
 
 export interface UsageUpdateNotification {

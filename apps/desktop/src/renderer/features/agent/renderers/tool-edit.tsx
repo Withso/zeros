@@ -33,11 +33,12 @@
 // shiki+hunk renderer (DiffView/Hunk/DiffLine) was removed.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useMemo } from "react";
+import { memo, useMemo, useState } from "react";
 import { FileEdit } from "lucide-react";
+import { Button } from "@/renderer/shared/ui";
 import { diffLines, structuredPatch } from "diff";
 
-import type { Renderer } from "./types";
+import type { Renderer, RendererContext } from "./types";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
 import type { EventMeta } from "./event-meta";
@@ -46,6 +47,8 @@ import { DiffHoverPreview } from "./diff-hover-preview";
 interface DiffSource {
   /** File path the diff applies to. */
   path: string;
+  previousPath?: string;
+  missingDiff?: boolean;
   /** Pre-edit content (empty string for Write/new-file cases). */
   before: string;
   /** Post-edit content. */
@@ -80,158 +83,128 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
     () => extractDiffSources(tool, baseline),
     [tool, baseline],
   );
-  const source = sources[0] ?? null;
-  const batchLabel = editBatchLabel(sources);
-  const multiFile = batchLabel !== null;
-  const renderedSources = multiFile
-    ? sources.slice(0, MAX_RENDERED_BATCH_EDITS)
-    : sources;
-  const hiddenSourceCount = sources.length - renderedSources.length;
-  // When no structured diff is available, fall back to any captured
-  // output/content text rather than a dead-end "No diff available" — keeps
-  // edit cards from rendering blank for adapters with unexpected field names.
-  const fallbackText = useMemo(
-    () => (source ? null : editFallbackText(tool)),
-    [source, tool],
-  );
-  // +N/−M for the header chip. Prefer the agent's OWN authoritative count, but
-  // fall back to diffing the rendered before/after — and when the card shows an
-  // overwrite diffed against a session `baseline`, the diff IS the count (see
-  // `resolveEditCounts`). (Ch.1)
-  const counts = useMemo(() => {
-    if (!multiFile) return resolveEditCounts(tool, source, baseline);
-    return sources.reduce(
-      (total, current) => {
-        const next = current.patch
-          ? patchSigilCounts(current.patch)
-          : countLineDelta(current);
-        return {
-          added: total.added + (next?.added ?? 0),
-          removed: total.removed + (next?.removed ?? 0),
-        };
-      },
-      { added: 0, removed: 0 },
+  const [showAll, setShowAll] = useState(false);
+  const visible = showAll
+    ? sources
+    : sources.slice(0, MAX_RENDERED_BATCH_EDITS);
+  if (!sources.length)
+    return (
+      <EditFileRow tool={tool} ctx={ctx} source={null} baseline={baseline} />
     );
-  }, [tool, source, sources, baseline, multiFile]);
+  return (
+    <>
+      {visible.map((source, index) => (
+        <EditFileRow
+          key={`${source.path}:${index}`}
+          tool={tool}
+          ctx={ctx}
+          source={source}
+          baseline={sources.length === 1 ? baseline : undefined}
+          batch={sources.length > 1}
+        />
+      ))}
+      {visible.length < sources.length && (
+        <Button variant="ghost" size="sm" onClick={() => setShowAll(true)}>
+          Show {sources.length - visible.length} more files
+        </Button>
+      )}
+    </>
+  );
+});
 
-  const path = multiFile
-    ? undefined
-    : (source?.path ?? readPath(tool.rawInput) ?? tool.title);
-  const isWrite = !multiFile && source?.write === true;
-  // The N in "Write N lines" = the written file's line count. Prefer the
-  // INPUT's full content: when the diff body comes from a real patch
-  // (structuredPatch overwrite), source.after is just the delta+context, not
-  // the whole file.
-  const writeLineCount = source?.write
-    ? contentLineCount(
-        (isObj(tool.rawInput) ? writeFullContent(tool.rawInput) : null) ??
-          source.after,
-      )
-    : null;
-
-  // Clean row: [Edit] [filename tag] +N −M — rendered
-  // through the SAME EventRow as Read so the two rows are pixel-identical. NO
-  // "new file" / "applied" badge, no duration, no status checkmark, no full
-  // path. FileTag (in EventRow) shows the basename + the file-type glyph.
-  // A whole-file write reads "Write N lines" instead — the same count-in-label
-  // pattern as "Read N lines".
-  const editMeta: EventMeta = {
-    Icon: FileEdit,
-    label:
-      batchLabel ??
-      (writeLineCount != null ? `Write ${writeLineCount} lines` : "Edit"),
-    target: path,
-    targetFile: !multiFile,
-    ...(multiFile ? {} : { targetKind: "file" as const }),
-    expandable: true,
-  };
-
-  // Accurate +N −M, green/red — authoritative from the agent's
-  // result when reported (Cursor), else diffed renderer-side (Claude/Codex).
-  // Hidden for a 0/0 net change: an edit tool always adds/removes/creates
-  // something, so a true 0/0 is a no-op re-apply and the badge is just noise.
-  // Also hidden on a Write row: "Write 5 lines" already says the count, so a
-  // "+5 −0" badge next to it is redundant.
-  // Also hidden on a FAILED edit: the green/red counts are the app-wide
-  // vocabulary for APPLIED change (Changes tab, turn footer), and a failed
-  // edit applied nothing — a green +21 on a red row claims lines that never
-  // landed, and double-counts the retry that follows.
+const EditFileRow = memo(function EditFileRow({
+  tool,
+  ctx,
+  source,
+  baseline,
+  batch = false,
+}: {
+  tool: AgentToolMessage;
+  ctx: RendererContext;
+  source: DiffSource | null;
+  baseline?: string;
+  batch?: boolean;
+}) {
+  const counts = useMemo(
+    () =>
+      batch && source
+        ? source.patch
+          ? patchSigilCounts(source.patch)
+          : countLineDelta(source)
+        : resolveEditCounts(tool, source, baseline),
+    [tool, source, baseline, batch],
+  );
   const failed = tool.status === "failed";
+  const settled = tool.status === "completed";
   const hasChanges =
     counts !== null && (counts.added > 0 || counts.removed > 0);
-  const trailingNode =
-    !failed && !isWrite && hasChanges ? (
-      <span className="shrink-0 text-xs tabular-nums">
-        <span className="text-green-primary">+{counts.added}</span>
-        <span className="text-red-primary ml-1">−{counts.removed}</span>
-      </span>
-    ) : undefined;
-
-  // A failed edit's result text is the ERROR the agent got back (Claude's
-  // "String to replace not found…", a permission denial, …). Without it the
-  // expanded body is only the ATTEMPTED diff — which hides WHY it failed and
-  // reads as if the change landed. Shown above the diff, inside EventRow's
-  // red-tinted failure box.
-  const failureText = useMemo(
-    () => (failed ? editFallbackText(tool) : null),
-    [failed, tool],
+  const isWrite = source?.write === true;
+  const path = source?.path ?? readPath(tool.rawInput) ?? tool.title;
+  const writeLineCount =
+    isWrite && source
+      ? contentLineCount(
+          (!batch && isObj(tool.rawInput)
+            ? writeFullContent(tool.rawInput)
+            : null) ?? source.after,
+        )
+      : null;
+  const meta: EventMeta = {
+    Icon: FileEdit,
+    label: writeLineCount != null ? `Write ${writeLineCount} lines` : "Edit",
+    target: path,
+    targetFile: true,
+    targetKind: "file",
+    expandable: true,
+  };
+  const fallbackText = useMemo(
+    () => (!source || failed ? editFallbackText(tool) : null),
+    [source, failed, tool],
   );
-
-  const detail =
-    sources.length > 0 ? (
-      <>
-        {failureText && (
-          <pre className="text-red-primary/90 m-0 mb-2 max-h-[200px] overflow-y-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
-            {failureText}
-          </pre>
-        )}
-        {multiFile ? (
-          <div className="space-y-3">
-            {renderedSources.map((entry, index) => (
-              <section key={`${entry.path}:${index}`}>
-                <div className="text-fg2 mb-1 truncate px-1 font-mono text-xs">
-                  {entry.path}
-                </div>
-                <EditDiff source={entry} />
-              </section>
-            ))}
-            {hiddenSourceCount > 0 && (
-              <div className="text-fg2 px-1 text-xs italic">
-                {hiddenSourceCount} more files are preserved in the tool input.
-              </div>
-            )}
-          </div>
-        ) : (
-          <EditDiff source={source!} />
-        )}
-      </>
-    ) : fallbackText ? (
-      <pre className="bg-bg2/60 text-fg1 m-0 max-h-[200px] overflow-y-auto rounded-md p-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap">
-        {fallbackText}
-      </pre>
-    ) : (
-      <div className="text-fg2 text-xs italic">
-        No diff available — adapter did not provide before/after content.
+  const detail = (
+    <>
+      <div className="text-fg2 mb-2 text-xs break-words">
+        {path}
+        {source?.previousPath ? ` (from ${source.previousPath})` : ""}
       </div>
-    );
-
-  // NO defaultOpen — a failed edit stays collapsed like every other failed
-  // tool row; the red tint + icon are the signal, expand is the user's move.
-  // Seeding open off `status === "failed"` auto-expanded the row mid-stream
-  // whenever a fast-failing Edit's tool_call and failed result landed in the
-  // same commit (the row's FIRST mount already saw "failed"), yet did nothing
-  // when the failure arrived after mount (useState never re-seeds) — and it
-  // re-expanded on every remount (summary-chip re-expand, chat reopen) even
-  // after the user collapsed it by hand.
+      {!settled && (
+        <div className="text-fg2 mb-2 text-xs">
+          {failed
+            ? "Edit did not complete."
+            : "Proposed changes — waiting for completion."}
+        </div>
+      )}
+      {fallbackText && (
+        <pre className="text-fg1 m-0 mb-2 max-h-[200px] overflow-y-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
+          {fallbackText}
+        </pre>
+      )}
+      {source && !source.missingDiff ? (
+        <EditDiff source={source} />
+      ) : (
+        !fallbackText && (
+          <div className="text-fg2 text-xs italic">
+            No diff was captured for this edit.
+          </div>
+        )
+      )}
+    </>
+  );
   return (
     <EventRow
       message={tool}
       ctx={ctx}
-      meta={editMeta}
+      meta={meta}
       detail={detail}
-      trailingNode={trailingNode}
+      trailingNode={
+        settled && !isWrite && hasChanges ? (
+          <span className="shrink-0 text-xs tabular-nums">
+            <span className="text-green-primary">+{counts.added}</span>
+            <span className="text-red-primary ml-1">−{counts.removed}</span>
+          </span>
+        ) : undefined
+      }
       hoverPreview={
-        !failed && !multiFile && hasChanges && source ? (
+        settled && hasChanges && source ? (
           <EditDiff source={source} compact />
         ) : undefined
       }
@@ -838,9 +811,12 @@ function readFileChange(inp: Record<string, unknown>): DiffSource | null {
 }
 
 function fileChangeSource(change: Record<string, unknown>): DiffSource | null {
-  const path = change.path as string;
+  const originalPath = change.path as string;
+  const destination = isObj(change.kind) && typeof change.kind.move_path === "string" ? change.kind.move_path : undefined;
+  const path = destination || originalPath;
+  const identity = { path, ...(destination ? { previousPath: originalPath } : {}) };
   const diff = readString(change, ["diff", "unified_diff", "content"]);
-  if (diff === null) return null;
+  if (diff === null) return { ...identity, before: "", after: "", missingDiff: true };
   const kind =
     isObj(change.kind) && typeof change.kind.type === "string"
       ? change.kind.type
@@ -855,10 +831,10 @@ function fileChangeSource(change: Record<string, unknown>): DiffSource | null {
   if (/(^|\n)@@ /.test(diff)) {
     const recon = reconstructFromUnifiedDiff(diff);
     if (recon)
-      return { path, before: recon.before, after: recon.after, patch: diff };
+      return { ...identity, before: recon.before, after: recon.after, patch: diff };
   }
   // Last resort: surface the body as added content rather than dropping it.
-  return { path, before: "", after: diff };
+  return { ...identity, before: "", after: diff };
 }
 
 /** Reconstruct before/after blobs from a unified diff's hunk bodies.

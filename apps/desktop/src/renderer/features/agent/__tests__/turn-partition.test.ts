@@ -50,6 +50,13 @@ const liveTool = (
 const ids = (xs: AgentMessage[]) => xs.map((m) => (m as { id: string }).id);
 
 describe("partitionTurn", () => {
+  it.each([true, false])("omits retired empty text without breaking the answer boundary (live %s)", (live) => {
+    const answer = phasedAgentText("answer", "final_answer");
+    const empty = { ...phasedAgentText("retired", "commentary"), text: "" } as AgentMessage;
+    const partition = partitionTurn([tool("t"), answer, empty], { live });
+    expect(ids(partition.working)).toEqual(["t"]);
+    expect(partition.finalOutput).toEqual([answer]);
+  });
   it("pulls the trailing agent text out as the final answer", () => {
     const { working, finalOutput } = partitionTurn([tool("a"), agentText("b")]);
     expect(ids(working)).toEqual(["a"]);
@@ -152,19 +159,19 @@ describe("partitionTurn", () => {
     expect(partitionTurn([])).toEqual({ working: [], finalOutput: [] });
   });
 
-  describe("live turns defer the answer boundary", () => {
-    it("withholds provisional prose and unfinished tools", () => {
+  describe("live turns expose progress", () => {
+    it("shows prose and unfinished tools in source order", () => {
       const events = [
         agentText("provisional"),
         liveTool("pending", "pending", 10),
         liveTool("running", "in_progress", 20),
       ];
       const { working, finalOutput } = partitionTurn(events, { live: true });
-      expect(working).toEqual([]);
+      expect(working).toEqual(events);
       expect(finalOutput).toEqual([]);
     });
 
-    it("reveals completed and failed tools in completion order", () => {
+    it("keeps tool positions stable as concurrent calls finish", () => {
       // Concurrent calls are stored in start order. If the second one finishes
       // first, the first completed row must stay put when the earlier call
       // later settles; otherwise the live list visibly jumps.
@@ -174,7 +181,7 @@ describe("partitionTurn", () => {
         agentText("still-provisional"),
       ];
       const { working, finalOutput } = partitionTurn(events, { live: true });
-      expect(ids(working)).toEqual(["finished-first", "finished-second"]);
+      expect(ids(working)).toEqual(["finished-second", "finished-first", "still-provisional"]);
       expect(finalOutput).toEqual([]);
     });
 
@@ -185,13 +192,25 @@ describe("partitionTurn", () => {
       );
     });
 
-    it("a live turn of only text stays unmounted until it is final", () => {
+    it("shows phase-less live text as working narration", () => {
       const { working, finalOutput } = partitionTurn([agentText("only")], {
         live: true,
       });
-      expect(working).toEqual([]);
+      expect(ids(working)).toEqual(["only"]);
       expect(finalOutput).toEqual([]);
     });
+  });
+
+  it.each([true, false])("keeps an explicit final answer visible across late tools (live=%s)", (live) => {
+    const commentary = phasedAgentText("progress", "commentary");
+    const reasoning = thought("reasoning");
+    const answer = phasedAgentText("answer", "final_answer");
+    const late = liveTool("subagent-finished", "completed", 20);
+    const partition = partitionTurn([commentary, reasoning, answer, late], { live });
+    expect(partition.working).toEqual([commentary, reasoning, late]);
+    expect(partition.finalOutput).toEqual([answer]);
+    expect(partition.working[0]).toBe(commentary);
+    expect(partition.finalOutput[0]).toBe(answer);
   });
 
   describe("compaction rows", () => {
