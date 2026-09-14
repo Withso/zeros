@@ -6,7 +6,7 @@
 // shares one chrome so menus read as a single system:
 //
 //   surface  16px corners (2 × --radius-lg), 4px inset, bg3 + border2
-//   rows     8px gap, 8px × 6px padding, 12px corners (16 − 4 inset), text-xs
+//   rows     8px gap, 8px × 6px padding, 8px corners, text-xs
 //   icons    14px (size-3.5), fg2 unless a row colors them itself
 //
 // The 16px corner is intentionally derived from the radius scale instead of
@@ -14,8 +14,8 @@
 
 export const MENU_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*2)]";
 
-/** Hover/selection fill on a row: surface radius minus the 4px inset. */
-export const MENU_ITEM_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
+/** Hover/selection fill on a row: the standard 8px radius-lg. */
+export const MENU_ITEM_RADIUS = "rounded-lg";
 
 /** Row icon sizing/coloring that still lets an explicit class win. */
 export const MENU_ITEM_ICON =

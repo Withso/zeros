@@ -205,8 +205,9 @@
    * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
    * ON PURPOSE so `rounded-xl` etc. no longer exist —
    * a class that won't compile beats a fourth radius sneaking in.
-   * Nesting rule: inner radius = outer radius − inset (16px menu with
-   * 4px padding → 12px item fills, see shared/ui/menu-surface.ts). */
+   * Nesting rule: inner radius = outer radius − inset (8px menu with
+   * 4px padding → 4px items). Dropdown rows are the documented exception:
+   * 16px surfaces carry 8px row fills (see shared/ui/menu-surface.ts). */
   --radius-*: initial;
   --radius-sm: 4px;
   --radius-md: 6px;
