@@ -18,6 +18,7 @@ import type {
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 import {
+  DESIGN_RUNTIME_DOCUMENT_BODY_ID,
   DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
   DESIGN_SELECTION_NODE_LIMIT,
 } from "@zeros/protocol/design-runtime";
@@ -45,7 +46,12 @@ import {
   useDesignWorkspaceUiStore,
 } from "./design-workspace-ui";
 import { revealDesignLayerPath } from "./design-layer-disclosure";
-import { designLayerAncestorIdsFor } from "../design-layer-tree";
+import {
+  designLayerAncestorIdsFor,
+  resolveDesignFrameBodyTarget,
+  type DesignFrameBodyIntent,
+} from "../design-layer-tree";
+import { canEditDesignNodeText } from "../design-node-capabilities";
 
 /** Open the Layers path down to a selection in the same transition that
  * publishes it, so a canvas click can never leave its row folded away. The
@@ -402,6 +408,8 @@ export async function selectDesignNode(input: {
   details?: DesignRuntimeNodeDetails;
   /** Runtime revisions can change computed values without changing source. */
   forceRuntimeRead?: boolean;
+  /** Exact-source local selection is ready; engine persistence may still wait. */
+  onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
 }): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, folder, frame, nodeId } = input;
   const generation = nextGeneration(
@@ -451,6 +459,7 @@ export async function selectDesignNode(input: {
       frame.sourceVersion,
     );
   clearDesignLivePreview(workspaceId, frame.file, nodeId);
+  input.onLocalSelection?.(details);
   await publishDurableDesignSelection(
     workspaceId,
     elementSelection(frame, details),
@@ -642,6 +651,127 @@ export async function selectDesignNodeAtLocation(input: {
   if (!details) {
     await selectDesignFrame(input.workspaceId, input.frame);
     return null;
+  }
+  return selectDesignNode({ ...input, nodeId: details.oid, details });
+}
+
+/** Canvas body selection shares the generation used by Layers, frame labels,
+ * and outside clicks. A late hit can never reopen a selection they replaced.
+ * Entering a frame is synchronous; only explicit nested intent needs a hit. */
+export async function selectDesignFrameBodyAtLocation(input: {
+  workspaceId: string;
+  folder: string;
+  frame: DesignCanvasFrameWire;
+  x: number;
+  y: number;
+  intent: DesignFrameBodyIntent;
+  additive?: boolean;
+  /** Double-click retains direct entry into editable text. */
+  preferText?: boolean;
+  /** Single-node entry can open its editor before selection persistence. */
+  onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
+}): Promise<DesignRuntimeNodeDetails | null> {
+  const { workspaceId, frame } = input;
+  const current = designWorkspaceView(workspaceId);
+  const selectedNodeId =
+    current.selectedFrame === frame.file ? current.selectedNodeId : null;
+  const labeledFrame = frame.kind !== "text";
+  const selectFrame = async () => {
+    // Empty-space Shift-click must not replace an existing group of layers.
+    if (input.additive && current.selectedNodeIds.length > 0) return null;
+    await selectDesignFrame(workspaceId, frame, {
+      selected: !(
+        input.additive &&
+        current.selectedFrame === frame.file &&
+        current.frameSelected
+      ),
+    });
+    return null;
+  };
+  if (labeledFrame && input.intent === "plain" && !selectedNodeId) {
+    return selectFrame();
+  }
+  const generation = nextGeneration(
+    selectionGenerationByWorkspace,
+    workspaceId,
+  );
+  const runtime = designFrameRuntime(workspaceId, frame.file);
+  if (!runtime) return selectFrame();
+  const isCurrent = () => {
+    const state = designRuntimeFrameState(workspaceId, frame.file);
+    return (
+      selectionGenerationByWorkspace.get(workspaceId) === generation &&
+      (!state?.sourceVersion || state.sourceVersion === frame.sourceVersion)
+    );
+  };
+  let details = await runtime.getElementAtLoc(input.x, input.y, {
+    mode: "deepest",
+  });
+  if (
+    !isCurrent() ||
+    (details && details.sourceVersion !== frame.sourceVersion)
+  ) {
+    return null;
+  }
+  if (!details) return selectFrame();
+  const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
+  const exactSnapshot =
+    snapshot?.sourceVersion === frame.sourceVersion ? snapshot : null;
+  const isFrameOwner = (candidate: DesignRuntimeNodeDetails) =>
+    labeledFrame &&
+    (candidate.oid === exactSnapshot?.frame.oid ||
+      candidate.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID ||
+      candidate.tag === "body" ||
+      candidate.tag === "html");
+  if (isFrameOwner(details)) return selectFrame();
+  const intent =
+    input.preferText && canEditDesignNodeText(details)
+      ? "deepest"
+      : input.intent;
+  const target = exactSnapshot
+    ? resolveDesignFrameBodyTarget({
+        nodes: exactSnapshot.tree,
+        deepestNodeId: details.oid,
+        deepestRect: details.rect,
+        selectedNodeId,
+        intent,
+        frameSize: frame,
+        rootRect: exactSnapshot.frame.rect,
+        labeledFrame,
+        frameRootId: exactSnapshot.frame.oid,
+      })
+    : { kind: "unresolved" as const };
+  if (target.kind === "frame") return selectFrame();
+  if (target.kind === "node" && target.nodeId !== details.oid) {
+    details = await runtime.getNodeDetails(target.nodeId);
+  } else if (target.kind === "unresolved" && intent !== "deepest") {
+    // A semantic frame selection has no selected node. Give fallback descent
+    // its runtime owner so a bounded tree cannot trap entry on that same root.
+    details = await runtime.getElementAtLoc(input.x, input.y, {
+      mode: intent === "plain" ? "preserve" : "descend",
+      selectedNodeId:
+        selectedNodeId ??
+        (labeledFrame && intent === "descend"
+          ? exactSnapshot?.frame.oid
+          : null),
+    });
+  }
+  if (
+    !isCurrent() ||
+    (details && details.sourceVersion !== frame.sourceVersion)
+  ) {
+    return null;
+  }
+  if (!details || isFrameOwner(details)) return selectFrame();
+  if (input.additive) {
+    const selection = await toggleDesignNodeSelection({
+      ...input,
+      nodeId: details.oid,
+      details,
+    });
+    return (
+      selection?.find((candidate) => candidate.oid === details.oid) ?? null
+    );
   }
   return selectDesignNode({ ...input, nodeId: details.oid, details });
 }

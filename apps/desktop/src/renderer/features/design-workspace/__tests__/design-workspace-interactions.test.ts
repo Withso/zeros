@@ -90,18 +90,17 @@ describe("design workspace interaction wiring", () => {
     );
   });
 
-  it("selects top-level frames only from their label, never their body", () => {
-    // The label (and frame handles) are the frame's selection surfaces…
+  it("shares frame selection between body, label, and keyboard navigation", () => {
     expect(source).toContain("publishSelection(frame, { selected: true });");
-    // …frame chrome follows the explicit frame-selected flag…
     expect(source).toContain(
       "selected && view.frameSelected && !selectedElement;",
     );
-    // …and body clicks resolve through the local tree so a body-like root
-    // reads as empty canvas instead of selecting the frame.
-    expect(source).toContain("const resolveFrameBodyHit = useCallback(");
-    expect(source).toContain("resolveDesignFrameBodyTarget({");
-    expect(source).toContain("if (!pointer.shiftKey) publishSelection(frame);");
+    // Body hit tests use the same stale-response guard as other selections.
+    expect(source).toContain("selectDesignFrameBodyAtLocation({");
+    expect(selectionSource).toContain("resolveDesignFrameBodyTarget({");
+    expect(source).toContain(
+      "designFrameLayerChildren(selectedRuntimeTree, selectedFrameRootId)",
+    );
     // Escape steps node → frame → nothing.
     expect(source).toContain(
       'if (event.key === "Escape" && view.frameSelected && selectedFrame)',

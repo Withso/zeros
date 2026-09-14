@@ -100,15 +100,13 @@ import {
   previewDesignNodeStylesTransient,
   previewDesignNodeTextTransient,
   selectDesignFrame,
+  selectDesignFrameBodyAtLocation,
   selectDesignNode,
   selectDesignNodes,
   selectDesignNodeAtLocation,
   toggleDesignNodeSelection,
 } from "./state/design-selection";
-import {
-  designRuntimeFrameState,
-  useDesignRuntimeStore,
-} from "./state/design-runtime-store";
+import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import {
   designLivePreviewValue,
   publishDesignGestureLivePreview,
@@ -300,8 +298,7 @@ import {
   designLayerSiblingId,
   designLayerTopLevelSelectionIds,
   flattenDesignLayerTree,
-  resolveDesignFrameBodyTarget,
-  type DesignFrameBodyIntent,
+  designFrameLayerChildren,
 } from "./design-layer-tree";
 import {
   designFrameLayerLabel,
@@ -2869,6 +2866,16 @@ function DesignCanvas({
         ?.revision ?? 0
     );
   });
+  const selectedFrameRootId = useDesignRuntimeStore((state) =>
+    workspaceId && selectedFrame
+      ? state.byWorkspace[workspaceId]?.frames[selectedFrame.file]?.snapshot
+          ?.frame.oid
+      : undefined,
+  );
+  const selectedNavigationTree = useMemo(
+    () => designFrameLayerChildren(selectedRuntimeTree, selectedFrameRootId),
+    [selectedRuntimeTree, selectedFrameRootId],
+  );
   const selectedParentId = useMemo(
     () =>
       view.selectedNodeId
@@ -3948,7 +3955,11 @@ function DesignCanvas({
       );
       activateTool("select");
       window.requestAnimationFrame(() => {
-        viewportRef.current?.focus({ preventScroll: true });
+        // A rapid double-click can already have opened a new editor. The
+        // cancelled edit must not steal its focus and trigger an immediate blur.
+        if (!inlineTextEditRef.current) {
+          viewportRef.current?.focus({ preventScroll: true });
+        }
       });
     },
     [activateTool, workspaceId],
@@ -4619,6 +4630,7 @@ function DesignCanvas({
       if (
         !workspaceId ||
         !active ||
+        spacePressedRef.current ||
         activeTool !== "select" ||
         !event.isPrimary ||
         event.button !== 0
@@ -4627,8 +4639,8 @@ function DesignCanvas({
       }
       event.preventDefault();
       event.stopPropagation();
-      // The label (and the frame's own handles) are the frame's only
-      // selection surfaces — body clicks never reach here.
+      // Labels move the whole frame; body drags retain scoped marquee.
+      viewportRef.current?.focus({ preventScroll: true });
       publishSelection(frame, { selected: true });
       const element = event.currentTarget.closest<HTMLElement>(
         "[data-design-frame]",
@@ -4673,6 +4685,7 @@ function DesignCanvas({
         const dy = (pointerEvent.clientY - startY) / zoom;
         if (!moved && Math.hypot(dx, dy) < 3 / zoom) return;
         moved = true;
+        if (mode === "move") document.body.style.cursor = "grabbing";
         latest =
           mode === "move"
             ? (() => {
@@ -4763,7 +4776,7 @@ function DesignCanvas({
       gestureCancelRef.current = cancel;
       document.body.style.cursor =
         mode === "move"
-          ? "grabbing"
+          ? "default"
           : (DESIGN_RESIZE_HANDLES.find((item) => item.handle === mode)
               ?.cursor ?? "nwse-resize");
       document.body.style.userSelect = "none";
@@ -5457,7 +5470,25 @@ function DesignCanvas({
       const finish = (pointerEvent?: PointerEvent) => {
         if (pointerEvent && pointerEvent.pointerId !== pointerId) return;
         cleanup();
-        if (!moved) return;
+        if (!moved) {
+          // A modifier-click selects through spacing chrome. Keep modifier
+          // drags on the existing spacing path, including their preview/undo.
+          if (!(event.metaKey || event.ctrlKey) || !folder || !frameElement)
+            return;
+          const bounds = frameElement.getBoundingClientRect();
+          if (bounds.width <= 0 || bounds.height <= 0) return;
+          viewportRef.current?.focus({ preventScroll: true });
+          void selectDesignFrameBodyAtLocation({
+            workspaceId,
+            folder,
+            frame,
+            x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
+            y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
+            intent: "deepest",
+            additive: event.shiftKey,
+          }).catch(() => {});
+          return;
+        }
         publishDesignGestureLivePreview(
           workspaceId,
           frame.file,
@@ -5500,7 +5531,7 @@ function DesignCanvas({
       window.addEventListener("pointercancel", cancel);
       window.addEventListener("blur", cancel);
     },
-    [active, childGeometryDetails, liveDesignZoom, workspaceId],
+    [active, childGeometryDetails, folder, liveDesignZoom, workspaceId],
   );
 
   const startNodeGroupMove = useCallback(
@@ -6176,6 +6207,9 @@ function DesignCanvas({
       ) {
         return;
       }
+      if (gestureMode === "move") {
+        viewportRef.current?.focus({ preventScroll: true });
+      }
       if (gestureMode === "move" && view.selectedNodeIds.length > 1) {
         const topLevelIds = designLayerTopLevelSelectionIds(
           selectedRuntimeTree,
@@ -6570,6 +6604,13 @@ function DesignCanvas({
         cleanup();
         if (!moved) {
           if (gestureMode !== "move" || !folder) return;
+          if (
+            event.detail > 1 &&
+            !event.metaKey &&
+            !event.ctrlKey &&
+            !event.shiftKey
+          )
+            return;
           if (event.shiftKey) {
             void toggleDesignNodeSelection({
               workspaceId,
@@ -6585,20 +6626,13 @@ function DesignCanvas({
           );
           const bounds = frameElement?.getBoundingClientRect();
           if (!bounds) return;
-          const mode =
-            event.metaKey || event.ctrlKey
-              ? "deepest"
-              : event.detail > 1
-                ? "descend"
-                : "preserve";
-          void selectDesignNodeAtLocation({
+          void selectDesignFrameBodyAtLocation({
             workspaceId,
             folder,
             frame,
             x: ((event.clientX - bounds.left) * frame.width) / bounds.width,
             y: ((event.clientY - bounds.top) * frame.height) / bounds.height,
-            mode,
-            selectedNodeId: view.selectedNodeId,
+            intent: event.metaKey || event.ctrlKey ? "deepest" : "plain",
           }).catch(() => {});
           return;
         }
@@ -6845,7 +6879,7 @@ function DesignCanvas({
       if (event.key === "Escape" && view.selectedNodeId && selectedFrame) {
         event.preventDefault();
         const parentId = designLayerParentId(
-          selectedRuntimeTree,
+          selectedNavigationTree,
           view.selectedNodeId,
         );
         if (parentId) navigateToNode(parentId);
@@ -6866,19 +6900,31 @@ function DesignCanvas({
         !event.metaKey &&
         !event.ctrlKey &&
         !event.altKey &&
-        view.selectedNodeId
+        (view.selectedNodeId || view.frameSelected)
       ) {
         event.preventDefault();
+        if (!view.selectedNodeId) {
+          if (!event.shiftKey) {
+            const child = selectedNavigationTree.find((node) => node.visible);
+            if (child) navigateToNode(child.oid);
+          }
+          return;
+        }
         if (event.shiftKey) {
           const parentId = designLayerParentId(
-            selectedRuntimeTree,
+            selectedNavigationTree,
             view.selectedNodeId,
           );
           if (parentId) navigateToNode(parentId);
+          else if (selectedFrame) {
+            void selectDesignFrame(workspaceId!, selectedFrame, {
+              selected: true,
+            });
+          }
           return;
         }
         const childId = designLayerChildId(
-          selectedRuntimeTree,
+          selectedNavigationTree,
           view.selectedNodeId,
         );
         if (childId) navigateToNode(childId);
@@ -6895,7 +6941,7 @@ function DesignCanvas({
         view.selectedNodeId
       ) {
         const siblingId = designLayerSiblingId(
-          selectedRuntimeTree,
+          selectedNavigationTree,
           view.selectedNodeId,
           event.shiftKey ? -1 : 1,
         );
@@ -7032,6 +7078,7 @@ function DesignCanvas({
     resizeSelectedNode,
     selectedFrame,
     selectedNodeDetails,
+    selectedNavigationTree,
     selectedRuntimeTree,
     snapshot?.frames,
     syncMeasureModifier,
@@ -7075,155 +7122,43 @@ function DesignCanvas({
 
   // --- EVENT HANDLERS ---
 
-  /** Resolve a frame-body pointer hit into paper.design-style selection: the
-   * deepest runtime hit maps through the local layer tree so a body-like root
-   * reads as empty canvas ("clear"), plain clicks enter at the root's
-   * children, and repeated clicks descend. "unresolved" means the local tree
-   * is stale; callers fall back to the runtime's own hit modes. */
-  const resolveFrameBodyHit = useCallback(
-    async (input: {
-      frame: DesignCanvasFrameWire;
-      x: number;
-      y: number;
-      intent: DesignFrameBodyIntent;
-      selectedNodeId: string | null;
-      deepest?: DesignRuntimeNodeDetails | null;
-    }): Promise<
-      | {
-          kind: "node";
-          nodeId: string;
-          details: DesignRuntimeNodeDetails | null;
-        }
-      | { kind: "clear" }
-      | { kind: "unresolved" }
-    > => {
-      if (!workspaceId) return { kind: "unresolved" };
-      const deepest =
-        input.deepest !== undefined
-          ? input.deepest
-          : await inspectDesignNodeAtLocation({
-              workspaceId,
-              frame: input.frame,
-              x: input.x,
-              y: input.y,
-              mode: "deepest",
-            });
-      if (!deepest) return { kind: "clear" };
-      const runtimeState = designRuntimeFrameState(
-        workspaceId,
-        input.frame.file,
-      );
-      const snapshotTree =
-        runtimeState?.snapshot?.sourceVersion === input.frame.sourceVersion
-          ? runtimeState.snapshot.tree
-          : null;
-      if (!snapshotTree) return { kind: "unresolved" };
-      const rootOid = snapshotTree.length === 1 ? snapshotTree[0]!.oid : null;
-      const rootCandidate = rootOid
-        ? runtimeState?.detailsByNode[rootOid]
-        : undefined;
-      const target = resolveDesignFrameBodyTarget({
-        nodes: snapshotTree,
-        deepestNodeId: deepest.oid,
-        deepestRect: deepest.rect,
-        selectedNodeId: input.selectedNodeId,
-        intent: input.intent,
-        frameSize: { width: input.frame.width, height: input.frame.height },
-        rootRect:
-          rootCandidate?.sourceVersion === input.frame.sourceVersion
-            ? rootCandidate.rect
-            : null,
-        labeledFrame: input.frame.kind !== "text",
-        frameRootId: runtimeState?.snapshot?.frame.oid,
-      });
-      if (target.kind === "node") {
-        return {
-          kind: "node",
-          nodeId: target.nodeId,
-          details: target.nodeId === deepest.oid ? deepest : null,
-        };
-      }
-      return target;
-    },
-    [workspaceId],
-  );
-
   const descendAtCanvasPoint = useCallback(
     (
       frame: DesignCanvasFrameWire,
       frameElement: HTMLElement,
       clientX: number,
       clientY: number,
-      selectedNodeId: string | null,
     ) => {
-      if (!workspaceId || !folder) return;
+      if (
+        !active ||
+        !workspaceId ||
+        !folder ||
+        activeTool !== "select" ||
+        spacePressedRef.current
+      )
+        return;
       const bounds = frameElement.getBoundingClientRect();
       if (bounds.width <= 0 || bounds.height <= 0) return;
-      const point = {
+      void selectDesignFrameBodyAtLocation({
+        workspaceId,
+        folder,
+        frame,
         x: ((clientX - bounds.left) * frame.width) / bounds.width,
         y: ((clientY - bounds.top) * frame.height) / bounds.height,
-      };
-      void inspectDesignNodeAtLocation({
-        workspaceId,
-        frame,
-        ...point,
-        mode: "deepest",
-      })
-        .then((details) => {
+        intent: "descend",
+        preferText: true,
+        onLocalSelection: (details) => {
           if (canEditDesignNodeText(details) && details.text !== null) {
-            void selectDesignNode({
-              workspaceId,
-              folder,
-              frame,
-              nodeId: details.oid,
-              details,
-            }).catch(() => {});
             finishInlineTextTool(frame, details);
-            return;
           }
-          return resolveFrameBodyHit({
-            frame,
-            ...point,
-            intent: "descend",
-            selectedNodeId,
-            deepest: details,
-          }).then((hit) => {
-            if (hit.kind === "node") {
-              return selectDesignNode({
-                workspaceId,
-                folder,
-                frame,
-                nodeId: hit.nodeId,
-                ...(hit.details ? { details: hit.details } : {}),
-              });
-            }
-            if (hit.kind === "unresolved") {
-              return selectDesignNodeAtLocation({
-                workspaceId,
-                folder,
-                frame,
-                ...point,
-                mode: "descend",
-                selectedNodeId,
-              });
-            }
-            publishSelection(frame);
-            return null;
-          });
-        })
-        .catch((selectionError) => {
-          toast.error("Couldn't inspect that nested element", {
-            description: errorMessage(selectionError),
-          });
+        },
+      }).catch((selectionError) => {
+        toast.error("Couldn't inspect that nested element", {
+          description: errorMessage(selectionError),
         });
+      });
     },
-    [
-      finishInlineTextTool,
-      folder,
-      publishSelection,
-      resolveFrameBodyHit,
-      workspaceId,
-    ],
+    [active, activeTool, finishInlineTextTool, folder, workspaceId],
   );
 
   const scheduleCanvasHover = useCallback(
@@ -7324,12 +7259,17 @@ function DesignCanvas({
         ((clientY - frameBounds.top) * frame.height) / frameBounds.height;
       void inspectDesignNodeAtLocation({ workspaceId, frame, x, y })
         .then((details) => {
-          if (!details || hitStackGenerationRef.current !== generation) return;
-          const tree =
+          if (hitStackGenerationRef.current !== generation) return;
+          const runtimeSnapshot =
             useDesignRuntimeStore.getState().byWorkspace[workspaceId]?.frames[
               frame.file
-            ]?.snapshot?.tree ?? EMPTY_DESIGN_TREE;
-          const path = designLayerPathIds(tree, details.oid);
+            ]?.snapshot;
+          const rawTree = runtimeSnapshot?.tree ?? EMPTY_DESIGN_TREE;
+          const tree =
+            frame.kind === "text"
+              ? rawTree
+              : designFrameLayerChildren(rawTree, runtimeSnapshot?.frame.oid);
+          const path = details ? designLayerPathIds(tree, details.oid) : [];
           const byId = new Map(
             flattenDesignLayerTree(tree).map((layer) => [
               layer.node.oid,
@@ -7340,7 +7280,6 @@ function DesignCanvas({
             const node = byId.get(oid);
             return node ? [{ oid, name: node.name, tag: node.tag }] : [];
           });
-          if (layers.length === 0) return;
           setHitStackMenu({
             frame,
             x: Math.min(
@@ -8304,9 +8243,8 @@ function DesignCanvas({
               ) ?? null;
             const parentElement =
               selected && selectedElement ? parentOutlineDetails : null;
-            // Frame chrome belongs to an explicit frame selection (label,
-            // Layers row, Escape) — an active frame with nothing selected
-            // stays chrome-free like Figma's resting state.
+            // Frame chrome follows the semantic selection shared by body,
+            // label, Layers, and keyboard navigation.
             const frameSelectedOnly =
               selected && view.frameSelected && !selectedElement;
             // Guides and Option/Alt measurements anchor on the primary
@@ -8377,6 +8315,7 @@ function DesignCanvas({
                 }}
                 onPointerDown={(event) => {
                   if (
+                    !active ||
                     !event.isPrimary ||
                     event.button !== 0 ||
                     spacePressedRef.current
@@ -8389,6 +8328,7 @@ function DesignCanvas({
                   ) {
                     return;
                   }
+                  viewportRef.current?.focus({ preventScroll: true });
                   if (startFrameCreation(event)) return;
                   if (startTextInsertion(event, frame)) return;
                   if (!workspaceId || !folder) {
@@ -8411,73 +8351,28 @@ function DesignCanvas({
                       bounds.width > 0 ? frame.width / bounds.width : 1;
                     const scaleY =
                       bounds.height > 0 ? frame.height / bounds.height : 1;
-                    const intent: DesignFrameBodyIntent =
-                      activeTool === "text" ||
-                      pointer.metaKey ||
-                      pointer.ctrlKey
-                        ? "deepest"
-                        : pointer.detail > 1
-                          ? "descend"
-                          : "plain";
-                    const point = {
+                    // The double-click handler owns descent exactly once. Its
+                    // second pointer-up must not start a competing hit request.
+                    if (
+                      pointer.detail > 1 &&
+                      !pointer.metaKey &&
+                      !pointer.ctrlKey &&
+                      !pointer.shiftKey
+                    )
+                      return;
+                    const selection = selectDesignFrameBodyAtLocation({
+                      workspaceId,
+                      folder,
+                      frame,
                       x: (pointer.clientX - bounds.left) * scaleX,
                       y: (pointer.clientY - bounds.top) * scaleY,
-                    };
-                    const legacyMode = intent === "plain" ? "preserve" : intent;
-                    const selection = resolveFrameBodyHit({
-                      frame,
-                      ...point,
-                      intent,
-                      selectedNodeId: view.selectedNodeId,
-                    }).then((hit) => {
-                      if (hit.kind === "node") {
-                        return pointer.shiftKey
-                          ? toggleDesignNodeSelection({
-                              workspaceId,
-                              folder,
-                              frame,
-                              nodeId: hit.nodeId,
-                              ...(hit.details ? { details: hit.details } : {}),
-                            }).then(() => hit.details)
-                          : selectDesignNode({
-                              workspaceId,
-                              folder,
-                              frame,
-                              nodeId: hit.nodeId,
-                              ...(hit.details ? { details: hit.details } : {}),
-                            });
-                      }
-                      if (hit.kind === "unresolved") {
-                        // Stale local tree — the runtime resolves the click.
-                        const hitInput = {
-                          workspaceId,
-                          frame,
-                          ...point,
-                          mode: legacyMode,
-                          selectedNodeId: view.selectedNodeId,
-                        } as const;
-                        return pointer.shiftKey
-                          ? inspectDesignNodeAtLocation(hitInput).then(
-                              (details) =>
-                                details
-                                  ? toggleDesignNodeSelection({
-                                      workspaceId,
-                                      folder,
-                                      frame,
-                                      nodeId: details.oid,
-                                      details,
-                                    }).then(() => details)
-                                  : null,
-                            )
-                          : selectDesignNodeAtLocation({
-                              ...hitInput,
-                              folder,
-                            });
-                      }
-                      // Empty frame body reads as canvas: a plain click clears
-                      // the selection without selecting the frame itself.
-                      if (!pointer.shiftKey) publishSelection(frame);
-                      return null;
+                      intent:
+                        activeTool === "text" ||
+                        pointer.metaKey ||
+                        pointer.ctrlKey
+                          ? "deepest"
+                          : "plain",
+                      additive: pointer.shiftKey,
                     });
                     void selection
                       .then((details) => {
@@ -8505,7 +8400,13 @@ function DesignCanvas({
                   selectAtPoint();
                 }}
                 onDoubleClick={(event) => {
-                  if (blocksDesignCanvasDoubleClick(event.target)) return;
+                  if (
+                    event.shiftKey ||
+                    event.metaKey ||
+                    event.ctrlKey ||
+                    blocksDesignCanvasDoubleClick(event.target)
+                  )
+                    return;
                   event.preventDefault();
                   event.stopPropagation();
                   descendAtCanvasPoint(
@@ -8513,7 +8414,6 @@ function DesignCanvas({
                     event.currentTarget,
                     event.clientX,
                     event.clientY,
-                    view.selectedNodeId,
                   );
                 }}
                 onPointerMove={(event) => scheduleCanvasHover(event, frame)}
@@ -8577,7 +8477,7 @@ function DesignCanvas({
                         data-design-frame-label=""
                         title={frame.title}
                         className={cn(
-                          "text-2xxs block max-w-full min-w-0 cursor-move overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
+                          "text-2xxs block max-w-full min-w-0 cursor-default overflow-hidden border-0 bg-transparent p-0 text-left leading-4 font-medium whitespace-nowrap outline-none",
                           frameSelectedOnly
                             ? "text-[var(--design-selection-stroke)]"
                             : "text-muted-fg",
@@ -8791,6 +8691,9 @@ function DesignCanvas({
                         if (
                           !primarySelection ||
                           selectedElements.length !== 1 ||
+                          event.shiftKey ||
+                          event.metaKey ||
+                          event.ctrlKey ||
                           blocksDesignCanvasDoubleClick(event.target)
                         ) {
                           return;
@@ -8811,7 +8714,6 @@ function DesignCanvas({
                           frameElement,
                           event.clientX,
                           event.clientY,
-                          details.oid,
                         );
                       }}
                     >
