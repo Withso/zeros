@@ -44,6 +44,12 @@ import { prefetchWorkspaceFileRead } from "../../workspace-file-data-cache";
 import { isNativeRuntime, nativeInvoke } from "@/renderer/platform/runtime";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
+  FILE_ICON_PALETTE_CSS,
+  FILE_ICON_TREE_CONFIG,
+  FOLDER_CLOSED_MASK_URL,
+  FOLDER_OPEN_MASK_URL,
+} from "@/renderer/shared/theme/file-icons";
+import {
   ancestorDirPrefixes,
   reconcileTreePathList,
   treeSelectionMirrorIntent,
@@ -109,13 +115,20 @@ const TREE_THEME_VARS = {
   "--trees-level-gap-override": "2px",
 } as React.CSSProperties;
 
+/** Rendered size of a row's glyph — file type icons and the folder masks
+ *  alike. The slot stays at the library's 16px (see the svg rule in
+ *  TREE_SHADOW_CSS for why). */
+const FILE_ICON_SIZE = 14;
+
 // Folders render a disclosure chevron ("dropdown") by default. We hide it
-// and paint a Lucide `folder` glyph in the icon slot via a CSS mask,
-// injected into the tree's shadow root through `unsafeCSS`. Files keep
-// their colored type icons untouched. Selectors verified against the
-// shipped stylesheet: [data-item-type='folder'] > [data-item-section='icon'].
-const FOLDER_MASK =
-  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/%3E%3C/svg%3E\") center / contain no-repeat";
+// and paint a Lucide folder glyph in the icon slot via a CSS mask injected
+// into the tree's shadow root through `unsafeCSS` — `folder` when collapsed,
+// `folder-open` when expanded (the row carries aria-expanded; a sticky
+// header row is an expanded folder by definition). Files keep their type
+// icons. Selectors verified against the shipped stylesheet:
+// [data-item-type='folder'] > [data-item-section='icon'].
+const FOLDER_MASK = `${FOLDER_CLOSED_MASK_URL} center / ${FILE_ICON_SIZE}px no-repeat`;
+const FOLDER_OPEN_MASK = `${FOLDER_OPEN_MASK_URL} center / ${FILE_ICON_SIZE}px no-repeat`;
 
 // ── Search-row geometry ────────────────────────────────────
 // The filter input lives in the tree's SHADOW ROOT, so a React control can't
@@ -153,6 +166,28 @@ const TREE_SHADOW_CSS = `
      unsafeCSS lands in the lib's LAST cascade layer (base, unsafe). */
   :host {
     color-scheme: inherit;
+    /* Palette for our file-type sprite. Each symbol paints with
+       var(--zeros-fi, var(--zeros-fi-<hue>)); custom properties inherit into
+       a <use>'s shadow tree, so defining them on :host is enough. */
+    ${FILE_ICON_PALETTE_CSS}
+  }
+  /* A .gitignore'd file's glyph dims with its name. The library does this for
+     its own icons via \`color\` (they paint with currentColor); ours bake a
+     hue in, so the escape-hatch variable carries the status colour instead.
+     --trees-git-ignored-color is the library's resolved status colour — the
+     same --fg3 fed in through TREE_THEME_VARS. */
+  [data-item-git-status='ignored'] > [data-item-section='icon'] > svg[data-icon-name='file-tree-icon-file'] {
+    --zeros-fi: var(--trees-git-ignored-color);
+  }
+  /* File-type glyphs render at 14px, not the svg's native 16: at 16 they
+     read heavy next to 13px row text. The svg carries width/height="16"
+     ATTRIBUTES, which the slot's --trees-icon-width can't reach, so this
+     targets the element. The 16px slot is deliberately kept:
+     --trees-level-gap and the indent guides are derived from it, so
+     shrinking the slot would shift every nested row. */
+  [data-item-type='file'] > [data-item-section='icon'] > svg[data-icon-name='file-tree-icon-file'] {
+    width: ${FILE_ICON_SIZE}px;
+    height: ${FILE_ICON_SIZE}px;
   }
   /* Folder rows: hide the disclosure chevron (kept for hit-testing) and
      paint a Lucide folder glyph in its place. Files keep type icons. */
@@ -170,6 +205,10 @@ const TREE_SHADOW_CSS = `
     background-color: var(--fg2);
     -webkit-mask: ${FOLDER_MASK};
     mask: ${FOLDER_MASK};
+  }
+  [data-item-type='folder']:is([aria-expanded='true'], [data-file-tree-sticky-row]) > [data-item-section='icon']::after {
+    -webkit-mask: ${FOLDER_OPEN_MASK};
+    mask: ${FOLDER_OPEN_MASK};
   }
   /* An ignored folder's glyph is painted by the mask above, whose colour is a
      LITERAL — the library's git-status rule sets \`color\`, which a mask ignores,
@@ -448,7 +487,9 @@ export const WorkspaceFileTree = React.forwardRef<
         // directories, not just roots, so this stays correct either way (see
         // ignored-entries.ts).
         flattenEmptyDirectories: false,
-        icons: { set: "complete" as const, colored: true },
+        // Zeros' own sprite (shared/theme/file-icons.ts) instead of the
+        // library's filled "complete" set — see that module's header.
+        icons: FILE_ICON_TREE_CONFIG,
         unsafeCSS: TREE_SHADOW_CSS,
         composition: { contextMenu: { enabled: true } },
         ...(initialPathRef.current
