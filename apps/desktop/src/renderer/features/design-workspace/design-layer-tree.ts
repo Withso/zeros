@@ -182,11 +182,10 @@ export type DesignFrameBodyIntent = "plain" | "descend" | "deepest";
 
 export type DesignFrameBodyTarget =
   | { kind: "node"; nodeId: string }
-  | { kind: "clear" }
+  | { kind: "frame" }
   | { kind: "unresolved" };
 
-/** A root that starts at the frame origin and spans it edge to edge is the
- * frame's body, not an element the pointer can mean. */
+/** Geometry fallback for older runtimes without an explicit frame owner. */
 export function designFrameBodyRootCoverage(
   rect: DesignRuntimeRect,
   frameSize: { width: number; height: number },
@@ -199,13 +198,10 @@ export function designFrameBodyRootCoverage(
   );
 }
 
-/** Resolve a frame-body click from the deepest runtime hit, paper.design
- * style: the frame itself is never selected from its body — a body-like root
- * counts as empty canvas (clears the selection), plain clicks enter at the
- * root's children, repeated clicks descend, and the platform modifier reaches
- * the deepest node. Text frames have no label, so their root stays clickable.
- * An empty path means the local tree is stale; callers fall back to the
- * runtime's own hit modes. */
+/** The outer frame owns ordinary entry; explicit descent opens its children.
+ * Once inside, preserve useful nesting depth. The runtime's frame owner and
+ * document wrappers share the frame identity, including deep selection.
+ * Unmarked authored roots and standalone text remain ordinary layers. */
 export function resolveDesignFrameBodyTarget(input: {
   nodes: readonly DesignRuntimeTreeNode[];
   deepestNodeId: string;
@@ -220,19 +216,34 @@ export function resolveDesignFrameBodyTarget(input: {
   /** Explicit runtime style owner; a full-size authored child is still a layer. */
   frameRootId?: string;
 }): DesignFrameBodyTarget {
-  const path = designLayerPathIds(input.nodes, input.deepestNodeId);
-  if (path.length === 0) return { kind: "unresolved" };
-  if (input.intent === "deepest") {
-    return { kind: "node", nodeId: path.at(-1)! };
+  if (
+    input.labeledFrame &&
+    ((input.intent === "plain" && !input.selectedNodeId) ||
+      input.deepestNodeId === input.frameRootId)
+  ) {
+    return { kind: "frame" };
   }
-  const singleRoot = input.nodes.length === 1;
+  // Match the visible Layers hierarchy: legacy body/html wrappers and a
+  // marked frame root must not introduce invisible levels of selection.
+  const nodes = input.labeledFrame
+    ? designFrameLayerChildren(input.nodes, input.frameRootId)
+    : input.nodes;
+  if (nodes !== input.nodes) {
+    const originalPath = designLayerPathIds(input.nodes, input.deepestNodeId);
+    if (
+      originalPath.length > 0 &&
+      designLayerPathIds(nodes, input.deepestNodeId).length === 0
+    ) {
+      return { kind: "frame" };
+    }
+  }
+  const path = designLayerPathIds(nodes, input.deepestNodeId);
+  if (path.length === 0) return { kind: "unresolved" };
+  const singleRoot = nodes.length === 1;
   const rootIsFrameBody =
     input.labeledFrame &&
+    input.frameRootId === undefined &&
     singleRoot &&
-    (input.frameRootId === undefined ||
-      path[0] === input.frameRootId ||
-      input.nodes[0]?.tag === "body" ||
-      input.nodes[0]?.tag === "html") &&
     (path.length === 1
       ? designFrameBodyRootCoverage(input.deepestRect, input.frameSize)
       : input.rootRect
@@ -240,8 +251,11 @@ export function resolveDesignFrameBodyTarget(input: {
         : true);
   if (path.length === 1) {
     return rootIsFrameBody
-      ? { kind: "clear" }
+      ? { kind: "frame" }
       : { kind: "node", nodeId: path[0]! };
+  }
+  if (input.intent === "deepest") {
+    return { kind: "node", nodeId: path.at(-1)! };
   }
   const floor = rootIsFrameBody ? 1 : 0;
   const selectedIndex = input.selectedNodeId
@@ -249,7 +263,7 @@ export function resolveDesignFrameBodyTarget(input: {
     : -1;
   const selectedPath =
     selectedIndex < 0 && input.selectedNodeId
-      ? designLayerPathIds(input.nodes, input.selectedNodeId)
+      ? designLayerPathIds(nodes, input.selectedNodeId)
       : [];
   const clamp = (index: number) =>
     path[Math.max(floor, Math.min(index, path.length - 1))]!;
