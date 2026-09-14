@@ -53,7 +53,7 @@
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
 
-import { chromium } from "@playwright/test";
+import { chromium, expect } from "@playwright/test";
 import { spawn } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -658,14 +658,26 @@ try {
   // Read related geometry in one browser frame. Three separate boundingBox
   // calls can straddle the sidecar's entrance animation on a busy machine,
   // reporting different absolute positions for correctly aligned siblings.
-  const { claudeMarkBox, claudeHeadingBox, opusNameBox } = await claudeGroup.evaluate((group) => {
-    const box = (element) => element?.getBoundingClientRect().toJSON() ?? null;
-    return {
-      claudeMarkBox: box(group.querySelector('[data-model-section-heading="agent"] > span:first-child')),
-      claudeHeadingBox: box(group.querySelector('[data-model-section-title]')),
-      opusNameBox: box([...group.querySelectorAll('span')].find((span) => span.textContent === 'Opus 5')),
-    };
-  });
+  const { claudeMarkBox, claudeHeadingBox, opusNameBox } =
+    await claudeGroup.evaluate((group) => {
+      const box = (element) =>
+        element?.getBoundingClientRect().toJSON() ?? null;
+      return {
+        claudeMarkBox: box(
+          group.querySelector(
+            '[data-model-section-heading="agent"] > span:first-child',
+          ),
+        ),
+        claudeHeadingBox: box(
+          group.querySelector("[data-model-section-title]"),
+        ),
+        opusNameBox: box(
+          [...group.querySelectorAll("span")].find(
+            (span) => span.textContent === "Opus 5",
+          ),
+        ),
+      };
+    });
   check(
     "agent brand marks and model names share the same left edge",
     !!claudeMarkBox &&
@@ -2301,6 +2313,8 @@ try {
     "GitHub overflow opens",
     await waitFor(githubMenuOpen, "github-menu-open"),
   );
+  // Focus and visibility precede Radix's active dismissable-layer registration.
+  await expect(page.getByRole("menu")).toHaveCSS("pointer-events", "auto");
   await page.keyboard.press("Escape");
   check(
     "Escape closes GitHub overflow",
