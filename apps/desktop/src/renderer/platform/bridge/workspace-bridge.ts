@@ -824,10 +824,19 @@ export async function bridgeFileTree(
   bridge: RuntimeClient,
   workspaceId: string,
   limit?: number,
+  options: {
+    includeIgnored?: boolean;
+    query?: string;
+    mentionRevision?: string;
+  } = {},
 ): Promise<string[]> {
-  const r = (await workspaceOp(bridge, "file.tree", { workspaceId, limit })) as
-    | { files?: string[] }
-    | undefined;
+  const r = (await workspaceOp(bridge, "file.tree", {
+    workspaceId,
+    limit,
+    ...options,
+  })) as { files?: string[] } | undefined;
+  if (options.includeIgnored && !Array.isArray(r?.files))
+    throw new Error("Invalid workspace mention listing");
   return r?.files ?? [];
 }
 

@@ -3501,6 +3501,27 @@ describe("WorkspaceService", () => {
     expect(r.files).toContain("hello.txt");
   });
 
+  it("searches ignored mention paths locally while keeping the remote file-tree boundary", async () => {
+    fs.writeFileSync(path.join(dir, ".gitignore"), ".context/\n");
+    fs.mkdirSync(path.join(dir, ".context/attachments"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".context/attachments/rollout.jsonl"), "fixture");
+    const params = {
+      workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+      includeIgnored: true,
+      query: "rollout",
+      limit: 1,
+    };
+    expect(await svc.handle("file.tree", params)).toEqual({
+      files: [".context/attachments/rollout.jsonl"],
+    });
+    await expect(svc.handle("file.tree", params, { remote: true }))
+      .rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    const ordinary = await svc.handle("file.tree", {
+      workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+    }) as { files: string[] };
+    expect(ordinary.files).not.toContain(".context/attachments/rollout.jsonl");
+  });
+
   it("blocks a REMOTE client from reading secret files (.env), allows local", async () => {
     fs.writeFileSync(path.join(dir, ".env"), "SECRET=hunter2", "utf-8");
     // Remote: denied with VALIDATION_FAILED — never returns the contents.

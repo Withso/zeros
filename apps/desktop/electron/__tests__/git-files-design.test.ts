@@ -34,3 +34,32 @@ it("native Files listing includes validated, untracked Design roots only when re
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+it("native mention requests include ignored attachments and honor the query before the cap", async () => {
+  const root = mkdtempSync(path.join(tmpdir(), "zeros-native-mention-files-"));
+  try {
+    await runGit(root, ["init", "-b", "main"]);
+    writeFileSync(path.join(root, ".gitignore"), ".context/\n");
+    mkdirSync(path.join(root, ".context/attachments"), { recursive: true });
+    writeFileSync(
+      path.join(root, ".context/attachments/rollout.jsonl"),
+      "fixture",
+    );
+    expect(
+      await gitListFiles(
+        {
+          cwd: root,
+          includeIgnored: true,
+          query: "rollout",
+          limit: 1,
+        },
+        {} as never,
+      ),
+    ).toEqual({ files: [".context/attachments/rollout.jsonl"] });
+    expect(await gitListFiles({ cwd: root }, {} as never)).toEqual({
+      files: [".gitignore"],
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

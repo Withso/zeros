@@ -9,8 +9,8 @@
 //     (`deselectAfterOpen`) with no selection mirror.
 //
 // It owns the tree model, the workspace file listing
-// (listWorkspaceFiles — the same gitignore-aware listing the @-mention
-// picker uses), the selection→open wiring, the shadow-DOM theme bridge,
+// (the default gitignore-aware listing, with ignored entries loaded lazily),
+// the selection→open wiring, the shadow-DOM theme bridge,
 // and the right-click menu. What "open" MEANS is left to the caller via
 // onOpenFile / onOpenInNewTab.
 //

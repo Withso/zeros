@@ -19,8 +19,12 @@ const FILES = [
 describe("deriveWorkspaceEntries", () => {
   it("emits every file plus each unique directory prefix", () => {
     const entries = deriveWorkspaceEntries(["src/features/agent/x.ts"]);
-    const folders = entries.filter((e) => e.kind === "folder").map((e) => e.path);
-    const fileEntries = entries.filter((e) => e.kind === "file").map((e) => e.path);
+    const folders = entries
+      .filter((e) => e.kind === "folder")
+      .map((e) => e.path);
+    const fileEntries = entries
+      .filter((e) => e.kind === "file")
+      .map((e) => e.path);
     expect(folders).toEqual(
       expect.arrayContaining(["src", "src/features", "src/features/agent"]),
     );
@@ -28,11 +32,32 @@ describe("deriveWorkspaceEntries", () => {
   });
 
   it("dedupes shared directory prefixes", () => {
-    const entries = deriveWorkspaceEntries(["a/b/one.ts", "a/b/two.ts", "a/c.ts"]);
-    const folders = entries.filter((e) => e.kind === "folder").map((e) => e.path);
+    const entries = deriveWorkspaceEntries([
+      "a/b/one.ts",
+      "a/b/two.ts",
+      "a/c.ts",
+    ]);
+    const folders = entries
+      .filter((e) => e.kind === "folder")
+      .map((e) => e.path);
     // "a" and "a/b" appear once each despite multiple children.
     expect(folders.filter((f) => f === "a")).toHaveLength(1);
     expect(folders.filter((f) => f === "a/b")).toHaveLength(1);
+  });
+
+  it("preserves explicit empty folders without creating file duplicates", () => {
+    expect(
+      deriveWorkspaceEntries([
+        ".context/",
+        ".context/empty/",
+        ".context/rollout.jsonl",
+        ".context/rollout.jsonl",
+      ]),
+    ).toEqual([
+      { path: ".context/rollout.jsonl", kind: "file" },
+      { path: ".context", kind: "folder" },
+      { path: ".context/empty", kind: "folder" },
+    ]);
   });
 });
 
@@ -48,7 +73,17 @@ describe("buildPathMentions", () => {
   it("matches fuzzily across path segments (subsequence)", () => {
     // "agentchat" is a subsequence of "agent/agent-chat" — should match.
     const out = buildPathMentions(entries, "agentchat", 8);
-    expect(out.some((m) => m.query === "src/features/agent/agent-chat.tsx")).toBe(true);
+    expect(
+      out.some((m) => m.query === "src/features/agent/agent-chat.tsx"),
+    ).toBe(true);
+  });
+
+  it("fuzzy-matches filenames containing characters outside the BMP", () => {
+    const out = buildPathMentions(
+      deriveWorkspaceEntries([".context/🐈-rollout.jsonl"]),
+      "🐈rollout",
+    );
+    expect(out[0]?.query).toBe(".context/🐈-rollout.jsonl");
   });
 
   it("wraps files in backticks and folders with a trailing slash", () => {
@@ -89,6 +124,21 @@ describe("buildPathMentions", () => {
 
   it("returns nothing for a query that matches no path", () => {
     expect(buildPathMentions(entries, "zzzznomatch", 8)).toEqual([]);
+  });
+
+  it("matches an explicitly typed dot-relative folder path", () => {
+    const out = buildPathMentions(
+      deriveWorkspaceEntries([
+        ".context/",
+        ".context/attachments/",
+        ".context/attachments/my screenshot.png",
+      ]),
+      "./.context/attachments/",
+    );
+    expect(out[0]?.token).toBe("`.context/attachments/`");
+    expect(out.some((item) => item.query.endsWith("my screenshot.png"))).toBe(
+      true,
+    );
   });
 });
 
