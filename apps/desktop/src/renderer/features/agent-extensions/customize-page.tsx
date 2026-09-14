@@ -135,7 +135,7 @@ function ScopePicker({
             className="items-start gap-2.5"
           >
             <span
-              className="bg-bg2-hover mt-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-sm"
+              className="bg-bg2-hover mt-0.5 inline-flex size-3.5 shrink-0 items-center justify-center rounded-sm"
               aria-hidden="true"
             >
               <RepositoryIcon project={p} className="size-full rounded-sm" />

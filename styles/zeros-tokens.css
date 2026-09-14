@@ -196,8 +196,11 @@
    *                     sidebar + settings nav rows (workspace rows,
    *                     Dashboard/Create, settings entries), small
    *                     cards/rows, markdown img/table, tooltips
-   *   --radius-lg 8px — composer shell, dialogs, popovers, menus,
-   *                     cards, code blocks, toasts, panels
+   *   --radius-lg 8px — composer shell, dialogs, cards, code blocks,
+   *                     toasts, panels
+   * Dropdown surfaces (Popover, DropdownMenu, ContextMenu, Select) use
+   * 2 × --radius-lg = 16px via shared/ui/menu-surface.ts — derived from
+   * the scale, not a fourth token.
    * Plus rounded-full (circles/scrollbars/switch) and rounded-none
    * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
    * ON PURPOSE so `rounded-xl` etc. no longer exist —
