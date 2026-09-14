@@ -5,6 +5,7 @@ import { ChevronRight } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
   MENU_ITEM_ICON,
+  MENU_ITEM_RADIUS,
   MENU_SURFACE_RADIUS,
 } from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
@@ -48,7 +49,8 @@ const ContextMenuSubTrigger = React.forwardRef<
   <ContextMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 data-[state=open]:bg-bg3-hover flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-xs outline-none select-none",
+      "focus:bg-bg3-hover focus:text-fg1 data-[state=open]:bg-bg3-hover flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-none select-none",
+      MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
       inset && "pl-8",
       className,
@@ -110,7 +112,8 @@ const ContextMenuItem = React.forwardRef<
   <ContextMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      MENU_ITEM_RADIUS,
       MENU_ITEM_ICON,
       inset && "pl-8",
       className,

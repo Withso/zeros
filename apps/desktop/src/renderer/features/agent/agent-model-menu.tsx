@@ -40,6 +40,7 @@ import {
 import { Check, ChevronRight, Star } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
+import { MENU_ITEM_RADIUS } from "../../shared/ui/menu-surface";
 import { Switch, Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Popover,
@@ -580,7 +581,8 @@ export function AgentModelMenu({
                   }
                   aria-expanded={catalogOpen}
                   className={cn(
-                    "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1 my-1 flex w-[calc(100%_-_0.5rem)] items-center gap-2 rounded-sm px-2 text-left outline-none",
+                    "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1 my-1 flex w-[calc(100%_-_0.5rem)] items-center gap-2 px-2 text-left outline-none",
+                    MENU_ITEM_RADIUS,
                     MODEL_ROW_HEIGHT,
                   )}
                   onPointerEnter={() => {
@@ -1178,7 +1180,8 @@ function CatalogModelRow({
       data-model-catalog-item
       data-favorite-placement={placement}
       className={cn(
-        "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover relative flex items-center rounded-sm",
+        "group/mi bg-bg3 hover:bg-bg3-hover focus-within:bg-bg3-hover relative flex items-center",
+        MENU_ITEM_RADIUS,
         MODEL_ROW_HEIGHT,
       )}
     >

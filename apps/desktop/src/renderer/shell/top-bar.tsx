@@ -165,6 +165,7 @@ import { useWorkspaceChangeLines } from "./use-workspace-change-lines";
 import { WorkspaceChangeCounts } from "./workspace-change-counts";
 import { ResourceMonitor } from "./resource-monitor";
 import { cn } from "../shared/ui/cn";
+import { MENU_ITEM_RADIUS } from "../shared/ui/menu-surface";
 import {
   effectiveWorkspaceListFilter,
   isMixedWorkspaceListFilter,
@@ -1256,7 +1257,10 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
                   <button
                     type="button"
                     key={workspace.id}
-                    className="hover:bg-bg2 flex w-full min-w-0 items-center gap-2 rounded-sm px-2 py-2 text-left disabled:pointer-events-none disabled:opacity-60"
+                    className={cn(
+                      "hover:bg-bg2 flex w-full min-w-0 items-center gap-2 px-2 py-2 text-left disabled:pointer-events-none disabled:opacity-60",
+                      MENU_ITEM_RADIUS,
+                    )}
                     role="listitem"
                     disabled={restoringId !== null}
                     onClick={() => {

@@ -5,7 +5,10 @@ import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react"
 import { Select as SelectPrimitive } from "radix-ui"
 
 import { cn } from "@/renderer/shared/ui/cn"
-import { MENU_SURFACE_RADIUS } from "@/renderer/shared/ui/menu-surface"
+import {
+  MENU_ITEM_RADIUS,
+  MENU_SURFACE_RADIUS,
+} from "@/renderer/shared/ui/menu-surface"
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus"
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay"
 
@@ -143,7 +146,8 @@ function SelectItem({
     <SelectPrimitive.Item
       data-slot="select-item"
       className={cn(
-        "relative flex w-full cursor-default items-center gap-2 rounded-sm py-1.5 pr-8 pl-2 text-xs outline-hidden select-none focus:bg-bg3-hover focus:text-fg1 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
+        MENU_ITEM_RADIUS,
+        "relative flex w-full cursor-default items-center gap-2 py-1.5 pr-8 pl-2 text-xs outline-hidden select-none focus:bg-bg3-hover focus:text-fg1 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2 *:[span]:last:flex *:[span]:last:items-center *:[span]:last:gap-2",
         className
       )}
       {...props}
