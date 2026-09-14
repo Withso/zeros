@@ -7,6 +7,8 @@ import { Select as SelectPrimitive } from "radix-ui"
 import { cn } from "@/renderer/shared/ui/cn"
 import {
   MENU_ITEM_RADIUS,
+  MENU_SEPARATOR,
+  MENU_SURFACE_INSET,
   MENU_SURFACE_RADIUS,
 } from "@/renderer/shared/ui/menu-surface"
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus"
@@ -111,9 +113,9 @@ function SelectContent({
         <SelectScrollUpButton />
         <SelectPrimitive.Viewport
           className={cn(
-            "p-1",
+            MENU_SURFACE_INSET,
             position === "popper" &&
-              "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)] scroll-my-1"
+              "h-[var(--radix-select-trigger-height)] w-full min-w-[var(--radix-select-trigger-width)] scroll-my-1.5"
           )}
         >
           {children}
@@ -172,7 +174,7 @@ function SelectSeparator({
   return (
     <SelectPrimitive.Separator
       data-slot="select-separator"
-      className={cn("pointer-events-none -mx-1 my-1 h-px bg-border2", className)}
+      className={cn("pointer-events-none", MENU_SEPARATOR, className)}
       {...props}
     />
   )

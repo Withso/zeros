@@ -165,7 +165,10 @@ import { useWorkspaceChangeLines } from "./use-workspace-change-lines";
 import { WorkspaceChangeCounts } from "./workspace-change-counts";
 import { ResourceMonitor } from "./resource-monitor";
 import { cn } from "../shared/ui/cn";
-import { MENU_ITEM_RADIUS } from "../shared/ui/menu-surface";
+import {
+  MENU_ITEM_RADIUS,
+  MENU_SURFACE_INSET,
+} from "../shared/ui/menu-surface";
 import {
   effectiveWorkspaceListFilter,
   isMixedWorkspaceListFilter,
@@ -1249,7 +1252,7 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
               </div>
             ) : (
               <div
-                className="p-1"
+                className={MENU_SURFACE_INSET}
                 role="list"
                 aria-label={`${project.name} archived workspaces`}
               >

@@ -40,7 +40,10 @@ import {
 import { Check, ChevronRight, Star } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
-import { MENU_ITEM_RADIUS } from "../../shared/ui/menu-surface";
+import {
+  MENU_ITEM_RADIUS,
+  MENU_SURFACE_INSET,
+} from "../../shared/ui/menu-surface";
 import { Switch, Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Popover,
@@ -581,7 +584,7 @@ export function AgentModelMenu({
                   }
                   aria-expanded={catalogOpen}
                   className={cn(
-                    "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1 my-1 flex w-[calc(100%_-_0.5rem)] items-center gap-2 px-2 text-left outline-none",
+                    "hover:bg-bg3-hover focus-visible:bg-bg3-hover text-fg1 mx-1.5 my-1.5 flex w-[calc(100%_-_0.75rem)] items-center gap-2 px-2 text-left outline-none",
                     MENU_ITEM_RADIUS,
                     MODEL_ROW_HEIGHT,
                   )}
@@ -628,7 +631,8 @@ export function AgentModelMenu({
                 sideOffset={6}
                 collisionPadding={8}
                 className={cn(
-                  "max-h-[var(--radix-popover-content-available-height)] overflow-y-auto p-1",
+                  "max-h-[var(--radix-popover-content-available-height)] overflow-y-auto",
+                  MENU_SURFACE_INSET,
                   MODEL_POPOVER_WIDTH,
                 )}
                 onOpenAutoFocus={(event) => event.preventDefault()}

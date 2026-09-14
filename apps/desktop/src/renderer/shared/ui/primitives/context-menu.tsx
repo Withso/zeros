@@ -6,6 +6,8 @@ import { cn } from "@/renderer/shared/ui/cn";
 import {
   MENU_ITEM_ICON,
   MENU_ITEM_RADIUS,
+  MENU_SEPARATOR,
+  MENU_SURFACE_INSET,
   MENU_SURFACE_RADIUS,
 } from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
@@ -71,7 +73,8 @@ const ContextMenuSubContent = React.forwardRef<
     ref={ref}
     className={cn(
       MENU_SURFACE_RADIUS,
-      "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden border p-1 shadow-[var(--shadow-dropdown)]",
+      "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[8rem] overflow-hidden border shadow-[var(--shadow-dropdown)]",
+      MENU_SURFACE_INSET,
       className,
     )}
     {...props}
@@ -94,7 +97,8 @@ const ContextMenuContent = React.forwardRef<
       }}
       className={cn(
         MENU_SURFACE_RADIUS,
-        "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[9rem] overflow-hidden border p-1 shadow-[var(--shadow-dropdown)]",
+        "border-border2 bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 z-50 min-w-[9rem] overflow-hidden border shadow-[var(--shadow-dropdown)]",
+        MENU_SURFACE_INSET,
         className,
       )}
       {...props}
@@ -147,7 +151,7 @@ const ContextMenuSeparator = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <ContextMenuPrimitive.Separator
     ref={ref}
-    className={cn("-mx-1 my-1 h-px bg-border2", className)}
+    className={cn(MENU_SEPARATOR, className)}
     {...props}
   />
 ));

@@ -65,7 +65,7 @@ export function ChatHistoryMenu({
         // 300px-wide list off the window edge.
         align="end"
         sideOffset={6}
-        className="max-h-[360px] min-w-[300px] overflow-y-auto p-1"
+        className="max-h-[360px] min-w-[300px] overflow-y-auto"
       >
         {chats.length === 0 ? (
           <DropdownMenuItem disabled>No closed chats</DropdownMenuItem>

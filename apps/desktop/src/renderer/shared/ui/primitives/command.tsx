@@ -5,7 +5,11 @@ import { Command as CommandPrimitive } from "cmdk";
 import { SearchIcon } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
-import { MENU_ITEM_RADIUS } from "@/renderer/shared/ui/menu-surface";
+import {
+  MENU_ITEM_RADIUS,
+  MENU_SEPARATOR,
+  MENU_SURFACE_INSET,
+} from "@/renderer/shared/ui/menu-surface";
 import {
   Dialog,
   DialogContent,
@@ -107,7 +111,7 @@ function CommandList({
     <CommandPrimitive.List
       data-slot="command-list"
       className={cn(
-        "max-h-[300px] scroll-py-1 overflow-x-hidden overflow-y-auto",
+        "max-h-[300px] scroll-py-1.5 overflow-x-hidden overflow-y-auto",
         className,
       )}
       {...props}
@@ -135,7 +139,8 @@ function CommandGroup({
     <CommandPrimitive.Group
       data-slot="command-group"
       className={cn(
-        "text-fg1 [&_[cmdk-group-heading]]:text-fg2 overflow-hidden p-1 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium",
+        "text-fg1 [&_[cmdk-group-heading]]:text-fg2 overflow-hidden [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium",
+        MENU_SURFACE_INSET,
         className,
       )}
       {...props}
@@ -150,7 +155,7 @@ function CommandSeparator({
   return (
     <CommandPrimitive.Separator
       data-slot="command-separator"
-      className={cn("bg-border2 -mx-1 h-px", className)}
+      className={cn(MENU_SEPARATOR, className)}
       {...props}
     />
   );
