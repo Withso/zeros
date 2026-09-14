@@ -288,7 +288,7 @@ export function PrStatusIsland({
   localDesktop,
 }: PrStatusIslandProps) {
   const prNumber = workspace.prNumber;
-  const sendToChat = useSendToActiveChat();
+  const sendToChat = useSendToActiveChat(workspace.path);
   // The repo's configured push/PR remote — action prompts must name the same
   // remote the engine's own git ops use.
   const remote = useGitRemote(workspace.repoRoot);
