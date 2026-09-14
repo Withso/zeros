@@ -504,7 +504,7 @@ export function AgentModelMenu({
         >
           <div
             data-model-section-heading="model"
-            className={cn(MODEL_SECTION_HEADING, "px-3")}
+            className={cn(MODEL_SECTION_HEADING, "px-3.5")}
           >
             Model
           </div>
@@ -1254,13 +1254,16 @@ function ModelConfigurationEditor({
   const reasoningHeadingId = useId();
   const optionsHeadingId = useId();
   return (
-    <div className="py-1">
+    <div>
       {levels.length > 0 && (
-        <section aria-labelledby={reasoningHeadingId}>
+        <section
+          aria-labelledby={reasoningHeadingId}
+          className={MENU_SURFACE_INSET}
+        >
           <div
             id={reasoningHeadingId}
             data-model-section-heading="reasoning"
-            className={cn(MODEL_SECTION_HEADING, "px-3")}
+            className={cn(MODEL_SECTION_HEADING, "px-2")}
           >
             Reasoning
           </div>
@@ -1278,7 +1281,8 @@ function ModelConfigurationEditor({
                   role="radio"
                   aria-checked={selected}
                   className={cn(
-                    "hover:bg-bg3-hover text-fg1 flex w-full items-center gap-2 px-3 text-left text-xs",
+                    "hover:bg-bg3-hover text-fg1 flex w-full items-center gap-2 px-2 text-left text-xs",
+                    MENU_ITEM_RADIUS,
                     MODEL_ROW_HEIGHT,
                   )}
                   onClick={() => onChange({ effort: level })}
@@ -1296,18 +1300,22 @@ function ModelConfigurationEditor({
       {supportsFast && (
         <section
           aria-labelledby={optionsHeadingId}
-          className={cn(levels.length > 0 && "border-border2 border-t")}
+          className={cn(
+            MENU_SURFACE_INSET,
+            levels.length > 0 && "border-border2 border-t",
+          )}
         >
           <div
             id={optionsHeadingId}
             data-model-section-heading="options"
-            className={cn(MODEL_SECTION_HEADING, "px-3")}
+            className={cn(MODEL_SECTION_HEADING, "px-2")}
           >
             Options
           </div>
           <div
             className={cn(
-              "text-fg1 flex items-center gap-3 px-3 text-xs",
+              "text-fg1 flex items-center gap-3 px-2 text-xs",
+              MENU_ITEM_RADIUS,
               MODEL_ROW_HEIGHT,
             )}
           >
