@@ -69,6 +69,7 @@ import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
 import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
 import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
+import { runComposerEditorSmoke } from "./ui-smoke-composer-editor.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -135,6 +136,8 @@ try {
   page.on("console", (msg) => consoleLines.push(msg.text()));
   page.on("pageerror", (err) => pageErrors.push(err.message));
 
+  await page.goto(pageUrl, { waitUntil: "networkidle" });
+  await runComposerEditorSmoke({ page, check });
   await page.goto(pageUrl, { waitUntil: "networkidle" });
   const pill = page.getByRole("button", { name: /^Model:/ });
   await pill.waitFor({ state: "visible", timeout: 10_000 });
