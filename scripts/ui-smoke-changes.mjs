@@ -5,6 +5,7 @@
 // Run with: node scripts/ui-smoke-changes.mjs
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { expectDiffSeparatorCards } from "./ui-smoke-diff-separators.mjs";
 const root = fileURLToPath(new URL("../", import.meta.url)).replace(
   /[\\/]$/,
   "",
@@ -266,22 +267,27 @@ try {
   ).toHaveCount(0);
   const hiddenContext = page.getByText(/unmodified lines/).first();
   await expect(hiddenContext).toBeVisible();
-  await expect(page.locator('[data-separator="line-info"]').first()).toHaveCSS(
-    "height",
-    "24px",
-  );
+  await expectDiffSeparatorCards(diffScroller);
   await expect(
     page.locator("[data-expand-button] [data-icon]").first(),
   ).toHaveCSS("width", "12px");
   const twoArrows = page.locator("[data-separator-multi-button]").first();
   await expect(twoArrows).toBeVisible();
-  await expect(twoArrows).toHaveCSS("height", "24px");
+  await expect(twoArrows).toHaveCSS("height", "28px");
   await expect(
     twoArrows.locator("[data-expand-up], [data-expand-down]"),
   ).toHaveCount(2);
   for (const arrow of await twoArrows.locator("[data-icon]").all()) {
     await expect(arrow).toHaveCSS("height", "12px");
   }
+  await expect(
+    diffScroller
+      .locator("[data-separator-last] [data-unmodified-lines]:visible")
+      .first(),
+  ).toHaveText("More unmodified lines");
+  await page.getByRole("button", { name: "Split diff" }).click();
+  await expectDiffSeparatorCards(diffScroller);
+  await page.getByRole("button", { name: "Unified diff" }).click();
   const firstHeader = page.getByTestId("changes-diff-header").first();
   const copy = firstHeader.getByRole("button", { name: "Copy .gitignore" });
   const collapse = firstHeader.getByRole("button", {
@@ -320,6 +326,7 @@ try {
     await page.screenshot({ path: process.env.UI_SMOKE_SCREENSHOT });
   await hiddenContext.click();
   await expect(page.getByText("line 1", { exact: true }).first()).toBeVisible();
+  await expectDiffSeparatorCards(diffScroller);
   await firstHeader.hover();
   await copy.click();
   await expect
