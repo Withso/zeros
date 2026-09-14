@@ -72,6 +72,10 @@ import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
 import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
+import {
+  expectDiffSeparatorCards,
+  runEditDiffSeparatorsSmoke,
+} from "./ui-smoke-diff-separators.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, "..");
@@ -1821,6 +1825,7 @@ try {
     footerScroll.scrollHeight > footerScroll.clientHeight,
     `${footerScroll.scrollHeight}/${footerScroll.clientHeight}`,
   );
+  await expectDiffSeparatorCards(footerPreview);
   await page.getByTestId("parking-lot").focus();
 
   // The expanded transcript reuses the same wrapped renderer without inheriting
@@ -1841,6 +1846,8 @@ try {
       "inline-edit-wrap",
     ),
   );
+
+  await runEditDiffSeparatorsSmoke({ page });
 
   check(
     "File Edit mode enables CodeMirror line wrapping",
