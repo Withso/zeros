@@ -676,7 +676,7 @@ describe("CodexAppServerTranslator", () => {
       };
       expect(u.kind).toBe("read");
       expect(u.title).toMatch(/README\.md/);
-      expect(u.rawInput.file_path).toBe("README.md");
+      expect(u.rawInput.file_path).toBe("/repo/README.md");
 
       // Completion surfaces the output as a content block (drives the renderer's
       // "N lines" count) rather than only the {exitCode, output} rawOutput.

@@ -13,14 +13,14 @@
 //   - content-block array (Claude tool_result: text + image blocks)
 //                                            → extract only readable text
 //                                              (NEVER JSON-dump the array)
-//   - plain result object ({exitCode,stdout})→ pretty-print, but skip base64
-//                                              payloads + oversized envelopes
+//   - plain result object ({exitCode,stdout})→ bounded readable preview, with
+//                                              binary payloads omitted
 // ──────────────────────────────────────────────────────────
 
 export const RAW_OUTPUT_MAX = 20_000;
 
 /** Coerce a tool's raw output into a displayable string, or null when there
- *  is nothing human-readable (so the caller falls through to rawInput). */
+ *  is nothing human-readable. Input is displayed separately by the caller. */
 export function asDisplayString(value: unknown): string | null {
   if (value == null) return null;
   if (typeof value === "string") return value.length > 0 ? clip(value) : null;
@@ -29,24 +29,68 @@ export function asDisplayString(value: unknown): string | null {
   }
   if (Array.isArray(value)) {
     const text = readableTextFromArray(value);
-    return text.length > 0 ? clip(text) : null;
+    if (text.length > 0) return clip(text);
+    // Structured result lists (for example web hits) are useful output too.
+    // Content-block arrays still omit binary-only / empty text records.
+    const structured = value.filter(
+      (entry) => entry && typeof entry === "object" && !("type" in entry),
+    );
+    return structured.length ? asDisplayString({ results: structured }) : null;
   }
   if (typeof value === "object") {
     try {
-      const s = JSON.stringify(value, null, 2);
+      const s = JSON.stringify(readableValue(value), null, 2);
       if (!s || s === "{}" || s === "null") return null;
-      // Skip binary/base64 blobs and oversized protocol envelopes — noise,
-      // not output the user wants to read.
-      if (/"(?:data|blob|base64)"\s*:\s*"[A-Za-z0-9+/=\\]{200,}"/.test(s)) {
-        return null;
-      }
-      if (s.length > RAW_OUTPUT_MAX) return null;
-      return s;
+      // Keep a bounded preview of readable fields beside any omitted binary.
+      return clip(s);
     } catch {
       return null;
     }
   }
   return null;
+}
+
+/** Bound work before JSON encoding, omit binary/private presentation fields,
+ * and retain readable siblings. Malformed/cyclic output must never crash chat. */
+function readableValue(
+  value: unknown,
+  depth = 0,
+  seen = new Set<object>(),
+  budget = { nodes: 1_024, characters: RAW_OUTPUT_MAX * 2 },
+): unknown {
+  if (budget.nodes-- <= 0 || budget.characters <= 0) return "[omitted]";
+  if (typeof value === "string") {
+    if (/^data:[^,]+;base64,/i.test(value)) return undefined;
+    const text = clip(value.slice(0, budget.characters));
+    budget.characters -= text.length;
+    return text;
+  }
+  if (!value || typeof value !== "object") return value;
+  if (depth > 8 || seen.has(value)) return "[omitted]";
+  seen.add(value);
+  let result: unknown;
+  if (Array.isArray(value))
+    result = value
+      .slice(0, 128)
+      .map((entry) => readableValue(entry, depth + 1, seen, budget));
+  else
+    result = Object.fromEntries(
+      Object.entries(value)
+        .slice(0, 128)
+        .flatMap(([key, entry]) => {
+          if (
+            key.startsWith("_zeros") ||
+            key === "zerosQuestion" ||
+            (typeof entry === "string" &&
+              /^(?:data|blob|base64|encrypted_content)$/i.test(key))
+          )
+            return [];
+          const readable = readableValue(entry, depth + 1, seen, budget);
+          return readable === undefined ? [] : [[key, readable]];
+        }),
+    );
+  seen.delete(value);
+  return result;
 }
 
 /** Pull readable text out of a content-block / result array, skipping

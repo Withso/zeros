@@ -133,6 +133,7 @@ import {
   scopeNativeMcpSurface,
 } from "./native-mcp";
 import { CodexAppServerTranslator } from "./app-server-translator";
+import { CodexThreadNotifications } from "./thread-notifications";
 import { listCodexSessions } from "./history";
 import {
   ensureSessionDir,
@@ -328,6 +329,7 @@ export interface CodexSession {
   executionBoundary?: PreparedBoundary;
   runtime: CodexAppServerHandle;
   translator: CodexAppServerTranslator;
+  notifications: CodexThreadNotifications;
   /** Codex threadId — captured from thread/start (new) or thread/resume (load). */
   threadId: string;
   excludedMcpServers: Set<string>;
@@ -391,8 +393,12 @@ export interface CodexSession {
       runtime: CodexAppServerHandle;
       request: QuestionRequest;
       native: CodexUserInputRequest;
+      toolCallId?: string;
     }
   >;
+  /** Optional native questions have no parked JSON-RPC resolver. Answers
+   * travel through the ordinary message path; retain only their receipts. */
+  pendingAsyncQuestions: Map<string, QuestionRequest>;
   /** Official Browser origin grants scoped to their native turn. The only
    * normalized pair is apex/www, so arbitrary subdomains remain gated. */
   browserOriginGrantsByTurn: Map<string, Map<string, string>>;
@@ -1504,7 +1510,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // or question resolvers. Fail closed and receipt every straggler before
       // a later turn can enqueue behind a dead renderer card.
       this.drainPendingApprovals(session, session.runtimeAlive);
-      this.drainPendingQuestions(session, session.runtimeAlive);
+      this.drainPendingQuestions(session, session.runtimeAlive, false);
       // IAB intentionally does not send the optional browser-client
       // `turnEnded` event. A timed-out/reset node_repl batch can also skip
       // tabs.finalize(), so app-server turn settlement is the authoritative
@@ -1825,6 +1831,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     nativeRequestId?: string;
   }): boolean {
     for (const session of this.sessions.values()) {
+      const asyncRequest = session.pendingAsyncQuestions.get(opts.questionId)
+        ?? [...session.pendingAsyncQuestions.values()].find((request) => request.nativeRequestId === opts.nativeRequestId);
+      if (asyncRequest) {
+        session.pendingAsyncQuestions.delete(asyncRequest.questionId);
+        this.settleQuestionRecord(session, asyncRequest.questionId, asyncRequest, opts.response.outcome);
+        return true;
+      }
       if (
         this.settlePendingQuestion(
           session,
@@ -1906,6 +1919,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         questionId,
         pending.request,
         delivered,
+        pending.toolCallId,
       );
     }
     return true;
@@ -2477,6 +2491,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const resolveArtwork = createCodexToolArtworkResolver(runtime, threadId, opts.cwd, opts.env?.CODEX_HOME);
     const translator = new CodexAppServerTranslator({
       sessionId: zerosSessionId,
+      onAsyncQuestion: (request) => {
+        const owner = this.sessions.get(zerosSessionId);
+        if (!owner || owner !== session) return;
+        owner.pendingAsyncQuestions.set(request.questionId, request);
+        if (owner.pendingAsyncQuestions.size > 32) {
+          const oldest = owner.pendingAsyncQuestions.values().next().value!;
+          owner.pendingAsyncQuestions.delete(oldest.questionId);
+          this.settleQuestionRecord(owner, oldest.questionId, oldest, { outcome: "dismissed" });
+        }
+        this.ctx.emit.onQuestionRequest(this.agentId, request.questionId, request);
+      },
       resolveArtwork: async (item) => {
         const artwork = await resolveArtwork(item);
         return this.sessions.get(zerosSessionId) === session ? artwork : undefined;
@@ -2488,7 +2513,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       },
     });
 
-    this.wireRuntimeToTranslator(runtime, translator, {
+    const notifications = this.wireRuntimeToTranslator(runtime, translator, {
       threadId,
       zerosSessionId,
     });
@@ -2508,6 +2533,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       executionBoundary: opts.executionBoundary,
       runtime,
       translator,
+      notifications,
       threadId,
       providerSessionId,
       browserSessionId: registeredBrowserSessionId,
@@ -2521,6 +2547,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       postCancelInterruptUntil: 0,
       pendingApprovals: new Map(),
       pendingQuestions: new Map(),
+      pendingAsyncQuestions: new Map(),
       browserOriginGrantsByTurn: new Map(),
       fileEditPathsByItemId: new Map(),
       authMode: null,
@@ -3371,8 +3398,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
   private drainPendingQuestions(
     session: CodexSession,
     resolveRuntime: boolean,
+    includeAsync = true,
   ): void {
     const outcome = { outcome: "dismissed" } as const;
+    if (includeAsync) {
+      for (const request of session.pendingAsyncQuestions.values()) this.settleQuestionRecord(session, request.questionId, request, outcome);
+      session.pendingAsyncQuestions.clear();
+    }
     for (const questionId of [...session.pendingQuestions.keys()]) {
       try {
         this.settlePendingQuestion(
@@ -3403,19 +3435,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
       session.zerosSessionId,
       request,
     );
-    if (request.method === "item/tool/requestUserInput") {
-      session.translator.emitUserInputToolCall(request.params);
-    } else {
-      session.translator.emitBlockingQuestionToolCall(
+    const translator = session.notifications.forThread(
+      typeof request.params.threadId === "string" ? request.params.threadId : session.threadId,
+    );
+    const toolCallId = request.method === "item/tool/requestUserInput"
+      ? translator.emitUserInputToolCall(request.params)
+      : translator.emitBlockingQuestionToolCall(
         canonical.toolCallId,
         "MCP input requested",
         mcpElicitationAuditInput(request.params as McpElicitationRequestLike),
       );
-    }
+    // The native id can repeat in another thread. Address this exact durable
+    // row in the renderer as well as in the engine's settlement receipt.
+    if (toolCallId) canonical.toolCallId = toolCallId;
     session.pendingQuestions.set(request.questionId, {
       runtime: session.runtime,
       request: canonical,
       native: request,
+      toolCallId,
     });
     this.ctx.emit.onQuestionRequest(
       this.agentId,
@@ -3498,8 +3535,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     questionId: string,
     request: QuestionRequest,
     outcome: QuestionResponse["outcome"],
+    toolCallId?: string,
   ): void {
-    this.stampQuestionRecord(session, request, outcome);
+    this.stampQuestionRecord(session, request, outcome, toolCallId);
     try {
       this.ctx.emit.onQuestionSettled?.(
         this.agentId,
@@ -3527,11 +3565,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: QuestionRequest,
     outcome: QuestionResponse["outcome"],
+    toolCallId?: string,
   ): void {
     try {
-      const mintedId = request.toolCallId
+      const mintedId = toolCallId ?? (!request.blocking ? request.toolCallId : request.toolCallId
         ? session.translator.toolCallIdFor(request.toolCallId)
-        : undefined;
+        : undefined);
       if (!mintedId) return;
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: session.zerosSessionId,
@@ -3567,7 +3606,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     runtime: CodexAppServerHandle,
     translator: CodexAppServerTranslator,
     owner: { threadId: string; zerosSessionId: string },
-  ): void {
+  ): CodexThreadNotifications {
+    const notifications = new CodexThreadNotifications(owner.threadId, translator);
     const methods = [
       "thread/started",
       "thread/status/changed",
@@ -3613,10 +3653,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
     ]);
     for (const m of methods) {
       runtime.onNotification(m, (params) => {
-        if (FIRST_OUTPUT_METHODS.has(m)) {
+        if (FIRST_OUTPUT_METHODS.has(m) && (params as { threadId?: string }).threadId === owner.threadId) {
           this.reportFirstOutput(owner.zerosSessionId);
         }
-        translator.handle(m, params);
+        notifications.handle(m, params);
       });
     }
     for (const method of [
@@ -3629,10 +3669,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "autoApprovalReview/strictReviewRequired",
     ] as const) {
       runtime.onNotification(method, (params) => {
-        if ((params as { threadId?: unknown }).threadId !== owner.threadId) {
-          return;
-        }
-        translator.handle(method, params);
+        if (!notifications.hasThread((params as { threadId?: unknown }).threadId)) return;
+        notifications.handle(method, params);
       });
     }
     for (const method of [
@@ -3749,6 +3787,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         ...(retryId ? { zerosRetryId: retryId } : {}),
       });
     });
+    return notifications;
   }
 
   /** Materialise base64 image blocks to per-session tempfiles and

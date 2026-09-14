@@ -34,6 +34,7 @@ import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
 import { matchSubagent } from "./subagent";
 import { EventStripe } from "./event-stripe";
+import { renderDetail } from "./event-row-renderer";
 import { statusTone } from "./event-meta";
 import { renderMarkdown } from "../markdown";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -219,6 +220,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
                 dangerouslySetInnerHTML={{ __html: resultHtml }}
               />
             )}
+            {!resultHtml && children.length === 0 && renderDetail(tool, ctx)}
           </div>
         )}
       </div>

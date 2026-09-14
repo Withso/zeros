@@ -77,6 +77,57 @@ as terminal input. MCP elicitation accepts the new `openaiForm` spelling through
 the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
+## Transcript fidelity
+
+Native items are keyed by thread, turn, and item identity before translation.
+Child threads have independent completion, error, usage, and replay state;
+their rows attach to the spawning tool even when the child speaks before
+spawn completion. Child usage cannot overwrite the foreground turn's usage.
+An autonomous parent follow-up also resets terminal and completed-item state,
+even when it starts without a new user prompt.
+
+`item/completed` is authoritative: completion-only tools are retained, final
+input replaces provisional input, and final text can correct or shorten a
+streamed draft. The shared protocol's `textMode: "replace"` updates the exact
+message while preserving durable row ids; retired legacy fragments persist as
+empty text and are omitted from presentation. `message_parent_update` attaches
+already-persisted child rows without changing their identities. These events
+ship with protocol version 15; the control-plane version mirror moves with it.
+Adapters that synthesize message identities, including Cursor, start a fresh
+text segment after a new tool or a change between narration and reasoning.
+Updates to an existing tool and late reasoning-duration metadata preserve the
+current prose segment, so a final reply stays after the work it describes.
+
+Commentary, readable reasoning summaries, plans, and running tools appear in
+the existing working feed. Summary parts retain their native order. Explicit
+`final_answer` messages remain visible across late bookkeeping. Encrypted or
+absent reasoning is never presented as readable thinking.
+Populated reasoning snapshots seed the indexed parts used by later deltas.
+
+Expanded tools expose input, captured output, and available status/exit details.
+Web calls retain search/open/find actions, including URLs and patterns when no
+query exists; absent and empty results have explicit fallbacks. Multi-file
+edits use one existing Edit row and file pill per file, with one canonical tool
+identity. Failed or pending edits never display applied-change counts. Output
+previews are bounded and media bytes are kept out of raw text disclosure.
+File patch updates change the proposed edit without replacing captured output;
+edit diagnostics survive completion, and late patch replays cannot reopen a
+settled tool.
+Previously discarded fields cannot be recovered merely by reopening a chat.
+
+Agent messages with `delivery: "async"` and structured questions use the shared
+question card without hiding the composer or parking the agent. Blocking asks
+take priority. An explicit answer follows the ordinary persisted message queue
+and steering path; there is no pending native request-user-input RPC for this
+notification shape. Preselection is not submission. Optional asks survive a
+normal turn completion and are dismissed on explicit cancellation or session
+teardown.
+
+Regression coverage lives beside the translator, thread router, message
+reducer, renderer, and question queue. The Codex transcript browser harness
+also exercises expansion, file rows, late final-answer boundaries, and optional
+question focus through the production components.
+
 ## Qualified Phase 2 product paths
 
 The generated surface now backs two additional, narrow product behaviors:

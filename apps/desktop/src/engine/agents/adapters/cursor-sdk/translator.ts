@@ -13,9 +13,9 @@
 // names degrade to a generic "other" card (confirm + extend via the
 // spike / dogfood).
 //
-// Streaming granularity is unknown from types alone (deltas vs whole
-// messages), so text/thought chunks coalesce by a synthesized per-turn
-// messageId — correct for both cases.
+// Text/thought chunks share an id within one uninterrupted segment. A new
+// tool or a change of role starts another segment so final replies retain
+// their position after working narration in the shared exact-id reducer.
 // ──────────────────────────────────────────────────────────
 
 import { randomUUID } from "node:crypto";
@@ -118,6 +118,9 @@ export class CursorSdkTranslator {
   private readonly onUnknown?: (event: unknown) => void;
 
   private readonly turnPrefix = randomUUID();
+  private messageSequence = 0;
+  private activeText: { role: "text" | "thought"; id: string } | undefined;
+  private lastThoughtMessageId: string | undefined;
   /** SDK call_id (or assistant tool_use block id) → Zeros toolCallId. */
   private readonly toolCallIds = new Map<string, string>();
   /** Ids we've already opened an in_progress card for (so the assistant
@@ -173,7 +176,6 @@ export class CursorSdkTranslator {
   private hasSeenTerminal = false;
   private hasSeenError = false;
   private hasSeenAssistantText = false;
-  private hasSeenThinkingText = false;
   /** onDelta is the richer native lifecycle. Once it supplies a category, the
    * corresponding completed onStep/SDKMessage records are replays. A runtime
    * may omit deltas and emit several onStep records, though, so those are
@@ -305,7 +307,7 @@ export class CursorSdkTranslator {
           update: {
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: raw.text } as ContentBlock,
-            messageId: `${this.turnPrefix}-text`,
+            messageId: this.messageIdFor("text"),
           },
         });
         return;
@@ -385,7 +387,7 @@ export class CursorSdkTranslator {
         update: {
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text } as ContentBlock,
-          messageId: `${this.turnPrefix}-text`,
+          messageId: this.messageIdFor("text"),
         },
       });
       return;
@@ -430,14 +432,19 @@ export class CursorSdkTranslator {
   }
 
   private emitThinking(text: string, durationMs?: number): void {
-    if (!text && !this.hasSeenThinkingText) return;
-    if (text) this.hasSeenThinkingText = true;
+    // A late duration belongs to the last thought, without opening another
+    // reasoning segment or breaking assistant text currently streaming.
+    const messageId = text
+      ? this.messageIdFor("thought")
+      : this.lastThoughtMessageId;
+    if (!messageId) return;
+    this.lastThoughtMessageId = messageId;
     this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "agent_thought_chunk",
         content: { type: "text", text } as ContentBlock,
-        messageId: `${this.turnPrefix}-thought`,
+        messageId,
         ...(durationMs !== undefined ? { durationMs } : {}),
       },
     });
@@ -464,7 +471,7 @@ export class CursorSdkTranslator {
           update: {
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: block.text } as ContentBlock,
-            messageId: `${this.turnPrefix}-text`,
+            messageId: this.messageIdFor("text"),
           },
         });
       } else if (block?.type === "tool_use" && typeof block.id === "string") {
@@ -560,6 +567,7 @@ export class CursorSdkTranslator {
       return;
     }
     // No prior "running" — emit a one-shot completed card.
+    this.activeText = undefined;
     const toolCallId = this.ensureToolCallId(callId);
     const mergeKey = computeMergeKey(name, args);
     this.emit({
@@ -849,6 +857,16 @@ export class CursorSdkTranslator {
 
   // ── helpers ─────────────────────────────────────────────
 
+  private messageIdFor(role: "text" | "thought"): string {
+    if (this.activeText?.role !== role) {
+      this.activeText = {
+        role,
+        id: `${this.turnPrefix}-${role}-${this.messageSequence++}`,
+      };
+    }
+    return this.activeText.id;
+  }
+
   private openToolCard(
     callId: string,
     name: string | undefined,
@@ -856,6 +874,7 @@ export class CursorSdkTranslator {
   ): void {
     if (this.opened.has(callId)) return;
     this.opened.add(callId);
+    this.activeText = undefined;
     const toolName = name ?? "tool";
     const toolCallId = this.ensureToolCallId(callId);
     const mergeKey = computeMergeKey(toolName, input);

@@ -73,8 +73,8 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
     // stampQuestionAnswer). Null while awaiting / for legacy records.
     const stamp = readQuestionStamp(message.rawOutput);
 
-    // Still queued → the composer card owns the interaction; this row is a
-    // status line only, and deliberately NOT expandable. The pending set holds
+    // Still queued → the composer card owns answering. This row retains the
+    // question and options for read-only inspection. The pending set holds
     // the VENDOR's id (QuestionRequest.toolCallId), which matches this row's
     // nativeToolCallId; toolCallId is checked too for adapters where the two
     // are the same id.
@@ -88,7 +88,7 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
     const meta: EventMeta = {
       Icon: MessageSquare,
       label: "User input",
-      expandable: !awaiting,
+      expandable: true,
     };
 
     const chip = awaiting ? (
@@ -111,7 +111,7 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
 
     // The detail body — same container recipe as the other tool rows'
     // expanded views (Bash output / raw input): rounded, bg-bg2/60, 14px.
-    const detail = awaiting ? undefined : (
+    const detail = (
       <div className="bg-bg2/60 flex flex-col gap-3 rounded-md p-2.5 text-sm leading-relaxed">
         {stamp?.outcome === "answered" ? (
           // Question ↔ answer pairs only — no scope tags, no option list.

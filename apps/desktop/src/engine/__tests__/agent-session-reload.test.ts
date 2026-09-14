@@ -8,6 +8,8 @@ import type {
   ContentBlock,
   LoadSessionResponse,
   RequestPermissionRequest,
+  QuestionRequest,
+  SessionNotification,
 } from "@zeros/protocol/agent-events";
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
 import type { AgentPromptBubble } from "@zeros/protocol/messages";
@@ -38,6 +40,10 @@ interface ActivePromptRecord {
 }
 
 interface TestEngineInternals {
+  persistSessionUpdate(sessionId: string, notification: SessionNotification): void;
+  pendingQuestionRequests: Map<string, { agentId: string; request: QuestionRequest }>;
+  hasPendingAgentInteraction(sessionId: string): boolean;
+  clearPendingAgentInteractions(sessionId: string, includeAsync?: boolean): void;
   sessionMessages: Map<string, AgentMessage[]>;
   persistUserPrompt(
     sessionId: string,
@@ -151,6 +157,17 @@ function internals(engine: ZerosEngine): TestEngineInternals {
 }
 
 describe("agent session continuity across a local renderer reload", () => {
+  it("retains optional questions across normal completion without treating them as a parked turn", () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
+    const state = internals(engine);
+    const request: QuestionRequest = { sessionId: "session-1", questionId: "ask", nativeRequestId: "native-ask", blocking: false, source: "native_dialog", questions: [{ id: "q0", prompt: "Which format?", options: [], allowOther: true }] };
+    state.pendingQuestionRequests.set("ask", { agentId: "codex", request });
+    expect(state.hasPendingAgentInteraction("session-1")).toBe(false);
+    state.clearPendingAgentInteractions("session-1", false);
+    expect(state.pendingQuestionRequests.has("ask")).toBe(true);
+    state.clearPendingAgentInteractions("session-1");
+    expect(state.pendingQuestionRequests.has("ask")).toBe(false);
+  });
   it.each([true, false])("retains empty-session replay across reload only until a successful prompt: %s", async (succeeds) => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_899 });
     const state = internals(engine);
@@ -496,6 +513,43 @@ describe("agent session continuity across a local renderer reload", () => {
     expect(state.conversationExecution.get("conversation-1")).toBe(
       "execution-1",
     );
+  });
+
+  it("persists corrected text and late child ownership across a database reopen", () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-corrected-transcript-"));
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    vi.useFakeTimers();
+    try {
+      upsertChat(persistedChat("chat-corrected", { folder: dbDir }));
+      const state = internals(new ZerosEngine({ root: dbDir, port: 29_901 }));
+      const legacy: AgentMessage[] = [
+        { id: "first", kind: "text", role: "agent", messageId: "native-reply", text: "Draft", createdAt: 1 },
+        { id: "fragment", kind: "text", role: "agent", messageId: "native-reply", text: " stale suffix", createdAt: 2 },
+      ];
+      state.sessionChat.set("execution-corrected", "chat-corrected");
+      state.sessionMessages.set("execution-corrected", legacy);
+      upsertChatMessagesBulk("chat-corrected", legacy.map((message) => ({
+        msgId: message.id, kind: message.kind, payload: JSON.stringify(message), createdAt: message.createdAt,
+      })));
+      state.persistSessionUpdate("execution-corrected", { sessionId: "execution-corrected", update: {
+        sessionUpdate: "agent_message_chunk", messageId: "native-reply", textMode: "replace", phase: "final_answer", content: { type: "text", text: "Corrected answer" },
+      } });
+      state.persistSessionUpdate("execution-corrected", { sessionId: "execution-corrected", update: {
+        sessionUpdate: "message_parent_update", messageIds: ["native-reply"], parentToolId: "spawn",
+      } });
+      closeZerosDb();
+      const saved = windowChatMessages("chat-corrected", 10).map((row) => JSON.parse(row.payload));
+      expect(saved).toEqual([
+        expect.objectContaining({ id: "first", text: "Corrected answer", phase: "final_answer", parentToolId: "spawn" }),
+        expect.objectContaining({ id: "fragment", text: "", parentToolId: "spawn" }),
+      ]);
+    } finally {
+      vi.clearAllTimers();
+      vi.useRealTimers();
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 
   it("classifies a conversation with no live execution or binding as an expected miss", async () => {
