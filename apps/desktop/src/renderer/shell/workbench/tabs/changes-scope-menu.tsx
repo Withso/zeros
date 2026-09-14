@@ -140,7 +140,6 @@ function HistoryItems({
   bounds,
   onAll,
   onRange,
-  showRangeHint = true,
   loading = false,
   error,
   onRetry,
@@ -151,7 +150,6 @@ function HistoryItems({
   bounds: [number, number] | null;
   onAll: () => void;
   onRange: (oldest: number, newest: number) => void;
-  showRangeHint?: boolean;
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
@@ -252,13 +250,9 @@ function HistoryItems({
           </Button>
         </div>
       ) : (
-        (!rows.length || showRangeHint) && (
+        !rows.length && (
           <p className="text-fg3 px-2 py-1.5 text-xs">
-            {!rows.length && loading
-              ? "Loading history…"
-              : rows.length
-                ? "Select two endpoints to choose a range."
-                : "No history yet"}
+            {loading ? "Loading history…" : "No history yet"}
           </p>
         )
       )}
@@ -411,7 +405,6 @@ export function ChangesScopeMenu({
                 error={turnsError}
                 onRetry={onRetry}
                 allLabel="All Turns"
-                showRangeHint={false}
                 allSelected={selected.kind === "turns"}
                 bounds={turnBounds}
                 onAll={() => onChange({ kind: "turns" })}

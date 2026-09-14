@@ -9,9 +9,11 @@ import { runDesignFrameChildrenSmoke } from "./ui-smoke-design-frame-children.mj
 import { runDesignAuthoredFrameSmoke } from "./ui-smoke-design-authored-frame.mjs";
 import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs";
 import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
+import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignGitMenuSmoke({ page, check });
+  await runDesignSelectionSmoke({ page, waitFor, check });
   await runDesignLayoutSmoke({ page, waitFor, check });
   await runDesignLayoutChildrenSmoke({ page, waitFor, check });
   await runDesignFrameChildrenSmoke({ page, waitFor, check });
@@ -4381,12 +4383,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   await canvasFocusTarget.focus();
   await page.keyboard.press("Shift+Enter");
-  await page.keyboard.down("Control");
+  await page.keyboard.down("ControlOrMeta");
   await page.mouse.click(
     nestedHeadingBox.x + nestedHeadingBox.width / 2,
     nestedHeadingBox.y + nestedHeadingBox.height / 2,
   );
-  await page.keyboard.up("Control");
+  await page.keyboard.up("ControlOrMeta");
   check(
     "Cmd/Ctrl-click deep-selects through an already selected container",
     await waitFor(

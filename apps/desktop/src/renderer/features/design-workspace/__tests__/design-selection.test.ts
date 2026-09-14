@@ -35,6 +35,7 @@ import {
   selectDesignNode,
   selectDesignNodes,
   selectDesignNodeAtLocation,
+  selectDesignFrameBodyAtLocation,
   setDesignNodeVisibility,
   toggleDesignNodeSelection,
 } from "../state/design-selection";
@@ -671,6 +672,310 @@ describe("design selection workflows", () => {
       selectedNodeId: "second",
     });
     expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects the outer frame synchronously without waiting for its runtime", async () => {
+    const getElementAtLoc = vi.fn();
+    mocks.designFrameRuntime.mockReturnValue({ getElementAtLoc });
+    const selecting = selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "plain",
+    });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: FRAME.file,
+      frameSelected: true,
+      selectedNodeId: null,
+    });
+    expect(getElementAtLoc).not.toHaveBeenCalled();
+    await selecting;
+  });
+
+  it("does not carry nesting depth across frames with identical node ids", async () => {
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+      details: details("heading"),
+    });
+    mocks.designFrameRuntime.mockReturnValue(undefined);
+    await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: { ...FRAME, file: "other.html" },
+      x: 20,
+      y: 20,
+      intent: "plain",
+    });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: "other.html",
+      frameSelected: true,
+      selectedNodeId: null,
+    });
+  });
+
+  it.each([false, true])(
+    "rejects a delayed body hit after frame selection (additive: %s)",
+    async (additive) => {
+      let resolveHit!: (value: DesignRuntimeNodeDetails) => void;
+      mocks.designFrameRuntime.mockReturnValue({
+        getElementAtLoc: vi.fn(
+          () =>
+            new Promise<DesignRuntimeNodeDetails>((resolve) => {
+              resolveHit = resolve;
+            }),
+        ),
+      });
+      const onLocalSelection = vi.fn();
+      const pending = selectDesignFrameBodyAtLocation({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        x: 20,
+        y: 20,
+        intent: "deepest",
+        additive,
+        onLocalSelection,
+      });
+      await selectDesignFrame(
+        "workspace-a",
+        { ...FRAME, file: "other.html" },
+        { selected: true },
+      );
+      resolveHit(details("heading"));
+      expect(await pending).toBeNull();
+      expect(onLocalSelection).not.toHaveBeenCalled();
+      expect(designWorkspaceView("workspace-a")).toMatchObject({
+        selectedFrame: "other.html",
+        frameSelected: true,
+        selectedNodeId: null,
+      });
+      expect(mocks.designSetSelection).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("keeps a pending canvas hit from reselecting after an outside click", async () => {
+    let resolveHit!: (value: DesignRuntimeNodeDetails | null) => void;
+    mocks.designFrameRuntime.mockReturnValue({
+      getElementAtLoc: vi.fn(
+        () =>
+          new Promise<DesignRuntimeNodeDetails | null>((resolve) => {
+            resolveHit = resolve;
+          }),
+      ),
+    });
+    const pending = selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "descend",
+    });
+    await selectDesignFrame("workspace-a", FRAME);
+    resolveHit(null);
+    await pending;
+    expect(designWorkspaceView("workspace-a").frameSelected).toBe(false);
+  });
+
+  it("rejects a hit from a replaced source without publishing its node id", async () => {
+    mocks.designFrameRuntime.mockReturnValue({
+      getElementAtLoc: vi.fn(async () =>
+        details("old", "222222222222222222222222"),
+      ),
+    });
+    await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "deepest",
+    });
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBeNull();
+    expect(mocks.designSetSelection).not.toHaveBeenCalled();
+  });
+
+  it("maps deep selection of document plumbing to the outer frame", async () => {
+    mocks.designFrameRuntime.mockReturnValue({
+      getElementAtLoc: vi.fn(async () => ({ ...details("body"), tag: "body" })),
+    });
+    await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "deepest",
+    });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      frameSelected: true,
+      selectedNodeId: null,
+    });
+  });
+
+  it("keeps Shift-click on empty frame space from replacing a nested selection", async () => {
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+      details: details("heading"),
+    });
+    mocks.designFrameRuntime.mockReturnValue({
+      getElementAtLoc: vi.fn(async () => null),
+    });
+    await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "plain",
+      additive: true,
+    });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedNodeId: "heading",
+      frameSelected: false,
+    });
+  });
+
+  it("toggles the selected outer frame with Shift-click", async () => {
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "plain",
+      additive: true,
+    });
+    expect(designWorkspaceView("workspace-a").frameSelected).toBe(false);
+  });
+
+  it("descends past the frame owner when the deepest hit is missing from the bounded tree", async () => {
+    const root = { ...details("frame-root"), tag: "main" };
+    const child = { ...details("container"), tag: "div" };
+    const leaf = { ...details("beyond-tree-limit"), tag: "div" };
+    useDesignRuntimeStore.getState().publishSnapshot(
+      "workspace-a",
+      "/design/a",
+      FRAME.file,
+      {
+        sourceVersion: FRAME.sourceVersion,
+        revision: 1,
+        frame: root,
+        tree: [
+          {
+            ...root,
+            children: [{ ...child, children: [] }],
+          },
+        ],
+        warnings: [],
+        viewport: { width: 1440, height: 900, scrollX: 0, scrollY: 0 },
+      },
+      FRAME.sourceVersion,
+    );
+    const getElementAtLoc = vi.fn(
+      async (
+        _x: number,
+        _y: number,
+        options: { mode: string; selectedNodeId?: string | null },
+      ) =>
+        options.mode === "deepest"
+          ? leaf
+          : options.selectedNodeId === root.oid
+            ? child
+            : root,
+    );
+    mocks.designFrameRuntime.mockReturnValue({ getElementAtLoc });
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+
+    await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "descend",
+    });
+
+    expect(getElementAtLoc).toHaveBeenLastCalledWith(20, 20, {
+      mode: "descend",
+      selectedNodeId: root.oid,
+    });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedNodeId: child.oid,
+      frameSelected: false,
+    });
+  });
+
+  it("publishes local text selection before its engine write settles", async () => {
+    let finishPersistence!: () => void;
+    mocks.designSetSelection.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        finishPersistence = resolve;
+      }),
+    );
+    const text = { ...details("heading"), textEditable: true };
+    mocks.designFrameRuntime.mockReturnValue({
+      getElementAtLoc: vi.fn(async () => text),
+    });
+    const onLocalSelection = vi.fn(() => {
+      expect(designWorkspaceView("workspace-a").selectedNodeId).toBe(text.oid);
+      expect(
+        designRuntimeFrameState("workspace-a", FRAME.file)?.detailsByNode[
+          text.oid
+        ],
+      ).toMatchObject(text);
+    });
+    let settled = false;
+    const selecting = selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 20,
+      y: 20,
+      intent: "descend",
+      preferText: true,
+      onLocalSelection,
+    }).then((result) => {
+      settled = true;
+      return result;
+    });
+
+    try {
+      await vi.waitFor(() => expect(onLocalSelection).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
+    } finally {
+      finishPersistence();
+      await selecting;
+    }
+    expect(onLocalSelection).toHaveBeenCalledExactlyOnceWith(text);
+  });
+
+  it("keeps standalone text directly selectable", async () => {
+    mocks.designFrameRuntime.mockReturnValue({
+      getElementAtLoc: vi.fn(async () => details("text")),
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("unavailable");
+      }),
+    });
+    const selected = await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: { ...FRAME, kind: "text" },
+      x: 20,
+      y: 20,
+      intent: "plain",
+    });
+    expect(selected?.oid).toBe("text");
+    expect(designWorkspaceView("workspace-a").selectedNodeId).toBe("text");
   });
 
   it("selects the frame when a cached canvas has no live iframe runtime", async () => {

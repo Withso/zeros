@@ -121,11 +121,26 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
   const height = layout.getByLabel("H", { exact: true });
   await height.fill("900");
   await committed(() => height.press("Enter"));
+  await page.getByLabel("Design canvas", { exact: true }).focus();
   await page.keyboard.press("Escape");
   const fullBounds = await frame.boundingBox();
   await page.mouse.click(
     fullBounds.x + fullBounds.width * 0.5,
     fullBounds.y + fullBounds.height * 0.5,
+  );
+  check(
+    "the outer frame takes precedence over a viewport-sized authored child",
+    (await canvasRow.getAttribute("aria-selected")) === "true",
+  );
+  await page.keyboard.down("ControlOrMeta");
+  await page.mouse.click(
+    fullBounds.x + fullBounds.width * 0.5,
+    fullBounds.y + fullBounds.height * 0.5,
+  );
+  await page.keyboard.up("ControlOrMeta");
+  await waitFor(
+    () => row.getAttribute("aria-selected").then((value) => value === "true"),
+    "authored-frame-deep-selection",
   );
   check(
     "a viewport-sized authored frame stays selectable on the canvas",

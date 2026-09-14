@@ -129,6 +129,72 @@ async function main() {
   }
 
   const ctx = { editBaselines: new Map() } as never;
+  const separatorHunks = [8, 20].map((start) => ({
+    oldStart: start,
+    oldLines: 3,
+    newStart: start,
+    newLines: 3,
+    lines: [
+      " const before = true;",
+      "-const old = 1;",
+      "+const next = 2;",
+      " export {};",
+    ],
+  }));
+  const separatorPatch =
+    "--- a/src/separators.ts\n+++ b/src/separators.ts\n" +
+    separatorHunks
+      .map(
+        (hunk) =>
+          `@@ -${hunk.oldStart},3 +${hunk.newStart},3 @@\n${hunk.lines.join("\n")}\n`,
+      )
+      .join("");
+  const separatorEdits = ["claude", "codex", "cursor", "streaming"].map(
+    (provider) => ({
+      provider,
+      message: {
+        id: `separator-${provider}`,
+        kind: "tool",
+        toolCallId: `separator-${provider}`,
+        title: "Edit",
+        toolKind: "edit",
+        status: provider === "streaming" ? "running" : "completed",
+        rawInput:
+          provider === "codex" || provider === "streaming"
+            ? {
+                changes: [
+                  {
+                    path: "src/separators.ts",
+                    kind: { type: "update" },
+                    diff: separatorPatch,
+                  },
+                ],
+              }
+            : provider === "cursor"
+              ? { path: "src/separators.ts" }
+              : {
+                  file_path: "src/separators.ts",
+                  old_string: "const old = 1;",
+                  new_string: "const next = 2;",
+                },
+        rawOutput:
+          provider === "claude"
+            ? { structuredPatch: separatorHunks }
+            : provider === "cursor"
+              ? {
+                  status: "success",
+                  value: {
+                    diffString: separatorPatch,
+                    linesAdded: 2,
+                    linesRemoved: 2,
+                  },
+                }
+              : undefined,
+        createdAt: 0,
+        updatedAt: 0,
+      } as never,
+    }),
+  );
   const edit = {
     id: "edit-smoke",
     kind: "tool",
@@ -337,6 +403,11 @@ async function main() {
               html={`<p>${"unbroken-preview-token".repeat(80)}</p><pre><code>${newLine}</code></pre>`}
             />
           </div>
+          {separatorEdits.map(({ provider, message }) => (
+            <div key={provider} data-testid={`separator-edit-${provider}`}>
+              <EditCard message={message} ctx={ctx} />
+            </div>
+          ))}
         </main>
       </TooltipProvider>
     );

@@ -320,8 +320,21 @@ Escape restores the exact baseline.
 - **Selection:** selection outlines follow the element's untransformed border
   box plus accumulated rotation. Handles, strokes, labels, constraint guides,
   and hit regions retain screen size at every supported zoom. Normal click
-  preserves useful nesting depth, double-click descends, the platform modifier
-  deep-selects, and Enter/Escape traverse child/parent hierarchy.
+  first selects the outer frame from its body, including empty space. Once a
+  child is selected, normal clicks preserve useful nesting depth. Double-click
+  descends once, the platform modifier deep-selects, and Enter/Escape traverse
+  the same visible child/parent hierarchy as Layers. Document wrappers and the
+  explicit frame root share the outer frame's identity; unmarked authored roots
+  remain real children, even when they fill the viewport. Frame bodies and labels
+  use the ordinary selection cursor; label dragging and resize handles retain
+  their gestures. Clicking a restored root-layer overlay also selects its frame.
+  Modifier-clicks pass through padding and gap controls to deep-select beneath
+  them; spacing drags retain their editing behavior. Outside-canvas clicks
+  deselect. Fallback descent starts from the frame owner when the deepest hit
+  is absent from a bounded tree. Text editing starts from confirmed local
+  selection without waiting for engine selection persistence. Body hit tests
+  share the selection generation with Layers and labels so delayed reads cannot
+  replace a newer selection or apply another frame's nesting depth.
 - **Multi-selection:** Shift-click and marquee publish a bounded primary-first
   group. Ancestor/descendant overlap reduces to top-level owners before
   transform or delete so no subtree is mutated twice.
