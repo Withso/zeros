@@ -48,7 +48,7 @@ const writeArgs = {
 describe("writeContextAttachment", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.activeBridge = {};
+    mocks.activeBridge = { executionIdentity: { kind: "local", sidecar: "active" } };
     mocks.resolveBridgeWorkspaceIdForCwd.mockResolvedValue("ws-1");
   });
 

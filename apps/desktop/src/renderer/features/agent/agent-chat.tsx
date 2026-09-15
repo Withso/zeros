@@ -92,7 +92,11 @@ import type { ComposerAttachment } from "./composer-attachments";
 // (the file input still uses the same accept list) — the textarea
 // autosize was removed with the textarea, and the visual shell moved
 // off ComposerShell/ComposerTextarea/ComposerToolbar.
-import { COMPOSER_FILE_ACCEPT, PROMPT_SURFACE_RADIUS } from "./composer-shell";
+import {
+  COMPOSER_FILE_ACCEPT,
+  PROMPT_SURFACE_RADIUS,
+} from "./composer-shell";
+import { isSubmittedComposerDocument } from "./composer-submission";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import {
   Conversation,
@@ -2832,14 +2836,14 @@ export function AgentChat({
   openPreviewRef.current = openPreview;
   // Live-draft mirror: the editor's onChange snapshots the composer into
   // composerLiveRef (read synchronously by the sidebar's "+ New Agent") and
-  // into the module-level ref. Store persistence happens when the retained
-  // surface is parked and again on bounded eviction/unmount.
+  // into the module-level ref. Draft snapshots include this live value while
+  // typing; parking and unmount also publish it to the workspace store.
   const updateLiveDraft = useCallback(() => {
     if (!chatId) return;
     const s = serializeComposerState();
     if (!s || s.isEmpty) {
       composerLiveRef.current = { text: "", attachments: [], json: null };
-      setLiveChatDraft(chatId, null);
+      setLiveChatDraft(chatId, composerLiveRef.current);
       return;
     }
     const draft = {
@@ -2889,8 +2893,9 @@ export function AgentChat({
   useEffect(() => {
     return () => {
       if (!chatId) return;
-      setLiveChatDraft(chatId, null);
       persistComposerDraft();
+      // Hand off to the parked snapshot before releasing the live owner.
+      setLiveChatDraft(chatId, null);
     };
   }, [chatId, persistComposerDraft]);
 
@@ -3279,15 +3284,24 @@ export function AgentChat({
   // editAndResubmit. It used to be a second, divergent copy with no
   // `kind === "text"` branch and no validation.ok guard — see that module's
   // header for what that cost.
-  const encodeComposerAttachments = (localAttachments: ComposerAttachment[]) =>
-    encodeAttachments(localAttachments, {
+  const encodeComposerAttachments = async (
+    localAttachments: ComposerAttachment[],
+  ) => {
+    const waitingForFile = localAttachments.some(
+      (a) => a.delivery === "reference",
+    );
+    if (waitingForFile) setSendPreparing(true);
+    return encodeAttachments(localAttachments, {
       supportsImage:
         session.initialize?.agentCapabilities?.promptCapabilities?.image !==
         false,
       cwd: chatThread?.folder || null,
       chatId: chatId ?? null,
       agentId: session.agentId ?? chatThread?.agentId ?? null,
+    }).finally(() => {
+      if (waitingForFile) setSendPreparing(false);
     });
+  };
 
   /** The chat whose send is already parked on an unreadable transcript. One
    *  automatic retry: the drain re-enters runSend, which re-hydrates, and if
@@ -3688,13 +3702,14 @@ export function AgentChat({
             localBubbleAttachmentById,
           )
         : extras?.bubbleSegments;
-    if (override === undefined) {
-      clearComposer();
-    }
+    const submittedDraftUnchanged =
+      override === undefined && snapshot &&
+      isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
+    if (submittedDraftUnchanged) clearComposer();
     // Drop any stashed draft for this chat —
     // the user just sent it. Defensive against the cleanup-on-unmount
     // path racing the post-send empty state.
-    if (chatId) {
+    if (chatId && (override !== undefined || submittedDraftUnchanged)) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
     }
     // Send-jump: scroll this prompt into view (bottom) once its turn
@@ -3747,6 +3762,10 @@ export function AgentChat({
     noteInteractiveAgentActivity();
     try {
       await runSend(override, extras, recordActivity);
+    } catch (error) {
+      toast.error("Message wasn't sent", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       sendInFlightRef.current = false;
     }
@@ -3803,14 +3822,14 @@ export function AgentChat({
   /** Persist the composer's content back onto the queued entry (Enter /
    *  tick). Runs the SAME pipeline as a fresh send — mention expansion +
    *  attachment encoding — so nothing degrades through an edit. */
-  const saveQueuedEdit = async () => {
+  const saveQueuedEdit = async (): Promise<boolean> => {
     const id = editingQueuedRef.current;
-    if (!id || queueSaveInFlightRef.current) return;
+    if (!id || queueSaveInFlightRef.current) return false;
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
     // Nothing to save — the tick is disabled; Esc cancels, Delete removes.
-    if (displayText.length === 0 && localAttachments.length === 0) return;
+    if (displayText.length === 0 && localAttachments.length === 0) return false;
     queueSaveInFlightRef.current = true;
     try {
       const wireText = expandMentionsInText(
@@ -3837,10 +3856,16 @@ export function AgentChat({
           bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
         segments: segments.length > 0 ? segments : undefined,
       });
+    } catch (error) {
+      toast.error("Queued message wasn't saved", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     } finally {
       queueSaveInFlightRef.current = false;
     }
     exitQueuedEdit();
+    return true;
   };
 
   const deleteQueued = (id: string) => {
@@ -3864,7 +3889,7 @@ export function AgentChat({
    *  when idle. Sending the row that's being edited saves the edit first, so
    *  what's dispatched is what the user sees in the composer. */
   const sendNowQueued = async (id: string) => {
-    if (editingQueuedRef.current === id) await saveQueuedEdit();
+    if (editingQueuedRef.current === id && !(await saveQueuedEdit())) return;
     const ok = await session.steerQueued?.(id);
     if (ok === false) {
       toast.error("Couldn't send now", {
@@ -4451,7 +4476,7 @@ export function AgentChat({
                           turn.isSteer
                             ? undefined
                             : (editedText, attachments, segments) => {
-                                editAndResubmit(
+                                return editAndResubmit(
                                   turn.userPrompt!.id,
                                   editedText,
                                   attachments,

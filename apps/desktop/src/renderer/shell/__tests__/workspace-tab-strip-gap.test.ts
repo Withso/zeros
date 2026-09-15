@@ -274,24 +274,25 @@ describe("workspace tab strip gap", () => {
 
   it("lets only the branch name absorb the cap", () => {
     // `flex-1` sets a basis of 0, which erases the child from the tab's
-    // intrinsic width and collapses every tab onto the floor. Both the open
-    // Button and the two label spans have to stay basis-auto for the tab to
-    // measure its own contents.
+    // intrinsic width and collapses every tab onto the floor. Both the tab
+    // contents and label group keep an auto basis. The name within that group
+    // truncates independently, leaving its adjacent draft pencil visible.
     const topBar = source(TOP_BAR);
 
-    expect(classConstant(topBar, "WORKSPACE_OPEN_BUTTON_CLS")).toMatch(
+    expect(classConstant(topBar, "WORKSPACE_TAB_CONTENT_CLS")).toMatch(
       /\bflex-auto\b/,
     );
-    expect(classConstant(topBar, "WORKSPACE_OPEN_BUTTON_CLS")).not.toMatch(
+    expect(classConstant(topBar, "WORKSPACE_TAB_CONTENT_CLS")).not.toMatch(
       /\bflex-1\b/,
     );
     const labelSpans = labelSpanClasses(topBar);
     expect(labelSpans).toHaveLength(2);
     for (const span of labelSpans) {
-      expect(span).toMatch(/\bflex-auto\b/);
       expect(span).toMatch(/\btruncate\b/);
       expect(span).not.toMatch(/\bflex-1\b/);
     }
+    expect(labelSpans[1]).toMatch(/\bflex-auto\b/);
+    expect(topBar).toContain('className="inline-flex min-w-0 flex-auto items-center gap-2 text-left"');
   });
 });
 

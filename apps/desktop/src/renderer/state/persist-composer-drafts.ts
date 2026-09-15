@@ -53,6 +53,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { ComposerDraft, EditDraftStash, WorkspaceState } from "./store";
+import { liveChatDraftEntries } from "../features/agent/composer-live-drafts";
 
 const STORAGE_KEY = "zeros:composer-drafts:v1";
 const DEBOUNCE_MS = 500;
@@ -227,7 +228,7 @@ function withoutAttachments(snapshot: PersistedDrafts): PersistedDrafts {
 
 function writeNow(snapshot: PersistedDrafts): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot, (key, value) => key === "sourceFile" ? undefined : value));
     return;
   } catch {
     /* fall through to the degraded write */
@@ -247,21 +248,22 @@ function writeNow(snapshot: PersistedDrafts): void {
 // ── Debounced write + beforeunload flush ─────────────────
 
 let pendingTimer: number | null = null;
-let pendingSnapshot: PersistedDrafts | null = null;
+let pendingState: WorkspaceState | null = null;
 
 function flushPending(): void {
   if (pendingTimer !== null) {
     window.clearTimeout(pendingTimer);
     pendingTimer = null;
   }
-  if (pendingSnapshot !== null) {
-    writeNow(pendingSnapshot);
-    pendingSnapshot = null;
+  if (pendingState !== null) {
+    writeNow(snapshotOf(pendingState));
+    pendingState = null;
   }
 }
 
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", flushPending);
+  window.addEventListener("pagehide", flushPending);
 }
 
 /** Snapshot the draft slots from the current WorkspaceState and
@@ -269,13 +271,13 @@ if (typeof window !== "undefined") {
  *  longer than the UI-state one — users type bursts and we don't
  *  need every keystroke on disk. */
 export function schedulePersistDrafts(state: WorkspaceState): void {
-  pendingSnapshot = snapshotOf(state);
+  pendingState = state;
   if (pendingTimer !== null) return;
   pendingTimer = window.setTimeout(() => {
     pendingTimer = null;
-    if (pendingSnapshot) {
-      writeNow(pendingSnapshot);
-      pendingSnapshot = null;
+    if (pendingState) {
+      writeNow(snapshotOf(pendingState));
+      pendingState = null;
     }
   }, DEBOUNCE_MS);
 }
@@ -293,13 +295,20 @@ export function persistDraftsNow(state: WorkspaceState): void {
     window.clearTimeout(pendingTimer);
     pendingTimer = null;
   }
-  pendingSnapshot = null;
+  pendingState = null;
   writeNow(snapshotOf(state));
 }
 
 function snapshotOf(state: WorkspaceState): PersistedDrafts {
+  const chats = { ...state.chatComposerDrafts };
+  const owners = state.chats && new Set(state.chats.map((chat) => chat.id));
+  for (const [id, draft] of liveChatDraftEntries()) {
+    if (owners && !owners.has(id)) continue;
+    if (draft.text.trim() || draft.attachments.length > 0) chats[id] = draft;
+    else delete chats[id];
+  }
   return {
-    chats: state.chatComposerDrafts,
+    chats,
     edits: state.editComposerDrafts,
     autoSend: state.pendingAutoSend,
   };

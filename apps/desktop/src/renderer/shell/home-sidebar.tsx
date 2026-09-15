@@ -37,7 +37,10 @@ import {
   useProjects,
 } from "../state/use-projects";
 import { countLiveVisibleBySlug } from "../state/live-workspace-selectors";
-import { usePendingCreatesAll } from "../state/pending-workspaces";
+import {
+  usePendingCreatesAll,
+  usePendingWorkspacesStore,
+} from "../state/pending-workspaces";
 import type { Project } from "../state/projects-store";
 import { useAuth } from "../features/auth";
 import { Button } from "../shared/ui/primitives/button";
@@ -187,9 +190,15 @@ export function HomeSidebar() {
   const displayName = session?.user.name ?? null;
   // Live-visible rows + deduped pending creates, computed by the SAME helper the
   // Dashboard uses — badge == that repo's top-bar tab count, including during
-  // the optimistic-create and confirmed-archive transition window. A workspace
-  // remains counted while its destructive operation is visibly in progress.
-  const countBySlug = countLiveVisibleBySlug(accessibleWorkspaces, allPending);
+  // optimistic create and archive transitions.
+  const archiveIntents = usePendingWorkspacesStore(
+    (state) => state.archiveIntents,
+  );
+  const countBySlug = useMemo(
+    () =>
+      countLiveVisibleBySlug(accessibleWorkspaces, allPending, archiveIntents),
+    [accessibleWorkspaces, allPending, archiveIntents],
+  );
 
   return (
     <div

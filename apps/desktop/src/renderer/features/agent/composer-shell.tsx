@@ -14,7 +14,7 @@
 // ──────────────────────────────────────────────────────────
 
 export const COMPOSER_FILE_ACCEPT =
-  "image/*,text/*,.md,.markdown,.txt,.json,.yaml,.yml,.toml,.csv,.ts,.tsx,.js,.jsx,.py,.rb,.go,.rs,.sh";
+  ""; // All formats are selectable; the shared policy explains excluded files.
 
 /** 12px corners for the three surfaces a user prompt lives on — the bottom
  *  composer card, the inline edit composer that replaces a sent message, and

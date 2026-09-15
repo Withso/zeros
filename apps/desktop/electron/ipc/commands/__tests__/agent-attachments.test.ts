@@ -64,4 +64,13 @@ describe("agent_attachment_write", () => {
       skipped: true,
     });
   });
+
+  it("accepts chunked files and resolves their completed path through the same trusted IPC", async () => {
+    const common = { ...args(trustedRoot), filename: "report.pdf", mimeType: "application/pdf", uploadId: "upload-1", offset: 0, totalBytes: 5 };
+    await expect(call({ ...common, base64: "" })).resolves.toMatchObject({ pending: true, bytes: 0 });
+    const result = await call(common);
+    expect(await fs.readFile(result.absolutePath as string, "utf8")).toBe("hello");
+    await expect(call({ ...args(trustedRoot), filename: "report.pdf", mimeType: "application/pdf", base64: "", resolve: true })).resolves.toMatchObject({ relativePath: result.relativePath, skipped: true });
+    await expect(call({ ...common, cwd: untrustedRoot, base64: "", resolve: true })).rejects.toThrow(/workspace/);
+  });
 });

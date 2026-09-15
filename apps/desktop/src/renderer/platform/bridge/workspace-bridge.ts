@@ -1,3 +1,4 @@
+import type { AttachmentTransferOptions } from "@zeros/protocol/attachment-policy";
 import type {
   ChangesHistory,
   TurnHistoryCursor,
@@ -899,7 +900,7 @@ export async function bridgeFileWrite(
 export async function bridgeAttachmentWrite(
   bridge: RuntimeClient,
   workspaceId: string,
-  args: {
+  args: AttachmentTransferOptions & {
     chatId?: string | null;
     attachmentId: string;
     base64: string;
@@ -912,6 +913,7 @@ export async function bridgeAttachmentWrite(
   mimeType: string;
   bytes: number;
   skipped?: boolean;
+  pending?: boolean;
 }> {
   return (await workspaceOp(
     bridge,
@@ -930,6 +932,7 @@ export async function bridgeAttachmentWrite(
     mimeType: string;
     bytes: number;
     skipped?: boolean;
+  pending?: boolean;
   };
 }
 

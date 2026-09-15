@@ -325,7 +325,8 @@ export type WorkspaceState = {
   // Persistent draft state per composer surface
   // so a user who's typing/attaching can switch chats (or away and
   // back to the new-agent landing) without losing their work. Stored
-  // in-memory only — drops on app reload, like any unsaved chat input.
+  // with live snapshots and metadata persisted by persist-composer-drafts.
+  // The saved snapshot seeds this store synchronously on app reload.
   // - chatComposerDrafts: keyed by chatId for the AgentChat composer
   // Cleared on submit; the cleanup-on-unmount writes the live state
   // back through SET_*_DRAFT.

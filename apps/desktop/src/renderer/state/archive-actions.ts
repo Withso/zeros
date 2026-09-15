@@ -1,4 +1,5 @@
-// Shared archive / unarchive actions with visible success/error feedback.
+// Shared archive / unarchive actions. Archive responds immediately and quietly;
+// errors remain actionable and durable state is committed only after success.
 // Centralized so the
 // sidebar, the PR island, and the Dashboard (cards + Archived column) all behave
 // identically — and so the audit's edge cases are handled in ONE place:
@@ -44,6 +45,7 @@ import { forgetDesignWorkspaceBootSnapshot } from "../features/design-workspace/
 import { isLocalMainWorkspace } from "./local-main-workspace";
 import { loadProjects, type Project } from "./projects-store";
 import {
+  beginWorkspaceArchive,
   clearWorkspaceArchiving,
   isWorkspaceArchiving,
   markWorkspaceArchiving,
@@ -76,7 +78,10 @@ import {
 import type { WorkspaceTabActivity } from "./workspace-list-filter";
 import { getActiveOrganizationSnapshot } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
-import { dedupePendingCreates } from "./live-workspace-selectors";
+import {
+  dedupePendingCreates,
+  selectLiveVisible,
+} from "./live-workspace-selectors";
 import { forgetWorkspaceVisibility } from "../features/dashboard/workspace-visibility";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
@@ -110,9 +115,13 @@ function pickRepointTarget(leaving: Workspace): {
   const state = useWorkspaceStore.getState();
   const projects = loadProjects();
   const activeOrganization = getActiveOrganizationSnapshot();
-  const cached = filterRowsForOrganization(
+  const confirmed = filterRowsForOrganization(
     peekLiveWorkspaceUnion(),
     activeOrganization,
+  );
+  const cached = selectLiveVisible(
+    confirmed,
+    usePendingWorkspacesStore.getState().archiveIntents,
   );
   const seenIds = new Set(cached.map((workspace) => workspace.id));
   if (!seenIds.has(leaving.id)) cached.push(leaving);
@@ -160,7 +169,7 @@ function pickRepointTarget(leaving: Workspace): {
       usePendingWorkspacesStore.getState().creates,
       activeOrganization,
     ),
-    cached,
+    confirmed,
   );
   const pendingNext = pendingWorkspaceNeighborAfterArchive({
     leaving,
@@ -177,9 +186,8 @@ function pickRepointTarget(leaving: Workspace): {
       validationPending: true,
     };
   }
-  // No stable confirmed/pending destination exists. Retain the existing burst
-  // archive behavior: briefly follow the nearest busy row; its own completion
-  // will resolve the next destination without flashing the Create page.
+  // A visible permanent-delete row may still own the only surviving surface.
+  // Archive intents were excluded above and can never become a destination.
   return next
     ? {
         folder: next.path,
@@ -457,7 +465,6 @@ function commitConfirmedArchive(
   dispatch: Dispatch,
   opts?: ArchiveFeedbackOptions,
 ): void {
-  const label = opts?.label ?? original.branch;
   trackGitOp({ op: "workspace_archive", outcome: "ok" });
   unstable_batchedUpdates(() => {
     // Resolve the destination while the live cache still contains `original`;
@@ -472,37 +479,11 @@ function commitConfirmedArchive(
     opts?.onArchived?.(archived);
   });
   notifyWorkspacesChanged(original.repoSlug);
-  toast.success("Workspace archived", {
-    description: "Find it in the Dashboard's Archived column to restore it.",
-    action: {
-      label: "Undo",
-      onClick: () => {
-        void restoreWorkspaceWithFeedback(archived, {
-          label,
-          // Bring the restored workspace back into view. Restore can adapt the
-          // path, so navigate to the confirmed result rather than the old path.
-          onRestored: (res) => {
-            const restoreId = selectChatToRestoreForFolder(
-              useWorkspaceStore.getState(),
-              res.path,
-            );
-            dispatch({
-              type: "OPEN_WORKSPACE",
-              folder: res.path,
-              repoRoot: original.repoRoot,
-              chatId: restoreId,
-              preservePage: true,
-            });
-          },
-        });
-      },
-    },
-  });
 }
 
-/** Follow a timed-out archive through exact engine state. The live row remains
- * inert in its original surface until `archivedAt` is authoritative; a concrete
- * failure only clears its busy affordance, so there is no disappearance/bounce. */
+/** Follow a timed-out archive through exact engine state. Keep the local intent
+ * hidden while the operation is active or unreachable. A concrete failure
+ * reveals the latest confirmed live row without changing the current route. */
 function watchTimedOutWorkspaceArchive(
   workspace: Workspace,
   dispatch: Dispatch,
@@ -550,7 +531,6 @@ function watchTimedOutWorkspaceArchive(
     if (current === null) {
       settled = true;
       commitConfirmedDeletion(workspace, dispatch);
-      toast.info("The workspace was deleted while archiving");
       return;
     }
     if (current === undefined) {
@@ -574,7 +554,6 @@ function watchTimedOutWorkspaceArchive(
     if (latest === null) {
       settled = true;
       commitConfirmedDeletion(workspace, dispatch);
-      toast.info("The workspace was deleted while archiving");
       return;
     }
     if (latest === undefined) {
@@ -591,7 +570,7 @@ function watchTimedOutWorkspaceArchive(
   void check();
 }
 
-/** Archive a workspace with an Undo toast. Durably checkpoints tracked,
+/** Hide and navigate synchronously, then durably checkpoint tracked,
  *  untracked, and configured ignored work, removes the worktree, and keeps the
  *  branch + lifecycle status. Never called for the synthetic Local main. */
 export async function archiveWorkspaceWithFeedback(
@@ -600,10 +579,13 @@ export async function archiveWorkspaceWithFeedback(
   opts?: ArchiveFeedbackOptions,
 ): Promise<void> {
   if (isLocalMainWorkspace(workspace)) return; // defensive — UI hides it anyway
-  // Confirmed-only transition: retain the tab/card in its current location and
-  // show its spinner until the engine has durably checkpointed + removed it.
-  // A failure therefore never makes the workspace disappear and bounce back.
-  markWorkspaceArchiving(workspace.id);
+  if (isWorkspaceArchiving(workspace.id)) return;
+  // The click publishes its complete destination before yielding to I/O. Keep
+  // confirmed rows, runtime state, and drafts until the engine safely finishes.
+  unstable_batchedUpdates(() => {
+    beginWorkspaceArchive(workspace.id);
+    repointViewIfActive(workspace, dispatch);
+  });
   try {
     const result = await workspaceArchive({
       workspaceId: workspace.id,
@@ -624,7 +606,6 @@ export async function archiveWorkspaceWithFeedback(
     // stale cache/UI instead of leaving a ghost row behind.
     if (isGitErrorShape(err) && err.code === "WORKSPACE_NOT_FOUND") {
       commitConfirmedDeletion(workspace, dispatch);
-      toast.info("The workspace was deleted while archiving");
       return;
     }
     // The worktree folder is gone from disk — the engine refuses to archive it
@@ -638,18 +619,14 @@ export async function archiveWorkspaceWithFeedback(
       showCorruptedWorkspaceToast(workspace);
       return;
     }
-    // A client timeout does not mean the engine transaction failed. Keep the row
-    // live; a confirming exact-key read is the only thing allowed to repoint it.
+    // A client timeout does not mean the engine transaction failed. Keep the
+    // presentation intent while exact-key reads observe its eventual outcome.
     if (isWorkspaceOpStillRunning(err)) {
-      toast.info("Archiving is taking longer than usual", {
-        description:
-          "It's still checkpointing safely in the background and will remain marked Archiving until confirmed.",
-      });
       watchTimedOutWorkspaceArchive(workspace, dispatch, opts);
       return;
     }
     trackGitOp({ op: "workspace_archive", outcome: "error", error: err });
-    // The archive genuinely failed; the row never left the live view.
+    // Reveal the current server row, preserving any concurrent edits to it.
     clearWorkspaceArchiving(workspace.id);
     const remediation = isGitErrorShape(err) ? err.remediation : undefined;
     toast.error("Couldn't archive workspace", {

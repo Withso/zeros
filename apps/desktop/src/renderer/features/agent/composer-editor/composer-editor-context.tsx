@@ -21,11 +21,14 @@ export interface ComposerEditorContextValue {
   cwd?: string | null;
   /** False while a retained composer is hidden; disk image leases stay cold. */
   attachmentImagesActive: boolean;
+  /** Mirrors TipTap's editable state for pill actions outside contenteditable. */
+  editable: boolean;
 }
 
 const ComposerEditorContext = createContext<ComposerEditorContextValue>({
   getAttachment: () => undefined,
   attachmentImagesActive: true,
+  editable: true,
 });
 
 export const ComposerEditorProvider = ComposerEditorContext.Provider;

@@ -34,6 +34,13 @@ import {
   useFileTree,
   useFileTreeSelection,
 } from "@pierre/trees/react";
+import type { ContextMenuOpenContext } from "@pierre/trees";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+} from "@/renderer/shared/ui/primitives/context-menu";
+import { createMenuAnchor } from "@/renderer/shared/ui/menu-anchor";
 
 import {
   loadWorkspaceFileListing,
@@ -910,6 +917,11 @@ export const WorkspaceFileTree = React.forwardRef<
         style={{ height: "100%" }}
         renderContextMenu={(item, ctx) => (
           <TreeMenu
+            key={item.path}
+            active={active}
+            owner={cwd}
+            path={item.path}
+            context={ctx}
             isFile={item.kind === "file"}
             onOpenNewTab={
               onOpenInNewTab
@@ -925,14 +937,16 @@ export const WorkspaceFileTree = React.forwardRef<
                 void navigator.clipboard?.writeText(item.path).catch(() => {});
               ctx.close();
             }}
-            onReveal={() => {
-              if (cwd && isNativeRuntime() && isSafeRelPath(item.path)) {
-                void nativeInvoke("reveal_in_finder", {
-                  path: joinPath(cwd, item.path),
-                }).catch(() => {});
-              }
-              ctx.close();
-            }}
+            onReveal={
+              cwd && isNativeRuntime() && isSafeRelPath(item.path)
+                ? () => {
+                    void nativeInvoke("reveal_in_finder", {
+                      path: joinPath(cwd, item.path),
+                    }).catch(() => {});
+                    ctx.close();
+                  }
+                : undefined
+            }
           />
         )}
       />
@@ -941,16 +955,25 @@ export const WorkspaceFileTree = React.forwardRef<
 });
 
 // ── Right-click menu ───────────────────────────────────────
-// Rendered by the tree (possibly inside its shadow root), so it's styled
-// with inline styles + CSS-var references rather than Tailwind classes,
-// which can't cross the shadow boundary.
+// The tree owns selection and dismissal; the shared menu owns the portal,
+// keyboard navigation, live row anchor and viewport collision handling.
+const TREE_MENU_ITEM_CLASS =
+  "hover:bg-bg2-hover focus:bg-bg2-hover cursor-pointer rounded-sm px-2.5";
 
 function TreeMenu({
+  active,
+  owner,
+  path,
+  context,
   isFile,
   onOpenNewTab,
   onCopyPath,
   onReveal,
 }: {
+  active: boolean;
+  owner: string | undefined;
+  path: string;
+  context: ContextMenuOpenContext;
   isFile: boolean;
   /** Omitted when the host doesn't want an "Open in new tab" action. */
   onOpenNewTab?: () => void;
@@ -958,55 +981,61 @@ function TreeMenu({
   /** Omitted without a host file manager — the item is then hidden. */
   onReveal?: () => void;
 }) {
+  const originalOwner = useRef(owner);
+  const anchor = useMemo(() => {
+    const root = context.anchorElement.getRootNode();
+    const row =
+      root instanceof ShadowRoot
+        ? root.querySelector<HTMLElement>(
+            `[data-item-path="${CSS.escape(path)}"]`,
+          )
+        : null;
+    if (!row) return undefined;
+    return createMenuAnchor(row, {
+      x: context.anchorRect.left,
+      y: context.anchorRect.top,
+    });
+  }, [context, path]);
+  const open =
+    active && owner === originalOwner.current && anchor !== undefined;
+  useLayoutEffect(() => {
+    if (!open) context.close({ restoreFocus: false });
+  }, [open, context]);
   return (
-    <div
-      style={{
-        minWidth: 180,
-        padding: 4,
-        borderRadius: 8,
-        background: "var(--bg2)",
-        border: "1px solid var(--border1)",
-        boxShadow: "var(--shadow-dropdown)",
-        fontSize: 13,
-        color: "var(--fg1)",
+    <ContextMenu
+      open={open}
+      anchor={anchor}
+      onOpenChange={(next) => {
+        if (!next) {
+          context.close({
+            restoreFocus: active && owner === originalOwner.current,
+          });
+        }
       }}
     >
-      {isFile && onOpenNewTab && (
-        <MenuButton label="Open in new tab" onClick={onOpenNewTab} />
-      )}
-      <MenuButton label="Copy path" onClick={onCopyPath} />
-      {onReveal && <MenuButton label="Reveal in Finder" onClick={onReveal} />}
-    </div>
-  );
-}
-
-function MenuButton({
-  label,
-  onClick,
-}: {
-  label: string;
-  onClick: () => void;
-}) {
-  const [hover, setHover] = useState(false);
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: "block",
-        width: "100%",
-        textAlign: "left",
-        padding: "6px 10px",
-        borderRadius: 4,
-        border: "none",
-        cursor: "pointer",
-        color: "inherit",
-        background: hover ? "var(--bg2-hover)" : "transparent",
-      }}
-    >
-      {label}
-    </button>
+      <ContextMenuContent
+        data-file-tree-context-menu-root="true"
+        aria-label="File actions"
+        className="border-border1 bg-bg2 min-w-[min(180px,var(--radix-context-menu-content-available-width))] rounded-lg p-1"
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          if (open) context.restoreFocus();
+        }}
+      >
+        {isFile && onOpenNewTab && (
+          <ContextMenuItem className={TREE_MENU_ITEM_CLASS} onSelect={onOpenNewTab}>
+            Open in new tab
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem className={TREE_MENU_ITEM_CLASS} onSelect={onCopyPath}>
+          Copy path
+        </ContextMenuItem>
+        {onReveal && (
+          <ContextMenuItem className={TREE_MENU_ITEM_CLASS} onSelect={onReveal}>
+            Reveal in Finder
+          </ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

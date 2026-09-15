@@ -452,9 +452,8 @@ function patchArchivedCollections(
 }
 
 /** Commit a confirmed archive across the live exact-key cache and every
- * retained Archived collection in one React batch. The live row remains in its
- * original surface while the operation is busy, so this authoritative result is
- * the sole membership transition and a concrete failure produces no bounce. */
+ * retained Archived collection in one React batch. Presentation may already
+ * hide a local archive intent; only this result changes server-state membership. */
 export function commitWorkspaceArchived(workspace: Workspace): void {
   unstable_batchedUpdates(() => {
     const prior = workspaceCache.peekSnapshot(workspace.repoSlug).data;

@@ -121,11 +121,13 @@ export interface AgentTextMessage {
 export interface AgentTextMessageAttachment {
   name: string;
   mimeType: string;
-  kind: "image" | "text";
+  kind: "image" | "text" | "file";
+  delivery?: "reference";
+  size?: number;
   /** Legacy data/file URL written by older clients. New messages must not put
    *  full-resolution image bytes in transcript JSON. */
   thumbnailUri?: string;
-  /** Cwd-relative image path under the workspace context graph. Its scope is
+  /** Cwd-relative attachment path under the workspace context graph. Its scope is
    *  a hint because the Context tab can move the stable record after send. */
   diskPath?: string;
   /** The composer attachment id this chip was encoded from — the key of its
@@ -152,10 +154,12 @@ export type MessageContentSegment =
       type: "attachment";
       name: string;
       mimeType: string;
-      kind: "image" | "text";
+      kind: "image" | "text" | "file";
+      delivery?: "reference";
+      size?: number;
       /** Legacy data URL for images persisted by older clients. */
       thumbnailUri?: string;
-      /** Disk-backed image reference; its local/shared scope can become stale. */
+      /** Disk-backed attachment reference; its local/shared scope can become stale. */
       diskPath?: string;
       /** Stable context-graph record id; local/shared is a movable scope. */
       attachmentId?: string;
