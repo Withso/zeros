@@ -434,7 +434,6 @@ function CommentComposer({
           variant="secondary"
           disabled={busy || !value.trim()}
           onClick={() => void submit()}
-          className="gap-1.5"
         >
           {busy && <ZerosSpinner size={16} />}
           Comment

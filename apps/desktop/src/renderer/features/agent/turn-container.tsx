@@ -38,6 +38,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import type { ComposerAttachment } from "./composer-attachments";
+import { PROMPT_SURFACE_RADIUS } from "./composer-shell";
 import {
   useComposerEditor,
   messageToEditorContent,
@@ -300,7 +301,12 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   // chrome so this wrapper's chrome shows through.
   if (editing && onEdit) {
     return (
-      <div className="zeros-agent-turn-prompt is-editing border-border2 bg-bg2 w-full rounded-lg border px-3.5 py-3">
+      <div
+        className={cn(
+          "zeros-agent-turn-prompt is-editing border-border2 bg-bg2 w-full border px-3.5 py-3",
+          PROMPT_SURFACE_RADIUS,
+        )}
+      >
         {/* Mounted-only-while-editing keeps `useComposerAttachments`'
             document-level drag listeners scoped to the active edit
             (otherwise every TurnPromptHeader on the page would attach
@@ -345,7 +351,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   // the prompt scrolls freely with the transcript (the JumpToPromptPill
   // still offers a manual "jump to your prompt" when it scrolls off).
   //   • bg-highlighted-bg + border-border1 + px-3 py-2 (12px horizontal /
-  //     8px vertical) + rounded-sm (4px, all corners) — the inner
+  //     8px vertical) + PROMPT_SURFACE_RADIUS (12px, all corners — the same
+  //     corner the composer the message was typed in wears) — the inner
   //     MessageContent keeps its text-fg1, so the bubble look is unchanged
   //     from before; only the width + alignment changed.
   //   • cursor-text/select-text: the bubble is plain content now, so its
@@ -365,7 +372,8 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
       <div
         className={cn(
-          "w-fit max-w-[min(768px,100%)] cursor-text rounded-sm border px-3 py-2 select-text",
+          "w-fit max-w-[min(768px,100%)] cursor-text border px-3 py-2 select-text",
+          PROMPT_SURFACE_RADIUS,
           autoAction
             ? // font-medium (500) sets the auto-sent label apart from typed
               // prose — only these "Create a PR" / "Commit & Push" bubbles.

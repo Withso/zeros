@@ -661,7 +661,6 @@ function MergeControls({
         variant="default"
         disabled={busy || !!blockedReason}
         onClick={onMarkReady}
-        className="gap-1.5"
       >
         {busy && <ZerosSpinner size={16} tone="inverted" />}
         Mark as ready

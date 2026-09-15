@@ -309,6 +309,7 @@ import {
 } from "./design-layer-label";
 import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // --- TYPES ---
 
 interface DesignWorkspaceColumnProps {
@@ -10895,6 +10896,7 @@ function DesignInspector({
       ref={inspectorRef}
       id={inspectorId}
       data-design-inspector=""
+      {...popoverBoundaryProps}
       className="border-border1 bg-bg1 relative flex w-[var(--zeros-design-style-width,280px)] max-w-[min(640px,50%)] min-w-[min(220px,45%)] [flex:0_1_var(--zeros-design-style-width,280px)] flex-col overflow-hidden border-l"
     >
       <DesignPanelResizeHandle

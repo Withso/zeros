@@ -1,11 +1,10 @@
 // ──────────────────────────────────────────────────────────
-// applyTheme — set appearance + palette attributes on <html>
+// applyTheme — set the appearance attribute on <html>
 // ──────────────────────────────────────────────────────────
 //
-// `data-theme` remains the resolved appearance contract (dark/light).
-// Orka black is a second DARK palette, selected independently with
-// `data-theme-palette="orka-black"`; this keeps Tailwind's `dark:`
-// variant and every polarity-sensitive consumer binary.
+// `data-theme` is the resolved appearance contract (dark/light) that
+// Tailwind's `dark:` variant and every polarity-sensitive consumer
+// key on.
 //
 // Transition suppression on concrete-theme change is preserved —
 // switching palettes still flashes ugly if every transition
@@ -44,11 +43,6 @@ export function applyTheme(
   }
 
   root.setAttribute("data-theme", variant);
-  if (themeId === "orka-black") {
-    root.setAttribute("data-theme-palette", themeId);
-  } else {
-    root.removeAttribute("data-theme-palette");
-  }
 
   if (themeChanged && typeof window !== "undefined") {
     window.requestAnimationFrame(() => {
@@ -66,8 +60,7 @@ export function applyTheme(
 /** Report the theme MODE to the main process (`appearance_set_mode`):
  *  it persists the mode to userData (the durable copy localStorage —
  *  relocated under ~/Library/Caches — can't provide) and makes
- *  native chrome follow the app polarity (main maps Orka black to
- *  native dark). The MODE, not the resolved variant, is sent so System
+ *  native chrome follow the app polarity. The MODE, not the resolved variant, is sent so System
  *  keeps native chrome AND the renderer's matchMedia on the live OS
  *  signal. Deduped — applyTheme also runs on OS flips and
  *  cross-window syncs where the mode hasn't changed. */

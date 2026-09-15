@@ -9,10 +9,8 @@
   <title>Zeros — Loaders &amp; Shimmers</title>
   <style>
 /* ── Design tokens — mirrored from styles/zeros-tokens.css ──
-       Dark is neutral; Orka black restores the former warm-gray dark
-       palette; Light keeps its warm off-whites. The app keeps data-theme
-       binary and selects Orka with data-theme-palette. The header control
-       cycles all three (note the bg3 rule: dark palettes use sidebar-bg,
+       Dark is neutral; Light keeps its warm off-whites. The header control
+       toggles between the two (note the bg3 rule: Dark uses sidebar-bg,
        while Light uses bg1). */
     :root {
       color-scheme: dark;
@@ -55,25 +53,6 @@
       --loader-rest: var(--fg3);
       --loader-active-inverted: var(--primary-button-fg);
       --loader-rest-inverted: var(--primary-button-fg);
-    }
-
-    :root[data-theme="dark"][data-theme-palette="orka-black"] {
-      --bg1: hsl(5 5% 7%);
-      --bg1-hover: hsl(8 5% 12%);
-      --bg2: hsl(25 4% 12%);
-      --bg2-hover: hsl(25 3% 15%);
-      --bg3: hsl(25 5% 9%);
-      --bg3-hover: hsl(25 2% 15%);
-      --fg1: hsl(0 2% 92%);
-      --fg2: hsl(20 4% 66%);
-      --fg3: hsl(15 1% 44%);
-      --muted-fg: hsl(15 4% 44%);
-      --border1: hsl(8 3% 14%);
-      --border2: hsl(25 1% 18%);
-      --border3: hsl(15 0% 24%);
-      --inverted-bg: hsl(0 2% 92%);
-      --inverted-fg: hsl(5 7% 5%);
-      --primary-button-hover: hsl(25 2% 83%);
     }
 
     [data-theme="light"] {
@@ -553,7 +532,7 @@
               Add project
             </button>
           </div>
-          <p class="demo-note">--loader-active/-rest-inverted → the on-inverted fg, so the piece never vanishes on the near-white (Dark / Orka black) or near-black (Light) fill.</p>
+          <p class="demo-note">--loader-active/-rest-inverted → the on-inverted fg, so the piece never vanishes on the near-white (Dark) or near-black (Light) fill.</p>
         </div>
         <div class="demo-card">
           <h3>Primary + disabled while loading</h3>
@@ -1008,34 +987,20 @@
       durationEls.forEach((el) => { el.textContent = text; });
     }, 1000);
 
-    // ── Dark / Orka black / Light theme cycle ──
+    // ── Dark / Light theme toggle ──
     // CSS-driven loaders and demo buttons re-theme for free — the spinning disc
     // included: its marks ride currentColor, so a flip needs no JS here.
     const themeToggle = document.getElementById("theme-toggle");
     function applyTheme(theme) {
       document.documentElement.dataset.theme = theme === "light" ? "light" : "dark";
-      if (theme === "orka-black") {
-        document.documentElement.dataset.themePalette = "orka-black";
-      } else {
-        delete document.documentElement.dataset.themePalette;
-      }
       if (themeToggle) {
-        themeToggle.textContent = theme === "light"
-          ? "☀ Light"
-          : theme === "orka-black"
-            ? "◐ Orka black"
-            : "☾ Dark";
+        themeToggle.textContent = theme === "light" ? "☀ Light" : "☾ Dark";
       }
     }
     if (themeToggle) {
       themeToggle.addEventListener("click", () => {
-        const current = document.documentElement.dataset.theme === "light"
-          ? "light"
-          : document.documentElement.dataset.themePalette === "orka-black"
-            ? "orka-black"
-            : "dark";
-        const next = current === "dark" ? "orka-black" : current === "orka-black" ? "light" : "dark";
-        applyTheme(next);
+        const current = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+        applyTheme(current === "dark" ? "light" : "dark");
       });
     }
 

@@ -111,8 +111,8 @@ describe("workspace mode toggle", () => {
     for (const buttonTag of buttonTags) {
       const buttonClasses =
         buttonTag.match(/class="([^"]*)"/)?.[1]?.split(" ") ?? [];
-      expect(buttonClasses).toContain("h-6");
-      expect(buttonClasses).toContain("w-6");
+      // 24px segments inside the 28px track (the bare icon button is 28px).
+      expect(buttonClasses).toContain("size-6");
       expect(buttonClasses).toContain("rounded-md");
     }
     const toggleTag = markup.match(

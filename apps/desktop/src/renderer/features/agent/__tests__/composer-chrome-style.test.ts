@@ -35,6 +35,20 @@ describe("composer chrome", () => {
     expect(agentChat).toContain('"!border-transparent"');
   });
 
+  it("gives the composer, the edit composer and the sent bubble one 12px corner", () => {
+    // A prompt visibly moves between three surfaces — typed in the bottom
+    // composer, re-opened in the inline edit composer, parked as the sent
+    // bubble — so all three share PROMPT_SURFACE_RADIUS rather than each
+    // picking off the 3-step scale (the bubble used to be rounded-sm/4px
+    // against an 8px card).
+    expect(code("../composer-shell.tsx")).toContain(
+      'export const PROMPT_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]"',
+    );
+    for (const file of ["../agent-chat.tsx", "../turn-container.tsx"]) {
+      expect(code(file)).toContain("PROMPT_SURFACE_RADIUS");
+    }
+  });
+
   it("paints the sent user message on the composer's own surface", () => {
     // --highlighted-bg is aliased to --bg2 in neutral Dark (see §9.1 of
     // styles/zeros-foundation.md), so the bubble and the composer read as one

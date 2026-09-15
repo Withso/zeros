@@ -30,7 +30,7 @@ import React, {
 } from "react";
 import { ArrowRight, Check, ChevronsUpDown } from "lucide-react";
 
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { Tooltip, selectTriggerClassName } from "@/renderer/shared/ui/primitives";
 import { toast } from "../../shared/ui/primitives/elements";
 import {
   Popover,
@@ -59,15 +59,14 @@ import {
   type Workspace,
 } from "../../platform/git";
 
-// The dropdown itself: a 24px (`h-6`, same as Create PR) secondary control —
-// design-system "secondary" tokens (TRANSPARENT fill so it blends with the PR
-// row's surface + border2, hover bg2-hover + border3), 13px text. Raw <button>
-// rather than the shared component so the small chevron isn't forced to the
-// shared button's 16px `[&_svg]` size. `min-w-0` lets it shrink (only when the
-// row runs out of room) so a long base name truncates rather than pushing on
+// The dropdown itself wears the shared Select-trigger chrome (6px corners,
+// 13px text, 14px glyph, bg2-highlight hover) so it is indistinguishable from
+// every other dropdown in the app — it just opens a Command popover instead
+// of a Select list, and shows ⇅ instead of ▾ because picking a base branch is
+// a search, not a flat choice. `min-w-0` lets it shrink (only when the row
+// runs out of room) so a long base name truncates rather than pushing on
 // Create PR.
-const TRIGGER_CLS =
-  "inline-flex h-6 min-w-0 items-center gap-1.5 rounded-sm border border-border2 bg-transparent pl-2.5 pr-2 text-xs text-fg1 transition-colors duration-120 ease-out hover:border-border3 hover:bg-bg2-hover disabled:opacity-50";
+const TRIGGER_CLS = selectTriggerClassName("fit", "min-w-0 text-fg1");
 
 // ── Target branch popover ────────────────────────────────
 
@@ -265,7 +264,7 @@ export function TargetBranchButton({
           <span className="text-fg1 min-w-0 truncate font-medium tabular-nums">
             {remote}/{workspace.baseBranch}
           </span>
-          <ChevronsUpDown className="text-fg2 size-3.5 shrink-0" />
+          <ChevronsUpDown className="size-3.5 shrink-0 opacity-50" />
         </button>
       </TargetBranchPopover>
     </div>

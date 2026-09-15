@@ -66,11 +66,70 @@ export function SettingsSection({
 /** Filled section card for settings rows — the Models-panel recipe (a
  *  borderless subtle-fill card, `--border1` hairlines between rows, 12px
  *  padding on all sides via `px-3` + the `[&>*]:py-3` row override). The
- *  fill is `--bg1-highlight`, NOT `--bg3`: in light mode bg3 = bg1 = white
- *  and the card would vanish (check:ui guards this). Pass as `className`
- *  to a `SettingsList`. */
+ *  fill is `--bg1-bright` (a step above bg1-highlight in dark, = bg2 in
+ *  light), NOT `--bg3`: in light mode bg3 = bg1 = white and the card would
+ *  vanish (check:ui guards this). Pass as `className` to a `SettingsList`. */
 export const SETTINGS_CARD_LIST_CLS =
-  "bg-bg1-highlight divide-border1 rounded-lg px-3 [&>*]:py-3";
+  "bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3";
+
+/** Grouped settings card — the Cursor-style recipe every settings tab is
+ *  migrating to (Appearance first, 2026-09-14). An optional MUTED heading
+ *  (`text-fg2 text-xs`, unlike `SettingsSection`'s fg1 title) sits 8px
+ *  above the card. The card is the same filled recipe as
+ *  `SETTINGS_CARD_LIST_CLS` but at a 12px radius: `--bg1-bright` fill, `--border1`
+ *  hairlines between rows, and 12px padding on all sides (`px-3` on the
+ *  card + `[&>*]:py-3` on every row, which overrides the rows' own
+ *  `py-3.5`). Groups are spaced 24px apart by the panel (`gap-6`). */
+/** 12px corners for the grouped card, DERIVED from the radius scale like
+ *  menu-surface.ts's 16px dropdown surface (1.5 × --radius-lg). Not
+ *  `rounded-xl`: zeros-tokens.css resets `--radius-xl` to `initial` on
+ *  purpose, so that class compiles to nothing (the card rendered with
+ *  square corners, 2026-09-14). The grouped card is a larger surface than
+ *  the 8px rows/chips inside it, hence the step up. */
+export const SETTINGS_GROUP_RADIUS = "rounded-[calc(var(--radius-lg)*1.5)]";
+
+export function SettingsGroup({
+  title,
+  description,
+  children,
+  className,
+}: {
+  title?: React.ReactNode;
+  /** One short muted line under the heading (same 12px). */
+  description?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={cn("flex flex-col gap-2", className)}>
+      {/* 12px: one step below the 13px row text so the heading reads as a
+          group label, not another row. */}
+      {(title || description) && (
+        <div className="flex flex-col gap-0.5">
+          {title && (
+            <h2 className="text-fg2 m-0 text-[12px] font-medium">{title}</h2>
+          )}
+          {description && (
+            <p className="text-muted-fg m-0 text-[12px]">{description}</p>
+          )}
+        </div>
+      )}
+      <SettingsGroupContext.Provider value={true}>
+        <SettingsList
+          className={cn(SETTINGS_CARD_LIST_CLS, SETTINGS_GROUP_RADIUS)}
+        >
+          {children}
+        </SettingsList>
+      </SettingsGroupContext.Provider>
+    </section>
+  );
+}
+
+/** True inside a `SettingsGroup` card. Rows there use the grouped type
+ *  scale — label AND hint both 13px, 2px apart — instead of the flat
+ *  page's 14px names. Context (not a prop) so existing `SettingsRow`
+ *  call sites migrate just by being wrapped. */
+const SettingsGroupContext = React.createContext(false);
 
 /** A flat row group: `SettingsRow` / `SettingsField` children separated by
  *  hairline dividers, sitting directly on the page surface — no card fill,
@@ -110,6 +169,12 @@ export function SettingsRow({
   /** Vertical alignment of the control against the label block. */
   align?: "center" | "start";
 }) {
+  // Grouped cards: 13px names (= the 13px hint). Flat sections keep 14px.
+  const grouped = React.useContext(SettingsGroupContext);
+  const labelCls = cn(
+    "text-fg1 font-medium",
+    grouped ? "text-[13px]" : "text-[14px]",
+  );
   return (
     <div
       className={cn(
@@ -122,14 +187,11 @@ export function SettingsRow({
         <div className="flex min-w-0 flex-col gap-0.5">
           {label &&
             (htmlFor ? (
-              <label
-                htmlFor={htmlFor}
-                className="text-fg1 text-[14px] font-medium"
-              >
+              <label htmlFor={htmlFor} className={labelCls}>
                 {label}
               </label>
             ) : (
-              <span className="text-fg1 text-[14px] font-medium">{label}</span>
+              <span className={labelCls}>{label}</span>
             ))}
           {hint && (
             <span className="text-fg2 text-xs leading-relaxed">{hint}</span>

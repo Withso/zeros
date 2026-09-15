@@ -5,6 +5,7 @@ import { XIcon } from "lucide-react"
 import { Dialog as SheetPrimitive } from "radix-ui"
 
 import { cn } from "@/renderer/shared/ui/cn"
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary"
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay"
 
 function Sheet({
@@ -73,6 +74,7 @@ function SheetContent({
       <SheetOverlay />
       <SheetPrimitive.Content
         data-slot="sheet-content"
+        {...popoverBoundaryProps}
         className={cn(
           "fixed z-50 flex flex-col gap-4 bg-bg1 shadow-[var(--shadow-dropdown)] transition ease-in-out data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:animate-in data-[state=open]:duration-500",
           side === "right" &&

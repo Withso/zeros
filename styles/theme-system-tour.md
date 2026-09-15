@@ -44,7 +44,6 @@ When the Electron app starts, the CSS arrives in this order:
    ├── @custom-variant dark (...)
    ├── @theme inline { ... }   ← wires primitives → utility classes
    ├── :root { ... }            ← primitive token values (neutral dark)
-   ├── [data-theme-palette="orka-black"] ← preserved warm dark overrides
    ├── [data-theme="light"]     ← light overrides
    └── @layer base { ... }      ← border-color + outline-color defaults
 2. styles/semantic-tokens.css    ← semantic/component aliases
@@ -58,28 +57,25 @@ Then on the JS side, the appearance store runs:
 apps/desktop/src/renderer/shared/theme/store.ts (module load)
   ↓ readStoredPrefs() — read localStorage (key: zeros.appearance.v2)
   ↓ applyTheme(prefs, { systemPrefersDark })
-      ├── write data-theme="dark|light" on <html>
-      └── set/remove data-theme-palette="orka-black"
+      └── write data-theme="dark|light" on <html>
 React mounts
 ```
 
 `data-theme` is deliberately only the resolved appearance (`dark` or `light`):
 Tailwind's `dark:` variant, `color-scheme`, syntax-theme filtering, and embedded
-surfaces all depend on that binary polarity. `:root` carries neutral Dark;
-`data-theme-palette="orka-black"` restores the former warm-gray dark structural
-tokens; and `[data-theme="light"]` overrides the full palette. System resolves to
-neutral Dark or Light with macOS—Orka black is an explicit selection.
+surfaces all depend on that binary polarity. `:root` carries neutral Dark and
+`[data-theme="light"]` overrides the full palette. System resolves to Dark or
+Light with macOS.
 
 `applyTheme` also reports the resolved `--bg1` to Electron
 (`window_set_background`) so the native window's pre-paint background tracks the
-theme across launches. JS-painted surfaces subscribe to the concrete theme id,
-not only dark/light, so xterm and canvas colors repaint during a Dark ↔ Orka
-black switch.
+theme across launches. JS-painted surfaces subscribe to the concrete theme id
+so xterm and canvas colors repaint on a theme switch.
 
 This is why **theme changes are instant**: CSS-painted surfaces update through the
 cascade without per-component theme props. The few JavaScript-painted surfaces
 (terminals and canvas loaders) subscribe to the concrete theme identity so they
-repaint when Dark and Orka black switch without changing dark/light polarity.
+repaint on a theme switch.
 
 ---
 
@@ -212,7 +208,7 @@ When the design direction shifts, here's where each kind of change lands:
 ## §8 — TL;DR
 
 - **Tokens live in `styles/zeros-tokens.css`.** Primitive HSL values; edit the token, not the component.
-- **Only knob: theme mode** (System / Light / Dark / Orka black). Dark is neutral in `:root`; Orka black restores the previous warm-gray dark primitives; Light is the `[data-theme="light"]` override; System follows macOS and uses neutral Dark when macOS is dark.
+- **Only knob: theme mode** (System / Light / Dark). Dark is neutral in `:root`; Light is the `[data-theme="light"]` override; System follows macOS and uses neutral Dark when macOS is dark.
 - **Backgrounds**: `bg-bg0` (inactive pane), `bg-bg1` (canvas), `bg-bg2` (composer), and `bg-bg3` (floating popover/dropdown/menu only). Hovers are surface-scoped (`bg-bg1-hover`, `bg-bg2-hover`, `bg-bg3-hover`).
 - **Foregrounds**: `text-fg1` (highlighted), `text-fg2` (default), then pick the quieter tier by REFERENCE POINT — `text-fg3` when stepping down from the `fg2` text beside it (placeholders, ignored file-tree rows), `text-muted-fg` when the content is incidental to the surface (metadata, disabled, empty states). See foundation §9.1.1.
 - **Borders**: `border-border1` (default) → `border-border3` (component) → `border-border4` (highlighted).

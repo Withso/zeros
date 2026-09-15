@@ -48,19 +48,6 @@
   --radius-sm:4px; --radius-md:6px; --radius-lg:8px;
 }
 
-/* Orka black preserves the app's former warm-gray structural palette. */
-:root[data-theme="dark"][data-theme-palette="orka-black"]{
-  --bg0:hsl(5 10% 5%); --bg1:hsl(5 5% 7%); --bg1-hover:hsl(8 5% 12%); --bg1-highlight:hsl(25 5% 9%);
-  --bg2:hsl(25 4% 12%); --bg2-hover:hsl(25 3% 15%);
-  --bg4:hsl(5 1% 24%); --bg5:hsl(8 0% 37%);
-  --fg1:hsl(0 2% 92%); --fg2:hsl(20 4% 66%); --fg3:hsl(15 1% 44%); --muted-fg:hsl(15 4% 44%);
-  --sidebar-bg:hsl(25 5% 9%); --sidebar-bg-hover:hsl(25 2% 15%);
-  --border1:hsl(8 3% 14%); --border2:hsl(25 1% 18%); --border3:hsl(15 0% 24%); --border4:hsl(15 0% 30%);
-  --highlighted-bg:hsl(5 8% 12%); --highlighted-bright:hsl(25 5% 65%);
-  --inverted-bg:hsl(0 2% 92%); --inverted-fg:hsl(5 7% 5%);
-  --primary-button-hover:hsl(25 2% 83%);
-}
-
 /* ── LIGHT THEME — [data-theme="light"] overrides (toggle top-right).
    Warm off-whites over the same taxonomy; bg1 + bg3 are BOTH pure white
    (popover lift = shadow + border). Ramp steps below are theme-static. */
@@ -358,14 +345,11 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
 <script>
 (function(){
   var btn=document.getElementById('themeToggle'),root=document.documentElement;
-  var themes=['dark','orka-black','light'];
-  function current(){return root.getAttribute('data-theme')==='light'?'light':
-    root.getAttribute('data-theme-palette')==='orka-black'?'orka-black':'dark';}
-  function apply(theme){root.setAttribute('data-theme',theme==='light'?'light':'dark');
-    if(theme==='orka-black')root.setAttribute('data-theme-palette','orka-black');
-    else root.removeAttribute('data-theme-palette');render();}
+  var themes=['dark','light'];
+  function current(){return root.getAttribute('data-theme')==='light'?'light':'dark';}
+  function apply(theme){root.setAttribute('data-theme',theme==='light'?'light':'dark');render();}
   function render(){var theme=current();
-    btn.textContent=theme==='light'?'☀ Light':theme==='orka-black'?'◐ Orka black':'☾ Dark';}
+    btn.textContent=theme==='light'?'☀ Light':'☾ Dark';}
   btn.addEventListener('click',function(){
     apply(themes[(themes.indexOf(current())+1)%themes.length]);});
   render();
@@ -376,10 +360,9 @@ textarea.inp{resize:vertical;min-height:60px;line-height:1.5}
   <h1>Zeros — Design System</h1>
   <p class="lede">The complete token reference for the Zeros Mac app: every primitive in
   <code>styles/zeros-tokens.css</code>, how each one is used, the usage rules &amp; anti-patterns, and a live
-  component library (mirroring <code>apps/desktop/src/renderer/shared/ui/primitives/</code>). Three palettes ship:
-  neutral <em>Dark</em>, <em>Orka black</em> (the former warm-gray dark palette), and <em>Light</em>. The top-right
-  toggle mirrors the app's binary <code>data-theme</code> polarity plus the Orka-only
-  <code>data-theme-palette</code> selector. Rendered on the real app canvas (<code>--bg1</code>). For semantic color
+  component library (mirroring <code>apps/desktop/src/renderer/shared/ui/primitives/</code>). Two palettes ship:
+  neutral <em>Dark</em> and <em>Light</em>. The top-right toggle mirrors the app's binary
+  <code>data-theme</code> polarity. Rendered on the real app canvas (<code>--bg1</code>). For semantic color
   applied to real UI, see <a href="color-palette-preview.html">color-palette-preview.html</a>.</p>
 </header>
 

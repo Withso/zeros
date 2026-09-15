@@ -301,6 +301,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         left: box.left,
         width: box.width,
         iconLeft: icon ? icon.getBoundingClientRect().left : null,
+        iconWidths: [...icons].map((svg) => svg.getBoundingClientRect().width),
         discloses: row.querySelector("[data-layer-disclosure]") !== null,
         radius: [
           style.borderTopLeftRadius,
@@ -352,6 +353,14 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       homeLayoutIcons.main === null &&
       homeLayoutIcons.nav === "flex-horizontal",
     JSON.stringify(homeLayoutIcons),
+  );
+  check(
+    "Layers icons honor the 12px size supplied by their rows",
+    [frameRowMetrics, parentRowMetrics, headingRowMetrics].every(
+      (row) =>
+        row?.iconWidths.length > 0 &&
+        row.iconWidths.every((width) => width === 12),
+    ),
   );
   check(
     "layer rows indent their content one step per depth below the frame row",

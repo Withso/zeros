@@ -177,7 +177,7 @@ describe("the added state is a Button variant, not an override", () => {
     const src = button();
     expect(src).toContain('"secondary-on":');
     expect(src).toContain("border-border4");
-    expect(src).toContain("bg-bg2-hover");
+    expect(src).toContain("bg-bg2-highlight");
   });
 
   it("does not overload the focus ring token for the pressed state", () => {

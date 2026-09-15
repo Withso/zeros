@@ -379,8 +379,7 @@ function WorkspaceSetup({
     resizeSchedulerRef.current?.flush();
   }, [visible, refetch]);
 
-  // Re-resolve the xterm colors when the concrete app theme flips (including
-  // neutral Dark ↔ Orka black). xterm holds concrete values, not CSS vars, so
+  // Re-resolve the xterm colors when the concrete app theme flips. xterm holds concrete values, not CSS vars, so
   // the mount-time resolve goes stale without this. Runs once at mount too,
   // which is a harmless re-set of the same values.
   //
