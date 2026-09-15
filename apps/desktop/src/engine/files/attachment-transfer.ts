@@ -1,7 +1,11 @@
 import fs from "node:fs/promises";
 import { constants } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { withAttachmentSource } from "./attachment-source";
+import {
+  createAttachmentTemporaryDirectory,
+  type AttachmentTemporaryDirectory,
+} from "./attachment-temporary-directory";
 import {
   ATTACHMENT_CHUNK_BYTES,
   validateAttachmentFile,
@@ -27,7 +31,7 @@ interface Upload {
   mimeType: string;
   totalBytes: number;
   offset: number;
-  directory?: string;
+  temporary?: AttachmentTemporaryDirectory;
   file?: fs.FileHandle;
   busy: boolean;
   timer?: ReturnType<typeof setTimeout>;
@@ -38,8 +42,7 @@ async function disposeUpload(key: string, upload: Upload): Promise<void> {
   if (uploads.get(key) === upload) uploads.delete(key);
   clearTimeout(upload.timer);
   await upload.file?.close().catch(() => {});
-  if (upload.directory)
-    await fs.rm(upload.directory, { recursive: true, force: true });
+  await upload.temporary?.dispose();
 }
 
 export async function resetAttachmentTransfersForTests(): Promise<void> {
@@ -106,6 +109,7 @@ async function resolveAttachment(
 export async function transferContextAttachment(
   workspaceRoot: string,
   args: Record<string, unknown>,
+  options: { allowNativeSource?: boolean } = {},
 ): Promise<AttachmentWriteResult> {
   const attachmentId = requiredString(args, "attachmentId");
   if (!ID_OK.test(attachmentId)) throw new Error("invalid attachment id");
@@ -116,6 +120,18 @@ export async function transferContextAttachment(
   const root = await fs.realpath(workspaceRoot);
   if (args.resolve === true)
     return resolveAttachment(root, attachmentId, filename, mimeType);
+
+  if (args.nativeSourceId !== undefined) {
+    if (!options.allowNativeSource) throw new Error("Native attachments require a local workspace");
+    if (args.uploadId !== undefined || args.base64 !== "") throw new Error("Invalid native attachment transfer");
+    return withAttachmentSource(args.nativeSourceId, async (file, size, verify) => {
+      const validation = validateAttachmentFile({ name: filename, mimeType, size });
+      if (!validation.ok) throw new Error(validation.reason);
+      const result = await stageContextGraphAttachmentFile(root, { attachmentId, filename, file, size, verify });
+      if (!result.ok) throw new Error(result.error);
+      return { absolutePath: result.absolutePath!, relativePath: result.relativePath!, mimeType, bytes: result.bytes!, skipped: result.skipped };
+    });
+  }
 
   if (args.uploadId === undefined) {
     if (
@@ -218,11 +234,9 @@ export async function transferContextAttachment(
   clearTimeout(upload.timer);
   try {
     if (!upload.file) {
-      upload.directory = await fs.mkdtemp(
-        path.join(os.tmpdir(), "zeros-attachment-upload-"),
-      );
+      upload.temporary = await createAttachmentTemporaryDirectory(root);
       upload.file = await fs.open(
-        path.join(upload.directory, "contents"),
+        path.join(upload.temporary.path, "contents"),
         constants.O_RDWR |
           constants.O_CREAT |
           constants.O_EXCL |

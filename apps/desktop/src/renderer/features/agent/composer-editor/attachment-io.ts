@@ -1,5 +1,6 @@
 import { validateAttachmentFile } from "@zeros/protocol/attachment-policy";
 import type { ComposerAttachment } from "../composer-attachments";
+import { prepareAttachmentSource } from "../attachment-sources";
 
 /** Clipboard/transcript text follows the same path-delivery policy as imports.
  * Keep the supplied string out of persistent composer state. */
@@ -13,7 +14,7 @@ export function textFileAttachment(
     mimeType: sourceFile.type,
     size: sourceFile.size,
   });
-  return {
+  const attachment: ComposerAttachment = {
     id: `att-${crypto.randomUUID()}`,
     name,
     mimeType: sourceFile.type,
@@ -24,6 +25,8 @@ export function textFileAttachment(
     validation,
     ...(validation.ok ? { sourceFile } : {}),
   };
+  if (validation.ok) void prepareAttachmentSource(attachment).catch(() => {});
+  return attachment;
 }
 
 export interface FilesToAttachmentsOpts {
@@ -32,8 +35,8 @@ export interface FilesToAttachmentsOpts {
   modelId: string | null | undefined;
 }
 
-/** Selection only reads metadata. Attach-time staging transfers File slices to
- * the owning workspace; sending waits for that copy and references its path. */
+/** Selection creates metadata and starts source recovery without awaiting I/O.
+ * Staging copies into the owning workspace; send awaits its confirmed path. */
 export async function filesToAttachments(
   files: FileList | File[] | null | undefined,
   _opts: FilesToAttachmentsOpts,
@@ -45,7 +48,7 @@ export async function filesToAttachments(
       size: file.size,
     });
     const kind = file.type.startsWith("image/") ? "image" : "file";
-    return {
+    const attachment: ComposerAttachment = {
       id: `att-${crypto.randomUUID()}`,
       name: file.name,
       mimeType: file.type || "application/octet-stream",
@@ -56,5 +59,7 @@ export async function filesToAttachments(
       validation,
       ...(validation.ok ? { sourceFile: file } : {}),
     };
+    if (validation.ok) void prepareAttachmentSource(attachment).catch(() => {});
+    return attachment;
   });
 }

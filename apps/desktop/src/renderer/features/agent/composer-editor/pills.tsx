@@ -164,7 +164,9 @@ export function AttachmentPill(props: NodeViewProps) {
       ? `${attrs.name} — ${progress.error}`
       : att && !att.validation.ok
         ? `${attrs.name} — ${att.validation.reason}`
-        : attrs.name;
+        : progress?.phase === "saving"
+          ? `${attrs.name} — Saving attachment${progress.percent > 0 ? ` (${progress.percent}%)` : ""}`
+          : attrs.name;
   // A synthesized attachment (a chat transcript) carries enough metadata to
   // show the selected file on hover instead of its own filename. Read the
   // staged Blob or its saved record, never the source chat's newer transcript.
@@ -223,10 +225,9 @@ export function AttachmentPill(props: NodeViewProps) {
         aria-label={isImage ? "Preview image" : attrs.name}
         className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default"
       >
+        {/* Transfer status belongs in the tooltip: adding/removing inline
+            text resizes this pill and rewraps every later file in a drop. */}
         <span className="max-w-[16rem] truncate">{attrs.name}</span>
-        {progress?.phase === "saving" && (
-          <span className="text-fg2">Saving {progress.percent}%</span>
-        )}
       </button>
     </NodeViewWrapper>
   );

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,8 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await resetAttachmentTransfersForTests();
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
 });
 const args = () => ({
@@ -28,6 +30,26 @@ const args = () => ({
 });
 
 describe("attachment chunk transfer", () => {
+  it("keeps pending chunks outside a repo-valued TMPDIR and cleans them on abort", async () => {
+    const privateData = await fs.mkdtemp(path.join(os.tmpdir(), "zeros-transfer-private-"));
+    vi.stubEnv("ZEROS_DATA_DIR", privateData);
+    vi.spyOn(os, "tmpdir").mockReturnValue(root);
+    try {
+      const pending = await transferContextAttachment(root, {
+        ...args(), base64: "YWJj", offset: 0, totalBytes: 6,
+      });
+      expect(pending.pending).toBe(true);
+      expect(await fs.readdir(root)).toEqual([]);
+      expect(await fs.readdir(privateData)).toHaveLength(1);
+      await transferContextAttachment(root, { ...args(), base64: "", abort: true });
+      expect(await fs.readdir(privateData)).toEqual([]);
+      expect(await fs.readdir(root)).toEqual([]);
+    } finally {
+      await resetAttachmentTransfersForTests();
+      await fs.rm(privateData, { recursive: true, force: true });
+    }
+  });
+
   it("publishes only the complete file and resolves the current scope without reading its contents", async () => {
     const first = await transferContextAttachment(root, {
       ...args(),

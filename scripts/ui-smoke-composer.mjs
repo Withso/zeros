@@ -71,6 +71,8 @@ import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
 import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runComposerEditorSmoke } from "./ui-smoke-composer-editor.mjs";
+import { runAttachmentPersistenceSmoke } from "./ui-smoke-attachment-persistence.mjs";
+import { runAttachmentLayoutSmoke } from "./ui-smoke-attachment-layout.mjs";
 import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
 import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
@@ -146,6 +148,8 @@ try {
 
   await page.goto(pageUrl, { waitUntil: "networkidle" });
   await runComposerEditorSmoke({ page, check });
+  await runAttachmentPersistenceSmoke({ page, check });
+  await runAttachmentLayoutSmoke({ page, check });
   await page.goto(pageUrl, { waitUntil: "networkidle" });
   const pill = page.getByRole("button", { name: /^Model:/ });
   await pill.waitFor({ state: "visible", timeout: 10_000 });

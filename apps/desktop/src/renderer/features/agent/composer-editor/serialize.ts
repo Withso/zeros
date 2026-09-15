@@ -16,6 +16,7 @@ import type { MessageContentSegment } from "@zeros/protocol/agent-messages";
 
 import type { ComposerSegment } from "./segments";
 import type { ComposerAttachment } from "../composer-attachments";
+import { unavailableAttachment } from "./clipboard";
 
 export interface ComposerSerialized {
   /** No text, no mentions, no attachments → nothing to send. */
@@ -131,7 +132,7 @@ export function serializeComposer(
         kind: (node.attrs.kind as "image" | "text" | "file") || "image",
       });
       const att = getAttachment(id);
-      if (att) attachments.push(att);
+      attachments.push(att ?? unavailableAttachment(node.attrs));
       return false;
     }
     if (name === "paragraph") {

@@ -91,10 +91,7 @@ import {
   pathExists,
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
-import {
-  contextGraphArchivePaths,
-  ensureContextGraph,
-} from "../files/context-graph";
+import { contextGraphArchivePaths } from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
 import {
@@ -1776,17 +1773,6 @@ async function createWorkspaceInner(
     if (internal?.provision) {
       await internal.provision(provisionContext!);
     }
-    // Every workspace gets a `.context/` skeleton (Context tab canvas +
-    // composer-attachment store). Best-effort and quiet: the scaffold is
-    // self-gitignoring, and a failure here must never roll back the worktree —
-    // the attachment IPC and the Context tab both re-scaffold lazily.
-    const graph = await ensureContextGraph(workspacePath);
-    if (!graph.ok) {
-      console.warn(
-        `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
-      );
-    }
-
     if (kind === "design") {
       // Design-at-birth: the identical checkout opens on the design surface.
       // Resolve WHICH folder is the design folder (the `[design] directory`

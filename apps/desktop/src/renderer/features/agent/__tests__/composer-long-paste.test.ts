@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const listContextGraph = vi.fn();
 const readWorkspaceFile = vi.fn();
 const writeContextAttachment = vi.fn();
-vi.mock("../agent-history-client", () => ({ writeContextAttachment: (...args: unknown[]) => writeContextAttachment(...args) }));
+vi.mock("../agent-history-client", () => ({ writeContextAttachment: (...args: unknown[]) => writeContextAttachment(...args), createContextAttachmentWriter: () => writeContextAttachment }));
 
 vi.mock("../../../platform/context-graph", () => ({
   listContextGraph: (...args: unknown[]) => listContextGraph(...args),

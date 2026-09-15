@@ -169,6 +169,8 @@ export function validateAttachmentFile(input: {
  * can continue sending small base64 payloads. File imports use bounded chunks;
  * resolve returns metadata only for an already-staged record. */
 export interface AttachmentTransferOptions {
+  /** Opaque Electron-selected source capability. Rejected by remote engines. */
+  nativeSourceId?: string;
   uploadId?: string;
   offset?: number;
   totalBytes?: number;
@@ -183,4 +185,15 @@ export interface AttachmentWriteResult {
   bytes: number;
   skipped?: boolean;
   pending?: boolean;
+}
+
+/** Shared by the atomic writer and clipboard paths for imports still saving. */
+export function safeAttachmentFilename(raw: string): string {
+  const cleaned = (raw.split("/").pop() ?? "").replace(/[^a-zA-Z0-9._-]+/g, "_");
+  const dot = cleaned.lastIndexOf(".");
+  const extension = dot > 0 && cleaned !== ".." ? cleaned.slice(dot) : "";
+  const capped = cleaned.length <= 80 ? cleaned
+    : extension.length > 0 && extension.length < 80
+      ? `${cleaned.slice(0, 80 - extension.length)}${extension}` : cleaned.slice(0, 80);
+  return capped === "" || capped === "." || capped === ".." ? "attachment" : capped;
 }

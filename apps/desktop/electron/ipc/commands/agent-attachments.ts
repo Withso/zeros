@@ -90,5 +90,5 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
     base64,
     filename,
     mimeType,
-  });
+  }, { allowNativeSource: true });
 };

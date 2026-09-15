@@ -20,8 +20,9 @@ generated files.
 
 ## Migration and compatibility
 
-Workspace creation, the first Context-tab load, attachment staging and share
-actions prepare the directory. Preparation merges `.context-graph/` into
+Workspace creation and Context-tab reads leave storage untouched. Attachment
+staging, share actions and explicit scaffold operations prepare the directory
+on demand. Preparation merges `.context-graph/` into
 `.context/`, including when the destination already exists. Read-only listing
 never migrates; it can list both roots while migration is pending or blocked.
 
@@ -49,9 +50,9 @@ Legacy files that collide with this metadata directory remain visible and
 archivable while migration reports the conflict.
 
 Preparation calls for the same workspace share an in-flight promise. Failed
-preparation retries on refresh, and the Context tab displays the error while
-keeping readable context visible. Attachment-stage and share failures also
-retain their error messages.
+preparation retries on the next write. Attachment-stage and share failures
+retain their error messages while Context-tab reads keep legacy/current files
+visible without attempting a migration or adding generated directories.
 
 Saved attachment `diskPath` values remain valid in both layouts. Attachment
 reads try the exact saved path, the other scope in that root, then both scopes

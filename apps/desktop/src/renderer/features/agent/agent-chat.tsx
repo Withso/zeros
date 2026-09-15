@@ -2833,14 +2833,14 @@ export function AgentChat({
   openPreviewRef.current = openPreview;
   // Live-draft mirror: the editor's onChange snapshots the composer into
   // composerLiveRef (read synchronously by the sidebar's "+ New Agent") and
-  // into the module-level ref. Store persistence happens when the retained
-  // surface is parked and again on bounded eviction/unmount.
+  // into the module-level ref. Draft snapshots include this live value while
+  // typing; parking and unmount also publish it to the workspace store.
   const updateLiveDraft = useCallback(() => {
     if (!chatId) return;
     const s = serializeComposerState();
     if (!s || s.isEmpty) {
       composerLiveRef.current = { text: "", attachments: [], json: null };
-      setLiveChatDraft(chatId, null);
+      setLiveChatDraft(chatId, composerLiveRef.current);
       return;
     }
     const draft = {

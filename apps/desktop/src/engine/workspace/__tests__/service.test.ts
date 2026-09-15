@@ -3979,6 +3979,12 @@ describe("WorkspaceService", () => {
     // design mode (agents/terminals live in code territory) — only the
     // sparse-checkout picker stays blocked, since hiding folders could
     // remove the design directory from disk under the open canvas.
+    // The first explicit context write prepares storage on demand.
+    await expect(
+      svc.handle("context.graph.scaffold", {
+        workspaceId: workspace.workspaceId,
+      }),
+    ).resolves.toMatchObject({ ok: true, created: true });
     await expect(
       svc.handle("context.graph.scaffold", {
         workspaceId: workspace.workspaceId,

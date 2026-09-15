@@ -5646,7 +5646,7 @@ export class WorkspaceService {
       case "attachment.write": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
         try {
-          return await transferContextAttachment(cwd, params);
+          return await transferContextAttachment(cwd, params, { allowNativeSource: !remote && hostLocalResources });
         } catch (error) {
           throw new GitError({
             code: "VALIDATION_FAILED",

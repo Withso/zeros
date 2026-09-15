@@ -63,6 +63,14 @@ export interface ComposerAttachment {
   delivery?: "reference";
   /** Browser file handle; omitted from persisted drafts. Never read in full. */
   sourceFile?: Blob;
+  /** Durable recovery key for an unfinished native/clipboard import. */
+  sourceRecoveryId?: string;
+  /** Source workspace identity; clipboard references never change owners. */
+  owner?: { runtime: string; cwd: string };
+  /** Confirmed full path for plain-text clipboard fallbacks. */
+  absolutePath?: string;
+  /** A visible pill without its reference must block send rather than vanish. */
+  unavailable?: boolean;
   /** base64 payload for images. Empty for text attachments. */
   data: string;
   /** Persisted cwd-relative source for a reconstructed transcript image.

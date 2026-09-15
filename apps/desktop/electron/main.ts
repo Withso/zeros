@@ -121,6 +121,7 @@ import {
   whenRendererReady,
 } from "./ipc/events";
 import { setCommand } from "./ipc/router";
+import { prepareAttachmentsForQuit } from "./ipc/attachment-source";
 import {
   defaultProjectRoot,
   shutdown as shutdownSidecar,
@@ -1678,7 +1679,7 @@ let subscriptionsStopped = false;
 app.on("before-quit", (event) => {
   if (!subscriptionsStopped) {
     event.preventDefault();
-    subscriptionShutdown ??= stopProviderSubscriptions().finally(() => {
+    subscriptionShutdown ??= Promise.allSettled([stopProviderSubscriptions(), prepareAttachmentsForQuit()]).then(() => {
       subscriptionsStopped = true;
       app.quit();
     });

@@ -52,6 +52,7 @@ import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
 import { filesToAttachments, textFileAttachment } from "./attachment-io";
 import { classifyComposerPaste, longPasteToAttachment } from "./long-paste";
+import { copyComposerSelection, pasteComposerClipboard } from "./clipboard";
 import {
   collectAttachmentIds,
   collectSourceKeys,
@@ -709,7 +710,12 @@ export function useComposerEditor(
     content: opts.initialContent?.json ?? "",
     editorProps: {
       attributes: { class: EDITOR_CLASS, "aria-label": "Message" },
-      handlePaste: (_view, event) => {
+      handleDOMEvents: {
+        copy: (view, event) => copyComposerSelection(view, event, optsRef.current.cwd, id => attachmentMapRef.current.get(id)),
+        cut: (view, event) => copyComposerSelection(view, event, optsRef.current.cwd, id => attachmentMapRef.current.get(id)),
+      },
+      handlePaste: (view, event) => {
+        if (pasteComposerClipboard(view, event, optsRef.current.cwd, attachmentMapRef.current)) return true;
         const payload = classifyComposerPaste(event.clipboardData);
         if (!payload) return false;
         event.preventDefault();

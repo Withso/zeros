@@ -37,12 +37,43 @@ allowed. This is a format policy, not content inspection or a malware scanner.
 
 ## Storage and delivery
 
-Selection stages a lightweight composer pill immediately. Files transfer in
-1 MiB chunks, with at most two concurrent renderer transfers. The engine
-validates the size, format, upload identity, and offsets. Incomplete uploads
-live in private temporary storage; only a completed file is published into
+Selection stages a lightweight composer pill immediately. For disk-backed
+files in a local workspace, Electron's File-aware preload registers an opaque
+source capability. The local engine opens that selected file and copies binary
+bytes directly, without reading or Base64-encoding them in the renderer. It
+checks the source inode, size and modification times before and after copying.
+The final rename publishes a complete file; JSONL, line endings and binary
+formats retain their original bytes. Disk speed and file size still determine
+completion time. The pill appears immediately; “ready” means the copy finished.
+Pills keep the same filename and geometry while queued, copying, complete or
+failed. Transfer status belongs in the tooltip and `aria-busy`, never an inline
+percentage that widens the pill and rewraps adjacent files. Failed copies retain
+their warning styling and error tooltip.
+
+Generated clipboard files and remote workspaces use bounded 1 MiB chunks, with
+at most two concurrent renderer transfers. Browser FileReader performs Base64
+encoding for the existing JSON transport. Encoding affects transport only,
+never the stored file format. A transfer captures its runtime and resolves its
+workspace once; switching runtimes rejects subsequent writes. Native source
+capabilities are refused over remote or non-host-local transports.
+
+The engine validates size, format, upload identity and offsets. Incomplete
+uploads and final copies live in owner-only temporary directories outside the
+workspace, on the destination filesystem. The engine checks both location and
+filesystem before writing. macOS uses its destination-aware item replacement
+directory when ordinary temporary/app storage is on another volume. It refuses
+an unsuitable location instead of falling back into the repository. Only a completed file is published into
 `.context/local/attachments/<attachmentId>/<filename>`. An attachment moved to
 `shared/` retains its identity. Aborted, failed and idle uploads are cleaned up.
+Successful publication removes its temporary directory as well. Interrupted
+copies retry from their separately persisted source; OS temporary directories
+are never the durable draft store. Imports no longer create
+`.context/.attachment-staging/` or its extra ignore file.
+
+Workspace creation and opening/refreshing the Context tab do not create
+`.context/`. An attachment or explicit context write prepares storage on demand.
+Existing context files and ignore rules retain their compatibility behavior;
+viewing legacy context never migrates it.
 
 Send waits for the complete file and provides its confirmed path in an
 `attached_file` text block. File contents are not embedded in the prompt or
@@ -62,7 +93,41 @@ Attachment support means the file is available to the agent's tools. It does
 not promise native playback, document conversion, or model understanding of
 every format. Existing image previews retain their bounded read behavior.
 
-Legacy drafts and transcripts remain readable. Their old inline image/text
-encoding and bounded base64-write path are retained for compatibility; newly
-created attachments use reference delivery. Bridge protocol 16 adds the file
-kind and reference metadata while retaining existing IPC and operation names.
+Legacy drafts and transcripts remain readable. On send, legacy inline text or
+image bytes are saved once and delivered as file references to every agent,
+including vision-capable agents. Old chat-scoped paths retain a bounded read
+fallback for migration. Protocol 17 adds the local native source capability;
+protocol 16 introduced file kinds and reference metadata. Existing IPC and
+operation names and the context directory layout remain compatible.
+
+## Draft recovery and clipboard
+
+The latest mounted composer document and attachment metadata participate in
+the debounced draft snapshot, with synchronous pagehide/beforeunload flushes.
+Clearing a live composer removes its old snapshot; deleting a chat cannot
+resurrect its mounted draft. Completed files remain independent of chat and
+composer lifetimes and are included by the existing workspace archive path.
+
+Pending imports serialize a recovery id immediately. Native capabilities live
+privately under the app data directory's `attachment-sources/`; generated and
+remote upload Blobs live in IndexedDB `zeros:attachment-sources:v1`. Restart
+first resolves a completed context record, then retries from the retained
+source if necessary. Completed uploads remove their IndexedDB source. Normal
+app quit waits for source preparation before shutting down, with a 30-second
+bound for an unresponsive renderer. A force-kill before preparation completes,
+storage failure, or removal/modification of an unfinished native source can
+still require reattaching. Those errors must not produce a successful send.
+
+Copy/cut writes a versioned custom clipboard format, an HTML metadata fallback,
+and plain text containing full source paths. Pasting within the same workspace
+restores the selected document and fresh pill node ids, preserving durable
+attachment ids and pending recovery keys. It reuses existing files. Rich paste
+runs before the long-text-to-file rule. Cross-workspace paste replaces attachment
+and file-mention pills with source-path text; remote paths include their runtime
+identity. Local clipboard identity is scoped to this app profile, preventing a
+clipboard copied on another computer from binding merely because paths match.
+Malformed or missing references cannot silently disappear from a send.
+
+Browser smoke coverage reloads a pending JSONL import through real IndexedDB,
+checks exact bytes, and exercises rich and HTML clipboard round trips and
+cross-workspace text fallbacks.

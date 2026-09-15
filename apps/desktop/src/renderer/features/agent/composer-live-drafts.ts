@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // The workspace-store-backed draft
-// persistence (state.chatComposerDrafts) only writes on UNMOUNT —
+// state (state.chatComposerDrafts) only writes on parking/unmount —
 // saving on every keystroke would re-render all 50+ workspace
 // consumers, which is too costly.
 //
@@ -13,6 +13,8 @@
 // also mirrors its live state into this module-level ref. Mutations
 // are synchronous and bypass React's render cycle entirely. The
 // click handler reads from here.
+// Draft persistence also observes these changes and saves a debounced live
+// snapshot without publishing keystrokes through the global React store.
 //
 // On unmount, the composer should call set*Draft(null) to drop its
 // entry — the store-backed persistence has already taken over.
@@ -21,6 +23,11 @@
 import type { ComposerDraft } from "../../state/store";
 
 const liveChatDrafts = new Map<string, ComposerDraft>();
+
+/** Read only at persistence boundaries; keystrokes never publish global state. */
+export function liveChatDraftEntries(): IterableIterator<[string, ComposerDraft]> {
+  return liveChatDrafts.entries();
+}
 
 /** Mounted composer owners, keyed exactly by chat. A failed queued send must
  * restore through this owner so the TipTap document and its unmount-persisted

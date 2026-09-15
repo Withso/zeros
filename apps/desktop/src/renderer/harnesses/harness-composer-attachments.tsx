@@ -47,6 +47,7 @@ const original = saveRecord(
 );
 
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   request: async (message: { op: string; params: Record<string, unknown> }) => {
     const p = message.params;
     operations.push(message.op);

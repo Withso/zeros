@@ -14,7 +14,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadPersistedDrafts, schedulePersistDrafts } from "../persist-composer-drafts";
+import { loadPersistedDrafts, schedulePersistDrafts, persistDraftsNow } from "../persist-composer-drafts";
+import { setLiveChatDraft } from "../../features/agent/composer-live-drafts";
 import { editSeedSource } from "../../features/agent/edit-seed";
 import type { WorkspaceState } from "../store";
 
@@ -103,6 +104,36 @@ describe("persist-composer-drafts", () => {
     vi.useFakeTimers();
     vi.unstubAllGlobals();
     installWindow();
+    setLiveChatDraft("chat-1", null);
+    setLiveChatDraft("chat-2", null);
+  });
+
+  it("flushes the newest mounted draft without a workspace store update", async () => {
+    installStorage();
+    const state = stateWith("previously parked", "");
+    schedulePersistDrafts(state);
+    setLiveChatDraft("chat-1", { text: "typed while active", attachments: [], json: null });
+    await flush();
+    expect(loadPersistedDrafts().chats["chat-1"].text).toBe("typed while active");
+  });
+
+  it("keeps live drafts isolated and persists an actively cleared composer", () => {
+    installStorage();
+    const state = stateWith("old text", "");
+    setLiveChatDraft("chat-1", { text: "", attachments: [], json: null });
+    setLiveChatDraft("chat-2", { text: "other chat", attachments: [], json: null });
+    persistDraftsNow(state);
+    expect(loadPersistedDrafts().chats).toEqual({
+      "chat-2": { text: "other chat", attachments: [], json: null },
+    });
+  });
+
+  it("does not resurrect live drafts whose chat was deleted", () => {
+    installStorage();
+    const state = { ...stateWith("old text", ""), chats: [] };
+    setLiveChatDraft("chat-2", { text: "deleted chat", attachments: [], json: null });
+    persistDraftsNow(state);
+    expect(loadPersistedDrafts().chats).not.toHaveProperty("chat-2");
   });
 
   it("writes the draft whole when it fits", async () => {

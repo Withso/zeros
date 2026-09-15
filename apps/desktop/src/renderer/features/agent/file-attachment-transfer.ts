@@ -3,7 +3,12 @@ import {
   validateAttachmentFile,
   type AttachmentWriteResult,
 } from "@zeros/protocol/attachment-policy";
-import { writeContextAttachment } from "./agent-history-client";
+import { createContextAttachmentWriter } from "./agent-history-client";
+import {
+  prepareAttachmentSource,
+  releaseAttachmentSource,
+} from "./attachment-sources";
+import { attachmentOwner } from "./attachment-owner";
 import type { ComposerAttachment } from "./composer-attachments";
 
 export type FileAttachmentProgress = {
@@ -19,7 +24,11 @@ let active = 0;
 const waiting: Array<() => void> = [];
 
 function keyFor(cwd: string, id: string): string {
-  return JSON.stringify([cwd, id]);
+  return JSON.stringify([
+    attachmentOwner(cwd).runtime,
+    cwd.replace(/\/$/, ""),
+    id,
+  ]);
 }
 export function getFileAttachmentProgress(
   cwd: string,
@@ -74,6 +83,19 @@ async function withUploadSlot<T>(task: () => Promise<T>): Promise<T> {
 }
 
 async function base64Chunk(blob: Blob): Promise<string> {
+  // The browser encodes in native code; avoid constructing a million-character
+  // JS string for every chunk. The fallback serves DOM-free test runtimes.
+  if (typeof FileReader !== "undefined") {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () =>
+        resolve(String(reader.result).split(",", 2)[1] ?? "");
+      reader.onerror = () => reject(reader.error);
+      reader.onabort = () =>
+        reject(new Error("Attachment read was interrupted"));
+      reader.readAsDataURL(blob);
+    });
+  }
   const bytes = new Uint8Array(await blob.arrayBuffer());
   let binary = "";
   for (let offset = 0; offset < bytes.length; offset += 0x8000) {
@@ -82,15 +104,17 @@ async function base64Chunk(blob: Blob): Promise<string> {
   return btoa(binary);
 }
 
-/** Attach-time and send-time callers share the exact same transfer. Blobs stay
- * in memory-only draft state; the wire and saved drafts contain metadata.
- * Restored drafts and edited messages resolve the durable record without
- * re-reading or embedding its contents. */
+/** Attach-time and send-time callers share the exact same transfer. Pending
+ * sources have private recovery storage; saved drafts contain metadata only.
+ * Restored drafts resolve completed records before retrying an interrupted
+ * import. Agent delivery never embeds the file contents. */
 export async function ensureFileAttachment(
   cwd: string,
   attachment: ComposerAttachment,
 ): Promise<AttachmentWriteResult> {
   const id = attachment.contextAttachmentId ?? attachment.id;
+  const owner = attachmentOwner(cwd);
+  attachment.owner ??= owner;
   const key = keyFor(cwd, id);
   let flight = flights.get(key);
   if (!flight) {
@@ -100,8 +124,8 @@ export async function ensureFileAttachment(
       size: attachment.size,
     });
     if (!validation.ok) throw new Error(validation.reason);
-    const source = attachment.sourceFile;
-    const canUpload = source && typeof source.slice === "function";
+    const writeContextAttachment = createContextAttachmentWriter(cwd);
+    const canUpload = !!attachment.sourceFile || !!attachment.sourceRecoveryId;
     const args = {
       cwd,
       attachmentId: id,
@@ -116,7 +140,7 @@ export async function ensureFileAttachment(
       // A dispatcher can reuse the same Blob in several workspaces. Resolve
       // against THIS workspace instead of trusting another owner's snapshot
       // or uploading the same 500 MB again on every send/undo.
-      if (attachment.diskPath) {
+      if (attachment.diskPath || !attachment.sourceFile) {
         try {
           return await writeContextAttachment({
             ...args,
@@ -131,7 +155,24 @@ export async function ensureFileAttachment(
             throw error;
         }
       }
-      if (source.size !== attachment.size)
+      const prepared = await prepareAttachmentSource(attachment);
+      if (prepared.nativeSourceId) {
+        const result = await writeContextAttachment({
+          ...args,
+          base64: "",
+          nativeSourceId: prepared.nativeSourceId,
+        });
+        if (
+          result.pending ||
+          !result.absolutePath ||
+          !result.relativePath ||
+          result.bytes !== attachment.size
+        )
+          throw new Error("Attachment copy did not finish");
+        return result;
+      }
+      const source = prepared.blob;
+      if (!source || source.size !== attachment.size)
         throw new Error("Attachment size changed — attach it again");
       const uploadId = crypto.randomUUID();
       try {
@@ -172,8 +213,8 @@ export async function ensureFileAttachment(
           publish(key, {
             phase: "saving",
             percent: source.size
-              ? Math.floor((received * 100) / source.size)
-              : 100,
+              ? Math.min(99, Math.floor((received * 100) / source.size))
+              : 99,
           });
         }
         if (
@@ -195,7 +236,10 @@ export async function ensureFileAttachment(
       }
     }).then((result) => {
       attachment.diskPath = result.relativePath;
+      attachment.absolutePath = result.absolutePath;
+      attachment.owner = attachmentOwner(cwd);
       attachment.contextAttachmentId = id;
+      void releaseAttachmentSource(attachment.sourceRecoveryId).catch(() => {});
       return result;
     });
     flights.set(key, flight);
@@ -222,6 +266,8 @@ export async function ensureFileAttachment(
   }
   const result = await flight;
   attachment.diskPath = result.relativePath;
+  attachment.absolutePath = result.absolutePath;
+  attachment.owner = attachmentOwner(cwd);
   attachment.contextAttachmentId = id;
   return result;
 }

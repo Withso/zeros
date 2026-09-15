@@ -11,7 +11,7 @@
 //   zeros:event    — main → renderer fan-out ({name, payload} envelope)
 // ──────────────────────────────────────────────────────────
 
-import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from "electron";
 import { isAppearanceMode } from "./appearance-mode";
 
 const INVOKE_CHANNEL = "zeros:invoke";
@@ -162,7 +162,25 @@ ipcRenderer.on(
   },
 );
 
+const quitPreparers = new Set<() => Promise<void>>();
+ipcRenderer.on("zeros:prepare-attachment-quit", (_event, token: unknown) => {
+  if (typeof token !== "string") return;
+  void Promise.allSettled([...quitPreparers].map(prepare => Promise.resolve().then(prepare)))
+    .then(() => ipcRenderer.send("zeros:attachment-quit-ready", token));
+});
+
 const bridge = {
+  beforeQuit(prepare: () => Promise<void>): () => void {
+    quitPreparers.add(prepare);
+    return () => { quitPreparers.delete(prepare); };
+  },
+  /** Accept a genuine DOM File, never a renderer-supplied filesystem path. */
+  prepareAttachmentFile(file: File, id: string): Promise<string | null> {
+    const path = webUtils.getPathForFile(file);
+    return path
+      ? ipcRenderer.invoke("zeros:attachment-source", { path, size: file.size, id })
+      : Promise.resolve(null);
+  },
   /** Call a main-process command. Args is passed through as the single
    *  object payload the handler receives (mirrors the native invoke shape).
    *  Only allowlisted commands are forwarded; anything else is rejected

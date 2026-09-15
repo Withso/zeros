@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ATTACHMENT_CHUNK_BYTES } from "@zeros/protocol/attachment-policy";
 const write = vi.hoisted(() => vi.fn());
-vi.mock("../agent-history-client", () => ({ writeContextAttachment: write }));
+const nativeSource = vi.hoisted(() => vi.fn(async () => null as string | null));
+vi.mock("../agent-history-client", () => ({ writeContextAttachment: write, createContextAttachmentWriter: () => write }));
+vi.mock("../../../platform/runtime", async (original) => ({ ...await original<object>(), prepareNativeAttachmentFile: nativeSource }));
 import {
   ensureFileAttachment,
   getFileAttachmentProgress,
@@ -32,6 +34,7 @@ const attachment = (
   ...over,
 });
 beforeEach(() => {
+  nativeSource.mockReset().mockResolvedValue(null);
   resetFileAttachmentTransfersForTests();
   write
     .mockReset()
@@ -90,6 +93,17 @@ describe("file imports", () => {
 });
 
 describe("reference attachment staging", () => {
+  it("copies native files without reading or encoding renderer bytes", async () => {
+    nativeSource.mockResolvedValue("native-source-id");
+    const source = new Blob(["abc"]);
+    const read = vi.spyOn(source, "arrayBuffer");
+    const a = attachment({ sourceFile: source });
+    await ensureFileAttachment("/repo", a);
+    expect(read).not.toHaveBeenCalled();
+    expect(write).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ nativeSourceId: "native-source-id", base64: "" }));
+    expect(a.absolutePath).toBe(final.absolutePath);
+  });
+
   it("isolates out-of-order workspace results and publishes the path before readiness", async () => {
     const pending = new Map<string, (value: typeof final) => void>();
     write.mockImplementation(

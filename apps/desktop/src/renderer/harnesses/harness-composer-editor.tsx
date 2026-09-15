@@ -15,19 +15,42 @@ import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
 
-const cwd = "/composer-editor-harness";
+const query = new URLSearchParams(location.search);
+const cwd = query.get("workspace") ?? "/composer-editor-harness";
 const records = new Map<
   string,
   { relativePath: string; bytes: Uint8Array; mimeType: string }
 >();
 const uploads = new Map<string, Uint8Array>();
+const pendingWrites: Array<{
+  filename: string;
+  finish: (error?: string) => void;
+}> = [];
+
+window.__composerAttachmentTransport = {
+  pending: () => pendingWrites.map(({ filename }) => filename),
+  releaseNext: (filename, error) => {
+    const index = pendingWrites.findIndex((write) => write.filename === filename);
+    if (index < 0) throw new Error(`No pending write for ${filename}`);
+    pendingWrites.splice(index, 1)[0].finish(error);
+  },
+};
 
 setActiveBridge({
+  executionIdentity: { kind: "local", sidecar: "active" },
   request: async (message: { op: string; params: Record<string, unknown> }) => {
     const p = message.params;
     let result: unknown = {};
     if (message.op === "workspace.list") result = { workspaces: [] };
     if (message.op === "attachment.write") {
+      if (query.has("hold-uploads") && !p.resolve && !p.abort) {
+        await new Promise<void>((resolve, reject) => {
+          pendingWrites.push({
+            filename: String(p.filename),
+            finish: (error) => (error ? reject(new Error(error)) : resolve()),
+          });
+        });
+      }
       const id = String(p.attachmentId);
       const uploadId = String(p.uploadId);
       const pending = (bytes: number) => ({
@@ -113,6 +136,10 @@ setActiveBridge({
 declare global {
   interface Window {
     __composerHarness?: ComposerEditorApi;
+    __composerAttachmentTransport: {
+      pending: () => string[];
+      releaseNext: (filename: string, error?: string) => void;
+    };
   }
 }
 
