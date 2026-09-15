@@ -56,7 +56,7 @@ import type { Project } from "../../state/projects-store";
 import { useProjects, useWorkspacesFor } from "../../state/use-projects";
 import {
   dedupePendingCreates,
-  selectLiveVisible,
+  useLiveVisible,
 } from "../../state/live-workspace-selectors";
 import { useActiveOrganization } from "../team/team-store";
 import { filterRowsForOrganization } from "../team/organization-capabilities";
@@ -237,12 +237,7 @@ function RepoWorkspacesList({ project }: { project: Project }) {
     () => filterRowsForOrganization(allWorkspaces, activeOrganization),
     [activeOrganization, allWorkspaces],
   );
-  // Shared selector: a row leaves only after the engine confirms archive/delete;
-  // while in flight it remains here, inert and visibly busy.
-  const workspaces = useMemo(
-    () => selectLiveVisible(accessibleWorkspaces),
-    [accessibleWorkspaces],
-  );
+  const workspaces = useLiveVisible(accessibleWorkspaces);
   const rawPendingCreates = usePendingCreatesFor(project.repoSlug);
   const pendingCreates = useMemo(
     () => filterRowsForOrganization(rawPendingCreates, activeOrganization),

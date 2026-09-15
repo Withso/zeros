@@ -39,6 +39,7 @@ import type {
 } from "@zeros/protocol/agent-messages";
 import { runFile, runGit, assertSafeGitRef } from "./git-exec";
 import { authoredPathsFromShellCommand } from "./shell-authored-paths";
+import { prepareSnapshotIndex } from "./snapshot-index";
 
 // ── Identity for snapshot commits (commit-tree needs an author/committer; we
 //    don't want to depend on, or pollute, the user's git config). ──
@@ -137,6 +138,14 @@ export function archiveSnapshotRef(workspaceId: string): string {
 
 // ── Snapshot ─────────────────────────────────────────────
 
+export interface SnapshotTimings {
+  seedMs: number;
+  stageMs: number;
+  forceAddMs: number;
+  writeMs: number;
+  reusedIndex: boolean;
+}
+
 /** Capture the whole working tree of `cwd` as a commit pinned at `ref`. Uses a
  *  scratch index so the user's real index is untouched — seeded from HEAD so a
  *  tracked path that is legitimately absent from the worktree (sparse-excluded
@@ -153,8 +162,17 @@ export async function snapshotWorkingTree(
     parent?: string;
     forceAddPaths?: string[];
     excludePaths?: string[];
+    onTiming?: (timings: SnapshotTimings) => void;
   } = {},
 ): Promise<string | null> {
+  const timings: SnapshotTimings = {
+    seedMs: 0,
+    stageMs: 0,
+    forceAddMs: 0,
+    writeMs: 0,
+    reusedIndex: false,
+  };
+  const seedStartedAt = Date.now();
   try {
     const dir = await gitDir(cwd);
     if (!dir) return null;
@@ -166,6 +184,8 @@ export async function snapshotWorkingTree(
     );
     const env = { ...SNAPSHOT_ENV, GIT_INDEX_FILE: scratch };
     try {
+      const indexCache = await prepareSnapshotIndex(cwd, dir, scratch, opts);
+      timings.reusedIndex = indexCache.reused;
       // Seed the scratch index from HEAD before staging.
       //
       // `add -A` can only stage what is ON DISK, and an EMPTY seed made that
@@ -192,11 +212,29 @@ export async function snapshotWorkingTree(
       //
       // Best-effort: an unborn HEAD (`git init`, nothing committed) has no tree
       // to read, and a snapshot there is still valid from an empty index.
-      await runGit(cwd, ["read-tree", "HEAD"], { env }).catch(() => undefined);
+      // An exact rule/HEAD match can retain the entire prior snapshot index.
+      // Otherwise reset to HEAD, retaining only unchanged committed entries.
+      // The final add always discovers and verifies current disk state.
+      try {
+        await runGit(cwd, ["read-tree", "--reset", indexCache.tree ?? "HEAD"], {
+          env,
+        });
+      } catch {
+        await fs.rm(scratch, { force: true });
+        // The cached tree may have been pruned with its ref. Rebuild from the
+        // live branch; an unborn HEAD retains the original empty-index path.
+        await runGit(cwd, ["read-tree", "HEAD"], { env }).catch(
+          () => undefined,
+        );
+      }
+      timings.seedMs = Date.now() - seedStartedAt;
       // Stage everything (tracked + untracked-not-ignored) into the scratch
       // index, then write it as a tree. `add -A` respects .gitignore, so
       // node_modules/dist/etc. are excluded for free.
+      const stageStartedAt = Date.now();
       await runGit(cwd, ["add", "-A"], { env });
+      timings.stageMs = Date.now() - stageStartedAt;
+      const forceStartedAt = Date.now();
       const forcedPathspecs: string[] = [];
       for (const candidate of opts.forceAddPaths ?? []) {
         if (!candidate || nodePath.isAbsolute(candidate)) continue;
@@ -244,6 +282,9 @@ export async function snapshotWorkingTree(
           { env },
         );
       }
+      timings.forceAddMs = Date.now() - forceStartedAt;
+      const writeStartedAt = Date.now();
+      await indexCache.validate();
       const { stdout: treeOut } = await runGit(cwd, ["write-tree"], { env });
       const tree = treeOut.trim();
       if (!tree) return null;
@@ -257,12 +298,18 @@ export async function snapshotWorkingTree(
       const commit = commitOut.trim();
       if (!commit) return null;
       await runGit(cwd, ["update-ref", ref, commit]);
+      // A failed publication never becomes the source of another snapshot.
+      // Cache allocation is optional; the durable ref already owns the tree.
+      await indexCache.publish(tree).catch(() => {});
+      timings.writeMs = Date.now() - writeStartedAt;
       return commit;
     } finally {
       await fs.rm(scratch, { force: true }).catch(() => {});
     }
   } catch {
     return null;
+  } finally {
+    opts.onTiming?.(timings);
   }
 }
 

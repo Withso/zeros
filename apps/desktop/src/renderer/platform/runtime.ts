@@ -45,10 +45,15 @@ import { useEffect, useState } from "react";
 import { parseNativeErrorMessage } from "@zeros/protocol/native-error";
 
 interface ZerosNativeBridge {
+  maintainAttachmentSources?(retainedIds: string[]): Promise<string[]>;
   beforeQuit?(prepare: () => Promise<void>): () => void;
   prepareAttachmentFile?(file: File, id: string): Promise<string | null>;
   invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T>;
   on<T = unknown>(eventName: string, handler: (payload: T) => void): () => void;
+}
+
+export async function maintainNativeAttachmentSources(retainedIds: string[]): Promise<string[] | null> {
+  return (typeof window !== "undefined" && window.__ZEROS_NATIVE__?.maintainAttachmentSources?.(retainedIds)) || null;
 }
 
 export function onNativeBeforeQuit(prepare: () => Promise<void>): () => void {

@@ -2893,8 +2893,9 @@ export function AgentChat({
   useEffect(() => {
     return () => {
       if (!chatId) return;
-      setLiveChatDraft(chatId, null);
       persistComposerDraft();
+      // Hand off to the parked snapshot before releasing the live owner.
+      setLiveChatDraft(chatId, null);
     };
   }, [chatId, persistComposerDraft]);
 

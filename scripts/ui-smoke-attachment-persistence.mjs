@@ -164,4 +164,101 @@ export async function runAttachmentPersistenceSmoke({ page, check }) {
       foreign.displayText.includes("z".repeat(4001)),
   );
   await expect(page.locator("[data-attachment-pill]")).toHaveCount(0);
+
+  const cleanup = await page.evaluate(async () => {
+    const sources =
+      await import("/apps/desktop/src/renderer/features/agent/attachment-sources.ts");
+    const retention =
+      await import("/apps/desktop/src/renderer/features/agent/attachment-source-retention.ts");
+    const operation = (run) =>
+      new Promise((resolve, reject) => {
+        const open = indexedDB.open("zeros:attachment-sources:v1", 1);
+        open.onerror = () => reject(open.error);
+        open.onsuccess = () => {
+          const db = open.result;
+          const transaction = db.transaction("sources", "readwrite");
+          const request = run(transaction.objectStore("sources"));
+          transaction.oncomplete = () => {
+            db.close();
+            resolve(request.result);
+          };
+          transaction.onabort = () => {
+            db.close();
+            reject(transaction.error);
+          };
+        };
+      });
+    const attachment = () => ({
+      id: crypto.randomUUID(),
+      name: "recovery.jsonl",
+      kind: "file",
+      mimeType: "application/jsonl",
+      size: 8,
+      validation: { ok: true },
+      sourceFile: new Blob(['{"n":1}\n'], { type: "application/jsonl" }),
+    });
+    const kept = attachment();
+    const abandoned = attachment();
+    const copied = attachment();
+    for (const item of [kept, abandoned, copied]) {
+      await sources.prepareAttachmentSource(item);
+      const record = await operation((store) =>
+        store.get(item.sourceRecoveryId),
+      );
+      record.touchedAt = Date.now() - 2 * 86_400_000;
+      await operation((store) => store.put(record, item.sourceRecoveryId));
+    }
+    const legacy = {
+      ...attachment(),
+      sourceFile: undefined,
+      sourceRecoveryId: crypto.randomUUID(),
+    };
+    await operation((store) =>
+      store.put(new Blob(['{"legacy":true}\n']), legacy.sourceRecoveryId),
+    );
+    const firstOwner = retention.registerAttachmentSourceOwner(() => [kept]);
+    const secondOwner = retention.registerAttachmentSourceOwner(() => [kept]);
+    retention.rememberAttachmentClipboardSources([copied]);
+    try {
+      firstOwner();
+      await sources.maintainAttachmentSources();
+      const protectedSourcesSurvive =
+        !!(await operation((store) => store.get(kept.sourceRecoveryId))) &&
+        !!(await operation((store) => store.get(copied.sourceRecoveryId)));
+      const abandonedRemoved =
+        (await operation((store) => store.get(abandoned.sourceRecoveryId))) ===
+        undefined;
+      const legacyBytes = (await sources.prepareAttachmentSource(legacy)).blob;
+      secondOwner();
+      retention.rememberAttachmentClipboardSources([]);
+      await sources.maintainAttachmentSources();
+      const releasedRemoved =
+        (await operation((store) => store.get(kept.sourceRecoveryId))) ===
+          undefined &&
+        (await operation((store) => store.get(copied.sourceRecoveryId))) ===
+          undefined;
+      return {
+        protectedSourcesSurvive,
+        abandonedRemoved,
+        releasedRemoved,
+        legacyText: await legacyBytes.text(),
+      };
+    } finally {
+      firstOwner();
+      secondOwner();
+      retention.rememberAttachmentClipboardSources([]);
+    }
+  });
+  check(
+    "recovery cleanup retains clipboard sources and a second owner after the first releases it",
+    cleanup.protectedSourcesSurvive,
+  );
+  check(
+    "recovery cleanup removes abandoned bytes and releases them after every owner is gone",
+    cleanup.abandonedRemoved && cleanup.releasedRemoved,
+  );
+  check(
+    "legacy raw-Blob recovery records migrate without losing their bytes",
+    cleanup.legacyText === '{"legacy":true}\n',
+  );
 }

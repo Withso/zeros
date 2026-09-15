@@ -17,6 +17,7 @@ import {
   transferContextAttachment,
   resetAttachmentTransfersForTests,
 } from "../../../../engine/files/attachment-transfer";
+import { setContextGraphAttachmentShared } from "../../../../engine/files/context-graph";
 import { encodeAttachments } from "../encode-attachments";
 import { messageToEditorContent } from "../composer-editor/reconstruct";
 import { resetFileAttachmentTransfersForTests } from "../file-attachment-transfer";
@@ -117,6 +118,93 @@ it("saves empty files and preserves metadata through repeated edits", async () =
   const second = await encodeAttachments(edited.attachments, context("codex"));
   expect(second.bubbleAttachments).toEqual(first.bubbleAttachments);
 });
+
+it.each(["local", "shared", "legacy root"])(
+  "preserves saved legacy text when resending an old transcript from %s",
+  async (location) => {
+    const body = "original attachment héllo\r\n";
+    await transferContextAttachment(root, {
+      attachmentId: "att-original",
+      filename: "notes.txt",
+      mimeType: "text/plain",
+      base64: Buffer.from(body).toString("base64"),
+    });
+    if (location === "shared")
+      await setContextGraphAttachmentShared(root, "att-original", true);
+    if (location === "legacy root")
+      await fs.rename(
+        path.join(root, ".context"),
+        path.join(root, ".context-graph"),
+      );
+    const edited = messageToEditorContent({
+      text: "edited prompt",
+      attachments: [
+        {
+          name: "notes.txt",
+          mimeType: "text/plain",
+          kind: "text",
+          attachmentId: "att-original",
+        },
+      ],
+    });
+    const result = await encodeAttachments(
+      edited.attachments,
+      context("codex"),
+    );
+    expect(
+      await fs.readFile(
+        path.join(root, result.bubbleAttachments[0].diskPath!),
+        "utf8",
+      ),
+    ).toBe(body);
+    expect(result.bubbleAttachments[0]).toMatchObject({
+      attachmentId: "att-original",
+      delivery: "reference",
+      size: Buffer.byteLength(body),
+    });
+    expect(
+      transport.write.mock.calls.every(([args]) => args.resolve === true),
+    ).toBe(true);
+    expect(transport.readText).not.toHaveBeenCalled();
+  },
+);
+
+it("fails a legacy resend when the saved text is missing instead of saving its empty placeholder", async () => {
+  transport.readText.mockResolvedValue(null);
+  const attachment = textAttachment({
+    text: "",
+    contextAttachmentId: "missing",
+  });
+  await expect(
+    encodeAttachments([attachment], context("codex")),
+  ).rejects.toThrow(/not available/);
+  expect(attachment.sourceFile).toBeUndefined();
+  expect(
+    transport.write.mock.calls.every(([args]) => args.resolve === true),
+  ).toBe(true);
+});
+
+it.each(["recovered legacy text\r\n", ""])(
+  "saves a confirmed legacy fallback body (%j), including a real empty file",
+  async (body) => {
+    transport.readText.mockResolvedValue(body);
+    const result = await encodeAttachments(
+      [textAttachment({ text: "", contextAttachmentId: "att-old" })],
+      context("codex"),
+    );
+    expect(transport.readText).toHaveBeenCalledExactlyOnceWith({
+      cwd: root,
+      attachmentId: "att-old",
+      diskPath: undefined,
+    });
+    expect(
+      await fs.readFile(
+        path.join(root, result.bubbleAttachments[0].diskPath!),
+        "utf8",
+      ),
+    ).toBe(body);
+  },
+);
 
 it("blocks sends on unavailable files and failed saves, retaining the draft", async () => {
   await expect(

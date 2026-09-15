@@ -141,10 +141,12 @@ export function workspaceTabDescription(args: {
   label: string;
   runActionRunning: boolean;
   changeLines: ChangeLineCounts;
+  hasDraft?: boolean;
 }): string {
   const { additions, deletions } = args.changeLines;
   const lines = (count: number) => `${count} line${count === 1 ? "" : "s"}`;
   const parts = [`Open workspace ${args.label}`];
+  if (args.hasDraft) parts.push("unsent draft");
   if (args.runActionRunning) parts.push("run action running");
   if (additions > 0) parts.push(`${lines(additions)} added`);
   if (deletions > 0) parts.push(`${lines(deletions)} removed`);

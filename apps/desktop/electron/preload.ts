@@ -170,6 +170,9 @@ ipcRenderer.on("zeros:prepare-attachment-quit", (_event, token: unknown) => {
 });
 
 const bridge = {
+  maintainAttachmentSources(retainedIds: string[]): Promise<string[]> {
+    return ipcRenderer.invoke("zeros:attachment-source-maintenance", retainedIds);
+  },
   beforeQuit(prepare: () => Promise<void>): () => void {
     quitPreparers.add(prepare);
     return () => { quitPreparers.delete(prepare); };

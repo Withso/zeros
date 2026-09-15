@@ -31,6 +31,7 @@ import { constants as fsConstants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
+import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
   assertContextDirectory,
   CONTEXT_DIR,
@@ -237,6 +238,7 @@ async function scaffoldContextGraph(
     }
     const migration = await migrateLegacyContextDirectory(workspaceRoot);
     created ||= migration;
+    await cleanupLegacyAttachmentStaging(root);
     return { ok: true, created };
   } catch (err) {
     return {

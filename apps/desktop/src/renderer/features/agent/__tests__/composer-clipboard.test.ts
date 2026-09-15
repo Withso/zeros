@@ -129,3 +129,17 @@ it("retains an unsaved legacy text attachment when copying its pill", () => {
   );
   expect(JSON.stringify(payload)).not.toContain("unsaved legacy body");
 });
+
+it("copies a saved legacy text reference without turning its placeholder into a recovery source", () => {
+  const legacy: ComposerAttachment = {
+    ...attachment,
+    delivery: undefined,
+    kind: "text",
+    text: "",
+    diskPath: undefined,
+  };
+  const payload = clipboardPayload(slice, () => legacy, owner);
+  expect(payload.attachments[0].contextAttachmentId).toBe("record-1");
+  expect(payload.attachments[0].sourceRecoveryId).toBeUndefined();
+  expect(legacy.sourceFile).toBeUndefined();
+});

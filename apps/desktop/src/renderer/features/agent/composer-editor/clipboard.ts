@@ -4,15 +4,17 @@ import type { EditorView } from "@tiptap/pm/view";
 import {
   safeAttachmentFilename,
   validateAttachmentFile,
+  ATTACHMENT_CLIPBOARD_MIME,
 } from "@zeros/protocol/attachment-policy";
 import type { ComposerAttachment } from "../composer-attachments";
 import { attachmentOwner, sameAttachmentOwner } from "../attachment-owner";
+import { rememberAttachmentClipboardSources } from "../attachment-source-retention";
 import {
   prepareAttachmentSource,
   supplyLegacyAttachmentBytes,
 } from "../attachment-sources";
 
-const MIME = "application/x-zeros-composer+json";
+const MIME = ATTACHMENT_CLIPBOARD_MIME;
 const HTML_ATTRIBUTE = "data-zeros-composer";
 type Owner = NonNullable<ComposerAttachment["owner"]>;
 interface ClipboardSlice {
@@ -256,8 +258,9 @@ export function copyComposerSelection(
   event.clipboardData.setData(MIME, encoded);
   event.clipboardData.setData("text/html", dom.outerHTML);
   event.clipboardData.setData("text/plain", payload.text);
+  rememberAttachmentClipboardSources(payload);
   event.preventDefault();
-  if (event.type === "cut")
+  if (event.type === "cut" && view.editable)
     view.dispatch(
       view.state.tr
         .deleteSelection()

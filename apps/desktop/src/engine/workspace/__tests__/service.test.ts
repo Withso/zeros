@@ -54,11 +54,13 @@ const PNG_1X1_BASE64 =
 
 describe("WorkspaceService", () => {
   let dir: string;
+  let stateDir: string;
   let svc: WorkspaceService;
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ws-"));
-    setStateRootForTesting(path.join(dir, "state"));
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ws-state-"));
+    setStateRootForTesting(stateDir);
     fs.writeFileSync(path.join(dir, "hello.txt"), "hi there", "utf-8");
     try {
       execFileSync("git", ["init", "-q"], { cwd: dir });
@@ -70,12 +72,7 @@ describe("WorkspaceService", () => {
   afterEach(() => {
     resetWorkspaceDesignApisForTests();
     closeState();
-    const contextCache = path.join(
-      dir,
-      "state",
-      ".appdata",
-      "isolation-context",
-    );
+    const contextCache = path.join(stateDir, ".appdata", "isolation-context");
     const makeOwnerWritable = (root: string): void => {
       try {
         fs.chmodSync(root, 0o700);
@@ -94,6 +91,7 @@ describe("WorkspaceService", () => {
     };
     makeOwnerWritable(contextCache);
     fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("lists workspaces including the synthetic local-main entry", async () => {

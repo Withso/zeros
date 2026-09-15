@@ -86,8 +86,8 @@ export async function encodeAttachments(
       throw new Error(`Choose a workspace before sending "${a.name}"`);
     const legacy = a.delivery !== "reference" && a.kind !== "file";
     const hadRecord = !!a.diskPath || !!a.contextAttachmentId;
-    a.contextAttachmentId = durableAttachmentId(a);
     if (legacy) supplyLegacyAttachmentBytes(a);
+    a.contextAttachmentId = durableAttachmentId(a);
     let written;
     try {
       written = await ensureFileAttachment(ctx.cwd, a);
@@ -119,7 +119,9 @@ export async function encodeAttachments(
           diskPath: a.diskPath,
         });
         if (body === null) throw error;
-        a.text = body;
+        // A successful read confirms the bytes, including a real empty file.
+        a.sourceFile = new Blob([body], { type: a.mimeType });
+        a.size = a.sourceFile.size;
       } else throw error;
       supplyLegacyAttachmentBytes(a);
       written = await ensureFileAttachment(ctx.cwd, a);

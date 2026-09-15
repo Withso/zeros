@@ -3,6 +3,29 @@ import os from "node:os";
 import path from "node:path";
 import { zerosDataDir } from "../db/paths";
 import { runFile } from "../git/git-exec";
+import {
+  recordAttachmentTemporaryDirectory,
+  pruneAttachmentTemporaryDirectories,
+} from "./attachment-temporary-records";
+export { pruneAttachmentTemporaryDirectories } from "./attachment-temporary-records";
+
+const sweptRoots = new Set<string>();
+
+/** A workspace can itself be nested inside another checkout or Design folder.
+ * Temporary storage must be outside every enclosing repository/Design boundary. */
+async function outsideOwnedFolders(candidate: string): Promise<boolean> {
+  for (let parent = candidate; ; parent = path.dirname(parent)) {
+    for (const marker of [".git", "design.toml"]) {
+      try {
+        await fs.lstat(path.join(parent, marker));
+        return false;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+      }
+    }
+    if (path.dirname(parent) === parent) return true;
+  }
+}
 
 // Foundation selects temporary space on the destination volume, including an
 // external disk. The destination is an argv value, never executable source.
@@ -42,12 +65,18 @@ export async function createAttachmentTemporaryDirectory(
 ): Promise<AttachmentTemporaryDirectory> {
   const workspace = await fs.realpath(workspaceRoot);
   const device = (await fs.stat(workspace)).dev;
+  const dataRoot = zerosDataDir();
+  if (!sweptRoots.has(dataRoot)) {
+    sweptRoots.add(dataRoot);
+    void pruneAttachmentTemporaryDirectories().catch(() => {});
+  }
   const suitable = async (candidate: string): Promise<string | null> => {
     try {
       const real = await fs.realpath(candidate);
       if (within(workspace, real)) return null;
       const stat = await fs.stat(real);
-      return stat.isDirectory() && stat.dev === device ? real : null;
+      if (!stat.isDirectory() || stat.dev !== device) return null;
+      return (await outsideOwnedFolders(real)) ? real : null;
     } catch {
       return null;
     }
@@ -60,11 +89,23 @@ export async function createAttachmentTemporaryDirectory(
       await fs.rmdir(directory).catch(() => {});
       throw new Error("Attachment temporary storage changed");
     }
+    let forget: () => Promise<void>;
+    try {
+      forget = await recordAttachmentTemporaryDirectory(
+        directory,
+        workspace,
+        replacementParent,
+      );
+    } catch (error) {
+      await fs.rmdir(directory).catch(() => {});
+      throw error;
+    }
     return {
       path: directory,
       dispose: async () => {
         await fs.rm(directory, { recursive: true, force: true });
         if (replacementParent) await fs.rmdir(parent).catch(() => {});
+        await forget();
       },
     };
   };
@@ -108,6 +149,29 @@ export async function createAttachmentTemporaryDirectory(
       await fs.rmdir(parent).catch(() => {});
       throw error;
     }
+  }
+  // Mounted Linux workspaces and secondary Windows drives may not share a
+  // filesystem with OS/app temporary storage. Allocate a short-lived private
+  // sibling (or ancestor sibling), never a folder inside a surrounding repo.
+  for (
+    let ancestor = path.dirname(workspace);
+    ancestor !== workspace;
+    ancestor = path.dirname(ancestor)
+  ) {
+    const parent = await suitable(ancestor);
+    if (parent) {
+      try {
+        return await allocate(parent);
+      } catch (error) {
+        if (
+          !["EACCES", "EPERM", "ENOENT", "EROFS"].includes(
+            (error as NodeJS.ErrnoException).code ?? "",
+          )
+        )
+          throw error;
+      }
+    }
+    if (path.dirname(ancestor) === ancestor) break;
   }
   throw new Error(
     "No private temporary storage is available on this workspace's filesystem",

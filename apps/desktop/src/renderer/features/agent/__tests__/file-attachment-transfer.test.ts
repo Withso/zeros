@@ -207,4 +207,52 @@ describe("reference attachment staging", () => {
       expect.objectContaining({ cwd: "/other", offset: 0 }),
     );
   });
+
+  it("retains the source after a mid-upload disconnect and retries all bytes with a new upload id", async () => {
+    const bytes = new Uint8Array(ATTACHMENT_CHUNK_BYTES + 11).fill(7);
+    const a = attachment({ size: bytes.length, sourceFile: new Blob([bytes]) });
+    let attempt = 0;
+    write.mockImplementation(async (args) => {
+      if (args.abort || (attempt === 1 && args.offset > 0)) {
+        throw new Error("WebSocket connection closed");
+      }
+      if (!args.base64) {
+        attempt += 1;
+        return { ...final, bytes: 0, pending: true };
+      }
+      const received = args.offset + Buffer.from(args.base64, "base64").length;
+      return {
+        ...final,
+        bytes: received,
+        ...(received < bytes.length ? { pending: true } : {}),
+      };
+    });
+
+    await expect(ensureFileAttachment("/repo", a)).rejects.toThrow(
+      "WebSocket connection closed",
+    );
+    expect(getFileAttachmentProgress("/repo", a.id)?.phase).toBe("error");
+    const recoveryId = a.sourceRecoveryId;
+    expect(recoveryId).toEqual(expect.any(String));
+    expect(a.diskPath).toBeUndefined();
+    expect(write).toHaveBeenLastCalledWith(
+      expect.objectContaining({ abort: true }),
+    );
+
+    await ensureFileAttachment("/repo", a);
+    const requests = write.mock.calls.map(([args]) => args);
+    const starts = requests.filter((args) => !args.abort && !args.base64);
+    expect(starts).toHaveLength(2);
+    expect(starts[1].uploadId).not.toBe(starts[0].uploadId);
+    const chunks = requests.filter(
+      (args) => args.uploadId === starts[1].uploadId && args.base64,
+    );
+    expect(chunks.map((args) => args.offset)).toEqual([0, ATTACHMENT_CHUNK_BYTES]);
+    expect(Buffer.concat(chunks.map((args) => Buffer.from(args.base64, "base64"))))
+      .toEqual(Buffer.from(bytes));
+    expect(requests.every((args) => args.attachmentId === a.id)).toBe(true);
+    expect(a.sourceRecoveryId).toBe(recoveryId);
+    expect(a.diskPath).toBe(final.relativePath);
+    expect(getFileAttachmentProgress("/repo", a.id)?.phase).toBe("ready");
+  });
 });

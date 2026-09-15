@@ -40,9 +40,12 @@ describe("attachment chunk transfer", () => {
       });
       expect(pending.pending).toBe(true);
       expect(await fs.readdir(root)).toEqual([]);
-      expect(await fs.readdir(privateData)).toHaveLength(1);
+      const privateEntries = await fs.readdir(privateData);
+      expect(privateEntries.filter((entry) => entry.startsWith("zeros-attachment-"))).toHaveLength(1);
+      expect(privateEntries).toContain("attachment-temporaries");
       await transferContextAttachment(root, { ...args(), base64: "", abort: true });
-      expect(await fs.readdir(privateData)).toEqual([]);
+      expect(await fs.readdir(privateData)).toEqual(["attachment-temporaries"]);
+      expect(await fs.readdir(path.join(privateData, "attachment-temporaries"))).toEqual([]);
       expect(await fs.readdir(root)).toEqual([]);
     } finally {
       await resetAttachmentTransfersForTests();

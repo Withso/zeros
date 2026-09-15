@@ -76,6 +76,8 @@ import { runAttachmentLayoutSmoke } from "./ui-smoke-attachment-layout.mjs";
 import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
 import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
+import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
+import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
 import {
   expectDiffSeparatorCards,
   runEditDiffSeparatorsSmoke,
@@ -140,6 +142,12 @@ try {
   await waitForHttp(pageUrl);
 
   browser = await chromium.launch();
+  const overlayPage = await browser.newPage();
+  await runOverlayPositioningSmoke({ page: overlayPage, check, harnessBase });
+  await overlayPage.close();
+  const draftPage = await browser.newPage();
+  await runDraftIndicatorsSmoke({ page: draftPage, check, harnessBase });
+  await draftPage.close();
   const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
   const consoleLines = [];
   const pageErrors = [];

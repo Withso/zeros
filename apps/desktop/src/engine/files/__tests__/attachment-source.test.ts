@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { registerAttachmentSource } from "../attachment-source";
+import { registerAttachmentSource, pruneAttachmentSources } from "../attachment-source";
 import { transferContextAttachment } from "../attachment-transfer";
 import {
   stageContextGraphAttachmentFile,
@@ -37,6 +37,32 @@ async function selection() {
   };
   return { source, bytes, args };
 }
+
+it("prunes only expired unreferenced source records, preserving source files and current references", async () => {
+  const { source, bytes, args } = await selection();
+  const directory = path.join(root, "private", "attachment-sources");
+  const protectedId = args.nativeSourceId;
+  const abandonedId = await registerAttachmentSource(source, bytes.length);
+  const freshId = await registerAttachmentSource(source, bytes.length);
+  const old = new Date(Date.now() - 2 * 86_400_000);
+  for (const id of [protectedId, abandonedId]) await fs.utimes(path.join(directory, `${id}.json`), old, old);
+  const linkedId = "f".repeat(36);
+  await fs.symlink(source, path.join(directory, `${linkedId}.json`));
+  await pruneAttachmentSources(new Set([protectedId]));
+  expect(await fs.readFile(source)).toEqual(bytes);
+  expect(await fs.readdir(directory)).toEqual(expect.arrayContaining([`${protectedId}.json`, `${freshId}.json`, `${linkedId}.json`]));
+  await expect(fs.stat(path.join(directory, `${abandonedId}.json`))).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+it("refreshes an existing capability before a cleanup can expire it", async () => {
+  const { source, bytes, args } = await selection();
+  const file = path.join(root, "private", "attachment-sources", `${args.nativeSourceId}.json`);
+  const old = new Date(Date.now() - 2 * 86_400_000);
+  await fs.utimes(file, old, old);
+  await registerAttachmentSource(source, bytes.length, args.nativeSourceId);
+  await pruneAttachmentSources(new Set());
+  expect((await fs.stat(file)).mtimeMs).toBeGreaterThan(old.getTime());
+});
 
 it("copies a selected file byte for byte through a durable opaque source id", async () => {
   const { source, bytes, args } = await selection();

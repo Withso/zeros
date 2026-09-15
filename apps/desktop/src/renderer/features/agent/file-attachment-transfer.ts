@@ -9,6 +9,7 @@ import {
   releaseAttachmentSource,
 } from "./attachment-sources";
 import { attachmentOwner } from "./attachment-owner";
+import { registerAttachmentSourceOwner } from "./attachment-source-retention";
 import type { ComposerAttachment } from "./composer-attachments";
 
 export type FileAttachmentProgress = {
@@ -133,6 +134,7 @@ export async function ensureFileAttachment(
       mimeType: attachment.mimeType,
     };
     publish(key, { phase: "saving", percent: 0 });
+    const releaseOwner = registerAttachmentSourceOwner(() => attachment);
     flight = withUploadSlot(async () => {
       if (!canUpload) {
         return writeContextAttachment({ ...args, base64: "", resolve: true });
@@ -241,7 +243,7 @@ export async function ensureFileAttachment(
       attachment.contextAttachmentId = id;
       void releaseAttachmentSource(attachment.sourceRecoveryId).catch(() => {});
       return result;
-    });
+    }).finally(releaseOwner);
     flights.set(key, flight);
     void flight
       .then(

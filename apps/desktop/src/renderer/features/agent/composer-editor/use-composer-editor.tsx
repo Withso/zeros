@@ -51,6 +51,7 @@ import { ComposerSuggestionPopup } from "./suggestion-popup";
 import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
 import { filesToAttachments, textFileAttachment } from "./attachment-io";
+import { registerAttachmentSourceOwner } from "../attachment-source-retention";
 import { classifyComposerPaste, longPasteToAttachment } from "./long-paste";
 import { copyComposerSelection, pasteComposerClipboard } from "./clipboard";
 import {
@@ -280,6 +281,7 @@ export function useComposerEditor(
   const store = storeRef.current;
 
   const attachmentMapRef = useRef<Map<string, ComposerAttachment>>(new Map());
+  useEffect(() => registerAttachmentSourceOwner(() => [...attachmentMapRef.current.values()]), []);
   // Seed staged attachment bytes from the initial content ONCE (draft/edit).
   const seededRef = useRef(false);
   if (!seededRef.current) {

@@ -5436,14 +5436,26 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     .getByRole("menuitem")
     .first()
     .textContent();
+  check(
+    "nested hit stack initially focuses its deepest layer",
+    await waitFor(
+      () => hitStack.getByRole("menuitem").first().evaluate(
+        (item) => item === document.activeElement,
+      ),
+      "design-hit-stack-initial-focus",
+    ),
+  );
   await page.keyboard.press("ArrowDown");
   check(
     "nested hit stack supports roving arrow-key focus",
-    await page.evaluate(
-      (deepest) =>
-        document.activeElement?.getAttribute("role") === "menuitem" &&
-        document.activeElement.textContent !== deepest,
-      deepestHitText,
+    await waitFor(
+      () => page.evaluate(
+        (deepest) =>
+          document.activeElement?.getAttribute("role") === "menuitem" &&
+          document.activeElement.textContent !== deepest,
+        deepestHitText,
+      ),
+      "design-hit-stack-arrow-focus",
     ),
   );
   await page.keyboard.press("Escape");

@@ -8,6 +8,7 @@ vi.mock("../../git/git-exec", () => ({ runFile }));
 import {
   createAttachmentTemporaryDirectory,
   MACOS_ATTACHMENT_TEMP_SCRIPT,
+  pruneAttachmentTemporaryDirectories,
 } from "../attachment-temporary-directory";
 
 let root: string;
@@ -64,6 +65,49 @@ it("ignores a TMPDIR symlink into the repository and preserves existing files", 
   );
 });
 
+it.each(["TMPDIR", "TMPDIR symlink", "app data"])(
+  "rejects %s inside a folder enclosing the workspace",
+  async (location) => {
+    const enclosing = path.join(root, "enclosing");
+    const nestedWorkspace = path.join(enclosing, "workspace");
+    const candidate = path.join(enclosing, "tmp");
+    await fs.mkdir(nestedWorkspace, { recursive: true });
+    await fs.mkdir(candidate);
+    if (location === "app data") {
+      // Model a Design marker without creating or modifying Design files.
+      const lstat = fs.lstat.bind(fs);
+      vi.spyOn(fs, "lstat").mockImplementation(
+        (async (target) =>
+          String(target) === path.join(enclosing, "design.toml")
+            ? lstat(enclosing)
+            : lstat(target)) as typeof fs.lstat,
+      );
+      vi.spyOn(os, "tmpdir").mockReturnValue(nestedWorkspace);
+      vi.stubEnv("ZEROS_DATA_DIR", candidate);
+    } else if (location === "TMPDIR symlink") {
+      await fs.writeFile(path.join(enclosing, ".git"), "gitdir: elsewhere\n");
+      const alias = path.join(root, "temp-alias");
+      await fs.symlink(candidate, alias);
+      vi.spyOn(os, "tmpdir").mockReturnValue(alias);
+    } else {
+      await fs.mkdir(path.join(enclosing, ".git"));
+      vi.spyOn(os, "tmpdir").mockReturnValue(candidate);
+    }
+    const temporary =
+      await createAttachmentTemporaryDirectory(nestedWorkspace);
+    try {
+      expect(temporary.path.startsWith(enclosing + path.sep)).toBe(false);
+      expect(
+        (await fs.readdir(candidate)).filter((entry) =>
+          entry.startsWith("zeros-attachment-"),
+        ),
+      ).toEqual([]);
+    } finally {
+      await temporary.dispose();
+    }
+  },
+);
+
 async function externalVolume() {
   const replacement = path.join(root, "replacement");
   await fs.mkdir(replacement);
@@ -105,11 +149,18 @@ it("asks macOS for destination-volume storage using argv and cleans its replacem
   expect(await fs.readdir(workspace)).toEqual([]);
 });
 
-it.each(["workspace", "other-device"])(
+it.each(["workspace", "other-device", "enclosing-repository"])(
   "refuses an unsafe macOS result (%s) without touching existing contents",
   async (location) => {
-    await externalVolume();
-    const unsuitable = location === "workspace" ? workspace : privateData;
+    const replacement = await externalVolume();
+    const unsuitable =
+      location === "workspace"
+        ? workspace
+        : location === "enclosing-repository"
+          ? replacement
+          : privateData;
+    if (location === "enclosing-repository")
+      await fs.mkdir(path.join(root, ".git"));
     await fs.writeFile(path.join(unsuitable, "keep.txt"), "user contents");
     runFile.mockResolvedValue({
       stdout: JSON.stringify(unsuitable),
@@ -131,4 +182,78 @@ it("reports a native resolver failure without falling back to repository storage
     "volume disconnected",
   );
   expect(await fs.readdir(workspace)).toEqual([]);
+});
+
+it("uses a private sibling on a Linux workspace volume when ordinary temp storage is elsewhere", async () => {
+  const stat = fs.stat.bind(fs);
+  vi.spyOn(fs, "stat").mockImplementation((async (target) => {
+    const result = await stat(target);
+    if (
+      String(target) === root ||
+      String(target) === workspace ||
+      String(target).startsWith(path.join(root, "zeros-attachment-"))
+    )
+      result.dev += 1;
+    return result;
+  }) as typeof fs.stat);
+  const temporary = await createAttachmentTemporaryDirectory(workspace);
+  try {
+    expect(path.dirname(temporary.path)).toBe(root);
+    expect(await fs.readdir(workspace)).toEqual([]);
+  } finally {
+    await temporary.dispose();
+  }
+});
+
+it("never puts sibling fallback storage inside an enclosing repository", async () => {
+  await fs.mkdir(path.join(root, ".git"));
+  const stat = fs.stat.bind(fs);
+  vi.spyOn(fs, "stat").mockImplementation((async (target) => {
+    const result = await stat(target);
+    if (
+      String(target) === root ||
+      String(target) === workspace ||
+      String(target).startsWith(path.join(root, "zeros-attachment-"))
+    )
+      result.dev += 1;
+    return result;
+  }) as typeof fs.stat);
+  await expect(createAttachmentTemporaryDirectory(workspace)).rejects.toThrow(
+    /temporary storage/,
+  );
+  expect((await fs.readdir(root)).sort()).toEqual([
+    ".git",
+    "app-data",
+    path.basename(workspace),
+  ]);
+});
+
+it("reclaims only recorded directories from dead processes and leaves active or replaced directories intact", async () => {
+  const dead = await createAttachmentTemporaryDirectory(workspace);
+  const active = await createAttachmentTemporaryDirectory(workspace);
+  const replaced = await createAttachmentTemporaryDirectory(workspace);
+  const registry = path.join(privateData, "attachment-temporaries");
+  const entries = await fs.readdir(registry);
+  for (const entry of entries) {
+    const recordPath = path.join(registry, entry);
+    const record = JSON.parse(await fs.readFile(recordPath, "utf8"));
+    record.createdAt = Date.now() - 2 * 86_400_000;
+    if (record.path !== active.path) record.pid = 999_999_999;
+    if (record.path === replaced.path) record.ino += 1;
+    await fs.writeFile(recordPath, JSON.stringify(record));
+  }
+  await fs.writeFile(path.join(dead.path, "contents"), "partial copy");
+  await fs.writeFile(path.join(replaced.path, "keep.txt"), "user contents");
+  try {
+    await pruneAttachmentTemporaryDirectories();
+    await expect(fs.stat(dead.path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await fs.stat(active.path)).isDirectory()).toBe(true);
+    expect(
+      await fs.readFile(path.join(replaced.path, "keep.txt"), "utf8"),
+    ).toBe("user contents");
+  } finally {
+    await dead.dispose();
+    await active.dispose();
+    await replaced.dispose();
+  }
 });

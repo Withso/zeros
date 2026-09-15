@@ -54,6 +54,12 @@ preparation retries on the next write. Attachment-stage and share failures
 retain their error messages while Context-tab reads keep legacy/current files
 visible without attempting a migration or adding generated directories.
 
+Attachment copy buffers and their cleanup records live in private storage
+outside the checkout. On an explicit context write, an obsolete
+`.context/.attachment-staging/` is removed only if empty or containing its exact
+generated ignore file. Other contents and links are preserved. Recovery-source
+maintenance does not delete completed files in either context scope.
+
 Saved attachment `diskPath` values remain valid in both layouts. Attachment
 reads try the exact saved path, the other scope in that root, then both scopes
 in the other root. Exact successful reads win when conflicting copies exist.

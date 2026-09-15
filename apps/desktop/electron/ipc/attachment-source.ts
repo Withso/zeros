@@ -1,8 +1,38 @@
-import { ipcMain, type IpcMainEvent } from "electron";
+import { clipboard, ipcMain, type IpcMainEvent } from "electron";
 import { randomUUID } from "node:crypto";
-import { MAX_ATTACHMENT_BYTES } from "@zeros/protocol/attachment-policy";
-import { registerAttachmentSource } from "../../src/engine/files/attachment-source";
+import { decodeHTML } from "entities";
+import {
+  MAX_ATTACHMENT_BYTES,
+  ATTACHMENT_CLIPBOARD_MIME,
+  collectAttachmentSourceIds,
+  isAttachmentSourceId,
+} from "@zeros/protocol/attachment-policy";
+import {
+  registerAttachmentSource,
+  pruneAttachmentSources,
+} from "../../src/engine/files/attachment-source";
+import { pruneAttachmentTemporaryDirectories } from "../../src/engine/files/attachment-temporary-records";
 import { getMainWindow } from "./events";
+
+function clipboardSourceIds(): string[] {
+  let encoded = clipboard
+    .readBuffer(ATTACHMENT_CLIPBOARD_MIME)
+    .toString("utf8");
+  if (!encoded) {
+    const html = clipboard.readHTML();
+    if (!html.includes("data-zeros-composer")) return [];
+    if (html.length > 2_000_000)
+      throw new Error("Attachment clipboard metadata is too large");
+    const match = html.match(/data-zeros-composer\s*=\s*(["'])(.*?)\1/s);
+    if (!match) throw new Error("Attachment clipboard metadata is unavailable");
+    encoded = decodeHTML(match[2]);
+  }
+  if (encoded.length > 2_000_000)
+    throw new Error("Attachment clipboard metadata is too large");
+  const ids = collectAttachmentSourceIds(JSON.parse(encoded));
+  if (!ids) throw new Error("Attachment clipboard metadata is too large");
+  return ids;
+}
 
 export function registerAttachmentSourceIpc(): void {
   ipcMain.handle("zeros:attachment-source", async (event, input: unknown) => {
@@ -30,6 +60,28 @@ export function registerAttachmentSourceIpc(): void {
     }
     return registerAttachmentSource(args.path, args.size as number, args.id);
   });
+  ipcMain.handle(
+    "zeros:attachment-source-maintenance",
+    async (event, input: unknown) => {
+      const contents = getMainWindow()?.webContents;
+      if (
+        !contents ||
+        event.sender !== contents ||
+        event.senderFrame !== contents.mainFrame
+      )
+        throw new Error("Attachment cleanup requires the main renderer");
+      if (
+        !Array.isArray(input) ||
+        input.length > 100_000 ||
+        !input.every(isAttachmentSourceId)
+      )
+        throw new Error("Invalid attachment recovery references");
+      const clipboardIds = clipboardSourceIds();
+      await pruneAttachmentSources(new Set([...input, ...clipboardIds]));
+      await pruneAttachmentTemporaryDirectories();
+      return clipboardIds;
+    },
+  );
 }
 
 /** Drain source preparation, not the full remote upload: the persisted source

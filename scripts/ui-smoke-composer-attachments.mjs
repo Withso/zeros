@@ -97,10 +97,42 @@ export async function runComposerAttachmentsSmoke({ page, check }) {
     "an edit submission ignores attachment removal events",
     (await page.locator("[data-attachment-pill]").count()) === 1,
   );
+  const lockedCut = await page.locator(".composer-pm").evaluate((element) => {
+    const editor = element.editor;
+    editor.commands.selectAll();
+    const before = editor.getJSON();
+    const clipboardData = new DataTransfer();
+    element.dispatchEvent(
+      new ClipboardEvent("cut", {
+        bubbles: true,
+        cancelable: true,
+        clipboardData,
+      }),
+    );
+    return {
+      before,
+      after: editor.getJSON(),
+      copied: clipboardData.getData("text/plain"),
+    };
+  });
+  expect(lockedCut.copied).toContain("Inspect the attached file");
+  expect(lockedCut.copied).toContain("/att-original/notes.txt");
+  check(
+    "cut copies the selection without deleting a submitting edit",
+    JSON.stringify(lockedCut.after) === JSON.stringify(lockedCut.before),
+  );
   await page.evaluate(() => window.composerAttachmentsHarness.failEdit());
   await expect(
     page.locator('.composer-pm[contenteditable="true"]'),
   ).toBeVisible();
+  check(
+    "a failed submission retains the full draft after a cut attempt",
+    JSON.stringify(
+      await page.locator(".composer-pm").evaluate((element) =>
+        element.editor.getJSON(),
+      ),
+    ) === JSON.stringify(lockedCut.before),
+  );
   if (await remove.count()) {
     await expect(remove).toBeEnabled();
     await remove.click();
@@ -113,4 +145,26 @@ export async function runComposerAttachmentsSmoke({ page, check }) {
       true,
     );
   }
+  const cutAfterFailure = await page.locator(".composer-pm").evaluate(
+    (element) => {
+      element.editor.commands.selectAll();
+      const clipboardData = new DataTransfer();
+      element.dispatchEvent(
+        new ClipboardEvent("cut", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData,
+        }),
+      );
+      return {
+        empty: element.editor.isEmpty,
+        copied: clipboardData.getData("text/plain"),
+      };
+    },
+  );
+  check(
+    "cut deletes the selection again after a failed submission unlocks the editor",
+    cutAfterFailure.empty &&
+      cutAfterFailure.copied.includes("Inspect the attached file"),
+  );
 }

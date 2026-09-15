@@ -3,6 +3,29 @@
 export const MAX_ATTACHMENT_BYTES = 500_000_000;
 /** Keep individual encoded requests comfortably below the bridge frame cap. */
 export const ATTACHMENT_CHUNK_BYTES = 1024 * 1024;
+/** Grace for unreferenced recovery data; referenced drafts never expire. */
+export const ATTACHMENT_SOURCE_GRACE_MS = 86_400_000;
+export const ATTACHMENT_CLIPBOARD_MIME = "application/x-zeros-composer+json";
+export const isAttachmentSourceId = (id: unknown): id is string =>
+  typeof id === "string" && /^[a-f0-9-]{36}$/.test(id);
+
+/** Read side metadata only. A partial traversal is never safe input to GC. */
+export function collectAttachmentSourceIds(value: unknown): string[] | null {
+  const ids = new Set<string>();
+  const seen = new Set<object>();
+  const pending = [value];
+  while (pending.length) {
+    const item = pending.pop();
+    if (!item || typeof item !== "object" || seen.has(item)) continue;
+    if (seen.size >= 100_000) return null;
+    seen.add(item);
+    for (const [key, child] of Object.entries(item)) {
+      if (key === "sourceRecoveryId" && isAttachmentSourceId(child)) ids.add(child);
+      else if (!["sourceFile", "json", "preview"].includes(key) && child && typeof child === "object") pending.push(child);
+    }
+  }
+  return [...ids];
+}
 
 // This is a format policy, not a malware scanner. Source scripts remain valid
 // coding context. Ambiguous data extensions (.bin, .obj) are not denied.
