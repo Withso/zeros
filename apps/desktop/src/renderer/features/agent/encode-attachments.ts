@@ -51,6 +51,7 @@ import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./composer-editor/reconstruc
 import type { ComposerAttachment } from "./composer-attachments";
 import type { ContentBlock } from "../../platform/bridge/agent-events";
 import type { AgentTextMessageAttachment } from "@zeros/protocol/agent-messages";
+import { ensureFileAttachment, fileAttachmentReference } from "./file-attachment-transfer";
 
 /** Everything the encoder needs from the surrounding session. Passed in rather
  *  than read from a hook so the function stays callable from both the live
@@ -207,6 +208,26 @@ export async function encodeAttachments(
         reason:
           a.validation.reason ?? "it exceeds this model's attachment budget",
       });
+      continue;
+    }
+
+    if (a.delivery === "reference" || a.kind === "file") {
+      if (!ctx.cwd) throw new Error(`Choose a workspace before sending "${a.name}"`);
+      // A failed or unfinished transfer must never produce a successful send
+      // containing a nonexistent path. The caller retains the unsent draft.
+      const written = await ensureFileAttachment(ctx.cwd, a);
+      blocks.push({ type: "text", text: fileAttachmentReference(a.name, written) });
+      const bubble: AgentTextMessageAttachment = {
+        name: a.name,
+        mimeType: a.mimeType,
+        kind: a.kind,
+        delivery: "reference",
+        size: written.bytes,
+        diskPath: written.relativePath,
+        attachmentId: a.contextAttachmentId ?? a.id,
+      };
+      bubbleAttachments.push(bubble);
+      bubbleAttachmentById.set(a.id, bubble);
       continue;
     }
 

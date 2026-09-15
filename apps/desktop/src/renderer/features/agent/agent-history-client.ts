@@ -353,14 +353,8 @@ export async function listChatSummariesForFolder(args: {
   );
 }
 
-export interface AttachmentWriteResult {
-  absolutePath: string;
-  relativePath: string;
-  mimeType: string;
-  bytes: number;
-  /** True when the exact bytes were already staged and disk did not change. */
-  skipped?: boolean;
-}
+export type { AttachmentWriteResult } from "@zeros/protocol/attachment-policy";
+import type { AttachmentWriteResult, AttachmentTransferOptions } from "@zeros/protocol/attachment-policy";
 
 export interface AttachmentReadResult {
   base64: string;
@@ -382,7 +376,7 @@ export { isAgentAttachmentDiskPath } from "./attachment-file-reader";
  *  shows what was attached. `chatId` is provenance only and optional: staging
  *  happens before the first prompt creates the chat. Unrelated to chat
  *  storage — a dedicated file-write IPC. */
-export async function writeContextAttachment(args: {
+export async function writeContextAttachment(args: AttachmentTransferOptions & {
   cwd: string;
   chatId?: string | null;
   attachmentId: string;
@@ -405,13 +399,13 @@ export async function writeContextAttachment(args: {
   } else {
     result = await nativeInvoke<AttachmentWriteResult>(
       "agent_attachment_write",
-      args,
+      { ...args },
     );
   }
   // Neither transport produces the renderer's filesystem intent signal at the
   // exact write boundary. Nudge the Context tab only when bytes changed; the
   // send-time idempotent safety net stays quiet.
-  if (!result.skipped) notifyContextGraphChanged(args.cwd);
+  if (!result.skipped && !result.pending) notifyContextGraphChanged(args.cwd);
   return result;
 }
 

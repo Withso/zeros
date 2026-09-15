@@ -49,7 +49,7 @@ export function AttachmentPillView({
   onPreview,
 }: {
   name: string;
-  kind: "image" | "text";
+  kind: "image" | "text" | "file";
   thumbnailUri?: string;
   /** Image pills open the lightbox on click; omitted = inert. */
   onPreview?: (dataUri: string) => void;

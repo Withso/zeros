@@ -35,7 +35,7 @@
 // basename, and every resolved path confined lexically + by realpath.
 // ──────────────────────────────────────────────────────────
 
-import { stageContextGraphAttachment } from "../../../src/engine/files/context-graph";
+import { transferContextAttachment } from "../../../src/engine/files/attachment-transfer";
 import type { CommandHandler } from "../router";
 import { cwdIsTrusted } from "./workspace-root-trust";
 
@@ -62,7 +62,8 @@ const ID_OK = /^[a-zA-Z0-9_-]+$/;
 export const agentAttachmentWrite: CommandHandler = async (args) => {
   const cwd = requireString(args, "cwd");
   const attachmentId = requireString(args, "attachmentId");
-  const base64 = requireString(args, "base64");
+  const base64 = args.base64;
+  if (typeof base64 !== "string") throw new Error("agent_attachment: missing base64");
   const mimeType = requireString(args, "mimeType");
   const filename = requireString(args, "filename");
   const chatId = args.chatId;
@@ -83,26 +84,11 @@ export const agentAttachmentWrite: CommandHandler = async (args) => {
     );
   }
 
-  const staged = await stageContextGraphAttachment(cwd, {
+  return transferContextAttachment(cwd, {
+    ...args,
     attachmentId,
     base64,
     filename,
-  });
-  if (!staged.ok) {
-    throw new Error(
-      `agent_attachment: ${staged.error ?? "couldn't stage the attachment"}`,
-    );
-  }
-
-  // The renderer needs both the absolute path (for tool-call paths
-  // like Read("/abs/path")) and the cwd-relative path (for @-mentions
-  // like @.context/local/attachments/...). Ship both so the prompt
-  // builder can pick whichever the active agent prefers.
-  return {
-    absolutePath: staged.absolutePath,
-    relativePath: staged.relativePath,
     mimeType,
-    bytes: staged.bytes,
-    ...(staged.skipped ? { skipped: true } : {}),
-  };
+  });
 };

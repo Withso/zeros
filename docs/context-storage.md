@@ -1,5 +1,8 @@
 # Workspace context storage
 
+See [Composer attachments](composer-attachments.md) for the 500 MB file policy
+and chunked transfer / path delivery contract.
+
 The Context tab uses `.context/local/` for private material and
 `.context/shared/` for material selected for sharing. Composer attachments use
 `<scope>/attachments/<attachmentId>/<filename>`; other files inside either

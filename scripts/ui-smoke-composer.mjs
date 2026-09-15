@@ -72,6 +72,7 @@ import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
 import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
+import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
 import {
   expectDiffSeparatorCards,
   runEditDiffSeparatorsSmoke,
@@ -2488,6 +2489,7 @@ try {
 
   await runPersonalOrganizationSmoke({ page, check });
   await runMentionsSmoke({ page, check });
+  await runComposerAttachmentsSmoke({ page, check });
   await runCustomizeSmoke({ page, check });
   await runToolsSmoke({ page, check });
   await runNativeToolsSmoke({ page, check });

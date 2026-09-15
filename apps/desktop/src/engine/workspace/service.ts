@@ -204,6 +204,7 @@ import {
 } from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
+import { transferContextAttachment } from "../files/attachment-transfer";
 import {
   externalizeLegacyMessageImages,
   payloadNeedsLegacyImageMigration,
@@ -212,7 +213,6 @@ import {
   ensureContextGraph,
   listContextGraph,
   setContextGraphAttachmentShared,
-  stageContextGraphAttachment,
 } from "../files/context-graph";
 import {
   opSettingsMigrateLegacy,
@@ -5645,27 +5645,14 @@ export class WorkspaceService {
       }
       case "attachment.write": {
         const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
-        const mimeType = reqStr(params, "mimeType");
-        const staged = await stageContextGraphAttachment(cwd, {
-          attachmentId: reqStr(params, "attachmentId"),
-          base64: reqStr(params, "base64"),
-          filename: reqStr(params, "filename"),
-        });
-        if (!staged.ok) {
+        try {
+          return await transferContextAttachment(cwd, params);
+        } catch (error) {
           throw new GitError({
             code: "VALIDATION_FAILED",
-            message:
-              staged.error ??
-              "Couldn't stage the attachment in the context graph",
+            message: error instanceof Error ? error.message : String(error),
           });
         }
-        return {
-          absolutePath: staged.absolutePath,
-          relativePath: staged.relativePath,
-          mimeType,
-          bytes: staged.bytes,
-          ...(staged.skipped ? { skipped: true } : {}),
-        };
       }
 
       // ── Context graph (the Context tab's canvas) ──────────

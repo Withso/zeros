@@ -57,7 +57,12 @@ export interface ComposerAttachment {
   name: string;
   mimeType: string;
   size: number;
-  kind: "image" | "text";
+  kind: "image" | "text" | "file";
+  /** Imported files are delivered by their confirmed context path. Legacy
+   * inline text/image payloads remain readable for existing drafts. */
+  delivery?: "reference";
+  /** Browser file handle; omitted from persisted drafts. Never read in full. */
+  sourceFile?: Blob;
   /** base64 payload for images. Empty for text attachments. */
   data: string;
   /** Persisted cwd-relative source for a reconstructed transcript image.

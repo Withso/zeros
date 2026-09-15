@@ -117,6 +117,24 @@ describe("persist-composer-drafts", () => {
     expect(written.chats["chat-1"].json).not.toBeNull();
   });
 
+  it("persists file references without serializing their source blob", async () => {
+    const { store, attempts } = installStorage({ maxBytes: 2_000 });
+    const state = stateWith("inspect the file", "");
+    const attachment = state.chatComposerDrafts["chat-1"].attachments[0];
+    Object.assign(attachment, {
+      kind: "file", name: "events.jsonl", delivery: "reference", size: 500_000_000,
+      sourceFile: new Blob(["body stays out of localStorage"]),
+      diskPath: ".context/local/attachments/att-1/events.jsonl",
+    });
+    schedulePersistDrafts(state);
+    await flush();
+    expect(attempts).toHaveLength(1);
+    const raw = store.get(KEY)!;
+    expect(raw).not.toContain("sourceFile");
+    expect(raw).not.toContain("body stays out of localStorage");
+    expect(loadPersistedDrafts().chats["chat-1"].attachments[0]).toMatchObject({ id: "att-1", delivery: "reference", size: 500_000_000 });
+  });
+
   it("keeps the typed prompt when the attachment blows the quota", async () => {
     // The regression. Before the fix this wrote NOTHING and the user lost
     // their prompt on reload.

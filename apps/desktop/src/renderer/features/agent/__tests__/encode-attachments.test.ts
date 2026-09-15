@@ -84,6 +84,47 @@ const NO_CWD: EncodeAttachmentsContext = {
   chatId: null,
 };
 
+describe("file references reach every agent without inline payloads", () => {
+  beforeEach(() => {
+    writeContextAttachment.mockReset().mockResolvedValue({
+      absolutePath: "/repo/.context/local/attachments/att-1/video.mkv",
+      relativePath: ".context/local/attachments/att-1/video.mkv",
+      mimeType: "video/x-matroska",
+      bytes: 500_000_000,
+      skipped: true,
+    });
+    readTextAttachment.mockReset();
+    readImageAttachment.mockReset();
+  });
+
+  const file = (): ComposerAttachment => ({
+    id: "att-1", name: "video.mkv", mimeType: "video/x-matroska", kind: "file",
+    delivery: "reference", size: 500_000_000, data: "", validation: { ok: true },
+  });
+
+  it.each([VISION, NON_VISION])("sends a short confirmed path for a 500 MB file (%j)", async (ctx) => {
+    const encoded = await encodeAttachments([file()], ctx);
+    expect(encoded.blocks).toEqual([{ type: "text", text: expect.stringContaining("/repo/.context/local/attachments/att-1/video.mkv") }]);
+    expect(JSON.stringify(encoded.blocks).length).toBeLessThan(1_000);
+    expect(encoded.bubbleAttachments[0]).toMatchObject({ delivery: "reference", size: 500_000_000 });
+    expect(readTextAttachment).not.toHaveBeenCalled();
+    expect(readImageAttachment).not.toHaveBeenCalled();
+  });
+
+  it("preserves file identity and path delivery when editing a sent message", async () => {
+    const encoded = await encodeAttachments([file()], VISION);
+    const reconstructed = messageToEditorContent({ text: "inspect", attachments: encoded.bubbleAttachments });
+    expect(reconstructed.attachments[0]).toMatchObject({ kind: "file", delivery: "reference", contextAttachmentId: "att-1", size: 500_000_000 });
+    expect((await encodeAttachments(reconstructed.attachments, VISION)).blocks).toEqual(encoded.blocks);
+  });
+
+  it("fails the send when the saved file is missing or the upload fails", async () => {
+    writeContextAttachment.mockRejectedValueOnce(new Error("attachment not available"));
+    await expect(encodeAttachments([file()], VISION)).rejects.toThrow(/not available/);
+    await expect(encodeAttachments([file()], NO_CWD)).rejects.toThrow(/Choose a workspace/);
+  });
+});
+
 describe("textAttachmentBlock", () => {
   it("wraps the body in <file name>", () => {
     expect(textAttachmentBlock("a.txt", "body")).toBe(

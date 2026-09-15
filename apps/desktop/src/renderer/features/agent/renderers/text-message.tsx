@@ -306,7 +306,7 @@ function MessageAttachmentPill({
     diskPath: seg.diskPath,
     attachmentId: seg.attachmentId,
     legacyUri: seg.thumbnailUri,
-    enabled: active,
+    enabled: active !== false && seg.kind === "image",
   });
   return (
     <AttachmentPillView
@@ -334,7 +334,7 @@ function UserBubbleAttachment({
     diskPath: a.diskPath,
     attachmentId: a.attachmentId,
     legacyUri: a.thumbnailUri,
-    enabled: attachmentImagesActive,
+    enabled: attachmentImagesActive !== false && a.kind === "image",
   });
   const isImage = a.kind === "image" && Boolean(source);
   if (isImage && source) {

@@ -62,10 +62,9 @@ const GITIGNORE_BODY = [
 
 /** Same id alphabet the composer generates and the attachment IPC enforces. */
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
-/** Keep remote/local graph writes on the same image budget as the composer and
- * read-file bridge. The encoded ceiling is checked before Buffer allocation so
- * a hostile relay cannot use an enormous invalid base64 string as a transient
- * memory spike either. */
+/** Legacy single-call base64 ceiling. New 500 MB imports use the chunked
+ * transfer path; never raise this limit to fit a whole file in one frame.
+ * Check the encoded ceiling before allocating a Buffer. */
 export const MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_ATTACHMENT_BASE64_CHARS =
   Math.ceil(MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES / 3) * 4;
@@ -445,9 +444,20 @@ export interface ContextGraphStageResult {
 
 /** Read and compare through one no-follow handle. A stable inode check keeps a
  * concurrent replacement from being mistaken for the bytes we inspected. */
+type AttachmentContents = Buffer | { file: fs.FileHandle; length: number };
+
+async function readAttachmentChunk(contents: AttachmentContents, offset: number): Promise<Buffer> {
+  const length = Math.min(64 * 1024, contents.length - offset);
+  if (Buffer.isBuffer(contents)) return contents.subarray(offset, offset + length);
+  const bytes = Buffer.allocUnsafe(length);
+  const read = await contents.file.read(bytes, 0, length, offset);
+  if (read.bytesRead !== length) throw new Error("incomplete attachment upload");
+  return bytes;
+}
+
 async function existingFileMatches(
   filePath: string,
-  expected: Buffer,
+  expected: AttachmentContents,
 ): Promise<boolean> {
   let handle: fs.FileHandle | null = null;
   try {
@@ -458,8 +468,13 @@ async function existingFileMatches(
     const openedStat = await handle.stat();
     if (!openedStat.isFile() || openedStat.size !== expected.length)
       return false;
-    const actual = await handle.readFile();
-    if (!actual.equals(expected)) return false;
+    for (let offset = 0; offset < expected.length;) {
+      const chunk = await readAttachmentChunk(expected, offset);
+      const actual = Buffer.allocUnsafe(chunk.length);
+      const read = await handle.read(actual, 0, actual.length, offset);
+      if (read.bytesRead !== actual.length || !actual.equals(chunk)) return false;
+      offset += chunk.length;
+    }
     const currentStat = await fs.lstat(filePath).catch(() => null);
     return (
       currentStat?.isFile() === true &&
@@ -478,7 +493,7 @@ async function existingFileMatches(
  * race at the predictable attachment filename. */
 async function atomicWriteAttachment(
   filePath: string,
-  contents: Buffer,
+  contents: AttachmentContents,
 ): Promise<void> {
   const temporaryPath = path.join(
     path.dirname(filePath),
@@ -494,7 +509,11 @@ async function atomicWriteAttachment(
         fsConstants.O_NOFOLLOW,
       0o600,
     );
-    await handle.writeFile(contents);
+    for (let offset = 0; offset < contents.length;) {
+      const chunk = await readAttachmentChunk(contents, offset);
+      await handle.writeFile(chunk);
+      offset += chunk.length;
+    }
     await handle.close();
     handle = null;
     try {
@@ -575,6 +594,29 @@ export async function stageContextGraphAttachment(
       error: "attachment exceeds the 5 MiB size limit",
     };
   }
+  return stageAttachmentContents(workspaceRoot, args, buf);
+}
+
+/** Internal, engine-owned upload handle. Never accepts a renderer-supplied
+ * source path. Chunks and completed copies stay bounded in memory. */
+export async function stageContextGraphAttachmentFile(
+  workspaceRoot: string,
+  args: { attachmentId: string; filename: string; file: fs.FileHandle; size: number },
+): Promise<ContextGraphStageResult> {
+  const { MAX_ATTACHMENT_BYTES } = await import("@zeros/protocol/attachment-policy");
+  if (!ID_OK.test(args.attachmentId) || !Number.isSafeInteger(args.size) || args.size < 0 || args.size > MAX_ATTACHMENT_BYTES) {
+    return { ok: false, error: "invalid attachment id or size" };
+  }
+  const stat = await args.file.stat();
+  if (!stat.isFile() || stat.size !== args.size) return { ok: false, error: "incomplete attachment upload" };
+  return stageAttachmentContents(workspaceRoot, args, { file: args.file, length: args.size });
+}
+
+async function stageAttachmentContents(
+  workspaceRoot: string,
+  args: { attachmentId: string; filename: string },
+  buf: AttachmentContents,
+): Promise<ContextGraphStageResult> {
   try {
     const scaffold = await ensureContextGraph(workspaceRoot);
     if (!scaffold.ok) {

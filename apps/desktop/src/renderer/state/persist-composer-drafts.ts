@@ -227,7 +227,7 @@ function withoutAttachments(snapshot: PersistedDrafts): PersistedDrafts {
 
 function writeNow(snapshot: PersistedDrafts): void {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot, (key, value) => key === "sourceFile" ? undefined : value));
     return;
   } catch {
     /* fall through to the degraded write */
