@@ -5,10 +5,18 @@ import { cva, type VariantProps } from "class-variance-authority";
 import { cn } from "@/renderer/shared/ui/cn";
 
 const buttonVariants = cva(
-  // Shared by EVERY button: fit content (no default width — width follows the
-  // text + icons), 10px horizontal padding, 8px icon↔text gap, and a 4px radius
-  // (--radius-sm; see RULES.md "Buttons"). The size variants set height only.
-  "inline-flex w-fit items-center justify-center gap-2 whitespace-nowrap rounded-sm px-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+  // Shared by EVERY button — and IDENTICAL to the Select dropdown trigger
+  // (primitives/select.tsx) so a button and a dropdown in one row are the
+  // same object in two roles: fit content, 6px corners (--radius-md), 6px
+  // horizontal / 4px vertical padding, 4px icon↔text gap, 13px text on an
+  // 18px line (leading-4.5), 14px glyphs. Height is NOT set — it falls out of
+  // the padding + line box + 1px border as 28px, exactly the trigger's. Every
+  // variant carries a border (transparent where it has no outline) so filled
+  // and outlined buttons measure the same. Size variants are height-neutral;
+  // only the icon-only squares pin a 28px box.
+  // :where keeps fallback SVG sizing below caller descendant selectors;
+  // explicit size classes on an SVG still take precedence as well.
+  "inline-flex w-fit items-center justify-center gap-1 whitespace-nowrap rounded-md border border-transparent px-1.5 py-1 text-xs leading-4.5 font-medium transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 focus-visible:border-highlighted-bright disabled:pointer-events-none disabled:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_:where(svg:not([class*='size-']))]:size-3.5",
   {
     variants: {
       // Canonical set: Primary (the rare main CTA) + Secondary (the everyday
@@ -18,24 +26,27 @@ const buttonVariants = cva(
         // Reserve for the single main action on a view.
         default:
           "bg-primary-button-bg text-primary-button-fg shadow hover:bg-primary-button-hover",
-        // SECONDARY — the everyday button: TRANSPARENT fill so it blends with
-        // whatever surface it sits on (bg1 / bg2 / bg3 alike) + border2 → hover
-        // bg2-hover + border3. (2026-07-17: fill bg2 → transparent so the button
-        // "matches its background"; on a bg2 surface this is visually identical
-        // to the old bg2 fill — it just stops over-lifting on bg1/bg3.)
+        // SECONDARY — the everyday button, wearing the dropdown trigger's
+        // exact chrome: TRANSPARENT fill so it blends with whatever surface it
+        // sits on (bg1 / bg2 / bg3 alike) + border3 → hover/open bg2-highlight
+        // + border4. (2026-07-17: fill bg2 → transparent so the button "matches
+        // its background"; 2026-09-15: border2/bg2-hover → the trigger's
+        // border3/bg2-highlight so a secondary button and a Select are
+        // indistinguishable at rest and on hover.)
         secondary:
-          "border border-border2 bg-transparent text-fg1 hover:border-border3 hover:bg-bg2-hover",
-        // GHOST — transparent; icon buttons + subtle/secondary text actions.
-        ghost: "hover:bg-bg2-hover hover:text-fg1",
+          "border-border3 bg-transparent text-fg1 hover:border-border4 hover:bg-bg2-highlight data-[state=open]:border-border4 data-[state=open]:bg-bg2-highlight",
+        // GHOST — transparent, no outline; icon buttons + subtle/secondary text
+        // actions (a dialog's Cancel). Same hover fill as the dropdown.
+        ghost: "hover:bg-bg2-highlight hover:text-fg1",
         // DESTRUCTIVE (primary) — solid red fill (--red-secondary); text is the
         // static --red-secondary-fg (white in both themes — fg1 would flip dark in light).
         destructive:
           "bg-red-secondary text-red-secondary-fg shadow hover:bg-red-secondary/90",
         // DESTRUCTIVE (secondary) — same neutral surface as Secondary
-        // (transparent fill + border2 → hover bg2-hover/border3); red-primary
-        // text carries the danger cue.
+        // (transparent fill + border3 → hover bg2-highlight/border4);
+        // red-primary text carries the danger cue.
         "destructive-secondary":
-          "border border-border2 bg-transparent text-red-primary hover:border-border3 hover:bg-bg2-hover",
+          "border-border3 bg-transparent text-red-primary hover:border-border4 hover:bg-bg2-highlight",
         // SECONDARY-ON — a Secondary button in a latched/selected state, for a
         // toggle that stays on screen after you press it (the empty chat's
         // transcript pills). Deliberately NOT Primary: N white fills is N main
@@ -50,19 +61,20 @@ const buttonVariants = cva(
         // make a focused-but-off control and an on-but-unfocused control look
         // identical.
         "secondary-on":
-          "border border-border4 bg-bg2-hover text-fg1 hover:bg-bg2-hover",
+          "border-border4 bg-bg2-highlight text-fg1 hover:bg-bg2-highlight",
       },
-      // Height only — 28px default; 24px (denser) / 32px (roomier) per layout.
-      // Icon-only squares sit on the SAME 24/28/32 scale so mixed rows line
-      // up: icon-sm ↔ sm, icon ↔ default, icon-lg ↔ lg. They drop the shared
-      // padding. (2026-07-12: was icon 36px / icon-sm 28px.)
+      // One height for every button (28px — see the base). The text sizes are
+      // kept as names so call sites don't churn, but they no longer differ:
+      // sm / default / lg are the same control. The icon-only squares pin the
+      // same 28px box (size-7) and drop the text padding. (2026-09-15: was
+      // 24 / 28 / 32px; unified with the dropdown trigger.)
       size: {
-        sm: "h-6 text-xs",
-        default: "h-7",
-        lg: "h-8",
-        "icon-sm": "h-6 w-6 px-0",
-        icon: "h-7 w-7 px-0",
-        "icon-lg": "h-8 w-8 px-0",
+        sm: "",
+        default: "",
+        lg: "",
+        "icon-sm": "size-7 p-0",
+        icon: "size-7 p-0",
+        "icon-lg": "size-7 p-0",
       },
     },
     defaultVariants: {

@@ -146,7 +146,6 @@ function DashedListBox({
         <Button
           variant="secondary"
           size="sm"
-          className="gap-1.5"
           onClick={onAdd}
         >
           <Plus className="size-3.5" aria-hidden="true" />
@@ -675,7 +674,6 @@ export function McpServerFormPage({
               <Button
                 variant="secondary"
                 size="sm"
-                className="gap-1.5"
                 onClick={() => setImportOpen(true)}
                 disabled={busy}
               >
@@ -686,7 +684,6 @@ export function McpServerFormPage({
             <Button
               variant="default"
               size="sm"
-              className="gap-1.5"
               disabled={!!error || busy || loading}
               onClick={() => void handleSave()}
             >
@@ -721,7 +718,7 @@ export function McpServerFormPage({
               value={draft.transport}
               onValueChange={(v) => set("transport", v as Transport)}
             >
-              <SelectTrigger className="min-w-[140px]">
+              <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -810,7 +807,7 @@ export function McpServerFormPage({
                     value={draft.auth}
                     onValueChange={(v) => set("auth", v as Draft["auth"])}
                   >
-                    <SelectTrigger className="min-w-[220px]">
+                    <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -934,7 +931,6 @@ export function McpServerFormPage({
               <Button
                 variant="secondary"
                 size="sm"
-                className="gap-1.5"
                 onClick={() =>
                   set("env", [
                     ...draft.env,
@@ -975,7 +971,6 @@ export function McpServerFormPage({
               <Button
                 variant="secondary"
                 size="sm"
-                className="gap-1.5"
                 onClick={() =>
                   set("env", [
                     ...draft.env,

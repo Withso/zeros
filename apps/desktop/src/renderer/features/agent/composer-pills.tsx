@@ -599,6 +599,8 @@ export function PermissionToggle({
 // `3 5` paints a 3-long rounded dash with a 5 gap; the near-zero `0.01` dot is
 // too small. The svg is inset 1px so we avoid
 // calc() in SVG geometry (Chromium-flaky) and the rect fills it at 100%.
+// rx/ry follow the nesting rule off that 1px inset: the card's 12px
+// PROMPT_SURFACE_RADIUS − 1px = 11.
 // Render INSIDE the composer card (position: relative); pair with a
 // transparent base border so only the dashes show.
 export function PlanModeFrame() {

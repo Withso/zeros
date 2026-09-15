@@ -534,7 +534,7 @@ export function DispatcherPage({
                     data-selected={p.id === selectedProjectId || undefined}
                     onSelect={() => setSelectedProjectId(p.id)}
                   >
-                    <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
+                    <span className="bg-bg2-hover inline-flex size-3.5 items-center justify-center rounded-sm text-xs">
                       <RepositoryIcon
                         project={p}
                         className="size-full rounded-sm"

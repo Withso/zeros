@@ -43,7 +43,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   await page.getByRole("tab", { name: "Experimental", exact: true }).click();
   await page
     .getByRole("switch", {
-      name: "Hide the archived workspace after 15 days",
+      name: "Hide archived workspaces after 15 days",
       exact: true,
     })
     .click();

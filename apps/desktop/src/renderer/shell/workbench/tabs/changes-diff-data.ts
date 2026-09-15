@@ -1,6 +1,7 @@
 import {
   parseDiffFromFile,
   parsePatchFiles,
+  type FileContents,
   type FileDiffLoadedFiles,
   type FileDiffMetadata,
 } from "@pierre/diffs";
@@ -20,6 +21,39 @@ export interface ChangesDiffData {
   message?: string;
   notice?: string;
   copyText?: string;
+}
+
+const MAX_PLACEHOLDER_FILES = 4096;
+const placeholderFiles = new Map<string, FileContents>();
+
+/** One shared object per (path, message) placeholder card.
+ *
+ * Pierre's virtualizer prepares a collapsed file item's layout against the
+ * object it already holds and then asserts the render committed that same
+ * object. Re-rendering a plain-text item with an equal-but-new `file` object
+ * (which is what a collapse or expand of a "No textual changes" card did) made
+ * the collapsed path commit the new object and throw "VirtualizedFile.render:
+ * rendered a different file than its prepared layout", unmounting the whole
+ * Changes surface. Reusing one identity per content keeps both sides equal. */
+export function placeholderFileContents(
+  path: string,
+  contents: string,
+): FileContents {
+  const key = `${path}\0${contents}`;
+  const existing = placeholderFiles.get(key);
+  if (existing) {
+    // Re-insert so files still on screen stay newest and never get evicted
+    // out from under a mounted card.
+    placeholderFiles.delete(key);
+    placeholderFiles.set(key, existing);
+    return existing;
+  }
+  while (placeholderFiles.size >= MAX_PLACEHOLDER_FILES) {
+    placeholderFiles.delete(placeholderFiles.keys().next().value!);
+  }
+  const file: FileContents = { name: path, contents, lang: "text" };
+  placeholderFiles.set(key, file);
+  return file;
 }
 
 const MAX_COMPLETE_PATCH_CHARS = 8 * 1024 * 1024;
@@ -222,6 +256,7 @@ export function loadChangesDiffData(
 
 export function resetChangesDiffDataForTests(): void {
   cache.clear();
+  placeholderFiles.clear();
   inFlight = 0;
   queue.length = 0;
 }

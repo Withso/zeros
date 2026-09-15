@@ -227,8 +227,8 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
   const markExited = useTerminalStore((s) => s.markExited);
   const markAlive = useTerminalStore((s) => s.markAlive);
   const { prefs } = useAppearance();
-  // Concrete visual theme — flips on OS appearance changes in System and on a
-  // neutral Dark ↔ Orka-black switch. Drives the token re-resolve below so the
+  // Concrete visual theme — flips on OS appearance changes in System and on
+  // an explicit Dark ↔ Light switch. Drives the token re-resolve below so the
   // xterm's concrete bg/fg values never go stale.
   const themeId = useThemeId();
 
@@ -713,15 +713,14 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
     });
   }, [sessionId, markExited]);
 
-  // Re-apply theme when the concrete app theme flips (including a dark-palette
-  // switch), or the code theme / surface token changes, so a live theme swap
+  // Re-apply theme when the concrete app theme flips, or the code theme / surface token changes, so a live theme swap
   // (and an HMR prop change) repaints the grid. The background +
   // foreground are app tokens (--bg1/--fg1) and the ANSI palette comes from the
   // code theme, so both have to be re-resolved on a flip.
   //
   // Keyed on `themeId`, NOT `prefs.mode`: an OS flip in System leaves mode
-  // unchanged, while Dark and Orka black share one appearance variant. Only the
-  // concrete id catches both transitions and guarantees a bg/fg re-read.
+  // unchanged. Only the concrete id catches that transition and guarantees a
+  // bg/fg re-read.
   //
   // useLayoutEffect (not useEffect): applyTheme() sets data-theme on <html>
   // synchronously inside the store's refresh(), re-theming the whole app in one

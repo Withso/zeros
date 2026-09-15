@@ -12,6 +12,7 @@ import {
   initialChangesDiff,
   loadChangesDiffData,
   peekChangesDiffData,
+  placeholderFileContents,
   resetChangesDiffDataForTests,
   withChangesDiffCopyText,
 } from "../changes-diff-data";
@@ -282,6 +283,42 @@ describe("Changes complete diff data", () => {
     );
     expect(changesDiffDataWeight(result)).toBeGreaterThan(
       (result.copyText?.length ?? 0) * 2,
+    );
+  });
+});
+
+describe("placeholderFileContents", () => {
+  // @pierre/diffs asserts by object identity that a collapsed re-render of a
+  // file item commits the object it prepared layout for. A fresh but equal
+  // object for the same card threw and unmounted the whole Changes surface.
+  it("returns one shared object per path and message", () => {
+    const first = placeholderFileContents("a.txt", "No textual changes");
+    expect(placeholderFileContents("a.txt", "No textual changes")).toBe(first);
+    expect(first).toEqual({
+      name: "a.txt",
+      contents: "No textual changes",
+      lang: "text",
+    });
+    expect(placeholderFileContents("a.txt", "Binary file changed")).not.toBe(
+      first,
+    );
+    expect(placeholderFileContents("b.txt", "No textual changes")).not.toBe(
+      first,
+    );
+  });
+
+  it("keeps recently rendered placeholders when older ones are evicted", () => {
+    const live = placeholderFileContents("live.txt", "Loading diff…");
+    const stale = placeholderFileContents("stale.txt", "No textual changes");
+    for (let index = 0; index < 4100; index += 1) {
+      placeholderFileContents(`other-${index}.txt`, "No textual changes");
+      // A mounted card touches its placeholder on every items pass.
+      if (index % 1000 === 0)
+        placeholderFileContents("live.txt", "Loading diff…");
+    }
+    expect(placeholderFileContents("live.txt", "Loading diff…")).toBe(live);
+    expect(placeholderFileContents("stale.txt", "No textual changes")).not.toBe(
+      stale,
     );
   });
 });

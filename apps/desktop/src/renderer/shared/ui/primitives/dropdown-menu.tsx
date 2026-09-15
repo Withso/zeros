@@ -3,6 +3,13 @@ import * as DropdownMenuPrimitive from "@radix-ui/react-dropdown-menu";
 import { Check, ChevronRight, Circle } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import {
+  MENU_ITEM_ICON,
+  MENU_ITEM_RADIUS,
+  MENU_SEPARATOR,
+  MENU_SURFACE_INSET,
+  MENU_SURFACE_RADIUS,
+} from "@/renderer/shared/ui/menu-surface";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
@@ -61,7 +68,9 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover data-[state=open]:bg-bg3-hover flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-xs outline-none select-none [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      "focus:bg-bg3-hover data-[state=open]:bg-bg3-hover flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-none select-none",
+      MENU_ITEM_RADIUS,
+      MENU_ITEM_ICON,
       inset && "pl-8",
       className,
     )}
@@ -81,7 +90,9 @@ const DropdownMenuSubContent = React.forwardRef<
   <DropdownMenuPrimitive.SubContent
     ref={ref}
     className={cn(
-      "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden rounded-lg border p-1 shadow-[var(--shadow-dropdown)]",
+      "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden border shadow-[var(--shadow-dropdown)]",
+      MENU_SURFACE_RADIUS,
+      MENU_SURFACE_INSET,
       className,
     )}
     {...props}
@@ -158,7 +169,9 @@ const DropdownMenuContent = React.forwardRef<
           onCloseAutoFocus?.(event);
         }}
         className={cn(
-          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden rounded-lg border p-1 shadow-[var(--shadow-dropdown)]",
+          "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden border shadow-[var(--shadow-dropdown)]",
+          MENU_SURFACE_RADIUS,
+          MENU_SURFACE_INSET,
           className,
         )}
       />
@@ -176,7 +189,9 @@ const DropdownMenuItem = React.forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      MENU_ITEM_RADIUS,
+      MENU_ITEM_ICON,
       inset && "pl-8",
       className,
     )}
@@ -199,7 +214,8 @@ const DropdownMenuCheckboxItem = React.forwardRef<
     <DropdownMenuPrimitive.CheckboxItem
       ref={ref}
       className={cn(
-        "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+        MENU_ITEM_RADIUS,
         indicatorSide === "end" && "pr-8 pl-2",
         className,
       )}
@@ -218,7 +234,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
         )}
       >
         <DropdownMenuPrimitive.ItemIndicator>
-          <Check className={indicatorSide === "end" ? "size-3" : "size-4"} />
+          <Check className={indicatorSide === "end" ? "size-3" : "size-3.5"} />
         </DropdownMenuPrimitive.ItemIndicator>
       </span>
       {children}
@@ -235,7 +251,8 @@ const DropdownMenuRadioItem = React.forwardRef<
   <DropdownMenuPrimitive.RadioItem
     ref={ref}
     className={cn(
-      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center rounded-sm py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "focus:bg-bg3-hover focus:text-fg1 relative flex cursor-default items-center py-1.5 pr-2 pl-8 text-xs transition-colors outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      MENU_ITEM_RADIUS,
       className,
     )}
     {...props}
@@ -274,7 +291,7 @@ const DropdownMenuSeparator = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <DropdownMenuPrimitive.Separator
     ref={ref}
-    className={cn("bg-border2 -mx-1 my-1 h-px", className)}
+    className={cn(MENU_SEPARATOR, className)}
     {...props}
   />
 ));

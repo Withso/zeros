@@ -110,6 +110,23 @@ export async function runTerminalWorkbenchSmoke({ page, check }) {
     true,
   );
 
+  const shellRow = sidebar().getByRole("tab", {
+    name: first.title,
+    exact: true,
+  });
+  const shellRowBox = await shellRow.boundingBox();
+  const closeBox = await shellRow
+    .locator("..")
+    .getByRole("button", { name: `Close ${first.title}`, exact: true })
+    .boundingBox();
+  check(
+    "terminal close buttons stay inset within their rows",
+    closeBox.width === 24 &&
+      closeBox.height === 24 &&
+      closeBox.y >= shellRowBox.y &&
+      closeBox.y + closeBox.height <= shellRowBox.y + shellRowBox.height,
+  );
+
   const header = main.locator(":scope > div").first();
   const titleChip = header
     .locator("[data-terminal-title-actions] > div")

@@ -14,6 +14,7 @@ import {
   readPersistedDesignWorkspaceLayersWidth,
 } from "./design-workspace-width";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 const SIDEBAR_BASE_CLS =
   "bg-bg1 relative flex min-h-0 w-[var(--zeros-design-layers-width,240px)] flex-col overflow-hidden [flex:0_1_var(--zeros-design-layers-width,240px)] min-w-[min(180px,34%)] max-w-[min(720px,50%)]";
 
@@ -61,6 +62,7 @@ export function DesignWorkspaceSidebar({
       ref={sectionRef}
       id={sidebarId}
       data-design-workspace-surface=""
+      {...popoverBoundaryProps}
       aria-label="Design workspace sidebar"
       className={SIDEBAR_BASE_CLS}
     >

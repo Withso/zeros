@@ -267,7 +267,7 @@ function InviteComposer({
           value={role}
           onValueChange={(v) => setRole(v as "member" | "admin")}
         >
-          <SelectTrigger size="sm" className="min-w-[100px] shrink-0">
+          <SelectTrigger size="sm" className="shrink-0">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -292,7 +292,7 @@ function InviteComposer({
           size="sm"
           disabled={!canSend}
           onClick={() => void send()}
-          className="shrink-0 gap-1.5"
+          className="shrink-0"
         >
           <Plus size={14} />
           {busy ? "Sending…" : "Send invite"}
@@ -442,7 +442,7 @@ function MemberRow({
             onValueChange={(v) => void setRole(v as TeamRole)}
             disabled={busy}
           >
-            <SelectTrigger size="sm" className="min-w-[110px]">
+            <SelectTrigger size="sm">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

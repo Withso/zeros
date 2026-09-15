@@ -106,7 +106,6 @@ import {
   readPersistedAppearanceMode,
   readPersistedWindowBackground,
 } from "./ipc/commands/window";
-import { nativeThemeSourceForAppearanceMode } from "./appearance-mode";
 import {
   attachWindowStatePersistence,
   boundsVisibleOnAnyDisplay,
@@ -744,21 +743,15 @@ function createMainWindow(): BrowserWindow {
   // Two consumers on the create path:
   //   1. nativeTheme.themeSource — native context menus/dialogs follow the APP
   //      polarity from the first frame. Preserve "system" so the renderer's
-  //      matchMedia-based resolution keeps seeing real OS flips; map Orka black
-  //      to native dark. Left untouched on a fresh install (null) — the renderer
-  //      reports its mode right after boot.
+  //      matchMedia-based resolution keeps seeing real OS flips. Left untouched
+  //      on a fresh install (null) — the renderer reports its mode right after
+  //      boot.
   //   2. additionalArguments — hands the mode to the preload, which exposes it
   //      to the page so the index.html pre-paint stamp and the appearance store
   //      can restore the theme when the Caches-backed localStorage was purged.
   const persistedMode = readPersistedAppearanceMode();
-  const persistedNativeThemeSource = persistedMode
-    ? nativeThemeSourceForAppearanceMode(persistedMode)
-    : null;
-  if (
-    persistedNativeThemeSource &&
-    nativeTheme.themeSource !== persistedNativeThemeSource
-  ) {
-    nativeTheme.themeSource = persistedNativeThemeSource;
+  if (persistedMode && nativeTheme.themeSource !== persistedMode) {
+    nativeTheme.themeSource = persistedMode;
   }
 
   // Reopen the window the way it was closed (userData window-state.json,

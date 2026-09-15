@@ -86,7 +86,7 @@ describe("pre-React boot surface", () => {
     expect(bootStyles).not.toBe("");
     expect(bootStyles).toContain("#zeros-boot");
     expect(bootStyles).toContain('[data-theme="light"]');
-    expect(bootStyles).toContain('[data-theme-palette="orka-black"]');
+    expect(bootStyles).not.toContain("data-theme-palette");
     expect(bootStyles).toContain("--zeros-boot-ink-strong");
     expect(bootStyles).toContain("--zeros-boot-ink-mid");
     expect(bootStyles).toContain("--zeros-boot-ink-soft");

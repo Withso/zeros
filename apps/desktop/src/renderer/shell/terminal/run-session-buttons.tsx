@@ -1,6 +1,7 @@
 import { Globe, Square } from "lucide-react";
 import { Button, Tooltip } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
+import { WORKBENCH_TITLE_ACTION_CLS } from "../workbench/tab-chrome";
 
 /** Headers show labels while their own container has room; sidebar rows always
  * use compact icons. Both placements share the same actions and accessible names. */
@@ -23,7 +24,8 @@ export function RunSessionButtons({
     ? preview.port || (preview.protocol === "https:" ? "443" : "80")
     : null;
   const buttonClass = cn(
-    "bg-bg1 text-fg1 shrink-0 gap-1.5 text-xs [&_svg]:size-3.5",
+    WORKBENCH_TITLE_ACTION_CLS,
+    "bg-bg1 text-fg1 gap-1.5 text-xs",
     showLabels &&
       "@[480px]/terminal-header:w-auto @[480px]/terminal-header:px-2",
   );

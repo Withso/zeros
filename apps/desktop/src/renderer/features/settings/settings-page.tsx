@@ -64,7 +64,6 @@ import {
   LogOut,
   Lock,
   Globe2,
-  ChevronRight,
   Trash2,
   type LucideIcon,
 } from "lucide-react";
@@ -146,7 +145,12 @@ import {
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { ensureSettingsTomlMigrated } from "./migrate-legacy";
 import { subscribeUserSettingsSection } from "./settings-navigation";
-import { SettingsList, SettingsRow, SettingsSection } from "./settings-ui";
+import {
+  SettingsGroup,
+  SettingsList,
+  SettingsRow,
+  SettingsSection,
+} from "./settings-ui";
 import { useAgentSessions } from "../agent/sessions-hooks";
 import { useEnabledAgents } from "../agent/enabled-agents";
 import { useAgentsSnapshot, loadAgents } from "../agent/agents-cache";
@@ -176,12 +180,10 @@ import {
   useClaudeFallbackModel,
   useClaudeIdleTimeoutMinutes,
 } from "../agent/reliability-settings";
-import { AgentIcon } from "../agent/agent-icon";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
-import type {
-  AgentMemorySettings,
-} from "@zeros/protocol/agent-events";
+import type { AgentMemorySettings } from "@zeros/protocol/agent-events";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 type SectionId =
   | "general"
   | "appearance"
@@ -729,9 +731,10 @@ export function SettingsPage() {
               a single `border-l` seam against the sidebar-bg canvas (the
               floating rounded island was retired 2026-07-12). Native
               overflow — macOS overlay scrollbars auto-hide, so no custom
-              Radix thumb. Content is a left-aligned reading column matching
-              the repo settings page: responsive left gutter (24px floor,
-              100px cap) + the same max width and top padding. */}
+              Radix thumb. Content is a CENTERED 680px reading column (the
+              Cursor-style settings recipe, 2026-09-14): a 24px gutter on
+              each side so the column shrinks with the window below 728px,
+              and `mx-auto` centers it above that. */}
         <div className="border-border1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden border-l">
           {/* "Open settings.toml" floats at the top right, mirroring the repo
               page — a transparent drag strip; the button opts out of drag. */}
@@ -741,7 +744,13 @@ export function SettingsPage() {
           >
             {fileScopeControls}
           </div>
-          <div ref={detailScrollRef} className="min-h-0 flex-1 overflow-y-auto">
+          {/* The 24px side gutter lives on the SCROLLER, not the column, so
+              the column's 680px max is the content width (no inner padding
+              eating into it) and it still shrinks below 728px windows. */}
+          <div
+            ref={detailScrollRef}
+            className="min-h-0 flex-1 overflow-y-auto px-6"
+          >
             {/* `settings-type-scale` sets this tab surface's type: NAMES
                 14px, everything else 13px (see settings-page.css). Names carry
                 `text-[14px]` (settings-ui + the custom labels in the panels)
@@ -750,7 +759,10 @@ export function SettingsPage() {
                 Descriptions are native `text-xs` = 13px. Open dropdown LISTS
                 are already 13px (Radix portals them to <body>, outside this
                 column, and their items are native `text-xs`). */}
-            <div className="settings-type-scale w-full max-w-5xl pt-10 pr-6 pb-16 pl-[clamp(1.5rem,5vw,6.25rem)]">
+            <div
+              {...popoverBoundaryProps}
+              className="settings-type-scale mx-auto w-full max-w-[680px] pt-10 pb-16"
+            >
               {/* A transient repo-scope selection (legacy deep link) renders
                   nothing for one frame — the redirect effect above re-routes
                   it to the repo page. */}
@@ -770,21 +782,7 @@ export function SettingsPage() {
                     className={isActive ? "flex flex-col gap-6" : "hidden"}
                     aria-hidden={!isActive}
                   >
-                    {section.id === "browser-use" ? (
-                      <div className="flex flex-col gap-2">
-                        <nav
-                          aria-label="Breadcrumb"
-                          className="text-fg3 flex items-center gap-1 text-xs"
-                        >
-                          <span>Agents</span>
-                          <ChevronRight className="size-3" aria-hidden="true" />
-                          <span className="text-fg2">Browser</span>
-                        </nav>
-                        <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
-                      </div>
-                    ) : (
-                      <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
-                    )}
+                    <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
                     <Panel surfaceActive={pageActive && isActive} />
                   </div>
                 );
@@ -853,12 +851,13 @@ function SectionNavButton({
 
 function GeneralPanel() {
   const showHidden = useShowHiddenWorkspaces();
+  // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
-    <div className="flex flex-col gap-8">
-      <SettingsList>
+    <div className="flex flex-col gap-6">
+      <SettingsGroup>
         <SettingsRow
           label="Show hidden workspaces in dashboard"
-          hint="Includes hidden workspaces in the Archived list. You can still unarchive them."
+          hint="Includes hidden workspaces in the Archived list."
         >
           <Switch
             checked={showHidden}
@@ -866,7 +865,8 @@ function GeneralPanel() {
             aria-label="Show hidden workspaces in dashboard"
           />
         </SettingsRow>
-      </SettingsList>
+      </SettingsGroup>
+      <PrivacyGroup />
     </div>
   );
 }
@@ -932,108 +932,111 @@ function AccountPanel() {
     // The AuthGate flips to the login screen and unmounts this view.
   };
 
+  // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
-    <div className="flex flex-col gap-8">
+    <div className="flex flex-col gap-6">
       {authed ? (
         <>
-          {/* Profile — flat header, no card. Initials only: we don't load remote
-              provider avatars (web CSP blocks them; fetching leaks the user's IP
-              to Google/GitHub on every Settings open). */}
-          <div className="flex items-center gap-3">
-            <div className="bg-bg2-hover text-fg1 flex size-12 shrink-0 items-center justify-center rounded-full text-sm font-medium">
-              {initial}
-            </div>
-            <div className="flex min-w-0 flex-col gap-0.5">
-              {displayName && (
-                <div className="text-fg1 truncate text-[14px] font-medium">
-                  {displayName}
+          {/* Identity card. Initials only: we don't load remote provider
+              avatars (web CSP blocks them; fetching leaks the user's IP to
+              Google/GitHub on every Settings open). */}
+          <SettingsGroup>
+            <div className="flex items-center gap-3">
+              <div className="bg-bg2-hover text-fg1 flex size-10 shrink-0 items-center justify-center rounded-full text-sm font-medium">
+                {initial}
+              </div>
+              <div className="flex min-w-0 flex-col gap-0.5">
+                {displayName && (
+                  <div className="text-fg1 truncate text-[13px] font-medium">
+                    {displayName}
+                  </div>
+                )}
+                <div
+                  className={cn(
+                    "truncate text-[13px]",
+                    displayName ? "text-fg2" : "text-fg1 font-medium",
+                  )}
+                >
+                  {email}
                 </div>
-              )}
-              <div className="text-fg2 truncate text-sm">{email}</div>
-              {primaryProviderLabel && (
-                <div className="text-muted-fg text-xs">
-                  Signed in with {primaryProviderLabel}
-                </div>
-              )}
+                {primaryProviderLabel && (
+                  <div className="text-fg2 text-[13px]">
+                    Signed in with {primaryProviderLabel}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          </SettingsGroup>
 
-          <SettingsSection
+          <SettingsGroup
             title="Sign-in methods"
             description="Linking a second provider arrives in a later update."
           >
-            <SettingsList>
-              <SignInMethodRow
-                label="GitHub"
-                desc="Link GitHub to sign in with one click."
-                connected={linked.has("github")}
-              />
-              <SignInMethodRow
-                label="Google"
-                desc="Link Google to sign in with one click."
-                connected={linked.has("google")}
-              />
-            </SettingsList>
-          </SettingsSection>
+            <SignInMethodRow
+              label="GitHub"
+              desc="Sign in with one click."
+              connected={linked.has("github")}
+            />
+            <SignInMethodRow
+              label="Google"
+              desc="Sign in with one click."
+              connected={linked.has("google")}
+            />
+          </SettingsGroup>
 
-          <SettingsSection title="Sign out">
-            <SettingsList>
-              <SettingsRow
-                label="Sign out"
-                hint="Sign out of Zeros on this device."
+          <SettingsGroup title="Sign out">
+            <SettingsRow
+              label="Sign out"
+              hint="Sign out of Zeros on this device."
+            >
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={signingOut}
+                disabled={signingOutAll}
+                onClick={handleSignOut}
               >
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={signingOut}
-                  disabled={signingOutAll}
-                  onClick={handleSignOut}
-                  className="gap-2"
-                >
-                  <LogOut size={14} />
-                  Sign out
-                </Button>
-              </SettingsRow>
-              <SettingsRow
-                label="Sign out everywhere"
-                hint="Revoke every active session on all devices. Use this if your account may be compromised."
+                <LogOut size={14} />
+                Sign out
+              </Button>
+            </SettingsRow>
+            <SettingsRow
+              label="Sign out everywhere"
+              hint="Revoke every active session on all devices."
+            >
+              {/* Cautionary (destructive-tinted) styling so this global,
+                  hard-to-undo action reads differently from the routine
+                  this-device "Sign out" directly above it. */}
+              <Button
+                variant="secondary"
+                size="sm"
+                loading={signingOutAll}
+                disabled={signingOut}
+                onClick={handleSignOutEverywhere}
+                className="border-red-primary/40 text-red-primary hover:bg-red-primary/10 hover:text-red-primary"
               >
-                {/* Cautionary (destructive-tinted) styling so this global,
-                    hard-to-undo action reads differently from the routine
-                    this-device "Sign out" directly above it. */}
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  loading={signingOutAll}
-                  disabled={signingOut}
-                  onClick={handleSignOutEverywhere}
-                  className="border-red-primary/40 text-red-primary hover:bg-red-primary/10 hover:text-red-primary gap-2"
-                >
-                  <LogOut size={14} />
-                  Sign out everywhere
-                </Button>
-              </SettingsRow>
-            </SettingsList>
-          </SettingsSection>
+                <LogOut size={14} />
+                Sign out everywhere
+              </Button>
+            </SettingsRow>
+          </SettingsGroup>
         </>
       ) : (
         <p className={HINT_CLS}>You're not signed in.</p>
       )}
-
-      {/* Usage data — moved here from the removed Privacy section. Always shown,
-          even signed out (it's a device-level analytics consent, not account). */}
-      <UsageDataSection />
     </div>
   );
 }
 
-// ── Usage data — anonymous usage analytics (opt-out) ──
+// ── Privacy — anonymous usage analytics (opt-out) ──
 //
 // Single consent control for metadata-only product analytics. Opt-out model:
-// on by default, anonymous, and never sends user content. Lives under Account
-// now (the standalone Privacy section was removed).
+// on by default, anonymous, and never sends user content. Rendered as the
+// "Privacy" group on the General tab (2026-09-14; it previously sat under
+// Account). Device-level consent, not account-level, so it never depends on
+// sign-in state.
 
-function UsageDataSection() {
+function PrivacyGroup() {
   const [optedOut, setOptedOut] = useState<boolean>(() =>
     isAnalyticsOptedOut(),
   );
@@ -1043,20 +1046,18 @@ function UsageDataSection() {
   };
 
   return (
-    <SettingsSection title="Usage data">
-      <SettingsList>
-        <SettingsRow
-          label="Share anonymous usage data"
-          hint="Anonymous metadata only — feature usage, agent success/failure, performance timings. Never your code, prompts, paths, or API keys, and no account or personal identifiers."
-        >
-          <Switch
-            checked={!optedOut}
-            onCheckedChange={toggle}
-            aria-label="Share anonymous usage data"
-          />
-        </SettingsRow>
-      </SettingsList>
-    </SettingsSection>
+    <SettingsGroup title="Privacy">
+      <SettingsRow
+        label="Share anonymous usage data"
+        hint="Anonymous feature and performance metadata. Never your code, prompts, or keys."
+      >
+        <Switch
+          checked={!optedOut}
+          onCheckedChange={toggle}
+          aria-label="Share anonymous usage data"
+        />
+      </SettingsRow>
+    </SettingsGroup>
   );
 }
 
@@ -1092,8 +1093,8 @@ function IntegrationsPanel({
 /** The Models tab groups its rows into filled sections: a borderless
  *  subtle-fill card with `--border1` hairlines
  *  between rows (overrides the SettingsList default `divide-border2`). The
- *  fill is `--bg1-highlight`, NOT the requested `--bg3`: in dark they're
- *  near-identical (#181716 vs #151413), but light bg3 = bg1 = white so the
+ *  fill is `--bg1-bright` (#1C1C1C dark, = bg2 light), NOT the requested `--bg3`: in dark they're
+ *  close, but light bg3 = bg1 = white so the
  *  card would vanish (check:ui guards this); same recipe as the
  *  repositories-panel list card.
  *
@@ -1103,7 +1104,7 @@ function IntegrationsPanel({
  *  of its own, so the edge-to-content gap is exactly the row's 12px top and
  *  bottom, and adjacent rows sit 24px apart (tighter than the old 28px). */
 const MODELS_SECTION_CLS =
-  "bg-bg1-highlight divide-border1 rounded-lg px-3 [&>*]:py-3";
+  "bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3";
 
 function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   const sessions = useAgentSessions();
@@ -1290,7 +1291,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
         <SettingsRow label="Default agent" hint="Agent for new chats">
           <div className="flex items-center gap-2">
             <Select value={effectiveAgentId ?? ""} onValueChange={pickAgent}>
-              <SelectTrigger className="min-w-[150px]">
+              <SelectTrigger>
                 <SelectValue placeholder="Select an agent" />
               </SelectTrigger>
               <SelectContent className="min-w-[180px]">
@@ -1301,16 +1302,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                 ) : (
                   modelAgents.map((a) => (
                     <SelectItem key={a.id} value={a.id}>
-                      <span className="flex items-center gap-2">
-                        {/* Keep provider marks in their documented brand colors. */}
-                        <AgentIcon
-                          agentId={a.id}
-                          iconUrl={a.icon ?? null}
-                          size={14}
-                          className="shrink-0"
-                        />
-                        {a.name}
-                      </span>
+                      {a.name}
                     </SelectItem>
                   ))
                 )}
@@ -1325,10 +1317,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                   starFavoriteModel(effectiveAgentId, model)
                 }
               >
-                <SelectTrigger
-                  className="min-w-[150px]"
-                  aria-label="Default model"
-                >
+                <SelectTrigger aria-label="Default model">
                   <SelectValue>{currentModelLabel}</SelectValue>
                 </SelectTrigger>
                 <SelectContent className="min-w-[180px]">
@@ -1354,7 +1343,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
               )
             }
           >
-            <SelectTrigger className="min-w-[150px]">
+            <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent className="min-w-[180px]">
@@ -1438,7 +1427,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                     applyClaudeSettings();
                   }}
                 >
-                  <SelectTrigger className="min-w-[150px]">
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="min-w-[180px]">
@@ -1464,7 +1453,7 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                     applyClaudeSettings();
                   }}
                 >
-                  <SelectTrigger className="min-w-[150px]">
+                  <SelectTrigger>
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent className="min-w-[180px]">
@@ -1645,16 +1634,17 @@ function ExperimentalPanel() {
   const [hideArchived, setHideArchived] = useExperimentalFeature(
     "hideArchivedWorkspacesAfter15Days",
   );
+  // Grouped-card layout (SettingsGroup) — same recipe as Appearance.
   return (
     <div className="flex flex-col gap-6">
       <p className={HINT_CLS}>
         Experimental features that are under development.{" "}
         <span className="text-fg1 font-medium">Expect breaking changes.</span>
       </p>
-      <SettingsList>
+      <SettingsGroup>
         <SettingsRow
           label="Terminal Agents"
-          hint="Adds a Terminal Agents tab to configure how coding CLIs launch in the terminal panel."
+          hint="Adds a Terminal Agents tab for configuring coding CLIs in the terminal panel."
         >
           <Switch
             checked={terminalAgents}
@@ -1664,7 +1654,7 @@ function ExperimentalPanel() {
         </SettingsRow>
         <SettingsRow
           label="Work in local main"
-          hint="Adds a main tab for each repo's primary checkout, so agents can run against it instead of a worktree."
+          hint="Adds a main tab for each repo's primary checkout so agents can run against it."
         >
           <Switch
             checked={workInLocalMain}
@@ -1673,16 +1663,16 @@ function ExperimentalPanel() {
           />
         </SettingsRow>
         <SettingsRow
-          label="Hide the archived workspace after 15 days"
-          hint="Automatically hides workspaces archived for 15 consecutive days. Unarchiving starts a fresh period the next time you archive. Chats and snapshots are kept."
+          label="Hide archived workspaces after 15 days"
+          hint="Hides workspaces archived for 15 days. Chats and snapshots are kept."
         >
           <Switch
             checked={hideArchived}
             onCheckedChange={setHideArchived}
-            aria-label="Hide the archived workspace after 15 days"
+            aria-label="Hide archived workspaces after 15 days"
           />
         </SettingsRow>
-      </SettingsList>
+      </SettingsGroup>
     </div>
   );
 }
@@ -1694,21 +1684,18 @@ function ExperimentalPanel() {
 // only — every channel (Zeros / Beta / Dev) has its own localStorage —
 // which is the point: enable a feature in Beta, leave it off in
 // Production, compare.
+//
+// Grouped-card layout (SettingsGroup) — same recipe as Appearance. No intro
+// paragraph: the per-channel scoping is documented above, and the tab is
+// staff-only, so the headline stands alone (2026-09-14).
 function InternalPanel() {
   const [copyLogs, setCopyLogs] = useInternalFeature("copyLogs");
   return (
     <div className="flex flex-col gap-6">
-      <p className={HINT_CLS}>
-        Internal-only features, visible to staff accounts.{" "}
-        <span className="text-fg1 font-medium">
-          Switches apply to this app (channel) only
-        </span>{" "}
-        — Zeros, Zeros Beta, and Zeros Dev each keep their own state.
-      </p>
-      <SettingsList>
+      <SettingsGroup>
         <SettingsRow
           label="Copy logs"
-          hint="⇧⌘L copies the recent app logs to the clipboard — the same scrubbed ~500 KB JSONL tail a feedback submission attaches."
+          hint="⇧⌘L copies recent app logs to the clipboard."
         >
           <Switch
             checked={copyLogs}
@@ -1716,7 +1703,7 @@ function InternalPanel() {
             aria-label="Enable the copy-logs shortcut"
           />
         </SettingsRow>
-      </SettingsList>
+      </SettingsGroup>
     </div>
   );
 }
@@ -1731,14 +1718,14 @@ function InternalPanel() {
 // in zeros-tokens.css), so Light joins the picker and System now
 // genuinely follows macOS.
 // 2026-08-08: Dark's structural tokens became neutral; bg1, bg2, and
-// sidebar-bg moved one lightness point up. The previous warm palette is
-// preserved unchanged as Orka black.
+// sidebar-bg moved one lightness point up.
+// 2026-09-14: the "Orka black" warm dark palette was retired — Dark and
+// Light are the only two themes.
 
 const THEME_OPTIONS: Array<{ value: ThemeMode; label: string }> = [
   { value: "system", label: "System" },
   { value: "light", label: "Light" },
   { value: "dark", label: "Dark" },
-  { value: "orka-black", label: "Orka black" },
 ];
 
 function AppearancePanel() {
@@ -1750,18 +1737,20 @@ function AppearancePanel() {
   const variant = useThemeVariant();
   const codeThemes = codeThemesForVariant(variant);
 
+  // Grouped-card layout (SettingsGroup): the app theme stands alone in an
+  // unlabeled card; the code theme + its live preview share a "Code" card.
   return (
-    <div className="flex flex-col gap-8">
-      <SettingsList>
+    <div className="flex flex-col gap-6">
+      <SettingsGroup>
         <SettingsRow
           label="Theme"
-          hint="Dark uses a neutral palette. Orka black preserves the previous warm-gray dark palette. System follows macOS."
+          hint="Choose the app color theme. System follows macOS."
         >
           <Select
             value={prefs.mode}
             onValueChange={(v) => setPrefs({ mode: v as ThemeMode })}
           >
-            <SelectTrigger className="min-w-[160px]">
+            <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1773,32 +1762,36 @@ function AppearancePanel() {
             </SelectContent>
           </Select>
         </SettingsRow>
-        <div>
-          <SettingsRow
-            label="Code theme"
-            hint="Syntax highlighting for code blocks, diffs, the editor, and the terminal. Dark and Orka black share one dark-theme choice; Light remembers its own."
+      </SettingsGroup>
+
+      <SettingsGroup title="Code">
+        <SettingsRow
+          label="Code theme"
+          hint="Syntax colors for code blocks, diffs, the editor, and terminal."
+        >
+          <Select
+            value={prefs.codeTheme}
+            onValueChange={(v) => setPrefs({ codeTheme: v })}
           >
-            <Select
-              value={prefs.codeTheme}
-              onValueChange={(v) => setPrefs({ codeTheme: v })}
-            >
-              <SelectTrigger className="min-w-[160px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {codeThemes.map((opt) => (
-                  <SelectItem key={opt.id} value={opt.id}>
-                    {opt.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-          <div className="pb-3.5">
-            <CodeThemePreview />
-          </div>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {codeThemes.map((opt) => (
+                <SelectItem key={opt.id} value={opt.id}>
+                  {opt.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </SettingsRow>
+        {/* The preview is its own divided row (the card's `[&>*]:py-3`
+            pads it) so it reads as part of the card rather than a stray
+            block hanging under the picker. */}
+        <div>
+          <CodeThemePreview />
         </div>
-      </SettingsList>
+      </SettingsGroup>
     </div>
   );
 }

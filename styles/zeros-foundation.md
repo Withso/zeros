@@ -374,7 +374,9 @@ Markdown body (`.zeros-agent-md`) uses its own scale — see
 
 **Spacing**: 4 px grid. Use `p-2` (8), `p-3` (12), `p-4` (16), `p-6` (24). No `p-3.5`, no `space-y-5`.
 
-**Radius**: a fixed 3-step scale (2026-07-12) — `rounded-sm` **4** (ALL buttons + icon buttons, pills/chips/badges, kbd, checkboxes, menu items, inputs, user messages), `rounded-md` **6** (tabs + segmented tracks, model/composer pills, sidebar + settings nav rows, small cards, tool-call rows, markdown img/table, tooltips), `rounded-lg` **8** (composer shell, dialogs, popovers, menus, cards, code blocks, toasts). Plus `rounded-full` (true circles only: avatars, spinner, switch, slider, dots, scrollbars) and `rounded-none` (nested resets). `rounded-xl/2xl/3xl/xs` and bare `rounded` no longer compile — those tokens were removed. Nesting: inner radius = outer radius − inset (8px menu, 4px padding → 4px items).
+**Radius**: a fixed 3-step scale (2026-07-12) — `rounded-sm` **4** (ALL buttons + icon buttons, pills/chips/badges, kbd, checkboxes, menu items, inputs), `rounded-md` **6** (tabs + segmented tracks, model/composer pills, sidebar + settings nav rows, small cards, tool-call rows, markdown img/table, tooltips), `rounded-lg` **8** (dialogs, cards, code blocks, toasts). Plus `rounded-full` (true circles only: avatars, spinner, switch, slider, dots, scrollbars) and `rounded-none` (nested resets). `rounded-xl/2xl/3xl/xs` and bare `rounded` no longer compile — those tokens were removed. Nesting: inner radius = outer radius − inset (8px menu, 4px padding → 4px items).
+
+Three surfaces step up from the scale rather than adding a fourth token: dropdown/popover/menu surfaces at **16** (`2 × --radius-lg`, `shared/ui/menu-surface.ts`), grouped settings cards at **12** (`1.5 × --radius-lg`, `SETTINGS_GROUP_RADIUS`), and the prompt surfaces at **12** (`PROMPT_SURFACE_RADIUS` in `features/agent/composer-shell.tsx` — the composer card, the inline edit composer, and the sent user message, so a prompt keeps one shape from typed to sent; 2026-09-14).
 
 **Motion**:
 
@@ -388,37 +390,35 @@ Only animate: `color`, `background-color`, `border-color`, `opacity`, `box-shado
 
 ## §9 — Appearance themes
 
-Settings exposes four modes:
+Settings exposes three modes over two themes:
 
-| Mode       | Resolved appearance | Structural palette                                                                     |
-| ---------- | ------------------- | -------------------------------------------------------------------------------------- |
-| System     | macOS dark/light    | Neutral Dark when macOS is dark; Light when macOS is light                             |
-| Light      | light               | Warm off-whites in `[data-theme="light"]`                                              |
-| Dark       | dark                | Achromatic structural values in `:root`                                                |
-| Orka black | dark                | The former warm-gray dark values in `[data-theme-palette="orka-black"]` on a dark root |
+| Mode   | Resolved appearance | Structural palette                                         |
+| ------ | ------------------- | ---------------------------------------------------------- |
+| System | macOS dark/light    | Neutral Dark when macOS is dark; Light when macOS is light |
+| Light  | light               | Warm off-whites in `[data-theme="light"]`                  |
+| Dark   | dark                | Achromatic structural values in `:root`                    |
 
-`data-theme` remains strictly `dark` or `light`; it is an appearance-polarity
+`data-theme` is strictly `dark` or `light`; it is an appearance-polarity
 contract for Tailwind, native controls, code-theme filtering, and embedded
-surfaces. The separate `data-theme-palette` attribute selects Orka black without
-pretending it is a third polarity. Dark and Orka black therefore share the dark
-syntax-theme preference; Light retains its own preference.
+surfaces. Each polarity keeps its own syntax-theme preference. (The opt-in
+"Orka black" warm dark palette that briefly shipped as a fourth mode was
+retired on 2026-09-14; saved prefs migrate to Dark.)
 
 ### 9.1 Neutral Dark contract
 
 Neutral Dark removes hue and saturation only from **structural primitives**:
 backgrounds, foregrounds, repository navigation, borders, highlighted/focus,
 the inverted pair, and the primary-button hover. Most keep the former dark
-palette's HSL lightness; the deliberate divergences are listed below, and one
-primitive becomes an alias. Orka black is otherwise preserved byte-for-byte —
-its only two intentional moves are the foreground-tier consolidation (§9.1.1):
+palette's HSL lightness; the deliberate divergences from that former warm
+palette are listed below, and one primitive becomes an alias:
 
-| Primitive          |     Neutral Dark | Orka black | Propagation                                                                                         |
-| ------------------ | ---------------: | ---------: | --------------------------------------------------------------------------------------------------- |
-| `--bg2`            |              L13 |        L12 | Composer, raised cards, hover cards, active canvas tabs — **and neutral Dark's `--highlighted-bg`** |
-| `--highlighted-bg` | `var(--bg2)` L13 |        L12 | User-message bubble, anchor selected states                                                         |
-| `--fg1`            |              L94 |        L92 | Highlighted/selected text + icons                                                                   |
-| `--fg2`            |              L72 |        L66 | Default text + icons app-wide                                                                       |
-| `--fg3`            |              L60 |        L57 | **Reserved — zero consumers** (§9.1.1)                                                              |
+| Primitive          |     Neutral Dark | Former warm dark | Propagation                                                                                         |
+| ------------------ | ---------------: | ---------------: | --------------------------------------------------------------------------------------------------- |
+| `--bg2`            |              L13 |              L12 | Composer, raised cards, hover cards, active canvas tabs — **and neutral Dark's `--highlighted-bg`** |
+| `--highlighted-bg` | `var(--bg2)` L13 |              L12 | User-message bubble, anchor selected states                                                         |
+| `--fg1`            |              L94 |              L92 | Highlighted/selected text + icons                                                                   |
+| `--fg2`            |              L72 |              L66 | Default text + icons app-wide                                                                       |
+| `--fg3`            |              L60 |              L57 | **Reserved — zero consumers** (§9.1.1)                                                              |
 
 `--bg1` (L7 → `#121212`) and `--sidebar-bg` (L9 → `#171717`) are the achromatic
 equivalents of the warm palette's own lightness, so the canvas and repository
@@ -426,15 +426,16 @@ navigation sit exactly where they always have.
 
 Aliases such as `--pane-bg`, `--bg3`, `--bg3-hover`,
 `--primary-button-bg`, and `--primary-button-fg` are not duplicated; they
-resolve lazily from the primitives. There is no `--bg2-highlight`
-token: the existing lifted-content primitive is `--bg1-highlight` and remains
-L9.
+resolve lazily from the primitives. `--bg2-highlight` (L18 in Dark, `= --bg5`
+in Light) is NOT a lifted-content step on the bg ramp — it is the hover/open
+fill for controls that are unfilled at rest (the Select dropdown trigger). The
+lifted-content primitive remains `--bg1-highlight` at L9.
 
 `--highlighted-bg` is the only structural primitive neutral Dark declares as a
 `var()` alias rather than a literal triple: a sent user message then wears the
 same fill as the composer it was typed in, so the prompt/composer pair reads as
-one surface family. Orka black and Light each keep their own literal bubble
-value, and because both re-declare the token the alias cannot leak into them.
+one surface family. Light keeps its own literal bubble value, and because it
+re-declares the token the alias cannot leak into it.
 
 The neutral ramp now has these intentional relationships:
 
@@ -442,23 +443,21 @@ The neutral ramp now has these intentional relationships:
 - `--muted-fg` is L44 — the lowest value that still clears the 3:1 non-text
   floor on `bg1`, `bg2`, AND `bg2-hover`. It is the app-wide quietest tier.
 - `--fg3` is L60 — the middle tier, ~60% of the way from `--muted-fg` up to
-  `--fg2` in log-contrast space. Orka black (L57) and Light (L44) re-derive that
-  same RELATIVE position inside their own bands instead of copying the number —
-  in Light a higher L means LESS contrast, so a copied `60` would invert the tier
-  order. A palette test asserts the ladder in all three palettes.
+  `--fg2` in log-contrast space. Light (L44) re-derives that same RELATIVE
+  position inside its own band instead of copying the number — in Light a
+  higher L means LESS contrast, so a copied `60` would invert the tier order.
+  A palette test asserts the ladder in both palettes.
 - `--bg1-highlight`, `--sidebar-bg`, and `--bg3` are all L9.
 - `--bg2-hover`, `--sidebar-bg-hover`, and `--bg3-hover` share L15.
 
 These tokens are separated by context. The deliberate `--bg2` lift, the
-`--highlighted-bg` alias, Orka black's preservation (minus the two changes in
-§9.1.1), and the four-tier foreground ladder are regression-tested theme
-contracts.
+`--highlighted-bg` alias, and the four-tier foreground ladder are
+regression-tested theme contracts.
 
 #### 9.1.1 Foreground tier consolidation
 
 `--fg3` and `--muted-fg` used to be **the same color**: both L44 in neutral Dark
-(byte-identical `#707070`), and L44 in Orka black differing only by 3% saturation.
-Only Light distinguished them. The two names were used inconsistently as a
+(byte-identical `#707070`). Only Light distinguished them. The two names were used inconsistently as a
 result — `--fg3` accumulated ~166 consumers app-wide while `--muted-fg` survived
 as a ~25-consumer pocket in the Review/Changes surfaces — and the docs described
 `--muted-fg` as the third tier while the code had converged on `--fg3`.
@@ -470,7 +469,6 @@ migrated sites stayed pixel-identical:
 | Palette      | `--muted-fg` before | after (former `--fg3`) | Effect on the 25 pre-existing consumers |
 | ------------ | ------------------- | ---------------------- | --------------------------------------- |
 | Neutral Dark | L44 `#707070`       | L44 `#707070`          | identical                               |
-| Orka black   | `15 4% 44%`         | `15 1% 44%`            | ~3/channel — imperceptible              |
 | Light        | L68 `#B1ACAA`       | L56 `#938D8A`          | 2.24:1 → 3.26:1 (intended fix)          |
 
 `--fg3` is now the **adopted middle tier**, sitting exactly one step below
@@ -505,9 +503,9 @@ The six status families remain chromatic: error/red, success/green,
 warning/yellow, info/blue, merged/violet, and file-path/brown. Desaturating them
 would erase useful semantic redundancy and flatten diff states. Syntax themes,
 agent brand colors, file-type icons, and user/runtime colors are likewise
-independent color systems and remain unchanged. The semantic-token layer needs
-no Orka-specific values: its dark aliases resolve through the active primitives,
-while status aliases deliberately keep their meaning-bearing families.
+independent color systems and remain unchanged. The semantic-token layer's dark
+aliases resolve through the active primitives, while status aliases
+deliberately keep their meaning-bearing families.
 
 HSL lightness is not WCAG relative luminance, so “same L” is not assumed to mean
 “same contrast.” The palette regression test verifies the authored H/S/L
@@ -515,20 +513,20 @@ contract, and UI review must still check text, focus, controls, selection,
 translucent composites, and canvas-rendered surfaces.
 
 The rendered-sRGB audit found no text or focus failure from the adjusted neutral
-surfaces:
+surfaces (the former warm dark palette is shown for reference):
 
-| Pair                             | Orka black | Neutral Dark |
-| -------------------------------- | ---------: | -----------: |
-| `fg1` / `bg1`                    |    15.69:1 |      16.41:1 |
-| `fg2` / `bg1`                    |     7.91:1 |       9.41:1 |
-| `fg3` / `bg1`                    |     5.98:1 |       6.58:1 |
-| `muted-fg` / `bg1`               |     3.80:1 |       3.80:1 |
-| `fg1` / `bg2`                    |    13.80:1 |      14.07:1 |
-| `fg2` / `bg2`                    |     6.96:1 |       8.07:1 |
-| `muted-fg` / `bg2`               |     3.34:1 |       3.26:1 |
-| `muted-fg` / `bg2-hover`         |     3.04:1 |       3.05:1 |
-| `highlighted-bright` / `bg1`     |     7.72:1 |       7.68:1 |
-| inverted foreground / background |    16.28:1 |      16.27:1 |
+| Pair                             | Former warm dark | Neutral Dark |
+| -------------------------------- | ---------------: | -----------: |
+| `fg1` / `bg1`                    |          15.69:1 |      16.41:1 |
+| `fg2` / `bg1`                    |           7.91:1 |       9.41:1 |
+| `fg3` / `bg1`                    |           5.98:1 |       6.58:1 |
+| `muted-fg` / `bg1`               |           3.80:1 |       3.80:1 |
+| `fg1` / `bg2`                    |          13.80:1 |      14.07:1 |
+| `fg2` / `bg2`                    |           6.96:1 |       8.07:1 |
+| `muted-fg` / `bg2`               |           3.34:1 |       3.26:1 |
+| `muted-fg` / `bg2-hover`         |           3.04:1 |       3.05:1 |
+| `highlighted-bright` / `bg1`     |           7.72:1 |       7.68:1 |
+| inverted foreground / background |          16.28:1 |      16.27:1 |
 
 Because `--highlighted-bg` now resolves to `--bg2`, the `fg1`/`bg2` and
 `fg2`/`bg2` rows are also the user-message bubble's text contrast.
@@ -570,10 +568,10 @@ visual indicator.
 
 ### 9.3 Non-CSS consumers and first paint
 
-- The inline stamp in `index.html` restores both theme attributes before bundle evaluation, preventing an incorrect first frame.
-- The Electron window's pre-paint `backgroundColor` tracks resolved `--bg1` via `window_set_background` and persists for the next launch. Every dark first-frame color the app has persisted (`#121212`, `#131111`, `#0e0c0c`, and the short-lived `#141414`) re-resolves against the active palette before the first frame. Native `themeSource` maps Orka black to dark while persisting the distinct app mode.
-- xterm and canvas renderers resolve CSS variables to concrete colors. They subscribe to the concrete theme id (`dark` / `light` / `orka-black`), not only the dark/light variant.
-- Cross-window storage sync, the durable userData fallback, and transition suppression all include palette-only changes.
+- The inline stamp in `index.html` restores `data-theme` before bundle evaluation, preventing an incorrect first frame.
+- The Electron window's pre-paint `backgroundColor` tracks resolved `--bg1` via `window_set_background` and persists for the next launch. Every dark first-frame color the app has ever persisted (`#121212`, the retired `#131111`, `#0e0c0c`, and the short-lived `#141414`) re-resolves against the active mode before the first frame. Native `themeSource` receives the app mode verbatim.
+- xterm and canvas renderers resolve CSS variables to concrete colors. They subscribe to the concrete theme id (`dark` / `light`) so a theme switch repaints them.
+- Cross-window storage sync, the durable userData fallback, and transition suppression all follow the same mode.
 
 ---
 

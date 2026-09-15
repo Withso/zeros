@@ -44,6 +44,7 @@ import {
   initialChangesDiff,
   loadChangesDiffData,
   peekChangesDiffData,
+  placeholderFileContents,
   type ChangesDiffData,
 } from "./changes-diff-data";
 import { diffViewVersion } from "./diff-view-version";
@@ -208,16 +209,17 @@ export function ChangesDiffViewer({
             `${file.hash ?? hashString(file.patch)}:${cached ? key : (current?.key ?? "partial")}:${collapsed(file.path)}`,
           ),
         };
+        // Pierre asserts a collapsed re-render commits the exact object it
+        // prepared layout for, so placeholder cards must keep one identity.
         return fileDiff
           ? { ...common, type: "diff", fileDiff }
           : {
               ...common,
               type: "file",
-              file: {
-                name: file.path,
-                contents: message ?? "No textual changes",
-                lang: "text",
-              },
+              file: placeholderFileContents(
+                file.path,
+                message ?? "No textual changes",
+              ),
             };
       }),
     [shown, data, collapsed, queryForFile, refreshKey],
@@ -336,7 +338,8 @@ export function ChangesDiffViewer({
                     }
                     aria-pressed={diffStyle === style}
                     className={cn(
-                      "text-fg2",
+                      // 24px segment inside the 2px-inset track above.
+                      "size-6 text-fg2",
                       diffStyle === style && "bg-bg1 text-fg1",
                     )}
                     onClick={() => setDiffStyle(style)}

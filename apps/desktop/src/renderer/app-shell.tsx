@@ -164,6 +164,7 @@ import {
   CHATS_TOMBSTONE_KEY,
 } from "./state/chats-local-cache";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 /** Engine-session prewarm claim.
  *
  *  This lives in agent-prewarm-singleflight's renderer-global state—not merely
@@ -1255,7 +1256,14 @@ function MainShellBody({
                   sidebar, so the Home rail is hidden there (Back returns to
                   the Home tab). Dashboard and the repo hub keep the rail. */}
               {activeHomePageId !== "settings" && <HomeSidebar />}
-              <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+              {/* The Home sub-page column (dashboard / customize / repo hub /
+                  team) — dropdown lists opened inside it stay inside it
+                  (popover-boundary.ts). Settings stamps its own narrower
+                  reading column below. */}
+              <div
+                {...popoverBoundaryProps}
+                className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"
+              >
                 {homePageIdsToRender.includes("dashboard") && (
                   <div
                     {...(activeHomePageId !== "dashboard" ? { inert: "" } : {})}

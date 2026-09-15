@@ -925,7 +925,6 @@ export function EnvironmentSection({
             variant="primary"
             size="sm"
             onClick={() => setAddOpen(true)}
-            className="gap-1.5"
             disabled={addDisabled}
           >
             <Plus className="size-3.5" strokeWidth={1} aria-hidden="true" />
@@ -955,7 +954,6 @@ export function EnvironmentSection({
                 size="sm"
                 onClick={() => setAddOpen(true)}
                 disabled={addDisabled}
-                className="gap-1.5"
               >
                 <Plus className="size-3.5" strokeWidth={1} aria-hidden="true" />
                 Add
@@ -1838,7 +1836,6 @@ function PathsSection({ project }: { project: Project }) {
               variant="secondary"
               size="lg"
               onClick={() => void handleBrowse()}
-              className="gap-1.5"
             >
               <FolderOpen className="size-3.5" aria-hidden="true" />
               Browse

@@ -106,7 +106,9 @@ export function WorkspaceModeToggleView({
             aria-pressed={active}
             disabled={disabled}
             className={cn(
-              "rounded-md p-0 transition-none",
+              // 24px segment inside the 28px / 2px-inset track above (the
+              // shared icon button is 28px on its own).
+              "size-6 rounded-md p-0 transition-none",
               active
                 ? "bg-bg1-highlight text-blue-fg hover:bg-bg1-highlight hover:text-blue-fg"
                 : "text-fg3 hover:bg-bg1-highlight/80 hover:text-fg3",

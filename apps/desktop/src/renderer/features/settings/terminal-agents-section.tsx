@@ -253,7 +253,7 @@ function DefaultAgentRow({
         value={defaultId ?? NONE}
         onValueChange={(v) => onChange(v === NONE ? null : v)}
       >
-        <SelectTrigger className="min-w-[200px]">
+        <SelectTrigger>
           <SelectValue placeholder="Pick an agent…" />
         </SelectTrigger>
         <SelectContent>
