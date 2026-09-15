@@ -79,19 +79,16 @@ describe("codeTheme resolution follows the variant", () => {
     expect(store.getVariant()).toBe("light");
   });
 
-  it("keeps Orka black dark for code themes but distinct for token repainting", async () => {
-    const dom = installDom({ stored: { mode: "orka-black" } });
+  it("never stamps the retired palette attribute", async () => {
+    const dom = installDom({ stored: { mode: "dark" } });
     const store = await freshStore();
-    expect(store.getPrefs().mode).toBe("orka-black");
-    expect(store.getPrefs().codeTheme).toBe("default");
-    expect(store.getVariant()).toBe("dark");
-    expect(store.getThemeId()).toBe("orka-black");
-    expect(dom.attributes.get("data-theme")).toBe("dark");
-    expect(dom.attributes.get("data-theme-palette")).toBe("orka-black");
-
-    store.setPrefs({ mode: "dark" });
     expect(store.getThemeId()).toBe("dark");
     expect(dom.attributes.get("data-theme")).toBe("dark");
+    expect(dom.attributes.has("data-theme-palette")).toBe(false);
+
+    store.setPrefs({ mode: "light" });
+    expect(store.getThemeId()).toBe("light");
+    expect(dom.attributes.get("data-theme")).toBe("light");
     expect(dom.attributes.has("data-theme-palette")).toBe(false);
   });
 
@@ -173,16 +170,15 @@ describe("durable-mode fallback (localStorage purged)", () => {
     expect(store.getPrefs().mode).toBe("dark");
   });
 
-  it("restores the durable Orka-black palette without changing its dark polarity", async () => {
+  it("ignores a durable retired orka-black mode and falls back to the default", async () => {
     const dom = installDom();
     (globalThis.window as unknown as Record<string, unknown>)[
       "__ZEROS_APPEARANCE_MODE__"
     ] = "orka-black";
     const store = await freshStore();
-    expect(store.getPrefs().mode).toBe("orka-black");
+    expect(store.getPrefs().mode).toBe("dark");
     expect(store.getVariant()).toBe("dark");
-    expect(store.getThemeId()).toBe("orka-black");
-    expect(dom.attributes.get("data-theme-palette")).toBe("orka-black");
+    expect(dom.attributes.has("data-theme-palette")).toBe(false);
   });
 });
 
@@ -210,10 +206,12 @@ describe("legacy storage migration", () => {
     expect(store.getVariant()).toBe("dark");
   });
 
-  it("does not repurpose the retired orka-night id for the new palette", async () => {
-    installDom({ stored: { mode: "orka-night" } });
-    const store = await freshStore();
-    expect(store.getPrefs().mode).toBe("dark");
-    expect(store.getThemeId()).toBe("dark");
+  it("migrates every retired orka id to dark", async () => {
+    for (const legacy of ["orka-night", "orka-black"]) {
+      installDom({ stored: { mode: legacy } });
+      const store = await freshStore();
+      expect(store.getPrefs().mode, legacy).toBe("dark");
+      expect(store.getThemeId(), legacy).toBe("dark");
+    }
   });
 });

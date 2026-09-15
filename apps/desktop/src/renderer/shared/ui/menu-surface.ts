@@ -1,0 +1,29 @@
+// ──────────────────────────────────────────────────────────
+// Shared dropdown / popover menu geometry
+// ──────────────────────────────────────────────────────────
+//
+// Every dropdown-style surface (Popover, DropdownMenu, ContextMenu, Select)
+// shares one chrome so menus read as a single system:
+//
+//   surface  16px corners (2 × --radius-lg), 6px inset, bg3 + border2
+//   dividers 1px border2 hairline, full-bleed, 6px above and below
+//   rows     8px gap, 8px × 6px padding, 8px corners, text-xs
+//   icons    14px (size-3.5), fg2 unless a row colors them itself
+//
+// The 16px corner is intentionally derived from the radius scale instead of
+// adding a fourth token; zeros-tokens.css documents the nesting rule.
+
+export const MENU_SURFACE_RADIUS = "rounded-[calc(var(--radius-lg)*2)]";
+
+/** Inset between the surface edge and its rows, equal on every side. */
+export const MENU_SURFACE_INSET = "p-1.5";
+
+/** Full-bleed hairline between row groups with the same 6px gap as the inset. */
+export const MENU_SEPARATOR = "bg-border2 -mx-1.5 my-1.5 h-px";
+
+/** Hover/selection fill on a row: the standard 8px radius-lg. */
+export const MENU_ITEM_RADIUS = "rounded-lg";
+
+/** Row icon sizing/coloring that still lets an explicit class win. */
+export const MENU_ITEM_ICON =
+  "[&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5 [&_svg:not([class*='text-'])]:text-fg2";

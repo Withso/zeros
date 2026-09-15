@@ -63,6 +63,7 @@ import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { useActiveOrganization } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // One shared row shape, mirroring the settings sidebar entry (settings-page.tsx
 // SIDEBAR_ENTRY_CLS) so both nav rails read as the same control: fg2 at rest,
 // fg1 + a lifted --sidebar-bg-hover background when selected, hover lifts only
@@ -197,6 +198,7 @@ export function HomeSidebar() {
       style={{ width: `${railWidth}px` }}
     >
       <nav
+        {...popoverBoundaryProps}
         className="bg-sidebar-bg flex min-w-0 flex-1 flex-col overflow-y-auto px-3 py-3"
         role="tablist"
         aria-label="Home navigation"

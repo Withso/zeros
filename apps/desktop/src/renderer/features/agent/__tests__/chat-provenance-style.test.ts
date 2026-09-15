@@ -221,7 +221,7 @@ describe("Settings → Git prefix pane", () => {
     // real value rather than a remembered one.
     expect(
       source("apps/desktop/src/renderer/features/settings/settings-ui.tsx"),
-    ).toContain('"bg-bg1-highlight divide-border1 rounded-lg px-3 [&>*]:py-3"');
+    ).toContain('"bg-bg1-bright divide-border1 rounded-lg px-3 [&>*]:py-3"');
   });
 
   it("keeps the preview line to the founder's two strings", () => {

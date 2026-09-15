@@ -6,6 +6,11 @@ import { SearchIcon } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import {
+  MENU_ITEM_RADIUS,
+  MENU_SEPARATOR,
+  MENU_SURFACE_INSET,
+} from "@/renderer/shared/ui/menu-surface";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -106,7 +111,7 @@ function CommandList({
     <CommandPrimitive.List
       data-slot="command-list"
       className={cn(
-        "max-h-[300px] scroll-py-1 overflow-x-hidden overflow-y-auto",
+        "max-h-[300px] scroll-py-1.5 overflow-x-hidden overflow-y-auto",
         className,
       )}
       {...props}
@@ -134,7 +139,8 @@ function CommandGroup({
     <CommandPrimitive.Group
       data-slot="command-group"
       className={cn(
-        "text-fg1 [&_[cmdk-group-heading]]:text-fg2 overflow-hidden p-1 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium",
+        "text-fg1 [&_[cmdk-group-heading]]:text-fg2 overflow-hidden [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1.5 [&_[cmdk-group-heading]]:text-xs [&_[cmdk-group-heading]]:font-medium",
+        MENU_SURFACE_INSET,
         className,
       )}
       {...props}
@@ -149,7 +155,7 @@ function CommandSeparator({
   return (
     <CommandPrimitive.Separator
       data-slot="command-separator"
-      className={cn("bg-border2 -mx-1 h-px", className)}
+      className={cn(MENU_SEPARATOR, className)}
       {...props}
     />
   );
@@ -164,7 +170,8 @@ const CommandItem = React.forwardRef<
       ref={ref}
       data-slot="command-item"
       className={cn(
-        "data-[selected=true]:bg-bg3-hover data-[selected=true]:text-fg1 [&_svg:not([class*='text-'])]:text-fg2 relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-xs outline-hidden select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4",
+        "data-[selected=true]:bg-bg3-hover data-[selected=true]:text-fg1 [&_svg:not([class*='text-'])]:text-fg2 relative flex cursor-default items-center gap-2 px-2 py-1.5 text-xs outline-hidden select-none data-[disabled=true]:pointer-events-none data-[disabled=true]:opacity-50 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-3.5",
+        MENU_ITEM_RADIUS,
         className,
       )}
       {...props}

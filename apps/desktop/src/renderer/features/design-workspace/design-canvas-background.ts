@@ -1,7 +1,7 @@
 import { formatDesignColor, parseDesignColor } from "./design-color-values";
 
 // Runtime fallback for the canvas boundary only. The normal path resolves the
-// active theme's --bg2 token, so Dark, Orka black, and Light each begin with
+// active theme's --bg2 token, so Dark and Light each begin with
 // the exact surface color defined by the design system.
 const DESIGN_CANVAS_FALLBACK_BACKGROUND = "#212121"; // check:ui ignore-line -- fallback for a runtime canvas color boundary.
 

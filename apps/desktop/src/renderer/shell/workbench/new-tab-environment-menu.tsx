@@ -18,10 +18,9 @@ import {
   type QuickOpenEnvironmentEntry,
 } from "./quick-open";
 
-// The add-menu reference uses a wider corner radius than ordinary menus.
-// Keep that requested geometry local; the shared menu scale is unchanged.
-export const NEW_TAB_MENU_CHROME =
-  "w-[280px] rounded-[calc(var(--radius-lg)*2)]";
+// Corner radius, inset, row metrics and icon scale come from the shared menu
+// primitives (see shared/ui/menu-surface.ts); only the width is local.
+export const NEW_TAB_MENU_CHROME = "w-[280px]";
 
 export function NewTabEnvironmentMenu({
   open,
@@ -111,7 +110,6 @@ function EnvironmentItems({
       {entries.map((entry) => (
         <DropdownMenuItem
           key={entry.terminalId}
-          className="[&_svg]:size-3.5"
           onSelect={() => onSelect(entry.terminalId, entry.title)}
         >
           <DynamicIcon name={entry.icon} className="text-fg2 size-3.5" />
@@ -166,7 +164,10 @@ export function NewTabEnvironmentSearchResults({
 function useEnvironmentEntries(terminalFolder: string, cwd?: string) {
   // Both consumers mount only while useful and share the terminal controller's
   // exact settings cache and platform filtering. Neither starts a command.
-  const { actions, actionsReady, runIdFor } = useRunControl(terminalFolder, cwd);
+  const { actions, actionsReady, runIdFor } = useRunControl(
+    terminalFolder,
+    cwd,
+  );
   const { workspace } = useActiveWorkspace();
   const entries = useMemo<QuickOpenEnvironmentEntry[]>(
     () => [

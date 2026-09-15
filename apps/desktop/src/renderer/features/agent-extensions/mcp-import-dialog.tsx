@@ -385,7 +385,6 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
             size="sm"
             disabled={busy || loading || selectedCount === 0}
             onClick={() => void handleImport()}
-            className="gap-1.5"
           >
             {busy && <ZerosSpinner size={16} tone="inverted" />}
             {selectedCount > 0 ? `Import ${selectedCount}` : "Import"}

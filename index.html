@@ -15,8 +15,8 @@
          document paints dark between stylesheet-apply and the appearance
          store's module-load flush inside the JS bundle. Reads the same
          zeros.appearance.v2 key the store owns
-         (mode: system|light|dark|orka-black;
-         legacy modes fall through to dark, matching the store's migration)
+         (mode: system|light|dark; legacy modes — including the retired
+         orka-black — fall through to dark, matching the store's migration)
          and resolves "system" via prefers-color-scheme. Must stay inline and
          dependency-free so it runs before ANY bundle bytes evaluate. -->
     <script>
@@ -31,7 +31,6 @@
               m === "light" ||
               m === "system" ||
               m === "dark" ||
-              m === "orka-black" ||
               m === "high-contrast"
             )
               mode = m;
@@ -49,12 +48,6 @@
               ? "light"
               : "dark";
           document.documentElement.setAttribute("data-theme", variant);
-          if (mode === "orka-black") {
-            document.documentElement.setAttribute(
-              "data-theme-palette",
-              "orka-black",
-            );
-          }
         } catch (e) {
           document.documentElement.setAttribute("data-theme", "dark");
         }
@@ -77,10 +70,6 @@
         --zeros-boot-ink-strong: #f2f2f0;
         --zeros-boot-ink-mid: #b6b6b2;
         --zeros-boot-ink-soft: #777774;
-      }
-
-      :root[data-theme="dark"][data-theme-palette="orka-black"] {
-        --zeros-boot-bg: #131111;
       }
 
       :root[data-theme="light"] {

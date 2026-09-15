@@ -179,8 +179,7 @@
               "enum": [
                 "system",
                 "light",
-                "dark",
-                "orka-black"
+                "dark"
               ]
             },
             "codeThemes": {
@@ -729,7 +728,8 @@
             "type": "string",
             "enum": [
               "cli",
-              "api-key"
+              "api-key",
+              "subscription"
             ],
             "description": "How this agent authenticates."
           },

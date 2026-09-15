@@ -32,6 +32,13 @@ describe("personal app preference ownership", () => {
       syncPersonalPreferences({ experimental: { terminalAgents: true } }),
     ).toEqual({ analytics_opt_out: true });
   });
+  it("migrates the retired orka-black appearance mode to dark on import", () => {
+    expect(
+      syncPersonalPreferences({
+        appearance: { mode: "orka-black", codeThemes: {} },
+      }),
+    ).toEqual({ appearance: { mode: "dark", codeThemes: {} } });
+  });
   it("replaces one preference object without losing another window's unrelated preference", () => {
     syncPersonalPreferences({
       appearance: { mode: "dark", codeThemes: { dark: "old" } },

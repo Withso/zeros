@@ -30,6 +30,7 @@ import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
 import { WorkspaceModeToggle } from "../../shared/ui/workspace-mode-header";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // ── Conversation pane className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-conversation pane family
 // (lines 97-270 of the original app-shell.css) is now inline
@@ -353,6 +354,7 @@ export function ConversationPane({
     <section
       ref={sectionRef}
       data-zeros-column-2=""
+      {...popoverBoundaryProps}
       className={cn(
         CONVERSATION_BASE_CLS,
         workbenchCollapsed

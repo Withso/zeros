@@ -3,10 +3,9 @@
 // ──────────────────────────────────────────────────────────
 //
 // useThemeVariant returns resolved dark/light appearance and is appropriate
-// for polarity decisions such as code-theme filtering. useThemeId also
-// distinguishes Orka black from neutral Dark; canvas/xterm surfaces that read
-// concrete token VALUES must use it so a dark-palette-only switch repaints.
-// Regular DOM styling should keep using var(--…), which re-themes with zero JS.
+// for polarity decisions such as code-theme filtering. useThemeId returns the
+// concrete painted theme; canvas/xterm surfaces that read concrete token
+// VALUES key their re-resolve on it. Regular DOM styling should keep using var(--…), which re-themes with zero JS.
 // ──────────────────────────────────────────────────────────
 
 import { useSyncExternalStore } from "react";

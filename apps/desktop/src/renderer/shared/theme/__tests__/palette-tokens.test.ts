@@ -73,7 +73,11 @@ function contrastRatio(
   return (lighter + 0.05) / (darker + 0.05);
 }
 
-const STRUCTURAL_ORKA_BLACK = {
+/** The former warm dark palette (shipped for a while as the opt-in "Orka
+ *  black" theme, retired 2026-09-14). Kept ONLY as the historical record
+ *  neutral Dark's lightness values were derived from — it no longer exists
+ *  in the stylesheet. */
+const FORMER_WARM_DARK = {
   bg0: [5, 10, 5],
   bg1: [5, 5, 7],
   "bg1-hover": [8, 5, 12],
@@ -104,10 +108,8 @@ const STRUCTURAL_ORKA_BLACK = {
  *    bg2      — a point higher so the composer and raised cards lift further
  *               off the canvas.
  *    fg1/fg2  — raised for stronger text contrast on the neutral canvas.
- *    fg3      — the RESERVED middle tier. Neutral Dark places it at L60; Orka
- *               black re-derives the same RELATIVE position inside its own
- *               (lower-contrast) fg2→muted-fg band and lands at L57, so the
- *               two legitimately differ. */
+ *    fg3      — the RESERVED middle tier. Neutral Dark places it at L60 (the
+ *               former palette sat at L44 before the tier consolidation). */
 const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
   bg2: 13,
   fg1: 94,
@@ -115,35 +117,23 @@ const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
   fg3: 60,
 };
 
-/** Orka black stays preserved byte-for-byte EXCEPT where the foreground-tier
- *  consolidation deliberately moved it. `--fg3` and `--muted-fg` used to be
- *  near-duplicates at L44 (sat 1% vs 4%); every consumer was migrated onto
- *  `--muted-fg`, so:
- *    muted-fg — ADOPTS the former --fg3 triple, which keeps all ~191 migrated
- *               consumers pixel-identical in Orka black.
- *    fg3      — re-purposed as the reserved middle tier (no consumers yet).
- *  Listing them here keeps the preservation contract meaningful and reviewable
- *  for every other token instead of silently editing the historical record. */
-const ORKA_DELIBERATE_CHANGES = {
-  fg3: [15, 1, 57],
-  "muted-fg": [15, 1, 44],
-} satisfies Record<string, [number, number, number]>;
-
 /** Structural primitives neutral Dark defines as an ALIAS rather than a literal
- *  HSL triple, mapped to the primitive each one resolves to. Orka black and
- *  Light keep their own literal values for these. */
+ *  HSL triple, mapped to the primitive each one resolves to. Light keeps its
+ *  own literal value for these. */
 const NEUTRAL_DARK_ALIASES: Record<string, string> = {
   "highlighted-bg": "bg2",
 };
 
 describe("dark structural palettes", () => {
   const neutral = extractBlock(":root");
-  const orka = extractBlock(
-    ':root[data-theme="dark"][data-theme-palette="orka-black"]',
-  );
+
+  it("has no trace of the retired Orka black palette", () => {
+    expect(css).not.toContain("data-theme-palette");
+    expect(css).not.toMatch(/orka/i);
+  });
 
   it("keeps structural values neutral with the deliberate surface adjustments", () => {
-    for (const [token, preserved] of Object.entries(STRUCTURAL_ORKA_BLACK)) {
+    for (const [token, preserved] of Object.entries(FORMER_WARM_DARK)) {
       if (token in NEUTRAL_DARK_ALIASES) continue;
       const neutralValue = tokenTriple(neutral, token);
       expect(neutralValue, token).toEqual([
@@ -157,8 +147,6 @@ describe("dark structural palettes", () => {
   it("propagates the adjusted canvases through shared aliases", () => {
     expect(neutral).toMatch(/--pane-bg:\s*var\(--bg1\)/);
     expect(neutral).toMatch(/--bg3:\s*var\(--sidebar-bg\)/);
-    expect(orka).not.toMatch(/--pane-bg:/);
-    expect(orka).not.toMatch(/--bg3:/);
   });
 
   it("aliases the user-message surface to bg2 in neutral Dark only", () => {
@@ -167,32 +155,10 @@ describe("dark structural palettes", () => {
       expect(neutral, token).toMatch(
         new RegExp(`--${token}:\\s*var\\(--${target}\\)`),
       );
-      // Orka black and Light must each still declare their OWN literal value —
-      // tokenTriple throws if the declaration is missing or itself an alias, so
-      // the neutral-Dark alias can never leak into either palette.
-      expect(tokenTriple(orka, token)[2], `orka ${token}`).toBeGreaterThan(0);
+      // Light must still declare its OWN literal value — tokenTriple throws if
+      // the declaration is missing or itself an alias, so the neutral-Dark
+      // alias can never leak into it.
       expect(tokenTriple(light, token)[2], `light ${token}`).toBeGreaterThan(0);
-    }
-  });
-
-  it("preserves the former dark structural palette exactly as Orka black", () => {
-    for (const [token, preserved] of Object.entries(STRUCTURAL_ORKA_BLACK)) {
-      if (token in ORKA_DELIBERATE_CHANGES) continue;
-      expect(tokenTriple(orka, token), token).toEqual(preserved);
-    }
-  });
-
-  it("moves only the two deliberately-changed Orka foreground tiers", () => {
-    for (const [token, expected] of Object.entries(ORKA_DELIBERATE_CHANGES)) {
-      expect(tokenTriple(orka, token), token).toEqual(expected);
-      // Each one must still be a DEVIATION from the historical record — if a
-      // future edit walks it back, the entry above is stale and should go.
-      expect(
-        tokenTriple(orka, token),
-        `${token} no longer deviates; drop it from ORKA_DELIBERATE_CHANGES`,
-      ).not.toEqual(
-        STRUCTURAL_ORKA_BLACK[token as keyof typeof STRUCTURAL_ORKA_BLACK],
-      );
     }
   });
 
@@ -205,7 +171,6 @@ describe("dark structural palettes", () => {
       "violet",
       "brown",
     ]) {
-      expect(orka).not.toContain(`--${family}-primary`);
       expect(
         tokenTriple(neutral, `${family}-primary`)[1],
         family,
@@ -233,7 +198,7 @@ describe("dark structural palettes", () => {
   });
 });
 
-/** The four foreground tiers must read as a ladder in EVERY palette. This is
+/** The four foreground tiers must read as a ladder in BOTH palettes. This is
  *  the guard against the lightness-polarity trap: dark themes gain contrast as
  *  L rises, Light LOSES it, so a tier value copied numerically from Dark into
  *  Light silently inverts the order. Asserting on contrast (not lightness)
@@ -241,18 +206,14 @@ describe("dark structural palettes", () => {
 describe("foreground tier ladder", () => {
   const palettes = {
     "neutral dark": extractBlock(":root"),
-    "orka black": extractBlock(
-      ':root[data-theme="dark"][data-theme-palette="orka-black"]',
-    ),
     light: extractBlock('[data-theme="light"]'),
   };
-  // Orka black inherits fg1 from :root only for tokens it does not re-declare;
-  // it declares all four tiers, as does Light, so each block is self-contained.
+  // Both blocks declare all four tiers, so each is self-contained.
   const tiers = ["fg1", "fg2", "fg3", "muted-fg"] as const;
 
-  /** Light's foreground tiers, pinned. Dark is already pinned two ways (neutral
-   *  via NEUTRAL_DARK_LIGHTNESS_OVERRIDES, Orka via STRUCTURAL_ORKA_BLACK), but
-   *  nothing pinned Light — so a "quick contrast tweak" there was unreviewable.
+  /** Light's foreground tiers, pinned. Dark is already pinned (via
+   *  FORMER_WARM_DARK + NEUTRAL_DARK_LIGHTNESS_OVERRIDES), but nothing pinned
+   *  Light — so a "quick contrast tweak" there was unreviewable.
    *
    *  This matters most for muted-fg. It clears the 3:1 non-text floor on Light's
    *  bg1 (3.26:1) but sits just under it on raised surfaces (2.93:1 on bg2) — a
@@ -306,13 +267,13 @@ describe("foreground tier ladder", () => {
   });
 
   // muted-fg also carries empty-state icons and metadata on RAISED surfaces.
-  // Both dark palettes clear 3:1 there with almost no margin (L44 is the
-  // lowest value that does) — lowering it further is what this locks down.
+  // Dark clears 3:1 there with almost no margin (L44 is the lowest value that
+  // does) — lowering it further is what this locks down.
   // Light is deliberately excluded: its muted-fg sits at 2.95:1 on bg2, a
   // PRE-EXISTING shortfall inherited unchanged from the former --fg3, not a
   // regression introduced by the tier consolidation.
   it("keeps dark muted-fg above the 3:1 floor on raised surfaces too", () => {
-    for (const name of ["neutral dark", "orka black"] as const) {
+    for (const name of ["neutral dark"] as const) {
       const block = palettes[name];
       for (const surface of ["bg2", "bg2-hover"] as const) {
         expect(
@@ -328,7 +289,7 @@ describe("foreground tier ladder", () => {
 
   it("declares fg3 as a literal in every palette", () => {
     // fg3 is consumed by the input placeholders and the file tree's ignored
-    // rows, so it must resolve in all three palettes — never inherit. A missing
+    // rows, so it must resolve in both palettes — never inherit. A missing
     // or aliased declaration makes tokenTriple throw.
     for (const [name, block] of Object.entries(palettes)) {
       expect(

@@ -37,25 +37,24 @@ function stamp(options: {
 }
 
 describe("pre-bundle theme stamp", () => {
-  it("restores Orka black as a dark palette before the renderer loads", () => {
-    const attributes = stamp({ storedMode: "orka-black" });
-    expect(attributes.get("data-theme")).toBe("dark");
-    expect(attributes.get("data-theme-palette")).toBe("orka-black");
-  });
-
-  it("keeps neutral Dark free of the Orka palette attribute", () => {
+  it("stamps only data-theme — the retired palette attribute is gone", () => {
     const attributes = stamp({ storedMode: "dark" });
     expect(attributes.get("data-theme")).toBe("dark");
     expect(attributes.has("data-theme-palette")).toBe(false);
   });
 
-  it("restores Orka black from the durable fallback after a cache purge", () => {
-    const attributes = stamp({ durableMode: "orka-black" });
+  it("migrates a saved retired orka-black mode to dark", () => {
+    const attributes = stamp({ storedMode: "orka-black" });
     expect(attributes.get("data-theme")).toBe("dark");
-    expect(attributes.get("data-theme-palette")).toBe("orka-black");
+    expect(attributes.has("data-theme-palette")).toBe(false);
   });
 
-  it("resolves System through the OS without stamping a dark palette", () => {
+  it("restores Light from the durable fallback after a cache purge", () => {
+    const attributes = stamp({ durableMode: "light" });
+    expect(attributes.get("data-theme")).toBe("light");
+  });
+
+  it("resolves System through the OS", () => {
     const attributes = stamp({
       storedMode: "system",
       systemPrefersDark: false,

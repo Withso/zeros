@@ -5,7 +5,14 @@ import { z } from "zod";
 export const personalPreferencesSchema = z
   .object({
     appearance: z.object({
-      mode: z.enum(["system", "light", "dark", "orka-black"]),
+      // "orka-black" (the retired opt-in warm dark palette, 2026-08 →
+      // 2026-09-14) is accepted from persisted/synced docs and normalized to
+      // "dark" so an old settings.toml or cloud copy keeps validating; the
+      // published JSON schema only advertises the three live modes.
+      mode: z.preprocess(
+        (mode) => (mode === "orka-black" ? "dark" : mode),
+        z.enum(["system", "light", "dark"]),
+      ),
       codeThemes: z
         .object({ dark: z.string().optional(), light: z.string().optional() })
         .default({}),

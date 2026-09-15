@@ -92,7 +92,7 @@ import type { ComposerAttachment } from "./composer-attachments";
 // (the file input still uses the same accept list) — the textarea
 // autosize was removed with the textarea, and the visual shell moved
 // off ComposerShell/ComposerTextarea/ComposerToolbar.
-import { COMPOSER_FILE_ACCEPT } from "./composer-shell";
+import { COMPOSER_FILE_ACCEPT, PROMPT_SURFACE_RADIUS } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import {
   Conversation,
@@ -4841,7 +4841,10 @@ export function AgentChat({
           <ComposerConcealedContext.Provider value={composerConcealed}>
             <div
               className={cn(
-                "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col rounded-lg border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
+                "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
+                // 12px corners, shared with the edit composer + the sent
+                // user-message bubble (see PROMPT_SURFACE_RADIUS).
+                PROMPT_SURFACE_RADIUS,
                 // Drag border: subtle (border2), not near-white --highlighted-bright; `!`
                 // beats the higher-specificity focus-within:border-border2 so the drag
                 // state looks identical whether or not the composer is focused.
@@ -4867,7 +4870,12 @@ export function AgentChat({
               {composerSuggestionPopup}
               {dragActive && (
                 <div
-                  className="bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 rounded-lg p-3 text-xs"
+                  className={cn(
+                    "bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs",
+                    // Tracks the card's corners so the drop veil doesn't square
+                    // off inside them.
+                    PROMPT_SURFACE_RADIUS,
+                  )}
                   aria-hidden="true"
                 >
                   <Upload size={20} />

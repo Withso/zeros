@@ -73,18 +73,14 @@ function normalizeStored(parsed: unknown): StoredAppearancePrefs {
   // "high-contrast" was removed in 2026-05-15 — any saved value of
   // that mode migrates to "system" silently. The retired variant
   // modes (orka-night / neutral / zeros-blue / zeros-shade, removed
-  // 2026-07-07 when Zeros Shade became the single :root theme) fall
-  // through to the default ("dark") the same way. `orka-black` is a NEW
-  // id for the palette preserved in 2026-08; do not repurpose the retired
-  // `orka-night` id because it represented a different historical palette.
+  // 2026-07-07 when Zeros Shade became the single :root theme) and the
+  // `orka-black` warm dark palette (2026-08 → retired 2026-09-14) all fall
+  // through to the default ("dark") the same way.
   const rawMode = raw.mode as string | undefined;
   const mode: StoredAppearancePrefs["mode"] =
     rawMode === "high-contrast"
       ? "system"
-      : rawMode === "system" ||
-          rawMode === "light" ||
-          rawMode === "dark" ||
-          rawMode === "orka-black"
+      : rawMode === "system" || rawMode === "light" || rawMode === "dark"
         ? rawMode
         : DEFAULT_STORED_PREFS.mode;
   // Per-variant picks. Slot values are validated lazily by
@@ -117,9 +113,7 @@ function durableModeFallback(): StoredAppearancePrefs["mode"] | null {
   if (typeof window === "undefined") return null;
   const m = (window as { __ZEROS_APPEARANCE_MODE__?: unknown })
     .__ZEROS_APPEARANCE_MODE__;
-  return m === "system" || m === "light" || m === "dark" || m === "orka-black"
-    ? m
-    : null;
+  return m === "system" || m === "light" || m === "dark" ? m : null;
 }
 
 function readStoredPrefs(): StoredAppearancePrefs {
@@ -196,8 +190,9 @@ export function getVariant(): ThemeVariant {
   return variant;
 }
 
-/** The concrete visual theme. Unlike getVariant(), this changes on a
- *  neutral-Dark ↔ Orka-black switch so canvas renderers can re-read tokens. */
+/** The concrete visual theme canvas/xterm renderers key their token
+ *  re-reads on. Equal to the variant now that Dark and Light are the only
+ *  palettes. */
 export function getThemeId(): ThemeId {
   return themeId;
 }

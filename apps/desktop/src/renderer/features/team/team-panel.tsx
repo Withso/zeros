@@ -158,7 +158,6 @@ export function TeamPanel() {
         <Button
           variant="secondary"
           size="sm"
-          className="gap-1.5"
           onClick={requestCreateTeamDialog}
         >
           <Plus size={14} />
