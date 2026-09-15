@@ -4,10 +4,9 @@ import { promisify } from "node:util";
 import {
   mkdtemp,
   mkdir,
+  open,
   readFile,
   rm,
-  stat,
-  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -124,11 +123,15 @@ describe("snapshot index reuse", () => {
   });
 
   it("rechecks same-size rewrites with restored modification time", async () => {
-    const file = path.join(root, "kept.txt");
-    const previous = await stat(file);
-    await capture("before");
-    await writeFile(file, "rewritten\n");
-    await utimes(file, previous.atime, previous.mtime);
+    const file = await open(path.join(root, "kept.txt"), "r+");
+    try {
+      const previous = await file.stat();
+      await capture("before");
+      await file.writeFile("rewritten\n");
+      await file.utimes(previous.atime, previous.mtime);
+    } finally {
+      await file.close();
+    }
     expect(await contents(await capture("after"), "kept.txt")).toBe(
       "rewritten\n",
     );

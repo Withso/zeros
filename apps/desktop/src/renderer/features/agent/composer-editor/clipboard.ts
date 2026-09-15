@@ -1,6 +1,7 @@
 import type { JSONContent } from "@tiptap/core";
 import { Slice } from "@tiptap/pm/model";
 import type { EditorView } from "@tiptap/pm/view";
+import { parse as parseHtml, type DefaultTreeAdapterTypes } from "parse5";
 import {
   safeAttachmentFilename,
   validateAttachmentFile,
@@ -270,6 +271,27 @@ export function copyComposerSelection(
   return true;
 }
 
+export function readComposerClipboardHtml(html: string): string {
+  if (html.length > 2_000_000 || !html.includes(HTML_ATTRIBUTE)) return "";
+  // Read only the serialized attribute from a data-only HTML tree. Clipboard
+  // markup must never enter a browser DOM or load its embedded resources.
+  const pending: DefaultTreeAdapterTypes.ChildNode[] = [];
+  const appendChildren = (children: DefaultTreeAdapterTypes.ChildNode[]) => {
+    for (let index = children.length - 1; index >= 0; index -= 1) {
+      pending.push(children[index]);
+    }
+  };
+  appendChildren(parseHtml(html, { scriptingEnabled: false }).childNodes);
+  while (pending.length) {
+    const node = pending.pop()!;
+    if (!("attrs" in node)) continue;
+    const attribute = node.attrs.find((attr) => attr.name === HTML_ATTRIBUTE);
+    if (attribute) return attribute.value;
+    appendChildren(node.childNodes);
+  }
+  return "";
+}
+
 export function pasteComposerClipboard(
   view: EditorView,
   event: ClipboardEvent,
@@ -279,13 +301,9 @@ export function pasteComposerClipboard(
   if (!event.clipboardData || !cwd) return false;
   let encoded = event.clipboardData.getData(MIME);
   if (!encoded) {
-    const html = event.clipboardData.getData("text/html");
-    if (html.length > 2_000_000 || !html.includes(HTML_ATTRIBUTE)) return false;
-    encoded =
-      new DOMParser()
-        .parseFromString(html, "text/html")
-        .querySelector(`[${HTML_ATTRIBUTE}]`)
-        ?.getAttribute(HTML_ATTRIBUTE) ?? "";
+    encoded = readComposerClipboardHtml(
+      event.clipboardData.getData("text/html"),
+    );
   }
   if (!encoded || encoded.length > 2_000_000) return false;
   try {

@@ -2,6 +2,7 @@ import { expect, it } from "vitest";
 import {
   clipboardPayload,
   prepareClipboardPaste,
+  readComposerClipboardHtml,
 } from "../composer-editor/clipboard";
 import type { ComposerAttachment } from "../composer-attachments";
 const owner = { runtime: "local", cwd: "/repo" };
@@ -35,6 +36,55 @@ const slice = {
   openStart: 1,
   openEnd: 1,
 };
+
+it("reads HTML clipboard metadata as data without a browser DOM", () => {
+  const payload = clipboardPayload(slice, () => attachment, owner);
+  const encoded = JSON.stringify(payload);
+  const attribute = encoded
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;");
+  const html = `<div data-zeros-composer="${attribute}"><img src="https://example.test/clipboard.png" onerror="alert(1)"><script>alert(1)</script></div>`;
+
+  const extracted = readComposerClipboardHtml(html);
+  expect(extracted).toBe(encoded);
+  expect(
+    prepareClipboardPaste(JSON.parse(extracted), owner)?.attachments[0],
+  ).toMatchObject({ contextAttachmentId: "record-1", owner });
+});
+
+it("extracts the first real clipboard marker and decodes attribute entities", () => {
+  expect(
+    readComposerClipboardHtml(
+      `<script>const marker = '<div data-zeros-composer="fake">';</script><!-- <div data-zeros-composer="comment"> --><section><span DATA-ZEROS-COMPOSER='&quot;first &amp; &#39;value&#39;&quot;'></span></section><div data-zeros-composer="second"></div>`,
+    ),
+  ).toBe("\"first & 'value'\"");
+});
+
+it("ignores clipboard markers inside template contents", () => {
+  expect(
+    readComposerClipboardHtml(
+      '<template><div data-zeros-composer="hidden"></div></template><div data-zeros-composer="visible"></div>',
+    ),
+  ).toBe("visible");
+});
+
+it.each([
+  '<!doctype html><html data-zeros-composer="metadata"><body></body></html>',
+  '<!doctype html><html><body data-zeros-composer="metadata"></body></html>',
+  '<noscript><div data-zeros-composer="metadata"></div></noscript>',
+])("keeps inert document parsing for %s", (html) => {
+  expect(readComposerClipboardHtml(html)).toBe("metadata");
+});
+
+it("rejects missing or oversized HTML clipboard metadata", () => {
+  expect(readComposerClipboardHtml("<div>ordinary HTML</div>")).toBe("");
+  expect(
+    readComposerClipboardHtml(
+      `<div data-zeros-composer="${"x".repeat(2_000_000)}"></div>`,
+    ),
+  ).toBe("");
+});
 
 it("rehydrates same-workspace references with fresh node ids and the same durable file", () => {
   const payload = clipboardPayload(slice, () => attachment, owner);

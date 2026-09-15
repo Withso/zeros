@@ -1704,6 +1704,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       textNode: heading.firstChild,
     };
   });
+  const styleSourceVersion = () =>
+    homeRuntime
+      .locator('[data-oid="home-heading"]')
+      .evaluate(() => window.__zerosDesignSourceVersion);
   await widthInput.fill("640");
   await page.waitForTimeout(150);
   check(
@@ -1715,6 +1719,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .locator('[data-oid="home-heading"]')
         .evaluate((heading) => getComputedStyle(heading).width === "900px")),
   );
+  const widthSourceBeforeCommit = await styleSourceVersion();
   await page.keyboard.press("Enter");
   check(
     "committing a width updates element pixels and selection geometry together",
@@ -1730,24 +1735,33 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       });
       const documentStable = await homeRuntime
         .locator('[data-oid="home-heading"]')
-        .evaluate((heading) => {
+        .evaluate((heading, previousSourceVersion) => {
           const identity = window.__zerosDesignHeadingIdentity;
           return (
+            window.__zerosDesignSourceVersion !== previousSourceVersion &&
             getComputedStyle(heading).width === "640px" &&
             identity?.heading === heading &&
             heading.firstChild === identity?.textNode
           );
-        });
+        }, widthSourceBeforeCommit);
       return parentStable && documentStable;
     }, "design-live-width-commit"),
   );
+  const widthSourceBeforeRestore = await styleSourceVersion();
   await widthInput.fill("900");
   await page.keyboard.press("Enter");
   await waitFor(
     () =>
       homeRuntime
         .locator('[data-oid="home-heading"]')
-        .evaluate((heading) => getComputedStyle(heading).width === "900px")
+        // The preview paints before persistence. Waiting for its pixels alone
+        // lets this fixture write leak into the rapid pair's mutation count.
+        .evaluate(
+          (heading, previousSourceVersion) =>
+            window.__zerosDesignSourceVersion !== previousSourceVersion &&
+            getComputedStyle(heading).width === "900px",
+          widthSourceBeforeRestore,
+        )
         .catch(() => false),
     "design-live-width-restore",
   );

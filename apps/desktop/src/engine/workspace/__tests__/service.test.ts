@@ -217,31 +217,43 @@ describe("WorkspaceService", () => {
     }
   });
 
-  it("writes an image attachment into the workspace context graph", async () => {
-    const result = (await svc.handle("attachment.write", {
-      workspaceId: LOCAL_MAIN_WORKSPACE_ID,
-      chatId: "chat-1",
-      attachmentId: "att-1",
-      base64: Buffer.from("full-resolution-image").toString("base64"),
-      mimeType: "image/png",
-      filename: "../../shot.png",
-    })) as {
-      absolutePath: string;
-      relativePath: string;
-      bytes: number;
-    };
+  it.each([false, true])(
+    "writes an image attachment into the workspace context graph (symlinked root: %s)",
+    async (symlinked) => {
+      const workspaceRoot = symlinked
+        ? path.join(stateDir, "workspace-link")
+        : dir;
+      if (symlinked) fs.symlinkSync(dir, workspaceRoot, "dir");
+      const service = new WorkspaceService(workspaceRoot);
+      const result = (await service.handle("attachment.write", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        chatId: "chat-1",
+        attachmentId: "att-1",
+        base64: Buffer.from("full-resolution-image").toString("base64"),
+        mimeType: "image/png",
+        filename: "../../shot.png",
+      })) as {
+        absolutePath: string;
+        relativePath: string;
+        bytes: number;
+      };
 
-    expect(result.relativePath).toBe(
-      ".context/local/attachments/att-1/shot.png",
-    );
-    expect(result.absolutePath).toBe(path.join(dir, result.relativePath));
-    expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
-      "full-resolution-image",
-    );
-    expect(
-      fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
-    ).toContain("/local/");
-  });
+      expect(result.relativePath).toBe(
+        ".context/local/attachments/att-1/shot.png",
+      );
+      // The attachment boundary returns canonical paths, including macOS's
+      // /var → /private/var alias and explicitly symlinked workspace roots.
+      expect(result.absolutePath).toBe(
+        path.join(fs.realpathSync(workspaceRoot), result.relativePath),
+      );
+      expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
+        "full-resolution-image",
+      );
+      expect(
+        fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
+      ).toContain("/local/");
+    },
+  );
 
   it("rejects an oversized attachment from a paired remote client before writing", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
