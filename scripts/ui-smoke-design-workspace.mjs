@@ -8,9 +8,11 @@ import { runDesignLayoutChildrenSmoke } from "./ui-smoke-design-layout-children.
 import { runDesignFrameChildrenSmoke } from "./ui-smoke-design-frame-children.mjs";
 import { runDesignAuthoredFrameSmoke } from "./ui-smoke-design-authored-frame.mjs";
 import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs";
+import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
 import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
+  await runDesignGitMenuSmoke({ page, check });
   await runDesignSelectionSmoke({ page, waitFor, check });
   await runDesignLayoutSmoke({ page, waitFor, check });
   await runDesignLayoutChildrenSmoke({ page, waitFor, check });

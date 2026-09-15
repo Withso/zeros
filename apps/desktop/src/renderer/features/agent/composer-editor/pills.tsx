@@ -9,19 +9,23 @@
 // Chrome = the unified pill recipe (PILL_SHELL): 20px
 // tall, 4px radius, bg-bg1, border-border3 — identical to the tool-row
 // FileTag and turn-footer file pills. Mentions use the Files-tab file-type
-// glyph; attachments show an image thumbnail or a file glyph, with a × to
-// remove (atoms also delete on Backspace).
+// glyph; attachments use the same file/image glyphs. Hover replaces the glyph
+// with × in its existing slot (atoms also delete on Backspace).
 // ──────────────────────────────────────────────────────────
 
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
-import { useCallback, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { X } from "lucide-react";
 
 import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
 import { useComposerEditorContext } from "./composer-editor-context";
-// Shared pill chrome — identical to the static sent-bubble pills. `mention`
-// uses symmetric padding (no ×); `attachment` reserves the right edge for ×.
+// Shared pill chrome; editable pills use their leading icon slot for removal.
 import { PILL_SHELL } from "./pill-views";
 import {
   HoverCard,
@@ -40,6 +44,40 @@ import {
   subscribeFileAttachmentProgress,
 } from "../file-attachment-transfer";
 
+function PillRemoveButton({
+  label,
+  disabled,
+  onRemove,
+  children,
+}: {
+  label: string;
+  disabled: boolean;
+  onRemove: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <Tooltip label="Remove">
+      <button
+        type="button"
+        // Removing a pill must preserve the editor's current selection.
+        onMouseDown={(event) => event.preventDefault()}
+        disabled={disabled}
+        onClick={onRemove}
+        aria-label={`Remove ${label}`}
+        className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
+      >
+        <span
+          data-composer-pill-icon=""
+          className="col-start-1 row-start-1 inline-flex"
+        >
+          {children}
+        </span>
+        <X size={11} className="col-start-1 row-start-1" />
+      </button>
+    </Tooltip>
+  );
+}
+
 // ── MentionPill — @-file / folder / selection ──────────────
 
 export function MentionPill(props: NodeViewProps) {
@@ -56,32 +94,25 @@ export function MentionPill(props: NodeViewProps) {
         data-mention-pill=""
         className={cn(
           PILL_SHELL,
-          "mx-[1.5px] pr-1 pl-2",
+          "composer-pill mx-[1.5px] gap-2 px-1.5",
           props.selected && "ring-highlighted-bright/40 ring-2",
         )}
         contentEditable={false}
       >
-        <FileTypeIcon
-          name={attrs.path || attrs.label}
-          kind={attrs.kind}
-          size={13}
-        />
+        <PillRemoveButton
+          label={attrs.label}
+          disabled={!ctx.editable}
+          onRemove={() => {
+            if (props.editor.isEditable) props.deleteNode();
+          }}
+        >
+          <FileTypeIcon
+            name={attrs.path || attrs.label}
+            kind={attrs.kind}
+            size={13}
+          />
+        </PillRemoveButton>
         <span className="max-w-[18rem] truncate">{attrs.label}</span>
-        <Tooltip label="Remove">
-          <button
-            type="button"
-            // mousedown preventDefault so removing never blurs/moves the selection.
-            onMouseDown={(e) => e.preventDefault()}
-            disabled={!ctx.editable}
-            onClick={() => {
-              if (props.editor.isEditable) props.deleteNode();
-            }}
-            aria-label={`Remove ${attrs.label}`}
-            className="text-fg2 hover:bg-bg1-hover hover:text-fg1 ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0"
-          >
-            <X size={11} />
-          </button>
-        </Tooltip>
       </NodeViewWrapper>
     </Tooltip>
   );
@@ -160,13 +191,26 @@ export function AttachmentPill(props: NodeViewProps) {
       onFocus={warmPreview}
       className={cn(
         PILL_SHELL,
-        "mx-[1.5px] pr-1 pl-1.5",
+        "composer-pill mx-[1.5px] gap-2 px-1.5",
         props.selected && "ring-highlighted-bright/40 ring-2",
         invalid &&
-          "border-yellow-primary/40 text-fg2 opacity-85 [&_img]:grayscale",
+          "border-yellow-primary/40 text-fg2 opacity-85 [&_[data-composer-pill-icon]]:grayscale",
       )}
       contentEditable={false}
     >
+      <PillRemoveButton
+        label={attrs.name}
+        disabled={!ctx.editable}
+        onRemove={() => {
+          if (props.editor.isEditable) props.deleteNode();
+        }}
+      >
+        <FileTypeIcon
+          name={attrs.name}
+          kind={isImage ? "image" : "file"}
+          size={13}
+        />
+      </PillRemoveButton>
       <button
         type="button"
         // mousedown preventDefault so clicking a pill doesn't blur/move the
@@ -179,34 +223,11 @@ export function AttachmentPill(props: NodeViewProps) {
         aria-label={isImage ? "Preview image" : attrs.name}
         className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default"
       >
-        {isImage && dataUri ? (
-          <img
-            src={dataUri}
-            alt=""
-            className="h-[16px] w-[16px] shrink-0 rounded-sm object-cover"
-          />
-        ) : (
-          <FileTypeIcon name={attrs.name} kind="file" size={13} />
-        )}
         <span className="max-w-[16rem] truncate">{attrs.name}</span>
         {progress?.phase === "saving" && (
           <span className="text-fg2">Saving {progress.percent}%</span>
         )}
       </button>
-      <Tooltip label="Remove">
-        <button
-          type="button"
-          onMouseDown={(e) => e.preventDefault()}
-          disabled={!ctx.editable}
-          onClick={() => {
-            if (props.editor.isEditable) props.deleteNode();
-          }}
-          aria-label={`Remove ${attrs.name}`}
-          className="text-fg2 hover:bg-bg1-hover hover:text-fg1 ml-0.5 inline-flex size-4 shrink-0 items-center justify-center rounded-sm border-0 bg-transparent p-0"
-        >
-          <X size={11} />
-        </button>
-      </Tooltip>
     </NodeViewWrapper>
   );
 

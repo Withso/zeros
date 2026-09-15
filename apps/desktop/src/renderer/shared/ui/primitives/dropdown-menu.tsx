@@ -127,8 +127,29 @@ const DropdownMenuContent = React.forwardRef<
   return (
     <DropdownMenuPrimitive.Portal>
       <DropdownMenuPrimitive.Content
+        {...props}
         ref={composedRef}
         sideOffset={sideOffset}
+        onPointerDownOutside={(event) => {
+          // Radix retains a closing menu through its exit animation. Its
+          // outside listener must not dismiss a fresh open from the same
+          // trigger, whose pointer handler already owns toggling the menu.
+          const content = contentRef.current;
+          const triggerId = content?.getAttribute("aria-labelledby");
+          const trigger = triggerId
+            ? content?.ownerDocument.getElementById(triggerId)
+            : null;
+          const originalEvent = event.detail.originalEvent;
+          if (
+            originalEvent.button === 0 &&
+            !originalEvent.ctrlKey &&
+            event.target instanceof Node &&
+            trigger?.contains(event.target)
+          ) {
+            event.preventDefault();
+          }
+          props.onPointerDownOutside?.(event);
+        }}
         // Default: drop the spurious focus ring Radix leaves on the
         // trigger after a pointer-driven close (see overlay-focus.ts).
         // Still forward to any consumer-supplied handler.
@@ -140,7 +161,6 @@ const DropdownMenuContent = React.forwardRef<
           "bg-bg3 text-fg1 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 border-border2 z-50 min-w-[8rem] overflow-hidden rounded-lg border p-1 shadow-[var(--shadow-dropdown)]",
           className,
         )}
-        {...props}
       />
     </DropdownMenuPrimitive.Portal>
   );

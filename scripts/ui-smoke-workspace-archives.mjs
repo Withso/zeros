@@ -95,9 +95,11 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
     "aria-disabled",
     "true",
   );
-  // Wait for Radix's opening focus handoff before sending a keyboard action.
+  // Focus arrives before Radix registers the menu as its active dismissable
+  // layer. Wait for that layer to accept input before sending Escape.
   const menu = page.getByRole("menu");
   await expect(menu).toBeFocused();
+  await expect(menu).toHaveCSS("pointer-events", "auto");
   await menu.press("Escape");
   await expect(menu).toHaveCount(0);
   await options("Recent")
