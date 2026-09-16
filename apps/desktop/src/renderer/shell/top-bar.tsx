@@ -7,6 +7,7 @@
 
 // --- IMPORTS ---
 
+import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
 import React, {
   useCallback,
   useEffect,
@@ -41,7 +42,7 @@ import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-
 import { useAgentSessions } from "../features/agent/sessions-hooks";
 import {
   useAnyChatAwaitingKind,
-  useAnyChatAgentWorking,
+  useAnyChatAgentActivity,
 } from "../features/agent/sessions-store";
 import {
   isLocalMainWorkspace,
@@ -756,7 +757,8 @@ function WorkspaceTab({
   const modeSwitching = requestedMode !== null;
   const designWorkspace = workspace.kind === "design";
   const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
-  const working = useAnyChatAgentWorking(agentChatIds);
+  const activity = useAnyChatAgentActivity(agentChatIds);
+  const working = activity !== null;
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
@@ -847,7 +849,7 @@ function WorkspaceTab({
                 strokeWidth={1.25}
               />
             ) : working ? (
-              <ZerosSpinner size={16} variant="agent" label="Agent working" />
+              <AgentActivityIndicator activity={activity} />
             ) : (
               (prTabIcon(workspace, islandKind) ?? (
                 <GitBranch className="size-3.5" strokeWidth={1.25} />
@@ -884,7 +886,7 @@ function WorkspaceTab({
               strokeWidth={1.25}
             />
           ) : (
-            <ZerosSpinner size={16} variant="agent" label="Agent working" />
+            <AgentActivityIndicator activity={activity} />
           )}
         </span>
       )}

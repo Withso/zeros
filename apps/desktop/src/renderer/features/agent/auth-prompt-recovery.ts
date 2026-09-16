@@ -63,7 +63,19 @@ export function authenticationTurn(
   events: readonly AgentMessage[],
   failureKind?: string,
 ): boolean {
-  return failureKind === "auth-required" || events.some(isAuthenticationNotice);
+  // A typed provider failure outranks legacy notice wording. A model or rate
+  // error can quote sign-in advice without requiring authentication.
+  const kind = failureKind ?? latestTurnFailureKind(events);
+  if (kind) return kind === "auth-required";
+  return events.some(isAuthenticationNotice);
+}
+
+function latestTurnFailureKind(events: readonly AgentMessage[]): string | undefined {
+  for (let index = events.length - 1; index >= 0; index--) {
+    const event = events[index];
+    if (event.kind === "error_notice" && !event.parentToolId && !event.recoverable && event.severity === "error" && event.turnFailure) return event.turnFailure.kind;
+  }
+  return undefined;
 }
 export function authenticationTurnOutput(
   events: AgentMessage[],
@@ -90,12 +102,8 @@ export function authenticationTurnState(input: {
   inFlight: boolean;
 }): "sign-in" | "stopped" | null {
   if (!input.userPrompt) return null;
-  const blocked =
-    !!input.userPrompt.authRecovery ||
-    authenticationTurn(
-      input.events,
-      input.isTail ? input.failureKind : undefined,
-    );
+  const kind = (input.isTail ? input.failureKind : undefined) ?? latestTurnFailureKind(input.events);
+  const blocked = kind ? kind === "auth-required" : !!input.userPrompt.authRecovery || authenticationTurn(input.events);
   if (!blocked) return null;
   if (!input.isTail) return "stopped";
   return input.inFlight ? null : "sign-in";
@@ -111,8 +119,10 @@ export function pendingAuthenticationPrompts(
 ): AgentTextMessage[] {
   const pending: AgentTextMessage[] = [];
   let legacyFailure = false;
+  let terminal: { turnId: string; kind: string } | undefined;
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
+    if (message.kind === "error_notice" && !message.parentToolId && !message.recoverable && message.severity === "error") terminal ??= message.turnFailure;
     if (isAuthenticationNotice(message)) legacyFailure = true;
     if (
       message.kind !== "text" ||
@@ -121,7 +131,10 @@ export function pendingAuthenticationPrompts(
       message.id === currentMessageId
     )
       continue;
-    if (!message.authRecovery && !legacyFailure) break;
+    const blocked = terminal?.turnId === message.id
+      ? terminal.kind === "auth-required"
+      : !!message.authRecovery || legacyFailure;
+    if (!blocked) break;
     pending.push(
       message.authRecovery
         ? message
@@ -131,6 +144,7 @@ export function pendingAuthenticationPrompts(
           },
     );
     legacyFailure = false;
+    terminal = undefined;
   }
   return pending.reverse();
 }

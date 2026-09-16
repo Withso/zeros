@@ -35,6 +35,7 @@
 //     right/bottom band to split — see PaneDropOverlay).
 //   - The active tab pins to whichever strip edge it reaches.
 
+import { AgentActivityIndicator } from "../../features/agent/agent-activity-indicator";
 import React, {
   useCallback,
   useEffect,
@@ -78,7 +79,7 @@ import { OpenInSubmenu } from "./conversation-header";
 import { AgentIcon } from "../../features/agent/agent-icon";
 import {
   useChatAwaitingKind,
-  useChatStreaming,
+  useChatAgentActivity,
 } from "../../features/agent/sessions-store";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useTerminalBusy } from "../terminal/terminal-activity";
@@ -698,7 +699,7 @@ function TabRow({
   // ZerosSpinner so the tab head signals activity. See the original
   // single-strip notes for the terminal/awaiting variants.
   const isTerminal = chat.kind === "terminal";
-  const isStreaming = useChatStreaming(chat.id);
+  const activity = useChatAgentActivity(chat.id);
   const awaitingKind = useChatAwaitingKind(chat.id);
   const isTerminalBusy = useTerminalBusy(chat.id, isTerminal);
 
@@ -848,13 +849,8 @@ function TabRow({
               className="text-fg2 shrink-0"
               aria-label="Agent awaiting your input"
             />
-          ) : isStreaming ? (
-            <ZerosSpinner
-              size={16}
-              variant="agent"
-              label="Agent working"
-              className="shrink-0"
-            />
+          ) : activity ? (
+            <AgentActivityIndicator activity={activity} className="shrink-0" />
           ) : (
             <AgentIcon
               agentId={chat.agentId}

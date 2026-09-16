@@ -6,16 +6,26 @@ import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surfa
 
 function HoverCard({
   onOpenChange,
+  open,
+  enabled = true,
   ...props
-}: React.ComponentProps<typeof HoverCardPrimitive.Root>) {
+}: React.ComponentProps<typeof HoverCardPrimitive.Root> & { enabled?: boolean }) {
   const publishOverlay = useNativeSurfaceOverlayIntent();
+  // A controlled close can bypass Radix's callback while keeping this root
+  // mounted. Release its native-surface token, and ignore delayed hover intent
+  // when the owner has disabled the preview.
+  React.useEffect(() => {
+    if (!enabled || open === false) publishOverlay(false);
+  }, [enabled, open, publishOverlay]);
   return (
     <HoverCardPrimitive.Root
       data-slot="hover-card"
       {...props}
-      onOpenChange={(open) => {
-        publishOverlay(open);
-        onOpenChange?.(open);
+      open={enabled ? open : false}
+      onOpenChange={(nextOpen) => {
+        if (!enabled) return;
+        publishOverlay(nextOpen);
+        onOpenChange?.(nextOpen);
       }}
     />
   );

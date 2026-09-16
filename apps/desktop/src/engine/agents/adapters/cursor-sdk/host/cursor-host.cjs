@@ -1557,6 +1557,20 @@ async function handle(m) {
       ok(id, res ?? null);
       return;
     }
+    case "run.steer": {
+      if (typeof args.text !== "string") throw new Error("Steering requires text");
+      const entry = runs.get(args.runId);
+      if (!entry || typeof entry.run.steer !== "function") {
+        ok(id, "revert_to_followup");
+        return;
+      }
+      const outcome = await entry.run.steer(args.text);
+      if (outcome !== "complete_delivered" && outcome !== "revert_to_followup") {
+        throw new Error("Invalid steering acknowledgement");
+      }
+      ok(id, outcome);
+      return;
+    }
     case "run.cancel": {
       const entry = runs.get(args.runId);
       if (entry) {

@@ -1,7 +1,8 @@
-import { expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import * as credentials from "../provider-credentials";
 import * as providerEnv from "../../settings/provider-env";
 import { AgentGateway } from "../gateway";
+import { normalizeProviderError, providerErrorFailure } from "../adapters/shared/provider-error";
 import type { AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
@@ -79,3 +80,75 @@ it("retires an execution with an older account before dispatching a new prompt",
   expect(disposeSession).toHaveBeenCalledWith("old-account");
   expect(internals.executionToAgent.has("old-account")).toBe(false);
 });
+
+describe.each(["claude", "cursor", "codex"] as const)(
+  "%s provider error health",
+  (provider) => {
+    afterEach(() => vi.restoreAllMocks());
+    it.each([
+      ["unauthenticated", true],
+      ["rate_limit_exceeded", false],
+      ["invalid_model", false],
+      ["session_expired", false],
+      ["ECONNRESET", false],
+      ["unknown", false],
+    ])(
+      "invalidates credentials only for authentication evidence: %s",
+      async (code, invalid) => {
+        vi.spyOn(providerEnv, "usesProviderApiKey").mockReturnValue(true);
+        const gateway = new AgentGateway({
+          projectRoot: "/tmp/zeros-error-health",
+          executionBoundary: testExecutionBoundary(),
+          events: {
+            onSessionUpdate: () => {},
+            onPermissionRequest: () => {},
+            onQuestionRequest: () => {},
+            onAgentStderr: () => {},
+            onAgentExit: () => {},
+          },
+        });
+        const failure = providerErrorFailure(
+          provider,
+          normalizeProviderError(provider, {
+            code,
+            message:
+              "Provider rejected this request. Check your API key settings.",
+          }),
+          "prompt",
+        );
+      const prompt = vi
+        .fn()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce({ response: { stopReason: "cancelled" } })
+        .mockResolvedValueOnce({ response: { stopReason: "end_turn" } });
+        const internal = gateway as unknown as {
+          adapters: Map<string, AgentAdapter>;
+          executionToAgent: Map<string, string>;
+          runtimeAuthFailed: Map<string, unknown>;
+        };
+        internal.adapters.set(provider, {
+          agentId: provider,
+          prompt,
+          dispose: async () => {},
+        } as unknown as AgentAdapter);
+        internal.executionToAgent.set("execution", provider);
+        try {
+          await expect(
+            gateway.prompt(provider, "execution", [
+              { type: "text", text: "hi" },
+            ]),
+          ).rejects.toBe(failure);
+        expect(internal.runtimeAuthFailed.has(provider)).toBe(invalid);
+        await gateway.prompt(provider, "execution", [{ type: "text", text: "stopped before dispatch" }]);
+        expect(internal.runtimeAuthFailed.has(provider)).toBe(invalid);
+        await gateway.prompt(provider, "execution", [
+            { type: "text", text: "retry" },
+          ]);
+          expect(internal.runtimeAuthFailed.has(provider)).toBe(false);
+        } finally {
+          await gateway.dispose();
+        }
+      },
+    );
+  },
+);

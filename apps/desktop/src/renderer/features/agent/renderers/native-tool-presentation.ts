@@ -1,10 +1,58 @@
 import type { AgentToolMessage } from "../use-agent-session";
 import { safeToolImageSource } from "@zeros/protocol/tool-artwork";
+import { asDisplayString, toolCompletionUnreported } from "./raw-output";
 
 export function toolRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
     : {};
+}
+
+/** Codex collaboration waits are coordination, separate from Claude's native
+ * background-task lifecycle. Keep transport thread ids in storage only. */
+export function nativeAgentWait(
+  tool: AgentToolMessage,
+): { label: string; result: string | null } | null {
+  const input = toolRecord(tool.rawInput);
+  if (
+    tool.toolKind !== "other" ||
+    input.tool !== "wait" ||
+    !("senderThreadId" in input || Array.isArray(input.receiverThreadIds))
+  )
+    return null;
+  const count = Array.isArray(input.receiverThreadIds)
+    ? input.receiverThreadIds.length
+    : 0;
+  const output = toolRecord(tool.rawOutput);
+  const states = Object.values(output).map(toolRecord);
+  // Each child contributes independently. One successful report must not hide
+  // another child's failure when that child has only a native status.
+  const summaries = states.flatMap((state, index) => {
+    const message =
+      typeof state.message === "string" ? state.message.trim() : "";
+    const status = typeof state.status === "string" ? state.status.trim() : "";
+    if (!message && !status) return [];
+    const label = `Agent${states.length > 1 ? ` ${index + 1}` : ""}`;
+    return [
+      message && (!status || status === "completed")
+        ? message
+        : `${label}: ${status}${message ? `\n${message}` : ""}`,
+    ];
+  });
+  const result = summaries.length
+    ? asDisplayString(summaries.join("\n\n"))
+    : typeof tool.rawOutput === "string"
+      ? asDisplayString(tool.rawOutput)
+      : tool.status === "failed"
+        ? (asDisplayString(output.message ?? output.error) ??
+          "The wait failed without an explanation.")
+        : toolCompletionUnreported(tool.rawOutput)
+          ? "Completion not reported. The provider did not report whether this wait completed."
+          : null;
+  return {
+    label: count > 1 ? `Waiting for ${count} agents` : "Waiting for agent",
+    result,
+  };
 }
 
 export function nativeToolTitle(tool: AgentToolMessage): string | undefined {

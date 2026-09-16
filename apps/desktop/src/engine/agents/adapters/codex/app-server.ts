@@ -1039,11 +1039,11 @@ export async function bootCodexAppServerRuntime(
     // recorded as a normal completion.
     recordCompletion(
       turnId,
-      status === "failed"
-        ? "failed"
-        : status === "interrupted"
+      status === "completed"
+        ? "completed"
+        : status === "interrupted" || status === "cancelled"
           ? "cancelled"
-          : "completed",
+          : "failed",
     );
   });
   subscribe("error", (params) => {
@@ -1391,7 +1391,7 @@ function wrapBootError(
 ): Error {
   const inner = err instanceof Error ? err.message : String(err);
   const tail = stderrTail ? `\nstderr tail:\n${stderrTail.slice(-1024)}` : "";
-  return new Error(`codex app-server boot failed at ${stage}: ${inner}${tail}`);
+  return new Error(`codex app-server boot failed at ${stage}: ${inner}${tail}`, { cause: err });
 }
 
 function truncate(s: string, n: number): string {

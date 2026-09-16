@@ -34,6 +34,142 @@ afterAll(() => {
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
+describe("Claude user-turn accounting", () => {
+  it("does not assign a coalesced result's bill to either of two different user turns", async () => {
+    const mock = makePushableQuery();
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const send = (turnId: string) => adapter.prompt({ sessionId: session.sessionId, turnId, prompt: [{ type: "text", text: "Continue" }] });
+      const first = send("a");
+      await flushMicrotasks();
+      const a = mock.inputsSeen[0]?.uuid;
+      mock.push({ type: "result", uuid: "r1", subtype: "success", user_message_uuid: a, total_cost_usd: 0.1 });
+      await first;
+      const second = send("b");
+      await flushMicrotasks();
+      mock.push({ type: "result", uuid: "r2", subtype: "success", user_message_uuids: [a, mock.inputsSeen[1]?.uuid], total_cost_usd: 0.2 });
+      expect((await second).response.usage).toBeUndefined();
+      expect(emitted.filter((n) => n.update.sessionUpdate === "turn_usage_update")).toHaveLength(1);
+    } finally { await adapter.dispose(); }
+  });
+
+  it("retains background deltas on their owner while a newer input is queued", async () => {
+    const mock = makePushableQuery();
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const send = (turnId: string) => adapter.prompt({ sessionId: session.sessionId, turnId, prompt: [{ type: "text", text: "Continue" }] });
+      const result = (uuid: string, owner: unknown, cost: number, input: number) => ({
+        type: "result", uuid, subtype: "success", is_error: false, user_message_uuid: owner,
+        total_cost_usd: cost, modelUsage: { "claude-opus-5": { inputTokens: input, outputTokens: input / 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: cost } },
+      });
+      const first = send("a");
+      await flushMicrotasks();
+      const a = mock.inputsSeen[0]?.uuid;
+      mock.push(result("r1", a, 0.1, 100));
+      expect((await first).response.usage).toMatchObject({ totalCostUsd: 0.1, inputTokens: 100 });
+      const second = send("b");
+      await flushMicrotasks();
+      const b = mock.inputsSeen[1]?.uuid;
+      expect(b).toEqual(expect.any(String));
+      mock.push(result("r2", a, 0.15, 150), result("r2", a, 0.15, 150));
+      await flushMicrotasks();
+      mock.push(result("r3", b, 0.2, 200));
+      expect((await second).response.usage).toMatchObject({ totalCostUsd: 0.05, inputTokens: 50 });
+      const updates = emitted.flatMap((n) => n.update.sessionUpdate === "turn_usage_update" ? [n.update] : []);
+      expect(updates.map((u) => [u.turnId, u.usage.totalCostUsd])).toEqual([["a", 0.1], ["a", 0.15], ["b", 0.05]]);
+    } finally { await adapter.dispose(); }
+  });
+});
+
+describe("Claude fallback model persistence", () => {
+  it("ignores retired app fallback and budget settings, including legacy config updates", async () => {
+    const mock = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: mock.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/project", env: {
+        CLAUDE_FALLBACK_MODEL: "claude-sonnet-5", CLAUDE_MAX_BUDGET_USD: "5",
+      } });
+      await adapter.updateConfig({ sessionId: session.sessionId, env: {
+        CLAUDE_FALLBACK_MODEL: "claude-haiku-4-5", CLAUDE_MAX_BUDGET_USD: "1",
+      } });
+      const pending = adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "Hello" }] });
+      await flushMicrotasks();
+      mock.push({ type: "result", subtype: "success", is_error: false });
+      await pending;
+      expect(mock.captured.at(-1)).not.toHaveProperty("fallbackModel");
+      expect(mock.captured.at(-1)).not.toHaveProperty("maxBudgetUsd");
+    } finally { await adapter.dispose(); }
+  });
+  it.each(["stop", "dispose"])("settles a %s during model restoration without dispatching the prompt", async (action) => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const setModel = vi.fn().mockResolvedValueOnce(undefined).mockReturnValue(gate);
+    const mock = makePushableQuery({ setModel });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: mock.queryFn });
+    let pending: ReturnType<typeof adapter.prompt> | undefined;
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: { ANTHROPIC_MODEL: "claude-fable-5" } });
+      const send = () => adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "Continue" }] });
+      const first = send();
+      await vi.waitFor(() => expect(mock.inputsSeen).toHaveLength(1));
+      await adapter.setModel({ sessionId: session.sessionId, model: "claude-opus-5" });
+      mock.push({ type: "result", subtype: "success", result: "Done", uuid: "first-result" });
+      await first;
+      let settled = false;
+      pending = send();
+      void pending.then(() => { settled = true; });
+      await vi.waitFor(() => expect(setModel).toHaveBeenCalledTimes(2));
+      if (action === "stop") await adapter.cancel({ sessionId: session.sessionId });
+      else await adapter.dispose();
+      await tick();
+      expect(settled).toBe(true);
+      expect((await pending).stopReason).toBe("cancelled");
+      expect(mock.inputsSeen).toHaveLength(1);
+    } finally { release(); await pending; await adapter.dispose(); }
+  });
+  it("reasserts a newer manual selection before sending into a query with a late sticky fallback", async () => {
+    const emitted: SessionNotification[] = [];
+    const mock = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: { ANTHROPIC_MODEL: "claude-fable-5" } });
+      const send = () => adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "Continue" }] });
+      const first = send();
+      await vi.waitFor(() => expect(mock.inputsSeen).toHaveLength(1));
+      await adapter.setModel({ sessionId: session.sessionId, model: "claude-opus-5" });
+      mock.push({ type: "system", subtype: "model_refusal_fallback", uuid: "late-fallback", scope: "session", original_model: "claude-fable-5", fallback_model: "claude-sonnet-5" });
+      mock.push({ type: "result", subtype: "success", result: "Done", uuid: "first-result" });
+      await first;
+      const second = send();
+      await vi.waitFor(() => expect(mock.inputsSeen).toHaveLength(2));
+      expect(mock.control.models).toEqual(["claude-opus-5", "claude-opus-5"]);
+      expect(emitted.filter((n) => n.update.sessionUpdate === "current_model_update")).toHaveLength(0);
+      mock.push({ type: "result", subtype: "success", result: "Done", uuid: "second-result" });
+      await second;
+    } finally { await adapter.dispose(); }
+  });
+  it.each(["session", "local"])("adopts only a %s fallback in the next query", async (scope) => {
+    const emitted: SessionNotification[] = [];
+    const success = { type: "result", subtype: "success", result: "Done", uuid: "end" };
+    const mock = makeScriptedQuery([
+      [{ type: "system", subtype: "model_refusal_fallback", uuid: "fallback", scope, original_model: "claude-opus-5", fallback_model: "claude-sonnet-5" }, success],
+      [{ ...success, uuid: "end-2" }],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn as never });
+    const { session } = await adapter.newSession({ cwd: "/tmp", env: { ANTHROPIC_MODEL: "claude-opus-5" } });
+    await adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "First" }] });
+    await tick();
+    await adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "Next" }] });
+    expect(mock.captured.at(-1)?.model).toBe(scope === "session" ? "claude-sonnet-5" : "claude-opus-5");
+    expect(emitted.filter((n) => n.update.sessionUpdate === "current_model_update")).toHaveLength(scope === "session" ? 1 : 0);
+    await adapter.dispose();
+  });
+});
+
 function codeTerritory(
   workspaceRoot = "/tmp/zeros-contained",
 ): AgentFilesystemTerritory {
@@ -139,8 +275,14 @@ function makeScriptedQuery(
       aliases?: string[];
     }>;
     mcpServerStatuses?: import("@anthropic-ai/claude-agent-sdk").McpServerStatus[];
-    supportedCommandsImpl?: (queryNo: number) => Promise<import("@anthropic-ai/claude-agent-sdk").SlashCommand[]>;
-    reloadSkillsImpl?: (queryNo: number) => Promise<{ skills: import("@anthropic-ai/claude-agent-sdk").SlashCommand[] }>;
+    supportedCommandsImpl?: (
+      queryNo: number,
+    ) => Promise<import("@anthropic-ai/claude-agent-sdk").SlashCommand[]>;
+    reloadSkillsImpl?: (
+      queryNo: number,
+    ) => Promise<{
+      skills: import("@anthropic-ai/claude-agent-sdk").SlashCommand[];
+    }>;
     /** Model list query.supportedModels() resolves to (default []). */
     supportedModels?: unknown[];
     /** Per-call override; receives the 1-based call number (lets a test
@@ -156,6 +298,8 @@ function makeScriptedQuery(
      *  settles on the result; the query just doesn't go null — so an IDLE+ALIVE
      *  query exists for the restart path. Released on interrupt/close/abort. */
     keepAliveAfterResult?: boolean;
+    /** A transport may close cleanly without ever publishing a result. */
+    closeWithoutResult?: boolean;
     /** Make setPermissionMode(mode) THROW for matching modes (mirrors the real
      *  CLI rejecting model-gated modes: "auto mode unavailable for this model"). */
     rejectModes?: RegExp;
@@ -229,7 +373,9 @@ function makeScriptedQuery(
       release = r;
     });
     const hasResult = msgs.some((m) => m.type === "result");
-    const stayOpen = !hasResult || opts?.keepAliveAfterResult === true;
+    const stayOpen =
+      (!hasResult && !opts?.closeWithoutResult) ||
+      opts?.keepAliveAfterResult === true;
     const signal = (
       params.options?.abortController as AbortController | undefined
     )?.signal;
@@ -291,10 +437,11 @@ function makeScriptedQuery(
 /** A single persistent query whose output can be advanced one SDK frame at a
  * time. This models autonomous/synthetic work that starts while the query is
  * idle, followed by a user send that the CLI leaves queued for the next turn. */
-function makePushableQuery() {
+function makePushableQuery(opts?: { ignoreAbort?: boolean; interrupt?: (input: unknown) => Promise<unknown>; inputGate?: Promise<void>; setModel?: (model: string) => Promise<void> }) {
   const inputsSeen: Msg[] = [];
   const output: Msg[] = [];
-  const control = { closes: 0 };
+  const captured: Array<Record<string, unknown>> = [];
+  const control = { closes: 0, models: [] as string[] };
   let wakeOutput: (() => void) | null = null;
   let open = true;
 
@@ -316,15 +463,19 @@ function makePushableQuery() {
     prompt?: AsyncIterable<Msg>;
     options?: Record<string, unknown>;
   }) => {
+    captured.push(params.options ?? {});
     if (params.prompt) {
       void (async () => {
-        for await (const message of params.prompt!) inputsSeen.push(message);
+        for await (const message of params.prompt!) {
+          inputsSeen.push(message);
+          if (inputsSeen.length === 1 && opts?.inputGate) await opts.inputGate;
+        }
       })();
     }
     const signal = (
       params.options?.abortController as AbortController | undefined
     )?.signal;
-    signal?.addEventListener("abort", stop, { once: true });
+    if (!opts?.ignoreAbort) signal?.addEventListener("abort", stop, { once: true });
 
     const query = (async function* () {
       while (open) {
@@ -337,10 +488,10 @@ function makePushableQuery() {
         while (output.length > 0) yield output.shift()!;
       }
     })() as unknown as Record<string, unknown>;
-    query.interrupt = async () => stop();
+    query.interrupt = opts?.interrupt ?? (async () => stop());
     query.stopTask = async () => {};
     query.setPermissionMode = async () => {};
-    query.setModel = async () => {};
+    query.setModel = async (model: string) => { control.models.push(model); await opts?.setModel?.(model); };
     query.applyFlagSettings = async () => {};
     query.supportedModels = async () => [];
     query.supportedCommands = async () => [];
@@ -351,7 +502,7 @@ function makePushableQuery() {
     return query;
   };
 
-  return { queryFn: queryFn as never, inputsSeen, push, control };
+  return { queryFn: queryFn as never, inputsSeen, push, control, captured, finish: stop };
 }
 
 async function flushMicrotasks(): Promise<void> {
@@ -889,7 +1040,7 @@ describe("ClaudeSdkAdapter", () => {
       sessionId: session.sessionId,
       prompt: [textBlock("browse")] as never,
     });
-    expect(captured[0]?.extraArgs).toEqual({ chrome: null });
+    expect(captured[0]?.extraArgs).toEqual({ chrome: null, "thinking-display": "summarized" });
 
     await adapter.loadSession({
       executionId: session.executionId,
@@ -902,7 +1053,7 @@ describe("ClaudeSdkAdapter", () => {
     });
 
     expect(captured).toHaveLength(2);
-    expect(captured[1]?.extraArgs).toEqual({ "no-chrome": null });
+    expect(captured[1]?.extraArgs).toEqual({ "no-chrome": null, "thinking-display": "summarized" });
     expect(captured[1]?.resume).toBe("claude-browser");
     await adapter.dispose();
   });
@@ -923,7 +1074,7 @@ describe("ClaudeSdkAdapter", () => {
       prompt: [textBlock("browse with the latest setting")] as never,
     });
 
-    expect(captured[0]?.extraArgs).toEqual({ chrome: null });
+    expect(captured[0]?.extraArgs).toEqual({ chrome: null, "thinking-display": "summarized" });
     await adapter.dispose();
   });
 
@@ -986,6 +1137,131 @@ describe("ClaudeSdkAdapter", () => {
       await adapter.dispose();
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it.each([false, true])("retains a persistent query across turn init while background work exists (ambient=%s)", async (ambient) => {
+    vi.useFakeTimers();
+    const live = makePushableQuery();
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), {
+      queryFn: live.queryFn,
+      idleTimeoutMs: 1_000,
+    });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] as never });
+      await flushMicrotasks();
+      live.push(initMsg("persistent"), {
+        type: "system", subtype: "background_tasks_changed",
+        tasks: [{ task_id: "ongoing", description: "Ongoing work", ambient }],
+      }, resultOk("persistent"));
+      await first;
+      const second = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("follow up")] as never });
+      await flushMicrotasks();
+      live.push(initMsg("persistent"), resultOk("persistent"));
+      await second;
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(live.control.closes).toBe(0);
+      const background = emitted.map((n) => n.update).filter((u) => u.sessionUpdate === "background_tasks_update").at(-1)!;
+      expect(background.tasks).toHaveLength(ambient ? 0 : 1);
+      expect(background.waiting).toBe(!ambient);
+      live.push({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.control.closes).toBe(1);
+    } finally {
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("clears process-owned work on a query replacement even if no new init is emitted", async () => {
+    vi.useFakeTimers();
+    const { queryFn, captured, control } = makeScriptedQuery([
+      [initMsg("same-session"), {
+        type: "system", subtype: "background_tasks_changed",
+        tasks: [{ task_id: "old-task", description: "Old process work" }],
+      }, resultOk("same-session")],
+      [assistantText("New process reply"), resultOk("same-session")],
+    ], { keepAliveAfterResult: true });
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn, idleTimeoutMs: 1_000 });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] as never });
+      // This is the same staged restart used by restart-only option changes.
+      const state = (adapter as unknown as { sessions: Map<string, { pendingRestart: boolean }> }).sessions.get(session.sessionId)!;
+      state.pendingRestart = true;
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("second")] as never });
+      expect(captured).toHaveLength(2);
+      expect(captured[1].resume).toBe("same-session");
+      expect(emitted.map((n) => n.update).filter((u) => u.sessionUpdate === "background_tasks_update").at(-1)).toMatchObject({ tasks: [], waiting: false });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(control.closes).toBeGreaterThan(0);
+    } finally {
+      await adapter.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("ignores retired query events and wakeup callbacks while a replacement owns live tasks", async () => {
+    const old = makePushableQuery({ ignoreAbort: true });
+    const current = makePushableQuery();
+    let calls = 0;
+    const emitted: SessionNotification[] = [];
+    const queryFn = (params: { prompt?: AsyncIterable<Msg>; options?: Record<string, unknown> }) => {
+      const factory = calls++ === 0 ? old : current;
+      return (factory.queryFn as (input: typeof params) => unknown)(params);
+    };
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: queryFn as never });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] as never });
+      await flushMicrotasks();
+      old.push(initMsg("same-session"), resultOk("same-session"));
+      await first;
+      const state = (adapter as unknown as { sessions: Map<string, { pendingRestart: boolean; providerRunActive: boolean }> }).sessions.get(session.sessionId)!;
+      state.pendingRestart = true;
+      const second = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("second")] as never });
+      await flushMicrotasks();
+      current.push(initMsg("same-session"), {
+        type: "system", subtype: "background_tasks_changed",
+        tasks: [{ task_id: "current-task", description: "Current work" }],
+      }, resultOk("same-session"));
+      await second;
+      const snapshot = () => emitted.map((n) => n.update).filter((u) => u.sessionUpdate === "background_tasks_update").at(-1);
+      const before = snapshot();
+      old.push(initMsg("same-session"), {
+        type: "system", subtype: "background_tasks_changed", tasks: [],
+      }, { ...resultOk("same-session"), uuid: "retired-result" });
+      const hooks = old.captured[0].hooks as Record<string, Array<{ hooks: Array<(input: Msg) => Promise<unknown>> }>>;
+      await hooks.UserPromptSubmit[0].hooks[0]({ hook_event_name: "UserPromptSubmit", source: "schedule_wakeup" });
+      await hooks.Stop[0].hooks[0]({ hook_event_name: "Stop", session_crons: [{ id: "old-wakeup", recurring: false, schedule: "0 12 5 8 *", prompt: "Old work" }] });
+      await flushMicrotasks();
+      expect(snapshot()).toBe(before);
+      expect(snapshot()).toMatchObject({ tasks: [{ taskId: "current-task" }], waiting: true });
+      expect(state.providerRunActive).toBe(false);
+    } finally {
+      old.finish();
+      await adapter.dispose();
+    }
+  });
+
+  it("does not revive provider activity from a wakeup callback after clean EOF", async () => {
+    const { queryFn, captured } = makeScriptedQuery([[initMsg("finished"), resultOk("finished")]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] as never });
+      await flushMicrotasks();
+      const state = (adapter as unknown as { sessions: Map<string, { query: unknown; providerRunActive: boolean }> }).sessions.get(session.sessionId)!;
+      expect(state.query).toBeNull();
+      const hooks = captured[0].hooks as Record<string, Array<{ hooks: Array<(input: Msg) => Promise<unknown>> }>>;
+      await hooks.UserPromptSubmit[0].hooks[0]({ hook_event_name: "UserPromptSubmit", source: "schedule_wakeup" });
+      expect(state.providerRunActive).toBe(false);
+    } finally {
+      await adapter.dispose();
     }
   });
 
@@ -1198,6 +1474,48 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("does not settle a new send with a replayed native result from the same query", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const first = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] as never });
+      await flushMicrotasks();
+      const oldResult = { ...resultOk("sdk-replay"), uuid: "old-result" };
+      live.push(initMsg("sdk-replay"), oldResult);
+      await first;
+      let settled = false;
+      const next = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("next")] as never }).then((value) => { settled = true; return value; });
+      await flushMicrotasks();
+      live.push(oldResult);
+      await flushMicrotasks();
+      expect(settled).toBe(false);
+      live.push({ ...resultOk("sdk-replay"), uuid: "new-result" });
+      await next;
+    } finally { await adapter.dispose(); }
+  });
+
+  it("keeps an autonomous parent alive before its first token when only its running-state edge arrives", async () => {
+    vi.useFakeTimers();
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn, idleTimeoutMs: 1_000 });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("test")] as never });
+      await flushMicrotasks();
+      live.push(initMsg("sdk-state"), resultOk("sdk-state"));
+      await turn;
+      live.push({ type: "system", subtype: "session_state_changed", state: "running" });
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(live.control.closes).toBe(0);
+      live.push(resultOk("sdk-state"));
+      await flushMicrotasks();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(live.control.closes).toBe(1);
+    } finally { await adapter.dispose(); vi.useRealTimers(); }
+  });
+
   it("keeps a correlated /compact pending across an earlier synthetic result", async () => {
     vi.useFakeTimers();
     try {
@@ -1336,6 +1654,11 @@ describe("ClaudeSdkAdapter", () => {
 
     expect(res.stopReason).toBe("end_turn");
     expect(captured[0]?.resume).toBeUndefined(); // unborn session → NO resume
+    expect(captured[0]?.forwardSubagentText).toBe(true);
+    expect(captured[0]?.extraArgs).toMatchObject({ "thinking-display": "summarized" });
+    expect(captured[0]?.settings).toMatchObject({
+      showThinkingSummaries: true,
+    });
     const textChunks = emitted.filter(
       (n) => n.update.sessionUpdate === "agent_message_chunk",
     );
@@ -2787,19 +3110,175 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
-  it("cancel() interrupts the live query", async () => {
+  it.each([false, true])(
+    "settles clean EOF without a result (partial output: %s) and allows another send",
+    async (partial) => {
+      const { queryFn } = makeScriptedQuery(
+        [
+          [
+            initMsg("sdk-eof"),
+            ...(partial ? [streamText("Partial answer")] : []),
+          ],
+          [
+            initMsg("sdk-eof"),
+            assistantText("Next answer"),
+            resultOk("sdk-eof"),
+          ],
+        ],
+        { closeWithoutResult: true },
+      );
+      const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const settled = vi.fn();
+      try {
+        const turn = adapter.prompt({
+          sessionId: session.sessionId,
+          prompt: [textBlock("hi")] as never,
+        });
+        void turn.then(settled, settled);
+        await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(1), {
+          timeout: 150,
+        });
+        expect(settled.mock.calls[0][0]).toMatchObject({
+          failure: { kind: "transport-closed", stage: "prompt" },
+        });
+        await expect(
+          adapter.prompt({
+            sessionId: session.sessionId,
+            prompt: [textBlock("again")] as never,
+          }),
+        ).resolves.toMatchObject({ stopReason: "end_turn" });
+        expect(settled).toHaveBeenCalledTimes(1);
+      } finally {
+        await adapter.dispose();
+      }
+    },
+  );
+
+  it("cancel() interrupts the live query and settles a clean EOF as cancelled", async () => {
     const emitted: SessionNotification[] = [];
     // A batch with no result so the turn stays in flight until we cancel.
     const { queryFn, control } = makeScriptedQuery([[initMsg("sdk-1")]]);
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
-    void adapter.prompt({
+    const turn = adapter.prompt({
       sessionId: session.sessionId,
       prompt: [textBlock("hi")] as never,
     });
     await tick();
     await adapter.cancel({ sessionId: session.sessionId });
     expect(control.interrupts).toBe(1);
+    try {
+      const settled = vi.fn();
+      void turn.then(settled, settled);
+      await vi.waitFor(() => expect(settled).toHaveBeenCalledTimes(1), {
+        timeout: 150,
+      });
+      expect(settled.mock.calls[0][0]).toMatchObject({
+        stopReason: "cancelled",
+      });
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
+  it("closes a query when its interrupt fails so stopped background work cannot survive invisibly", async () => {
+    const { queryFn, control } = makeScriptedQuery([[initMsg("sdk-interrupt")]], {
+      onInterrupt: () => { throw new Error("control channel disconnected"); },
+    });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("test")] as never });
+      await tick();
+      await adapter.cancel({ sessionId: session.sessionId });
+      expect(control.closes).toBe(1);
+      await expect(turn).resolves.toMatchObject({ stopReason: "cancelled" });
+    } finally { await adapter.dispose(); }
+  });
+
+  it("opts into parent state events and releases waiting activity when an already-settled session stops", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn, captured } = makeScriptedQuery([[initMsg("sdk-background"),
+      { type: "system", subtype: "task_started", task_id: "bg-1", description: "Tests", is_backgrounded: true },
+      resultOk("sdk-background"),
+    ]], { keepAliveAfterResult: true });
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("test")] as never })).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(captured[0].env).toMatchObject({ CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" });
+      const snapshot = () => emitted.map((n) => n.update).filter((u) => u.sessionUpdate === "background_tasks_update").at(-1);
+      expect(snapshot()).toMatchObject({ waiting: true, tasks: [{ taskId: "bg-1" }] });
+      await adapter.cancel({ sessionId: session.sessionId });
+      expect(snapshot()).toMatchObject({ waiting: false, tasks: [], activity: null });
+    } finally { await adapter.dispose(); }
+  });
+
+  it("reports a disconnect after the foreground result without settling that send twice", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn } = makeScriptedQuery([[initMsg("sdk-bg-eof"),
+      { type: "system", subtype: "task_started", task_id: "bg-1", description: "Tests", is_backgrounded: true },
+      resultOk("sdk-bg-eof"),
+    ]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const settled = vi.fn();
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("test")] as never }).then(settled);
+      await flushMicrotasks();
+      expect(settled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ stopReason: "end_turn" }));
+      expect(emitted.map((n) => n.update)).toContainEqual(expect.objectContaining({ sessionUpdate: "error_notice", severity: "error", code: "claude-background-transport-closed" }));
+      expect(emitted.map((n) => n.update).filter((u) => u.sessionUpdate === "background_tasks_update").at(-1)).toMatchObject({ tasks: [], waiting: false, activity: null });
+    } finally { await adapter.dispose(); }
+  });
+
+  it("reports an autonomous error result and clears its recovery card only after a later successful result", async () => {
+    const emitted: SessionNotification[] = [];
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("test")] as never });
+      await flushMicrotasks();
+      live.push(initMsg("sdk-bg-error"), resultOk("sdk-bg-error"));
+      await turn;
+      live.push(assistantText("Checking again"), { type: "result", subtype: "error_during_execution", is_error: true, errors: ["Selected model is at capacity."] });
+      await flushMicrotasks();
+      const notices = () => emitted.map((n) => n.update).filter((u) => u.sessionUpdate === "error_notice");
+      expect(notices().at(-1)).toMatchObject({ code: "claude-background-failed", message: "Selected model is at capacity." });
+      live.push(assistantText("Checking again"));
+      await flushMicrotasks();
+      expect(notices().at(-1)).toMatchObject({ code: "claude-background-failed" });
+      live.push(resultOk("sdk-bg-error"));
+      await flushMicrotasks();
+      expect(notices().at(-1)).toMatchObject({ code: "claude-background-recovered", recoverable: true });
+    } finally { await adapter.dispose(); }
+  });
+
+  it("settles a disposed session once and ignores a late result", async () => {
+    const live = makePushableQuery();
+    const emitted: SessionNotification[] = [];
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), {
+      queryFn: live.queryFn,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    const settled = vi.fn();
+    void turn.then(settled, settled);
+    await flushMicrotasks();
+    live.push(initMsg("sdk-disposed"), streamText("Partial answer"));
+    await flushMicrotasks();
+    await adapter.disposeSession(session.sessionId);
+    await expect(turn).resolves.toMatchObject({ stopReason: "cancelled" });
+    const updateCount = emitted.length;
+    live.push(resultOk("sdk-disposed"));
+    await flushMicrotasks();
+    expect(settled).toHaveBeenCalledTimes(1);
+    expect(emitted).toHaveLength(updateCount);
     await adapter.dispose();
   });
 
@@ -2810,7 +3289,7 @@ describe("ClaudeSdkAdapter", () => {
   // turn streamed to completion behind a "STOPPED BY USER" pill. The reset is
   // now generation-aware (cancelSeq): stale flags still clear, this one holds.
   it("keeps a cancel that lands while prompt() waits on the previous turn", async () => {
-    const { queryFn } = makeScriptedQuery([[initMsg("sdk-1")]]);
+    const { queryFn, inputsSeen } = makeScriptedQuery([[initMsg("sdk-1")]]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
     const state = (
@@ -2832,7 +3311,7 @@ describe("ClaudeSdkAdapter", () => {
       }),
     };
 
-    void adapter.prompt({
+    const prompt = adapter.prompt({
       sessionId: session.sessionId,
       prompt: [textBlock("hi")] as never,
     });
@@ -2845,7 +3324,32 @@ describe("ClaudeSdkAdapter", () => {
 
     // Survived the per-turn reset, so the turn settles as the user's stop.
     expect(state.cancelRequested).toBe(true);
+    expect(inputsSeen).toHaveLength(0);
+    await expect(prompt).resolves.toMatchObject({
+      stopReason: "cancelled", response: { stopReason: "cancelled" },
+    });
     await adapter.dispose();
+  });
+
+  it("ignores background hooks from a query replaced by a newer prompt", async () => {
+    const emitted: SessionNotification[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-hooks"), resultOk("sdk-hooks")],
+      [initMsg("sdk-hooks"), resultOk("sdk-hooks")],
+    ], { keepAliveAfterResult: true });
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("first")] as never });
+      const oldHooks = captured[0].hooks as Record<string, Array<{ hooks: Array<(input: unknown) => Promise<unknown>> }>>;
+      await adapter.updateConfig({ sessionId: session.sessionId, env: { CLAUDE_MAX_TURNS: "2" } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("next")] as never });
+      expect(captured).toHaveLength(2);
+      const count = emitted.length;
+      await oldHooks.Stop[0].hooks[0]({ hook_event_name: "Stop", session_crons: [{ id: "old-wake", schedule: "* * * * *", createdAt: Date.now(), recurring: false, prompt: "Old query" }] });
+      await oldHooks.UserPromptSubmit[0].hooks[0]({ hook_event_name: "UserPromptSubmit", source: "loop_wakeup" });
+      expect(emitted).toHaveLength(count);
+    } finally { await adapter.dispose(); }
   });
 
   it("publishes only one-shot wakeups from the passive Stop hook", async () => {
@@ -4674,6 +5178,136 @@ describe("ClaudeSdkAdapter MCP elicitation", () => {
 // ── steer() — mid-turn user-message injection (queued-card "Send now") ──
 
 describe("ClaudeSdkAdapter.steer", () => {
+  it("waits for the native message identity before confirming steering", async () => {
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+    await flushMicrotasks();
+    const done = vi.fn();
+    const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never }).then(done);
+    await flushMicrotasks();
+    expect(done).not.toHaveBeenCalled();
+    const uuid = live.inputsSeen[1]!.uuid;
+    live.push({ type: "command_lifecycle", command_uuid: "other", state: "started" });
+    await flushMicrotasks();
+    expect(done).not.toHaveBeenCalled();
+    live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+    await steer;
+    expect(done).toHaveBeenCalledExactlyOnceWith("delivered");
+    await adapter.cancel({ sessionId: session.sessionId });
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("cancels queued native steering and returns its ownership using the interrupt receipt", async () => {
+    const interrupt = vi.fn(async () => ({ still_queued: [], cancelled: [live.inputsSeen[1]!.uuid] }));
+    const live = makePushableQuery({ interrupt });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+    live.push({ ...initMsg("queued-stop"), capabilities: ["interrupt_cancel_queued_v1"] });
+    await flushMicrotasks();
+    const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never });
+    await flushMicrotasks();
+    await adapter.cancel({ sessionId: session.sessionId });
+    expect(interrupt).toHaveBeenCalledWith({ cancelQueued: true });
+    await expect(steer).resolves.toBe("queued");
+    expect(live.control.closes).toBe(0);
+    live.push({ ...resultOk("queued-stop"), user_message_uuid: live.inputsSeen[0]!.uuid });
+    await expect(turn).resolves.toMatchObject({ stopReason: "cancelled" });
+    await adapter.dispose();
+  });
+
+  it("waits for the interrupt receipt when cancellation lifecycle and EOF arrive first", async () => {
+    let acknowledge!: (value: unknown) => void;
+    const receipt = new Promise((resolve) => { acknowledge = resolve; });
+    const live = makePushableQuery({ interrupt: async () => receipt });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+    live.push({ ...initMsg("receipt-order"), capabilities: ["interrupt_cancel_queued_v1"] });
+    await flushMicrotasks();
+    const settled = vi.fn();
+    const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never }).then(settled);
+    await flushMicrotasks();
+    const uuid = live.inputsSeen[1]!.uuid;
+    const stop = adapter.cancel({ sessionId: session.sessionId });
+    live.push({ type: "command_lifecycle", command_uuid: uuid, state: "cancelled" });
+    await flushMicrotasks(); live.finish(); await flushMicrotasks();
+    expect(settled).not.toHaveBeenCalled();
+    acknowledge({ still_queued: [], cancelled: [uuid] });
+    await stop; await steer;
+    expect(settled).toHaveBeenCalledExactlyOnceWith("queued");
+    await expect(turn).resolves.toMatchObject({ stopReason: "cancelled" });
+    await adapter.dispose();
+  });
+
+  it.each([false, true])("bounds a missing receipt after an empty-queue result, with late completion=%s", async (lateCompletion) => {
+    vi.useFakeTimers();
+    const live = makePushableQuery();
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp" });
+      const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+      await flushMicrotasks();
+      const settled = vi.fn();
+      const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never }).then(settled);
+      await flushMicrotasks();
+      const uuid = live.inputsSeen[1]!.uuid;
+      live.push({ ...resultOk("missing-receipt"), queued_turn_count: 0 });
+      await turn;
+      expect(settled).not.toHaveBeenCalled();
+      if (lateCompletion) {
+        await vi.advanceTimersByTimeAsync(100);
+        live.push({ type: "command_lifecycle", command_uuid: uuid, state: "completed" });
+        await flushMicrotasks();
+      }
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(settled).toHaveBeenCalledExactlyOnceWith(lateCompletion ? "delivered" : "interrupted");
+      await steer;
+    } finally { await adapter.dispose(); vi.useRealTimers(); }
+  });
+
+  it("removes steering that the wrapper has not yet pulled before Stop", async () => {
+    let releaseInput!: () => void;
+    const inputGate = new Promise<void>((resolve) => { releaseInput = resolve; });
+    const live = makePushableQuery({ inputGate, interrupt: async () => ({ still_queued: [], cancelled: [] }) });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+    live.push({ ...initMsg("local-stop"), capabilities: ["interrupt_cancel_queued_v1"] });
+    await flushMicrotasks();
+    const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never });
+    await adapter.cancel({ sessionId: session.sessionId });
+    await expect(steer).resolves.toBe("queued");
+    releaseInput();
+    await flushMicrotasks();
+    expect(live.inputsSeen).toHaveLength(1);
+    live.push(resultOk("local-stop"));
+    await expect(turn).resolves.toMatchObject({ stopReason: "cancelled" });
+    await adapter.dispose();
+  });
+
+  it("retires a query whose interrupt still leaves native steering queued", async () => {
+    const live = makePushableQuery({ interrupt: async () => ({ still_queued: [live.inputsSeen[1]!.uuid], cancelled: [] }) });
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: live.queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("A")] as never });
+    live.push({ ...initMsg("surviving-stop"), capabilities: ["interrupt_cancel_queued_v1"] });
+    await flushMicrotasks();
+    const steer = adapter.steer({ sessionId: session.sessionId, prompt: [textBlock("C")] as never });
+    await flushMicrotasks();
+    const uuid = live.inputsSeen[1]!.uuid;
+    await adapter.cancel({ sessionId: session.sessionId });
+    await expect(steer).resolves.toBe("interrupted");
+    await expect(turn).resolves.toMatchObject({ stopReason: "cancelled" });
+    expect(live.control.closes).toBe(1);
+    live.push({ type: "command_lifecycle", command_uuid: uuid, state: "started" });
+    await flushMicrotasks();
+    await adapter.dispose();
+  });
+
   it("advertises the steering capability", async () => {
     const { queryFn } = makeScriptedQuery([]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
@@ -4684,9 +5318,8 @@ describe("ClaudeSdkAdapter.steer", () => {
 
   it("pushes the steered message into the LIVE turn's input queue (no new turn)", async () => {
     // Batch with no `result` → the turn stays in flight while we steer.
-    const { queryFn, captured, inputsSeen } = makeScriptedQuery([
-      [initMsg("sdk-steer"), streamText("working…")],
-    ]);
+    const live = makePushableQuery();
+    const { queryFn, captured, inputsSeen } = live;
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
 
@@ -4700,7 +5333,7 @@ describe("ClaudeSdkAdapter.steer", () => {
     await tick();
     expect(inputsSeen).toHaveLength(1); // the original prompt
 
-    await adapter.steer({
+    const steering = adapter.steer({
       sessionId: session.sessionId,
       prompt: [textBlock("also say APPLE at the end")] as never,
     });
@@ -4718,6 +5351,8 @@ describe("ClaudeSdkAdapter.steer", () => {
     expect(steered.message?.role).toBe("user");
     expect(steered.message?.content).toBe("also say APPLE at the end");
 
+    live.push({ type: "command_lifecycle", command_uuid: inputsSeen[1]!.uuid, state: "started" });
+    await expect(steering).resolves.toBe("delivered");
     await adapter.cancel({ sessionId: session.sessionId });
     await adapter.dispose();
   });
@@ -4734,7 +5369,7 @@ describe("ClaudeSdkAdapter.steer", () => {
       prompt: [textBlock("start")] as never,
     });
     await flushMicrotasks();
-    await adapter.steer({
+    const steering = adapter.steer({
       sessionId: session.sessionId,
       prompt: [textBlock("add this")] as never,
     });
@@ -4751,6 +5386,7 @@ describe("ClaudeSdkAdapter.steer", () => {
       user_message_uuid: steerUuid,
     });
     await expect(turn).resolves.toMatchObject({ stopReason: "end_turn" });
+    await expect(steering).resolves.toBe("delivered");
     await adapter.dispose();
   });
 
@@ -4780,7 +5416,7 @@ describe("ClaudeSdkAdapter.steer", () => {
     await adapter.dispose();
   });
 
-  it("refuses to steer when no turn is in flight", async () => {
+  it("returns idle steering to the follow-up queue", async () => {
     const { queryFn, inputsSeen } = makeScriptedQuery([
       [initMsg("sdk-steer2"), assistantText("done"), resultOk("sdk-steer2")],
     ]);
@@ -4793,7 +5429,7 @@ describe("ClaudeSdkAdapter.steer", () => {
         sessionId: session.sessionId,
         prompt: [textBlock("too early")] as never,
       }),
-    ).rejects.toThrow(/no turn is in flight/i);
+    ).resolves.toBe("queued");
 
     await adapter.prompt({
       sessionId: session.sessionId,
@@ -4805,7 +5441,7 @@ describe("ClaudeSdkAdapter.steer", () => {
         sessionId: session.sessionId,
         prompt: [textBlock("too late")] as never,
       }),
-    ).rejects.toThrow(/no turn is in flight/i);
+    ).resolves.toBe("queued");
     // Neither refused steer leaked into the input stream.
     expect(inputsSeen.filter((m) => m.type === "user")).toHaveLength(1);
     await adapter.dispose();
@@ -4863,7 +5499,7 @@ describe("ClaudeSdkAdapter.steer", () => {
     await adapter.dispose();
   });
 
-  it("still resolves (stopReason refusal) for a NON-network is_error result", async () => {
+  it("rejects a non-network SDK error with its errors-array detail", async () => {
     const emitted: SessionNotification[] = [];
     const { queryFn } = makeScriptedQuery([
       [
@@ -4873,22 +5509,66 @@ describe("ClaudeSdkAdapter.steer", () => {
           subtype: "error_during_execution",
           session_id: "sdk-pol",
           is_error: true,
-          result: "Something entirely unrelated broke.",
+          errors: ["Something entirely unrelated broke."],
         },
       ],
     ]);
     const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn });
     const { session } = await adapter.newSession({ cwd: "/tmp" });
 
-    const res = await adapter.prompt({
-      sessionId: session.sessionId,
-      prompt: [textBlock("hi")] as never,
-    });
-    expect(res.stopReason).toBe("refusal");
+    await expect(
+      adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: [textBlock("hi")] as never,
+      }),
+    ).rejects.toThrow("Something entirely unrelated broke.");
     expect(emitted.some((n) => n.update.sessionUpdate === "error_notice")).toBe(
       false,
     );
     await adapter.dispose();
+  });
+
+  it.each([
+    [{ code: "authentication_failed", message: "Credential rejected before dispatch." }, "auth-required"],
+    [{ code: "rate_limit_error", message: "API key request throttled." }, "rate-limited"],
+    [{ code: "ECONNRESET", message: "Request interrupted before dispatch." }, "transport-closed"],
+  ])("classifies query startup errors without losing native details: %j", async (native, kind) => {
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: () => { throw native; } });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    try {
+      const error = await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never }).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ failure: { kind } });
+      expect((error as Error).message).toContain(native.message);
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each([
+    ["authentication_failed", ["Your login credential has expired."], "auth-required"],
+    ["rate_limit", ["Request refused. Check your API key settings."], "rate-limited"],
+    ["model_not_found", ["Access denied for this selection."], "protocol-error"],
+    [undefined, ['API Error: 429 {"error":{"type":"rate_limit_error","message":"Authentication request rejected."}}'], "rate-limited"],
+    [undefined, ["No conversation found with session ID old-chat."], "session-expired"],
+    [undefined, ["ECONNRESET during request."], "transport-closed"],
+    [undefined, ["Unknown failure. Check your API key settings.", "Provider diagnostic detail."], "protocol-error"],
+  ])("preserves and classifies native result errors (%s, %j)", async (code, errors, kind) => {
+    const { queryFn } = makeScriptedQuery([[
+      initMsg("sdk-native-error"),
+      ...(code ? [{ ...assistantText(errors[0]), error: code }] : []),
+      { type: "result", subtype: "error_during_execution", is_error: true, errors, result: "generic fallback" },
+    ]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    try {
+      const error = await adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never }).catch((failure: unknown) => failure);
+      expect(error).toBeInstanceOf(AgentFailureError);
+      const failure = (error as AgentFailureError).failure;
+      expect(failure.kind).toBe(kind);
+      for (const detail of errors) expect(failure.message).toContain(detail);
+      expect(failure.message).not.toContain("generic fallback");
+      if (code === "model_not_found") expect(failure.advice).toMatch(/model menu/);
+    } finally {
+      await adapter.dispose();
+    }
   });
 
   it("classifies provider throttling without immediately replaying the turn", async () => {
@@ -4924,6 +5604,22 @@ describe("ClaudeSdkAdapter.steer", () => {
       inputsSeen.filter((message) => message.type === "user"),
     ).toHaveLength(1);
     await adapter.dispose();
+  });
+
+  it("does not carry a recovered or child error into a later parent result", async () => {
+    const { queryFn } = makeScriptedQuery([
+      [initMsg("sdk-recovery"), { ...assistantText("Expired credential."), error: "authentication_failed" }, { type: "result", subtype: "error_during_execution", is_error: true, errors: ["Expired credential."] }],
+      [{ ...assistantText("Child error"), error: "authentication_failed", parent_tool_use_id: "child-task" }, assistantText("Recovered"), resultOk("sdk-recovery")],
+      [{ type: "result", subtype: "error_during_execution", is_error: true, errors: ["Unknown failure. Check your API key settings."] }],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const prompt = () => adapter.prompt({ sessionId: session.sessionId, prompt: [textBlock("hi")] as never });
+    try {
+      await expect(prompt()).rejects.toMatchObject({ failure: { kind: "auth-required" } });
+      await expect(prompt()).resolves.toMatchObject({ stopReason: "end_turn" });
+      await expect(prompt()).rejects.toMatchObject({ failure: { kind: "protocol-error" } });
+    } finally { await adapter.dispose(); }
   });
 
   it("an exhausted-retry timeout message also routes to transport-closed", async () => {

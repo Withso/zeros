@@ -594,12 +594,12 @@
             "fallback_model": {
               "type": "string",
               "minLength": 1,
-              "description": "Fallback Claude model id, or the sentinel \"none\" to fail fast."
+              "description": "Deprecated compatibility key. Ignored; Claude owns native fallback routing."
             },
             "budget_cap_usd": {
               "type": "number",
               "exclusiveMinimum": 0,
-              "description": "Optional maximum Claude spend in USD per turn."
+              "description": "Deprecated compatibility key. Ignored; Zeros no longer applies a spend cap."
             },
             "idle_timeout_minutes": {
               "anyOf": [
@@ -729,7 +729,8 @@
             "type": "string",
             "enum": [
               "cli",
-              "api-key"
+              "api-key",
+              "subscription"
             ],
             "description": "How this agent authenticates."
           },

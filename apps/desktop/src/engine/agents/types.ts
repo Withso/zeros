@@ -38,7 +38,7 @@ import type {
   TurnUsage,
 } from "@zeros/protocol/agent-events";
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
-import type { AccountDetails } from "@zeros/protocol/messages";
+import type { AccountDetails, SteerOutcome } from "@zeros/protocol/messages";
 import type {
   ExecutionBoundaryPortsSnapshot,
   ExecutionBoundaryStatus,
@@ -331,7 +331,7 @@ export interface AgentBackgroundWorkCapabilityPort {
 }
 
 export interface AgentTurnControlCapabilityPort {
-  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<void>;
+  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<SteerOutcome | void>;
   setMode?(opts: { sessionId: string; modeId: string }): Promise<void>;
   compactContext?(opts: { sessionId: string }): Promise<void>;
 }
@@ -609,13 +609,12 @@ export interface AgentAdapter {
     taskId: string;
   }): Promise<void>;
 
-  /** Inject a user message into the RUNNING turn without cancelling it
-   *  (mid-turn "steering"). Resolves once the message is delivered to the
-   *  agent runtime; the in-flight prompt() keeps streaming and settles the
-   *  whole (steered) turn. MUST throw when no turn is in flight. Optional —
-   *  only adapters advertising `agentCapabilities.steering` implement it
-   *  (claude-sdk pushes into the SDK input queue; codex calls `turn/steer`). */
-  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<void>;
+  /** Offer input to a running turn without cancelling it. A native receipt
+   * establishes delivered/queued/interrupted; local enqueue alone is not an
+   * acknowledgement. Idle or rejected-before-submission input returns queued.
+   * Only adapters advertising agentCapabilities.steering implement this.
+   * Legacy adapters returning void retain their delivered-ack behavior. */
+  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<SteerOutcome | void>;
 
   /** Switch session mode (e.g. plan/default/accept-edits). */
   setMode?(opts: { sessionId: string; modeId: string }): Promise<void>;

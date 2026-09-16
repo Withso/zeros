@@ -19,8 +19,8 @@
 //
 // Actions per row: Edit (loads the message into the composer — see
 // agent-chat's "Editing queued message" mode), Delete, and Send now. Send
-// now STEERS the running turn for agents that support it (Claude, Codex);
-// for agents that don't (Cursor) the arrow is disabled with an explanatory
+// now STEERS the running turn for Claude, Codex and Cursor. For a harness
+// without steering the arrow is disabled with an explanatory
 // tooltip. While the chat is idle (queue parked behind an edit), Send now
 // is a plain out-of-order flush and is always allowed.
 //
@@ -68,7 +68,8 @@ export interface QueuedMessagesCardProps {
   /** True while a turn is in flight — gates send-now on steering support.
    *  While idle, send-now is a plain flush and is always allowed. */
   streaming: boolean;
-  /** For the disabled-send tooltip ("Cursor doesn't support steering"). */
+  paused?: boolean;
+  /** Name for a provider without mid-turn steering. */
   agentName: string;
 }
 
@@ -86,6 +87,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
   onSendNow,
   steeringSupported,
   streaming,
+  paused = false,
   agentName,
 }: QueuedMessagesCardProps) {
   if (messages.length === 0) return null;
@@ -109,7 +111,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
           className="text-fg2 hover:text-fg1 flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left text-sm transition-colors"
         >
           <span>
-            {messages.length} queued message{messages.length === 1 ? "" : "s"}
+            {messages.length} queued message{messages.length === 1 ? "" : "s"}{paused ? " · Paused" : ""}
           </span>
           {collapsed ? (
             <ChevronUp size={16} aria-hidden="true" />
@@ -175,7 +177,7 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         <RowAction
                           label="Edit"
                           onClick={() => onEdit(m.id)}
-                          disabled={editing || m.queuedEditable === false}
+                          disabled={editing || m.queuedEditable === false || !!m.queuedDelivery}
                         >
                           <Pencil size={14} aria-hidden="true" />
                         </RowAction>
@@ -184,13 +186,14 @@ export const QueuedMessagesCard = memo(function QueuedMessagesCard({
                         label="Delete"
                         destructive
                         onClick={() => onDelete(m.id)}
+                        disabled={!!m.queuedDelivery}
                       >
                         <Trash2 size={14} aria-hidden="true" />
                       </RowAction>
                       <RowAction
-                        label={sendLabel}
+                        label={m.queuedDelivery === "sending" ? "Sending…" : m.queuedDelivery === "unconfirmed" ? "Retry delivery" : sendLabel}
                         onClick={() => onSendNow(m.id)}
-                        disabled={sendBlocked}
+                        disabled={sendBlocked || m.queuedDelivery === "sending"}
                       >
                         <ArrowUp size={14} aria-hidden="true" />
                       </RowAction>

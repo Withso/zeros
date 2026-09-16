@@ -9,9 +9,8 @@
 // into a zero-byte temp file. Dragging a .md into the composer rendered a
 // chip, sent successfully, and the agent never saw the file.
 //
-// So the load-bearing assertions here are the three transport branches — a
-// text attachment must survive ALL of them, because which one runs depends on
-// the agent's vision capability and whether the chat has a cwd.
+// Attachments now reach every harness as confirmed workspace paths. The tests
+// retain coverage for validation, missing files, ordering and durable resend ids.
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -29,7 +28,6 @@ vi.mock("../agent-history-client", () => ({
 import {
   encodeAttachments,
   reportSkippedAttachments,
-  textAttachmentBlock,
   type EncodeAttachmentsContext,
 } from "../encode-attachments";
 import type { ComposerAttachment } from "../composer-attachments";
@@ -84,20 +82,6 @@ const NO_CWD: EncodeAttachmentsContext = {
   chatId: null,
 };
 
-describe("textAttachmentBlock", () => {
-  it("wraps the body in <file name>", () => {
-    expect(textAttachmentBlock("a.txt", "body")).toBe(
-      '<file name="a.txt">\nbody\n</file>',
-    );
-  });
-
-  it("folds quotes in the name so the attribute can't be broken out of", () => {
-    expect(textAttachmentBlock('we"ird.txt', "x")).toBe(
-      `<file name="we'ird.txt">\nx\n</file>`,
-    );
-  });
-});
-
 describe("encodeAttachments — text attachments reach the agent", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset();
@@ -115,15 +99,14 @@ describe("encodeAttachments — text attachments reach the agent", () => {
   for (const [label, ctx] of [
     ["vision agent", VISION],
     ["non-vision agent with a cwd", NON_VISION],
-    ["session with no cwd or chat", NO_CWD],
   ] as const) {
-    it(`emits <file> for a text attachment — ${label}`, async () => {
+    it(`emits a confirmed path for a text attachment — ${label}`, async () => {
       const { blocks, bubbleAttachments } = await encodeAttachments(
         [textAttachment()],
         ctx,
       );
       expect(blocks).toEqual([
-        { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+        { type: "text", text: expect.stringContaining("notes.txt") },
       ]);
       // The sent bubble must say "text" too — the old encoder hard-coded
       // "image", which is why the bubble rendered a broken thumbnail. The
@@ -135,6 +118,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
           mimeType: "text/plain",
           kind: "text",
           attachmentId: "att-1",
+          diskPath: ".context/local/attachments/att-img/shot.png",
         },
       ]);
     });
@@ -171,33 +155,39 @@ describe("encodeAttachments — text attachments reach the agent", () => {
     });
   });
 
-  it("does not re-stage a reconstructed chip — its send already owns a record", async () => {
+  it("reuses the original record when persisting a reconstructed chip", async () => {
     // Edit-in-place rebuilds sent messages under fresh `att-edit-` ids
     // (reconstruct.ts). Staging those again would duplicate the canvas card
     // on every edit-resubmit.
     const { blocks } = await encodeAttachments(
-      [textAttachment({ id: "att-edit-k2-1", text: "hello world" })],
+      [
+        textAttachment({
+          id: "att-edit-k2-1",
+          contextAttachmentId: "original",
+          text: "hello world",
+        }),
+      ],
       VISION,
     );
-    // The prompt still carries the body — only the graph copy is skipped.
+    // Persist under the original identity, never the reconstructed composer id.
     expect(blocks).toEqual([
-      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+      { type: "text", text: expect.stringContaining("notes.txt") },
     ]);
-    expect(writeContextAttachment).not.toHaveBeenCalled();
+    expect(writeContextAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({ attachmentId: "original" }),
+    );
   });
 
-  it("still delivers the inline block when the graph copy fails", async () => {
-    // The graph write is additive — the prompt already carries the body, so a
-    // failed copy (unavailable IPC or read-only disk) must not skip the attachment.
+  it("reports the attachment when the graph copy fails", async () => {
     writeContextAttachment.mockRejectedValueOnce(new Error("no IPC"));
     const { blocks, skipped } = await encodeAttachments(
       [textAttachment()],
       VISION,
     );
-    expect(blocks).toEqual([
-      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+    expect(blocks).toEqual([]);
+    expect(skipped).toEqual([
+      { name: "notes.txt", reason: "it couldn't be saved to disk" },
     ]);
-    expect(skipped).toEqual([]);
   });
 
   it("never emits an empty image block for a text attachment", async () => {
@@ -259,7 +249,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
       diskPath: undefined,
     });
     expect(blocks).toEqual([
-      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+      { type: "text", text: expect.stringContaining("notes.txt") },
     ]);
     // The DURABLE id, not the fresh `att-edit-` one: the next edit of this
     // resubmitted message has to find the same record.
@@ -324,7 +314,7 @@ describe("encodeAttachments — text attachments reach the agent", () => {
     );
     // The rest of the prompt still goes; only the unrecoverable chip is named.
     expect(blocks).toEqual([
-      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      { type: "text", text: expect.stringContaining("shot.png") },
     ]);
     expect(skipped).toEqual([
       {
@@ -365,13 +355,20 @@ describe("encodeAttachments — text attachments reach the agent", () => {
       attachmentId: durableId,
     });
     expect(third.blocks).toEqual([
-      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+      { type: "text", text: expect.stringContaining("notes.txt") },
     ]);
   });
 });
 
 describe("encodeAttachments — validation", () => {
-  beforeEach(() => writeContextAttachment.mockReset());
+  beforeEach(() => {
+    writeContextAttachment.mockReset().mockImplementation(async (args) => ({
+      absolutePath: `/repo/.context/local/attachments/${args.attachmentId}/${args.filename}`,
+      relativePath: `.context/local/attachments/${args.attachmentId}/${args.filename}`,
+      mimeType: args.mimeType,
+      bytes: 11,
+    }));
+  });
 
   it("excludes an invalid attachment — and reports it", async () => {
     // agent-attachments.ts documents that "submission filters out anything not
@@ -397,7 +394,7 @@ describe("encodeAttachments — validation", () => {
     );
     expect(blocks).toHaveLength(1);
     expect(blocks[0]).toMatchObject({
-      text: '<file name="ok.txt">\nhello world\n</file>',
+      text: expect.stringContaining("ok.txt"),
     });
     expect(bubbleAttachments).toHaveLength(1);
     expect(skipped).toEqual([{ name: "huge.txt", reason: "too big" }]);
@@ -424,11 +421,11 @@ describe("encodeAttachments — image branches still work", () => {
     });
   });
 
-  it("inlines the image for a vision agent while persisting only its disk path", async () => {
+  it("references the image for a vision agent while persisting its disk path", async () => {
     const { blocks, bubbleAttachments, bubbleAttachmentById } =
       await encodeAttachments([imageAttachment()], VISION);
     expect(blocks).toEqual([
-      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+      { type: "text", text: expect.stringContaining("shot.png") },
     ]);
     expect(writeContextAttachment).toHaveBeenCalledTimes(1);
     expect(bubbleAttachments).toEqual([
@@ -468,24 +465,15 @@ describe("encodeAttachments — image branches still work", () => {
     );
   });
 
-  it("falls back to a byte-free transcript entry when there is no cwd", async () => {
-    const { blocks, bubbleAttachments } = await encodeAttachments(
+  it("reports an image when there is no workspace to save it in", async () => {
+    const { blocks, bubbleAttachments, skipped } = await encodeAttachments(
       [imageAttachment()],
       NO_CWD,
     );
-    expect(blocks).toEqual([
-      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
-    ]);
+    expect(blocks).toEqual([]);
+    expect(bubbleAttachments).toEqual([]);
+    expect(skipped).toHaveLength(1);
     expect(writeContextAttachment).not.toHaveBeenCalled();
-    expect(bubbleAttachments).toEqual([
-      {
-        name: "shot.png",
-        mimeType: "image/png",
-        kind: "image",
-        attachmentId: "att-img",
-      },
-    ]);
-    expect(JSON.stringify(bubbleAttachments)).not.toContain("aGVsbG8=");
   });
 
   it("keeps the disk-reference path for a non-vision agent on a brand-new chat", async () => {
@@ -510,7 +498,7 @@ describe("encodeAttachments — image branches still work", () => {
     // The text attachment still arrives — one bad image must not take the
     // prompt's context with it.
     expect(blocks).toEqual([
-      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+      { type: "text", text: expect.stringContaining("notes.txt") },
     ]);
     warn.mockRestore();
   });
@@ -556,7 +544,7 @@ describe("encodeAttachments — image branches still work", () => {
         }),
       );
       expect(blocks).toEqual([
-        { type: "image", mimeType: "image/png", data: "cmVsb2FkZWQ=" },
+        { type: "text", text: expect.stringContaining("shot.png") },
       ]);
       expect(bubbleAttachments[0]).toMatchObject({
         diskPath: ".context/local/attachments/original/shot.png",
@@ -626,9 +614,9 @@ describe("encodeAttachments — ordering", () => {
       VISION,
     );
     expect(blocks.map((b) => (b.type === "text" ? b.text : "IMG"))).toEqual([
-      '<file name="one.txt">\n1\n</file>',
-      "IMG",
-      '<file name="two.txt">\n2\n</file>',
+      expect.stringContaining("one.txt"),
+      expect.stringContaining("shot.png"),
+      expect.stringContaining("two.txt"),
     ]);
   });
 });
@@ -680,7 +668,7 @@ describe("reportSkippedAttachments", () => {
     // encodeAttachments directly, plus the encodeComposerAttachments wrapper
     // — but not the wrapper's own definition.
     const callSites = [
-      ...src.matchAll(/await encode(?:Composer)?Attachments\(/g),
+      ...src.matchAll(/(?<!return )await encode(?:Composer)?Attachments\(/g),
     ];
     expect(callSites.length).toBeGreaterThanOrEqual(3);
 

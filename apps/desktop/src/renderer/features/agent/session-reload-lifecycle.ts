@@ -354,28 +354,26 @@ export function queuedPromptPresentation(input: {
   return "queued-card";
 }
 
-/** Protection failures retain their stopped-turn footer; authentication failures
- * retain the prompt as context for the next normal send after Settings sign-in.
- * Other startup failures restore composer text; follow-ups remain queue rows. */
+/** An accepted first prompt survives failed admission with its recovery card.
+ * Follow-ups still use the queue's existing restoration flow. */
 export function shouldPreserveAdmissionPromptOnFailure(
   failureKind: string | null | undefined,
   presentation: "active-turn" | "queued-card" | undefined,
 ): boolean {
   return (
-    (failureKind === "design-protection-failed" ||
-      failureKind === "auth-required") &&
+    !!failureKind && failureKind !== "lifecycle-superseded" &&
     presentation === "active-turn"
   );
 }
 
 /** A first prompt waiting only for admission already owns the visible turn.
  * Stop must settle that prompt in place so the transcript and STOPPED BY USER
- * footer agree with what the user saw. True follow-ups are still discarded:
- * they were queued behind work the user explicitly cancelled. */
+ * footer agree with what the user saw. Follow-ups remain editable in the
+ * paused queue until the next explicit send resumes dispatch. */
 export function cancelledQueuedMessageAction(
   presentation: "active-turn" | "queued-card" | undefined,
-): "preserve-as-turn" | "drop" {
-  return presentation === "active-turn" ? "preserve-as-turn" : "drop";
+): "preserve-as-turn" | "preserve-in-queue" {
+  return presentation === "active-turn" ? "preserve-as-turn" : "preserve-in-queue";
 }
 
 /** The first prompt is already a live user turn while its execution boundary

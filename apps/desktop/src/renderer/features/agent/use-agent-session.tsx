@@ -108,6 +108,8 @@ export interface AgentUsage {
 }
 
 export interface AgentSessionState {
+  /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
+  queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on
    * the next actual send, and retain the marker across failed authentication. */
   needsConversationReplay?: boolean;
@@ -200,6 +202,7 @@ export interface AgentSessionState {
   /** Active background work owned by this exact session. Engine snapshots
    * replace the set; completed tasks move into persisted tool-call history. */
   backgroundTasks: BackgroundTask[];
+  backgroundActivity: import("@zeros/protocol/agent-events").BackgroundTasksUpdate["activity"];
   /** Foreground multi-agent workflows owned by this exact session. Full
    * engine snapshots replace this ephemeral list; narrator lines live in the
    * ordinary tool-call transcript instead. */
@@ -211,8 +214,8 @@ export interface AgentSessionState {
   safetyReviewRetries: Record<string, string>;
   /** Parent session is parked and waiting for the active task set to wake it. */
   waitingForBackgroundTasks: boolean;
-  /** Start of the current continuous parked interval. Session-owned so a
-   * retained-view eviction/remount cannot restart the visible timer. */
+  /** Original request start while parked. Session-owned so waiting/resuming
+   * and retained-view remounts cannot restart the visible timer. */
   backgroundTasksWaitingSince: number | null;
   /** Settings-drift guard (2026-07-13): JSON of the CHAT-derived env
    *  (envForChat — model/effort/fast/dirs) this session was actually created
@@ -223,6 +226,9 @@ export interface AgentSessionState {
    *  turn on the stale model (the "pill says Haiku, turn ran Opus" bug).
    *  Undefined = unknown (legacy slot) → the reconcile skips it. */
   appliedChatEnvKey?: string;
+  /** Local revisions avoid comparing renderer and remote-engine wall clocks. */
+  modelSelectionRevision?: number;
+  modelSelectionRevisionAtRequest?: number;
 }
 
 export interface StartSessionOptions {

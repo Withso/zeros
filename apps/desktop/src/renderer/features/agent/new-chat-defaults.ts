@@ -61,16 +61,11 @@ import {
 } from "./permission-preferences";
 import {
   DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED,
-  DEFAULT_CLAUDE_FALLBACK,
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
   getClaudeAutoMemoryEnabled,
-  getClaudeBudgetCapUsd,
-  getClaudeFallbackModel,
   getClaudeIdleTimeoutMinutes,
   isClaudeIdleTimeoutMinutes,
-  setClaudeBudgetCapUsd,
   setClaudeAutoMemoryEnabled,
-  setClaudeFallbackModel,
   setClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
 import type { ChatEffort, ChatPermissionMode } from "../../state/store";
@@ -431,13 +426,10 @@ function buildModelsTable(): Record<string, unknown> {
     claude_code: {
       // Legacy family effort was migrated onto the selected exact model.
       default_effort_level: null,
-      // Claude reliability knobs, mirrored losslessly: the fallback
-      // writes its resolved value ("none" for explicit fail-fast) so the
-      // default never forges a user pick; a null cap (off) drops its key. The
-      // idle timeout is always explicit so every process receives one of the
-      // four bounded choices even after a hand edit or cache migration.
-      fallback_model: getClaudeFallbackModel() ?? "none",
-      budget_cap_usd: getClaudeBudgetCapUsd(),
+      // Remove retired app overrides from synced settings. Older files stay
+      // readable, but neither value can configure a hidden limit or backup.
+      fallback_model: null,
+      budget_cap_usd: null,
       idle_timeout_minutes: getClaudeIdleTimeoutMinutes(),
       auto_memory_enabled: getClaudeAutoMemoryEnabled(),
     },
@@ -584,20 +576,8 @@ export function hydrateModelsFromSettings(
     if (authoritative || Array.isArray(m.permission_preferences)) {
       replacePermissionPreferences(m.permission_preferences);
     }
-    // Claude reliability knobs. ADDITIVE for the fallback (an absent
-    // key keeps the local value — legacy files predate it); the cap follows
-    // the same rule (absent = keep; explicit null in TOML can't occur). Idle
-    // timeout is authoritative: absence/invalid means the bounded default.
+    // Only active settings hydrate. Legacy fallback/cap values are ignored.
     const cc = m.claude_code as Record<string, unknown> | undefined;
-    if (typeof cc?.fallback_model === "string" && cc.fallback_model) {
-      const fb = cc.fallback_model === "none" ? null : cc.fallback_model;
-      if (getClaudeFallbackModel() !== fb) setClaudeFallbackModel(fb);
-    } else if (authoritative) setClaudeFallbackModel(DEFAULT_CLAUDE_FALLBACK);
-    if (typeof cc?.budget_cap_usd === "number" && cc.budget_cap_usd > 0) {
-      if (getClaudeBudgetCapUsd() !== cc.budget_cap_usd) {
-        setClaudeBudgetCapUsd(cc.budget_cap_usd);
-      }
-    } else if (authoritative) setClaudeBudgetCapUsd(null);
     const idleTimeout = isClaudeIdleTimeoutMinutes(cc?.idle_timeout_minutes)
       ? cc.idle_timeout_minutes
       : DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES;
@@ -626,8 +606,6 @@ export function hasModelDefaults(): boolean {
   if (serializeModelPreferences().length > 0) return true;
   if (serializePermissionPreferences().length > 0) return true;
   if (getChatTitleModel() !== DEFAULT_CHAT_TITLE_MODEL) return true;
-  if (getClaudeFallbackModel() !== DEFAULT_CLAUDE_FALLBACK) return true;
-  if (getClaudeBudgetCapUsd() != null) return true;
   if (getClaudeIdleTimeoutMinutes() !== DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES)
     return true;
   if (getClaudeAutoMemoryEnabled() !== DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED)

@@ -1,3 +1,6 @@
+import type { SteerOutcome } from "@zeros/protocol/messages";
+import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
+import { FallbackModelSelection } from "../shared/fallback-model-selection";
 import {
   AccountModelDiscovery,
   type AccountModelState,
@@ -109,11 +112,6 @@ import {
 } from "../../../browser/browser-tool-client";
 import { resolveCodexBinary } from "./binary-resolver";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
-import {
-  extractUnavailableModelId,
-  isModelUnavailableError,
-  modelUnavailableAdvice,
-} from "../shared/model-availability";
 
 import {
   bootCodexAppServerRuntime,
@@ -318,6 +316,7 @@ export interface PendingApproval {
 }
 
 export interface CodexSession {
+  modelSelection: FallbackModelSelection;
   readonly modelState: AccountModelState;
   zerosSessionId: string;
   cwd: string;
@@ -1241,6 +1240,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   async prompt(opts: {
     sessionId: string;
+    turnId?: string;
     prompt: ContentBlock[];
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     // A prompt can race a session teardown: the engine supersedes a chat's
@@ -1259,6 +1259,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // session (reboots the child, resumes the thread) and resends the prompt.
     if (!session.runtimeAlive) throw codexDisconnectedFailure();
 
+    session.modelSelection.beginTurn();
     session.translator.startTurn();
     session.activeTurnId = null;
     session.sawCollabTurns = false;
@@ -1313,6 +1314,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // Clock starts at the handoff to the app-server, so the number reported
     // is the provider's wait rather than our own dispatch above it.
     session.firstToken.beginTurn();
+    const cancelledTurn = () => {
+      const usage = session.translator.turnUsage ? { ...session.translator.turnUsage, accountingVersion: 1 as const, revision: 1 } : undefined;
+      return {
+        stopReason: "cancelled" as const,
+        response: {
+          stopReason: "cancelled" as const,
+          effectiveModel: model ?? session.threadModel ?? undefined,
+          ...(usage ? { usage } : {}),
+        },
+      };
+    };
     try {
       // Collaboration mode (EXPERIMENTAL): codex only allows the
       // request_user_input tool in PLAN mode, or in DEFAULT mode with our
@@ -1389,6 +1401,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
             turnOptions,
           );
       session.activeTurnId = null;
+      if (session.cancelRequested || result.status === "cancelled") {
+        return cancelledTurn();
+      }
+      if (result.status !== "completed" && result.status !== "failed") {
+        throw new AgentFailureError({
+          kind: "transport-closed",
+          stage: "prompt",
+          agentId: AGENT_ID,
+          message:
+            "Codex disconnected before confirming that the turn finished.",
+        });
+      }
       // The app-server child died mid-turn — runTurn resolves "failed" from
       // the runtime's proc.exited handler (which also set childExitedMidTurn
       // via handleRuntimeExit). Surface a RECOVERABLE transport-closed, not
@@ -1399,48 +1423,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
       if (result.status === "failed" && session.childExitedMidTurn) {
         throw codexDisconnectedFailure();
       }
-      // A failed turn RESOLVES (it doesn't throw), so the auth/quota
-      // classifier in the catch below never sees a mid-turn
-      // unauthorized / usageLimitExceeded — it would surface only as a
-      // chat bubble while the green dot stayed green. Promote it to a real
-      // auth-required failure here so the gateway's runtime auth
-      // invalidation flips the dot.
-      const rateLimit = session.translator.rateLimitFailure;
-      if (rateLimit) {
-        throw new AgentFailureError({
-          kind: "rate-limited",
-          message: `Codex: ${rateLimit}.`,
-          stage: "prompt",
-          agentId: AGENT_ID,
-          advice:
-            "Codex is rate-limiting requests. Wait for the provider reset, then try again.",
-        });
-      }
-      const authQuota = session.translator.authQuotaFailure;
-      if (authQuota) {
-        throw new AgentFailureError({
-          kind: "auth-required",
-          message: `Codex: ${authQuota}. Open Settings → Providers to sign in / check your plan.`,
-          stage: "prompt",
-          agentId: AGENT_ID,
-        });
-      }
-      // A non-auth/quota failed turn (mid-turn server/network error, turn
-      // timeout, proc exit) RESOLVES with status "failed" rather than throwing,
-      // so without this it returns as a clean/ready turn (translator default
-      // stopReason is end_turn; the renderer then marks AGENT_PROMPT_COMPLETE
-      // "ready"). Editing mapStopReason is a no-op — the gateway discards the
-      // top-level stopReason and codex sets response:{}. Promote it to a real
-      // failure so the chat reflects it; the translator already emitted the
-      // detailed ⚠ error bubble. Auth/quota and stale-thread are handled above /
-      // in the catch, so this is the generic-failure case only.
+      // Classify the native terminal error before decorating it. Codes and
+      // additionalDetails must survive completion-only failures too.
       if (result.status === "failed") {
-        throw new AgentFailureError({
-          kind: "protocol-error",
-          message: "Codex turn failed.",
-          stage: "prompt",
-          agentId: AGENT_ID,
-        });
+        const acknowledgementError = (result.raw as { turn?: { error?: unknown } } | null)?.turn?.error;
+        const native = session.translator.terminalFailure ?? normalizeProviderError(
+          "codex", acknowledgementError ?? { message: "Codex turn failed before confirming completion." },
+        );
+        throw providerErrorFailure("codex", native, "prompt");
       }
       // Collab subagents outlive the PARENT turn: codex ends the parent's
       // turn the moment its own tail message is done, while spawned agent
@@ -1462,7 +1452,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
       // Surface this turn's token usage (Codex reports tokens,
       // no cost over the app-server protocol) for LLM analytics.
-      const turnUsage = session.translator.turnUsage;
+      const turnUsage = session.translator.turnUsage ? { ...session.translator.turnUsage, accountingVersion: 1 as const, revision: 1 } : undefined;
       const stopReason = session.cancelRequested
         ? "cancelled"
         : mapStopReason(result.status, session.translator.stopReason);
@@ -1481,6 +1471,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       };
     } catch (err) {
       session.activeTurnId = null;
+      if (session.cancelRequested) return cancelledTurn();
       // The child exited during this turn — but early enough that runTurn
       // REJECTED (the turn/start RPC was cut off by the client close) rather
       // than resolving "failed". Surface the same recoverable transport-closed
@@ -1494,11 +1485,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // as plain Errors → the renderer falls back to its narrower
       // bridge-side regex → mis-classifies as "protocol-error" → the
       // user sees a hard "Agent error" toast instead of the muted
-      // session-expired self-heal path. classifyThreadFailure returns
-      // the raw err unchanged when no pattern matches, so non-codex
-      // failures (network, etc.) keep their original message.
+      // session-expired self-heal path. Already normalized failures retain
+      // their identity and explanation through this catch.
       throw classifyThreadFailure(err, "prompt");
     } finally {
+      if (opts.turnId && session.translator.turnUsage) this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: opts.sessionId,
+        update: { sessionUpdate: "turn_usage_update", turnId: opts.turnId,
+          usage: { ...session.translator.turnUsage, accountingVersion: 1, revision: 1 } },
+      });
       // The turn has settled (completed, failed, or threw) — a subsequent
       // child exit is now an idle crash, not a mid-turn one.
       session.turnActive = false;
@@ -1546,19 +1541,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async steer(opts: {
     sessionId: string;
     prompt: ContentBlock[];
-  }): Promise<void> {
+  }): Promise<SteerOutcome> {
     const session = this.sessions.get(opts.sessionId);
     if (!session) throw codexDisconnectedFailure();
     if (!session.runtimeAlive) throw codexDisconnectedFailure();
     const turnId = session.activeTurnId;
-    if (!session.turnActive || !turnId) {
-      throw new AgentFailureError({
-        kind: "protocol-error",
-        message: "no turn is in flight to steer",
-        stage: "prompt",
-        agentId: AGENT_ID,
-      });
-    }
+    if (!session.turnActive || !turnId || session.cancelRequested)
+      return "queued";
     let input = await this.buildUserInput(session, opts.prompt);
     if (
       session.browserSessionId &&
@@ -1567,11 +1556,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
     ) {
       input = injectCodexBrowserSkillInput(input, session.browserSkill);
     }
-    await session.runtime.requestTyped("turn/steer", {
-      threadId: session.threadId,
-      input,
-      expectedTurnId: turnId,
-    });
+    if (
+      this.sessions.get(opts.sessionId) !== session ||
+      session.cancelRequested ||
+      !session.runtimeAlive ||
+      !session.turnActive ||
+      session.activeTurnId !== turnId
+    )
+      return "queued";
+    try {
+      await session.runtime.requestTyped("turn/steer", {
+        threadId: session.threadId,
+        input,
+        expectedTurnId: turnId,
+      });
+      return "delivered";
+    } catch (error) {
+      // A native RPC rejection proves the injection was declined. A lost
+      // transport reply does not; never automatically resend that attempt.
+      return typeof (error as { code?: unknown })?.code === "number"
+        ? "queued"
+        : "interrupted";
+    }
   }
 
   /** Run a real context compaction through `thread/compact/start`.
@@ -1649,6 +1655,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
     session.cancelRequested = true;
+    session.notifications.endAgentActivity();
     session.postCancelInterruptUntil = Date.now() + POST_CANCEL_INTERRUPT_MS;
     // Release approval RPCs as part of Stop itself. Interrupting the turn does
     // not guarantee the app-server will settle every server→client request.
@@ -1759,6 +1766,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const session = this.sessions.get(opts.sessionId);
     const model = opts.model.trim();
     if (!session || !model) return;
+    session.modelSelection.select(model);
     session.env = { ...(session.env ?? {}), OPENAI_MODEL: model };
   }
 
@@ -1779,6 +1787,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const session = this.sessions.get(opts.sessionId);
     if (!session) return;
     const carried = { ...(session.env ?? {}) };
+    const incomingModel = opts.env.OPENAI_MODEL?.trim();
+    if (incomingModel && incomingModel !== session.modelSelection.model) session.modelSelection.select(incomingModel);
     delete carried.ZEROS_FAST_MODE;
     delete carried.ZEROS_THINKING_EFFORT;
     delete carried.ZEROS_ADDITIONAL_DIRS;
@@ -2117,6 +2127,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async disposeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    s.cancelRequested = true;
+    s.notifications.endAgentActivity();
     this.clearBackgroundTaskPoll(s);
     this.drainPendingApprovals(s, s.runtimeAlive);
     this.drainPendingQuestions(s, s.runtimeAlive);
@@ -2158,6 +2170,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async dispose(): Promise<void> {
     const all = Array.from(this.sessions.values());
     for (const s of all) {
+      s.cancelRequested = true;
+      s.notifications.endAgentActivity();
       this.disposing.add(s.zerosSessionId);
       this.clearBackgroundTaskPoll(s);
     }
@@ -2363,6 +2377,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
       throw error;
     }
 
+    // Resume can emit the restored cumulative snapshot before its RPC returns.
+    // Capture it before constructing the transcript translator.
+    let restoredUsage: unknown;
+    const stopUsageCapture = runtime.onNotification("thread/tokenUsage/updated", (params) => {
+      if (params && typeof params === "object" && "threadId" in params && params.threadId === opts.resumeThreadId) restoredUsage = params;
+    });
     let threadId: string;
     let providerSessionId: string;
     let threadModel: string | null = null;
@@ -2461,6 +2481,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         runtimeFailure,
         opts.kind === "resume" ? "loadSession" : "newSession",
       );
+    } finally {
+      stopUsageCapture();
     }
 
     let registeredBrowserSessionId: string | null = null;
@@ -2491,6 +2513,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     const resolveArtwork = createCodexToolArtworkResolver(runtime, threadId, opts.cwd, opts.env?.CODEX_HOME);
     const translator = new CodexAppServerTranslator({
       sessionId: zerosSessionId,
+      resumed: opts.kind === "resume" && !resumedFresh,
       onAsyncQuestion: (request) => {
         const owner = this.sessions.get(zerosSessionId);
         if (!owner || owner !== session) return;
@@ -2506,12 +2529,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
         const artwork = await resolveArtwork(item);
         return this.sessions.get(zerosSessionId) === session ? artwork : undefined;
       },
-      emit: (notification: SessionNotification) =>
-        this.ctx.emit.onSessionUpdate(this.agentId, notification),
+      emit: (notification: SessionNotification) => {
+        const update = notification.update;
+        if (session && this.sessions.get(zerosSessionId) === session && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId) {
+          const adopted = session.modelSelection.adopt(update.toModel, update.fromModel);
+          if (adopted) {
+            session.env = { ...session.env, OPENAI_MODEL: adopted.model };
+            session.threadModel = adopted.model;
+            this.ctx.emit.onSessionUpdate(this.agentId, { sessionId: zerosSessionId, update: adopted });
+          }
+        }
+        this.ctx.emit.onSessionUpdate(this.agentId, notification);
+      },
       onUnknown: (method, _params) => {
         console.log(`[codex-app-server] unknown notification: ${method}`);
       },
     });
+
+    if (restoredUsage && !resumedFresh) translator.handle("thread/tokenUsage/updated", restoredUsage);
 
     const notifications = this.wireRuntimeToTranslator(runtime, translator, {
       threadId,
@@ -2519,6 +2554,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     });
 
     session = {
+      modelSelection: new FallbackModelSelection(opts.env?.OPENAI_MODEL?.trim() || threadModel),
       modelState,
       accountExtensionsEnabled: cloudExtensions,
       accountAppBridgeEnabled,
@@ -2703,6 +2739,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!session) return;
 
     session.runtimeAlive = false;
+    session.notifications.endAgentActivity();
     // Clear lifecycle state tied to the dead runtime:
     //   - activeTurnId → a later cancel() would interrupt a dead turn id.
     //   - pendingApprovals → respondToPermission would look OK but the
@@ -4844,25 +4881,6 @@ function truncate(s: string, n: number): string {
 // Wrap initialize / thread errors so codex's app-server failure
 // modes land on the same UI surfaces as the legacy adapter's.
 
-const AUTH_HINT_RX =
-  /\b(not\s+(?:logged|signed)\s*in|please\s+run\s*\/?login|sign[- ]in\s+required|api\s*key\s+(?:not|required|invalid)|refresh\s+token\s+(?:was\s+)?(?:already\s+used|expired|invalid)|access\s+token\s+(?:could\s+not\s+be\s+refreshed|expired|invalid)|log\s+out\s+and\s+sign\s+in|token[_\s-]invalidated|unauthori[sz]ed|401)\b/i;
-const RATE_LIMIT_RX =
-  /\b(?:429|rate[\s_-]*limit(?:ed|_error)?|too many requests|resource exhausted|usage limit exceeded|server overloaded)\b/i;
-
-function codexRateLimitFailure(
-  message: string,
-  stage: "newSession" | "loadSession" | "forkSession" | "prompt",
-): AgentFailureError {
-  return new AgentFailureError({
-    kind: "rate-limited",
-    message: `Codex rate limit: ${message}`,
-    stage,
-    agentId: AGENT_ID,
-    advice:
-      "Codex is rate-limiting requests. Wait for the provider reset, then try again.",
-  });
-}
-
 // Patterns that indicate codex no longer has the rollout/thread we're
 // trying to talk to. Broadened from the original "no rollout found"
 // regex because the runtime's wording has
@@ -4919,91 +4937,15 @@ function classifyBootFailure(
   err: unknown,
   stage: "newSession" | "loadSession" | "forkSession",
 ): Error {
-  const message = err instanceof Error ? err.message : String(err);
-  if (RATE_LIMIT_RX.test(message)) {
-    return codexRateLimitFailure(message, stage);
-  }
-  if (isModelUnavailableError(message)) {
-    return codexModelUnavailableFailure(message, stage);
-  }
-  if (AUTH_HINT_RX.test(message)) {
-    return new AgentFailureError({
-      kind: "auth-required",
-      message: `Codex sign-in required: ${message}`,
-      stage,
-      agentId: AGENT_ID,
-    });
-  }
-  // Surface unmodified so the upstream "boot failed" wrapper retains
-  // its stderr-tail context.
-  return err instanceof Error ? err : new Error(message);
+  return classifyThreadFailure(err, stage);
 }
 
-/** Codex refused the model id (a retired or plan-gated OPENAI_MODEL). Terminal:
- *  no automatic model swap here — Codex's catalog is the one the picker shows,
- *  so the user's pick, not a guess, must change. The toast drops technical
- *  `message` detail, so which pill to change travels as `advice`. */
-function codexModelUnavailableFailure(
-  message: string,
-  stage: "newSession" | "loadSession" | "forkSession" | "prompt",
-): AgentFailureError {
-  return new AgentFailureError({
-    kind: "protocol-error",
-    message: `Codex rejected the model: ${message}`,
-    stage,
-    agentId: AGENT_ID,
-    advice: modelUnavailableAdvice("Codex", extractUnavailableModelId(message)),
-  });
-}
-
-/** Classify a codex error from the thread/turn lifecycle.
- *
- *  Returns AgentFailureError when the message matches our session-
- *  expired or auth-required signatures; otherwise the raw error is
- *  rethrown unchanged so callers can surface it without losing the
- *  original message.
- *
- *  The stage parameter is metadata for the renderer — the regex match
- *  is the actual classification signal. Earlier versions only matched
- *  STALE_THREAD_RX when `isResume` was true (assuming stale rollouts
- *  could only happen on resume), but codex can also surface "no
- *  rollout" mid-turn if a rollout was cleaned up between turns — the
- *  prompt path needs the same auto-classification or the renderer's
- *  session-expired self-heal never fires. */
-// Exported for unit testing — see __tests__/app-server-adapter-failures.test.ts.
+/** Shared by thrown RPC errors and native terminal failures. Already typed
+ * failures retain their identity so generated advice is never reclassified. */
 export function classifyThreadFailure(
   err: unknown,
   stage: "newSession" | "loadSession" | "forkSession" | "prompt",
 ): Error {
-  const message = err instanceof Error ? err.message : String(err);
-  if (RATE_LIMIT_RX.test(message)) {
-    return codexRateLimitFailure(message, stage);
-  }
-  if (STALE_THREAD_RX.test(message)) {
-    // Wording differs by stage so the renderer's chip / inline note
-    // makes sense: load-time means the chat is being reopened cold;
-    // prompt-time means an in-flight turn lost its rollout.
-    const friendly =
-      stage === "prompt"
-        ? "Codex lost the rollout for this thread mid-turn. Reconnecting…"
-        : "Codex no longer has a rollout for this thread. Start a fresh chat to continue.";
-    return new AgentFailureError({
-      kind: "session-expired",
-      message: friendly,
-      stage,
-      agentId: AGENT_ID,
-    });
-  }
-  if (isModelUnavailableError(message)) {
-    return codexModelUnavailableFailure(message, stage);
-  }
-  if (AUTH_HINT_RX.test(message)) {
-    return new AgentFailureError({
-      kind: "auth-required",
-      message: `Codex sign-in required: ${message}`,
-      stage,
-      agentId: AGENT_ID,
-    });
-  }
-  return err instanceof Error ? err : new Error(message);
+  if (err instanceof AgentFailureError) return err;
+  return providerErrorFailure("codex", normalizeProviderError("codex", err), stage);
 }

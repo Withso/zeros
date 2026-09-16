@@ -7,11 +7,14 @@ import type { AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "../renderers/types";
 import { CompactionRecordCard } from "../renderers/compaction-card";
 import { QuestionRecordCard } from "../renderers/question-card";
+import { CursorTaskCard } from "../renderers/tool-cursor-task";
+import { SubagentCard } from "../renderers/tool-subagent";
 
 vi.mock("../renderers/highlighted-code", () => ({
   HighlightedCode: ({ code }: { code: string }) => code,
   CodeWithGutter: ({ code }: { code: string }) => code,
 }));
+vi.mock("../markdown", () => ({ renderMarkdown: (text: string) => text }));
 
 function tool(overrides: Partial<AgentToolMessage> = {}): AgentToolMessage {
   return {
@@ -94,7 +97,7 @@ describe("expanded tool details", () => {
     );
     expect(question).toContain('aria-expanded="false"');
   });
-  it("shows a full command and cwd even when a successful command captured no output", () => {
+  it("shows the full command without execution metadata when no output was captured", () => {
     const html = render(
       tool({
         rawInput: {
@@ -105,12 +108,12 @@ describe("expanded tool details", () => {
       }),
     );
     expect(html).toContain("pnpm typecheck");
-    expect(html).toContain("/workspace");
-    expect(html).toContain("Exit code: 0");
+    expect(html).not.toContain("/workspace");
+    expect(html).not.toContain("Exit code:");
     expect(html).toContain("No output was captured");
   });
 
-  it("shows failure output, input and exact exit status together", () => {
+  it("keeps the command and failure output without status chrome", () => {
     const html = render(
       tool({
         status: "failed",
@@ -123,8 +126,41 @@ describe("expanded tool details", () => {
     );
     expect(html).toContain("pnpm check");
     expect(html).toContain("Server ready");
-    expect(html).toContain("Exit code: 143");
-    expect(html).toContain("Failed");
+    expect(html).not.toContain("Exit code:");
+    expect(html).not.toContain(">Failed<");
+  });
+
+  it("keeps Cursor failure output without exposing the SDK wrapper", () => {
+    const html = render(tool({
+      status: "failed",
+      rawOutput: { status: "success", value: { exitCode: 1, stdout: "Started", stderr: "Permission denied" } },
+      content: [{ type: "content", content: { type: "text", text: "Started\nPermission denied" } }],
+    }));
+    expect(html).not.toContain("Exit code:");
+    expect(html).not.toContain(">Failed<");
+    expect(html.match(/Permission denied/g)).toHaveLength(1);
+  });
+
+  it("does not count a Read failure message as lines successfully read", () => {
+    const value = tool({ toolKind: "read", status: "failed", rawInput: { path: "denied.ts" }, content: [{ type: "content", content: { type: "text", text: "Permission denied" } }] });
+    expect(metaForEvent(value).label).toBe("Read");
+    expect(render(value)).toContain("Permission denied");
+  });
+
+  it("describes a stopped unresolved tool without promising more output", () => {
+    const html = render(tool({ status: "pending", rawOutput: { _zerosToolCompletion: "unreported" } }));
+    expect(html).toContain("Completion not reported");
+    expect(html).not.toContain("Waiting for output");
+    expect(html).not.toContain("Completed");
+    expect(html).not.toContain("_zerosToolCompletion");
+  });
+
+  it.each([CursorTaskCard, SubagentCard])("does not animate a child whose completion was never reported", (Card) => {
+    const ctx = { subagentChildren: new Map(), pendingQuestionToolCallIds: new Set() } as unknown as RendererContext;
+    const html = renderToStaticMarkup(createElement(Card, {
+      message: tool({ status: "pending", rawOutput: { _zerosToolCompletion: "unreported" } }), ctx,
+    }));
+    expect(html).not.toContain('role="status"');
   });
 
   it("shows web actions and results even without a query string", () => {

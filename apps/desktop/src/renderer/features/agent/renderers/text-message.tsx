@@ -27,7 +27,7 @@
 // to bind.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useMemo, type SyntheticEvent } from "react";
+import { memo, useMemo, useRef, type SyntheticEvent } from "react";
 import type { Renderer, RendererContext } from "./types";
 import type {
   AgentTextMessage,
@@ -50,6 +50,8 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { trimTrailingSegments } from "./trim-trailing-segments";
 import { MarkdownCodeBlock } from "./markdown-code-block";
 import { useAttachmentImageSource } from "../attachment-image-source";
+import { useStreamingText, useStreamingTextEdge } from "./use-streaming-text";
+import { fallbackDisplayText } from "../model-fallback";
 
 type ChatRole = "user" | "assistant" | "system";
 
@@ -102,11 +104,15 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     // changes the hook count and React throws "Rendered more hooks than
     // during the previous render", blanking the chat surface.
     const role = mapRole(message.role);
-    const useMarkdown = message.role === "agent";
+    const useMarkdown = message.role === "agent" && !message.modelFallback;
+    const text = message.modelFallback ? fallbackDisplayText(message.modelFallback) : message.text;
+    const proseRef = useRef<HTMLDivElement>(null);
+    const smooth = useStreamingText(text, useMarkdown && ctx.isStreaming && ctx.lastMessageId === message.id && ctx.attachmentImagesActive !== false);
     const segments = useMemo(
-      () => (useMarkdown ? renderMarkdownSegments(message.text) : null),
-      [useMarkdown, message.text],
+      () => (useMarkdown ? renderMarkdownSegments(smooth.text) : null),
+      [useMarkdown, smooth.text],
     );
+    useStreamingTextEdge(proseRef, smooth.text, smooth.pending);
 
     // Drop trailing whitespace from the sent user bubble so a message ending in
     // stray newlines/spaces doesn't render as a tall, mostly-empty bubble (the
@@ -122,7 +128,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
     // rebuilds are invisible by design, with no resume or continuation UI.
     // groupMessagesIntoTurns drops them before they reach
     // this renderer; this guard covers any other dispatch path.
-    if (message.resumeBoundary) return null;
+    if (message.resumeBoundary || message.retracted) return null;
 
     return (
       <>
@@ -195,6 +201,7 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // container delegates clicks/Enter on file-path chips + links
                   // to workbench (see handleMarkdownActivate).
                   <div
+                    ref={proseRef}
                     className="zeros-agent-md"
                     onClick={(e) => handleMarkdownActivate(e, ctx)}
                     onKeyDown={(e) => {
@@ -228,8 +235,8 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   // the w-fit user bubble past a narrow pane's left edge.
                   <div className="leading-snug wrap-anywhere whitespace-pre-wrap">
                     {message.role === "user"
-                      ? message.text.trimEnd()
-                      : message.text}
+                      ? text.trimEnd()
+                      : text}
                   </div>
                 )}
               </>

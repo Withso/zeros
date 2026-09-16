@@ -52,6 +52,7 @@ import {
   PromptInputToolbar,
   PromptInputTools,
   PromptInputSubmit,
+  toast,
 } from "@/renderer/shared/ui/primitives/elements";
 import {
   useEditComposerDraft,
@@ -230,7 +231,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
-  ) => void;
+  ) => void | boolean | Promise<void | boolean>;
   /** Pills (model / effort / permissions) rendered in the edit-mode
    *  toolbar so editing a past message has the same affordances as
    *  the main composer. The component appends its own Cancel/Send
@@ -514,7 +515,7 @@ function TurnPromptEditor({
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
-  ) => void;
+  ) => void | boolean | Promise<void | boolean>;
   onCancel: () => void;
   editToolbarPills?: React.ReactNode;
   agentContext?: EditAgentContext;
@@ -522,6 +523,15 @@ function TurnPromptEditor({
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Seed the editor: a prior in-progress edit (stash json), then its plain-text
   // mirror, then the WHOLE original message reconstructed as inline content —
@@ -563,7 +573,9 @@ function TurnPromptEditor({
     availableCommands: agentContext?.availableCommands ?? [],
     placeholder: "Edit your message…",
     onSubmit: () => submitRef.current(),
-    onEscape: onCancel,
+    onEscape: () => {
+      if (!submittingRef.current) onCancel();
+    },
     onChange: () => persistRef.current(),
     initialContent: initialContentRef.current,
   });
@@ -588,6 +600,7 @@ function TurnPromptEditor({
   // `contains` check covers the editor, attach button, pills, and overlay).
   useEffect(() => {
     const onDocPointerDown = (e: PointerEvent) => {
+      if (submittingRef.current) return;
       const root = wrapperRef.current;
       if (!root) return;
       const target = e.target;
@@ -648,7 +661,8 @@ function TurnPromptEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const submitEdit = useCallback(() => {
+  const submitEdit = useCallback(async () => {
+    if (submittingRef.current) return;
     const s = serialize();
     const trimmed = (s?.displayText ?? "").trim();
     const attachments = s?.attachments ?? [];
@@ -657,13 +671,31 @@ function TurnPromptEditor({
       onCancel();
       return;
     }
-    submittedRef.current = true;
-    onEdit(trimmed, attachments, s?.segments ?? []);
-    onCancel();
-  }, [serialize, onEdit, onCancel]);
+    submittingRef.current = true;
+    setSubmitting(true);
+    editor?.setEditable(false);
+    try {
+      const accepted = await onEdit(trimmed, attachments, s?.segments ?? []);
+      if (accepted === false) return;
+      submittedRef.current = true;
+      onClearDraft();
+      // Truncation may already have removed this turn. Do not close a newer edit.
+      if (mountedRef.current) onCancel();
+    } catch (error) {
+      toast.error("Edited message wasn't sent", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      submittingRef.current = false;
+      if (mountedRef.current) {
+        setSubmitting(false);
+        if (editor && !editor.isDestroyed) editor.setEditable(true);
+      }
+    }
+  }, [serialize, onEdit, onCancel, onClearDraft, editor]);
   submitRef.current = submitEdit;
 
-  const sendDisabled = composerEmpty;
+  const sendDisabled = composerEmpty || submitting;
 
   return (
     <div
@@ -688,7 +720,7 @@ function TurnPromptEditor({
           className={`zeros-agent-turn-prompt-edit relative${
             dragActive ? "ring-highlighted-bright/40 ring-2" : ""
           }`}
-          {...dragHandlers}
+          {...(submitting ? {} : dragHandlers)}
         >
           <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0 dark:bg-transparent">
             {suggestionPopup}
@@ -710,6 +742,7 @@ function TurnPromptEditor({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     aria-label="Attach file"
+                    disabled={submitting}
                     className="rounded-sm"
                   >
                     <Plus size={14} />
@@ -718,6 +751,7 @@ function TurnPromptEditor({
                 <input
                   ref={fileInputRef}
                   type="file"
+                  disabled={submitting}
                   multiple
                   hidden
                   onChange={(e) => {

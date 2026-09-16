@@ -13,6 +13,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { SteeringReceiptCapacityError, SteeringReceipts } from "./agents/steering-receipts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -195,6 +196,7 @@ import { providerLoginCommand } from "./pty/provider-login";
 import { applyUserProviderConfig } from "./settings/provider-env";
 import { resolveClaudeBinary } from "./agents/claude-binary";
 import { AgentFailureError, type AgentGatewayOptions } from "./agents/types";
+import { redactLogSecrets } from "@zeros/protocol/scrub";
 import {
   detectFramework,
   findProjectRoot,
@@ -238,6 +240,7 @@ import {
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
+  type SteerOutcome,
 } from "@zeros/protocol/messages";
 import {
   coerceProviderBinding,
@@ -250,6 +253,8 @@ import { upsertChatMessagesBulk } from "./db/messages";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
+  updateTurnUsage,
+  getTurn as getTurnRow,
   turnsWithSnapshotsBeyond,
   clearTurnSnapshots,
   type TurnFile,
@@ -260,6 +265,7 @@ import {
   getChat,
   getChatLocation,
   updateChatProviderIdentity,
+  upsertChat,
 } from "./db/chats";
 import {
   authoredPathsFromMessages,
@@ -883,6 +889,7 @@ export class ZerosEngine {
   /** Agent sessionId → the authoritative provider turn currently recording.
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
   private readonly activeTurnSnapshots = new Map<string, TurnSnapshotContext>();
+  private readonly steeringReceipts = new SteeringReceipts<{ outcome: SteerOutcome; turnId?: string }>();
   /** Workspace process/session starts and checkout mutations that have crossed
    *  the caller-side gate but have not settled. Archive/delete wait for these
    *  promises before enumerating processes and snapshotting. Without this
@@ -1878,6 +1885,37 @@ export class ZerosEngine {
             executionId,
             sessionId: executionId,
           };
+          if (notification.update.sessionUpdate === "turn_usage_update") {
+            try {
+              const update = notification.update;
+              const chatId = this.sessionChat.get(executionId);
+              const currentExecution = chatId ? this.conversationExecution.get(chatId) : undefined;
+              if (!chatId || executionAgentId !== agentId || (currentExecution && currentExecution !== executionId) ||
+                  !updateTurnUsage(chatId, update.turnId, agentId, update.usage, executionId)) return;
+              const usage = getTurnRow(chatId, update.turnId)?.usage;
+              if (usage) normalizedNotification.update = { ...update, usage };
+            } catch (error) {
+              console.warn("[agents] could not persist turn usage", error);
+              return;
+            }
+          }
+          if (notification.update.sessionUpdate === "current_model_update") {
+            const update = notification.update;
+            const chatId = this.sessionChat.get(executionId);
+            const chat = chatId ? getChat(chatId) : null;
+            // Preserve a later explicit selection and every unrelated chat
+            // field. Persist before delivery, including with no UI connected.
+            if (chat && chat.agentId === agentId && executionAgentId === agentId && (!chat.model || chat.model === update.previousModel)) {
+              upsertChat({ ...chat, model: update.model, updatedAt: Date.now() });
+              this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }));
+            }
+          }
+          if (notification.update.sessionUpdate === "background_tasks_update" && executionAgentId) {
+            this.sessionLoadResponses.set(executionId, {
+              ...this.sessionLoadResponses.get(executionId),
+              backgroundTasks: notification.update,
+            });
+          }
           if (notification.update.sessionUpdate === "current_mode_update") {
             const cached = this.sessionLoadResponses.get(executionId);
             if (cached?.modes) {
@@ -1982,7 +2020,7 @@ export class ZerosEngine {
               );
             }
           }
-          this.touchActivePrompt(executionId);
+          if (notification.update.sessionUpdate !== "turn_usage_update") this.touchActivePrompt(executionId);
           this.routeSessionScoped(
             executionId,
             createMessage({
@@ -2002,7 +2040,7 @@ export class ZerosEngine {
             }),
           );
           // Persist the transcript as it streams; the engine is the source.
-          this.persistSessionUpdate(executionId, normalizedNotification);
+          if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, normalizedNotification);
         },
         onPermissionRequest: (
           agentId: string,
@@ -4166,6 +4204,7 @@ export class ZerosEngine {
         );
       });
     }
+    this.steeringReceipts.delete(executionId);
     this.router.clearOwner(executionId);
     this.sessionAgent.delete(executionId);
     this.sessionChat.delete(executionId);
@@ -5474,6 +5513,14 @@ export class ZerosEngine {
                 response.usage ?? null,
               );
             }
+            if (turnCtx) {
+              try {
+                const usage = getTurnRow(turnCtx.chatId, turnCtx.turnId)?.usage;
+                if (usage?.accountingVersion === 1) response.usage = usage;
+              } catch {
+                // Accounting reads cannot fail a completed provider response.
+              }
+            }
             if (!activePrompt.terminalPublished) {
               this.emitTurnState(
                 activePrompt,
@@ -5500,6 +5547,44 @@ export class ZerosEngine {
             const wasCancelled =
               activePrompt.cancelledByUser === true ||
               this.cancelRequested.has(msg.sessionId);
+            // Persist the cause independently of the request socket, so an
+            // adopted/reopened chat has the same recovery card. A cancelled or
+            // superseded turn must never attach a late error to newer work.
+            if (
+              !wasCancelled && !activePrompt.terminalPublished &&
+              this.activePromptContexts.get(msg.sessionId) === activePrompt
+            ) {
+              const failure =
+                err instanceof AgentFailureError ? err.failure : undefined;
+              const notification: SessionNotification = {
+                sessionId: msg.sessionId,
+                update: {
+                  sessionUpdate: "error_notice",
+                  noticeId: `turn-failure-${activePrompt.turnId}-${msg.id}`,
+                  severity: "error",
+                  recoverable: false,
+                  message: redactLogSecrets(
+                    failure?.message ?? (err instanceof Error ? err.message : String(err)),
+                  ).slice(0, 8000) || "The agent stopped before confirming completion.",
+                  turnFailure: {
+                    turnId: activePrompt.turnId,
+                    kind: failure?.kind ?? "protocol-error",
+                  },
+                },
+              };
+              this.persistSessionUpdate(msg.sessionId, notification);
+              this.routeSessionScoped(
+                msg.sessionId,
+                createMessage({
+                  type: "AGENT_SESSION_UPDATE",
+                  source: "engine",
+                  agentId: msg.agentId,
+                  executionId: msg.sessionId,
+                  ...(activePrompt.chatId ? { chatId: activePrompt.chatId } : {}),
+                  notification,
+                }),
+              );
+            }
             if (turnCtx && !activePrompt.turnRowSettled) {
               // A user cancel can surface as a rejection instead of a clean
               // stopReason:"cancelled" (e.g. the SIGTERM'd subprocess tears
@@ -5602,22 +5687,73 @@ export class ZerosEngine {
             msg.sessionId,
             this.workspaceIdForAgentSession(msg.sessionId),
           );
-          // Deliver FIRST, persist after: if the adapter refuses (no turn in
-          // flight, non-steerable turn, old codex CLI), the message stays
-          // queued client-side and must NOT appear in the transcript. No
-          // beginTurn/enterPrompt — the steered input rides the in-flight
-          // AGENT_PROMPT's turn, which is still awaited above.
-          await this.agents.steer(msg.agentId, msg.sessionId, msg.prompt);
-          const steeredTurnId = this.activeTurnSnapshots.get(
-            msg.sessionId,
-          )?.turnId;
-          this.persistSteeredUserPrompt(
-            msg.sessionId,
-            msg.prompt,
-            msg.bubble,
-            msg.userMessageId,
-            steeredTurnId,
-          );
+          const acceptingTurn = this.activeTurnSnapshots.get(msg.sessionId);
+          const receipt = await this.steeringReceipts
+            .run(
+              msg.sessionId,
+              msg.attemptId ?? msg.userMessageId ?? msg.id,
+              async () => {
+                // Capture the accepting turn before awaiting provider delivery.
+                // Stop or a subsequent prompt may replace the active snapshot.
+                const turnId = acceptingTurn?.turnId;
+                if (
+                  !turnId ||
+                  this.activeTurnSnapshots.get(msg.sessionId) !==
+                    acceptingTurn ||
+                  this.cancelRequested.has(msg.sessionId)
+                ) {
+                  return { outcome: "queued" as const };
+                }
+                let outcome: SteerOutcome;
+                try {
+                  outcome =
+                    (await this.agents.steer(
+                      msg.agentId,
+                      msg.sessionId,
+                      msg.prompt,
+                      () =>
+                        this.activeTurnSnapshots.get(msg.sessionId) ===
+                          acceptingTurn &&
+                        !this.cancelRequested.has(msg.sessionId),
+                    )) ?? "delivered";
+                } catch {
+                  outcome = "interrupted";
+                }
+                if (outcome !== "queued") {
+                  this.persistSteeredUserPrompt(
+                    msg.sessionId,
+                    msg.prompt,
+                    msg.bubble,
+                    msg.userMessageId,
+                    turnId,
+                  );
+                }
+                return { outcome, turnId };
+              },
+            )
+            .catch((error: unknown) => {
+              if (error instanceof SteeringReceiptCapacityError)
+                return { outcome: "queued" as const };
+              throw error;
+            });
+          // Legacy renderers interpret every AGENT_STEERED as delivered.
+          // Only receipt-aware requests opt in to non-delivered outcomes.
+          if (!msg.attemptId && receipt.outcome !== "delivered") {
+            client.send(
+              createMessage({
+                type: "AGENT_ERROR",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                code: "STEER_NOT_DELIVERED",
+                message:
+                  receipt.outcome === "queued"
+                    ? "This instruction was not delivered and remains queued."
+                    : "Delivery could not be confirmed. Review the turn before sending again.",
+              }),
+            );
+            return;
+          }
           client.send(
             createMessage({
               type: "AGENT_STEERED",
@@ -5626,7 +5762,7 @@ export class ZerosEngine {
               agentId: msg.agentId,
               executionId: msg.sessionId,
               sessionId: msg.sessionId,
-              ...(steeredTurnId ? { turnId: steeredTurnId } : {}),
+              ...receipt,
             }),
           );
           return;
@@ -7230,8 +7366,6 @@ export class ZerosEngine {
       "ANTHROPIC_MODEL",
       "OPENAI_MODEL",
       "CURSOR_MODEL",
-      "CLAUDE_FALLBACK_MODEL",
-      "CLAUDE_MAX_BUDGET_USD",
     ]);
     const out: Record<string, string> = {};
     for (const [name, value] of Object.entries(env)) {
@@ -7308,6 +7442,7 @@ export class ZerosEngine {
             .map((block) => (block.type === "text" ? block.text : ""))
             .join(""),
         createdAt: startedAt ?? tail.createdAt,
+        ...(bubble?.retryText != null ? { retryText: bubble.retryText } : {}),
         ...(bubble?.segments?.length ? { segments: bubble.segments } : {}),
         ...(bubble?.attachments?.length
           ? { attachments: bubble.attachments }
@@ -7335,6 +7470,7 @@ export class ZerosEngine {
       ((bubble.segments != null && bubble.segments.length > 0) ||
         (bubble.attachments != null && bubble.attachments.length > 0) ||
         bubble.displayText != null ||
+        bubble.retryText != null ||
         bubble.autoAction != null);
     if (hasRich && bubble) {
       // Rich-bubble path: persist ONE user message that mirrors the composer
@@ -7368,6 +7504,7 @@ export class ZerosEngine {
                 // matches turn.userPrompt.id in the live session.
                 ...(userMessageId ? { id: userMessageId } : {}),
                 ...(startedAt !== undefined ? { createdAt: startedAt } : {}),
+                ...(bubble.retryText != null ? { retryText: bubble.retryText } : {}),
                 ...(m.segments == null &&
                 bubble.segments != null &&
                 bubble.segments.length > 0

@@ -737,7 +737,7 @@ describe("CursorSdkTranslator", () => {
   // calls live in its on-disk transcript, read via the injected
   // loadSubagentTranscript (keyed by the agentId on the task args), at flush.
 
-  it("streams subagent tool calls LIVE via pollSubagents, then narration + report at flush", () => {
+  it("streams subagent tools and narration at checkpoints, then reconciles the report at flush", () => {
     const out: SessionNotification[] = [];
     let visibleTools = 1; // simulate the transcript growing tool-by-tool
     const t = new CursorSdkTranslator({
@@ -745,7 +745,7 @@ describe("CursorSdkTranslator", () => {
       emit: (n) => out.push(n),
       loadSubagentTranscript: () => ({
         steps: [
-          { type: "text", text: "Exploring" }, // narration (held for flush)
+          { type: "text", text: "Exploring" },
           ...Array.from({ length: visibleTools }, (_, i) => ({
             type: "tool" as const,
             toolKind: "read",
@@ -773,12 +773,12 @@ describe("CursorSdkTranslator", () => {
     visibleTools = 2;
     t.pollSubagents(); // sees 2 — emits ONLY the new one (deduped)
     expect(toolChildren()).toHaveLength(2);
-    // narration is NOT streamed live — only tools.
+    // Narration is visible at the same checkpoint as the tools.
     expect(
       childrenOf(out, parentId).some(
         (c) => c.sessionUpdate === "agent_message_chunk",
       ),
-    ).toBe(false);
+    ).toBe(true);
 
     t.feed({
       type: "tool_call",
@@ -793,7 +793,7 @@ describe("CursorSdkTranslator", () => {
       childrenOf(out, parentId).filter(
         (c) => c.sessionUpdate === "agent_message_chunk",
       ),
-    ).toHaveLength(1); // narration now
+    ).toHaveLength(1); // no duplicate narration at flush
     expect(answerOf(out, parentId)).toBe("# Report");
   });
 
@@ -954,17 +954,8 @@ describe("CursorSdkTranslator", () => {
     });
   });
 
-  // ── Live discovery (the real shape: agentId only at completion) ──────
-  // Cursor does NOT put the subagent agentId on the running-leg task args — it
-  // assigns it internally and echoes it only in the task RESULT at completion.
-  // So `pollSubagents()` learns the agentId mid-run by matching the prompt we
-  // sent against the on-disk transcripts (discoverSubagentAgentId), THEN streams.
-  // Without this, an entry with no agentId is invisible and nothing shows until
-  // flush — the "subagent tools only appear after it's done" bug.
-
-  it("discovers a running subagent by prompt (agentId absent on the running leg) and streams it LIVE", () => {
+  it("streams checkpoints once a later native start identifies the child", () => {
     const out: SessionNotification[] = [];
-    const discoverCalls: Array<{ prompt: string; claimed: string[] }> = [];
     const t = new CursorSdkTranslator({
       sessionId: "s1",
       emit: (n) => out.push(n),
@@ -983,10 +974,6 @@ describe("CursorSdkTranslator", () => {
               finalText: "# Report",
             }
           : null,
-      discoverSubagentAgentId: (prompt, claimed) => {
-        discoverCalls.push({ prompt, claimed: [...claimed] });
-        return prompt.includes("explore the codebase") ? "disc-1" : null;
-      },
     });
     // NOTE: no agentId on the running-leg args — the realistic shape.
     t.feed({
@@ -1004,23 +991,20 @@ describe("CursorSdkTranslator", () => {
       childrenOf(out, parentId).filter((c) => c.sessionUpdate === "tool_call");
 
     expect(toolChildren()).toHaveLength(0); // nothing before the first poll
-    t.pollSubagents(); // discovers disc-1 by prompt, then streams its tool LIVE
-    expect(discoverCalls).toHaveLength(1);
-    expect(discoverCalls[0].prompt).toContain("explore the codebase");
+    t.pollSubagents();
+    expect(toolChildren()).toHaveLength(0);
+    t.feed({ type: "tool_call", call_id: "tt", name: "task", status: "running", args: { agentId: "disc-1" } });
+    t.pollSubagents();
     expect(toolChildren()).toHaveLength(1);
   });
 
-  it("discovers + streams LIVE even when the running-leg args carry NO prompt", () => {
-    // The realistic Cursor shape: the streamed `task` args omit the prompt (it
-    // streams via partial-tool-call). Discovery must still run — keyed on the
-    // recency fallback (here the injected resolver returns the active agentId) —
-    // or nothing streams until the run ends (the reported bug).
+  it("defers promptless child details until the native completion supplies ownership", () => {
     const out: SessionNotification[] = [];
     const t = new CursorSdkTranslator({
       sessionId: "s1",
       emit: (n) => out.push(n),
       loadSubagentTranscript: (agentId) =>
-        agentId === "by-recency"
+        agentId === "native-child"
           ? {
               steps: [
                 {
@@ -1034,10 +1018,6 @@ describe("CursorSdkTranslator", () => {
               finalText: "",
             }
           : null,
-      // No prompt → the adapter's findSubagentByPrompt resolves by recency; the
-      // mock stands in for "the most-recently-active transcript".
-      discoverSubagentAgentId: (prompt) =>
-        prompt === "" ? "by-recency" : null,
     });
     t.feed({
       type: "tool_call",
@@ -1047,6 +1027,10 @@ describe("CursorSdkTranslator", () => {
       args: { description: "Explore" },
     });
     const parentId = (updates(out)[0] as { toolCallId: string }).toolCallId;
+    t.pollSubagents();
+    expect(childrenOf(out, parentId)).toHaveLength(0);
+    t.feed({ type: "tool_call", call_id: "tt", name: "task", status: "completed",
+      result: { status: "success", value: { agentId: "native-child" } } });
     t.pollSubagents();
     expect(
       childrenOf(out, parentId).filter((c) => c.sessionUpdate === "tool_call"),
@@ -1137,12 +1121,7 @@ describe("CursorSdkTranslator", () => {
     expect(answerOf(out, parentId)).toBe("The final report.");
   });
 
-  it("re-emits the authoritative transcript in full when a live guess streamed the WRONG file", () => {
-    // Concurrent, promptless subagents: live discovery resolves by recency and
-    // can pick the wrong transcript. The completion names the real one
-    // (transcriptPath), which is authoritative — flush must re-emit THAT file's
-    // tools in full, NOT skip its leading N using a count taken from the wrong
-    // file (the dropped-leading-tools bug).
+  it("emits the authoritative transcript without ever retaining another child's rows", () => {
     const out: SessionNotification[] = [];
     const wrong: ParsedSubagentTranscript = {
       steps: [
@@ -1182,7 +1161,6 @@ describe("CursorSdkTranslator", () => {
         id === "wrong" ? wrong : id === "right" ? right : null,
       loadSubagentTranscriptByPath: (p) =>
         p === "/abs/right.jsonl" ? right : null,
-      discoverSubagentAgentId: () => "wrong", // recency guesses the WRONG file
     });
     t.feed({
       type: "tool_call",
@@ -1195,10 +1173,10 @@ describe("CursorSdkTranslator", () => {
     const toolChildren = () =>
       childrenOf(out, parentId).filter((c) => c.sessionUpdate === "tool_call");
 
-    t.pollSubagents(); // discovers "wrong" by recency, streams its 1 tool LIVE
-    expect(toolChildren()).toHaveLength(1);
+    t.pollSubagents();
+    expect(toolChildren()).toHaveLength(0);
 
-    // Completion names the REAL transcript — authoritative over the live guess.
+    // Completion names the real transcript. No other child was attributed.
     t.feed({
       type: "tool_call",
       call_id: "tt",
@@ -1211,9 +1189,8 @@ describe("CursorSdkTranslator", () => {
     });
     t.flushSubagents();
 
-    // BOTH of the right file's tools must appear (skip reset to 0 on the source
-    // change) — never just its tail. 1 (wrong, already live) + 2 (right) = 3.
-    expect(toolChildren()).toHaveLength(3);
+    expect(toolChildren()).toHaveLength(2);
+    expect(toolChildren()).not.toContainEqual(expect.objectContaining({ rawInput: { path: "wrong.ts" } }));
     expect(answerOf(out, parentId)).toBe("# Right report");
   });
 });

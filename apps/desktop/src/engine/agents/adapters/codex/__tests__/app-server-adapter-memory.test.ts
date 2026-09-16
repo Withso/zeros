@@ -1,5 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+describe("Codex fallback selection", () => {
+  it.each([false, true])("uses the fallback on the next send unless manually changed: %s", async (manual) => {
+    const updates: unknown[] = [];
+    const instance = new CodexAppServerAdapter({ projectRoot: "/tmp/proj", mcpServers: [], sessionDirRoot: "/tmp/sessions",
+      emit: { onSessionUpdate: (_a, n) => updates.push(n.update), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() } });
+    const { session: info } = await instance.newSession({ cwd: "/tmp/proj", env: { OPENAI_MODEL: "gpt-6-astra" } });
+    const session = (instance as unknown as { sessions: Map<string, import("../app-server-adapter").CodexSession> }).sessions.get(info.sessionId)!;
+    let calls = 0;
+    vi.mocked(session.runtime.runTurn).mockImplementation(async () => {
+      if (calls++ === 0) {
+        if (manual) await instance.setModel({ sessionId: info.sessionId, model: "gpt-5.6-luna" });
+        const fallback = { threadId: session.threadId, turnId: "native-turn", fromModel: "gpt-6-astra", toModel: "gpt-5.6-sol", reason: "highRiskCyberActivity" };
+        native.state.notificationHandlers.get("model/rerouted")?.(fallback);
+        native.state.notificationHandlers.get("model/rerouted")?.(fallback);
+      }
+      return { status: "completed", turnId: "native-turn", raw: {} } as never;
+    });
+    await instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "First" }] });
+    await instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "Next" }] });
+    const model = manual ? "gpt-5.6-luna" : "gpt-5.6-sol";
+    expect(vi.mocked(session.runtime.runTurn).mock.calls.at(-1)?.[0]).toMatchObject({ model, collaborationMode: { settings: { model } } });
+    expect(updates.filter((u) => (u as { sessionUpdate: string }).sessionUpdate === "current_model_update")).toHaveLength(manual ? 0 : 1);
+    await instance.dispose();
+  });
+});
+
 const native = vi.hoisted(() => {
   const state = {
     config: {

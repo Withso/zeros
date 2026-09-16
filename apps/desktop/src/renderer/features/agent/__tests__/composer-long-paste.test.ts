@@ -2,6 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const listContextGraph = vi.fn();
 const readWorkspaceFile = vi.fn();
+const writeContextAttachment = vi.fn();
+
+vi.mock("../agent-history-client", async (original) => ({
+  ...(await original<typeof import("../agent-history-client")>()),
+  writeContextAttachment: (...args: unknown[]) =>
+    writeContextAttachment(...args),
+}));
 
 vi.mock("../../../platform/context-graph", () => ({
   listContextGraph: (...args: unknown[]) => listContextGraph(...args),
@@ -118,6 +125,12 @@ describe("a pasted body survives edit-and-resend", () => {
   beforeEach(() => {
     listContextGraph.mockReset();
     readWorkspaceFile.mockReset();
+    writeContextAttachment.mockReset().mockImplementation(async (args) => ({
+      absolutePath: `${args.cwd}/.context/local/attachments/${args.attachmentId}/${args.filename}`,
+      relativePath: `.context/local/attachments/${args.attachmentId}/${args.filename}`,
+      mimeType: args.mimeType,
+      bytes: Buffer.from(args.base64, "base64").length,
+    }));
   });
 
   it("re-reads the graph record the original send wrote", async () => {
@@ -127,13 +140,20 @@ describe("a pasted body survives edit-and-resend", () => {
       modelId: "claude-sonnet-4-6",
     });
 
-    // 1. First send — the body rides inline in the prompt.
+    // 1. First send saves the body and gives the agent only its confirmed path.
     const sent = await encodeAttachments([attachment], AGENT);
+    const relPath = `.context/local/attachments/${attachment.id}/pasted-text.txt`;
     expect(sent.blocks).toEqual([
-      { type: "text", text: `<file name="pasted-text.txt">\n${body}\n</file>` },
+      { type: "text", text: expect.stringContaining(`${CWD}/${relPath}`) },
     ]);
+    expect(JSON.stringify(sent.blocks)).not.toContain(body);
+    expect(
+      Buffer.from(
+        writeContextAttachment.mock.calls[0][0].base64,
+        "base64",
+      ).toString("utf8"),
+    ).toBe(body);
     // …and the send's graph copy leaves this record behind.
-    const relPath = `.context-graph/local/attachments/${attachment.id}/pasted-text.txt`;
     listContextGraph.mockResolvedValue({
       exists: true,
       truncated: false,
@@ -175,5 +195,7 @@ describe("a pasted body survives edit-and-resend", () => {
     expect(resent.bubbleAttachments[0]).toMatchObject({
       attachmentId: attachment.id,
     });
+    expect(readWorkspaceFile).toHaveBeenCalledWith(CWD, relPath);
+    expect(listContextGraph).not.toHaveBeenCalled();
   });
 });

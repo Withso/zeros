@@ -748,6 +748,48 @@ describe("codex app-server initiated requests", () => {
     await runtime.dispose();
   });
 
+  it.each([undefined, "inProgress"])(
+    "does not invent success from a completion event with status %s",
+    async (status) => {
+      const fake = createFakeProcess();
+      harness.proc = fake.proc;
+      const runtime = await bootCodexAppServerRuntime({
+        cwd: "/tmp/project",
+        clientInfo: { name: "Zeros-test", version: "0.0.0" },
+      });
+      const turn = runtime.runTurn({
+        threadId: "thread-1",
+        input: [],
+      } as never);
+      const settled = vi.fn();
+      void turn.then(settled);
+      const start = await fake.waitFor(
+        (frame) => frame.method === "turn/start" && frame.id != null,
+      );
+      fake.send({
+        jsonrpc: "2.0",
+        id: start.id,
+        result: { turn: { id: "turn-1", status: "inProgress" } },
+      });
+      fake.send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: { threadId: "thread-1", turn: { id: "turn-1", status } },
+      });
+      await expect(turn).resolves.toMatchObject({ status: "failed" });
+      fake.send({
+        jsonrpc: "2.0",
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "completed" },
+        },
+      });
+      await runtime.dispose();
+      expect(settled).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("starts an inline working-tree review and waits for its turn completion", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;

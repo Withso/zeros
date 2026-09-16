@@ -35,6 +35,7 @@ export const ZSR_CONTRACT_TEST_FILES = Object.freeze([
   "apps/desktop/src/engine/agents/__tests__/gateway-provider-oneshot-boundary.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-provider-probe-boundary.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-session-readiness.test.ts",
+  "apps/desktop/src/engine/agents/__tests__/gateway-steering.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-warm-session-boundary.test.ts",
   "apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts",
   "apps/desktop/src/engine/agents/containment/__tests__/claude-oauth-authority.test.ts",

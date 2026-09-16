@@ -14,6 +14,7 @@
 import type {
   AgentMessagePhase,
   ModeSwitchUpdate,
+  ModelFallbackInfo,
   SessionNotification,
   ToolCall,
   ToolCallUpdate,
@@ -26,12 +27,25 @@ export interface AgentTextMessage {
   kind: "text";
   role: AgentMessageRole;
   text: string;
+  /** Payload-free durable tombstone for an explicitly withdrawn native frame. */
+  retracted?: true;
+  retractedToolCallId?: string;
+  modelFallback?: ModelFallbackInfo;
   createdAt: number;
+  /** Time of the last changed text chunk. Older stored messages omit it.
+   * Extends a parent reply's footer through native background continuations. */
+  updatedAt?: number;
   /** A prompt stopped by provider authentication. Its original expanded text
    * survives Settings navigation and reload as context for the next user send;
    * attachment bytes remain in the context graph. Historical markers retain
    * the stopped footer. Optional for compatibility with older transcripts. */
   authRecovery?: { text: string };
+  /** Original expanded request for explicit retry. Attachment bodies remain
+   * in the context graph, referenced by attachments/segments below. */
+  retryText?: string;
+  /** Failure before engine admission, or while the renderer lost its request
+   * transport. Engine-confirmed failures also have a terminal error notice. */
+  recoveryFailure?: { kind: string; message: string };
   /** Engine-side message id from the SessionNotification chunk. Used
    *  to coalesce streaming chunks of the SAME message; differs across
    *  turns, so without this every turn's agent reply would merge into
@@ -92,6 +106,8 @@ export interface AgentTextMessage {
    *  it is NEVER persisted (it becomes a normal message once it flushes).
    *  See sendQueueRef in sessions-provider. */
   queued?: boolean;
+  /** Transient ownership while a native steering receipt is pending/being retried. */
+  queuedDelivery?: "sending" | "unconfirmed";
   /** The first prompt waiting only for session admission is logically active,
    * even though it remains transient until dispatch. It renders as the live
    * transcript turn (with timer) instead of in the follow-up queue card. */
@@ -162,6 +178,9 @@ export type MessageContentSegment =
     };
 
 export interface AgentToolMessage {
+  /** A withdrawn result remains unresolved until a new native result arrives. */
+  resultRetracted?: boolean;
+  resultRevision?: number;
   id: string;
   kind: "tool";
   toolCallId: string;
@@ -323,7 +342,8 @@ export interface AgentErrorNoticeMessage {
   kind: "error_notice";
   severity: "warning" | "error";
   message: string;
-  /** When recoverable, renderer shows a "retry" affordance. */
+  turnFailure?: { turnId: string; kind: string };
+  /** True while the provider is retrying automatically within the live turn. */
   recoverable: boolean;
   /** Adapter-side error code for click-through to docs. */
   code?: string;
@@ -456,7 +476,26 @@ export function applyUpdate(
   notification: SessionNotification,
 ): AgentMessage[] {
   const upd = notification.update;
+  const retiredParent = "parentToolId" in upd && upd.parentToolId
+    ? messages.some((m) => m.kind === "text" && m.retractedToolCallId === upd.parentToolId)
+    : false;
+  if (retiredParent && upd.sessionUpdate !== "message_parent_update") return messages;
   switch (upd.sessionUpdate) {
+    case "model_fallback": {
+      const messageId = `model-fallback-${upd.noticeId}`;
+      const { provider, fromModel, toModel, scope, reason } = upd;
+      const info = { provider, fromModel, toModel, scope, reason };
+      const index = messages.findIndex((m) => m.kind === "text" && m.messageId === messageId);
+      if (index >= 0) {
+        const previous = messages[index] as AgentTextMessage;
+        if (previous.retracted || (JSON.stringify(previous.modelFallback) === JSON.stringify(info) && (!upd.parentToolId || upd.parentToolId === previous.parentToolId))) return messages;
+        const next = [...messages];
+        next[index] = { ...previous, text: modelFallbackText(info), modelFallback: info, updatedAt: Date.now(), parentToolId: upd.parentToolId ?? previous.parentToolId };
+        return next;
+      }
+      return [...messages, { id: messageId, messageId, kind: "text", role: "agent", phase: "commentary",
+        text: modelFallbackText(info), modelFallback: info, parentToolId: upd.parentToolId, createdAt: Date.now() }];
+    }
     case "user_message_chunk": {
       // Speculative dedup. sendPrompt() adds the user's bubble locally
       // before the AGENT_PROMPT round-trip so the UI updates instantly.
@@ -520,6 +559,7 @@ export function applyUpdate(
       );
     case "tool_call": {
       const tc = upd as unknown as ToolCall & { sessionUpdate: "tool_call" };
+      if (messages.some((m) => m.kind === "text" && m.retractedToolCallId === tc.toolCallId)) return messages;
       const status = tc.status ?? "pending";
       const at = typeof tc.at === "number" ? tc.at : Date.now();
       const msg: AgentToolMessage = {
@@ -555,6 +595,8 @@ export function applyUpdate(
         return {
           ...m,
           status,
+          resultRetracted: upd2.status === "completed" || upd2.status === "failed" ? false : m.resultRetracted,
+          nativeToolCallId: upd2.nativeToolCallId ?? m.nativeToolCallId,
           title: upd2.title ?? m.title,
           toolKind: upd2.kind ?? m.toolKind,
           content: upd2.content ?? m.content,
@@ -578,6 +620,57 @@ export function applyUpdate(
         if (!key || !ids.has(key) || ("parentToolId" in message && message.parentToolId === upd.parentToolId)) return message;
         changed = true;
         return { ...message, parentToolId: upd.parentToolId };
+      });
+      if (retiredParent) return applyUpdate(next, { ...notification, update: {
+        sessionUpdate: "message_retraction", messageIds: [upd.parentToolId],
+      } });
+      return changed ? next : messages;
+    }
+    case "message_retraction": {
+      const ids = new Set(upd.messageIds);
+      const children = new Map<string, AgentMessage[]>();
+      for (const m of messages) {
+        if (!("parentToolId" in m) || !m.parentToolId) continue;
+        const siblings = children.get(m.parentToolId) ?? [];
+        siblings.push(m);
+        children.set(m.parentToolId, siblings);
+      }
+      // A replaced owner must not leave its children orphaned at the root.
+      // Persist payload-free tombstones for every descendant, including late
+      // attribution to an owner that was already withdrawn.
+      const retiredIds = new Set<string>();
+      const owners = [...ids];
+      const visited = new Set<string>();
+      for (let i = 0; i < owners.length; i++) {
+        const owner = owners[i];
+        if (visited.has(owner)) continue;
+        visited.add(owner);
+        for (const child of children.get(owner) ?? []) {
+          retiredIds.add(child.id);
+          if (child.kind === "tool") owners.push(child.toolCallId);
+        }
+      }
+      let changed = false;
+      const next = messages.map((m): AgentMessage => {
+        const key = m.kind === "tool" ? m.toolCallId : m.kind === "text" ? m.messageId : undefined;
+        if ((!retiredIds.has(m.id) && (!key || !ids.has(key))) || (m.kind === "text" && (m.retracted || m.role === "user"))) return m;
+        changed = true;
+        return { id: m.id, kind: "text", role: "agent", text: "", retracted: true,
+          messageId: m.kind === "text" ? m.messageId : undefined,
+          ...(m.kind === "tool" ? { retractedToolCallId: m.toolCallId } : {}),
+          createdAt: m.createdAt, updatedAt: Date.now(),
+        };
+      });
+      return changed ? next : messages;
+    }
+    case "tool_result_retraction": {
+      const ids = new Set(upd.toolCallIds);
+      let changed = false;
+      const next = messages.map((m): AgentMessage => {
+        if (m.kind !== "tool" || !ids.has(m.toolCallId) || m.resultRetracted) return m;
+        changed = true;
+        return { ...m, content: undefined, rawOutput: undefined, status: "pending", settledAt: undefined,
+          resultRetracted: true, resultRevision: (m.resultRevision ?? 0) + 1, updatedAt: Date.now() };
       });
       return changed ? next : messages;
     }
@@ -618,6 +711,7 @@ export function applyUpdate(
         kind: "error_notice",
         severity: n.severity === "error" ? "error" : "warning",
         message: n.message,
+        ...(n.turnFailure ? { turnFailure: n.turnFailure } : {}),
         recoverable: n.recoverable === true,
         code: n.code,
         ...(n.parentToolId ? { parentToolId: n.parentToolId } : {}),
@@ -628,6 +722,12 @@ export function applyUpdate(
     default:
       return messages;
   }
+}
+
+export function modelFallbackText(info: ModelFallbackInfo, model = info.toModel): string {
+  if (info.provider === "codex" && info.reason === "cybersecurity")
+    return `Model fallback to ${model} because of a cybersecurity-related safety check`;
+  return info.scope === "session" ? `Model switched to ${model}` : `Model fallback used ${model}`;
 }
 
 function appendText(
@@ -645,6 +745,7 @@ function appendText(
     return messages;
   }
   const chunkText = content.text;
+  if (messageId && messages.some((m) => m.kind === "text" && m.messageId === messageId && m.retracted)) return messages;
 
   // A provider's completed item can correct or shorten earlier deltas. Match
   // the exact owner/id, even when a concurrent tool split it into fragments.
@@ -665,7 +766,14 @@ function appendText(
       found = true;
       if (message.text === chunkText && (!phase || message.phase === phase)) return [message];
       changed = true;
-      return [{ ...message, text: chunkText, ...(phase ? { phase } : {}) }];
+      return [
+        {
+          ...message,
+          text: chunkText,
+          updatedAt: Date.now(),
+          ...(phase ? { phase } : {}),
+        },
+      ];
     });
     if (found) return changed ? next : messages;
   }
@@ -722,6 +830,7 @@ function appendText(
       {
         ...last,
         text: last.text + chunkText,
+        updatedAt: Date.now(),
         // Once a message has been flagged redacted (any block in it),
         // keep the flag set — Anthropic interleaves redacted/plain
         // blocks within a single thinking message and we want the

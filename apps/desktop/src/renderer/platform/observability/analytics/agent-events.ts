@@ -555,6 +555,8 @@ export function trackAiGeneration(args: {
   cacheWriteTokens?: number;
   reasoningTokens?: number;
   costUsd?: number;
+  accountingVersion?: 1;
+  costKind?: "estimated" | "reported";
 }): void {
   const hasUsage =
     args.inputTokens != null ||
@@ -568,12 +570,43 @@ export function trackAiGeneration(args: {
     $ai_trace_id: safeMetadataToken(args.traceId),
     $ai_latency: args.latencyMs / 1000, // PostHog expects seconds
     $ai_input_tokens: args.inputTokens,
+    $ai_cache_reporting_exclusive: args.accountingVersion === 1 ? false : undefined,
     $ai_output_tokens: args.outputTokens,
     $ai_cache_read_input_tokens: args.cacheReadTokens,
     $ai_cache_creation_input_tokens: args.cacheWriteTokens,
     $ai_reasoning_tokens: args.reasoningTokens,
     // Omitted when undefined → PostHog auto-computes from provider+model+tokens.
     $ai_total_cost_usd: args.costUsd,
+    $ai_cost_passthrough: args.costUsd !== undefined ? true : undefined,
+    agent_cost_source: args.costUsd !== undefined ? (args.costKind ?? "reported") : "unavailable",
     agent_id: safeMetadataToken(args.agentId) ?? "unknown",
+  });
+}
+
+/** Absolute snapshots: analytics must select the latest revision per turn,
+ * never sum revisions. Continuations do not emit another $ai_generation. */
+const usageRevisions = new Map<string, number>();
+export function trackAgentTurnUsage(args: {
+  executionId: string;
+  turnId: string;
+  agentId: string;
+  usage: import("@zeros/protocol/agent-events").TurnUsage;
+}): void {
+  const revision = args.usage.revision;
+  if (!Number.isSafeInteger(revision) || (revision ?? 0) < 1) return;
+  const key = `${args.executionId}\0${args.turnId}`;
+  if ((usageRevisions.get(key) ?? 0) >= revision!) return;
+  usageRevisions.set(key, revision!);
+  if (usageRevisions.size > 1024) usageRevisions.delete(usageRevisions.keys().next().value!);
+  capture("agent_turn_usage_updated", {
+    turn_id: safeMetadataToken(args.turnId),
+    agent_id: safeMetadataToken(args.agentId),
+    usage_revision: revision,
+    input_tokens: safeCount(args.usage.inputTokens),
+    output_tokens: safeCount(args.usage.outputTokens),
+    cache_read_tokens: safeCount(args.usage.cacheReadTokens),
+    cache_write_tokens: safeCount(args.usage.cacheWriteTokens),
+    cost_usd: args.usage.totalCostUsd,
+    cost_source: args.usage.totalCostUsd === undefined ? "unavailable" : args.usage.costKind,
   });
 }

@@ -367,12 +367,12 @@ const claudeModelsSchema = z
       .string()
       .min(1)
       .describe(
-        'Fallback Claude model id, or the sentinel "none" to fail fast.',
+        'Deprecated compatibility key. Ignored; Claude owns native fallback routing.',
       ),
     budget_cap_usd: z
       .number()
       .positive()
-      .describe("Optional maximum Claude spend in USD per turn."),
+      .describe("Deprecated compatibility key. Ignored; Zeros no longer applies a spend cap."),
     idle_timeout_minutes: z
       .union([z.literal(30), z.literal(60), z.literal(120), z.literal(300)])
       .describe(

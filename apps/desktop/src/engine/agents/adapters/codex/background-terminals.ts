@@ -1,9 +1,9 @@
 // Codex background-terminal normalization.
 //
 // The app-server endpoint is paginated and returns process telemetry with a
-// bigint field. The renderer intentionally needs none of that chrome: it gets
-// the same compact Background Task rows as Claude (name, elapsed, Stop). This
-// module keeps pagination/bounds and lifecycle reconciliation pure enough to
+// bigint field. Normalize exact-session process ownership for activity and
+// termination without synthesizing Claude's transcript task rows. This module
+// keeps pagination/bounds and lifecycle reconciliation pure enough to
 // race-test without booting a Codex child process.
 
 import { createHash } from "node:crypto";

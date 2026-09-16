@@ -209,6 +209,8 @@ export interface ToolCall {
 
 export interface ToolCallUpdate {
   toolCallId: ToolCallId;
+  /** A native id can arrive after a completed callback created the local row. */
+  nativeToolCallId?: string | null;
   title?: string | null;
   kind?: ToolKind | null;
   status?: ToolCallStatus | null;
@@ -504,6 +506,10 @@ export type SessionUpdate =
   | ToolCallStartUpdate
   | ToolCallChangeUpdate
   | MessageParentUpdate
+  | MessageRetractionUpdate
+  | ToolResultRetractionUpdate
+  | ModelFallbackUpdate
+  | CurrentModelUpdate
   | AvailableCommandsUpdate
   | AvailableSubagentsUpdate
   | BackgroundTasksUpdate
@@ -513,6 +519,7 @@ export type SessionUpdate =
   | ModeSwitchUpdate
   | ErrorNoticeUpdate
   | UsageUpdateNotification
+  | TurnUsageUpdate
   | SessionInfoUpdateNotification
   | ProviderBindingUpdateNotification
   | ProviderBindingDetachedNotification
@@ -618,13 +625,20 @@ export interface AvailableSubagentsUpdate {
 }
 
 /** Full REPLACE snapshot of active background work for one exact session.
- * Empty is authoritative and removes the live card. This deliberately is not
- * a message event: only settled task records belong in persisted history. */
+ * Empty is authoritative. Live activity is execution-owned, never restored
+ * from persisted task records. */
 export interface BackgroundTasksUpdate {
   sessionUpdate: "background_tasks_update";
   tasks: BackgroundTask[];
   /** True only when the parent session reports idle while work remains. */
   waiting: boolean;
+  /** Claude's parent can resume after prompt() has settled. Keep that activity
+   * separate from turn settlement and retain its clock across quiet waits.
+   * null explicitly releases process ownership on cancellation/disconnect. */
+  activity?: {
+    state: "running" | "idle" | "requires_action";
+    startedAt: number;
+  } | null;
 }
 
 /** Full REPLACE snapshot of foreground workflows for one exact session. */
@@ -644,6 +658,31 @@ export interface CurrentModeUpdate {
 export interface CurrentEffortUpdate {
   sessionUpdate: "current_effort_update";
   effort: string;
+}
+
+export interface ModelFallbackInfo {
+  provider: "claude" | "codex";
+  fromModel: string | null;
+  toModel: string;
+  scope: "local" | "session";
+  reason: "refusal" | "overloaded" | "cybersecurity" | "unknown";
+}
+
+/** Provider facts displayed as ordinary in-between prose, never tool calls. */
+export interface ModelFallbackUpdate extends ModelFallbackInfo {
+  sessionUpdate: "model_fallback";
+  noticeId: string;
+  parentToolId?: string;
+  /** Originating request clock when the provider can correlate a late notice. */
+  turnStartedAt?: number;
+}
+
+/** Emitted only after adopting a main-session fallback for subsequent sends. */
+export interface CurrentModelUpdate {
+  sessionUpdate: "current_model_update";
+  model: string;
+  previousModel: string | null;
+  turnStartedAt: number;
 }
 
 /** Timeline-visible record of a mode change. Distinct from
@@ -689,6 +728,9 @@ export interface ErrorNoticeUpdate {
   parentToolId?: string;
   severity: "warning" | "error";
   message: string;
+  /** Engine-confirmed terminal failure. Optional for older transcripts and
+   * provider retry notices; turn identity prevents late errors crossing turns. */
+  turnFailure?: { turnId: string; kind: string };
   /** True for transient/retryable notices where the active turn is expected
    *  to continue. These should never be treated as terminal failures. */
   recoverable?: boolean;
@@ -707,10 +749,23 @@ export interface MessageParentUpdate {
   parentToolId: string;
 }
 
+/** Exact translated identities withdrawn by the provider. Persist empty
+ * tombstones so a stale history window cannot restore withdrawn content. */
+export interface MessageRetractionUpdate {
+  sessionUpdate: "message_retraction";
+  messageIds: string[];
+}
+
+/** Withdraw only a tool's result, retaining the actual invocation. */
+export interface ToolResultRetractionUpdate {
+  sessionUpdate: "tool_result_retraction";
+  toolCallIds: string[];
+}
+
 export interface UsageUpdateNotification {
   sessionUpdate: "usage_update";
-  size: number;
-  used: number;
+  size?: number;
+  used?: number;
   cost?: UsageCost;
   /** Per-category context-window breakdown for the composer gauge's
    *  popover — Claude fills it from the SDK's
@@ -718,6 +773,14 @@ export interface UsageUpdateNotification {
    *  whose protocol has no breakdown (Codex) omit it and the popover
    *  shows Used/Free only. Ordered as received; tokens are absolute. */
   categories?: Array<{ name: string; tokens: number }>;
+}
+
+/** Absolute accounting snapshot for an exact user turn, including late native
+ * background/billing updates. Never render this as a transcript message. */
+export interface TurnUsageUpdate {
+  sessionUpdate: "turn_usage_update";
+  turnId: string;
+  usage: TurnUsage;
 }
 
 export interface SessionInfoUpdateNotification {
@@ -946,7 +1009,7 @@ export type StopReason =
 
 /** One model's share of a turn's bill (SDK `result.modelUsage`).
  *  A single Claude turn can span models (subagents on Haiku, an overload
- *  fallback) — this is the itemized row behind the footer's usage popover.
+ *  fallback). Retained for accounting/debugging; the footer shows one total.
  *  No reasoning-token field by design (2026-07-13 decision): Anthropic folds
  *  thinking into outputTokens, so surfacing it for one agent only would be an
  *  inconsistent readout. */
@@ -960,6 +1023,12 @@ export interface TurnModelUsage {
 }
 
 export interface TurnUsage {
+  /** Version 1 input includes cache reads/writes; cache fields are subsets.
+   * Older stored records retain their original provider-specific semantics. */
+  accountingVersion?: 1;
+  /** Monotonic within one Zeros turn; late snapshots replace, never add. */
+  revision?: number;
+  costKind?: "estimated" | "reported";
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
@@ -1012,6 +1081,8 @@ export interface LoadSessionResponse {
   providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
+  /** Exact live execution snapshot when adopting an existing process. */
+  backgroundTasks?: BackgroundTasksUpdate;
   /** Redacted engine-authoritative containment state for this execution. */
   boundary?: ExecutionBoundaryStatus;
   /** Exact initial listener snapshot. Later changes arrive as

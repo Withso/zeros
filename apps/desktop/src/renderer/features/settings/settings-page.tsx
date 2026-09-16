@@ -78,7 +78,7 @@ import {
   providerMemorySettingsCache,
   PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
 } from "../../state/read-caches";
-import { Button, Input } from "../../shared/ui";
+import { Button } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
@@ -169,11 +169,8 @@ import {
 } from "../agent/new-chat-defaults";
 import {
   CLAUDE_IDLE_TIMEOUT_OPTIONS,
-  DEFAULT_BUDGET_CAP_USD,
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
-  useClaudeBudgetCap,
   useClaudeAutoMemoryEnabled,
-  useClaudeFallbackModel,
   useClaudeIdleTimeoutMinutes,
 } from "../agent/reliability-settings";
 import { AgentIcon } from "../agent/agent-icon";
@@ -1178,11 +1175,9 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   useFavoritesVersion();
   const [planDefault, setPlanDefault] = useDefaultPlanMode();
   const [titleModel, setTitleModel] = useChatTitleModel();
-  // Claude reliability knobs (fallback model + per-turn budget).
-  const [fallbackModel, setFallbackModel] = useClaudeFallbackModel();
+  // Claude process lifetime and memory settings.
   const [claudeAutoMemoryEnabled, setClaudeAutoMemoryEnabled] =
     useClaudeAutoMemoryEnabled();
-  const [budgetCap, setBudgetCap] = useClaudeBudgetCap();
   const [idleTimeoutMinutes, setIdleTimeoutMinutes] =
     useClaudeIdleTimeoutMinutes();
   // Reliability settings are global, but already-loaded Claude chats hold an
@@ -1240,19 +1235,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
       setCodexMemoryBusy(false);
     }
   };
-  // The $-amount field edits locally and commits on blur/Enter so a
-  // half-typed "0" never lands in settings.
-  const [budgetDraft, setBudgetDraft] = useState<string | null>(null);
-  const commitBudgetDraft = () => {
-    if (budgetDraft == null) return;
-    const v = Number.parseFloat(budgetDraft);
-    setBudgetCap(Number.isFinite(v) && v > 0 ? v : budgetCap);
-    setBudgetDraft(null);
-    applyClaudeSettings();
-  };
-  // The Claude family's curated models — the fallback picker's options.
-  const claudeModels = modelsForAgent("claude", null);
-
   // Families with a connected (runnable + enabled) agent — gates which
   // "Custom models" picks are selectable (Haiku needs Claude, Luna needs
   // Codex, Composer 2.5 needs Cursor). At runtime a disconnected pick
@@ -1453,69 +1435,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
                   </SelectContent>
                 </Select>
               </SettingsRow>
-              <SettingsRow
-                label="Fallback model"
-                hint="Used automatically when the primary model is overloaded or unavailable"
-              >
-                <Select
-                  value={fallbackModel ?? "none"}
-                  onValueChange={(v) => {
-                    setFallbackModel(v === "none" ? null : v);
-                    applyClaudeSettings();
-                  }}
-                >
-                  <SelectTrigger className="min-w-[150px]">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent className="min-w-[180px]">
-                    {claudeModels.map((m) => (
-                      <SelectItem key={m.value} value={m.value}>
-                        {displayModelLabel("claude", m.label)}
-                      </SelectItem>
-                    ))}
-                    <SelectItem value="none">None (fail fast)</SelectItem>
-                  </SelectContent>
-                </Select>
-              </SettingsRow>
-              {/* Budget: a hard per-turn ceiling that ends a turn cleanly
-          instead of letting it run away. Off by default. */}
-              <SettingsRow
-                label="Cap spend per turn"
-                hint="Ends the turn with a Turn-stopped record once the cap is hit"
-              >
-                <Switch
-                  checked={budgetCap != null}
-                  onCheckedChange={(on) => {
-                    setBudgetCap(on ? DEFAULT_BUDGET_CAP_USD : null);
-                    setBudgetDraft(null);
-                    applyClaudeSettings();
-                  }}
-                  aria-label="Cap spend per turn"
-                />
-              </SettingsRow>
-              {budgetCap != null && (
-                <SettingsRow
-                  label="Maximum per turn"
-                  hint="The turn ends cleanly when it reaches this amount."
-                >
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-muted-fg text-xs">$</span>
-                    <Input
-                      type="number"
-                      min={0.5}
-                      step={0.5}
-                      value={budgetDraft ?? budgetCap.toFixed(2)}
-                      onChange={(e) => setBudgetDraft(e.target.value)}
-                      onBlur={commitBudgetDraft}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") commitBudgetDraft();
-                      }}
-                      className="w-24 text-right font-mono tabular-nums"
-                      aria-label="Maximum spend per turn in dollars"
-                    />
-                  </div>
-                </SettingsRow>
-              )}
             </SettingsList>
           </TabsContent>
           <TabsContent value="codex" className="mt-0">

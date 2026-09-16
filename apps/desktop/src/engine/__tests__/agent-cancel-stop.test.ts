@@ -28,6 +28,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoadSessionResponse } from "@zeros/protocol/agent-events";
 import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
+import { AgentFailureError } from "../agents/types";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
@@ -89,6 +90,7 @@ interface TestEngineInternals {
     mutation: () => Promise<T>,
   ): Promise<T>;
   handleMessage(message: EngineMessage, client: TransportClient): Promise<void>;
+  persistSessionUpdate(...args: unknown[]): void;
 }
 
 const roots: string[] = [];
@@ -206,6 +208,53 @@ afterEach(() => {
 });
 
 describe("prompt start time continuity", () => {
+  it.each(["claude", "codex", "cursor"])(
+    "publishes and persists the %s error before settling the turn",
+    async (agentId) => {
+      const { state } = testEngine(29_943);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("session-1", agentId);
+      const persisted = vi.spyOn(state, "persistSessionUpdate");
+      vi.spyOn(state.agents, "prompt").mockRejectedValue(
+        new AgentFailureError({
+          kind: "protocol-error",
+          stage: "prompt",
+          agentId,
+          message: "Selected model is at capacity.",
+        }),
+      );
+      await state.handleMessage(promptMessage({ agentId }), client);
+      const notice = {
+        sessionId: "session-1",
+        update: {
+          sessionUpdate: "error_notice",
+          severity: "error",
+          message: "Selected model is at capacity.",
+          turnFailure: { turnId: "user-1", kind: "protocol-error" },
+        },
+      };
+      expect(persisted).toHaveBeenCalledWith(
+        "session-1",
+        expect.objectContaining({
+          ...notice,
+          update: expect.objectContaining(notice.update),
+        }),
+      );
+      const noticeIndex = messages.findIndex(
+        (m) =>
+          m.type === "AGENT_SESSION_UPDATE" &&
+          (m.notification as { update: { sessionUpdate: string } }).update
+            .sessionUpdate === "error_notice",
+      );
+      const failedIndex = messages.findIndex(
+        (m) => m.type === "AGENT_PROMPT_FAILED",
+      );
+      expect(noticeIndex).toBeGreaterThanOrEqual(0);
+      expect(failedIndex).toBeGreaterThan(noticeIndex);
+    },
+  );
+
   it("publishes the original renderer send time after delayed admission", async () => {
     const { state } = testEngine(29_940);
     const { client, messages } = testClient();

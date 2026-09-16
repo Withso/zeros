@@ -29,6 +29,11 @@ describe("hasTextualDiffHunk", () => {
 });
 
 describe("DiffHoverPreview layout contract", () => {
+  it("leaves scrolling to the single tool card when embedded", () => {
+    const html = renderToStaticMarkup(createElement(DiffHoverPreview, { path: "src/a.ts", patch: "", embedded: true }));
+    expect(html).not.toContain("overflow-y-auto");
+    expect(html).not.toContain("max-h-");
+  });
   it("keeps both hover-card callers at 450px wide and 350px tall", () => {
     expect(DIFF_HOVER_CONTENT_CLASS).toContain("w-[450px]");
     expect(DIFF_HOVER_CONTENT_CLASS).toContain("min(350px");

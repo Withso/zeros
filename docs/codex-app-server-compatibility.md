@@ -104,6 +104,11 @@ the existing working feed. Summary parts retain their native order. Explicit
 absent reasoning is never presented as readable thinking.
 Populated reasoning snapshots seed the indexed parts used by later deltas.
 
+A terminal turn with `itemsView: "full"` also reconciles missing item
+notifications, including child-parent associations recovered from a spawn.
+Summary/notLoaded views are not final-answer evidence, and unfinished items
+or commands missing their native status are not inferred to have completed.
+
 Expanded tools expose input, captured output, and available status/exit details.
 Web calls retain search/open/find actions, including URLs and patterns when no
 query exists; absent and empty results have explicit fallbacks. Multi-file

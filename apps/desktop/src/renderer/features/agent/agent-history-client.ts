@@ -88,8 +88,8 @@ export function fromPersistedMessage(
   }
 }
 
-/** Persist a user prompt blocked before provider admission, without inventing
- * agent output or a tool call. Uses the engine's existing message upsert. */
+/** Persist the exact user row needed for sign-in or failed-send recovery.
+ * Uses the engine's existing message upsert, including before admission. */
 export async function persistAuthenticationPrompt(
   bridge: import("../../platform/bridge/ws-client").RuntimeClient,
   chatId: string,
@@ -107,7 +107,7 @@ export async function persistAuthenticationPrompt(
     ],
   })) as { imported?: number };
   if (result.imported !== 1)
-    throw new Error("Could not save the message waiting for sign-in.");
+    throw new Error("Could not save the message for retry.");
 }
 
 /** Vestigial: the engine persists transcripts on emit (persist-on-emit +

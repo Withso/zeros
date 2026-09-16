@@ -2,32 +2,31 @@
 // Cursor subagent transcript reader
 // ──────────────────────────────────────────────────────────
 //
-// Cursor runs a `task` (subagent) as a BLACK BOX: it does not stream the
-// child's internals through the parent run, and the completed task result's
-// `value.conversationSteps` is empty in local mode (verified 2026-06-18 — the
-// raw result is just `{ status: "success" }`). The only place the subagent's
-// real work survives is the transcript JSONL the SDK persists to disk:
+// Cursor can omit a child's internals from the parent stream and leave
+// `value.conversationSteps` empty in local mode. Recover those checkpoints
+// from the transcript JSONL the SDK persists to disk:
 //
 //   ~/.cursor/projects/<slug(cwd)>/agent-transcripts/<agentDir>/subagents/<subagentId>.jsonl
 //
 // where `slug` mirrors the SDK's own sanitizer and `<subagentId>` is the
-// `agentId` carried on the `task` tool-call's args. The file is the raw
+// `agentId` carried on complete native task arguments or results. The file is the raw
 // Anthropic message format (`{ role, message: { content: [ {type:"text"},
 // {type:"tool_use", name, input}, {type:"thinking"} ] } }`) — tool NAMES are
-// Claude-style (Glob / Read / Grep / Shell / Edit / …); there are no
-// tool_result blocks (results aren't persisted here).
+// Claude-style (Glob / Read / Grep / Shell / Edit / …). Some runtime versions
+// omit tool_result blocks; their calls must remain unresolved.
 //
-// We read it on task completion and normalize it into the SAME step shape the
-// SubagentCard renders, so a Cursor subagent finally shows its tool calls +
-// final report instead of an empty card. Best-effort throughout: a missing /
-// malformed file degrades to null and the translator falls back.
+// Read live checkpoints and the final snapshot into the same nested feed.
+// Require native parent/child identity; prompts and recency never establish
+// ownership. Missing/malformed files degrade to null without borrowing another
+// child's transcript. The translator owns the final conversationSteps fallback.
 // ──────────────────────────────────────────────────────────
 
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import type { ContentBlock } from "../../types";
+import { cursorToolResultContent, cursorToolStatus } from "./tool-result";
 
 /** One normalized step in a subagent's transcript — the shared shape the
  *  translator emits as parentToolId-tagged children (also produced by the
@@ -37,8 +36,10 @@ export type NormalizedSubagentStep =
       type: "tool";
       toolKind: string;
       title: string;
-      status: "completed" | "failed";
+      nativeToolCallId?: string;
+      status: "pending" | "completed" | "failed";
       rawInput: unknown;
+      rawOutput?: unknown;
       content?: Array<{ type: "content"; content: ContentBlock }>;
     }
   | { type: "text"; text: string }
@@ -51,6 +52,22 @@ export interface ParsedSubagentTranscript {
   /** The subagent's concluding report (its last assistant text) — surfaced as
    *  the SubagentCard's answer, held back from `steps` so it isn't duplicated. */
   finalText: string;
+  /** Checkpoint order, including the provisional trailing text. JSONL/native
+   * block identity lets live polls reconcile it before it becomes a report. */
+  timeline?: Array<{ identity: string; step: NormalizedSubagentStep }>;
+}
+
+interface TranscriptLocation {
+  home?: string;
+  parentAgentId?: string;
+}
+
+/** Mirrors the SDK transcript filename encoding (distinct from cwd slugs). */
+function transcriptId(id: string): string | null {
+  const encoded = encodeURIComponent(id).replace(/%/g, "_");
+  // The SDK truncates filenames. A shared prefix is not an exact child ID;
+  // wait for the native transcriptPath instead of reading a colliding file.
+  return encoded && encoded.length <= 200 ? encoded : null;
 }
 
 /** Sanitize a workspace path into the SDK's project-dir slug. Mirrors
@@ -64,9 +81,9 @@ export function cursorProjectSlug(cwd: string): string {
 }
 
 /** Locate the subagent transcript file for a (cwd, subagentAgentId). The
- *  parent agent-dir name varies (`agent-<id>` vs bare `<id>`), so we scan one
- *  level and probe `<dir>/subagents/<subagentId>.jsonl`. Returns null when not
- *  found (best-effort — never throws).
+ *  parent agent-dir name varies (`agent-<id>` vs bare `<id>`). Resolve only
+ *  inside the supplied native parent chat; absent identity means no lookup.
+ *  Returns null when not found (best-effort — never throws).
  *
  *  `home` MUST be the home the Cursor host actually ran with. A deployment may
  *  provide a different HOME through its selected execution boundary; blindly
@@ -75,13 +92,15 @@ export function cursorProjectSlug(cwd: string): string {
 export function findSubagentTranscriptPath(
   cwd: string,
   subagentAgentId: string,
-  opts?: { home?: string },
+  opts?: TranscriptLocation,
 ): string | null {
   try {
     const root = agentTranscriptsRoot(cwd, opts);
     if (!existsSync(root)) return null;
-    const file = `${subagentAgentId}.jsonl`;
-    for (const entry of readdirSync(root)) {
+    const id = transcriptId(subagentAgentId);
+    if (!id) return null;
+    const file = `${id}.jsonl`;
+    for (const entry of parentDirectories(root, opts?.parentAgentId)) {
       const candidate = join(root, entry, "subagents", file);
       if (existsSync(candidate)) return candidate;
     }
@@ -96,7 +115,7 @@ export function findSubagentTranscriptPath(
 export function loadSubagentTranscript(
   cwd: string,
   subagentAgentId: string,
-  opts?: { home?: string },
+  opts?: TranscriptLocation,
 ): ParsedSubagentTranscript | null {
   const path = findSubagentTranscriptPath(cwd, subagentAgentId, opts);
   if (!path) return null;
@@ -107,7 +126,7 @@ export function loadSubagentTranscript(
     return null;
   }
   const parsed = parseSubagentTranscript(text);
-  if (parsed.steps.length === 0 && !parsed.finalText) return null;
+  if (parsed.steps.length === 0 && !parsed.finalText && !parsed.timeline?.length) return null;
   return parsed;
 }
 
@@ -126,82 +145,8 @@ export function loadSubagentTranscriptByPath(
     return null;
   }
   const parsed = parseSubagentTranscript(text);
-  if (parsed.steps.length === 0 && !parsed.finalText) return null;
+  if (parsed.steps.length === 0 && !parsed.finalText && !parsed.timeline?.length) return null;
   return parsed;
-}
-
-/** Locate a RUNNING subagent's transcript so a live run can stream its tool
- *  calls as they appear.
- *
- *  Why this is needed: Cursor reveals the subagent's `agentId` only in the task
- *  RESULT (at completion), and frequently omits the prompt from the streamed
- *  running-leg `task` args too. So we locate the child transcript by two
- *  signals, in order of reliability:
- *    1. PROMPT MATCH — when we DO have the prompt, the subagent transcript's
- *       first user line wraps it verbatim (`<user_query>…</user_query>`), so a
- *       substring match pins the exact file and disambiguates concurrent
- *       subagents (each has a distinct prompt).
- *    2. RECENCY — otherwise, the most-recently-written transcript that appeared
- *       SINCE THE TASK STARTED (`sinceMs`) is the active one. This is what makes
- *       live streaming work at all when the prompt isn't on the args.
- *
- *  `claimed` excludes transcripts already attributed to another running task.
- *  `sinceMs` (the task's start time) scopes candidates to files written since —
- *  so we never claim a prior turn's still-recent subagent file. Returns the
- *  matched agentId (the transcript filename stem) or null. Best-effort. */
-export function findSubagentByPrompt(
-  cwd: string,
-  promptText: string,
-  claimed: ReadonlySet<string>,
-  opts?: {
-    nowMs?: number;
-    windowMs?: number;
-    sinceMs?: number;
-    root?: string;
-    home?: string;
-  },
-): string | null {
-  const nowMs = opts?.nowMs ?? Date.now();
-  const windowMs = opts?.windowMs ?? 15 * 60 * 1000;
-  // Only files written since the task started (5s slack for the create→first-
-  // write gap), capped by the absolute recency window.
-  const minMtime = Math.max(
-    opts?.sinceMs != null ? opts.sinceMs - 5_000 : 0,
-    nowMs - windowMs,
-  );
-  const root = opts?.root ?? agentTranscriptsRoot(cwd, opts);
-  let candidates = listSubagentTranscriptFiles(root)
-    .filter((c) => !claimed.has(c.agentId) && c.mtimeMs >= minMtime)
-    .sort((a, b) => b.mtimeMs - a.mtimeMs);
-  if (candidates.length === 0) return null;
-  // Cap the files we crack open per call so a project with many transcripts
-  // stays cheap (the live one is being written now, so it sorts to the top).
-  candidates = candidates.slice(0, 12);
-
-  const needle = normalizePrompt(promptText);
-  if (needle.length >= 24) {
-    for (const c of candidates) {
-      const head = normalizePrompt(readFirstUserText(c.path));
-      if (head && head.includes(needle.slice(0, 160))) return c.agentId;
-    }
-    // Prompt given but unmatched (first line not flushed yet, or Cursor
-    // rewrote it): only claim a lone unambiguous candidate; else wait.
-    return candidates.length === 1 ? candidates[0].agentId : null;
-  }
-  // No usable prompt → only stream live when there's a SINGLE unambiguous
-  // candidate. With ≥2 concurrent transcripts written since the task started,
-  // recency can't tell which belongs to THIS task (the prompt is the only
-  // disambiguator), so guessing would stream the wrong subagent's tool calls
-  // into this card. Defer those to flushSubagents(), which resolves each task
-  // by its authoritative `transcriptPath`. Single-subagent turns (the common
-  // case) still stream live.
-  return candidates.length === 1 ? candidates[0].agentId : null;
-}
-
-interface SubagentTranscriptFile {
-  agentId: string;
-  path: string;
-  mtimeMs: number;
 }
 
 /** The `<home>/.cursor/projects/<slug(cwd)>/agent-transcripts` root for a cwd.
@@ -230,93 +175,30 @@ export function agentIdFromTranscriptPath(path: string): string {
   return base.endsWith(".jsonl") ? base.slice(0, -".jsonl".length) : base;
 }
 
-/** List every subagent transcript file under an agent-transcripts `root`, with
- *  its mtime (cheap — no file reads). Exported for tests. */
-export function listSubagentTranscriptFiles(
-  root: string,
-): SubagentTranscriptFile[] {
-  const out: SubagentTranscriptFile[] = [];
-  try {
-    if (!existsSync(root)) return out;
-    for (const dir of readdirSync(root)) {
-      const subdir = join(root, dir, "subagents");
-      if (!existsSync(subdir)) continue;
-      for (const file of readdirSync(subdir)) {
-        if (!file.endsWith(".jsonl")) continue;
-        const path = join(subdir, file);
-        let mtimeMs = 0;
-        try {
-          mtimeMs = statSync(path).mtimeMs;
-        } catch {
-          /* skip unreadable */
-        }
-        out.push({ agentId: file.slice(0, -".jsonl".length), path, mtimeMs });
-      }
-    }
-  } catch {
-    /* best-effort — return what we have */
-  }
-  return out;
-}
-
-/** The first `role:"user"` message's text in a transcript (the subagent's
- *  prompt), with Cursor's `<user_query>` wrapper stripped. "" when unreadable. */
-function readFirstUserText(path: string): string {
-  let text: string;
-  try {
-    text = readFileSync(path, "utf8");
-  } catch {
-    return "";
-  }
-  for (const line of text.split("\n")) {
-    if (!line.trim()) continue;
-    let obj: unknown;
-    try {
-      obj = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (!isObj(obj) || obj.role !== "user") continue;
-    const message = isObj(obj.message) ? obj.message : null;
-    const content =
-      message && Array.isArray(message.content) ? message.content : null;
-    if (!content) return "";
-    const parts: string[] = [];
-    for (const block of content) {
-      if (
-        isObj(block) &&
-        block.type === "text" &&
-        typeof block.text === "string"
-      ) {
-        parts.push(block.text);
-      }
-    }
-    return parts.join("");
-  }
-  return "";
-}
-
-/** Normalize a prompt for matching: drop Cursor's `<user_query>` wrapper and
- *  collapse whitespace, so the prompt we sent matches the transcript's echo. */
-function normalizePrompt(s: string): string {
-  return s
-    .replace(/<\/?user_query>/gi, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+function parentDirectories(root: string, parentAgentId?: string): string[] {
+  if (!parentAgentId) return [];
+  const id = transcriptId(parentAgentId);
+  if (!id) return [];
+  // Prefer the actual native directory. Falling through it could read another
+  // chat whose real ID happens to equal the old prefixed spelling.
+  return existsSync(join(root, id)) ? [id] : [`agent-${id}`];
 }
 
 /** Pure parser for a subagent transcript's JSONL text (exported for tests).
  *  Walks assistant messages, emitting tool_use → tool step, thinking →
  *  thought step, text → narration step; the LAST assistant text becomes the
  *  final report (pulled out of `steps`). The leading user message is the
- *  prompt (shown in the Prompt block) — skipped; later user messages are
- *  tool_result echoes with nothing extra to render. */
+ *  prompt (shown in the Prompt block) — skipped. Tool results in user records
+ *  update their native-ID-matched call, even if the records arrive out of order. */
 export function parseSubagentTranscript(
   jsonl: string,
 ): ParsedSubagentTranscript {
   const steps: NormalizedSubagentStep[] = [];
+  const timeline: NonNullable<ParsedSubagentTranscript["timeline"]> = [];
+  const calls = new Map<string, Extract<NormalizedSubagentStep, { type: "tool" }>>();
+  const results: Record<string, unknown>[] = [];
   let finalText = "";
-  for (const line of jsonl.split("\n")) {
+  for (const [lineIndex, line] of jsonl.split("\n").entries()) {
     if (!line.trim()) continue;
     let obj: unknown;
     try {
@@ -324,13 +206,26 @@ export function parseSubagentTranscript(
     } catch {
       continue;
     }
-    if (!isObj(obj) || obj.role !== "assistant") continue;
+    if (!isObj(obj)) continue;
     const message = isObj(obj.message) ? obj.message : null;
+    const role = obj.role ?? message?.role ?? obj.type;
+    if (role !== "assistant" && role !== "user") continue;
     const content =
       message && Array.isArray(message.content) ? message.content : null;
     if (!content) continue;
-    for (const block of content) {
+    for (const [blockIndex, block] of content.entries()) {
       if (!isObj(block)) continue;
+      const identity = JSON.stringify([obj.uuid ?? message?.id ?? `line:${lineIndex}`, blockIndex]);
+      const append = (step: NormalizedSubagentStep) => {
+        steps.push(step);
+        timeline.push({ identity, step });
+      };
+      if (role === "user") {
+        if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+          results.push(block);
+        }
+        continue;
+      }
       if (block.type === "text" && typeof block.text === "string") {
         // Cursor redacts the subagent's interleaved reasoning to the literal
         // token "[REDACTED]" — strip those tokens; a block that's ONLY
@@ -338,20 +233,42 @@ export function parseSubagentTranscript(
         // between the opening narration and the report) is dropped as noise.
         const text = stripRedaction(block.text);
         if (text) {
-          steps.push({ type: "text", text });
+          append({ type: "text", text });
           finalText = text; // last real assistant text wins → the report
-        }
+        } else timeline.push({ identity, step: { type: "text", text: "" } });
       } else if (
         block.type === "thinking" &&
-        typeof block.thinking === "string" &&
-        block.thinking.trim()
+        typeof block.thinking === "string"
       ) {
-        steps.push({ type: "thought", text: block.thinking });
+        if (block.thinking.trim()) append({ type: "thought", text: block.thinking });
+        else timeline.push({ identity, step: { type: "thought", text: "" } });
       } else if (block.type === "tool_use" && typeof block.name === "string") {
         const m = mapTranscriptTool(block.name, block.input);
-        steps.push({ type: "tool", status: "completed", ...m });
+        const nativeToolCallId = typeof block.id === "string" && block.id ? block.id : undefined;
+        if (nativeToolCallId && calls.has(nativeToolCallId)) continue;
+        finalText = ""; // Text before further work is narration, not a final report.
+        const step: Extract<NormalizedSubagentStep, { type: "tool" }> = {
+          type: "tool", status: "pending", ...m,
+          ...(nativeToolCallId ? { nativeToolCallId } : {}),
+        };
+        append(step);
+        if (nativeToolCallId) calls.set(nativeToolCallId, step);
       }
     }
+  }
+  for (const result of results) {
+    const step = calls.get(result.tool_use_id as string);
+    if (!step) continue;
+    const nativeStatus = cursorToolStatus(step.toolKind, result.content);
+    const status = result.is_error === true || nativeStatus === "failed"
+      ? "failed"
+      : step.toolKind === "execute" && isObj(result.content)
+        ? nativeStatus
+        : "completed"; // Native text/empty tool_result is completion evidence; a structured shell still needs its exit status.
+    if (step.status === "failed" && status !== "failed") continue;
+    step.status = status;
+    step.rawOutput = result.content;
+    step.content = cursorToolResultContent(result.content);
   }
   // The final report is the LAST assistant text — pull that step out so it
   // renders once as the card's answer, not also as a trailing narration row.
@@ -364,7 +281,7 @@ export function parseSubagentTranscript(
       }
     }
   }
-  return { steps, finalText };
+  return { steps, finalText, ...(timeline.length ? { timeline } : {}) };
 }
 
 /** Map a transcript `tool_use` (Claude-style name + input) to a Zeros tool

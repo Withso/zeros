@@ -78,6 +78,23 @@ function render(isStreaming: boolean): string {
 }
 
 describe("TurnEventList streaming projection", () => {
+  it("places quiet background waiting after the settled output and footer, then resumes the working feed", () => {
+    const props = {
+      events, isActive: true, isStreaming: false,
+      backgroundTasks: [{ taskId: "bg-1", name: "Tests", startedAt: 2, updatedAt: 3 }],
+      activityStartedAt: 1, footer: createElement("div", null, "OUTPUT FOOTER"), ctx,
+    };
+    const waiting = renderToStaticMarkup(createElement(TurnEventList, props));
+    expect(waiting).toContain("Waiting for 1 background task");
+    expect(waiting).not.toContain("LIVE ACTIVITY");
+    expect(waiting).not.toContain("Completed check");
+    expect(waiting.indexOf("Progress text")).toBeLessThan(waiting.indexOf("OUTPUT FOOTER"));
+    expect(waiting.indexOf("OUTPUT FOOTER")).toBeLessThan(waiting.indexOf("Waiting for 1 background task"));
+    const resumed = renderToStaticMarkup(createElement(TurnEventList, { ...props, isStreaming: true }));
+    expect(resumed).not.toContain("Waiting for 1 background task");
+    expect(resumed).toContain("LIVE ACTIVITY");
+    expect(resumed).toContain("Completed check");
+  });
   it("keeps activity visible while an optional question awaits an answer", () => {
     const html = renderToStaticMarkup(createElement(TurnEventList, {
       events, isActive: true, isStreaming: true,

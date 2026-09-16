@@ -5,9 +5,8 @@
 // Claude's ExitPlanMode is plan REVIEW, not a permission gate. A permission
 // card is a blocking Yes/No that REPLACES the composer; plan review keeps the
 // composer live. So while a plan is pending we show this as its OWN card
-// stacked above the (still-usable) composer — same consistent island recipe as
-// the "Reconnecting…" card (bg1 + border-border1 + rounded-lg), so the surface
-// reads consistently across the app.
+// stacked above the (still-usable) composer with bg1, border-border1 and
+// rounded-lg, matching the other above-composer cards.
 //
 //   • Copy    — copy the plan markdown
 //   • Reject  — deny the ExitPlanMode gate; the agent STAYS in Plan mode

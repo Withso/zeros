@@ -24,7 +24,7 @@ import {
   Brain,
   FileEdit,
   FileText,
-  FolderTree,
+  FileSearch,
   Globe,
   Plug,
   Search as SearchIcon,
@@ -150,7 +150,7 @@ export function iconForToolKind(
     case "search":
       return SearchIcon;
     case "list":
-      return FolderTree;
+      return FileSearch;
     case "fetch":
     case "web_search":
       return Globe;

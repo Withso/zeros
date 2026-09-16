@@ -1,3 +1,5 @@
+import { trackAgentTurnUsage } from "@/renderer/platform/observability/analytics/agent-events";
+import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 // ──────────────────────────────────────────────────────────
 // sessions-store — Zustand store for per-chat session slots
 // ──────────────────────────────────────────────────────────
@@ -30,6 +32,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { agentActivity, chatAgentActivity, combinedAgentActivity, type AgentActivity } from "./agent-activity";
 import { create } from "zustand";
 import type {
   AvailableCommand,
@@ -266,6 +269,7 @@ export const BLANK: AgentSessionState = {
   availableCommands: [],
   availableSubagents: [],
   backgroundTasks: [],
+  backgroundActivity: null,
   workflows: [],
   goal: null,
   safetyReviewRetries: {},
@@ -279,18 +283,10 @@ export interface SessionsStoreState {
   /** executionId → chatId reverse index. Updated atomically with `sessions`
    *  so bridge dispatch stays O(1) and never reads a half-applied state. */
   executionToChatId: Record<string, string>;
-  // NOTE (2026-06-08): the `loadInProgress` content-suppression was removed.
-  // It existed solely to drop the OLD Claude `history.ts` JSONL transcript
-  // replay (`claude -p --resume`) so it wouldn't duplicate the disk hydrate.
-  // That adapter is deleted — Claude runs through the Agent SDK now, which
-  // keeps the conversation in-process and never re-emits prior turns on
-  // resume; NO current adapter (Codex app-server, Cursor) replays on
-  // loadSession either. Suppressing the whole load window instead
-  // silently swallowed live turns sent during a slow resume (the Cursor
-  // "reply shows up later" bug). `dedupeConsecutiveMessages` (in hydrateChat)
-  // remains as the net for any legacy on-disk dupes. If a future adapter ever
-  // replays on load, re-introduce a gate keyed on a per-adapter capability —
-  // not a blanket window.
+  // Live updates can arrive during a slow session load. Never suppress that
+  // entire window: adapters reconcile native replay identities, and history
+  // hydration reconciles durable row ids in reconcileHistoryMessages. Equal
+  // content or tool inputs do not prove that two events are the same call.
 
   /** Per-chat scroll position. When the user swaps
    *  between parallel agent chats, each chat restores its last scroll
@@ -828,6 +824,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       tasks?: BackgroundTask[];
       workflows?: WorkflowProgress[];
       waiting?: boolean;
+      activity?: AgentSessionState["backgroundActivity"];
       state?: "running" | "completed" | "failed" | "cancelled";
       stopReason?: AgentSessionState["lastStopReason"];
       startedAt?: number;
@@ -979,6 +976,17 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       return;
     }
 
+    if (notification.update.sessionUpdate === "turn_usage_update") {
+      const slot = get().sessions[chatId];
+      if (!slot || (slot.executionId ?? slot.sessionId) !== (notification.executionId ?? notification.sessionId)) return;
+      // Persisted before delivery by the engine. Invalidate this key only;
+      // retained confirmed data stays visible while it revalidates.
+      turnRowCache.invalidate(turnRowKey(chatId, notification.update.turnId));
+      if (slot.agentId) trackAgentTurnUsage({ executionId: notification.executionId ?? notification.sessionId,
+        turnId: notification.update.turnId, agentId: slot.agentId, usage: notification.update.usage });
+      return;
+    }
+
     // usage_update → context window accounting. Keep cumulative counters
     // from prompt-response usage; overwrite size/used. The adapter adds
     // costUsd capture from upd.cost.totalCostUsd.
@@ -1010,6 +1018,31 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
 
     if (upd.sessionUpdate === "current_mode_update" && upd.currentModeId) {
       get().patchSession(chatId, { currentModeId: upd.currentModeId });
+      return;
+    }
+
+    if (notification.update.sessionUpdate === "current_model_update") {
+      const upd = notification.update;
+      const slot = get().sessions[chatId];
+      if (!slot || (slot.executionId ?? slot.sessionId) !== (notification.executionId ?? notification.sessionId) ||
+          typeof upd.model !== "string" || !upd.model || upd.model.length > 200 || (/\s/.test(upd.model) || [...upd.model].some((char) => char.charCodeAt(0) < 32)) ||
+          !Number.isFinite(upd.turnStartedAt) || (slot.modelSelectionRevision ?? 0) !== (slot.modelSelectionRevisionAtRequest ?? 0)) return;
+      const workspace = useWorkspaceStore.getState();
+      const chat = workspace.chats.find((c) => c.id === chatId);
+      if (!chat || chat.agentId !== slot.agentId || (chat.model && chat.model !== upd.model && chat.model !== upd.previousModel)) return;
+      // This is a provider fact for one chat, never a user preference/global
+      // default. The adapter has already adopted it for the next queued send.
+      if (chat.model !== upd.model) workspace.dispatch({ type: "UPDATE_CHAT_SETTINGS", id: chatId, updates: { model: upd.model } });
+      if (slot.appliedChatEnvKey) {
+        try {
+          const env = JSON.parse(slot.appliedChatEnvKey) as Record<string, string>;
+          const key = slot.agentId?.includes("claude") ? "ANTHROPIC_MODEL" : "OPENAI_MODEL";
+          if (!env[key] || env[key] === upd.previousModel) {
+            env[key] = upd.model;
+            get().patchSession(chatId, { appliedChatEnvKey: JSON.stringify(env) });
+          }
+        } catch { /* Keep a missing/legacy stamp available for reconciliation. */ }
+      }
       return;
     }
 
@@ -1079,17 +1112,20 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       const waiting = upd.waiting === true && incomingTasks.length > 0;
       set((state) => {
         const slot = state.sessions[chatId];
-        if (!slot) return state;
+        if (!slot || (slot.executionId ?? slot.sessionId) !== (notification.executionId ?? notification.sessionId)) return state;
         const tasks = incomingTasks.slice(0, MAX_BACKGROUND_TASKS_PER_CHAT);
+        const activity = upd.activity ?? null;
         const waitingSince = waiting
-          ? slot.waitingForBackgroundTasks &&
+          ? activity?.startedAt ?? slot.activeTurnStartedAt ?? (slot.waitingForBackgroundTasks &&
             typeof slot.backgroundTasksWaitingSince === "number"
             ? slot.backgroundTasksWaitingSince
-            : Date.now()
+            : Date.now())
           : null;
         if (
           sameBackgroundTasks(slot.backgroundTasks, tasks) &&
           slot.waitingForBackgroundTasks === waiting &&
+          slot.backgroundActivity?.state === activity?.state &&
+          slot.backgroundActivity?.startedAt === activity?.startedAt &&
           slot.backgroundTasksWaitingSince === waitingSince
         ) {
           return state;
@@ -1100,6 +1136,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
             [chatId]: {
               ...slot,
               backgroundTasks: tasks,
+              backgroundActivity: activity,
               waitingForBackgroundTasks: waiting,
               backgroundTasksWaitingSince: waitingSince,
             },
@@ -1435,6 +1472,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
                 pendingPermissions: [],
                 pendingQuestions: [],
                 backgroundTasks: [],
+                backgroundActivity: null,
                 workflows: [],
                 waitingForBackgroundTasks: false,
                 backgroundTasksWaitingSince: null,
@@ -1479,6 +1517,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           pendingPermissions: [],
           pendingQuestions: [],
           backgroundTasks: [],
+          backgroundActivity: null,
           workflows: [],
           waitingForBackgroundTasks: false,
           backgroundTasksWaitingSince: null,
@@ -1556,11 +1595,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         if (
           cur.backgroundTasks.length > 0 ||
           cur.waitingForBackgroundTasks ||
-          cur.backgroundTasksWaitingSince !== null
+          cur.backgroundTasksWaitingSince !== null ||
+          cur.backgroundActivity != null
         ) {
           cur = {
             ...cur,
             backgroundTasks: [],
+            backgroundActivity: null,
             waitingForBackgroundTasks: false,
             backgroundTasksWaitingSince: null,
           };
@@ -1642,6 +1683,14 @@ function withoutPendingLocalTurn(
 // Selector hooks — preferred over reading the whole store
 // ──────────────────────────────────────────────────────────
 
+export function useChatAgentActivity(chatId: string | null | undefined): AgentActivity {
+  return useSessionsStore((state) => chatId ? chatAgentActivity(state.sessions[chatId], state.pendingLocalTurns[chatId]) : null);
+}
+
+export function useAnyChatAgentActivity(chatIds: readonly string[]): AgentActivity {
+  return useSessionsStore((state) => combinedAgentActivity(chatIds.map((id) => agentActivity(state.sessions[id], state.pendingLocalTurns[id]))));
+}
+
 /** True if ANY chat in the given id list currently has an in-flight
  *  turn (status === "streaming"). Used by Repository panel's WorkspaceRow to
  *  swap the GitBranch icon for the ZerosSpinner whenever any agent
@@ -1687,19 +1736,7 @@ export function agentSessionHasActiveWork(
   slot: AgentSessionState | undefined,
   pendingLocalTurnId: string | null | undefined,
 ): boolean {
-  if (pendingLocalTurnId) return true;
-  if (!slot) return false;
-  if (slot.status === "streaming") return true;
-  if (
-    (slot.status === "warming" || slot.status === "reconnecting") &&
-    slot.activeTurnStartedAt !== null
-  ) {
-    return true;
-  }
-  if (slot.backgroundTasks.length > 0) return true;
-  // Paused workflows remain resumable/stoppable lifecycle entries, but they
-  // are not executing and must not paint the "Agent working" spinner alone.
-  return slot.workflows.some((workflow) => workflow.status === "running");
+  return agentActivity(slot, pendingLocalTurnId) !== null;
 }
 
 /** Workspace-tab activity indicator. Unlike useAnyChatWorking (a conservative
@@ -1735,7 +1772,8 @@ export function useAnyChatWorking(chatIds: readonly string[]): boolean {
       if (
         status === "warming" ||
         status === "streaming" ||
-        status === "reconnecting"
+        status === "reconnecting" ||
+        agentSessionHasActiveWork(s.sessions[id], s.pendingLocalTurns[id])
       ) {
         return true;
       }
@@ -1819,7 +1857,8 @@ export function useAnyAgentRunning(): boolean {
       if (
         status === "warming" ||
         status === "streaming" ||
-        status === "reconnecting"
+        status === "reconnecting" ||
+        agentSessionHasActiveWork(slot, null)
       ) {
         return true;
       }

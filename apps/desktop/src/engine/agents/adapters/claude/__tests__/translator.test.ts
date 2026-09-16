@@ -26,6 +26,23 @@ function collect() {
 }
 
 describe("ClaudeStreamTranslator onUser", () => {
+  it.each(["Read", "Bash"])("keeps a child %s unresolved until its ID-matched error arrives", (name) => {
+    const { t, updates } = collect();
+    t.feed({ type: "assistant", message: { content: [{ type: "tool_use", id: "parent", name: "Task", input: {} }] } });
+    t.feed({ type: "assistant", parent_tool_use_id: "parent", message: { content: [
+      { type: "tool_use", id: "child-failed", name, input: {} },
+      { type: "tool_use", id: "child-open", name, input: {} },
+    ] } });
+    const calls = updates.map((u) => u.update).filter((u) => u.sessionUpdate === "tool_call");
+    expect(calls[1]).toMatchObject({ status: "in_progress", parentToolId: calls[0].toolCallId });
+    t.feed({ type: "user", parent_tool_use_id: "parent", message: { content: [
+      { type: "tool_result", tool_use_id: "child-failed", is_error: true, content: "Permission denied" },
+    ] } });
+    expect(updates.map((u) => u.update).filter((u) => u.sessionUpdate === "tool_call_update")).toEqual([
+      expect.objectContaining({ toolCallId: calls[1].toolCallId, status: "failed", rawOutput: "Permission denied", content: [{ type: "content", content: { type: "text", text: "Permission denied" } }] }),
+    ]);
+  });
+
   it("does NOT re-emit the prompt echo as a user_message_chunk", () => {
     const { t, kinds } = collect();
     t.feed({
@@ -1611,6 +1628,12 @@ describe("ClaudeStreamTranslator local workflow progress", () => {
     expect(updates).toHaveLength(before);
 
     t.feed({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "workflow-1",
+      status: "completed",
+    });
+    t.feed({
       type: "result",
       subtype: "success",
       is_error: false,
@@ -1673,8 +1696,9 @@ describe("ClaudeStreamTranslator local workflow progress", () => {
       usage: { input_tokens: 1, output_tokens: 1 },
     });
 
-    // A LATER workflow re-using the task id must narrate again rather than be
-    // silently suppressed by the previous run's fingerprint.
+    // Task IDs may be reused by a replacement process; an ordinary result
+    // does not establish that an unfinished workflow ended.
+    t.beginProcess();
     run();
     expect(narrationCount()).toBe(2);
   });
@@ -2460,7 +2484,7 @@ describe("ClaudeStreamTranslator compaction lifecycle (status messages, 2026-07-
 });
 
 describe("ClaudeStreamTranslator result usage_update (zero-dip guard, 2026-07-12)", () => {
-  it("a billed result emits size/used", () => {
+  it("a billed result reports capacity without mistaking turn tokens for context fill", () => {
     const { t, updates } = collect();
     t.feed({
       type: "result",
@@ -2470,7 +2494,7 @@ describe("ClaudeStreamTranslator result usage_update (zero-dip guard, 2026-07-12
     } as never);
     const u = updates.find((x) => x.update.sessionUpdate === "usage_update")!
       .update as { size?: number; used?: number };
-    expect(u.used).toBe(5_000);
+    expect(u.used).toBeUndefined();
     // No init seen yet → unknown model → the conservative 200k default.
     expect(u.size).toBe(200_000);
   });
@@ -2761,10 +2785,10 @@ describe("ClaudeStreamTranslator overload fallback", () => {
         content: [{ type: "text", text: "Failed to authenticate: OAuth session expired" }],
       },
     });
-    expect(updates.some((u) => (u.update as { kind?: string }).kind === "model_switch")).toBe(false);
+    expect(updates.some((u) => u.update.sessionUpdate === "model_fallback")).toBe(false);
   });
 
-  it("emits ONE 'Model switched' tool call when a top-level assistant answers on a different model", () => {
+  it("emits one plain fallback notice when a top-level assistant answers on a different model", () => {
     const { t, updates } = collect();
     t.armFallbackDetection("claude-fable-5[1m]", true);
     const msg = {
@@ -2779,15 +2803,14 @@ describe("ClaudeStreamTranslator overload fallback", () => {
     t.feed(msg); // same turn — no duplicate record
     const calls = updates.filter(
       (u) =>
-        u.update.sessionUpdate === "tool_call" &&
-        (u.update as { kind?: string }).kind === "model_switch",
+        u.update.sessionUpdate === "model_fallback",
     );
     expect(calls).toHaveLength(1);
     const raw = (
       calls[0].update as {
-        rawInput?: { fromModel?: string; toModel?: string; reason?: string };
+        fromModel?: string; toModel?: string; reason?: string;
       }
-    ).rawInput;
+    );
     expect(raw?.fromModel).toBe("claude-fable-5[1m]");
     expect(raw?.toModel).toBe("claude-sonnet-5-20260203");
     expect(raw?.reason).toBe("overloaded");
@@ -2806,7 +2829,7 @@ describe("ClaudeStreamTranslator overload fallback", () => {
     });
     expect(
       updates.some(
-        (u) => (u.update as { kind?: string }).kind === "model_switch",
+        (u) => u.update.sessionUpdate === "model_fallback",
       ),
     ).toBe(false);
   });
@@ -2825,7 +2848,7 @@ describe("ClaudeStreamTranslator overload fallback", () => {
     });
     expect(
       updates.some(
-        (u) => (u.update as { kind?: string }).kind === "model_switch",
+        (u) => u.update.sessionUpdate === "model_fallback",
       ),
     ).toBe(false);
   });
@@ -2843,7 +2866,7 @@ describe("ClaudeStreamTranslator overload fallback", () => {
     });
     expect(
       updates.some(
-        (u) => (u.update as { kind?: string }).kind === "model_switch",
+        (u) => u.update.sessionUpdate === "model_fallback",
       ),
     ).toBe(false);
   });
@@ -2863,7 +2886,7 @@ describe("ClaudeStreamTranslator overload fallback", () => {
     t.feed({ type: "result", subtype: "success" });
     t.feed(msg);
     const calls = updates.filter(
-      (u) => (u.update as { kind?: string }).kind === "model_switch",
+      (u) => u.update.sessionUpdate === "model_fallback",
     );
     expect(calls).toHaveLength(2);
   });
@@ -2877,14 +2900,14 @@ describe("ClaudeStreamTranslator overload fallback", () => {
       fallback_model: "claude-opus-4-8",
     });
     const call = updates.find(
-      (u) => (u.update as { kind?: string }).kind === "model_switch",
+      (u) => u.update.sessionUpdate === "model_fallback",
     );
     expect(call).toBeTruthy();
     const raw = (
       call!.update as {
-        rawInput?: { fromModel?: string; toModel?: string; reason?: string };
+        fromModel?: string; toModel?: string; reason?: string;
       }
-    ).rawInput;
+    );
     expect(raw?.reason).toBe("refusal");
     expect(raw?.toModel).toBe("claude-opus-4-8");
   });

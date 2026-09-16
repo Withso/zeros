@@ -47,10 +47,10 @@
 
 /* Brightness hierarchy (2026-06-19, refined): inside the working feed, ONLY the
    in-between NARRATION — the agent/system prose the model emits while working —
-   is muted to `--fg2`, and uniformly: bold, headings, links, inline code and
+   is muted to `--fg3`, and uniformly: bold, headings, links, inline code and
    table cells otherwise carry their own `--fg1`/`--blue-primary`, so without this they
    read as brighter "highlights" inside an otherwise-muted message (user: "even
-   bold or any formatting → fg2"). Narration is a <TextMessage>, so it carries a
+   bold or any formatting → muted"). Narration is a <TextMessage>, so it carries a
    `[data-role]`; reaching its `.zeros-agent-md *` at specificity (0,4,0) beats
    every per-element markdown color (0,2,1) WITHOUT `!important`.
 
@@ -61,12 +61,40 @@
        OUTSIDE the feed (TurnEventList's finalOutput); inside an agent/task group
        it's a bare `.zeros-agent-md` result / "Output" section (NOT under a
        `[data-role]`). Both render identically to our own output markdown.
-   This is the in-between=fg2 / output=fg1 split, applied at every depth. */
+   This is the in-between=fg3 / output=fg1 split, applied at every depth. */
 [data-Zeros-root] .zeros-working-feed [data-role="assistant"] .zeros-agent-md,
 [data-Zeros-root] .zeros-working-feed [data-role="assistant"] .zeros-agent-md *,
 [data-Zeros-root] .zeros-working-feed [data-role="system"],
 [data-Zeros-root] .zeros-working-feed [data-role="system"] * {
-  color: var(--fg2);
+  color: var(--fg3);
+}
+
+/* The current narrated block stays bright as it streams. Advancing to the
+   next event removes the marker. Explicit child answers remain output at any
+   nesting depth, even though the group lives in an outer working feed. */
+[data-Zeros-root]
+  .zeros-working-feed
+  [data-live-narration="true"]
+  [data-role="assistant"]
+  .zeros-agent-md,
+[data-Zeros-root]
+  .zeros-working-feed
+  [data-live-narration="true"]
+  [data-role="assistant"]
+  .zeros-agent-md
+  *,
+[data-Zeros-root]
+  .zeros-working-feed
+  [data-agent-output]
+  [data-role="assistant"]
+  .zeros-agent-md,
+[data-Zeros-root]
+  .zeros-working-feed
+  [data-agent-output]
+  [data-role="assistant"]
+  .zeros-agent-md
+  * {
+  color: var(--fg1);
 }
 
 /* ──────────────────────────────────────────────────────────
@@ -513,4 +541,17 @@
 }
 [data-Zeros-root] .zeros-agent-md sub {
   bottom: -0.25em;
+}
+/* These are alpha masks, not UI colors: black supplies opaque coverage. */
+[data-Zeros-root] .zeros-agent-md[data-streaming-edge="true"] {
+  mask-image:
+    linear-gradient(to bottom, black var(--stream-edge-y), transparent var(--stream-edge-y)),
+    linear-gradient(to var(--stream-edge-direction), black var(--stream-edge-x), color-mix(in srgb, black 65%, transparent) var(--stream-edge-end));
+  mask-composite: add;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-Zeros-root] .zeros-agent-md[data-streaming-edge="true"] {
+    mask-image: none;
+  }
 }

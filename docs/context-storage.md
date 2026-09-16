@@ -1,5 +1,19 @@
 # Workspace context storage
 
+Composer attachments reach every agent as confirmed file references. Staging
+starts when the file is attached; Send awaits persistence before passing the
+engine-returned path with an instruction to read the file or open the image.
+Text bodies and image bytes are not embedded in composer prompts, regardless
+of the harness's native image-input capability. Reading a referenced format
+depends on the tools available to that agent.
+
+The shared encoder also handles older drafts and edited/retried messages. It
+can restore legacy text/image bytes to persist the file, but sends only the
+resulting path and retains the original attachment id. Both text and image
+bubble metadata keep that relative path. Failed saves retain the unsent draft;
+typing during a save cannot be cleared by the earlier submission. Attachment
+format and upload-size policy is separate from this delivery contract.
+
 The Context tab uses `.context/local/` for private material and
 `.context/shared/` for material selected for sharing. Composer attachments use
 `<scope>/attachments/<attachmentId>/<filename>`; other files inside either

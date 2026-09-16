@@ -6061,10 +6061,12 @@ export class AgentGateway {
           prompt: outgoing,
         }),
       );
-      // A clean prompt is the strongest possible signal that auth is
-      // good — clear any prior failed-auth marker so the green dot
-      // re-illuminates the moment the user resolves their login.
-      if (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId)) this.markAuthOk(adapter.agentId);
+      // A completed provider response confirms usable credentials. A Stop can
+      // settle before dispatch and provides no new authentication evidence.
+      if (
+        response.stopReason !== "cancelled" &&
+        (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId))
+      ) this.markAuthOk(adapter.agentId);
       return response;
     } catch (err) {
       // Mark the agent auth-failed ONLY on an explicit `auth-required`
@@ -6128,8 +6130,12 @@ export class AgentGateway {
     agentId: string,
     sessionId: string,
     prompt: ContentBlock[],
-  ): Promise<void> {
+    isCurrent?: () => boolean,
+  ): Promise<import("@zeros/protocol/messages").SteerOutcome | void> {
     await this.awaitAdapterStartupSettled(sessionId);
+    // Admission may outlive Stop or the accepting turn. The engine owns this
+    // identity; do not let a delayed dispatch target whichever turn is now live.
+    if (isCurrent && !isCurrent()) return "queued";
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
     });
@@ -6137,7 +6143,7 @@ export class AgentGateway {
     if (!steer) {
       throw new Error(`agent ${adapter.agentId} does not support steering`);
     }
-    await steer({ sessionId, prompt });
+    return steer({ sessionId, prompt });
   }
 
   async setMode(

@@ -148,6 +148,24 @@ function makeAdapter(): CodexAppServerAdapter {
 }
 
 describe("CodexAppServerAdapter.steer", () => {
+  it("does not deliver prepared input after Stop", async () => {
+    const adapter = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    const turn = adapter.prompt({ sessionId: session.sessionId, prompt: text("initial") });
+    await tick();
+    let ready!: (input: unknown[]) => void;
+    vi.spyOn(adapter as unknown as { buildUserInput: () => Promise<unknown[]> }, "buildUserInput")
+      .mockImplementationOnce(() => new Promise((resolve) => { ready = resolve; }));
+    const steering = adapter.steer({ sessionId: session.sessionId, prompt: text("follow-up") });
+    await adapter.cancel({ sessionId: session.sessionId });
+    ready([{ type: "text", text: "follow-up", text_elements: [] }]);
+    await expect(steering).resolves.toBe("queued");
+    expect(rt.requests.filter((request) => request.method === "turn/steer")).toEqual([]);
+    rt.resolveTurn?.({ turnId: "turn-active", status: "interrupted", raw: {} });
+    await turn;
+    await adapter.dispose();
+  });
+
   beforeEach(() => {
     vi.useFakeTimers();
     rt.handlers.clear();

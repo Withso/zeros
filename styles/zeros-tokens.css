@@ -400,7 +400,7 @@
    * Light re-derive the SAME relative position in their own bands rather than
    * copying this lightness — in Light a higher L means LESS contrast, so
    * copying `60` there would invert the tier order. */
-  --fg3: hsl(0 0% 60%); /* #999999 — middle tier (one step below fg2) */
+  --fg3: hsl(0 0% 63%); /* #999999 — middle tier (one step below fg2) */
   --muted-fg: hsl(0 0% 44%); /* #707070 — quietest tier (app-wide 3rd tier) */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
@@ -474,7 +474,7 @@
                                         * fills. THEME-STATIC (white in both themes —
                                         * the red fill stays vivid in light, so fg1,
                                         * which flips dark, can't sit on it). */
-  --red-bg: hsl(13 81% 14%); /* #421407 — error container surface */
+  --red-bg: hsl(3 26% 13.7%); /* #2C1B1A — error container surface */
   --red-fg: hsl(20 97% 72%); /* #FDA274 — text/icon on --red-bg */
 
   --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
@@ -508,7 +508,9 @@
    * The ramps are LITERALS, deliberately NOT aliased to the anchors: the
    * anchors re-theme per [data-theme] while a 50→950 scale must keep its
    * light→dark direction in every theme. (In the dark theme the anchors happen
-   * to coincide: 500 ≈ primary, 900 ≈ bg, red 700 ≈ secondary.) */
+   * to coincide: 500 ≈ primary, 900 ≈ bg, red 700 ≈ secondary — except red,
+   * whose --red-bg was retuned to a desaturated brown-red while --red-900
+   * keeps its place in the 50→950 scale. Do NOT resync them.) */
   --red-50: hsl(0 85% 97%);
   --red-100: hsl(0 85% 93%);
   --red-200: hsl(0 85% 86%);

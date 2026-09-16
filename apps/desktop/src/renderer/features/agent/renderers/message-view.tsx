@@ -48,6 +48,11 @@ export const MessageView = memo(
       prev.ctx.chatId !== next.ctx.chatId
     )
       return false;
+    if (prev.message.kind === "text" && prev.message.role === "agent") {
+      const wasStreaming = prev.ctx.isStreaming && prev.ctx.lastMessageId === prev.message.id;
+      const isStreaming = next.ctx.isStreaming && next.ctx.lastMessageId === next.message.id;
+      if (wasStreaming !== isStreaming) return false;
+    }
     if (prev.message.kind === "tool") {
       const id = prev.message.toolCallId;
       // Re-render when this card's inline permission cluster

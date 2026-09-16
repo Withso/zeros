@@ -515,6 +515,9 @@ export class CursorHostClient {
           { runId },
           0,
         ).then((r) => r ?? undefined),
+      steer: (text) => this.request<"complete_delivered" | "revert_to_followup">(
+        "run.steer", { runId, text }, 0,
+      ),
       cancel: async () => {
         try {
           await this.request<void>("run.cancel", { runId });

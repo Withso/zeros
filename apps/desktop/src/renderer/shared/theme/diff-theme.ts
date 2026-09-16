@@ -64,6 +64,8 @@ export function resolveDiffTheme(codeThemeId?: string): {
  *       the package's navy #69b1ff). @pierre leaves the -override slots unset, so
  *       ours win. Fine-tune washes via --diffs-bg-*(-emphasis)-override.
  *  Preview: styles/Artifacts/diff-theme-preview.html. */
+export const DIFF_HUNK_SEPARATOR_HEIGHT = 24;
+
 function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
   return `
   :host, pre, code {
@@ -76,7 +78,31 @@ function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
     --diffs-addition-color-override: var(--green-primary);
     --diffs-deletion-color-override: var(--red-primary);
     --diffs-modified-color-override: var(--highlighted-bright);
+    --diffs-gap-block: 0px;
   }
+      :host {
+        --diffs-bg-separator-override: var(--bg2);
+        --diffs-bg-addition-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--green-primary) 65%, var(--fg2)));
+        --diffs-bg-deletion-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--red-primary) 65%, var(--fg2)));
+      }
+      [data-separator="line-info"] {
+        height: ${DIFF_HUNK_SEPARATOR_HEIGHT}px;
+      }
+      [data-separator="line-info"] [data-separator-wrapper] {
+        grid-template-columns: 24px auto;
+      }
+      [data-separator="line-info"] [data-expand-button] {
+        min-width: 24px;
+      }
+      [data-separator="line-info"] [data-expand-button] [data-icon] {
+        width: 12px;
+        height: 12px;
+      }
+      @media (pointer: coarse) {
+        [data-separator="line-info"] [data-separator-multi-button] {
+          grid-template-columns: 24px 24px auto;
+        }
+      }
 `;
 }
 

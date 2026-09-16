@@ -26,8 +26,8 @@
 // the same file later mints a fresh id and a fresh record.
 //
 // The diff (pure, tested) is separate from the IO (fire-and-forget): staging
-// must never block or break typing, and a failed write is only a cosmetic gap
-// the send-path safety net (encode-attachments.ts) re-covers. Fire-and-forget
+// must never block or break typing. Send retries a failed write and awaits
+// confirmation before delivering the file reference (encode-attachments.ts). Fire-and-forget
 // is NOT silent, though — every failed op logs, and the first failure per
 // workspace raises a toast (reportStagingFailure). A day of writes rejected
 // by a stale main process produced zero user-visible signal on 2026-08-03;
@@ -189,7 +189,7 @@ export function discardQueuedContextGraphWrites(cwd: string): void {
 /** A staging op failed. Always logged (the renderer console rides the app's
  *  structured log, so this is greppable in app.jsonl); toasted once per
  *  workspace per session when native notifications exist. Browser development
- *  and optional relay clients stay silent; inline blocks still carry delivery. */
+ *  and optional relay clients stay silent; Send reports failed persistence. */
 function reportStagingFailure(
   cwd: string,
   filename: string,

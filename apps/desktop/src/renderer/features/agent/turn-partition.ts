@@ -1,3 +1,4 @@
+import { toolPresentationReady } from "./renderers/tool-readiness";
 // Split working narration/tools from provider-declared final answers.
 // Live events retain their source order and become inspectable immediately.
 
@@ -20,6 +21,7 @@ export interface PartitionOptions {
 /** Replaced legacy fragments retain their durable ids with empty text so a
  * database upsert can retire them. They contribute neither rows nor counts. */
 export function isVisibleTranscriptEvent(event: AgentMessage): boolean {
+  if (event.kind === "tool") return toolPresentationReady(event);
   return (
     event.kind !== "text" ||
     (event.role !== "agent" && event.role !== "thought") ||
@@ -71,15 +73,13 @@ function isBudgetStop(e: AgentMessage): boolean {
  * tool call and therefore belongs in the collapsible working stripe, but its
  * late arrival must be transparent to answer-boundary detection: otherwise a
  * settled lifecycle row after the reply would make the real answer disappear.
- * Running background tasks are NOT transparent because their presence means
- * the turn has not reached a settled answer boundary. */
-function isSettledBackgroundTask(e: AgentMessage): boolean {
+ * The parent can be idle while a task still runs. Its activity signal, rather
+ * than the child task's status, determines whether the answer is settled. */
+function isBackgroundTask(e: AgentMessage): boolean {
+  if (e.kind === "error_notice" && !e.parentToolId && e.code?.startsWith("claude-background-")) return true;
   if (e.kind !== "tool") return false;
   const tool = e as AgentToolMessage;
-  return (
-    tool.toolKind === "background_task" &&
-    (tool.status === "completed" || tool.status === "failed")
-  );
+  return tool.toolKind === "background_task";
 }
 
 /** Trailing-run membership: the concluding answer text, plus any manual
@@ -108,7 +108,7 @@ export function partitionTurn(
   // Legacy providers have no phase. Keep their settled trailing-answer
   // convention, while an explicit final phase survives any late bookkeeping.
   for (let i = events.length - 1; !options?.live && i >= 0; i--) {
-    if (isSettledBackgroundTask(events[i])) continue;
+    if (isBackgroundTask(events[i])) continue;
     if (isFinalOutputEvent(events[i])) {
       finalOutputIndexes.add(i);
     } else {
@@ -124,4 +124,29 @@ export function partitionTurn(
     (finalOutputIndexes.has(index) ? finalOutput : working).push(event);
   });
   return { working, finalOutput };
+}
+
+export interface TurnSegment {
+  kind: "working" | "output";
+  /** First durable event id keeps disclosure state stable as a feed grows. */
+  key: string;
+  events: AgentMessage[];
+}
+
+/** A send can produce several confirmed replies, separated by more work.
+ * Keep those boundaries in source order instead of moving later work ahead
+ * of an earlier answer. The legacy partition remains available to counters. */
+export function partitionTurnSequence(events: AgentMessage[], options?: PartitionOptions): TurnSegment[] {
+  const { working, finalOutput } = partitionTurn(events, options);
+  const output = new Set(finalOutput);
+  const visible = new Set([...working, ...finalOutput]);
+  const segments: TurnSegment[] = [];
+  for (const event of events) {
+    if (!visible.has(event)) continue;
+    const kind = output.has(event) ? "output" : "working";
+    const previous = segments.at(-1);
+    if (kind === "working" && previous?.kind === kind) previous.events.push(event);
+    else segments.push({ kind, key: event.id, events: [event] });
+  }
+  return segments;
 }

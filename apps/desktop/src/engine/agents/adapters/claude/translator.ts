@@ -1,3 +1,4 @@
+import { ClaudeQueryUsage } from "./usage-accounting";
 // ──────────────────────────────────────────────────────────
 // Claude stream-json → SessionNotification translator
 // ──────────────────────────────────────────────────────────
@@ -38,7 +39,7 @@ import type {
 } from "@zeros/protocol/agent-events";
 import { claudeContextWindow } from "@zeros/protocol/model-context";
 
-import { isDevRuntime } from "../../../runtime";
+import { ClaudeTranscriptState } from "./transcript-state";
 import type {
   ContentBlock,
   SessionNotification,
@@ -133,6 +134,8 @@ interface ClaudeAssistantContentBlock {
 }
 
 interface ClaudeMessageEvent {
+  uuid?: string;
+  request_id?: string;
   type: "user" | "assistant";
   /** SDK errors are synthetic notices, never evidence of a model fallback. */
   error?: string;
@@ -148,11 +151,13 @@ interface ClaudeMessageEvent {
    *  line 1. */
   tool_use_result?: unknown;
   message?: {
+    id?: string;
     role?: string;
     /** The model that actually produced this assistant message (the Anthropic
      *  API message's `model` field). When a fallback model answers
      *  (primary overloaded), this is the per-message signal of the swap. */
     model?: string;
+    stop_reason?: string | null;
     content?: ClaudeAssistantContentBlock[];
   };
 }
@@ -172,10 +177,13 @@ interface ClaudeSystemEvent {
   workflow_name?: string;
   prompt?: string;
   skip_transcript?: boolean;
+  ambient?: boolean;
+  is_backgrounded?: boolean;
   tasks?: Array<{
     task_id?: string;
     task_type?: string;
     description?: string;
+    ambient?: boolean;
   }>;
   usage?: { duration_ms?: number };
   last_tool_name?: string;
@@ -205,6 +213,8 @@ interface ClaudeSystemEvent {
 
 interface ClaudeResultEvent {
   type: "result";
+  uuid?: string;
+  errors?: string[];
   subtype?: "success" | "error_max_turns" | "error_during_execution" | string;
   session_id?: string;
   total_cost_usd?: number;
@@ -323,25 +333,27 @@ export interface ClaudeTranslatorOptions {
   emit: Emit;
   /** Optional hook for diagnostics of unknown Claude event shapes. */
   onUnknown?: (event: unknown) => void;
-  /** When the SDK runs with `includePartialMessages: true`, it emits
-   *  `stream_event` deltas (token-by-token) BEFORE the final full
-   *  `assistant` message. With this on we render text/thinking from those
-   *  deltas (live typing animation) and SKIP the matching blocks of the
-   *  final message to avoid double-rendering. Off (default) = the legacy
-   *  full-message-per-chunk behavior. */
+  /** Render incremental SDK text/thinking and reconcile completed snapshots
+   * by native message id, parent and block index. Full messages remain usable
+   * when partial streaming is disabled or a transport omits its deltas. */
   streamPartials?: boolean;
 }
 
-/** A `stream_event` (SDKPartialAssistantMessage): the raw Anthropic
- *  streaming event wrapped by the Agent SDK. We only consume content
- *  deltas; block-start/stop + message-level events are boundary noise we
- *  derive from the existing reset points (result/user/tool_use). */
+/** Native message-start and block-index metadata owns partial reconciliation. */
 interface ClaudeStreamEvent {
   type: "stream_event";
   parent_tool_use_id?: string | null;
   event?: {
     type?: string;
-    delta?: { type?: string; text?: string; thinking?: string };
+    index?: number;
+    message?: { id?: string };
+    content_block?: ClaudeAssistantContentBlock;
+    delta?: {
+      type?: string;
+      text?: string;
+      thinking?: string;
+      stop_reason?: string | null;
+    };
   };
 }
 
@@ -361,6 +373,14 @@ export class ClaudeStreamTranslator {
   /** Active background work is level-triggered by
    * background_tasks_changed and enriched by the task edge stream. */
   private readonly backgroundTasks = new Map<string, BackgroundTask>();
+  /** Process ownership includes ambient tasks, even though the visible map
+   * above excludes them. A level snapshot replaces this set; subsequent edges
+   * enrich/settle it but cannot recreate membership absent from that snapshot. */
+  private readonly liveBackgroundTasks = new Map<string, boolean>();
+  private hasBackgroundTaskSnapshot = false;
+  /** Keep retirement conservative if native membership exceeds our ID budget.
+   * The next level replaces this bit, including an authoritative empty set. */
+  private backgroundTaskOverflow = false;
   /** Edge metadata can arrive before membership (ordering is explicitly
    * unspecified by the SDK). Cache it separately until the level signal says
    * whether that task is actually background work. */
@@ -377,8 +397,12 @@ export class ClaudeStreamTranslator {
    * misclassifying ordinary foreground Task subagents. */
   private readonly taskStartedIds = new Set<string>();
   private readonly observedBackgroundTaskIds = new Set<string>();
-  private readonly taskRecordIds = new Map<string, string>();
-  private readonly settledTaskRecords = new Map<string, SettledTaskRecord>();
+  /** ID and settlement share one eviction boundary. Separate bounded caches
+   * could forget completion while retaining its ID and fail that row on Stop. */
+  private readonly taskRecords = new Map<string, {
+    toolCallId: string;
+    settlement?: SettledTaskRecord;
+  }>();
   private readonly skippedTaskRecords = new Set<string>();
   private readonly notifiedTaskIds = new Set<string>();
   /** Edge/level ordering is unspecified. Once an edge settles an id, ignore a
@@ -390,11 +414,15 @@ export class ClaudeStreamTranslator {
   private readonly pausedTaskIds = new Set<string>();
   private sessionActivityState: "idle" | "running" | "requires_action" | null =
     null;
+  private activityStartedAt: number | null = null;
+  private activityStopped = false;
+  private readonly ambientTaskIds = new Set<string>();
   /** Last wire snapshot, retained only to suppress semantically identical
    * provider observations before they cross the engine/renderer bridge. */
   private lastEmittedBackgroundTasks: {
     tasks: BackgroundTask[];
     waiting: boolean;
+    activity?: { state: "idle" | "running" | "requires_action"; startedAt: number } | null;
   } | null = null;
   /** Foreground local-workflow progress is a separate ephemeral level stream;
    * it must never be folded into the background-task dock. */
@@ -423,6 +451,9 @@ export class ClaudeStreamTranslator {
     if (existing) return existing;
     const toolCallId = `tool-${randomUUID()}`;
     this.toolCallIds.set(nativeToolUseId, toolCallId);
+    setBoundedMap(this.scopedTools, JSON.stringify(["", nativeToolUseId]), {
+      id: toolCallId, announced: true, status: "in_progress",
+    }, 4_000);
     this.emit({
       sessionId: this.sessionId,
       update: {
@@ -447,30 +478,45 @@ export class ClaudeStreamTranslator {
    *  tool message in the UI. */
   private readonly suppressedToolUseIds = new Set<string>();
 
-  /** Messages emitted in this turn get stable IDs so the UI can
-   *  merge chunks. Claude doesn't send a messageId today — we
-   *  synthesize one and share it across consecutive text-only
-   *  assistant events so a multi-block reply stays in one bubble.
-   *  Rotated on tool_use, onUser, or onResult. */
-  private currentAssistantMessageId: string | null = null;
-  /** Running concatenation of text we've already emitted under
-   *  `currentAssistantMessageId` — deltas AND full blocks. onAssistant's
-   *  dedup branch compares full text blocks against it, so a final
-   *  full-text event that matches what already streamed adds nothing,
-   *  while a SYNTHETIC assistant message that never streamed (e.g. the
-   *  CLI's "Not enough messages to compact." after a failed /compact —
-   *  no API call, no deltas) still renders. Before 2026-07-12 the
-   *  streamPartials path skipped ALL text blocks unconditionally, which
-   *  silently swallowed those synthetic messages. */
-  private emittedAssistantText = "";
+  private readonly transcript = new ClaudeTranscriptState((update) => {
+    this.emit({ sessionId: this.sessionId, update });
+  });
+  private readonly scopedTools = new Map<string, { id: string; announced: boolean; inputComplete?: boolean; resultFrameId?: string; status: "pending" | "in_progress" | "completed" | "failed" }>();
+  private readonly nativeFrames = new Map<string, { parent: string; startedAt: number; resultKeys: Set<string> }>();
+  private readonly retractedFrames = new Set<string>();
+  private readonly retractedTools = new Set<string>();
+  private readonly requestParents = new Map<string, string | null>();
+  private readonly fallbackNotices = new Map<string, string>();
+  private readonly inferredFallbacks = new Map<string, string>();
+  private fallbackGeneration = 0;
+  private readonly requestStarts = new Map<string, number>();
+  private modelTurnStartedAt = 0;
+  private readonly seenResultIds = new Set<string>();
+  private readonly agentTasks = new Map<
+    string,
+    {
+      toolCallId: string;
+      status: "in_progress" | "completed" | "failed";
+      model?: string;
+      error?: string;
+    }
+  >();
+
+  // A terminal task notification may precede both its start and launch ack,
+  // and tool_use_id is optional. Preserve its outcome until the task id binds.
+  private readonly agentTaskEnds = new Map<
+    string,
+    { status: "completed" | "failed"; error?: string }
+  >();
 
   private lastStopReason: string = "end_turn";
   private hasSeenResult = false;
-  /** Error text carried by a result{is_error:true} event. The adapter
-   *  surfaces it as a failure when it matches the session-expired
-   *  keywords (e.g. a stale-resume "No conversation found with session
-   *  ID …"). Null on clean turns. */
+  /** Native result error text and parent assistant error code. The adapter
+   * normalizes them together before choosing recovery. Null on clean turns. */
   private terminalErrorMsg: string | null = null;
+  private assistantFailure: { code: string; message: string } | null = null;
+  private assistantFailureFrame: string | undefined;
+  private terminalErrorCode: string | undefined;
 
   /** Claude's session id from the `system.init` event. Kept for
    *  resume bookkeeping; not emitted to the UI. */
@@ -483,6 +529,9 @@ export class ClaudeStreamTranslator {
 
   /** Per-turn token/cost usage from the result event. */
   private currentTurnUsage: TurnUsage | undefined;
+  private readonly queryUsage = new ClaudeQueryUsage();
+  private readonly seenUsageResets = new Set<string>();
+  private usageConversationId: string | null = null;
 
   /** True once the CURRENT retry burst has produced its error_notice row.
    *  The CLI emits one `system/api_retry` per attempt (up to ~10 with
@@ -522,7 +571,7 @@ export class ClaudeStreamTranslator {
   // The SDK swaps to Options.fallbackModel silently when the primary is
   // overloaded/unavailable; the only per-message trace is the assistant
   // message's `model` field. The adapter arms detection with the primary
-  // model it configured; we surface ONE "Model switched" tool call per turn
+  // model it configured; we surface one fallback narration message per turn
   // when a top-level assistant message answers on a different model.
   /** The primary model the adapter configured (verbatim id, may carry the
    *  `[1m]` suffix). Null = no explicit model → detection disabled. */
@@ -530,7 +579,7 @@ export class ClaudeStreamTranslator {
   /** True when Options.fallbackModel was set — detection is meaningless
    *  (and false-positive-prone) without a configured fallback. */
   private fallbackArmed = false;
-  /** One "Model switched" record per turn; reset at result. */
+  /** One inferred fallback per turn; explicit native notices keep their IDs. */
   private fallbackNoticedThisTurn = false;
 
   /** Adapter hook: arm overload-fallback detection for this session.
@@ -558,21 +607,51 @@ export class ClaudeStreamTranslator {
     this.streamPartials = opts.streamPartials ?? false;
   }
 
-  /** True while provider-owned work needs the persistent Claude process.
-   * Adapter idle teardown consults this exact provider snapshot at both arm
-   * time and the timer boundary. */
+  /** User-visible work. Ambient watchers never contribute to activity. */
   get hasActiveWork(): boolean {
-    return (
-      this.backgroundTasks.size > 0 ||
-      this.scheduledWakeups.size > 0 ||
-      this.workflows.size > 0
-    );
+    if (this.backgroundTasks.size > 0 || this.scheduledWakeups.size > 0) return true;
+    for (const workflow of this.workflows.values()) {
+      if (!this.ambientTaskIds.has(workflow.taskId) &&
+          (workflow.status === "running" || workflow.status === "paused")) return true;
+    }
+    return false;
+  }
+
+  /** Runtime retention is independent of the visible activity projection. */
+  get hasProcessWork(): boolean {
+    return this.liveBackgroundTasks.size > 0 || this.backgroundTaskOverflow || this.hasActiveWork;
+  }
+
+  /** Called only by the adapter when it creates a new query/process. SDK
+   * system/init is metadata for every turn, including turns on the SAME query.
+   * Preserve transcript identities/history while replacing process ownership. */
+  beginProcess(): void {
+    this.queryUsage.reset();
+    this.currentTurnUsage = undefined;
+    this.usageConversationId = null;
+    this.endActivity();
+    this.hasBackgroundTaskSnapshot = false;
+    this.backgroundTaskMetadata.clear();
+    this.toolInputs.clear();
+    this.taskStartedIds.clear();
+    this.observedBackgroundTaskIds.clear();
+    this.taskRecords.clear();
+    this.skippedTaskRecords.clear();
+    this.notifiedTaskIds.clear();
+    this.terminalTaskIds.clear();
+    this.agentTasks.clear();
+    this.agentTaskEnds.clear();
+    this.pausedTaskIds.clear();
+    this.ambientTaskIds.clear();
+    this.workflowNarration.clear();
+    this.activityStopped = false;
   }
 
   /** Replace the session's one-shot wakeups from StopHookInput.session_crons.
    * Recurring jobs belong to the deliberately skipped scheduling feature and
    * must never leak into the background-task card. */
   setScheduledWakeups(crons: readonly ClaudeScheduledWakeup[]): void {
+    if (this.activityStopped) return;
     const now = Date.now();
     const next = new Map<string, BackgroundTask>();
     const eligible = crons
@@ -658,33 +737,105 @@ export class ClaudeStreamTranslator {
 
   /** The local prompt boundary is authoritative evidence that the parent is
    * running even if this CLI build omits a matching session-state edge. */
-  beginTurn(): void {
-    const wasWaiting =
-      this.sessionActivityState === "idle" &&
-      (this.backgroundTasks.size > 0 || this.scheduledWakeups.size > 0);
+  beginTurn(startedAt = Date.now()): void {
+    this.currentTurnUsage = undefined;
+    this.fallbackGeneration++;
+    this.modelTurnStartedAt = startedAt;
+    this.transcript.beginTurn();
+    this.assistantFailure = null;
+    this.activityStopped = false;
+    this.activityStartedAt = Date.now();
     this.sessionActivityState = "running";
-    if (wasWaiting) this.emitBackgroundTasks();
+    this.emitBackgroundTasks();
+  }
+
+  /** Native automatic wake-up: the same request continues on its old clock. */
+  resumeActivity(): void {
+    if (this.activityStopped || this.sessionActivityState === "running") return;
+    const wasWaiting = this.sessionActivityState === "idle";
+    this.sessionActivityState = "running";
+    if (wasWaiting || this.activityStartedAt !== null) this.emitBackgroundTasks();
+  }
+
+  /** Stop/EOF releases process-owned activity, independently of the already
+   * settled prompt. Buffered frames cannot resurrect it before the next send. */
+  endActivity(): void {
+    for (const [taskId, agent] of this.agentTasks) {
+      if (agent.status === "in_progress")
+        this.settleAgentTask(
+          taskId,
+          "failed",
+          "Agent ended before reporting completion.",
+        );
+    }
+    for (const [taskId, record] of [...this.taskRecords]) {
+      if (!record.settlement) {
+        this.settleTaskRecord(taskId, {
+          status: "failed", providerStatus: "stopped",
+          error: "Background task ended before reporting completion.",
+        });
+      }
+    }
+    for (const taskId of new Set([...this.liveBackgroundTasks.keys(), ...this.backgroundTasks.keys(), ...this.workflows.keys()])) {
+      addBoundedSet(this.terminalTaskIds, taskId, MAX_BACKGROUND_TASK_LIFECYCLE);
+    }
+    this.activityStopped = true;
+    this.sessionActivityState = null;
+    this.activityStartedAt = null;
+    this.backgroundTasks.clear();
+    this.liveBackgroundTasks.clear();
+    this.backgroundTaskOverflow = false;
+    this.scheduledWakeups.clear();
+    this.pendingScheduledWakeupReason = null;
+    this.workflows.clear();
+    this.emitBackgroundTasks();
+    this.emitWorkflows();
   }
 
   /** Feed a parsed JSON event from Claude's stdout. */
-  feed(event: unknown): void {
+  feed(event: unknown): boolean {
     if (!isObj(event) || typeof event.type !== "string") {
       this.onUnknown?.(event);
-      return;
+      return false;
     }
+    // Markers can be added to a replayed frame; apply them BEFORE replay
+    // suppression. Only identities previously observed by this query qualify.
+    if (event.type === "assistant") this.retractMessages(event.supersedes);
+    if (typeof event.uuid === "string" && this.retractedFrames.has(event.uuid)) return false;
+    if (event.type === "assistant" && isObj(event.message) &&
+        typeof event.message.id === "string" &&
+        this.transcript.isReplay(event.message.id, typeof event.parent_tool_use_id === "string" ? event.parent_tool_use_id : "", typeof event.uuid === "string" ? event.uuid : undefined)) return false;
+    if (event.type === "result" && event.parent_tool_use_id) return false;
+    if (event.type === "conversation_reset" && typeof event.new_conversation_id === "string") {
+      const key = typeof event.uuid === "string" ? event.uuid : event.new_conversation_id;
+      if (!this.seenUsageResets.has(key)) {
+        addBoundedSet(this.seenUsageResets, key, 2_000);
+        this.queryUsage.reset();
+        this.usageConversationId = event.new_conversation_id;
+      }
+      return true;
+    }
+    if (event.type === "result" && typeof event.uuid === "string") {
+      if (this.seenResultIds.has(event.uuid)) return false;
+      addBoundedSet(this.seenResultIds, event.uuid, 2_000);
+    }
+    const replayedStream = event.type === "stream_event" && isObj(event.event) &&
+      this.transcript.isStreamReplay(event.event, typeof event.parent_tool_use_id === "string" ? event.parent_tool_use_id : "");
+    const streamActivity = event.type === "stream_event" && isObj(event.event) &&
+      ["message_start", "content_block_start", "content_block_delta"].includes(String(event.event.type));
     // Any non-system event means the API call got through (or the turn
     // settled) — the current retry burst, if any, is over. The next
     // api_retry starts a NEW burst and gets its own notice row.
     if (event.type !== "system") this.retryBurstNoticed = false;
     // Internal loop wake-ups can begin without passing through adapter.prompt.
-    // Any model/user stream beat proves the parent is active and clears a
-    // stale idle+background waiting presentation defensively.
+    // Child output and user/tool-result echoes do not prove the parent resumed.
     if (
-      event.type === "assistant" ||
-      event.type === "user" ||
-      event.type === "stream_event"
+      !this.activityStopped &&
+      !event.parent_tool_use_id &&
+      !replayedStream &&
+      (event.type === "assistant" || streamActivity)
     ) {
-      this.beginTurn();
+      this.resumeActivity();
     }
     switch (event.type) {
       case "system":
@@ -705,71 +856,66 @@ export class ClaudeStreamTranslator {
       default:
         this.onUnknown?.(event);
     }
+    return !replayedStream && (event.type !== "stream_event" || streamActivity);
+  }
+
+  private retractMessages(raw: unknown): void {
+    if (!Array.isArray(raw)) return;
+    const messageIds: string[] = [];
+    const toolCallIds: string[] = [];
+    for (const uuid of raw.slice(0, 4_000)) {
+      if (typeof uuid !== "string" || this.retractedFrames.has(uuid)) continue;
+      const frame = this.nativeFrames.get(uuid);
+      if (!frame) continue;
+      if (this.assistantFailureFrame === uuid) { this.assistantFailure = null; this.assistantFailureFrame = undefined; }
+      addBoundedSet(this.retractedFrames, uuid, 8_000);
+      const retired = this.transcript.retract(uuid);
+      messageIds.push(...retired.messageIds);
+      for (const tool of retired.tools) {
+        const key = JSON.stringify([tool.parent, tool.id]);
+        const state = this.scopedTools.get(key);
+        if (state) { messageIds.push(state.id); addBoundedSet(this.retractedTools, key, 8_000); }
+      }
+      for (const key of frame.resultKeys) {
+        const tool = this.scopedTools.get(key);
+        if (tool?.resultFrameId !== uuid) continue;
+        toolCallIds.push(tool.id);
+        this.scopedTools.set(key, { ...tool, status: "pending", resultFrameId: undefined });
+      }
+    }
+    if (messageIds.length) this.emit({ sessionId: this.sessionId, update: { sessionUpdate: "message_retraction", messageIds } });
+    if (toolCallIds.length) this.emit({ sessionId: this.sessionId, update: { sessionUpdate: "tool_result_retraction", toolCallIds } });
+  }
+
+  private rememberFrame(event: ClaudeMessageEvent): void {
+    if (event.uuid && !this.nativeFrames.has(event.uuid))
+      setBoundedMap(this.nativeFrames, event.uuid, { parent: event.parent_tool_use_id ?? "", startedAt: this.modelTurnStartedAt, resultKeys: new Set() }, 4_000);
+    if (event.request_id) {
+      if (!this.requestStarts.has(event.request_id)) setBoundedMap(this.requestStarts, event.request_id, this.modelTurnStartedAt, 4_000);
+      const parent = event.parent_tool_use_id ?? "";
+      const previous = this.requestParents.get(event.request_id);
+      setBoundedMap(this.requestParents, event.request_id, previous === undefined || previous === parent ? parent : null, 4_000);
+    }
   }
 
   // ── Partial stream deltas (token-by-token) ──────────────
   //
-  // Only active with `includePartialMessages: true`. We emit text/thinking
-  // deltas under the SAME messageId machinery the full-message path uses,
-  // so the renderer coalesces them into one growing bubble. The matching
-  // full blocks of the final `assistant` message are then skipped (see
-  // onAssistant) to avoid rendering the content twice.
+  // Only active with `includePartialMessages: true`. Native message ids and
+  // block indices keep partials and completed snapshots on the same row.
+  // Full assistant blocks reconcile the row, including corrected text.
   private onStreamEvent(event: ClaudeStreamEvent): void {
-    if (!this.streamPartials) return;
-    const ev = event.event;
-    if (!ev || ev.type !== "content_block_delta" || !ev.delta) return;
-
-    // Subagent deltas carry parent_tool_use_id — route them into the parent
-    // SubagentCard rather than the top-level transcript (mirrors onAssistant).
-    const claudeParentId = event.parent_tool_use_id ?? undefined;
-    const parentToolId = claudeParentId
-      ? this.toolCallIds.get(claudeParentId)
-      : undefined;
-
-    const d = ev.delta;
     if (
-      d.type === "text_delta" &&
-      typeof d.text === "string" &&
-      d.text.length > 0
-    ) {
-      if (!this.currentAssistantMessageId) {
-        this.currentAssistantMessageId = randomUUID();
-        this.emittedAssistantText = "";
-      }
-      // Grow the accumulator on BOTH paths: onAssistant's dedup branch
-      // compares the final full text block against it, which is what lets
-      // a streamed message add nothing while a SYNTHETIC no-delta message
-      // (e.g. the /compact failure text) still renders (2026-07-12 fix —
-      // the old streamPartials skip swallowed synthetics entirely).
-      this.emittedAssistantText += d.text;
-      this.emit({
-        sessionId: this.sessionId,
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: d.text } as ContentBlock,
-          messageId: this.currentAssistantMessageId,
-          ...(parentToolId ? { parentToolId } : {}),
-        },
-      });
-    } else if (
-      d.type === "thinking_delta" &&
-      typeof d.thinking === "string" &&
-      d.thinking.length > 0
-    ) {
-      if (!this.currentAssistantMessageId) {
-        this.currentAssistantMessageId = randomUUID();
-        this.emittedAssistantText = "";
-      }
-      this.emit({
-        sessionId: this.sessionId,
-        update: {
-          sessionUpdate: "agent_thought_chunk",
-          content: { type: "text", text: d.thinking } as ContentBlock,
-          messageId: this.currentAssistantMessageId,
-          ...(parentToolId ? { parentToolId } : {}),
-        },
-      });
+      !event.parent_tool_use_id &&
+      event.event?.type === "message_delta" &&
+      !this.transcript.isStreamReplay(event.event, "")
+    )
+      this.parkBackgroundReply(event.event.delta?.stop_reason);
+    if (!this.streamPartials || !event.event) return;
+    const parent = event.parent_tool_use_id ?? "";
+    if (!this.transcript.isStreamReplay(event.event, parent) && event.event.type === "content_block_start" && event.event.content_block?.type === "tool_use") {
+      this.onAssistantTool(event.event.content_block, parent || undefined, this.toolCallIds.get(parent), true);
     }
+    this.transcript.stream(event.event, parent, this.toolCallIds.get(parent));
   }
 
   /** Retrieve the last terminal reason the translator saw. Defaults
@@ -809,6 +955,12 @@ export class ClaudeStreamTranslator {
     return this.terminalErrorMsg;
   }
 
+  get terminalFailure(): { message: string; code?: string } | null {
+    return this.terminalErrorMsg
+      ? { message: this.terminalErrorMsg, code: this.terminalErrorCode }
+      : null;
+  }
+
   /** Per-turn token/cost usage for LLM analytics. */
   get turnUsage(): TurnUsage | undefined {
     return this.currentTurnUsage;
@@ -817,33 +969,12 @@ export class ClaudeStreamTranslator {
   // ── System init ─────────────────────────────────────────
   private onSystem(event: ClaudeSystemEvent): void {
     if (event.subtype === "init" && typeof event.session_id === "string") {
+      if (this.usageConversationId && this.usageConversationId !== event.session_id) this.queryUsage.reset();
+      this.usageConversationId = event.session_id;
       this.claudeSessionId = event.session_id;
     }
     if (event.subtype === "init" && typeof event.model === "string") {
       this.currentModel = event.model;
-    }
-    if (event.subtype === "init") {
-      // Agent SDK background membership is process-local. A query restart has
-      // no startup snapshot, so an explicit empty replace prevents stale tasks
-      // from surviving a reconnect in the renderer.
-      this.backgroundTasks.clear();
-      this.backgroundTaskMetadata.clear();
-      this.toolInputs.clear();
-      this.scheduledWakeups.clear();
-      this.pendingScheduledWakeupReason = null;
-      this.taskStartedIds.clear();
-      this.observedBackgroundTaskIds.clear();
-      this.taskRecordIds.clear();
-      this.settledTaskRecords.clear();
-      this.skippedTaskRecords.clear();
-      this.notifiedTaskIds.clear();
-      this.terminalTaskIds.clear();
-      this.pausedTaskIds.clear();
-      this.sessionActivityState = null;
-      this.emitBackgroundTasks();
-      this.workflows.clear();
-      this.workflowNarration.clear();
-      this.emitWorkflows();
     }
     if (event.subtype === "task_started") this.onTaskStarted(event);
     if (event.subtype === "background_tasks_changed") {
@@ -854,7 +985,7 @@ export class ClaudeStreamTranslator {
     if (event.subtype === "task_notification") {
       this.onTaskNotification(event);
     }
-    if (event.subtype === "session_state_changed" && event.state) {
+    if (event.subtype === "session_state_changed" && event.state && !this.activityStopped) {
       this.sessionActivityState = event.state;
       this.emitBackgroundTasks();
     }
@@ -936,20 +1067,34 @@ export class ClaudeStreamTranslator {
         });
       }
     }
-    // `model_refusal_fallback`: the SDK retried a refused turn on
-    // the fallback model and made the swap persistent for the session. The
-    // structured sibling of the silent overload swap (detected per-message in
-    // onAssistant) — both surface the same "Model switched" record.
+    // The explicit native scope outranks model-name differences. Local
+    // subagent/side-question fallbacks never change the parent selection.
     if ((event as { subtype?: string }).subtype === "model_refusal_fallback") {
       const ev = event as unknown as {
         original_model?: string;
         fallback_model?: string;
+        uuid?: string;
+        scope?: string;
+        request_id?: string;
+        retracted_message_uuids?: string[];
       };
+      this.retractMessages(ev.retracted_message_uuids);
+      const retractedIds = Array.isArray(ev.retracted_message_uuids) ? ev.retracted_message_uuids.slice(0, 4_000) : [];
+      const candidates = new Set(retractedIds.flatMap((id) => {
+        const frame = this.nativeFrames.get(id); return frame ? [frame.parent] : [];
+      }));
+      const nativeParent = ev.scope === "local"
+        ? (ev.request_id ? this.requestParents.get(ev.request_id) : undefined) ?? (candidates.size === 1 ? [...candidates][0] : undefined)
+        : undefined;
       this.emitModelSwitched({
         fromModel:
-          typeof ev.original_model === "string" ? ev.original_model : null,
+          typeof ev.original_model === "string" && ev.original_model.length <= 200 ? ev.original_model : null,
         toModel: typeof ev.fallback_model === "string" ? ev.fallback_model : "",
         reason: "refusal",
+        scope: ev.scope === undefined || ev.scope === "session" ? "session" : "local",
+        noticeId: (ev.request_id ? this.inferredFallbacks.get(ev.request_id) : undefined) ?? (typeof ev.uuid === "string" ? ev.uuid : undefined),
+        nativeParent: nativeParent || undefined,
+        turnStartedAt: (ev.request_id ? this.requestStarts.get(ev.request_id) : undefined) ?? this.modelTurnStartedAt,
       });
     }
     // `local_command_output` — a slash command's textual output (e.g.
@@ -967,8 +1112,7 @@ export class ClaudeStreamTranslator {
           },
         });
         // Its own bubble — the next streamed text starts fresh.
-        this.currentAssistantMessageId = null;
-        this.emittedAssistantText = "";
+        this.transcript.boundary();
       }
     }
     // Nothing else to emit to the UI — the init event is just bookkeeping.
@@ -992,27 +1136,35 @@ export class ClaudeStreamTranslator {
       ...scheduled,
     ];
     const waiting = this.sessionActivityState === "idle" && tasks.length > 0;
+    const activity = this.activityStartedAt !== null && this.sessionActivityState
+      ? { state: this.sessionActivityState, startedAt: this.activityStartedAt }
+      : null;
     if (
       this.lastEmittedBackgroundTasks &&
       this.lastEmittedBackgroundTasks.waiting === waiting &&
+      this.lastEmittedBackgroundTasks.activity?.state === activity?.state &&
+      this.lastEmittedBackgroundTasks.activity?.startedAt === activity?.startedAt &&
       sameBackgroundTaskList(this.lastEmittedBackgroundTasks.tasks, tasks)
     ) {
       return;
     }
-    this.lastEmittedBackgroundTasks = { tasks, waiting };
+    this.lastEmittedBackgroundTasks = { tasks, waiting, activity };
     this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "background_tasks_update",
         tasks,
         waiting,
+        ...(activity || this.activityStopped ? { activity } : {}),
       },
     });
   }
 
   /** Emit one authoritative, bounded replacement of foreground workflows. */
   private emitWorkflows(): void {
-    const workflows = [...this.workflows.values()].slice(
+    const workflows = [...this.workflows.values()].filter(
+      (workflow) => !this.ambientTaskIds.has(workflow.taskId),
+    ).slice(
       0,
       MAX_ACTIVE_BACKGROUND_TASKS,
     );
@@ -1030,7 +1182,38 @@ export class ClaudeStreamTranslator {
   }
 
   private onTaskStarted(event: ClaudeSystemEvent): void {
-    if (!event.task_id) return;
+    if (!event.task_id || this.activityStopped) return;
+    const agentToolId =
+      event.tool_use_id && this.toolCallIds.get(event.tool_use_id);
+    if (
+      agentToolId &&
+      event.task_type === "local_agent" &&
+      !this.agentTasks.has(event.task_id)
+    ) {
+      setBoundedMap(
+        this.agentTasks,
+        event.task_id,
+        { toolCallId: agentToolId, status: "in_progress" },
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    const priorEnd = this.agentTaskEnds.get(event.task_id);
+    if (priorEnd)
+      this.settleAgentTask(event.task_id, priorEnd.status, priorEnd.error);
+    if (this.terminalTaskIds.has(event.task_id)) return;
+    addBoundedSet(this.taskStartedIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
+    if (event.skip_transcript) addBoundedSet(this.skippedTaskRecords, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
+    const ambient = this.taskIsAmbient(event);
+    if (!this.hasBackgroundTaskSnapshot && (ambient || event.is_backgrounded)) {
+      this.trackBackgroundOwnership(event.task_id, ambient);
+    }
+    if (ambient) {
+      addBoundedSet(this.ambientTaskIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
+      this.backgroundTasks.delete(event.task_id);
+      this.emitBackgroundTasks();
+      if (this.workflows.has(event.task_id)) this.emitWorkflows();
+      return;
+    }
     if (event.task_type === "local_workflow") {
       const now = Date.now();
       const previous = this.workflows.get(event.task_id);
@@ -1101,29 +1284,18 @@ export class ClaudeStreamTranslator {
       metadata,
       MAX_BACKGROUND_TASK_LIFECYCLE,
     );
-    addBoundedSet(
-      this.taskStartedIds,
-      event.task_id,
-      MAX_BACKGROUND_TASK_LIFECYCLE,
-    );
-    if (event.skip_transcript) {
-      addBoundedSet(
-        this.skippedTaskRecords,
-        event.task_id,
-        MAX_BACKGROUND_TASK_LIFECYCLE,
-      );
-    }
-    if (previous) {
+    if (previous || (event.is_backgrounded && this.acceptsBackgroundEdge(event.task_id))) {
       const candidate = {
         ...previous,
         ...metadata,
-        startedAt: previous.startedAt,
+        startedAt: previous?.startedAt ?? metadata.startedAt,
         updatedAt: now,
       };
-      const activeTask = sameBackgroundTaskContents(previous, candidate)
+      const activeTask = previous && sameBackgroundTaskContents(previous, candidate)
         ? previous
         : candidate;
-      this.backgroundTasks.set(event.task_id, activeTask);
+      setBoundedMap(this.backgroundTasks, event.task_id, activeTask, MAX_ACTIVE_BACKGROUND_TASKS);
+      addBoundedSet(this.observedBackgroundTaskIds, event.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
       this.emitBackgroundTasks();
       if (!event.skip_transcript) {
         this.ensureBackgroundTaskRecord(event.task_id, activeTask);
@@ -1138,14 +1310,14 @@ export class ClaudeStreamTranslator {
     taskId: string,
     task: BackgroundTask,
   ): void {
-    if (this.skippedTaskRecords.has(taskId) || this.taskRecordIds.has(taskId)) {
+    if (this.skippedTaskRecords.has(taskId) || this.taskRecords.has(taskId)) {
       return;
     }
     const toolCallId = `background-task-${randomUUID()}`;
     setBoundedMap(
-      this.taskRecordIds,
+      this.taskRecords,
       taskId,
-      toolCallId,
+      { toolCallId },
       MAX_BACKGROUND_TASK_LIFECYCLE,
     );
     this.emit({
@@ -1167,15 +1339,26 @@ export class ClaudeStreamTranslator {
   }
 
   private onBackgroundTasksChanged(event: ClaudeSystemEvent): void {
+    if (this.activityStopped || !Array.isArray(event.tasks)) return;
     const now = Date.now();
     const next = new Map<string, BackgroundTask>();
-    for (const incoming of (event.tasks ?? []).slice(
-      0,
-      MAX_ACTIVE_BACKGROUND_TASKS,
-    )) {
-      if (!incoming.task_id || this.terminalTaskIds.has(incoming.task_id)) {
+    this.liveBackgroundTasks.clear();
+    this.backgroundTaskOverflow = false;
+    this.hasBackgroundTaskSnapshot = true;
+    for (const incoming of event.tasks) {
+      if (!incoming || typeof incoming.task_id !== "string" || !incoming.task_id || this.terminalTaskIds.has(incoming.task_id)) {
         continue;
       }
+      const ambient = incoming.ambient === true ||
+        (incoming.ambient == null && this.skippedTaskRecords.has(incoming.task_id));
+      this.trackBackgroundOwnership(incoming.task_id, ambient);
+      if (ambient) {
+        addBoundedSet(this.ambientTaskIds, incoming.task_id, MAX_BACKGROUND_TASK_LIFECYCLE);
+        continue;
+      }
+      // Membership is authoritative, including an ambient flag changing back.
+      this.ambientTaskIds.delete(incoming.task_id);
+      if (next.size >= MAX_ACTIVE_BACKGROUND_TASKS && !next.has(incoming.task_id)) continue;
       const previous = this.backgroundTasks.get(incoming.task_id);
       const metadata = this.backgroundTaskMetadata.get(incoming.task_id);
       const candidate: BackgroundTask = {
@@ -1226,10 +1409,58 @@ export class ClaudeStreamTranslator {
     this.backgroundTasks.clear();
     for (const [taskId, task] of next) this.backgroundTasks.set(taskId, task);
     this.emitBackgroundTasks();
+    if (this.workflows.size > 0) this.emitWorkflows();
+  }
+
+  private trackBackgroundOwnership(taskId: string, ambient: boolean): void {
+    if (this.liveBackgroundTasks.size >= MAX_BACKGROUND_TASK_LIFECYCLE && !this.liveBackgroundTasks.has(taskId)) {
+      this.backgroundTaskOverflow = true;
+      return;
+    }
+    this.liveBackgroundTasks.set(taskId, ambient);
+  }
+
+  private acceptsBackgroundEdge(taskId: string): boolean {
+    return !this.hasBackgroundTaskSnapshot || this.liveBackgroundTasks.has(taskId) || this.backgroundTasks.has(taskId);
+  }
+
+  private taskIsAmbient(event: ClaudeSystemEvent): boolean {
+    if (this.hasBackgroundTaskSnapshot && event.task_id && this.liveBackgroundTasks.has(event.task_id)) {
+      return this.liveBackgroundTasks.get(event.task_id)!;
+    }
+    return event.ambient === true || event.skip_transcript === true ||
+      (event.task_id !== undefined && this.ambientTaskIds.has(event.task_id));
+  }
+
+  /** Hidden work still has a terminal lifecycle; omitting its row must not
+   * omit cleanup or allow a late membership frame to resurrect it. */
+  private endAmbientTask(event: ClaudeSystemEvent): void {
+    const taskId = event.task_id!;
+    this.liveBackgroundTasks.delete(taskId);
+    this.backgroundTaskMetadata.delete(taskId);
+    this.pausedTaskIds.delete(taskId);
+    addBoundedSet(this.terminalTaskIds, taskId, MAX_BACKGROUND_TASK_LIFECYCLE);
+    const failed = event.status === "failed" || event.status === "stopped" ||
+      event.patch?.status === "failed" || event.patch?.status === "killed";
+    this.settleAgentTask(taskId, failed ? "failed" : "completed", event.patch?.error);
+    // If this task was visible before becoming ambient, settle its existing
+    // row. Never create an inline row for work that was always hidden.
+    if (this.taskRecords.has(taskId)) {
+      this.settleTaskRecord(taskId, {
+        status: failed ? "failed" : "completed",
+        providerStatus: event.status ?? event.patch?.status,
+        summary: event.summary,
+        outputFile: event.output_file,
+        durationMs: event.usage?.duration_ms,
+        error: event.patch?.error,
+      });
+    }
+    if (this.backgroundTasks.delete(taskId)) this.emitBackgroundTasks();
+    if (this.workflows.delete(taskId)) this.emitWorkflows();
   }
 
   private onTaskProgress(event: ClaudeSystemEvent): void {
-    if (!event.task_id) return;
+    if (!event.task_id || this.activityStopped || this.ambientTaskIds.has(event.task_id)) return;
     if (Array.isArray(event.workflow_progress)) {
       this.onWorkflowProgress(event);
     }
@@ -1415,13 +1646,17 @@ export class ClaudeStreamTranslator {
   }
 
   private onTaskUpdated(event: ClaudeSystemEvent): void {
-    if (!event.task_id) return;
+    if (!event.task_id || this.activityStopped) return;
     // Level and edge ordering is unspecified. Once either terminal bookend has
     // won, no later task_updated edge may mutate or reopen that lifecycle.
     if (this.terminalTaskIds.has(event.task_id)) return;
     const status = event.patch?.status;
     const terminal =
       status === "completed" || status === "failed" || status === "killed";
+    if (this.taskIsAmbient(event)) {
+      if (terminal) this.endAmbientTask(event);
+      return;
+    }
     if (status === "paused") {
       addBoundedSet(
         this.pausedTaskIds,
@@ -1460,10 +1695,11 @@ export class ClaudeStreamTranslator {
       : undefined;
     const wasBackground =
       !!previous ||
-      this.taskRecordIds.has(event.task_id) ||
+      this.taskRecords.has(event.task_id) ||
       this.observedBackgroundTaskIds.has(event.task_id) ||
       explicitlyBackgrounded;
-    if (explicitlyBackgrounded && !terminal && !previous && transitionTask) {
+    if (explicitlyBackgrounded && !terminal && !previous && transitionTask && this.acceptsBackgroundEdge(event.task_id)) {
+      if (!this.hasBackgroundTaskSnapshot) this.trackBackgroundOwnership(event.task_id, false);
       this.backgroundTasks.set(event.task_id, transitionTask);
       setBoundedMap(
         this.backgroundTaskMetadata,
@@ -1500,10 +1736,16 @@ export class ClaudeStreamTranslator {
       );
     }
     if (terminal || event.patch?.is_backgrounded === false) {
+      this.liveBackgroundTasks.delete(event.task_id);
       if (this.backgroundTasks.delete(event.task_id))
         this.emitBackgroundTasks();
     }
     if (terminal) {
+      this.settleAgentTask(
+        event.task_id,
+        status === "failed" || status === "killed" ? "failed" : "completed",
+        event.patch?.error,
+      );
       addBoundedSet(
         this.terminalTaskIds,
         event.task_id,
@@ -1551,7 +1793,9 @@ export class ClaudeStreamTranslator {
             ? "failed"
             : providerStatus === "killed"
               ? "killed"
-              : "running";
+              : providerStatus == null
+                ? (previous?.status ?? (this.pausedTaskIds.has(event.task_id) ? "paused" : "running"))
+                : "running";
     // This run is over: release its narrator fingerprints so a later workflow
     // (including one that re-uses this task id) narrates from scratch. The
     // snapshot itself stays until the turn boundary for its final counts.
@@ -1589,6 +1833,34 @@ export class ClaudeStreamTranslator {
 
   private onTaskNotification(event: ClaudeSystemEvent): void {
     if (!event.task_id) return;
+    if (this.taskIsAmbient(event)) {
+      this.endAmbientTask(event);
+      return;
+    }
+    const agentToolId =
+      event.tool_use_id && this.toolCallIds.get(event.tool_use_id);
+    const agentTool =
+      event.tool_use_id && this.toolInputs.get(event.tool_use_id);
+    if (
+      agentToolId &&
+      agentTool &&
+      /^(Agent|Task)$/i.test(agentTool.name) &&
+      !this.agentTasks.has(event.task_id)
+    ) {
+      setBoundedMap(
+        this.agentTasks,
+        event.task_id,
+        { toolCallId: agentToolId, status: "in_progress" },
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    this.settleAgentTask(
+      event.task_id,
+      event.status === "failed" || event.status === "stopped"
+        ? "failed"
+        : "completed",
+      event.status === "completed" ? undefined : event.summary,
+    );
     if (this.workflows.has(event.task_id)) {
       this.onWorkflowTaskUpdated({
         ...event,
@@ -1610,7 +1882,7 @@ export class ClaudeStreamTranslator {
     const task = activeTask ?? this.backgroundTaskMetadata.get(event.task_id);
     const wasBackground =
       !!activeTask ||
-      this.taskRecordIds.has(event.task_id) ||
+      this.taskRecords.has(event.task_id) ||
       this.observedBackgroundTaskIds.has(event.task_id);
     addBoundedSet(
       this.terminalTaskIds,
@@ -1618,6 +1890,7 @@ export class ClaudeStreamTranslator {
       MAX_BACKGROUND_TASK_LIFECYCLE,
     );
     this.pausedTaskIds.delete(event.task_id);
+    this.liveBackgroundTasks.delete(event.task_id);
     this.backgroundTaskMetadata.delete(event.task_id);
     if (this.backgroundTasks.delete(event.task_id)) this.emitBackgroundTasks();
     if (event.skip_transcript || this.skippedTaskRecords.has(event.task_id)) {
@@ -1655,6 +1928,45 @@ export class ClaudeStreamTranslator {
     );
   }
 
+  private settleAgentTask(
+    taskId: string,
+    status: "completed" | "failed",
+    error?: string,
+  ): void {
+    if (this.agentTaskEnds.get(taskId)?.status !== "failed") {
+      setBoundedMap(
+        this.agentTaskEnds,
+        taskId,
+        { status, error },
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
+    }
+    const agent = this.agentTasks.get(taskId);
+    if (!agent || agent.status === "failed" || agent.status === status) return;
+    agent.status = status;
+    agent.error = error;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: agent.toolCallId,
+        status,
+        rawOutput: {
+          status,
+          ...(agent.model ? { resolvedModel: agent.model } : {}),
+          ...(error ? { message: error } : {}),
+        },
+        ...(error
+          ? {
+              content: [
+                { type: "content", content: { type: "text", text: error } },
+              ],
+            }
+          : {}),
+      },
+    });
+  }
+
   private settleTaskRecord(
     taskId: string,
     result: {
@@ -1667,10 +1979,16 @@ export class ClaudeStreamTranslator {
     },
     task?: BackgroundTask,
   ): void {
-    const previousSettlement = this.settledTaskRecords.get(taskId);
+    const existing = this.taskRecords.get(taskId);
+    const previousSettlement = existing?.settlement;
+    // Late success may enrich a stopped/failed row's output, never turn it
+    // green after the owning activity was explicitly ended.
+    const status = previousSettlement?.status === "failed" ? "failed" : result.status;
     const rawOutput = {
       ...previousSettlement?.rawOutput,
-      status: result.providerStatus ?? result.status,
+      status: previousSettlement?.status === "failed"
+        ? previousSettlement.rawOutput.status
+        : (result.providerStatus ?? result.status),
       ...(result.summary ? { summary: result.summary } : {}),
       ...(result.error ? { error: result.error } : {}),
       ...(result.outputFile ? { outputFile: result.outputFile } : {}),
@@ -1679,10 +1997,9 @@ export class ClaudeStreamTranslator {
         : {}),
     };
     const settlement: SettledTaskRecord = {
-      status: result.status,
+      status,
       rawOutput,
     };
-    const existing = this.taskRecordIds.get(taskId);
     if (
       existing &&
       previousSettlement &&
@@ -1690,33 +2007,22 @@ export class ClaudeStreamTranslator {
     ) {
       return;
     }
-    setBoundedMap(
-      this.settledTaskRecords,
-      taskId,
-      settlement,
-      MAX_BACKGROUND_TASK_LIFECYCLE,
-    );
+    const toolCallId = existing?.toolCallId ?? `background-task-${randomUUID()}`;
+    setBoundedMap(this.taskRecords, taskId, { toolCallId, settlement }, MAX_BACKGROUND_TASK_LIFECYCLE);
     if (existing) {
       this.emit({
         sessionId: this.sessionId,
         update: {
           sessionUpdate: "tool_call_update",
-          toolCallId: existing,
+          toolCallId,
           title: "Background Task",
           kind: "background_task",
-          status: result.status,
+          status,
           rawOutput,
         },
       });
       return;
     }
-    const toolCallId = `background-task-${randomUUID()}`;
-    setBoundedMap(
-      this.taskRecordIds,
-      taskId,
-      toolCallId,
-      MAX_BACKGROUND_TASK_LIFECYCLE,
-    );
     this.emit({
       sessionId: this.sessionId,
       update: {
@@ -1724,7 +2030,7 @@ export class ClaudeStreamTranslator {
         toolCallId,
         title: "Background Task",
         kind: "background_task",
-        status: result.status,
+        status,
         rawInput: {
           taskId,
           name: task?.name ?? `Task ${taskId}`,
@@ -1797,29 +2103,32 @@ export class ClaudeStreamTranslator {
     }
   }
 
-  /** One durable "Model switched" transcript record (the FALLBACK
-   *  card). Collapsible tool call, same recipe as the "User input" card; the
-   *  renderer builds the detail copy from rawInput. Deduped per turn. */
+  /** Plain provider narration, keyed by native notice/request identity. A
+   * later explicit notice can refine an inferred fallback in the same row. */
   private emitModelSwitched(info: {
     fromModel: string | null;
     toModel: string;
     reason: "overloaded" | "refusal";
+    scope?: "local" | "session";
+    noticeId?: string;
+    nativeParent?: string;
+    turnStartedAt?: number;
   }): void {
-    if (this.fallbackNoticedThisTurn) return;
-    this.fallbackNoticedThisTurn = true;
+    if (!info.toModel.trim() || info.toModel.length > 200 || (/\s/.test(info.toModel) || [...info.toModel].some((char) => char.charCodeAt(0) < 32))) return;
+    const signature = JSON.stringify([info.fromModel, info.toModel, info.scope ?? "local", info.reason, info.nativeParent]);
+    const noticeId = info.noticeId ?? `legacy-${this.sessionId}-${this.fallbackGeneration}-${signature}`;
+    if (this.fallbackNotices.get(noticeId) === signature) return;
+    setBoundedMap(this.fallbackNotices, noticeId, signature, 4_000);
+    if (!info.nativeParent && (info.scope !== "local" || info.reason === "overloaded")) this.fallbackNoticedThisTurn = true;
+    const parentToolId = info.nativeParent ? this.toolCallIds.get(info.nativeParent) : undefined;
+    if (info.nativeParent && !parentToolId) this.transcript.trackParent(info.nativeParent, `model-fallback-${noticeId}`);
     this.emit({
       sessionId: this.sessionId,
       update: {
-        sessionUpdate: "tool_call",
-        toolCallId: `model-switch-${randomUUID()}`,
-        title: "Model switched",
-        kind: "model_switch",
-        status: "completed",
-        rawInput: {
-          ...(info.fromModel ? { fromModel: info.fromModel } : {}),
-          toModel: info.toModel,
-          reason: info.reason,
-        },
+        sessionUpdate: "model_fallback", noticeId, provider: "claude",
+        fromModel: info.fromModel, toModel: info.toModel, reason: info.reason,
+        scope: info.scope ?? "local", ...(parentToolId ? { parentToolId } : {}),
+        turnStartedAt: info.turnStartedAt ?? this.modelTurnStartedAt,
       },
     });
   }
@@ -1842,10 +2151,14 @@ export class ClaudeStreamTranslator {
     // so "claude-opus-4-8[1m]" matches "claude-opus-4-8-20260115".
     const prefix = expected.replace(/\[1m\]$/i, "");
     if (actual === expected || actual.startsWith(prefix)) return;
+    const noticeId = event.request_id ? `request-${event.request_id}` : undefined;
+    if (event.request_id && noticeId) setBoundedMap(this.inferredFallbacks, event.request_id, noticeId, 4_000);
     this.emitModelSwitched({
       fromModel: expected,
       toModel: actual,
       reason: "overloaded",
+      scope: "local",
+      noticeId,
     });
   }
 
@@ -1898,11 +2211,11 @@ export class ClaudeStreamTranslator {
   // replay (history.ts) still renders prior user prompts for a cold
   // import; the LIVE stream must not.
   private onUser(event: ClaudeMessageEvent): void {
+    this.rememberFrame(event);
     // A user event ends the previous assistant message logically — the
     // next assistant chunk should start a fresh bubble even if it's
     // text-only (e.g. tool result → assistant continues with more text).
-    this.currentAssistantMessageId = null;
-    this.emittedAssistantText = "";
+    this.transcript.boundary(event.parent_tool_use_id ?? "");
 
     // `message.content` can be a plain STRING, not a block array — the SDK
     // emits string-content user messages (e.g. the continuation summary it
@@ -1933,6 +2246,7 @@ export class ClaudeStreamTranslator {
     for (const b of blocks) {
       if (b.type !== "tool_result") continue;
       const tool = b as unknown as ClaudeToolResultBlock;
+      if (typeof tool.tool_use_id !== "string" || !tool.tool_use_id) continue;
       const nativeTool = this.toolInputs.get(tool.tool_use_id);
       const structuredTaskOutput =
         resultCount === 1 &&
@@ -1962,19 +2276,121 @@ export class ClaudeStreamTranslator {
         this.suppressedToolUseIds.delete(tool.tool_use_id);
         continue;
       }
-      const toolCallId =
-        this.toolCallIds.get(tool.tool_use_id) ?? tool.tool_use_id;
-      const content = toolResultContent(tool);
+      const key = JSON.stringify([event.parent_tool_use_id ?? "", tool.tool_use_id]);
+      if (this.retractedTools.has(key)) continue;
+      const previous = this.scopedTools.get(key);
+      const agentResult =
+        resultCount === 1 &&
+        /^(Agent|Task)$/i.test(nativeTool?.name ?? "") &&
+        isObj(event.tool_use_result)
+          ? event.tool_use_result
+          : null;
+      const asyncAgent =
+        !tool.is_error &&
+        agentResult?.status === "async_launched" &&
+        typeof agentResult.agentId === "string";
+      if (
+        previous?.status === "failed" ||
+        (previous?.status === "completed" && !tool.is_error && !agentResult)
+      )
+        continue;
+      const toolCallId = previous?.id ?? randomUUID();
+      const knownAgent = asyncAgent
+        ? this.agentTasks.get(agentResult.agentId as string)
+        : undefined;
+      const endedAgent = asyncAgent
+        ? this.agentTaskEnds.get(agentResult.agentId as string)
+        : undefined;
+      const agent = endedAgent
+        ? { ...knownAgent, ...endedAgent, toolCallId }
+        : knownAgent;
+      const status = tool.is_error
+        ? "failed"
+        : asyncAgent
+          ? (agent?.status ?? "in_progress")
+          : "completed";
+      if (asyncAgent)
+        setBoundedMap(
+          this.agentTasks,
+          agentResult.agentId as string,
+          {
+            ...agent,
+            toolCallId,
+            status,
+            ...(typeof agentResult.resolvedModel === "string"
+              ? { model: agentResult.resolvedModel }
+              : {}),
+          },
+          MAX_BACKGROUND_TASK_LIFECYCLE,
+        );
+      setBoundedMap(
+        this.scopedTools,
+        key,
+        {
+          id: toolCallId,
+          announced: previous?.announced ?? false,
+          inputComplete: previous?.inputComplete,
+          resultFrameId: event.uuid,
+          status,
+        },
+        4_000,
+      );
+      if (event.uuid) this.nativeFrames.get(event.uuid)?.resultKeys.add(key);
+      if (!event.parent_tool_use_id || !this.toolCallIds.has(tool.tool_use_id))
+        this.toolCallIds.set(tool.tool_use_id, toolCallId);
+      const content =
+        !tool.is_error &&
+        agentResult?.status === "completed" &&
+        Array.isArray(agentResult.content)
+          ? agentResult.content.flatMap((block) =>
+              isObj(block) &&
+              block.type === "text" &&
+              typeof block.text === "string"
+                ? [
+                    {
+                      type: "content" as const,
+                      content: { type: "text" as const, text: block.text },
+                    },
+                  ]
+                : [],
+            )
+          : toolResultContent(tool);
+      if (
+        event.parent_tool_use_id &&
+        !this.toolCallIds.has(event.parent_tool_use_id)
+      )
+        this.transcript.trackParent(event.parent_tool_use_id, toolCallId);
       this.emit({
         sessionId: this.sessionId,
         update: {
-          sessionUpdate: "tool_call_update",
+          ...(previous ? { sessionUpdate: "tool_call_update" as const } : { sessionUpdate: "tool_call" as const, title: "Tool", kind: "other" as const, nativeToolCallId: tool.tool_use_id, ...(event.parent_tool_use_id && this.toolCallIds.get(event.parent_tool_use_id) ? { parentToolId: this.toolCallIds.get(event.parent_tool_use_id) } : {}) }),
           toolCallId,
-          status: tool.is_error ? "failed" : "completed",
+          status,
           rawOutput: structuredPatch
             ? { structuredPatch }
-            : (structuredTaskOutput ?? tool.content),
-          content: content.length > 0 ? content : null,
+            : agentResult
+              ? {
+                  ...agentResult,
+                  status:
+                    asyncAgent && status !== "in_progress"
+                      ? status
+                      : agentResult.status,
+                  ...(typeof agentResult.resolvedModel === "string"
+                    ? { resolvedModel: agentResult.resolvedModel }
+                    : {}),
+                  ...(agent?.error ? { message: agent.error } : {}),
+                }
+              : (structuredTaskOutput ?? tool.content),
+          content: agent?.error
+            ? [
+                {
+                  type: "content",
+                  content: { type: "text", text: agent.error },
+                },
+              ]
+            : !asyncAgent && content.length > 0
+              ? content
+              : null,
         },
       });
     }
@@ -1982,10 +2398,19 @@ export class ClaudeStreamTranslator {
 
   // ── Assistant turn (thinking, text, tool_use) ───────────
   private onAssistant(event: ClaudeMessageEvent): void {
+    this.rememberFrame(event);
     // Same string-content guard as onUser — never trust `content` to be an
     // array (a string would crash `.every`/iteration below).
     const rawContent = event.message?.content;
     const blocks = Array.isArray(rawContent) ? rawContent : [];
+    // Only the parent's synthetic SDK error can classify its final result.
+    // Child tool errors and an earlier recovered attempt must not poison it.
+    if (!event.parent_tool_use_id) {
+      this.assistantFailureFrame = event.error ? event.uuid : undefined;
+      this.assistantFailure = event.error
+        ? { code: event.error, message: blocks.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n") }
+        : null;
+    }
     // When Claude routes a Task subagent's emissions
     // through the parent stream, every event in this assistant chunk
     // is stamped with `parent_tool_use_id` pointing at the Task tool's
@@ -2002,182 +2427,106 @@ export class ClaudeStreamTranslator {
     // happened, ahead of the fallback model's own output.
     this.maybeNoticeFallback(event, claudeParentId ?? parentToolId);
 
-    // Only the SDK adapter (claude-sdk/adapter.ts) constructs this
-    // translator, always with streamPartials:true. Under that path text
-    // and thinking already streamed token-by-token via onStreamEvent, so
-    // this full assistant event is consumed mainly for tool_use blocks
-    // (text/thinking are skipped just below). We still share one messageId
-    // across consecutive text-only assistant events — a single turn can
-    // surface as several text/thinking blocks — and rotate it whenever a
-    // boundary fires (tool_use seen here, or onUser / onResult elsewhere).
-    //
-    // The legacy non-streamPartials path (no live caller today) instead
-    // rendered the full block here and used the emittedAssistantText dedup
-    // branch below to fold a repeated final full-text event into one bubble.
-    //
-    // `redacted_thinking` counts as non-boundary too: Anthropic interleaves
-    // it WITH the plaintext `thinking` of the same reasoning block. Under
-    // partial streaming the plaintext already streamed under the current id;
-    // if redacted_thinking rotated the id, the redacted sentinel would land
-    // in a SEPARATE thought bubble instead of coalescing onto (and flagging)
-    // the streamed one. Only a real `tool_use` should rotate.
-    const isInlineReasoningOrText = blocks.every(
-      (b) =>
-        b.type === "text" ||
-        b.type === "thinking" ||
-        b.type === "redacted_thinking",
+    this.transcript.complete(
+      event.message?.id,
+      blocks,
+      claudeParentId ?? "",
+      parentToolId,
+      (index) =>
+        this.onAssistantTool(blocks[index], claudeParentId, parentToolId),
+      event.uuid,
     );
-    // Snapshot what already STREAMED for this logical message BEFORE any id
-    // rotation below resets the accumulator — a `[text, tool_use]` event
-    // rotates first, and the text block's dedup must still see the streamed
-    // deltas or it would re-emit the whole text (2026-07-12).
-    const streamedBeforeRotation = this.emittedAssistantText;
-    if (!this.currentAssistantMessageId || !isInlineReasoningOrText) {
-      this.currentAssistantMessageId = randomUUID();
-      this.emittedAssistantText = "";
-    }
+    if (!event.error)
+      this.transcript.endMessage(
+        event.message?.stop_reason,
+        claudeParentId ?? "",
+        parentToolId,
+        event.message?.id,
+      );
+    if (!claudeParentId) this.parkBackgroundReply(event.message?.stop_reason);
+  }
 
-    for (const block of blocks) {
-      // With partial streaming on, THINKING already arrived token-by-token
-      // via stream_event deltas (onStreamEvent) — re-emitting the final full
-      // block would double-render it. redacted_thinking has NO partial
-      // representation, so it still falls through below. TEXT is NOT skipped
-      // wholesale any more (2026-07-12): the dedup branch below compares
-      // against the delta accumulator, so a streamed final block still adds
-      // nothing while a synthetic no-delta message (a slash command's
-      // response, the /compact failure text) finally renders.
-      if (this.streamPartials && block.type === "thinking") {
-        continue;
-      }
-      if (block.type === "thinking" && typeof block.thinking === "string") {
-        this.emit({
-          sessionId: this.sessionId,
-          update: {
-            sessionUpdate: "agent_thought_chunk",
-            content: { type: "text", text: block.thinking } as ContentBlock,
-            messageId: this.currentAssistantMessageId,
-            ...(parentToolId ? { parentToolId } : {}),
-          },
-        });
-      } else if (block.type === "redacted_thinking") {
-        // Anthropic encrypted-thinking blocks indicate that the
-        // model produced reasoning but won't surface it in plaintext;
-        // the wire payload is a `data` blob we don't decode. Emit a
-        // sentinel so the renderer shows a "Thinking · redacted"
-        // badge with no expandable body. Use a single space so the
-        // appendText coalesce path doesn't reject it as empty.
-        this.emit({
-          sessionId: this.sessionId,
-          update: {
-            sessionUpdate: "agent_thought_chunk",
-            content: { type: "text", text: " " } as ContentBlock,
-            messageId: this.currentAssistantMessageId,
-            redacted: true,
-            ...(parentToolId ? { parentToolId } : {}),
-          },
-        });
-      } else if (block.type === "text" && typeof block.text === "string") {
-        const text = block.text;
-        // Dedup against what already streamed for this logical message
-        // (the pre-rotation snapshot — see above). Live path: the final
-        // full block of a streamed message matches the delta accumulator
-        // and adds nothing; a SYNTHETIC no-delta message (slash-command
-        // response, /compact failure text) has an empty snapshot and
-        // renders in full — before 2026-07-12 those were swallowed by an
-        // unconditional skip. Four cases:
-        //   1. snapshot empty       → nothing streamed; emit in full
-        //   2. text ⊆ snapshot      → already streamed (exact final block,
-        //                             or one block of a multi-block final)
-        //   3. text = snapshot+new  → stream died mid-message; emit the tail
-        //   4. else                 → genuinely new content; emit in full
-        let toEmit: string;
-        if (
-          streamedBeforeRotation.length > 0 &&
-          (text === streamedBeforeRotation ||
-            streamedBeforeRotation.includes(text))
-        ) {
-          continue;
-        } else if (
-          streamedBeforeRotation.length > 0 &&
-          text.startsWith(streamedBeforeRotation)
-        ) {
-          toEmit = text.slice(streamedBeforeRotation.length);
-          this.emittedAssistantText = text;
-        } else {
-          toEmit = text;
-          this.emittedAssistantText += text;
-        }
-        if (!toEmit) continue;
-        this.emit({
-          sessionId: this.sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: toEmit } as ContentBlock,
-            messageId: this.currentAssistantMessageId,
-            ...(parentToolId ? { parentToolId } : {}),
-          },
-        });
-      } else if (
-        block.type === "tool_use" &&
-        typeof block.id === "string" &&
-        typeof block.name === "string"
-      ) {
-        // Tool use ends the current logical message — next text stream
-        // is a separate reply.
-        this.currentAssistantMessageId = null;
-        this.emittedAssistantText = "";
+  private parkBackgroundReply(stopReason?: string | null): void {
+    // The SDK may hold Result until its background-agent loop exits. An
+    // end_turn message parks the parent's reply while remaining tasks run;
+    // it does not settle the outstanding send or invent a successful result.
+    if (
+      stopReason !== "end_turn" ||
+      this.activityStopped ||
+      !this.backgroundTasks.size
+    )
+      return;
+    this.sessionActivityState = "idle";
+    this.emitBackgroundTasks();
+  }
 
-        const toolCallId = randomUUID();
-        this.toolCallIds.set(block.id, toolCallId);
-        const retainedInput = retainToolInput(block.name, block.input);
-        if (retainedInput) {
-          setBoundedMap(
-            this.toolInputs,
-            block.id,
-            retainedInput,
-            MAX_BACKGROUND_TASK_LIFECYCLE,
-          );
-        }
-        // mergeKey collapses consecutive Edit/Write calls
-        // against the same file into one card with "+N more changes"
-        // history. Path is the only stable group key the renderer needs.
-        const mergeKey = computeMergeKey(block.name, block.input);
-        this.emit({
-          sessionId: this.sessionId,
-          update: {
-            sessionUpdate: "tool_call",
-            toolCallId,
-            // Claude's own tool_use id. Blocking-interaction requests
-            // (AskUserQuestion → QuestionRequest.toolCallId, canUseTool
-            // permissions) reference THIS id, not our minted uuid — the
-            // renderer correlates them to this row through it.
-            nativeToolCallId: block.id,
-            title: describeTool(block.name, block.input),
-            kind: mapToolKind(block.name),
-            status: "in_progress",
-            rawInput: block.input,
-            ...(mergeKey ? { mergeKey } : {}),
-            ...(parentToolId ? { parentToolId } : {}),
-          },
-        });
-      }
+  private onAssistantTool(block: ClaudeAssistantContentBlock, claudeParentId?: string, parentToolId?: string, partial = false): void {
+    if (typeof block.id !== "string" || typeof block.name !== "string") return;
+    const key = JSON.stringify([claudeParentId ?? "", block.id]);
+    if (this.retractedTools.has(key)) return;
+    const previous = this.scopedTools.get(key);
+    if (previous?.announced && (partial || previous.inputComplete !== false)) return;
+    const toolCallId = previous?.id ?? randomUUID();
+    setBoundedMap(this.scopedTools, key, { id: toolCallId, announced: true, inputComplete: !partial, resultFrameId: previous?.resultFrameId, status: previous?.status ?? "in_progress" }, 4_000);
+    if (!claudeParentId || !this.toolCallIds.has(block.id)) this.toolCallIds.set(block.id, toolCallId);
+    if (claudeParentId && !parentToolId) this.transcript.trackParent(claudeParentId, toolCallId);
+    const retainedInput = retainToolInput(block.name, block.input);
+    if (retainedInput) {
+      setBoundedMap(
+        this.toolInputs,
+        block.id,
+        retainedInput,
+        MAX_BACKGROUND_TASK_LIFECYCLE,
+      );
     }
+    // mergeKey collapses consecutive Edit/Write calls
+    // against the same file into one card with "+N more changes"
+    // history. Path is the only stable group key the renderer needs.
+    const mergeKey = computeMergeKey(block.name, block.input);
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: previous ? "tool_call_update" : "tool_call",
+        toolCallId,
+        // Claude's own tool_use id. Blocking-interaction requests
+        // (AskUserQuestion → QuestionRequest.toolCallId, canUseTool
+        // permissions) reference THIS id, not our minted uuid — the
+        // renderer correlates them to this row through it.
+        nativeToolCallId: block.id,
+        title: describeTool(block.name, block.input),
+        kind: mapToolKind(block.name),
+        status: previous?.status ?? "in_progress",
+        rawInput: block.input,
+        ...(mergeKey ? { mergeKey } : {}),
+        ...(parentToolId ? { parentToolId } : {}),
+      },
+    });
+    this.transcript.attachParent(block.id, toolCallId);
   }
 
   // ── Result (final) ──────────────────────────────────────
   private onResult(event: ClaudeResultEvent): void {
+    if (event.subtype === "success" && event.is_error !== true && !event.errors?.length) this.transcript.final(event.result, event.uuid);
     this.hasSeenResult = true;
+    if (!this.activityStopped) {
+      this.sessionActivityState = "idle";
+      if (this.activityStartedAt !== null || this.lastEmittedBackgroundTasks) this.emitBackgroundTasks();
+    }
     // Turn boundary — any text after this should bubble separately.
-    this.currentAssistantMessageId = null;
-    this.emittedAssistantText = "";
-    if (this.workflows.size > 0) {
-      this.workflows.clear();
+    this.transcript.boundary();
+    let removedWorkflow = false;
+    for (const [taskId, workflow] of this.workflows) {
+      if (workflow.status === "running" || workflow.status === "paused") continue;
+      this.workflows.delete(taskId);
+      this.forgetWorkflowNarration(taskId);
+      this.pausedTaskIds.delete(taskId);
+      removedWorkflow = true;
+    }
+    if (removedWorkflow) {
       this.emitWorkflows();
     }
-    // Narrator dedupe is scoped to the workflows that ran inside this turn — a
-    // next-turn workflow must be able to narrate the same line again.
-    this.workflowNarration.clear();
-    this.pausedTaskIds.clear();
+    // A result settles the parent turn, not every process-owned workflow.
+    // Preserve pause state and narrator dedupe until native task termination.
     // A compaction row that never got its definitive settle (success-status
     // with no boundary, or a run cut short) must not leak into the next
     // run — a later compaction opens its own row. If it settled we just
@@ -2209,9 +2558,13 @@ export class ClaudeStreamTranslator {
     // per-prompt adapter got a fresh translator each turn, so this never
     // surfaced there.)
     this.terminalErrorMsg = null;
+    this.terminalErrorCode = undefined;
+    const assistantFailure = this.assistantFailure;
+    this.assistantFailure = null;
     // A new turn retries the primary model; a fresh fallback gets
     // its own "Model switched" record.
     this.fallbackNoticedThisTurn = false;
+    this.fallbackGeneration++;
     // Named endings first: the SDK's subtype/terminal_reason carry
     // structured stop causes that must NOT degrade into a generic "refusal"
     // (they'd render as an error toast) or a clean "end_turn" (a truncated
@@ -2222,12 +2575,18 @@ export class ClaudeStreamTranslator {
     const mappedTerminalReason = mapClaudeTerminalReason(terminalReason);
     const captureTerminalError = () => {
       const raw =
-        typeof event.result === "string"
-          ? event.result
-          : typeof event.subtype === "string"
-            ? event.subtype
-            : "";
+        Array.isArray(event.errors) &&
+        event.errors.some((error) => typeof error === "string" && error.trim())
+          ? event.errors
+              .filter((error) => typeof error === "string" && error.trim())
+              .join("\n")
+          : typeof event.result === "string" && event.result.trim()
+            ? event.result
+            : assistantFailure?.message || (typeof event.subtype === "string"
+              ? event.subtype
+              : "");
       this.terminalErrorMsg = raw || "claude turn ended with an error";
+      this.terminalErrorCode = assistantFailure?.code;
     };
     if (
       event.subtype === "error_max_budget_usd" ||
@@ -2266,9 +2625,8 @@ export class ClaudeStreamTranslator {
       if (mappedTerminalReason === "refusal") captureTerminalError();
     } else if (event.is_error) {
       this.lastStopReason = "refusal";
-      // Capture the error text so the adapter can promote stale-resume
-      // failures ("No conversation found …") to session-expired. The
-      // text can live in `result` or, failing that, the subtype.
+      // Standard SDK failures use errors[]. Older results used result, and
+      // synthetic assistant errors can supply the missing code/explanation.
       captureTerminalError();
     } else if (event.stop_reason === "max_tokens") {
       // The output-token cap cut the answer mid-thought. Was dead
@@ -2281,82 +2639,13 @@ export class ClaudeStreamTranslator {
       this.lastStopReason = "end_turn";
     }
 
-    // Usage reporting: Claude's `result.usage` gives the
-    // CUMULATIVE tokens billed across the turn's tool-use loop (one
-    // user prompt → multiple internal API calls; each can carry up to
-    // the model's window in prompt tokens). It is *not* the current
-    // window fill. The UI used to compare `used` against the window
-    // cap and render a percentage, which produced "Window 291.4k /
-    // 200.0k · 100%" on perfectly normal Haiku turns. We now just
-    // report tokens-this-turn and let the UI present it as a counter,
-    // not a ratio.
-    //
-    // size still carries the per-model window so the UI can show "of
-    // 1M" / "of 200k" context for users who want the absolute bound;
-    // the renderer keeps the number out of the headline ratio.
-    const u = event.usage;
-    if (u) {
-      const used =
-        (u.input_tokens ?? 0) +
-        (u.cache_read_input_tokens ?? 0) +
-        (u.cache_creation_input_tokens ?? 0);
-      // Itemize the turn's bill per model (main loop vs subagents
-      // vs fallback). camelCase per the SDK's ModelUsage, unlike the
-      // snake_case aggregate above. Order by cost, priciest first, so the
-      // popover reads main-model-first without re-sorting.
-      const perModel = Object.entries(event.modelUsage ?? {})
-        .filter(([model]) => typeof model === "string" && model.length > 0)
-        .map(([model, v]) => ({
-          model,
-          inputTokens: v?.inputTokens,
-          outputTokens: v?.outputTokens,
-          cacheReadTokens: v?.cacheReadInputTokens,
-          cacheWriteTokens: v?.cacheCreationInputTokens,
-          costUsd: v?.costUSD,
-        }))
-        .sort((a, b) => (b.costUsd ?? 0) - (a.costUsd ?? 0));
-      this.currentTurnUsage = {
-        inputTokens: u.input_tokens,
-        outputTokens: u.output_tokens,
-        cacheReadTokens: u.cache_read_input_tokens,
-        cacheWriteTokens: u.cache_creation_input_tokens,
-        totalCostUsd:
-          typeof event.total_cost_usd === "number"
-            ? event.total_cost_usd
-            : undefined,
-        ...(perModel.length > 0 ? { perModel } : {}),
-      };
-      // Dev-only cache-health signal: the fraction of this turn's input
-      // tokens Anthropic served from the prompt cache. Tail the engine log
-      // across a multi-turn chat — the ratio should climb once the stable
-      // prefix (system prompt + tools + prior turns) starts hitting cache,
-      // which is the concrete proof the harness's caching is working.
-      if (isDevRuntime() && used > 0) {
-        const read = u.cache_read_input_tokens ?? 0;
-        console.info(
-          `[claude-sdk] cache-read ratio: ${((read / used) * 100).toFixed(0)}% ` +
-            `(read=${read} / input-total=${used})`,
-        );
-      }
-      // size/used only when this result BILLED something. A command-style
-      // run (e.g. the /compact turn) settles with ~zero usage — writing
-      // that into the store makes the gauge dip to 0 until the next
-      // getContextUsage refresh. Omitted fields keep the store's previous reading;
-      // cost still rides along either way.
-      this.emit({
-        sessionId: this.sessionId,
-        update: {
-          sessionUpdate: "usage_update",
-          ...(used > 0
-            ? { size: contextWindowForClaudeModel(this.currentModel), used }
-            : {}),
-          cost:
-            typeof event.total_cost_usd === "number"
-              ? ({ totalCostUsd: event.total_cost_usd } as never)
-              : null,
-        } as never,
-      });
-    }
+    this.currentTurnUsage = this.queryUsage.record(event);
+    if ((this.currentTurnUsage?.inputTokens ?? 0) > 0 || (event.usage?.input_tokens ?? 0) > 0) this.emit({ sessionId: this.sessionId, update: {
+      sessionUpdate: "usage_update", size: contextWindowForClaudeModel(this.currentModel),
+    } });
+    // Context fill is refreshed independently by the adapter. Do not send
+    // billed turn tokens as a context-window measurement.
+
   }
 }
 
@@ -2404,7 +2693,7 @@ function retainToolInput(
         : {}),
     };
   }
-  if (!command && !description) return null;
+  if (!command && !description && !/^(Agent|Task)$/i.test(name)) return null;
   return {
     name,
     ...(command ? { command: command.slice(0, MAX_RETAINED_TOOL_TEXT) } : {}),

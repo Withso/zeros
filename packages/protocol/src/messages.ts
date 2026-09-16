@@ -491,6 +491,8 @@ export interface AgentTitleGeneratedMessage extends BaseMessage {
  *  can persist a user message that re-renders inline pills faithfully when the
  *  chat is reopened (instead of falling back to plain backtick text). */
 export interface AgentPromptBubble {
+  /** Expanded request retained for explicit retry without re-reading mentions. */
+  retryText?: string;
   /** Exactly what the composer showed (mention TOKENS, not their expansion).
    *  Falls back to the joined wire text blocks when omitted. */
   displayText?: string;
@@ -568,15 +570,23 @@ export interface AgentSteerMessage extends BaseMessage {
   /** Renderer's local user-message id — same contract as
    *  AGENT_PROMPT.userMessageId. */
   userMessageId?: string;
+  /** Stable across retries of one steering attempt, new after a queued receipt. */
+  attemptId?: string;
 }
 
-/** Ack that a steer was delivered into the running turn. */
+/** "queued" proves the provider did not consume the input. "interrupted"
+ * means delivery was not confirmed before transport/Stop ended the attempt;
+ * retain the attempt in its original turn instead of automatically duplicating it. */
+export type SteerOutcome = "delivered" | "queued" | "interrupted";
+
+/** Terminal steering receipt. An absent outcome is a legacy delivered ack. */
 export interface AgentSteeredMessage extends BaseMessage {
   type: "AGENT_STEERED";
   requestId: string;
   agentId: string;
   sessionId: string;
   executionId?: ExecutionId;
+  outcome?: SteerOutcome;
   /** Opening user-message id for the provider turn that accepted this steer.
    *  Lets the renderer keep a separate steer bubble without inventing a
    *  second persisted turn/footer. Absent for mixed-version engines. */

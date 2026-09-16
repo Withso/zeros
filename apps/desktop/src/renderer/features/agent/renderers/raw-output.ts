@@ -19,6 +19,30 @@
 
 export const RAW_OUTPUT_MAX = 20_000;
 
+export function toolCompletionUnreported(rawOutput: unknown): boolean {
+  return (
+    !!rawOutput &&
+    typeof rawOutput === "object" &&
+    (rawOutput as Record<string, unknown>)._zerosToolCompletion === "unreported"
+  );
+}
+
+/** Execution metadata can be inside Cursor's SDK wrapper. Keep the stored
+ * result intact; only unwrap known command fields for the detail presenter. */
+export function commandResultOutput(rawOutput: unknown): unknown {
+  if (!rawOutput || typeof rawOutput !== "object" || Array.isArray(rawOutput))
+    return rawOutput;
+  const outer = rawOutput as Record<string, unknown>;
+  if ("exitCode" in outer) return outer;
+  const oneof =
+    outer.result && typeof outer.result === "object"
+      ? (outer.result as Record<string, unknown>)
+      : {};
+  const value = outer.value ?? outer.success ?? oneof.value;
+  if (value && typeof value === "object" && "exitCode" in value) return value;
+  return rawOutput;
+}
+
 /** Coerce a tool's raw output into a displayable string, or null when there
  *  is nothing human-readable. Input is displayed separately by the caller. */
 export function asDisplayString(value: unknown): string | null {

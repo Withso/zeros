@@ -15,20 +15,9 @@
 //      → constants below; tuned conservatively across the agents
 //        we support so we don't trip the strictest one.
 //
-// Agent attachment audit (Claude + Cursor forward `image` blocks; Codex
-// forwards `text` only):
-//
-//   | Agent  | Image | Text   | Source-of-truth                          |
-//   |--------|-------|--------|------------------------------------------|
-//   | Claude | YES   | YES    | adapters/claude-sdk/adapter.ts           |
-//   | Codex  | NO    | YES    | adapters/codex/app-server-adapter.ts     |
-//   | Cursor | YES   | YES    | adapters/cursor-sdk/adapter.ts           |
-//
-// We surface this as a per-attachment status so the user sees the
-// warning BEFORE pressing send instead of silently sending a prompt
-// that won't include the image. Text files always work — every
-// agent reads the synthetic <file name="X">…</file> block as plain
-// message text, so all the user sees is a confirmation chip.
+// Attachment intake budgets are independent of delivery: the shared encoder
+// persists accepted files and sends a path for every agent. Native prompt image
+// capabilities remain available to the harness, but do not select this route.
 // ──────────────────────────────────────────────────────────
 
 import {
@@ -179,8 +168,8 @@ export function iconForFile(name: string, mimeType: string): LucideIcon {
  *  budget scales with the picked model's context window so a 1M-token
  *  chat allows a much larger file than a 128K-token Codex chat.
  *
- *  Sending an image to a non-vision agent is no
- *  longer marked invalid — the submit flow now writes the bytes to
+ *  An image is accepted independently of native prompt-image support.
+ *  The submit flow writes its bytes to
  *  `<cwd>/.context/<scope>/attachments/...` and references them by path inside
  *  a text block, so EVERY agent at minimum receives the file
  *  location. Vision-capable models (Claude, GPT-5, Cursor Composer-2)
@@ -215,39 +204,6 @@ export function validateAttachment(input: {
     };
   }
   return { ok: true };
-}
-
-/** Build the text-block body that references a saved image file.
- *  Vision-capable agents (Claude, Cursor) interpret `@path` as a
- *  resource link the model can pull via its Read tool; others see
- *  it as plain text — but the absolute path makes it actionable
- *  for any tool-using agent. The `<attached_image>` wrapper is a
- *  small structured cue so the agent recognises the intent.
- *
- *  agentId-aware so we can pick the right reference syntax per
- *  agent (Claude / Cursor prefer @-mentions, others fall back to
- *  the absolute path). */
-export function imageReferenceBlock(input: {
-  agentId: string | null | undefined;
-  filename: string;
-  absolutePath: string;
-  relativePath: string;
-  mimeType: string;
-}): string {
-  // Claude + Cursor parse @-mentions natively — give them the
-  // cwd-relative path under @ so the agent's existing resolver
-  // pulls it in. Other agents get an absolute path which their
-  // Read tool / ls / cat can act on directly.
-  const useAtMention = input.agentId === "claude" || input.agentId === "cursor";
-  const reference = useAtMention
-    ? `@${input.relativePath}`
-    : input.absolutePath;
-  const safeName = input.filename.replace(/"/g, "'");
-  return [
-    `<attached_image name="${safeName}" mime="${input.mimeType}">`,
-    reference,
-    `</attached_image>`,
-  ].join("\n");
 }
 
 function formatBytes(n: number): string {
