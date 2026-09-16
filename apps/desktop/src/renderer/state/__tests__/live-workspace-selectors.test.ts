@@ -62,6 +62,19 @@ describe("selectLiveVisible", () => {
   it("returns the SAME array reference when nothing is filtered", () => {
     const rows = [ws({ id: "a" }), ws({ id: "b", present: false })];
     expect(selectLiveVisible(rows)).toBe(rows);
+    expect(selectLiveVisible(rows, { unrelated: 1 })).toBe(rows);
+  });
+
+  it("hides only the exact archive intent while preserving server rows and counts", () => {
+    const a = ws({ id: "a" });
+    const b = ws({ id: "b", repoSlug: "other/repo" });
+    const rows = [a, b];
+    expect(selectLiveVisible(rows, { a: 1 })).toEqual([b]);
+    const counts = countLiveVisibleBySlug(rows, [], { a: 1 });
+    expect(counts.get(a.repoSlug)).toBe(0);
+    expect(counts.get(b.repoSlug)).toBe(1);
+    expect(rows).toEqual([a, b]);
+    expect(selectLiveVisible(rows, {})).toBe(rows);
   });
 });
 

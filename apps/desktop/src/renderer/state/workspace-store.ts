@@ -64,6 +64,8 @@ import {
   recoverPendingAutoSend,
   schedulePersistDrafts,
 } from "./persist-composer-drafts";
+import { subscribeToLiveChatDrafts, liveChatDraftEntries } from "../features/agent/composer-live-drafts";
+import { startAttachmentSourceMaintenance } from "../features/agent/attachment-sources";
 import { loadProjects } from "./projects-store";
 import { DEFAULT_REPO_MODE_VIEWS, repoPageModeForView } from "./repo-page-mode";
 import {
@@ -2142,6 +2144,18 @@ export function recordWorkspaceActivity(folder: string): void {
 // dependency arrays watched, so a write is scheduled on precisely the same
 // changes — no more, no less. Subscribed once at module load; lives for the
 // app's lifetime, so there's no teardown.
+const stopAttachmentSourceMaintenance = startAttachmentSourceMaintenance(() => [
+  useWorkspaceStore.getState().chatComposerDrafts,
+  useWorkspaceStore.getState().editComposerDrafts,
+  [...liveChatDraftEntries()],
+  loadPersistedDrafts(),
+]);
+if (import.meta.hot) import.meta.hot.dispose(stopAttachmentSourceMaintenance);
+
+subscribeToLiveChatDrafts(() => {
+  schedulePersistDrafts(useWorkspaceStore.getState());
+});
+
 useWorkspaceStore.subscribe((s, prev) => {
   if (
     s.activePage !== prev.activePage ||
@@ -2173,7 +2187,8 @@ useWorkspaceStore.subscribe((s, prev) => {
     persistDraftsNow(s);
   } else if (
     s.chatComposerDrafts !== prev.chatComposerDrafts ||
-    s.editComposerDrafts !== prev.editComposerDrafts
+    s.editComposerDrafts !== prev.editComposerDrafts ||
+    s.chats !== prev.chats
   ) {
     schedulePersistDrafts(s);
   }

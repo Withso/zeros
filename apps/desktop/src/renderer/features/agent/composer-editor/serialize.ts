@@ -16,6 +16,7 @@ import type { MessageContentSegment } from "@zeros/protocol/agent-messages";
 
 import type { ComposerSegment } from "./segments";
 import type { ComposerAttachment } from "../composer-attachments";
+import { unavailableAttachment } from "./clipboard";
 
 export interface ComposerSerialized {
   /** No text, no mentions, no attachments → nothing to send. */
@@ -43,6 +44,8 @@ export function toMessageSegments(
       diskPath?: string;
       thumbnailUri?: string;
       attachmentId?: string;
+      delivery?: "reference";
+      size?: number;
     }
   >,
 ): MessageContentSegment[] {
@@ -59,6 +62,7 @@ export function toMessageSegments(
       name: s.name,
       mimeType: s.mimeType,
       kind: s.kind,
+      ...(bubbleAttachment?.delivery ? { delivery: bubbleAttachment.delivery, size: bubbleAttachment.size } : {}),
       ...(bubbleAttachment?.diskPath
         ? { diskPath: bubbleAttachment.diskPath }
         : {}),
@@ -125,10 +129,10 @@ export function serializeComposer(
         attachmentId: id,
         name: (node.attrs.name as string) || "",
         mimeType: (node.attrs.mimeType as string) || "",
-        kind: (node.attrs.kind as "image" | "text") || "image",
+        kind: (node.attrs.kind as "image" | "text" | "file") || "image",
       });
       const att = getAttachment(id);
-      if (att) attachments.push(att);
+      attachments.push(att ?? unavailableAttachment(node.attrs));
       return false;
     }
     if (name === "paragraph") {

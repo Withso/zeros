@@ -172,14 +172,6 @@ export const ContextSurface = React.memo(function ContextSurface({
   );
   return (
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
-      {data?.storageError && (
-        <div
-          role="alert"
-          className="text-fg2 border-border1 border-b px-3 py-2 text-xs"
-        >
-          {data.storageError}
-        </div>
-      )}
       {body}
     </div>
   );

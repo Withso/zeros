@@ -127,6 +127,17 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 import { clearWorkspaceSettling } from "../../state/pending-workspaces";
 import { cn } from "../../shared/ui/cn";
+import {
+  createMenuAnchor,
+  type MenuAnchor,
+} from "../../shared/ui/menu-anchor";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuLabel,
+  ContextMenuSeparator,
+} from "../../shared/ui/primitives/context-menu";
 import { useThemeId } from "../../shared/theme/use-theme-variant";
 import {
   Alert,
@@ -775,8 +786,8 @@ const DesignInlineTextEditor = React.memo(function DesignInlineTextEditor({
 
 interface CanvasHitStackMenu {
   frame: DesignCanvasFrameWire;
-  x: number;
-  y: number;
+  workspaceId: string;
+  anchor: MenuAnchor;
   layers: Array<{ oid: string; name: string; tag: string }>;
 }
 
@@ -3223,6 +3234,10 @@ function DesignCanvas({
     null,
   );
   const hitStackGenerationRef = useRef(0);
+  useEffect(() => {
+    hitStackGenerationRef.current += 1;
+    setHitStackMenu(null);
+  }, [workspaceId, active]);
   const nodeActionRef = useRef(false);
   const [selectionOverlaySuppressed, setSelectionOverlaySuppressed] =
     useState(false);
@@ -7254,6 +7269,11 @@ function DesignCanvas({
       const generation = ++hitStackGenerationRef.current;
       const clientX = event.clientX;
       const clientY = event.clientY;
+      const anchor = createMenuAnchor(
+        event.currentTarget,
+        { x: clientX, y: clientY },
+        { scaleWithElement: true },
+      );
       const x =
         ((clientX - frameBounds.left) * frame.width) / frameBounds.width;
       const y =
@@ -7283,14 +7303,8 @@ function DesignCanvas({
           });
           setHitStackMenu({
             frame,
-            x: Math.min(
-              Math.max(8, clientX - viewportBounds.left),
-              Math.max(8, viewportBounds.width - 220),
-            ),
-            y: Math.min(
-              Math.max(8, clientY - viewportBounds.top),
-              Math.max(8, viewportBounds.height - layers.length * 28 - 48),
-            ),
+            workspaceId,
+            anchor,
             layers,
           });
         })
@@ -8945,103 +8959,83 @@ function DesignCanvas({
         ) : null}
 
         {hitStackMenu ? (
-          <div
-            data-design-controls
-            role="menu"
-            aria-label="Layers under pointer"
-            className="border-border2 bg-bg1 absolute z-50 w-52 overflow-hidden rounded-md border py-1 shadow-lg"
-            style={{ left: hitStackMenu.x, top: hitStackMenu.y }}
-            onPointerDown={(event) => event.stopPropagation()}
-            onKeyDown={(event) => {
-              if (
-                event.key !== "ArrowDown" &&
-                event.key !== "ArrowUp" &&
-                event.key !== "Home" &&
-                event.key !== "End"
-              ) {
-                return;
-              }
-              const items = Array.from(
-                event.currentTarget.querySelectorAll<HTMLButtonElement>(
-                  '[role="menuitem"]',
-                ),
-              );
-              if (items.length === 0) return;
-              const current = items.indexOf(
-                document.activeElement as HTMLButtonElement,
-              );
-              const nextIndex =
-                event.key === "Home"
-                  ? 0
-                  : event.key === "End"
-                    ? items.length - 1
-                    : event.key === "ArrowUp"
-                      ? (current - 1 + items.length) % items.length
-                      : (current + 1) % items.length;
-              event.preventDefault();
-              event.stopPropagation();
-              items[nextIndex]?.focus();
+          <ContextMenu
+            open={active && hitStackMenu.workspaceId === workspaceId}
+            anchor={hitStackMenu.anchor}
+            modal={false}
+            onOpenChange={(open) => {
+              if (!open) setHitStackMenu(null);
             }}
           >
-            <div className="text-muted-fg flex h-6 items-center px-2 text-[9px] font-medium tracking-wide uppercase">
-              Select layer
-            </div>
-            {hitStackMenu.layers.map((layer, index) => (
-              <button
-                key={layer.oid}
-                type="button"
-                role="menuitem"
-                autoFocus={index === 0}
-                tabIndex={index === 0 ? 0 : -1}
-                className={cn(
-                  "hover:bg-bg2 flex h-7 w-full min-w-0 items-center gap-2 px-2 text-left",
-                  view.selectedNodeId === layer.oid && "bg-highlighted-bg",
-                )}
-                onClick={() => {
-                  setHitStackMenu(null);
-                  if (!workspaceId || !folder) return;
-                  void selectDesignNode({
-                    workspaceId,
-                    folder,
-                    frame: hitStackMenu.frame,
-                    nodeId: layer.oid,
-                  }).catch((selectionError) => {
-                    toast.error("Couldn't select that design layer", {
-                      description: errorMessage(selectionError),
+            <ContextMenuContent
+              data-design-controls
+              aria-label="Layers under pointer"
+              className="bg-bg1 w-52 rounded-md px-0 py-1"
+              onPointerDown={(event) => event.stopPropagation()}
+              onEntryFocus={(event) => {
+                // This pointer-driven picker has always focused its deepest
+                // layer first. Keep that origin for subsequent arrow keys.
+                event.preventDefault();
+                if (event.target instanceof HTMLElement) {
+                  event.target.querySelector<HTMLElement>('[role="menuitem"]')
+                    ?.focus({ preventScroll: true });
+                }
+              }}
+              loop
+            >
+              <ContextMenuLabel className="text-muted-fg flex h-6 items-center px-2 text-[9px] font-medium tracking-wide uppercase">
+                Select layer
+              </ContextMenuLabel>
+              {hitStackMenu.layers.map((layer, index) => (
+                <ContextMenuItem
+                  key={layer.oid}
+                  className={cn(
+                    "hover:bg-bg2 focus:bg-bg2 flex h-7 w-full min-w-0 items-center gap-2 rounded-none px-2 text-left",
+                    view.selectedNodeId === layer.oid && "bg-highlighted-bg",
+                  )}
+                  onSelect={() => {
+                    setHitStackMenu(null);
+                    if (!workspaceId || !folder) return;
+                    void selectDesignNode({
+                      workspaceId,
+                      folder,
+                      frame: hitStackMenu.frame,
+                      nodeId: layer.oid,
+                    }).catch((selectionError) => {
+                      toast.error("Couldn't select that design layer", {
+                        description: errorMessage(selectionError),
+                      });
                     });
+                  }}
+                >
+                  <span className="text-muted-fg border-border2 shrink-0 rounded-sm border px-1 font-mono text-[8px] uppercase">
+                    {layer.tag}
+                  </span>
+                  <span className="text-fg1 min-w-0 flex-1 truncate text-[11px]">
+                    {layer.name}
+                  </span>
+                  <span className="text-muted-fg font-mono text-[9px]">
+                    {index === 0 ? "deep" : `↑${index}`}
+                  </span>
+                </ContextMenuItem>
+              ))}
+              <ContextMenuSeparator className="bg-border1 mx-0 my-1" />
+              <ContextMenuItem
+                className="hover:bg-bg2 focus:bg-bg2 flex h-7 w-full items-center gap-2 rounded-none px-2 text-left"
+                onSelect={() => {
+                  setHitStackMenu(null);
+                  void selectDesignFrame(workspaceId!, hitStackMenu.frame, {
+                    selected: true,
                   });
                 }}
               >
-                <span className="text-muted-fg border-border2 shrink-0 rounded-sm border px-1 font-mono text-[8px] uppercase">
-                  {layer.tag}
+                <Frame className="text-muted-fg size-3.5" />
+                <span className="text-fg1 truncate text-[11px]">
+                  {hitStackMenu.frame.title}
                 </span>
-                <span className="text-fg1 min-w-0 flex-1 truncate text-[11px]">
-                  {layer.name}
-                </span>
-                <span className="text-muted-fg font-mono text-[9px]">
-                  {index === 0 ? "deep" : `↑${index}`}
-                </span>
-              </button>
-            ))}
-            <div className="bg-border1 my-1 h-px" />
-            <button
-              type="button"
-              role="menuitem"
-              tabIndex={-1}
-              className="hover:bg-bg2 flex h-7 w-full items-center gap-2 px-2 text-left"
-              onClick={() => {
-                setHitStackMenu(null);
-                void selectDesignFrame(workspaceId!, hitStackMenu.frame, {
-                  selected: true,
-                });
-              }}
-            >
-              <Frame className="text-muted-fg size-3.5" />
-              <span className="text-fg1 truncate text-[11px]">
-                {hitStackMenu.frame.title}
-              </span>
-            </button>
-          </div>
+              </ContextMenuItem>
+            </ContextMenuContent>
+          </ContextMenu>
         ) : null}
 
         <DesignMotionTimeline

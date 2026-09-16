@@ -10,37 +10,67 @@
 // ──────────────────────────────────────────────────────────
 
 import type { Workspace } from "../git";
-import type { RuntimeClient } from "./ws-client";
+import { runtimeExecutionKey, type RuntimeClient } from "./ws-client";
 import { requestWorkspaceList } from "./workspace-bridge";
 import {
   repoRootForCwd,
   workspaceIdForCwd,
+  folderIsWithinRoot,
 } from "../../state/workspace-resolution";
 
-let cachedBridgeWorkspaces: Workspace[] = [];
-let inflightBridgeWorkspaces: Promise<Workspace[]> | null = null;
+interface WorkspaceLookup {
+  key: string;
+  rows: Workspace[];
+  pending: Promise<Workspace[]> | null;
+}
+const lookups = new WeakMap<RuntimeClient, WorkspaceLookup>();
+function lookupFor(bridge: RuntimeClient): WorkspaceLookup {
+  const key = bridge.executionIdentity
+    ? runtimeExecutionKey(bridge.executionIdentity)
+    : "local:sidecar";
+  let lookup = lookups.get(bridge);
+  if (!lookup || lookup.key !== key) {
+    lookup = { key, rows: [], pending: null };
+    lookups.set(bridge, lookup);
+  }
+  return lookup;
+}
+
+/** Synchronous ownership from the exact runtime's confirmed workspace rows. */
+export function cachedBridgeWorkspaceRootForCwd(
+  bridge: RuntimeClient,
+  cwd: string,
+): string | null {
+  return (
+    lookupFor(bridge)
+      .rows.flatMap((row) => [row.path, row.repoRoot])
+      .filter((root): root is string => !!root && folderIsWithinRoot(cwd, root))
+      .sort((a, b) => b.length - a.length)[0] ?? null
+  );
+}
 
 export async function refillBridgeWorkspaces(
   bridge: RuntimeClient,
 ): Promise<Workspace[]> {
-  if (!inflightBridgeWorkspaces) {
-    inflightBridgeWorkspaces = requestWorkspaceList(bridge)
+  const lookup = lookupFor(bridge);
+  if (!lookup.pending) {
+    lookup.pending = requestWorkspaceList(bridge)
       .then((workspaces) => {
-        cachedBridgeWorkspaces = workspaces;
+        lookup.rows = workspaces;
         return workspaces;
       })
       .finally(() => {
-        inflightBridgeWorkspaces = null;
+        lookup.pending = null;
       });
   }
-  return inflightBridgeWorkspaces;
+  return lookup.pending;
 }
 
 export async function resolveBridgeWorkspaceIdForCwd(
   bridge: RuntimeClient,
   cwd: string | null | undefined,
 ): Promise<string | null> {
-  const cached = workspaceIdForCwd(cwd, cachedBridgeWorkspaces);
+  const cached = workspaceIdForCwd(cwd, lookupFor(bridge).rows);
   if (cached) return cached;
   const fresh = await refillBridgeWorkspaces(bridge);
   return workspaceIdForCwd(cwd, fresh);
@@ -53,7 +83,7 @@ export async function resolveBridgeRepoRootForCwd(
   bridge: RuntimeClient,
   cwd: string | null | undefined,
 ): Promise<string | null> {
-  const cached = repoRootForCwd(cwd, cachedBridgeWorkspaces);
+  const cached = repoRootForCwd(cwd, lookupFor(bridge).rows);
   if (cached) return cached;
   const fresh = await refillBridgeWorkspaces(bridge);
   return repoRootForCwd(cwd, fresh);

@@ -29,7 +29,7 @@ import { formatChatHistoryTime } from "./chat-history";
  *  heavier than the "⋯" beside it. */
 const HISTORY_BUTTON_CLS = "shrink-0 text-fg2 [&_svg]:size-3.5";
 const HISTORY_ROW_CLS =
-  "flex max-w-[420px] min-w-[300px] items-center gap-2 px-2 py-1.5 text-fg1";
+  "flex max-w-[420px] min-w-0 items-center gap-2 px-2 py-1.5 text-fg1";
 const HISTORY_TIME_CLS = "ml-2 shrink-0 text-xs tabular-nums text-fg2";
 
 export function ChatHistoryMenu({
@@ -65,7 +65,7 @@ export function ChatHistoryMenu({
         // 300px-wide list off the window edge.
         align="end"
         sideOffset={6}
-        className="max-h-[360px] min-w-[300px] overflow-y-auto"
+        className="max-h-[min(360px,var(--radix-dropdown-menu-content-available-height))] min-w-[min(300px,var(--radix-dropdown-menu-content-available-width))] overflow-y-auto"
       >
         {chats.length === 0 ? (
           <DropdownMenuItem disabled>No closed chats</DropdownMenuItem>

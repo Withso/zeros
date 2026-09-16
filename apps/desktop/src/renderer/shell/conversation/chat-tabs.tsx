@@ -76,6 +76,8 @@ import { useWorkspaceDispatch, type ChatThread } from "../../state/store";
 import { useNativeRuntime } from "../../platform/runtime";
 import { OpenInSubmenu } from "./conversation-header";
 import { AgentIcon } from "../../features/agent/agent-icon";
+import { ComposerDraftIndicator } from "../../features/agent/composer-draft-indicator";
+import { useChatHasDraft } from "../../state/composer-draft-presence";
 import {
   useChatAwaitingKind,
   useChatStreaming,
@@ -177,6 +179,10 @@ const TAB_LABEL_CLS = "min-w-0 truncate text-xs font-medium leading-none";
  *  gradient matches the tab's bg2 fill so long titles fade behind it. */
 const TAB_HOVER_OVERLAY_CLS =
   "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-bg2 from-50% to-transparent pr-1.5 pl-4 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
+// A drafted tab already has a trailing slot. Cover its pencil in place, with
+// the same 20px close target, without reserving another column or fading text.
+const TAB_DRAFT_ACTION_OVERLAY_CLS =
+  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-bg2 opacity-0 transition-none group-data-[hovered=true]/tab:opacity-100 focus-within:opacity-100";
 
 const TAB_AFFORDANCE_BTN_CLS =
   "pointer-events-auto size-5 inline-flex items-center justify-center rounded-sm shrink-0 text-fg2 hover:text-fg1 hover:bg-bg2-hover transition-[background-color,color] duration-120 ease-out";
@@ -698,6 +704,9 @@ function TabRow({
   // ZerosSpinner so the tab head signals activity. See the original
   // single-strip notes for the terminal/awaiting variants.
   const isTerminal = chat.kind === "terminal";
+  const hasDraft = useChatHasDraft(chat.id) && !isTerminal;
+  // isActive is this pane's displayed chat, including an unfocused split.
+  const showDraft = hasDraft && !isActive;
   const isStreaming = useChatStreaming(chat.id);
   const awaitingKind = useChatAwaitingKind(chat.id);
   const isTerminalBusy = useTerminalBusy(chat.id, isTerminal);
@@ -789,6 +798,25 @@ function TabRow({
     [chat.id],
   );
 
+  const closeAction = !renaming && (
+    <span
+      className={
+        showDraft ? TAB_DRAFT_ACTION_OVERLAY_CLS : TAB_HOVER_OVERLAY_CLS
+      }
+    >
+      <Tooltip label="Close chat">
+        <button
+          type="button"
+          className={TAB_AFFORDANCE_BTN_CLS}
+          onClick={(e) => onClose(chat, e)}
+          aria-label="Close chat"
+        >
+          <X className="size-3.5" />
+        </button>
+      </Tooltip>
+    </span>
+  );
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -798,6 +826,9 @@ function TabRow({
           aria-selected={isActive}
           tabIndex={isActive ? 0 : -1}
           className={TAB_BASE_CLS}
+          aria-label={
+            hasDraft ? `${chat.title || "Untitled chat"}, unsent draft` : undefined
+          }
           draggable={!renaming}
           onPointerEnter={() => onPrefetch(chat.id)}
           onFocus={() => onPrefetch(chat.id)}
@@ -818,6 +849,7 @@ function TabRow({
           }}
           data-active={isActive}
           data-chat-tab="true"
+          data-chat-id={chat.id}
         >
           {isTerminal ? (
             isTerminalBusy ? (
@@ -892,19 +924,13 @@ function TabRow({
               {chat.title || "Untitled chat"}
             </span>
           )}
-          {!renaming && (
-            <div className={TAB_HOVER_OVERLAY_CLS} aria-hidden="false">
-              <Tooltip label="Close chat">
-                <button
-                  type="button"
-                  className={TAB_AFFORDANCE_BTN_CLS}
-                  onClick={(e) => onClose(chat, e)}
-                  aria-label="Close chat"
-                >
-                  <X className="size-3.5" />
-                </button>
-              </Tooltip>
-            </div>
+          {showDraft ? (
+            <span className="relative inline-flex size-3 shrink-0 items-center justify-center">
+              <ComposerDraftIndicator />
+              {closeAction}
+            </span>
+          ) : (
+            closeAction
           )}
         </div>
       </ContextMenuTrigger>

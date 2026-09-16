@@ -132,4 +132,46 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
     "Visibility survives reload, explicit snapshot deletion keeps the archive, and hidden archives can unarchive",
     true,
   );
+
+  const liveCard = page.getByRole("button").filter({
+    has: page.getByText("Recent", { exact: true }),
+  });
+  await expect(liveCard).toHaveCount(1);
+  await liveCard.click({ button: "right" });
+  const firstFrame = await menuItem("Archive").evaluate(async (item) => {
+    const card = [...document.querySelectorAll('[role="button"]')].find(
+      (node) => node.textContent.includes("Recent"),
+    );
+    const startedAt = performance.now();
+    item.click();
+    await new Promise(requestAnimationFrame);
+    return {
+      hidden: !card.isConnected,
+      pending: window.archiveFixture.archivePending("recent"),
+      elapsedMs: performance.now() - startedAt,
+    };
+  });
+  expect(firstFrame.hidden).toBe(true);
+  expect(firstFrame.pending).toBe(true);
+  await expect(liveCard).toHaveCount(0);
+  await expect(options("Recent")).toHaveCount(0);
+  await page.evaluate(() =>
+    window.archiveFixture.finishArchive("recent", true),
+  );
+  await expect(liveCard).toHaveCount(1);
+  await expect(
+    page.getByText("Couldn't archive workspace", { exact: true }),
+  ).toBeVisible();
+  await liveCard.click({ button: "right" });
+  await menuItem("Archive").click();
+  await expect(liveCard).toHaveCount(0);
+  await page.evaluate(() => window.archiveFixture.finishArchive("recent"));
+  await expect(options("Recent")).toBeVisible();
+  await expect(
+    page.getByText("Workspace archived", { exact: true }),
+  ).toHaveCount(0);
+  check(
+    `Archive hides by the next frame (${firstFrame.elapsedMs.toFixed(1)}ms), recovers on failure, and confirms quietly`,
+    true,
+  );
 }

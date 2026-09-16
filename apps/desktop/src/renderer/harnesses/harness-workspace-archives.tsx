@@ -53,6 +53,7 @@ Object.assign(window, {
 });
 const { setActiveBridge } = await import("../platform/bridge/active-bridge");
 const requests: { op: string; params?: Record<string, unknown> }[] = [];
+const archiveFlights = new Map<string, (fail: boolean) => void>();
 setActiveBridge({
   status: "connected",
   onStatusChange: () => () => {},
@@ -74,6 +75,30 @@ setActiveBridge({
     if (message.op === "project.list") result = { projects: [repo] };
     if (message.op === "workspace.get")
       result = rows.find((owner) => owner.id === message.params?.workspaceId);
+    if (message.op === "workspace.archive") {
+      const id = String(message.params?.workspaceId);
+      result = await new Promise((resolve, reject) => {
+        archiveFlights.set(id, (fail) => {
+          archiveFlights.delete(id);
+          if (fail) {
+            reject(new Error("Fixture checkpoint failure"));
+            return;
+          }
+          const original = rows.find((owner) => owner.id === id)!;
+          const workspace = {
+            ...original,
+            archivedAt: Date.now(),
+            present: false,
+          };
+          rows = rows.map((owner) => (owner.id === id ? workspace : owner));
+          resolve({
+            workspace,
+            archivedAt: workspace.archivedAt,
+            stashRef: null,
+          });
+        });
+      });
+    }
     if (
       message.op === "workspace.restore" ||
       message.op === "workspace.deleteSnapshot"
@@ -107,6 +132,8 @@ useWorkspaceStore.setState({ activePage: "dashboard", chats: [] });
 Object.assign(window, {
   archiveFixture: {
     requests,
+    archivePending: (id: string) => archiveFlights.has(id),
+    finishArchive: (id: string, fail = false) => archiveFlights.get(id)?.(fail),
     navigate: (activePage: "dashboard" | "settings") =>
       useWorkspaceStore.setState({ activePage }),
   },
@@ -114,6 +141,7 @@ Object.assign(window, {
 const { DashboardPage } = await import("../features/dashboard/dashboard-page");
 const { SettingsPage } = await import("../features/settings/settings-page");
 const { TooltipProvider } = await import("../shared/ui/primitives/tooltip");
+const { Toaster } = await import("../shared/ui/primitives/elements/toast");
 const { Button } = await import("../shared/ui/primitives/button");
 const { ActionsCtx } = await import("../features/agent/sessions-context");
 const { AuthContext } = await import("../features/auth/auth-context");
@@ -168,6 +196,7 @@ function Harness() {
             </div>
             {activePage === "settings" && <SettingsPage />}
           </main>
+          <Toaster />
         </TooltipProvider>
       </ActionsCtx.Provider>
     </AuthContext.Provider>

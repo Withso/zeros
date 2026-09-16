@@ -25,6 +25,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -49,8 +50,10 @@ import {
 import { ComposerSuggestionPopup } from "./suggestion-popup";
 import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
-import { filesToAttachments } from "./attachment-io";
+import { filesToAttachments, textFileAttachment } from "./attachment-io";
+import { registerAttachmentSourceOwner } from "../attachment-source-retention";
 import { classifyComposerPaste, longPasteToAttachment } from "./long-paste";
+import { copyComposerSelection, pasteComposerClipboard } from "./clipboard";
 import {
   collectAttachmentIds,
   collectSourceKeys,
@@ -61,10 +64,7 @@ import {
   planGraphSync,
   planSeedStage,
 } from "./context-graph-staging";
-import {
-  validateAttachment,
-  type AttachmentValidation,
-} from "../agent-attachments";
+import type { AttachmentValidation } from "../agent-attachments";
 import {
   buildPathMentions,
   collectMentions,
@@ -281,6 +281,7 @@ export function useComposerEditor(
   const store = storeRef.current;
 
   const attachmentMapRef = useRef<Map<string, ComposerAttachment>>(new Map());
+  useEffect(() => registerAttachmentSourceOwner(() => [...attachmentMapRef.current.values()]), []);
   // Seed staged attachment bytes from the initial content ONCE (draft/edit).
   const seededRef = useRef(false);
   if (!seededRef.current) {
@@ -711,7 +712,12 @@ export function useComposerEditor(
     content: opts.initialContent?.json ?? "",
     editorProps: {
       attributes: { class: EDITOR_CLASS, "aria-label": "Message" },
-      handlePaste: (_view, event) => {
+      handleDOMEvents: {
+        copy: (view, event) => copyComposerSelection(view, event, optsRef.current.cwd, id => attachmentMapRef.current.get(id)),
+        cut: (view, event) => copyComposerSelection(view, event, optsRef.current.cwd, id => attachmentMapRef.current.get(id)),
+      },
+      handlePaste: (view, event) => {
+        if (pasteComposerClipboard(view, event, optsRef.current.cwd, attachmentMapRef.current)) return true;
         const payload = classifyComposerPaste(event.clipboardData);
         if (!payload) return false;
         event.preventDefault();
@@ -886,28 +892,10 @@ export function useComposerEditor(
       // Replace-in-place: attaching the full transcript of a chat whose
       // concise one is already staged must swap the chip, not add a rival.
       removeBySourceKey(ed, input.sourceKey);
-      const v = optsRef.current;
-      const id = `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-      const mimeType = "text/plain";
-      // Byte length, not string length: the budget is bytes, and a transcript
-      // is full of multi-byte punctuation the em-dash-loving formatter emits.
-      const size = new TextEncoder().encode(input.text).length;
-      const validation = validateAttachment({
-        kind: "text",
-        size,
-        agentName: v.agentName,
-        agentSupportsImage: v.agentSupportsImage,
-        modelId: v.modelId,
-      });
+      const attachment = textFileAttachment(input.name, input.text);
+      const { id, mimeType } = attachment;
       attachmentMapRef.current.set(id, {
-        id,
-        name: input.name,
-        mimeType,
-        size,
-        kind: "text",
-        data: "",
-        text: input.text,
-        validation,
+        ...attachment,
         sourceKey: input.sourceKey,
         preview: input.preview,
       });
@@ -929,7 +917,7 @@ export function useComposerEditor(
         .run();
       setIsEmpty(ed.isEmpty);
       syncSourceKeys(ed);
-      return validation;
+      return attachment.validation;
     },
     [syncSourceKeys],
   );
@@ -1110,14 +1098,31 @@ export function useComposerEditor(
   }, []);
 
   // ── render nodes ──
+  // setEditable emits an update without changing the ProseMirror document.
+  // Publish that boolean once for all pill actions, including queued clicks.
+  const editable = useSyncExternalStore(
+    useCallback(
+      (listener) => {
+        if (!editor) return () => {};
+        editor.on("update", listener);
+        return () => {
+          editor.off("update", listener);
+        };
+      },
+      [editor],
+    ),
+    useCallback(() => editor?.isEditable ?? false, [editor]),
+    () => false,
+  );
   const ctxValue = useMemo(
     () => ({
       getAttachment: (id: string) => attachmentMapRef.current.get(id),
       onPreviewImage: openPreview,
       cwd,
       attachmentImagesActive,
+      editable,
     }),
-    [openPreview, cwd, attachmentImagesActive],
+    [openPreview, cwd, attachmentImagesActive, editable],
   );
 
   const editorContent = (

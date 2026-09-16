@@ -58,6 +58,7 @@ import { discoverLocalhostServices } from "./localhost";
 import { notifySend } from "./notifications";
 import { processMetricsSnapshot } from "./process-metrics";
 import { agentAttachmentWrite } from "./agent-attachments";
+import { registerAttachmentSourceIpc } from "../attachment-source";
 import { designExportPng } from "./design-export";
 import {
   processRelaunch,
@@ -113,6 +114,7 @@ import {
   cloudWorkspaceTunnelStart,
 } from "./cloud-workspace-access";
 export function registerAllCommands(): void {
+  registerAttachmentSourceIpc();
   // App info (runtime mode / version / platform) — consumed by the
   // renderer analytics layer to route events to the right PostHog
   // project (Zeros Dev vs Zeros). Metadata only.

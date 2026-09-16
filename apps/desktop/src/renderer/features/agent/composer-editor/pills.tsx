@@ -14,8 +14,13 @@
 // ──────────────────────────────────────────────────────────
 
 import { NodeViewWrapper, type NodeViewProps } from "@tiptap/react";
+import {
+  useCallback,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import { X } from "lucide-react";
-import type { ReactNode } from "react";
 
 import { cn } from "../../../shared/ui/cn";
 import { FileTypeIcon } from "./file-type-icon";
@@ -28,15 +33,25 @@ import {
   HoverCardTrigger,
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
-import { TranscriptPreviewShell } from "../chat-transcript-preview";
+import {
+  AttachmentTextPreview,
+  attachmentTextPreviewKey,
+  warmAttachmentTextPreview,
+} from "./attachment-text-preview";
 import { useAttachmentImageSource } from "../attachment-image-source";
+import {
+  getFileAttachmentProgress,
+  subscribeFileAttachmentProgress,
+} from "../file-attachment-transfer";
 
 function PillRemoveButton({
   label,
+  disabled,
   onRemove,
   children,
 }: {
   label: string;
+  disabled: boolean;
   onRemove: () => void;
   children: ReactNode;
 }) {
@@ -46,6 +61,7 @@ function PillRemoveButton({
         type="button"
         // Removing a pill must preserve the editor's current selection.
         onMouseDown={(event) => event.preventDefault()}
+        disabled={disabled}
         onClick={onRemove}
         aria-label={`Remove ${label}`}
         className="composer-pill-remove text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright grid size-4 shrink-0 place-items-center rounded-sm border-0 bg-transparent p-0 focus-visible:ring-1 focus-visible:outline-none"
@@ -65,6 +81,7 @@ function PillRemoveButton({
 // ── MentionPill — @-file / folder / selection ──────────────
 
 export function MentionPill(props: NodeViewProps) {
+  const ctx = useComposerEditorContext();
   const attrs = props.node.attrs as {
     label: string;
     path: string;
@@ -82,7 +99,13 @@ export function MentionPill(props: NodeViewProps) {
         )}
         contentEditable={false}
       >
-        <PillRemoveButton label={attrs.label} onRemove={props.deleteNode}>
+        <PillRemoveButton
+          label={attrs.label}
+          disabled={!ctx.editable}
+          onRemove={() => {
+            if (props.editor.isEditable) props.deleteNode();
+          }}
+        >
           <FileTypeIcon
             name={attrs.path || attrs.label}
             kind={attrs.kind}
@@ -98,34 +121,55 @@ export function MentionPill(props: NodeViewProps) {
 // ── AttachmentPill — inline image / text-file attachment ───
 
 export function AttachmentPill(props: NodeViewProps) {
+  const [previewOpen, setPreviewOpen] = useState(false);
   const attrs = props.node.attrs as {
     attachmentId: string;
     name: string;
     mimeType: string;
-    kind: "image" | "text";
+    kind: "image" | "text" | "file";
   };
   const ctx = useComposerEditorContext();
   const att = ctx.getAttachment(attrs.attachmentId);
   const isImage = attrs.kind === "image";
+  const progressId = att?.contextAttachmentId ?? attrs.attachmentId;
+  const progress = useSyncExternalStore(
+    useCallback(
+      (listener) =>
+        ctx.cwd && ctx.attachmentImagesActive
+          ? subscribeFileAttachmentProgress(ctx.cwd, progressId, listener)
+          : () => {},
+      [ctx.cwd, ctx.attachmentImagesActive, progressId],
+    ),
+    useCallback(
+      () =>
+        ctx.cwd ? getFileAttachmentProgress(ctx.cwd, progressId) : undefined,
+      [ctx.cwd, progressId],
+    ),
+    () => undefined,
+  );
   const diskImageSource = useAttachmentImageSource({
     cwd: ctx.cwd,
-    diskPath: att?.diskPath,
+    diskPath: att?.diskPath ?? progress?.diskPath,
     attachmentId: att?.contextAttachmentId,
-    enabled: ctx.attachmentImagesActive,
+    enabled: ctx.attachmentImagesActive && isImage,
   });
   const dataUri =
     att && isImage && att.data
       ? `data:${att.mimeType};base64,${att.data}`
       : diskImageSource;
-  const invalid = att ? !att.validation.ok : false;
+  const invalid =
+    (att ? !att.validation.ok : false) || progress?.phase === "error";
   const tooltip =
-    att && !att.validation.ok
-      ? `${attrs.name} — ${att.validation.reason}`
-      : attrs.name;
+    progress?.phase === "error"
+      ? `${attrs.name} — ${progress.error}`
+      : att && !att.validation.ok
+        ? `${attrs.name} — ${att.validation.reason}`
+        : progress?.phase === "saving"
+          ? `${attrs.name} — Saving attachment${progress.percent > 0 ? ` (${progress.percent}%)` : ""}`
+          : attrs.name;
   // A synthesized attachment (a chat transcript) carries enough metadata to
-  // show the real thing on hover instead of its own filename. The body comes
-  // from the staged bytes, never from a fresh read: the chip IS the snapshot,
-  // so re-reading would show something the user never agreed to send.
+  // show the selected file on hover instead of its own filename. Read the
+  // staged Blob or its saved record, never the source chat's newer transcript.
   //
   // An INVALID attachment keeps its tooltip regardless of the preview.
   // `tooltip` is the only live surface in the app for validation.reason, and
@@ -133,14 +177,20 @@ export function AttachmentPill(props: NodeViewProps) {
   // would make the largest attachment the app can stage the one case that is
   // dropped with no explanation anywhere.
   const preview =
-    att?.preview && att.kind === "text" && att.validation.ok
-      ? att.preview
-      : null;
+    att?.preview && att.kind === "text" && !invalid ? att.preview : null;
+  const warmPreview = () => {
+    if (preview && att && ctx.attachmentImagesActive) {
+      void warmAttachmentTextPreview(ctx.cwd, att).catch(() => {});
+    }
+  };
 
   const shell = (
     <NodeViewWrapper
       as="span"
       data-attachment-pill=""
+      aria-busy={progress?.phase === "saving" || undefined}
+      onPointerEnter={warmPreview}
+      onFocus={warmPreview}
       className={cn(
         PILL_SHELL,
         "composer-pill mx-[1.5px] gap-2 px-1.5",
@@ -150,7 +200,13 @@ export function AttachmentPill(props: NodeViewProps) {
       )}
       contentEditable={false}
     >
-      <PillRemoveButton label={attrs.name} onRemove={props.deleteNode}>
+      <PillRemoveButton
+        label={attrs.name}
+        disabled={!ctx.editable}
+        onRemove={() => {
+          if (props.editor.isEditable) props.deleteNode();
+        }}
+      >
         <FileTypeIcon
           name={attrs.name}
           kind={isImage ? "image" : "file"}
@@ -169,6 +225,8 @@ export function AttachmentPill(props: NodeViewProps) {
         aria-label={isImage ? "Preview image" : attrs.name}
         className="m-0 inline-flex min-w-0 items-center gap-1 border-0 bg-transparent p-0 font-[inherit] text-inherit disabled:cursor-default"
       >
+        {/* Transfer status belongs in the tooltip: adding/removing inline
+            text resizes this pill and rewraps every later file in a drop. */}
         <span className="max-w-[16rem] truncate">{attrs.name}</span>
       </button>
     </NodeViewWrapper>
@@ -177,9 +235,14 @@ export function AttachmentPill(props: NodeViewProps) {
   // A transcript chip earns the panel; everything else keeps the plain
   // filename tooltip. This is the one case where hover has something strictly
   // better to say than the name already on screen.
-  if (preview) {
+  if (preview && att) {
     return (
-      <HoverCard openDelay={400} closeDelay={120}>
+      <HoverCard
+        open={ctx.attachmentImagesActive && previewOpen}
+        onOpenChange={setPreviewOpen}
+        openDelay={400}
+        closeDelay={120}
+      >
         <HoverCardTrigger asChild>{shell}</HoverCardTrigger>
         <HoverCardContent
           side="top"
@@ -187,12 +250,12 @@ export function AttachmentPill(props: NodeViewProps) {
           collisionPadding={12}
           className="w-[24rem] overflow-hidden p-0"
         >
-          <TranscriptPreviewShell
-            agentId={preview.agentId}
-            agentName={preview.agentName}
-            userMessageCount={preview.userMessageCount}
-            lastMessageAt={preview.lastMessageAt}
-            body={att?.text ?? null}
+          <AttachmentTextPreview
+            key={attachmentTextPreviewKey(ctx.cwd, att)}
+            cwd={ctx.cwd}
+            attachment={att}
+            preview={preview}
+            active={ctx.attachmentImagesActive && previewOpen}
           />
         </HoverCardContent>
       </HoverCard>

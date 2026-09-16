@@ -54,11 +54,13 @@ const PNG_1X1_BASE64 =
 
 describe("WorkspaceService", () => {
   let dir: string;
+  let stateDir: string;
   let svc: WorkspaceService;
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ws-"));
-    setStateRootForTesting(path.join(dir, "state"));
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ws-state-"));
+    setStateRootForTesting(stateDir);
     fs.writeFileSync(path.join(dir, "hello.txt"), "hi there", "utf-8");
     try {
       execFileSync("git", ["init", "-q"], { cwd: dir });
@@ -70,12 +72,7 @@ describe("WorkspaceService", () => {
   afterEach(() => {
     resetWorkspaceDesignApisForTests();
     closeState();
-    const contextCache = path.join(
-      dir,
-      "state",
-      ".appdata",
-      "isolation-context",
-    );
+    const contextCache = path.join(stateDir, ".appdata", "isolation-context");
     const makeOwnerWritable = (root: string): void => {
       try {
         fs.chmodSync(root, 0o700);
@@ -94,6 +91,7 @@ describe("WorkspaceService", () => {
     };
     makeOwnerWritable(contextCache);
     fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("lists workspaces including the synthetic local-main entry", async () => {
@@ -219,31 +217,43 @@ describe("WorkspaceService", () => {
     }
   });
 
-  it("writes an image attachment into the workspace context graph", async () => {
-    const result = (await svc.handle("attachment.write", {
-      workspaceId: LOCAL_MAIN_WORKSPACE_ID,
-      chatId: "chat-1",
-      attachmentId: "att-1",
-      base64: Buffer.from("full-resolution-image").toString("base64"),
-      mimeType: "image/png",
-      filename: "../../shot.png",
-    })) as {
-      absolutePath: string;
-      relativePath: string;
-      bytes: number;
-    };
+  it.each([false, true])(
+    "writes an image attachment into the workspace context graph (symlinked root: %s)",
+    async (symlinked) => {
+      const workspaceRoot = symlinked
+        ? path.join(stateDir, "workspace-link")
+        : dir;
+      if (symlinked) fs.symlinkSync(dir, workspaceRoot, "dir");
+      const service = new WorkspaceService(workspaceRoot);
+      const result = (await service.handle("attachment.write", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        chatId: "chat-1",
+        attachmentId: "att-1",
+        base64: Buffer.from("full-resolution-image").toString("base64"),
+        mimeType: "image/png",
+        filename: "../../shot.png",
+      })) as {
+        absolutePath: string;
+        relativePath: string;
+        bytes: number;
+      };
 
-    expect(result.relativePath).toBe(
-      ".context/local/attachments/att-1/shot.png",
-    );
-    expect(result.absolutePath).toBe(path.join(dir, result.relativePath));
-    expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
-      "full-resolution-image",
-    );
-    expect(
-      fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
-    ).toContain("/local/");
-  });
+      expect(result.relativePath).toBe(
+        ".context/local/attachments/att-1/shot.png",
+      );
+      // The attachment boundary returns canonical paths, including macOS's
+      // /var → /private/var alias and explicitly symlinked workspace roots.
+      expect(result.absolutePath).toBe(
+        path.join(fs.realpathSync(workspaceRoot), result.relativePath),
+      );
+      expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
+        "full-resolution-image",
+      );
+      expect(
+        fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
+      ).toContain("/local/");
+    },
+  );
 
   it("rejects an oversized attachment from a paired remote client before writing", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
@@ -3979,6 +3989,12 @@ describe("WorkspaceService", () => {
     // design mode (agents/terminals live in code territory) — only the
     // sparse-checkout picker stays blocked, since hiding folders could
     // remove the design directory from disk under the open canvas.
+    // The first explicit context write prepares storage on demand.
+    await expect(
+      svc.handle("context.graph.scaffold", {
+        workspaceId: workspace.workspaceId,
+      }),
+    ).resolves.toMatchObject({ ok: true, created: true });
     await expect(
       svc.handle("context.graph.scaffold", {
         workspaceId: workspace.workspaceId,

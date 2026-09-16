@@ -1,7 +1,7 @@
 // The Context tab's data cache, under the one race that matters to it:
 // attach-time staging fires its change signal while the tab's own listing can
-// still be in flight (activation + scaffold + list is two bridge round trips,
-// and the write IPC often lands inside that window on a fresh workspace).
+// still be in flight, and the write IPC can land inside that window on a fresh
+// workspace. Reads must never scaffold storage or trigger migration.
 //
 // KeyedAsyncCache dedups a forced load into a non-stale pending request, so
 // `loadContextGraph(cwd, { force: true })` alone would (a) be satisfied by the
@@ -65,22 +65,21 @@ describe("contextGraphKey", () => {
 });
 
 describe("loadContextGraph with force during an in-flight listing", () => {
-  it("keeps conflict listings visible, isolates the error by workspace and retries preparation", async () => {
-    scaffoldContextGraph.mockResolvedValueOnce({
-      ok: false,
-      created: false,
-      error: "context migration conflict",
-    });
+  it("reads legacy and current context without scaffolding or migrating on open or refresh", async () => {
     listContextGraph.mockResolvedValue(ONE);
     const a = await loadContextGraph("/a");
     const b = await loadContextGraph("/b");
-    expect(a).toMatchObject({
-      items: ONE.items,
-      storageError: "context migration conflict",
-    });
+    expect(a).toEqual(ONE);
     expect(b).toEqual(ONE);
     expect(await loadContextGraph("/a", { force: true })).toEqual(ONE);
-    expect(scaffoldContextGraph).toHaveBeenCalledTimes(3);
+    expect(scaffoldContextGraph).not.toHaveBeenCalled();
+  });
+
+  it("keeps an untouched workspace empty without preparing storage", async () => {
+    const absent = { exists: false, items: [], truncated: false };
+    listContextGraph.mockResolvedValue(absent);
+    expect(await loadContextGraph("/new")).toEqual(absent);
+    expect(scaffoldContextGraph).not.toHaveBeenCalled();
   });
 
   it("re-fetches after the stale request settles and publishes the fresh result", async () => {

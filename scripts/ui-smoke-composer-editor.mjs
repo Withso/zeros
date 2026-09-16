@@ -148,16 +148,23 @@ export async function runComposerEditorSmoke({ page, check }) {
     JSON.stringify(removed),
   );
   await page.evaluate(() => window.__composerHarness.editor.commands.undo());
-  const restored = await page.evaluate(() =>
-    window.__composerHarness.serialize(),
-  );
+  const restored = await page.evaluate(() => {
+    const snapshot = window.__composerHarness.serialize();
+    return {
+      ...snapshot,
+      sourceBytes: snapshot.attachments.map((a) => a.sourceFile?.size ?? 0),
+    };
+  });
   check(
-    "undo restores the removed attachment with its bytes",
+    "undo restores the removed attachment with its source Blob",
     restored.attachments.length === 3 &&
-      restored.attachments.every((a) => a.data.length > 0),
+      restored.sourceBytes.every((bytes) => bytes > 0) &&
+      restored.attachments.every(
+        (a) => a.delivery === "reference" && a.data.length === 0,
+      ),
     JSON.stringify({
       count: restored.attachments.length,
-      bytes: restored.attachments.map((a) => a.data.length),
+      bytes: restored.sourceBytes,
     }),
   );
   check(
