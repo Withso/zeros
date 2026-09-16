@@ -1,3 +1,5 @@
+// New attachments use the shared 500 MB policy in @zeros/protocol/attachment-policy
+// and path delivery. The inline budgets below remain for legacy payload readers.
 // ──────────────────────────────────────────────────────────
 // agent-attachments.ts — attachment limits, icons, validation
 // ──────────────────────────────────────────────────────────

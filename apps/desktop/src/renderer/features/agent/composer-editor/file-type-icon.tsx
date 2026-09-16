@@ -51,8 +51,8 @@ const resolver = createFileTreeIconResolver(FILE_ICON_TREE_CONFIG);
 export interface FileTypeIconProps {
   /** File/dir path or name used to resolve the glyph (e.g. "src/foo.ts"). */
   name: string;
-  /** Mention kind — folders + selection use lucide; files use the sprite. */
-  kind?: "file" | "folder" | "selection";
+  /** Images can be identified by MIME even when their filename has no suffix. */
+  kind?: "file" | "folder" | "selection" | "image";
   size?: number;
   className?: string;
 }
@@ -77,7 +77,10 @@ export function FileTypeIcon({
       />
     );
   }
-  const icon = resolver.resolveIcon("file-tree-icon-file", name);
+  const icon = resolver.resolveIcon(
+    "file-tree-icon-file",
+    kind === "image" ? "image.png" : name,
+  );
   return (
     <svg
       width={size}

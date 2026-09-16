@@ -3,12 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const listContextGraph = vi.fn();
 const readWorkspaceFile = vi.fn();
 const writeContextAttachment = vi.fn();
-
-vi.mock("../agent-history-client", async (original) => ({
-  ...(await original<typeof import("../agent-history-client")>()),
-  writeContextAttachment: (...args: unknown[]) =>
-    writeContextAttachment(...args),
-}));
+vi.mock("../agent-history-client", () => ({ writeContextAttachment: (...args: unknown[]) => writeContextAttachment(...args), createContextAttachmentWriter: () => writeContextAttachment }));
 
 vi.mock("../../../platform/context-graph", () => ({
   listContextGraph: (...args: unknown[]) => listContextGraph(...args),
@@ -55,7 +50,7 @@ describe("composer long-paste classification", () => {
     expect(LONG_PASTE_ATTACHMENT_NAME).toBe("pasted-text.txt");
   });
 
-  it("preserves the exact UTF-8 body for send and context-graph staging", () => {
+  it("preserves the exact UTF-8 file while keeping its body out of draft state", async () => {
     const text = `${"essay 🧭\n".repeat(376)}final line`;
     const attachment = longPasteToAttachment(text, {
       agentName: "Codex",
@@ -68,7 +63,7 @@ describe("composer long-paste classification", () => {
       mimeType: "text/plain",
       kind: "text",
       data: "",
-      text,
+      delivery: "reference",
       validation: { ok: true },
     });
     expect(attachment.size).toBe(new TextEncoder().encode(text).length);
@@ -77,11 +72,9 @@ describe("composer long-paste classification", () => {
       id === attachment.id ? attachment : undefined,
     );
     expect(plan.stage).toEqual([attachment]);
-    expect(
-      Buffer.from(stageablePayload(attachment) ?? "", "base64").toString(
-        "utf8",
-      ),
-    ).toBe(text);
+    expect(stageablePayload(attachment)).toBeNull();
+    expect(await attachment.sourceFile!.text()).toBe(text);
+    expect(attachment.text).toBeUndefined();
   });
 
   it("counts Unicode code points instead of UTF-16 halves", () => {
@@ -126,47 +119,24 @@ describe("a pasted body survives edit-and-resend", () => {
     listContextGraph.mockReset();
     readWorkspaceFile.mockReset();
     writeContextAttachment.mockReset().mockImplementation(async (args) => ({
-      absolutePath: `${args.cwd}/.context/local/attachments/${args.attachmentId}/${args.filename}`,
-      relativePath: `.context/local/attachments/${args.attachmentId}/${args.filename}`,
-      mimeType: args.mimeType,
-      bytes: Buffer.from(args.base64, "base64").length,
+      absolutePath: `${CWD}/.context/local/attachments/${args.attachmentId}/pasted-text.txt`,
+      relativePath: `.context/local/attachments/${args.attachmentId}/pasted-text.txt`,
+      bytes: args.totalBytes ?? body.length,
+      mimeType: "text/plain",
+      ...(args.uploadId && args.base64 === "" ? { bytes: 0, pending: true } : {}),
     }));
   });
 
-  it("re-reads the graph record the original send wrote", async () => {
+  it("resolves the saved path for edit-and-resend without re-reading the body", async () => {
     const attachment = longPasteToAttachment(body, {
       agentName: "Claude",
       agentSupportsImage: true,
       modelId: "claude-sonnet-4-6",
     });
 
-    // 1. First send saves the body and gives the agent only its confirmed path.
     const sent = await encodeAttachments([attachment], AGENT);
-    const relPath = `.context/local/attachments/${attachment.id}/pasted-text.txt`;
-    expect(sent.blocks).toEqual([
-      { type: "text", text: expect.stringContaining(`${CWD}/${relPath}`) },
-    ]);
+    expect(sent.blocks[0]).toMatchObject({ type: "text", text: expect.stringContaining(`/.context/local/attachments/${attachment.id}/pasted-text.txt`) });
     expect(JSON.stringify(sent.blocks)).not.toContain(body);
-    expect(
-      Buffer.from(
-        writeContextAttachment.mock.calls[0][0].base64,
-        "base64",
-      ).toString("utf8"),
-    ).toBe(body);
-    // …and the send's graph copy leaves this record behind.
-    listContextGraph.mockResolvedValue({
-      exists: true,
-      truncated: false,
-      items: [
-        { relPath, name: "pasted-text.txt", attachmentId: attachment.id },
-      ],
-    });
-    readWorkspaceFile.mockResolvedValue({
-      kind: "text",
-      path: relPath,
-      bytes: body.length,
-      content: body,
-    });
 
     // 2. The persisted transcript row keeps the reference, never the bytes.
     const segments = toMessageSegments(
@@ -195,7 +165,7 @@ describe("a pasted body survives edit-and-resend", () => {
     expect(resent.bubbleAttachments[0]).toMatchObject({
       attachmentId: attachment.id,
     });
-    expect(readWorkspaceFile).toHaveBeenCalledWith(CWD, relPath);
-    expect(listContextGraph).not.toHaveBeenCalled();
+    expect(readWorkspaceFile).not.toHaveBeenCalled();
+    expect(writeContextAttachment).toHaveBeenLastCalledWith(expect.objectContaining({ resolve: true, attachmentId: attachment.id }));
   });
 });

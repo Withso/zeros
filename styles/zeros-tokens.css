@@ -8,18 +8,16 @@
    family. Component aliases (primary-button-*) are thin
    aliases over the primitives.
 
-   THEMES: neutral dark default, "Orka black" (the preserved
-   warm-gray dark palette), and light. `data-theme` remains the
-   resolved APPEARANCE (`dark` / `light`) because Tailwind, native
-   controls, code themes, and embedded surfaces depend on that
-   polarity. The opt-in Orka black palette is selected separately
-   by `data-theme-palette="orka-black"` on the dark root.
+   THEMES: neutral dark default and light — two themes, nothing else.
+   `data-theme` is the resolved APPEARANCE (`dark` / `light`) because
+   Tailwind, native controls, code themes, and embedded surfaces all
+   depend on that polarity.
 
    ─── STRUCTURE ──────────────────────────────────────────────
    1. Imports + setup (Tailwind, Geist Variable font, @source, dark variant)
    2. @theme inline — wire primitive tokens to Tailwind utilities
    3. :root — neutral dark primitives + shared dark status palettes
-   4. Dark-palette + light-theme override blocks
+   4. Light-theme override block
    5. @layer base — default border-color + focus outline
 
    ─── TOKEN TAXONOMY ─────────────────────────────────────────
@@ -40,8 +38,13 @@
      --bg1                  default canvas / app backdrop + ACTIVE chat window
      --bg1-hover            hover state on bg1 (tool calls, tabs)
      --bg1-highlight        highlighted content above bg1
+     --bg1-bright           filled section card on bg1 (settings groups) —
+                            brighter than bg1-highlight in dark; = --bg2 in light
      --bg2                  composer surface (raised above bg1)
      --bg2-hover            hover state on bg2 (icon buttons)
+     --bg2-highlight        hover/open fill on an unfilled-at-rest control
+                            sitting on bg1/bg2 (dropdown TRIGGER) — L18 in
+                            dark; = --bg5 in light
      --bg3                  FLOATING popover / dropdown / menu surface ONLY —
                             always ON TOP of a background, never a fill or a
                             selected/chip state. Dark = --sidebar-bg, light =
@@ -74,10 +77,10 @@
      --border3              secondary button, dropdown TRIGGER, input field
      --border4              highlighted state of border3 consumers (dropdown hover)
 
-   HIGHLIGHTED (neutral interaction emphasis in both dark palettes):
+   HIGHLIGHTED (neutral interaction emphasis):
      --highlighted-bg              user-message bg in chat (text on it: fg1/fg2)
-                                   neutral dark aliases this to --bg2; Orka
-                                   black and light keep their own values
+                                   dark aliases this to --bg2; light keeps
+                                   its own value
      --highlighted-bright          input focus border, brighter accent borders
 
    INVERTED (polarity-flipping surface — always the OPPOSITE of bg1):
@@ -191,19 +194,27 @@
    * The whole app uses exactly three corner radii; pick by use case,
    * never by taste:
    *   --radius-sm 4px — ALL buttons + icon buttons, pills/chips/badges,
-   *                     kbd, checkboxes, menu items, inputs, user msgs
+   *                     kbd, checkboxes, menu items, inputs
    *   --radius-md 6px — tabs + segmented pills, model/composer pills,
    *                     sidebar + settings nav rows (workspace rows,
    *                     Dashboard/Create, settings entries), small
    *                     cards/rows, markdown img/table, tooltips
-   *   --radius-lg 8px — composer shell, dialogs, popovers, menus,
-   *                     cards, code blocks, toasts, panels
+   *   --radius-lg 8px — dialogs, cards, code blocks, toasts, panels
+   * Dropdown surfaces (Popover, DropdownMenu, ContextMenu, Select) use
+   * 2 × --radius-lg = 16px via shared/ui/menu-surface.ts; the grouped
+   * settings cards use 1.5 × --radius-lg = 12px via
+   * features/settings/settings-ui.tsx (SETTINGS_GROUP_RADIUS); and the
+   * prompt surfaces — composer card, inline edit composer, sent user
+   * message — use the same 12px via features/agent/composer-shell.tsx
+   * (PROMPT_SURFACE_RADIUS), so a prompt keeps its shape from typed to
+   * sent. All derived from the scale, not a fourth token.
    * Plus rounded-full (circles/scrollbars/switch) and rounded-none
    * (nested resets). xs/xl/2xl/3xl/4xl are reset to `initial` below
    * ON PURPOSE so `rounded-xl` etc. no longer exist —
    * a class that won't compile beats a fourth radius sneaking in.
    * Nesting rule: inner radius = outer radius − inset (8px menu with
-   * 4px padding → 4px items). */
+   * 4px padding → 4px items). Dropdown rows are the documented exception:
+   * 16px surfaces carry 8px row fills (see shared/ui/menu-surface.ts). */
   --radius-*: initial;
   --radius-sm: 4px;
   --radius-md: 6px;
@@ -214,8 +225,10 @@
   --color-bg1: var(--bg1);
   --color-bg1-hover: var(--bg1-hover);
   --color-bg1-highlight: var(--bg1-highlight);
+  --color-bg1-bright: var(--bg1-bright);
   --color-bg2: var(--bg2);
   --color-bg2-hover: var(--bg2-hover);
+  --color-bg2-highlight: var(--bg2-highlight);
   --color-bg3: var(--bg3);
   --color-bg3-hover: var(--bg3-hover);
   --color-bg4: var(--bg4);
@@ -243,7 +256,7 @@
   --color-highlighted-bg: var(--highlighted-bg);
   --color-highlighted-bright: var(--highlighted-bright);
 
-  /* ── INVERTED (polarity-flipping pair — buttons, switch ON) ── */
+  /* ── INVERTED (polarity-flipping pair — buttons, checkbox ON) ── */
   --color-inverted-bg: var(--inverted-bg);
   --color-inverted-fg: var(--inverted-fg);
 
@@ -355,8 +368,7 @@
    Neutral Dark also aliases --highlighted-bg to --bg2 so the
    user-message bubble and the composer read as one surface family.
    Meaning-bearing status palettes remain chromatic; see COLOR PALETTES
-   below. Orka black restores the former warm structural values in its
-   override block, and Light overrides the full palette. */
+   below. Light overrides the full palette. */
 
 :root {
   /* Native UA hint — form controls, scrollbars, selection.
@@ -375,8 +387,10 @@
   --pane-bg: var(--bg1);
   --bg1-hover: hsl(0 0% 12%); /* #1F1F1F — hover on bg1 (tool calls, tabs) */
   --bg1-highlight: hsl(0 0% 9%); /* #171717 — highlighted content above bg1 */
+  --bg1-bright: hsl(0 0% 11%); /* #1C1C1C — filled section card on bg1 */
   --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
   --bg2-hover: hsl(0 0% 15%); /* #262626 — hover on bg2 */
+  --bg2-highlight: hsl(0 0% 18%); /* #2E2E2E — dropdown trigger hover/open */
   /* bg3 is a FLOATING-SURFACE-ONLY token (popover / dropdown / menu / select /
    * command) — always on TOP of a background, NEVER a fill/chip/selected state.
    * Aliased to --sidebar-bg so a floating panel sits one subtle step above the
@@ -396,11 +410,11 @@
   --fg2: hsl(0 0% 72%); /* #B8B8B8 — default text + icon across app */
   /* MIDDLE tier — one step below --fg2 (see TOKEN TAXONOMY).
    * Placed 60% of the way from --muted-fg up to --fg2 in log-contrast space:
-   * 6.58:1 on bg1, between fg2's 9.41:1 and muted-fg's 3.80:1. Orka black and
-   * Light re-derive the SAME relative position in their own bands rather than
+   * 6.58:1 on bg1, between fg2's 9.41:1 and muted-fg's 3.80:1. Light
+   * re-derives the SAME relative position in its own band rather than
    * copying this lightness — in Light a higher L means LESS contrast, so
    * copying `60` there would invert the tier order. */
-  --fg3: hsl(0 0% 63%); /* #999999 — middle tier (one step below fg2) */
+  --fg3: hsl(0 0% 63%); /* #A1A1A1 — middle tier (one step below fg2) */
   --muted-fg: hsl(0 0% 44%); /* #707070 — quietest tier (app-wide 3rd tier) */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
@@ -424,9 +438,8 @@
 
   /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
   /* User-message bubble. Neutral Dark ALIASES this to bg2 so the bubble reads
-   * as the same raised surface as the composer the message was typed in (Orka
-   * black and Light keep their own literal values, so this alias is
-   * neutral-Dark-only). At 13% L it still sits just BELOW border1 (14%), which
+   * as the same raised surface as the composer the message was typed in (Light
+   * keeps its own literal value, so this alias is dark-only). At 13% L it still sits just BELOW border1 (14%), which
    * gives the bubble its faint outline — keep any hover chip painted on this
    * surface at bg2-hover (15%) or above, or it disappears into the fill
    * (turn-container.tsx "More" pill). */
@@ -593,65 +606,11 @@
 }
 
 /* ──────────────────────────────────────────────────────────
-   2b. ORKA BLACK — preserved warm dark palette
-   ──────────────────────────────────────────────────────────
-   Orka black is the former default dark palette, byte-for-byte at
-   the token-value level. Only structural neutrals need overrides:
-   status families, ramps, elevation, scrim, and aliases remain shared
-   with neutral Dark. Requiring BOTH attributes keeps `data-theme` as
-   the dark/light polarity contract for Tailwind and embedded surfaces. */
-
-:root[data-theme="dark"][data-theme-palette="orka-black"] {
-  /* ── BACKGROUNDS ── */
-  --bg0: hsl(5 10% 5%); /* #0E0C0B — INACTIVE chat window fill (below bg1) */
-  --bg1: hsl(
-    5 5% 7%
-  ); /* #131111 — default canvas / app backdrop + active chat window */
-  --bg1-hover: hsl(8 5% 12%); /* #201D1D — hover on bg1 (tool calls, tabs) */
-  --bg1-highlight: hsl(25 5% 9%); /* #181716 — highlighted content above bg1 */
-  --bg2: hsl(25 4% 12%); /* #201E1D — composer surface */
-  --bg2-hover: hsl(25 3% 15%); /* #272625 — hover on bg2 */
-  --bg4: hsl(5 1% 24%); /* #3E3D3D — rare */
-  --bg5: hsl(8 0% 37%); /* #5E5E5E — rare */
-
-  /* ── FOREGROUNDS ── */
-  --fg1: hsl(0 2% 92%); /* #EBEAEA — selected/highlighted text + icons */
-  --fg2: hsl(20 4% 66%); /* #ACA7A5 — default text + icon across app */
-  /* MIDDLE tier — 5.98:1 on Orka's bg1, the same
-   * relative position between muted-fg and fg2 that neutral Dark's L60 holds.
-   * Orka's --fg2 is L66 (not L72), so copying L60 here would leave a far
-   * tighter fg2/fg3 gap than intended. */
-  --fg3: hsl(15 1% 57%); /* #929190 — middle tier (one step below fg2) */
-  /* Adopts the former --fg3 value (sat 1%, not 4%): every one of the ~191
-   * migrated consumers rendered at that exact color, so this keeps Orka black
-   * pixel-identical for them. */
-  --muted-fg: hsl(15 1% 44%); /* #71706F — quietest tier (app-wide 3rd tier) */
-
-  /* ── REPOSITORY NAVIGATION ── */
-  --sidebar-bg: hsl(25 5% 9%); /* #181716 */
-  --sidebar-bg-hover: hsl(25 2% 15%); /* #272625 */
-
-  /* ── BORDERS ── */
-  --border1: hsl(8 3% 14%); /* #252323 — default for bg1 surfaces */
-  --border2: hsl(25 1% 18%); /* #2E2E2D — sidebar / composer focus / bg2 */
-  --border3: hsl(15 0% 24%); /* #3D3D3D — secondary btn / dropdown / input */
-  --border4: hsl(15 0% 30%); /* #4D4D4D — highlighted state of border3 */
-
-  /* ── HIGHLIGHTED + INVERTED + COMPONENT HOVER ── */
-  --highlighted-bg: hsl(5 8% 12%); /* #211D1C — user msg bg */
-  --highlighted-bright: hsl(25 5% 65%); /* #AAA5A1 — focus / brighter borders */
-  --inverted-bg: hsl(0 2% 92%); /* #EBEAEA — near-white on dark */
-  --inverted-fg: hsl(5 7% 5%); /* #0E0C0C — content on inverted fill */
-  --primary-button-hover: hsl(25 2% 83%); /* #D5D4D3 — lifted warm neutral */
-}
-
-/* ──────────────────────────────────────────────────────────
-   2c. LIGHT THEME — [data-theme="light"] overrides
+   2b. LIGHT THEME — [data-theme="light"] overrides
    ──────────────────────────────────────────────────────────
    Warm off-whites over the same taxonomy. Same specificity as
-   `:root` for the values it replaces and mutually exclusive with
-   the Orka selector, so it wins whenever the appearance store writes
-   data-theme="light".
+   `:root` for the values it replaces, so it wins whenever the
+   appearance store writes data-theme="light".
    Notes on the ramp shape:
      • bg1 and bg3 are BOTH pure white — in light mode, popovers
        get their lift from --shadow-dropdown + border, not fill.
@@ -671,8 +630,10 @@
   ); /* #FFFFFF — default canvas / app backdrop + active chat window */
   --bg1-hover: hsl(0 4% 95%); /* #F3F2F2 — hover on bg1 (tool calls, tabs) */
   --bg1-highlight: hsl(0 0% 97%); /* #F7F7F7 — highlighted content above bg1 */
+  --bg1-bright: var(--bg2); /* = #F3F3F2 — filled section card on bg1 */
   --bg2: hsl(60 4% 95%); /* #F3F3F2 — composer surface */
   --bg2-hover: hsl(60 4% 91%); /* #E9E9E7 — hover on bg2 */
+  --bg2-highlight: var(--bg5); /* = #E0E0E0 — dropdown trigger hover/open */
   /* Floating popover surface = the bg1 canvas itself; lift is border2 +
    * --shadow-dropdown (bg3 == bg1 in light — see the dark block's note). */
   --bg3: var(--bg1); /* = #FFFFFF — floating popover surface */

@@ -38,7 +38,10 @@ import {
 } from "lucide-react";
 
 import { cn } from "../../shared/ui/cn";
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import {
+  Tooltip,
+  splitTriggerClassNames,
+} from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -97,18 +100,16 @@ import {
   usePrCreateActionClaimed,
 } from "./pr-create-claim";
 
-// 24px (`h-6`) split control on the design-system "secondary" tokens
-// (TRANSPARENT fill so it blends with the row's surface + border2, hover
-// bg2-hover + border3) — the same family as the Target-branch dropdown
-// sitting across the row.
-const CONTAINER_CLS =
-  "inline-flex shrink-0 items-center overflow-hidden rounded-sm border border-border2 bg-transparent transition-colors duration-120 ease-out hover:border-border3";
-// `enabled:` hovers so a disabled button doesn't light up under the cursor
-// while its tooltip explains why it's inert.
-const MAIN_BTN_CLS =
-  "inline-flex h-6 items-center gap-1.5 pl-2 pr-2.5 text-xs font-medium text-fg1 transition-colors duration-120 ease-out enabled:hover:bg-bg2-hover disabled:opacity-50";
-const CHEVRON_BTN_CLS =
-  "inline-flex h-6 w-6 items-center justify-center border-l border-border2 text-fg2 transition-colors duration-120 ease-out enabled:hover:bg-bg2-hover enabled:hover:text-fg1 disabled:opacity-50";
+// The shared dropdown chrome in its SPLIT form (primitives/select.tsx): same
+// 6px corners, 13px text, 14px glyphs, border3 shell and bg2-highlight hover
+// as the Target-branch dropdown across the row — only the action segment and
+// the ▾ menu segment hover independently. `enabled:` hovers keep a disabled
+// control inert under the cursor while its tooltip explains why.
+const {
+  shell: CONTAINER_CLS,
+  main: MAIN_BTN_CLS,
+  chevron: CHEVRON_BTN_CLS,
+} = splitTriggerClassNames;
 
 interface CreatePrButtonProps {
   workspace: Workspace;
@@ -127,7 +128,7 @@ export function CreatePrButton({
   disabled,
   disabledReason,
 }: CreatePrButtonProps) {
-  const sendToChat = useSendToActiveChat();
+  const sendToChat = useSendToActiveChat(workspace.path);
   const dispatch = useWorkspaceDispatch();
   const busy = usePrCreateActionClaimed(workspace.id);
   const directOnly = workspace.kind === "design";
@@ -485,7 +486,7 @@ export function CreatePrButton({
               disabled={inert}
               aria-label="More PR options"
             >
-              <ChevronDown className="size-3" />
+              <ChevronDown />
             </button>
           </DropdownMenuTrigger>
         </Tooltip>

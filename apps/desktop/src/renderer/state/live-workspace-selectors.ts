@@ -5,35 +5,54 @@
 // Every surface that lists live (non-archived) workspaces — the top-bar strip,
 // the Dashboard board, the repo hub list, and the home-sidebar repo counts —
 // reads the SAME per-repo `workspaceCache` rows (unioned for cross-repo views)
-// and projects them through these pure helpers. A destructive operation does
-// not change membership: its row remains in place with a busy affordance until
-// the authoritative cache transition confirms archive/delete. That prevents a
-// failed operation from making the workspace disappear and then bounce back.
+// and projects them through these helpers. Local archive intent hides its row
+// immediately; the confirmed cache changes only after the engine finishes.
+// Clearing a failed intent reveals the newest confirmed row without rollback
+// writes that could clobber a concurrent update.
 // ──────────────────────────────────────────────────────────
 
+import { useMemo } from "react";
 import type { Workspace } from "../platform/git";
-import type { PendingWorkspaceCreate } from "./pending-workspaces";
+import {
+  usePendingWorkspacesStore,
+  type PendingWorkspaceCreate,
+} from "./pending-workspaces";
 
 const EMPTY_PENDING: PendingWorkspaceCreate[] = [];
+const EMPTY_ARCHIVE_INTENTS: Readonly<Record<string, number>> = {};
 
-/** The single visibility filter: drop only rows the server has confirmed
- * archived. Deliberately KEEPS `present === false` (orphaned worktree) rows so
+/** The single visibility filter: drop confirmed archives and local archive
+ * intents. Deliberately KEEPS `present === false` (orphaned worktree) rows so
  * every surface's SET — and therefore its count — agrees; each surface still
  * HANDLES present===false in its own rendering (Dashboard → "Worktree missing"
  * card, top-bar/repo rows → open the WorktreeMissingPanel). Returns the input
  * array unchanged when nothing is filtered, so referential identity is
  * preserved for memo bailout. */
-export function selectLiveVisible(rows: readonly Workspace[]): Workspace[] {
+export function selectLiveVisible(
+  rows: readonly Workspace[],
+  archiveIntents: Readonly<Record<string, number>> = EMPTY_ARCHIVE_INTENTS,
+): Workspace[] {
   let anyFiltered = false;
   const out: Workspace[] = [];
   for (const w of rows) {
-    if (w.archivedAt != null) {
+    if (w.archivedAt != null || w.id in archiveIntents) {
       anyFiltered = true;
       continue;
     }
     out.push(w);
   }
   return anyFiltered ? out : (rows as Workspace[]);
+}
+
+/** Shared presentation subscription for tabs, Dashboard, and repository rows. */
+export function useLiveVisible(rows: readonly Workspace[]): Workspace[] {
+  const archiveIntents = usePendingWorkspacesStore(
+    (state) => state.archiveIntents,
+  );
+  return useMemo(
+    () => selectLiveVisible(rows, archiveIntents),
+    [rows, archiveIntents],
+  );
 }
 
 /** Drop any pending create whose reserved branch (fallback: path) already
@@ -76,6 +95,7 @@ export function dedupePendingCreates(
 export function countLiveVisibleBySlug(
   rows: readonly Workspace[],
   allPending: readonly PendingWorkspaceCreate[],
+  archiveIntents: Readonly<Record<string, number>> = EMPTY_ARCHIVE_INTENTS,
 ): Map<string, number> {
   const bySlug = new Map<string, Workspace[]>();
   for (const w of rows) {
@@ -85,7 +105,7 @@ export function countLiveVisibleBySlug(
   }
   const counts = new Map<string, number>();
   for (const [slug, slugRows] of bySlug) {
-    counts.set(slug, selectLiveVisible(slugRows).length);
+    counts.set(slug, selectLiveVisible(slugRows, archiveIntents).length);
   }
   const pendingBySlug = new Map<string, PendingWorkspaceCreate[]>();
   for (const p of allPending) {

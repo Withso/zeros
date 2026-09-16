@@ -90,7 +90,10 @@ import { isSubmittedComposerDocument } from "./composer-submission";
 // (the file input still uses the same accept list) — the textarea
 // autosize was removed with the textarea, and the visual shell moved
 // off ComposerShell/ComposerTextarea/ComposerToolbar.
-import { COMPOSER_FILE_ACCEPT } from "./composer-shell";
+import {
+  COMPOSER_FILE_ACCEPT,
+  PROMPT_SURFACE_RADIUS,
+} from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import {
   Conversation,
@@ -2828,14 +2831,14 @@ export function AgentChat({
   openPreviewRef.current = openPreview;
   // Live-draft mirror: the editor's onChange snapshots the composer into
   // composerLiveRef (read synchronously by the sidebar's "+ New Agent") and
-  // into the module-level ref. Store persistence happens when the retained
-  // surface is parked and again on bounded eviction/unmount.
+  // into the module-level ref. Draft snapshots include this live value while
+  // typing; parking and unmount also publish it to the workspace store.
   const updateLiveDraft = useCallback(() => {
     if (!chatId) return;
     const s = serializeComposerState();
     if (!s || s.isEmpty) {
       composerLiveRef.current = { text: "", attachments: [], json: null };
-      setLiveChatDraft(chatId, null);
+      setLiveChatDraft(chatId, composerLiveRef.current);
       return;
     }
     const draft = {
@@ -2885,8 +2888,9 @@ export function AgentChat({
   useEffect(() => {
     return () => {
       if (!chatId) return;
-      setLiveChatDraft(chatId, null);
       persistComposerDraft();
+      // Hand off to the parked snapshot before releasing the live owner.
+      setLiveChatDraft(chatId, null);
     };
   }, [chatId, persistComposerDraft]);
 
@@ -3264,19 +3268,19 @@ export function AgentChat({
 
   // Attach-time staging has normally completed already. Await the final
   // persistence check for every kind before publishing a reference to an agent.
-  const encodeComposerAttachments = async (localAttachments: ComposerAttachment[]) => {
+  const encodeComposerAttachments = async (
+    localAttachments: ComposerAttachment[],
+  ) => {
     if (localAttachments.length > 0) setSendPreparing(true);
-    try {
-      return await encodeAttachments(localAttachments, {
-        supportsImage:
-          session.initialize?.agentCapabilities?.promptCapabilities?.image !== false,
-        cwd: chatThread?.folder || null,
-        chatId: chatId ?? null,
-        agentId: session.agentId ?? chatThread?.agentId ?? null,
-      });
-    } finally {
+    return encodeAttachments(localAttachments, {
+      supportsImage:
+        session.initialize?.agentCapabilities?.promptCapabilities?.image !== false,
+      cwd: chatThread?.folder || null,
+      chatId: chatId ?? null,
+      agentId: session.agentId ?? chatThread?.agentId ?? null,
+    }).finally(() => {
       if (localAttachments.length > 0) setSendPreparing(false);
-    }
+    });
   };
 
   /** The chat whose send is already parked on an unreadable transcript. One
@@ -3738,6 +3742,10 @@ export function AgentChat({
     noteInteractiveAgentActivity();
     try {
       await runSend(override, extras, recordActivity);
+    } catch (error) {
+      toast.error("Message wasn't sent", {
+        description: error instanceof Error ? error.message : String(error),
+      });
     } finally {
       sendInFlightRef.current = false;
     }
@@ -3794,14 +3802,14 @@ export function AgentChat({
   /** Persist the composer's content back onto the queued entry (Enter /
    *  tick). Runs the SAME pipeline as a fresh send — mention expansion +
    *  attachment encoding — so nothing degrades through an edit. */
-  const saveQueuedEdit = async () => {
+  const saveQueuedEdit = async (): Promise<boolean> => {
     const id = editingQueuedRef.current;
-    if (!id || queueSaveInFlightRef.current) return;
+    if (!id || queueSaveInFlightRef.current) return false;
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
     // Nothing to save — the tick is disabled; Esc cancels, Delete removes.
-    if (displayText.length === 0 && localAttachments.length === 0) return;
+    if (displayText.length === 0 && localAttachments.length === 0) return false;
     queueSaveInFlightRef.current = true;
     try {
       const wireText = expandMentionsInText(
@@ -3815,7 +3823,7 @@ export function AgentChat({
       // made it. The queued message has not been dispatched yet, which makes
       // this the LAST moment the user can act on it.
       reportSkippedAttachments(skipped, toast.warning);
-      if (skipped.length > 0) return;
+      if (skipped.length > 0) return false;
       const segments = toMessageSegments(
         s?.segments ?? [],
         localAttachments,
@@ -3829,10 +3837,16 @@ export function AgentChat({
           bubbleAttachments.length > 0 ? bubbleAttachments : undefined,
         segments: segments.length > 0 ? segments : undefined,
       });
+    } catch (error) {
+      toast.error("Queued message wasn't saved", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      return false;
     } finally {
       queueSaveInFlightRef.current = false;
     }
     exitQueuedEdit();
+    return true;
   };
 
   const deleteQueued = (id: string) => {
@@ -3856,7 +3870,7 @@ export function AgentChat({
    *  when idle. Sending the row that's being edited saves the edit first, so
    *  what's dispatched is what the user sees in the composer. */
   const sendNowQueued = async (id: string) => {
-    if (editingQueuedRef.current === id) await saveQueuedEdit();
+    if (editingQueuedRef.current === id && !(await saveQueuedEdit())) return;
     const ok = await session.steerQueued?.(id);
     if (ok === false) {
       toast.error("Couldn't send now", {
@@ -4809,7 +4823,10 @@ export function AgentChat({
           <ComposerConcealedContext.Provider value={composerConcealed}>
             <div
               className={cn(
-                "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col rounded-lg border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
+                "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
+                // 12px corners, shared with the edit composer + the sent
+                // user-message bubble (see PROMPT_SURFACE_RADIUS).
+                PROMPT_SURFACE_RADIUS,
                 // Drag border: subtle (border2), not near-white --highlighted-bright; `!`
                 // beats the higher-specificity focus-within:border-border2 so the drag
                 // state looks identical whether or not the composer is focused.
@@ -4835,7 +4852,12 @@ export function AgentChat({
               {composerSuggestionPopup}
               {dragActive && (
                 <div
-                  className="bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 rounded-lg p-3 text-xs"
+                  className={cn(
+                    "bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs",
+                    // Tracks the card's corners so the drop veil doesn't square
+                    // off inside them.
+                    PROMPT_SURFACE_RADIUS,
+                  )}
                   aria-hidden="true"
                 >
                   <Upload size={20} />

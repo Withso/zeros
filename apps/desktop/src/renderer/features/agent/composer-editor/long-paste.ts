@@ -2,7 +2,7 @@
 // Keep the boundary and clipboard precedence in this DOM-free module so all
 // composer surfaces share one exact, regression-tested policy.
 
-import { validateAttachment } from "../agent-attachments";
+import { textFileAttachment } from "./attachment-io";
 import type { ComposerAttachment } from "../composer-attachments";
 
 /** Pasting strictly more than this many Unicode code points creates a .txt
@@ -55,23 +55,7 @@ export function classifyComposerPaste(
  * string, so this path stays synchronous and preserves it byte-for-byte. */
 export function longPasteToAttachment(
   text: string,
-  opts: LongPasteAttachmentOpts,
+  _opts: LongPasteAttachmentOpts,
 ): ComposerAttachment {
-  const size = new TextEncoder().encode(text).length;
-  return {
-    id: `att-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-    name: LONG_PASTE_ATTACHMENT_NAME,
-    mimeType: "text/plain",
-    kind: "text",
-    data: "",
-    text,
-    size,
-    validation: validateAttachment({
-      kind: "text",
-      size,
-      agentName: opts.agentName ?? null,
-      agentSupportsImage: opts.agentSupportsImage,
-      modelId: opts.modelId ?? null,
-    }),
-  };
+  return textFileAttachment(LONG_PASTE_ATTACHMENT_NAME, text);
 }

@@ -8,17 +8,14 @@
 // exact-key snapshot while a refresh is in flight (a refresh must
 // never blank an already-rendered canvas).
 //
-// Scaffolding rides the first load: one idempotent `context.graph.scaffold`
-// per folder per session, BEFORE the first list, so opening the Context tab
-// is what materialises `.context/` for pre-existing workspaces (new
-// worktrees get it at create time in the engine).
+// Opening or refreshing this surface is read-only. Attachment and explicit
+// context writes own directory creation and legacy migration.
 // ──────────────────────────────────────────────────────────
 
 import { useCallback, useSyncExternalStore } from "react";
 
 import {
   listContextGraph,
-  scaffoldContextGraph,
   type ContextGraphListWire,
 } from "@/renderer/platform/context-graph";
 import {
@@ -26,16 +23,9 @@ import {
   type AsyncCacheSnapshot,
 } from "@/renderer/shared/lib/keyed-async-cache";
 
-interface ContextGraphData extends ContextGraphListWire {
-  /** Preparation can fail while legacy/current files remain readable. */
-  storageError?: string;
-}
+type ContextGraphData = ContextGraphListWire;
 
 const graphCache = new KeyedAsyncCache<ContextGraphData>(32);
-
-/** Folders whose scaffold ran this session — once is enough, the engine call
- *  is idempotent and re-runs on the attachment write path anyway. */
-const scaffolded = new Set<string>();
 
 function normalizeCwd(cwd: string): string {
   if (cwd === "/" || /^[A-Za-z]:[\\/]$/.test(cwd)) return cwd;
@@ -47,21 +37,7 @@ export function contextGraphKey(cwd: string): string {
 }
 
 async function fetchContextGraph(cwd: string): Promise<ContextGraphData> {
-  let storageError: string | undefined;
-  if (!scaffolded.has(cwd)) {
-    // Best-effort: a client without graph writes (or a broken graph) still gets the listing;
-    // the set is marked only on success so a transient failure retries.
-    try {
-      const res = await scaffoldContextGraph(cwd);
-      if (res.ok) scaffolded.add(cwd);
-      else storageError = res.error;
-    } catch (error) {
-      storageError =
-        error instanceof Error ? error.message : "Couldn't prepare .context";
-    }
-  }
-  const data = await listContextGraph(cwd);
-  return storageError ? { ...data, storageError } : data;
+  return listContextGraph(cwd);
 }
 
 /** Subscribe to one folder's graph snapshot (stable references, exact-key). */
@@ -101,5 +77,4 @@ export function loadContextGraph(
 /** Test-only reset. The cache stays a module singleton in production. */
 export function resetContextGraphCacheForTests(): void {
   graphCache.clear();
-  scaffolded.clear();
 }

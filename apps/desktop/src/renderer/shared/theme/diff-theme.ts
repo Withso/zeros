@@ -32,6 +32,12 @@ import { DEFAULT_CODE_VIEW_LAYOUT } from "@pierre/diffs";
 import { getPrefs } from "./store";
 import { resolveCodeTheme } from "./code-themes";
 
+const HUNK_CARD_HEIGHT = 28;
+const HUNK_CARD_GAP = 8;
+// Include both gaps in the separator's measured region, even at file edges.
+// Pierre's virtualizer must reserve the same space that its shadow DOM paints.
+const HUNK_SEPARATOR_HEIGHT = HUNK_CARD_HEIGHT + HUNK_CARD_GAP * 2;
+
 /** Resolve the live diff theme from the user's unified codeTheme setting. The
  *  picked Shiki theme drives BOTH dark/light keys (so `themeType` just selects
  *  it), and `themeType` tracks the theme's appearance. @pierre/diffs accepts any
@@ -64,8 +70,6 @@ export function resolveDiffTheme(codeThemeId?: string): {
  *       the package's navy #69b1ff). @pierre leaves the -override slots unset, so
  *       ours win. Fine-tune washes via --diffs-bg-*(-emphasis)-override.
  *  Preview: styles/Artifacts/diff-theme-preview.html. */
-export const DIFF_HUNK_SEPARATOR_HEIGHT = 24;
-
 function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
   return `
   :host, pre, code {
@@ -74,36 +78,51 @@ function diffShadowCss(surface: "bg1" | "bg2" | "sidebar-bg"): string {
   pre, code { background: transparent; }
   :host {
     background: var(--${surface});
+    --diffs-gap-block: 0px;
     --diffs-bg: var(--${surface});
     --diffs-addition-color-override: var(--green-primary);
     --diffs-deletion-color-override: var(--red-primary);
     --diffs-modified-color-override: var(--highlighted-bright);
-    --diffs-gap-block: 0px;
+    --diffs-bg-separator-override: var(--bg2);
+    --diffs-bg-addition-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--green-primary) 65%, var(--fg2)));
+    --diffs-bg-deletion-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--red-primary) 65%, var(--fg2)));
   }
-      :host {
-        --diffs-bg-separator-override: var(--bg2);
-        --diffs-bg-addition-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--green-primary) 65%, var(--fg2)));
-        --diffs-bg-deletion-override: color-mix(in lab, var(--diffs-bg) 15%, color-mix(in srgb, var(--red-primary) 65%, var(--fg2)));
-      }
-      [data-separator="line-info"] {
-        height: ${DIFF_HUNK_SEPARATOR_HEIGHT}px;
-      }
-      [data-separator="line-info"] [data-separator-wrapper] {
-        grid-template-columns: 24px auto;
-      }
-      [data-separator="line-info"] [data-expand-button] {
-        min-width: 24px;
-      }
-      [data-separator="line-info"] [data-expand-button] [data-icon] {
-        width: 12px;
-        height: 12px;
-      }
-      @media (pointer: coarse) {
-        [data-separator="line-info"] [data-separator-multi-button] {
-          grid-template-columns: 24px 24px auto;
-        }
-      }
+  [data-separator="line-info"] {
+    height: ${HUNK_SEPARATOR_HEIGHT}px;
+    margin-block: 0;
+    background: var(--diffs-bg);
+  }
+  [data-separator="line-info"] [data-separator-wrapper] {
+    top: ${HUNK_CARD_GAP}px;
+    height: ${HUNK_CARD_HEIGHT}px;
+    grid-template-columns: ${HUNK_CARD_HEIGHT}px auto;
+  }
+  [data-separator="line-info"] [data-expand-button] {
+    min-width: ${HUNK_CARD_HEIGHT}px;
+  }
+  [data-separator="line-info"] [data-expand-button] [data-icon] {
+    width: 12px;
+    height: 12px;
+  }
+  @media (pointer: coarse) {
+    [data-separator="line-info"] [data-separator-multi-button] {
+      grid-template-columns: ${HUNK_CARD_HEIGHT}px ${HUNK_CARD_HEIGHT}px auto;
+    }
+  }
 `;
+}
+
+/** Pierre owns these shadow-DOM text nodes and offers no label option. Its
+ * post-render hook also runs after context expansion and virtual remounts, so
+ * the visible and accessible trailing label stay in sync on every surface. */
+function finishDiffRender(node: HTMLElement): void {
+  for (const label of node.shadowRoot?.querySelectorAll(
+    "[data-separator-last] [data-unmodified-lines]",
+  ) ?? []) {
+    if (label.textContent !== "More unmodified lines") {
+      label.textContent = "More unmodified lines";
+    }
+  }
 }
 
 /** Shared diff render options for the `options` prop of PatchDiff /
@@ -125,6 +144,8 @@ export function zerosDiffOptions(opts?: {
   unsafeCSS: string;
   diffStyle: "unified" | "split";
   overflow: "wrap";
+  hunkSeparators: "line-info";
+  onPostRender: (node: HTMLElement) => void;
   disableFileHeader?: boolean;
 } {
   return {
@@ -146,6 +167,8 @@ function zerosSharedDiffPresentation(opts?: {
   unsafeCSS: string;
   diffStyle: "unified" | "split";
   overflow: "wrap";
+  hunkSeparators: "line-info";
+  onPostRender: (node: HTMLElement) => void;
 } {
   const { theme, themeType } = resolveDiffTheme(opts?.codeThemeId);
   return {
@@ -153,6 +176,8 @@ function zerosSharedDiffPresentation(opts?: {
     themeType,
     unsafeCSS: diffShadowCss(opts?.surface ?? "sidebar-bg"),
     diffStyle: opts?.diffStyle ?? "unified",
+    hunkSeparators: "line-info",
+    onPostRender: finishDiffRender,
     // One file-reading contract across Review, Changes, chat, and hover
     // previews: long source lines reflow inside the available width instead of
     // creating a second horizontal navigation axis.
@@ -175,9 +200,6 @@ export function zerosCodeViewOptions(opts?: {
   const presentation = zerosSharedDiffPresentation(opts);
   return {
     ...presentation,
-    // The shadow DOM paints its own block padding independently of the virtual
-    // layout. Keep both flush with the workbench pane, including split diffs.
-    unsafeCSS: `${presentation.unsafeCSS}\n:host { --diffs-gap-block: 0px; }`,
     ...(opts?.disableFileHeader ? { disableFileHeader: true } : {}),
     layout: {
       ...DEFAULT_CODE_VIEW_LAYOUT,
@@ -185,6 +207,11 @@ export function zerosCodeViewOptions(opts?: {
       paddingBottom: 0,
       gap: 0,
     },
-    itemMetrics: { paddingTop: 0, paddingBottom: 0, spacing: 0 },
+    itemMetrics: {
+      paddingTop: 0,
+      paddingBottom: 0,
+      spacing: 0,
+      hunkSeparatorHeight: HUNK_SEPARATOR_HEIGHT,
+    },
   };
 }

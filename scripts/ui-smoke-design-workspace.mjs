@@ -8,8 +8,12 @@ import { runDesignLayoutChildrenSmoke } from "./ui-smoke-design-layout-children.
 import { runDesignFrameChildrenSmoke } from "./ui-smoke-design-frame-children.mjs";
 import { runDesignAuthoredFrameSmoke } from "./ui-smoke-design-authored-frame.mjs";
 import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs";
+import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
+import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
+  await runDesignGitMenuSmoke({ page, check });
+  await runDesignSelectionSmoke({ page, waitFor, check });
   await runDesignLayoutSmoke({ page, waitFor, check });
   await runDesignLayoutChildrenSmoke({ page, waitFor, check });
   await runDesignFrameChildrenSmoke({ page, waitFor, check });
@@ -301,6 +305,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         left: box.left,
         width: box.width,
         iconLeft: icon ? icon.getBoundingClientRect().left : null,
+        iconWidths: [...icons].map((svg) => svg.getBoundingClientRect().width),
         discloses: row.querySelector("[data-layer-disclosure]") !== null,
         radius: [
           style.borderTopLeftRadius,
@@ -352,6 +357,14 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       homeLayoutIcons.main === null &&
       homeLayoutIcons.nav === "flex-horizontal",
     JSON.stringify(homeLayoutIcons),
+  );
+  check(
+    "Layers icons honor the 12px size supplied by their rows",
+    [frameRowMetrics, parentRowMetrics, headingRowMetrics].every(
+      (row) =>
+        row?.iconWidths.length > 0 &&
+        row.iconWidths.every((width) => width === 12),
+    ),
   );
   check(
     "layer rows indent their content one step per depth below the frame row",
@@ -1691,6 +1704,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       textNode: heading.firstChild,
     };
   });
+  const styleSourceVersion = () =>
+    homeRuntime
+      .locator('[data-oid="home-heading"]')
+      .evaluate(() => window.__zerosDesignSourceVersion);
   await widthInput.fill("640");
   await page.waitForTimeout(150);
   check(
@@ -1702,6 +1719,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .locator('[data-oid="home-heading"]')
         .evaluate((heading) => getComputedStyle(heading).width === "900px")),
   );
+  const widthSourceBeforeCommit = await styleSourceVersion();
   await page.keyboard.press("Enter");
   check(
     "committing a width updates element pixels and selection geometry together",
@@ -1717,24 +1735,33 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       });
       const documentStable = await homeRuntime
         .locator('[data-oid="home-heading"]')
-        .evaluate((heading) => {
+        .evaluate((heading, previousSourceVersion) => {
           const identity = window.__zerosDesignHeadingIdentity;
           return (
+            window.__zerosDesignSourceVersion !== previousSourceVersion &&
             getComputedStyle(heading).width === "640px" &&
             identity?.heading === heading &&
             heading.firstChild === identity?.textNode
           );
-        });
+        }, widthSourceBeforeCommit);
       return parentStable && documentStable;
     }, "design-live-width-commit"),
   );
+  const widthSourceBeforeRestore = await styleSourceVersion();
   await widthInput.fill("900");
   await page.keyboard.press("Enter");
   await waitFor(
     () =>
       homeRuntime
         .locator('[data-oid="home-heading"]')
-        .evaluate((heading) => getComputedStyle(heading).width === "900px")
+        // The preview paints before persistence. Waiting for its pixels alone
+        // lets this fixture write leak into the rapid pair's mutation count.
+        .evaluate(
+          (heading, previousSourceVersion) =>
+            window.__zerosDesignSourceVersion !== previousSourceVersion &&
+            getComputedStyle(heading).width === "900px",
+          widthSourceBeforeRestore,
+        )
         .catch(() => false),
     "design-live-width-restore",
   );
@@ -4379,12 +4406,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   await canvasFocusTarget.focus();
   await page.keyboard.press("Shift+Enter");
-  await page.keyboard.down("Control");
+  await page.keyboard.down("ControlOrMeta");
   await page.mouse.click(
     nestedHeadingBox.x + nestedHeadingBox.width / 2,
     nestedHeadingBox.y + nestedHeadingBox.height / 2,
   );
-  await page.keyboard.up("Control");
+  await page.keyboard.up("ControlOrMeta");
   check(
     "Cmd/Ctrl-click deep-selects through an already selected container",
     await waitFor(
@@ -5423,14 +5450,26 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     .getByRole("menuitem")
     .first()
     .textContent();
+  check(
+    "nested hit stack initially focuses its deepest layer",
+    await waitFor(
+      () => hitStack.getByRole("menuitem").first().evaluate(
+        (item) => item === document.activeElement,
+      ),
+      "design-hit-stack-initial-focus",
+    ),
+  );
   await page.keyboard.press("ArrowDown");
   check(
     "nested hit stack supports roving arrow-key focus",
-    await page.evaluate(
-      (deepest) =>
-        document.activeElement?.getAttribute("role") === "menuitem" &&
-        document.activeElement.textContent !== deepest,
-      deepestHitText,
+    await waitFor(
+      () => page.evaluate(
+        (deepest) =>
+          document.activeElement?.getAttribute("role") === "menuitem" &&
+          document.activeElement.textContent !== deepest,
+        deepestHitText,
+      ),
+      "design-hit-stack-arrow-focus",
     ),
   );
   await page.keyboard.press("Escape");

@@ -62,7 +62,7 @@ describe("live Run wave placement", () => {
     // either could shrink, a busy workspace would render half a number.
     expect(counts).toMatch(/className="[^"]*\bshrink-0\b/);
     expect(topBar).toMatch(
-      /<span className="[^"]*\bflex-auto\b[^"]*">\{label\}/,
+      /<span className="[^"]*\bflex-auto\b[^"]*">\s*<span className="[^"]*\btruncate\b[^"]*">\{label\}/,
     );
   });
 

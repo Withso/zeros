@@ -3,16 +3,15 @@
 // ──────────────────────────────────────────────────────────
 //
 // Current model (2026-08-08):
-//   - mode: "system" | "light" | "dark" | "orka-black"
+//   - mode: "system" | "light" | "dark"
 //   - codeTheme: resolved syntax-theme id for the current variant
 //     (stored as per-variant picks — see StoredAppearancePrefs)
 //
 // All neutral / accent tokens are concrete HSL values in
 // `styles/zeros-tokens.css`. `:root` carries the neutral dark
-// default; `[data-theme-palette="orka-black"]` restores the former
-// warm-gray dark primitives; `[data-theme="light"]` carries the
-// light overrides. `data-theme` stays strictly "dark" | "light"
-// and drives Tailwind plus every polarity-sensitive embedded surface.
+// default; `[data-theme="light"]` carries the light overrides.
+// `data-theme` is strictly "dark" | "light" and drives Tailwind plus
+// every polarity-sensitive embedded surface.
 //
 // ─── History ────────────────────────────────────────────────
 // 2026-05-16: hue/intensity/accent sliders and their OKLCH recipe exports were
@@ -43,20 +42,23 @@
 //   migrates via migrateLegacyCodeTheme on load.
 // 2026-08-08: Dark became structurally neutral. Most HSL lightness values
 //   stayed fixed; bg1, bg2, and sidebar-bg moved one point up. The former
-//   dark palette was preserved unchanged as the new "orka-black" mode. Both
-//   dark palettes intentionally share the dark code-theme slot and resolved
-//   appearance variant.
+//   dark palette was preserved unchanged as an opt-in "orka-black" mode.
+// 2026-09-14: "orka-black" retired. Two themes only — Dark and Light (plus
+//   System). Saved "orka-black" prefs migrate to "dark" on load; the
+//   `data-theme-palette` attribute and its CSS block were deleted.
 // ──────────────────────────────────────────────────────────
 
-export type ThemeMode = "system" | "light" | "dark" | "orka-black";
+export type ThemeMode = "system" | "light" | "dark";
 
 /** Resolved variant after `system` is decided via prefers-color-scheme.
  *  This is what gets written to the document's data-theme attribute. */
 export type ThemeVariant = "dark" | "light";
 
-/** Concrete visual theme after resolving System. Unlike ThemeVariant, this
- *  distinguishes the two dark palettes so JS-rendered canvases can repaint. */
-export type ThemeId = ThemeVariant | "orka-black";
+/** Concrete visual theme after resolving System. Since the second dark
+ *  palette was retired this is the same set as ThemeVariant; it stays a
+ *  distinct name so canvas/xterm consumers that key on "which concrete
+ *  theme is painted" read as intended. */
+export type ThemeId = ThemeVariant;
 
 export interface AppearancePrefs {
   mode: ThemeMode;
@@ -93,7 +95,6 @@ export function resolveThemeId(
 ): ThemeId {
   if (mode === "light") return "light";
   if (mode === "dark") return "dark";
-  if (mode === "orka-black") return "orka-black";
   return systemPrefersDark ? "dark" : "light";
 }
 

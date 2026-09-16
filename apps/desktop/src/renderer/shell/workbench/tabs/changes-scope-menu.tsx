@@ -31,9 +31,6 @@ import {
 } from "@/renderer/shared/ui/primitives";
 import { type Scope } from "./changes-scope";
 
-// Match New tab's 16px corners; the Changes menu uses 13px type.
-const MENU_CHROME = "rounded-[calc(var(--radius-lg)*2)] p-1.5";
-const ROW = "h-8 gap-2 rounded-lg px-2 text-xs font-normal [&_svg]:size-3.5";
 const PAGE_SIZE = 50;
 const LATEST_TURN_LABEL = "Latest agent turn";
 
@@ -140,7 +137,6 @@ function HistoryItems({
   bounds,
   onAll,
   onRange,
-  showRangeHint = true,
   loading = false,
   error,
   onRetry,
@@ -151,7 +147,6 @@ function HistoryItems({
   bounds: [number, number] | null;
   onAll: () => void;
   onRange: (oldest: number, newest: number) => void;
-  showRangeHint?: boolean;
   loading?: boolean;
   error?: string | null;
   onRetry?: () => void;
@@ -176,7 +171,6 @@ function HistoryItems({
   return (
     <>
       <DropdownMenuCheckboxItem
-        className={`${ROW} pr-8`}
         indicatorSide="end"
         checked={allSelected}
         disabled={!rows.length}
@@ -194,7 +188,6 @@ function HistoryItems({
         return (
           <DropdownMenuCheckboxItem
             key={row.id}
-            className={`${ROW} pr-8`}
             indicatorSide="end"
             checked={checked}
             title={row.detail ?? row.label}
@@ -225,7 +218,6 @@ function HistoryItems({
       })}
       {visible < rows.length && (
         <DropdownMenuItem
-          className={ROW}
           onSelect={(event) => {
             event.preventDefault();
             setVisible((count) => count + PAGE_SIZE);
@@ -252,13 +244,9 @@ function HistoryItems({
           </Button>
         </div>
       ) : (
-        (!rows.length || showRangeHint) && (
+        !rows.length && (
           <p className="text-fg3 px-2 py-1.5 text-xs">
-            {!rows.length && loading
-              ? "Loading history…"
-              : rows.length
-                ? "Select two endpoints to choose a range."
-                : "No history yet"}
+            {loading ? "Loading history…" : "No history yet"}
           </p>
         )
       )}
@@ -381,10 +369,9 @@ export function ChangesScopeMenu({
           <ChevronDown className="size-3.5" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className={`${MENU_CHROME} w-[260px]`}>
+      <DropdownMenuContent align="start" className="w-[260px]">
         <DropdownMenuSub>
           <DropdownMenuSubTrigger
-            className={ROW}
             data-selected={turnScope || undefined}
             onClick={(event) => {
               event.preventDefault();
@@ -402,16 +389,13 @@ export function ChangesScopeMenu({
             {turnScope && <Check />}
           </DropdownMenuSubTrigger>
           <DropdownMenuPortal>
-            <DropdownMenuSubContent
-              className={`${MENU_CHROME} max-h-[min(480px,var(--radix-dropdown-menu-content-available-height))] w-[320px] overflow-y-auto`}
-            >
+            <DropdownMenuSubContent className="max-h-[min(480px,var(--radix-dropdown-menu-content-available-height))] w-[320px] overflow-y-auto">
               <HistoryItems
                 rows={turnRows}
                 loading={turnsLoading}
                 error={turnsError}
                 onRetry={onRetry}
                 allLabel="All Turns"
-                showRangeHint={false}
                 allSelected={selected.kind === "turns"}
                 bounds={turnBounds}
                 onAll={() => onChange({ kind: "turns" })}
@@ -432,7 +416,6 @@ export function ChangesScopeMenu({
         ).map(({ kind, label, icon: Icon }) => (
           <DropdownMenuItem
             key={kind}
-            className={ROW}
             data-selected={selected.kind === kind || undefined}
             onSelect={() => onChange({ kind })}
           >
@@ -448,15 +431,13 @@ export function ChangesScopeMenu({
           </DropdownMenuItem>
         ))}
         <DropdownMenuSub>
-          <DropdownMenuSubTrigger className={ROW}>
+          <DropdownMenuSubTrigger>
             <GitCommitVertical className="text-fg2" />
             <span className="flex-1">Commits</span>
             {commitScope && <Check />}
           </DropdownMenuSubTrigger>
           <DropdownMenuPortal>
-            <DropdownMenuSubContent
-              className={`${MENU_CHROME} max-h-[min(480px,var(--radix-dropdown-menu-content-available-height))] w-[320px] overflow-y-auto`}
-            >
+            <DropdownMenuSubContent className="max-h-[min(480px,var(--radix-dropdown-menu-content-available-height))] w-[320px] overflow-y-auto">
               <HistoryItems
                 rows={commitRows}
                 loading={commitsLoading}

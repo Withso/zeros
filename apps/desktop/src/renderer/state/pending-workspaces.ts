@@ -57,6 +57,9 @@ interface PendingWorkspacesState {
   settlingFolders: Record<string, number>;
   /** Workspace ids whose archive OR permanent-delete is in flight. */
   archivingIds: Record<string, number>;
+  /** Local archive intent hides live rows immediately without changing the
+   * confirmed workspace cache. Permanent deletion keeps its busy row visible. */
+  archiveIntents: Record<string, number>;
   /** Renderer-local presentation intent while workspace.setMode is queued or
    * initializing its first Design document. Kept separate from confirmed
    * Workspace rows so server state never becomes optimistic. */
@@ -74,6 +77,7 @@ export const usePendingWorkspacesStore = create<PendingWorkspacesState>(() => ({
   creates: [],
   settlingFolders: {},
   archivingIds: {},
+  archiveIntents: {},
   modeSwitches: {},
 }));
 
@@ -274,8 +278,19 @@ export function isWorkspaceSettling(
 
 // ── Archive/delete busy state ──────────────────────────────────────────────
 
-/** Mark a workspace mutation in flight. The row stays in its current surface,
- * inert and visibly busy, until the engine confirms the destructive result. */
+/** Begin archive presentation in the click's batch. This is transient UI state;
+ * only the engine's completed checkpoint can publish an archived Workspace. */
+export function beginWorkspaceArchive(workspaceId: string): void {
+  usePendingWorkspacesStore.setState((state) => {
+    const startedAt = Date.now();
+    return {
+      archivingIds: { ...state.archivingIds, [workspaceId]: startedAt },
+      archiveIntents: { ...state.archiveIntents, [workspaceId]: startedAt },
+    };
+  });
+}
+
+/** Mark permanent deletion busy while retaining its visible row. */
 export function markWorkspaceArchiving(workspaceId: string): void {
   usePendingWorkspacesStore.setState((state) => {
     const startedAt = Date.now();
@@ -291,7 +306,10 @@ export function clearWorkspaceArchiving(workspaceId: string): void {
     if (!(workspaceId in state.archivingIds)) return state;
     const archivingIds = { ...state.archivingIds };
     delete archivingIds[workspaceId];
-    return { archivingIds };
+    if (!(workspaceId in state.archiveIntents)) return { archivingIds };
+    const archiveIntents = { ...state.archiveIntents };
+    delete archiveIntents[workspaceId];
+    return { archivingIds, archiveIntents };
   });
 }
 

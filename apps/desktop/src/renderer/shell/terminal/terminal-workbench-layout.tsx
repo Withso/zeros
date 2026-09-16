@@ -89,6 +89,7 @@ export function TerminalWorkbenchLayout({
             size="icon-sm"
             aria-label="New terminal"
             onClick={onAdd}
+            className={WORKBENCH_TITLE_ACTION_CLS}
           >
             <Plus className="text-fg2 size-3.5" />
           </Button>
@@ -146,6 +147,7 @@ export function TerminalWorkbenchLayout({
               onClick={onConfigure}
               onPointerEnter={onConfigureIntent}
               onFocus={onConfigureIntent}
+              className={WORKBENCH_TITLE_ACTION_CLS}
             >
               <Settings2 className="text-fg2 size-3.5" />
             </Button>
@@ -165,7 +167,10 @@ export function TerminalWorkbenchLayout({
               }
               aria-pressed={sidebarVisible}
               onClick={onToggleSidebar}
-              className={cn("shrink-0", sidebarVisible && "bg-bg2 text-fg1")}
+              className={cn(
+                WORKBENCH_TITLE_ACTION_CLS,
+                sidebarVisible && "bg-bg2 text-fg1",
+              )}
             >
               <ListTree
                 className={cn(
@@ -356,7 +361,7 @@ export function TerminalWorkbenchLayout({
                                   else if (entry.runActionId)
                                     onRun(entry.runActionId);
                                 }}
-                                className="text-blue-fg hover:text-blue-fg px-2 text-xs"
+                                className="text-blue-fg hover:text-blue-fg h-6 px-2 py-0 text-xs"
                               >
                                 Run
                               </Button>
@@ -370,7 +375,10 @@ export function TerminalWorkbenchLayout({
                           size="icon-sm"
                           aria-label={`Close ${entry.title}`}
                           onClick={() => onClose(entry.id)}
-                          className="pointer-events-none absolute top-0.5 right-1 opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-[:focus-visible]/terminal:pointer-events-auto group-has-[:focus-visible]/terminal:opacity-100 [&_svg]:size-3.5"
+                          className={cn(
+                            WORKBENCH_TITLE_ACTION_CLS,
+                            "pointer-events-none absolute top-0.5 right-1 opacity-0 group-hover/terminal:pointer-events-auto group-hover/terminal:opacity-100 group-has-[:focus-visible]/terminal:pointer-events-auto group-has-[:focus-visible]/terminal:opacity-100",
+                          )}
                         >
                           <X className="text-fg2 size-3.5" />
                         </Button>

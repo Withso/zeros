@@ -9,12 +9,11 @@ const Switch = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <SwitchPrimitive.Root
     className={cn(
-      // On (checked): the inverted fill — same polarity-flipping surface as the
-      // primary button (near-white on dark, near-black on light). Off (unchecked):
-      // border3 track with a 1px border4 ring. Knob is bg3 in both states (see
-      // Thumb) — it reads dark-on-light in dark mode, white-on-dark in light. The
+      // On (checked): --switch-on-bg, the brown accent (--brown-fg) in every
+      // theme. Off (unchecked): border3 track with a 1px border4 ring. The
       // border stays transparent when checked so the track doesn't resize.
-      "peer inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border border-transparent shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-highlighted-bright/50 disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-inverted-bg data-[state=unchecked]:bg-border3 data-[state=unchecked]:border-border4",
+      // Both switch tokens live in styles/semantic-tokens.css.
+      "peer focus-visible:ring-highlighted-bright/50 data-[state=unchecked]:bg-border3 data-[state=unchecked]:border-border4 inline-flex h-5 w-8 shrink-0 cursor-pointer items-center rounded-full border border-transparent shadow-sm transition-colors focus-visible:ring-[3px] focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-50 data-[state=checked]:bg-[var(--switch-on-bg)]",
       className,
     )}
     {...props}
@@ -22,12 +21,13 @@ const Switch = React.forwardRef<
   >
     <SwitchPrimitive.Thumb
       className={cn(
-        // bg3 fill + stock shadow are intentional: the thumb rides the
-        // INVERTED track — near-white bg3 on a dark track in light, dark on
-        // light in dark — so the "no bg3 on lower surfaces" rule doesn't
-        // apply, and --shadow-dropdown's 24px blur is wrong for a 16px thumb.
-        // check:ui ignore-next (inverted-track thumb — see above)
-        "pointer-events-none block h-4 w-4 rounded-full bg-bg3 shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-[18px] data-[state=unchecked]:translate-x-0",
+        // --switch-thumb: a white-ish knob in every theme (near-white
+        // --inverted-bg on dark, pure-white --inverted-fg in Light) so it reads
+        // against both the brown ON track and the border3 OFF track. The stock
+        // shadow is intentional: --shadow-dropdown's 24px blur is wrong for a
+        // 16px thumb.
+        // check:ui ignore-next (stock shadow on the 16px thumb — see above)
+        "pointer-events-none block h-4 w-4 rounded-full bg-[var(--switch-thumb)] shadow-lg ring-0 transition-transform data-[state=checked]:translate-x-[14px] data-[state=unchecked]:translate-x-0",
       )}
     />
   </SwitchPrimitive.Root>

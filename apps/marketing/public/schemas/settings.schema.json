@@ -179,8 +179,7 @@
               "enum": [
                 "system",
                 "light",
-                "dark",
-                "orka-black"
+                "dark"
               ]
             },
             "codeThemes": {

@@ -399,7 +399,7 @@ export async function runUsageSmoke({ page, check }) {
     await expect(info).not.toContainText("Not available");
     await expect(page.getByRole("heading", { name: "Authentication", exact: true })).toHaveCount(0);
     await expect(info.getByRole("link", { name: /^View usage in/ })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "Connected via subscription", exact: true })).toHaveCSS("height", "32px");
+    await expect(page.getByRole("button", { name: "Connected via subscription", exact: true })).toHaveCSS("height", "28px");
     await page.getByRole("button", { name: "Release usage responses" }).click();
     await expect(info.getByRole("progressbar").first()).toHaveAttribute("aria-valuenow", "20");
     await expect(loading).toHaveCount(0);
@@ -422,7 +422,7 @@ export async function runUsageSmoke({ page, check }) {
     await expect(refresh).toHaveAttribute("aria-busy", "true");
     await page.getByRole("button", { name: "Release usage responses" }).click();
     await expect(refresh).toHaveAttribute("aria-busy", "false");
-    check(`${provider}: first-load spinner, retained usage on return and restart, and 32px connection button`, true);
+    check(`${provider}: first-load spinner, retained usage on return and restart, and 28px connection button`, true);
   }
   const refresh = page.getByRole("button", { name: "Refresh Cursor usage" });
   const reads = (await counts()).usageReads;

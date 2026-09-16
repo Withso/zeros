@@ -14,7 +14,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { loadPersistedDrafts, schedulePersistDrafts } from "../persist-composer-drafts";
+import { loadPersistedDrafts, schedulePersistDrafts, persistDraftsNow } from "../persist-composer-drafts";
+import { setLiveChatDraft } from "../../features/agent/composer-live-drafts";
 import { editSeedSource } from "../../features/agent/edit-seed";
 import type { WorkspaceState } from "../store";
 
@@ -103,6 +104,36 @@ describe("persist-composer-drafts", () => {
     vi.useFakeTimers();
     vi.unstubAllGlobals();
     installWindow();
+    setLiveChatDraft("chat-1", null);
+    setLiveChatDraft("chat-2", null);
+  });
+
+  it("flushes the newest mounted draft without a workspace store update", async () => {
+    installStorage();
+    const state = stateWith("previously parked", "");
+    schedulePersistDrafts(state);
+    setLiveChatDraft("chat-1", { text: "typed while active", attachments: [], json: null });
+    await flush();
+    expect(loadPersistedDrafts().chats["chat-1"].text).toBe("typed while active");
+  });
+
+  it("keeps live drafts isolated and persists an actively cleared composer", () => {
+    installStorage();
+    const state = stateWith("old text", "");
+    setLiveChatDraft("chat-1", { text: "", attachments: [], json: null });
+    setLiveChatDraft("chat-2", { text: "other chat", attachments: [], json: null });
+    persistDraftsNow(state);
+    expect(loadPersistedDrafts().chats).toEqual({
+      "chat-2": { text: "other chat", attachments: [], json: null },
+    });
+  });
+
+  it("does not resurrect live drafts whose chat was deleted", () => {
+    installStorage();
+    const state = { ...stateWith("old text", ""), chats: [] };
+    setLiveChatDraft("chat-2", { text: "deleted chat", attachments: [], json: null });
+    persistDraftsNow(state);
+    expect(loadPersistedDrafts().chats).not.toHaveProperty("chat-2");
   });
 
   it("writes the draft whole when it fits", async () => {
@@ -115,6 +146,24 @@ describe("persist-composer-drafts", () => {
     expect(written.chats["chat-1"].attachments).toHaveLength(1);
     expect(written.chats["chat-1"].attachments[0].text).toBe("small body");
     expect(written.chats["chat-1"].json).not.toBeNull();
+  });
+
+  it("persists file references without serializing their source blob", async () => {
+    const { store, attempts } = installStorage({ maxBytes: 2_000 });
+    const state = stateWith("inspect the file", "");
+    const attachment = state.chatComposerDrafts["chat-1"].attachments[0];
+    Object.assign(attachment, {
+      kind: "file", name: "events.jsonl", delivery: "reference", size: 500_000_000,
+      sourceFile: new Blob(["body stays out of localStorage"]),
+      diskPath: ".context/local/attachments/att-1/events.jsonl",
+    });
+    schedulePersistDrafts(state);
+    await flush();
+    expect(attempts).toHaveLength(1);
+    const raw = store.get(KEY)!;
+    expect(raw).not.toContain("sourceFile");
+    expect(raw).not.toContain("body stays out of localStorage");
+    expect(loadPersistedDrafts().chats["chat-1"].attachments[0]).toMatchObject({ id: "att-1", delivery: "reference", size: 500_000_000 });
   });
 
   it("keeps the typed prompt when the attachment blows the quota", async () => {

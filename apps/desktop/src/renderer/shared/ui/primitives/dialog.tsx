@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import { cn } from "@/renderer/shared/ui/cn";
 import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 function Dialog({
   onOpenChange,
   ...props
@@ -82,6 +83,7 @@ const DialogContent = React.forwardRef<
         <DialogOverlay />
         <DialogPrimitive.Content
           ref={ref}
+          {...popoverBoundaryProps}
           onEscapeKeyDown={(event) => {
             radixEscapeEvents.current.add(event);
             onEscapeKeyDown?.(event);

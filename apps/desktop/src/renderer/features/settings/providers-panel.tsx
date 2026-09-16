@@ -30,7 +30,6 @@ import {
   ArrowUpRight,
   ChevronDown,
   ExternalLink,
-  Folder,
   Check,
   Play,
   Copy,
@@ -38,6 +37,15 @@ import {
 } from "lucide-react";
 import { Button, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { selectTriggerClassName } from "../../shared/ui/primitives/select";
+import { OpenAppIcon } from "../agent/open-app-icon";
+import {
+  FINDER_APP_ID,
+  findOpenApp,
+  getDetectedOpenApps,
+  refreshDetectedOpenApps,
+  useDetectedOpenApps,
+} from "../../platform/open-apps";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -190,6 +198,15 @@ const AGENT_CONFIG_FILE: Record<string, { title: string; path: string }> = {
  *  AGENT_CONFIG_FILE entry (e.g. Cursor). */
 function AgentConfigCard({ agentId }: { agentId: string }) {
   const cfg = AGENT_CONFIG_FILE[agentId];
+  // Real Finder icon (extracted by open-apps detection) — the same mark the
+  // workspace header's "Open in" menu shows. Falls back to a folder glyph
+  // only while detection hasn't run.
+  const finderApp = findOpenApp(useDetectedOpenApps(), FINDER_APP_ID)!;
+  // Cold cache (fresh profile / settings opened before any workspace): probe
+  // once so the icon resolves instead of sitting on the fallback forever.
+  useEffect(() => {
+    if (getDetectedOpenApps() === null) void refreshDetectedOpenApps();
+  }, []);
   if (!cfg) return null;
   return (
     <div className="border-border1 flex flex-row items-center justify-between gap-3 rounded-lg border px-4 py-3">
@@ -198,12 +215,14 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
         <code className="text-fg2 text-xs">{cfg.path}</code>
       </div>
       <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant="secondary" size="sm" className="gap-1.5">
-            <Folder className="size-3.5" aria-hidden="true" />
-            Open in
-            <ChevronDown className="size-3" aria-hidden="true" />
-          </Button>
+        <DropdownMenuTrigger
+          // Same chrome as every Select trigger (fit-to-text, 13px label,
+          // 14px chevron) so this action menu reads as "a dropdown", not a
+          // button that happens to open one.
+          className={selectTriggerClassName("fit", "text-fg1")}
+        >
+          Open in
+          <ChevronDown className="size-3.5 opacity-50" aria-hidden="true" />
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align="end"
@@ -211,7 +230,7 @@ function AgentConfigCard({ agentId }: { agentId: string }) {
           className="min-w-[160px]"
         >
           <DropdownMenuItem onSelect={() => void openAgentConfig(agentId)}>
-            <Folder className="text-fg2 size-3.5" />
+            <OpenAppIcon app={finderApp} />
             <span>Finder</span>
           </DropdownMenuItem>
           <DropdownMenuItem
@@ -837,7 +856,6 @@ function ProviderCard({
                 variant="secondary"
                 size="sm"
                 onClick={() => void handleRunInstall()}
-                className="gap-1.5"
               >
                 <Play className="size-3.5" aria-hidden="true" />
                 Run
@@ -938,7 +956,7 @@ function ProviderCard({
                       asChild
                       variant="secondary"
                       size="sm"
-                      className="shrink-0 gap-1.5"
+                      className="shrink-0"
                     >
                       <a
                         href={vendor.consoleUrl}

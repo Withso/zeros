@@ -14,6 +14,9 @@ bubble metadata keep that relative path. Failed saves retain the unsent draft;
 typing during a save cannot be cleared by the earlier submission. Attachment
 format and upload-size policy is separate from this delivery contract.
 
+See [Composer attachments](composer-attachments.md) for the 500 MB file policy
+and chunked transfer / path delivery contract.
+
 The Context tab uses `.context/local/` for private material and
 `.context/shared/` for material selected for sharing. Composer attachments use
 `<scope>/attachments/<attachmentId>/<filename>`; other files inside either
@@ -31,8 +34,9 @@ generated files.
 
 ## Migration and compatibility
 
-Workspace creation, the first Context-tab load, attachment staging and share
-actions prepare the directory. Preparation merges `.context-graph/` into
+Workspace creation and Context-tab reads leave storage untouched. Attachment
+staging, share actions and explicit scaffold operations prepare the directory
+on demand. Preparation merges `.context-graph/` into
 `.context/`, including when the destination already exists. Read-only listing
 never migrates; it can list both roots while migration is pending or blocked.
 
@@ -60,9 +64,15 @@ Legacy files that collide with this metadata directory remain visible and
 archivable while migration reports the conflict.
 
 Preparation calls for the same workspace share an in-flight promise. Failed
-preparation retries on refresh, and the Context tab displays the error while
-keeping readable context visible. Attachment-stage and share failures also
-retain their error messages.
+preparation retries on the next write. Attachment-stage and share failures
+retain their error messages while Context-tab reads keep legacy/current files
+visible without attempting a migration or adding generated directories.
+
+Attachment copy buffers and their cleanup records live in private storage
+outside the checkout. On an explicit context write, an obsolete
+`.context/.attachment-staging/` is removed only if empty or containing its exact
+generated ignore file. Other contents and links are preserved. Recovery-source
+maintenance does not delete completed files in either context scope.
 
 Saved attachment `diskPath` values remain valid in both layouts. Attachment
 reads try the exact saved path, the other scope in that root, then both scopes

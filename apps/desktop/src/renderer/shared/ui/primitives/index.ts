@@ -98,6 +98,8 @@ export {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
+  selectTriggerClassName,
+  splitTriggerClassNames,
 } from "./select";
 export {
   InputGroup,

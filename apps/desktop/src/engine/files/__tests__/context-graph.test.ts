@@ -43,6 +43,27 @@ async function seedAttachment(
 }
 
 describe("ensureContextGraph", () => {
+  it.each([false, true])("removes an unused legacy staging scaffold (ignore file: %s)", async (ignore) => {
+    const staging = graph(".attachment-staging");
+    await fs.mkdir(staging, { recursive: true });
+    if (ignore) await fs.writeFile(path.join(staging, ".gitignore"), "*\n");
+    expect((await ensureContextGraph(root)).ok).toBe(true);
+    await expect(fs.stat(staging)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.each(["file", "edited-ignore", "symlink"])("preserves legacy staging contents it cannot identify (%s)", async (kind) => {
+    const staging = graph(".attachment-staging");
+    const outside = path.join(root, "user-files");
+    await fs.mkdir(outside);
+    await fs.mkdir(path.dirname(staging), { recursive: true });
+    if (kind === "symlink") await fs.symlink(outside, staging);
+    else await fs.mkdir(staging);
+    const keep = path.join(staging, kind === "file" ? "notes.txt" : ".gitignore");
+    await fs.writeFile(keep, "user contents");
+    expect((await ensureContextGraph(root)).ok).toBe(true);
+    expect(await fs.readFile(keep, "utf8")).toBe("user contents");
+  });
+
   it("creates both scopes, their attachments dirs, and the gitignore", async () => {
     const first = await ensureContextGraph(root);
     expect(first).toEqual({ ok: true, created: true });

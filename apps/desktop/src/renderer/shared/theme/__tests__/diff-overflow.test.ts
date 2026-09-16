@@ -7,11 +7,11 @@ describe("file and diff overflow policy", () => {
   it("shares the Changes hunk chrome and row colors with expanded Edit cards", () => {
     const patch = zerosDiffOptions();
     const changes = changesDiffOptions({ diffStyle: "unified", codeThemeId: "github-dark" });
-    for (const style of ["--diffs-bg-separator-override: var(--bg2)", "--diffs-bg-addition-override:", "--diffs-bg-deletion-override:", 'height: 24px']) {
+    for (const style of ["--diffs-bg-separator-override: var(--bg2)", "--diffs-bg-addition-override:", "--diffs-bg-deletion-override:", 'height: 44px', 'height: 28px']) {
       expect(patch.unsafeCSS).toContain(style);
       expect(changes.unsafeCSS).toContain(style);
     }
-    expect(changes.itemMetrics?.hunkSeparatorHeight).toBe(24);
+    expect(changes.itemMetrics?.hunkSeparatorHeight).toBe(44);
   });
   it("wraps PatchDiff content instead of creating a horizontal scroller", () => {
     expect(zerosDiffOptions().overflow).toBe("wrap");

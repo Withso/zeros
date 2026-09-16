@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
 
-import { Badge } from "../../shared/ui/primitives/badge";
 import { Button } from "../../shared/ui/primitives/button";
 import { Switch } from "../../shared/ui/primitives/switch";
 import {
@@ -13,7 +12,7 @@ import {
 } from "../../shared/ui/primitives/select";
 import { toast } from "../../shared/ui/primitives/elements";
 import { shellOpenUrl } from "../../platform/app";
-import { SettingsList, SettingsRow, SettingsSection } from "./settings-ui";
+import { SettingsGroup, SettingsRow } from "./settings-ui";
 import { useResolvedSettings, useSettingsLayer } from "./use-settings";
 import {
   BROWSER_SETTINGS_ROWS,
@@ -208,153 +207,137 @@ export function BrowserUsePanel() {
 
   const settingsUnavailable = !resolved.resolved || Boolean(resolved.error);
 
+  // One "Browser use" heading over two untitled cards: Codex's rows, then
+  // Claude's. 12px between the cards (they're one section), vs the 24px
+  // that separates sections elsewhere.
   return (
-    <SettingsSection title="Browser use">
-      <div className="flex flex-col gap-6">
-        <div className="flex flex-col gap-2">
-          <Badge variant="secondary" className="w-fit select-none">
-            Codex
-          </Badge>
-          <SettingsList>
-            <SettingsRow
-              label={codexEnabledRow.label}
-              hint={codexEnabledRow.hint}
-              htmlFor="browser-use-codex-enabled"
+    <div className="flex flex-col gap-3">
+      <SettingsGroup title="Browser use">
+        <SettingsRow
+          label={codexEnabledRow.label}
+          hint={codexEnabledRow.hint}
+          htmlFor="browser-use-codex-enabled"
+        >
+          <div className="flex items-center gap-2">
+            {managed.codex_enabled ? (
+              <span className="text-fg3 text-xs">Managed</span>
+            ) : null}
+            <Switch
+              id="browser-use-codex-enabled"
+              aria-label={codexEnabledRow.label}
+              checked={values.codex_enabled}
+              disabled={
+                settingsUnavailable ||
+                managed.codex_enabled ||
+                pending.codex_enabled?.settled === false
+              }
+              onCheckedChange={(checked) =>
+                updateSetting("codex_enabled", checked)
+              }
+            />
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label={autoOpenRow.label}
+          hint={autoOpenRow.hint}
+          htmlFor="browser-use-auto-open"
+        >
+          <div className="flex items-center gap-2">
+            {managed.auto_open ? (
+              <span className="text-fg3 text-xs">Managed</span>
+            ) : null}
+            <Switch
+              id="browser-use-auto-open"
+              aria-label={autoOpenRow.label}
+              checked={values.auto_open}
+              disabled={
+                settingsUnavailable ||
+                managed.auto_open ||
+                !values.codex_enabled ||
+                pending.auto_open?.settled === false
+              }
+              onCheckedChange={(checked) => updateSetting("auto_open", checked)}
+            />
+          </div>
+        </SettingsRow>
+        <SettingsRow
+          label={navigationApprovalRow.label}
+          hint={navigationApprovalRow.hint}
+        >
+          <div className="flex items-center gap-2">
+            {managed.navigation_approval ? (
+              <span className="text-fg3 text-xs">Managed</span>
+            ) : null}
+            <Select
+              value={values.navigation_approval}
+              disabled={
+                settingsUnavailable ||
+                managed.navigation_approval ||
+                !values.codex_enabled ||
+                pendingNavigation?.settled === false
+              }
+              onValueChange={(value) =>
+                updateNavigationApproval(value as BrowserNavigationApproval)
+              }
             >
-              <div className="flex items-center gap-2">
-                {managed.codex_enabled ? (
-                  <span className="text-fg3 text-xs">Managed</span>
-                ) : null}
-                <Switch
-                  id="browser-use-codex-enabled"
-                  aria-label={codexEnabledRow.label}
-                  checked={values.codex_enabled}
-                  disabled={
-                    settingsUnavailable ||
-                    managed.codex_enabled ||
-                    pending.codex_enabled?.settled === false
-                  }
-                  onCheckedChange={(checked) =>
-                    updateSetting("codex_enabled", checked)
-                  }
-                />
-              </div>
-            </SettingsRow>
-            <SettingsRow
-              label={autoOpenRow.label}
-              hint={autoOpenRow.hint}
-              htmlFor="browser-use-auto-open"
-            >
-              <div className="flex items-center gap-2">
-                {managed.auto_open ? (
-                  <span className="text-fg3 text-xs">Managed</span>
-                ) : null}
-                <Switch
-                  id="browser-use-auto-open"
-                  aria-label={autoOpenRow.label}
-                  checked={values.auto_open}
-                  disabled={
-                    settingsUnavailable ||
-                    managed.auto_open ||
-                    !values.codex_enabled ||
-                    pending.auto_open?.settled === false
-                  }
-                  onCheckedChange={(checked) =>
-                    updateSetting("auto_open", checked)
-                  }
-                />
-              </div>
-            </SettingsRow>
-            <SettingsRow
-              label={navigationApprovalRow.label}
-              hint={navigationApprovalRow.hint}
-            >
-              <div className="flex items-center gap-2">
-                {managed.navigation_approval ? (
-                  <span className="text-fg3 text-xs">Managed</span>
-                ) : null}
-                <Select
-                  value={values.navigation_approval}
-                  disabled={
-                    settingsUnavailable ||
-                    managed.navigation_approval ||
-                    !values.codex_enabled ||
-                    pendingNavigation?.settled === false
-                  }
-                  onValueChange={(value) =>
-                    updateNavigationApproval(value as BrowserNavigationApproval)
-                  }
-                >
-                  <SelectTrigger
-                    className="min-w-[132px]"
-                    aria-label={navigationApprovalRow.label}
-                  >
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="always-ask">Always ask</SelectItem>
-                    <SelectItem value="always-allow">Always allow</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </SettingsRow>
-          </SettingsList>
-        </div>
+              <SelectTrigger aria-label={navigationApprovalRow.label}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="always-ask">Always ask</SelectItem>
+                <SelectItem value="always-allow">Always allow</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+        </SettingsRow>
+      </SettingsGroup>
 
-        <div className="flex flex-col gap-2">
-          <Badge variant="secondary" className="w-fit select-none">
-            Claude
-          </Badge>
-          <SettingsList>
-            <SettingsRow
-              label={claudeEnabledRow.label}
-              hint={claudeEnabledRow.hint}
-              htmlFor="browser-use-claude-enabled"
+      <SettingsGroup>
+        <SettingsRow
+          label={claudeEnabledRow.label}
+          hint={claudeEnabledRow.hint}
+          htmlFor="browser-use-claude-enabled"
+        >
+          <div className="flex items-center gap-2">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-fg2"
+              aria-label="Install the Claude in Chrome extension"
+              onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_EXTENSION_URL)}
             >
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-fg2 gap-1.5"
-                  aria-label="Install the Claude in Chrome extension"
-                  onClick={() =>
-                    openClaudeChromeUrl(CLAUDE_CHROME_EXTENSION_URL)
-                  }
-                >
-                  Get extension
-                  <ExternalLink className="size-3" aria-hidden="true" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="text-fg2 gap-1.5"
-                  aria-label="Open Claude Code Chrome documentation"
-                  onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_DOCS_URL)}
-                >
-                  Docs
-                  <ExternalLink className="size-3" aria-hidden="true" />
-                </Button>
-                {managed.claude_enabled ? (
-                  <span className="text-fg3 text-xs">Managed</span>
-                ) : null}
-                <Switch
-                  id="browser-use-claude-enabled"
-                  aria-label={claudeEnabledRow.label}
-                  checked={values.claude_enabled}
-                  disabled={
-                    settingsUnavailable ||
-                    managed.claude_enabled ||
-                    pending.claude_enabled?.settled === false
-                  }
-                  onCheckedChange={(checked) =>
-                    updateSetting("claude_enabled", checked)
-                  }
-                />
-              </div>
-            </SettingsRow>
-          </SettingsList>
-        </div>
-      </div>
-    </SettingsSection>
+              Get extension
+              <ExternalLink className="size-3" aria-hidden="true" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-fg2"
+              aria-label="Open Claude Code Chrome documentation"
+              onClick={() => openClaudeChromeUrl(CLAUDE_CHROME_DOCS_URL)}
+            >
+              Docs
+              <ExternalLink className="size-3" aria-hidden="true" />
+            </Button>
+            {managed.claude_enabled ? (
+              <span className="text-fg3 text-xs">Managed</span>
+            ) : null}
+            <Switch
+              id="browser-use-claude-enabled"
+              aria-label={claudeEnabledRow.label}
+              checked={values.claude_enabled}
+              disabled={
+                settingsUnavailable ||
+                managed.claude_enabled ||
+                pending.claude_enabled?.settled === false
+              }
+              onCheckedChange={(checked) =>
+                updateSetting("claude_enabled", checked)
+              }
+            />
+          </div>
+        </SettingsRow>
+      </SettingsGroup>
+    </div>
   );
 }

@@ -40,14 +40,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import {
-  ChevronDown,
-  Code,
-  Copy,
-  Folder,
-  Pencil,
-  Terminal as TerminalIcon,
-} from "lucide-react";
+import { ChevronDown, Copy, Pencil } from "lucide-react";
 
 import { Button } from "../../shared/ui";
 import { cn } from "../../shared/ui/cn";
@@ -97,7 +90,7 @@ import {
   useOpenInDefaultId,
   type DetectedOpenApp,
 } from "../../platform/open-apps";
-import { AgentIcon } from "../../features/agent/agent-icon";
+import { OpenAppIcon } from "../../features/agent/open-app-icon";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
 
 // ── className constants ──────────────────────────────────
@@ -292,37 +285,10 @@ function isEditableTarget(target: EventTarget | null): boolean {
   return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
 }
 
-/** An app's mark: the real installed-app icon when detection extracted
- *  one, else a bundled/lucide fallback per app. */
-export function OpenAppIcon({ app }: { app: DetectedOpenApp }) {
-  if (app.iconDataUrl) {
-    return (
-      <img
-        src={app.iconDataUrl}
-        alt=""
-        draggable={false}
-        className="size-4 shrink-0"
-      />
-    );
-  }
-  if (app.id === FINDER_APP_ID) return <Folder className="text-fg2 size-3.5" />;
-  if (app.id === TERMINAL_APP_ID)
-    return <TerminalIcon className="text-fg2 size-3.5" />;
-  // Reuse bundled monochrome marks when a CLI has no application bundle or
-  // native icon extraction misses.
-  if (app.id === "opencode" || app.id === "cursor") {
-    return (
-      <AgentIcon
-        agentId={app.id}
-        iconUrl={null}
-        size={14}
-        monochrome
-        className="text-fg2"
-      />
-    );
-  }
-  return <Code className="text-fg2 size-3.5" />;
-}
+// OpenAppIcon lives in features/agent/open-app-icon.tsx (also used by the
+// settings page's agent-config "Open in" menu); re-exported here for
+// existing importers.
+export { OpenAppIcon };
 
 interface OpenInDropdownProps {
   /** Target path — the workspace path when one is active, the project

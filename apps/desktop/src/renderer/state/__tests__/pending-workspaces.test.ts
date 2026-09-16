@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 
 import {
   beginWorkspaceModeSwitch,
+  beginWorkspaceArchive,
   beginPendingCreate,
   finishWorkspaceModeSwitch,
   finishPendingCreate,
@@ -20,6 +21,7 @@ function reset(): void {
     creates: [],
     settlingFolders: {},
     archivingIds: {},
+    archiveIntents: {},
     modeSwitches: {},
   });
 }
@@ -91,6 +93,21 @@ describe("pending-workspaces store", () => {
 
     markWorkspaceArchiving("ws_b");
     expect(isWorkspaceArchiving("ws_b")).toBe(true);
+  });
+
+  it("hides only archive intents and clears each operation independently", () => {
+    beginWorkspaceArchive("ws_a");
+    beginWorkspaceArchive("ws_b");
+    markWorkspaceArchiving("ws_delete");
+    expect(
+      Object.keys(usePendingWorkspacesStore.getState().archiveIntents),
+    ).toEqual(["ws_a", "ws_b"]);
+    clearWorkspaceArchiving("ws_a");
+    const state = usePendingWorkspacesStore.getState();
+    expect(Object.keys(state.archiveIntents)).toEqual(["ws_b"]);
+    expect(Object.keys(state.archivingIds)).toEqual(["ws_b", "ws_delete"]);
+    clearWorkspaceArchiving("ws_a");
+    expect(usePendingWorkspacesStore.getState()).toBe(state);
   });
 
   it("tracks a new create independently from an in-flight archive", () => {

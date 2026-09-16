@@ -200,7 +200,6 @@ function HeadlessAuthModal({
             size="sm"
             disabled={!code.trim() || busy}
             onClick={() => onComplete(code.trim())}
-            className="gap-1.5"
           >
             {busy && <ZerosSpinner size={16} tone="inverted" />}
             Finish sign-in
@@ -338,7 +337,6 @@ function ServerRow({
               <Button
                 variant="secondary"
                 size="sm"
-                className="gap-1.5"
                 onClick={gateway.onSignIn}
                 disabled={gateway.signingIn || busy}
               >
@@ -739,7 +737,7 @@ export function CustomizeMcpSection({
               <Button
                 variant="secondary"
                 size="sm"
-                className="shrink-0 gap-1.5"
+                className="shrink-0"
                 onClick={() => setImporting(true)}
               >
                 <Download className="size-3.5" aria-hidden="true" />

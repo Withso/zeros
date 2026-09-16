@@ -58,6 +58,7 @@ import {
 } from "../use-retained-view-keys";
 import { PrStatusRow } from "../pr/pr-status-row";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // Proportional columns (2026-07-17): workbench grows by `(1 - ratio)·100`,
 // the complement of conversation pane's `--zeros-column-2-ratio` grow factor (see
 // CONVERSATION_DEFAULT_WIDTH_CLS in conversation/conversation-pane.tsx) — so a window
@@ -451,6 +452,7 @@ export function WorkbenchPane({
       <div
         ref={workbenchRef}
         data-zeros-column-3=""
+        {...popoverBoundaryProps}
         {...(collapsed ? { inert: "" } : {})}
         className={WORKBENCH_PANE_CLS}
         style={collapsed ? { display: "none" } : undefined}

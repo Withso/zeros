@@ -6,6 +6,7 @@ const { write, readImage, readText } = vi.hoisted(() => ({
   readText: vi.fn(),
 }));
 vi.mock("../agent-history-client", () => ({
+  createContextAttachmentWriter: () => write,
   writeContextAttachment: write,
   readImageAttachment: readImage,
   readTextAttachment: readText,
@@ -13,6 +14,8 @@ vi.mock("../agent-history-client", () => ({
 
 import { encodeAttachments } from "../encode-attachments";
 import { messageToEditorContent } from "../composer-editor/reconstruct";
+import { resetFileAttachmentTransfersForTests } from "../file-attachment-transfer";
+import type { AttachmentWriteResult } from "@zeros/protocol/attachment-policy";
 import type { ComposerAttachment } from "../composer-attachments";
 
 const text: ComposerAttachment = {
@@ -40,20 +43,38 @@ const ctx = {
   agentId: "claude",
   supportsImage: true,
 };
-function saved(id: string, filename: string, mimeType: string) {
+function saved(id: string, filename: string, mimeType: string, bytes = 11) {
   return {
     absolutePath: `/repo/.context/local/attachments/${id}/${filename}`,
     relativePath: `.context/local/attachments/${id}/${filename}`,
-    bytes: 11,
+    bytes,
     mimeType,
+  };
+}
+
+type WriteArgs = {
+  cwd: string;
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+  uploadId?: string;
+  base64: string;
+  totalBytes?: number;
+};
+
+function writeResult(args: WriteArgs, result?: AttachmentWriteResult) {
+  return {
+    ...saved(args.attachmentId, args.filename, args.mimeType),
+    ...result,
+    bytes: args.totalBytes ?? result?.bytes ?? 11,
+    ...(args.uploadId && args.base64 === "" ? { bytes: 0, pending: true } : {}),
   };
 }
 
 beforeEach(() => {
   vi.resetAllMocks();
-  write.mockImplementation(async (args) =>
-    saved(args.attachmentId, args.filename, args.mimeType),
-  );
+  resetFileAttachmentTransfersForTests();
+  write.mockImplementation(async (args: WriteArgs) => writeResult(args));
 });
 
 describe.each(["claude", "codex", "cursor"])(
@@ -62,7 +83,7 @@ describe.each(["claude", "codex", "cursor"])(
     it.each([true, false])(
       "sends file references with native image support=%s",
       async (supportsImage) => {
-        const result = await encodeAttachments([text, image], {
+        const result = await encodeAttachments([structuredClone(text), structuredClone(image)], {
           ...ctx,
           agentId,
           supportsImage,
@@ -83,6 +104,7 @@ describe.each(["claude", "codex", "cursor"])(
         expect(prompt).not.toContain(image.data);
         expect(prompt).not.toContain("<file ");
         expect(prompt).toMatch(/read|inspect/i);
+        expect(prompt).toContain("image-reading tool");
         expect(result.bubbleAttachments.map((a) => a.diskPath)).toEqual([
           saved(text.id, text.name, text.mimeType).relativePath,
           saved(image.id, image.name, image.mimeType).relativePath,
@@ -125,13 +147,15 @@ describe.each(["claude", "codex", "cursor"])(
 
 it("waits for text persistence before releasing its reference", async () => {
   let finish!: (value: ReturnType<typeof saved>) => void;
-  write.mockReturnValue(
-    new Promise((resolve) => {
-      finish = resolve;
-    }),
+  write.mockImplementation((args: WriteArgs) =>
+    args.uploadId && args.base64 === ""
+      ? Promise.resolve(writeResult(args))
+      : new Promise<ReturnType<typeof saved>>((resolve) => {
+          finish = resolve;
+        }).then((result) => writeResult(args, result)),
   );
   let complete = false;
-  const sending = encodeAttachments([text], ctx).then((result) => {
+  const sending = encodeAttachments([structuredClone(text)], ctx).then((result) => {
     complete = true;
     return result;
   });
@@ -145,35 +169,30 @@ it.each([text, image])(
   "does not fall back to inline $kind contents when persistence fails",
   async (attachment) => {
     write.mockRejectedValue(new Error("disk unavailable"));
-    const result = await encodeAttachments([attachment], ctx);
-    expect(result.blocks).toEqual([]);
-    expect(result.bubbleAttachments).toEqual([]);
-    expect(result.skipped).toHaveLength(1);
+    await expect(encodeAttachments([structuredClone(attachment)], ctx))
+      .rejects.toThrow("disk unavailable");
   },
 );
 
 it("requires a workspace for every attachment", async () => {
-  const result = await encodeAttachments([text, image], { ...ctx, cwd: null });
-  expect(result.blocks).toEqual([]);
-  expect(result.skipped).toHaveLength(2);
+  await expect(encodeAttachments([structuredClone(text), structuredClone(image)], { ...ctx, cwd: null }))
+    .rejects.toThrow(/workspace/);
   expect(write).not.toHaveBeenCalled();
 });
 
 it("does not publish an unfinished write as a file reference", async () => {
-  write.mockResolvedValue({ absolutePath: "", relativePath: "", bytes: 0 });
-  const result = await encodeAttachments([text], ctx);
-  expect(result.blocks).toEqual([]);
-  expect(result.bubbleAttachments).toEqual([]);
-  expect(result.skipped).toHaveLength(1);
+  write.mockResolvedValue({ absolutePath: "", relativePath: "", bytes: 0, pending: true });
+  await expect(encodeAttachments([structuredClone(text)], ctx))
+    .rejects.toThrow("Attachment transfer did not finish");
 });
 
 it("uses the confirmed shared location and sanitized filename", async () => {
-  write.mockResolvedValue({
+  write.mockImplementation(async (args: WriteArgs) => writeResult(args, {
     absolutePath: "/repo/.context/shared/attachments/att-notes/safe.md",
     relativePath: ".context/shared/attachments/att-notes/safe.md",
     mimeType: "text/markdown",
     bytes: 33,
-  });
+  }));
   const result = await encodeAttachments(
     [{ ...text, name: 'my "notes".md' }],
     ctx,
@@ -191,18 +210,20 @@ it("uses the confirmed shared location and sanitized filename", async () => {
 
 it("keeps concurrent workspace paths isolated when writes finish out of order", async () => {
   let finish!: (value: ReturnType<typeof saved>) => void;
-  write.mockImplementation((args) =>
-    args.cwd === "/first"
-      ? new Promise((resolve) => {
+  write.mockImplementation((args: WriteArgs) =>
+    args.uploadId && args.base64 === ""
+      ? Promise.resolve(writeResult(args))
+      : args.cwd === "/first"
+      ? new Promise<ReturnType<typeof saved>>((resolve) => {
           finish = resolve;
-        })
-      : Promise.resolve({
+        }).then((result) => writeResult(args, result))
+      : Promise.resolve(writeResult(args, {
           ...saved(args.attachmentId, args.filename, args.mimeType),
           absolutePath: "/second/.context/local/attachments/att-notes/notes.md",
-        }),
+        })),
   );
-  const first = encodeAttachments([text], { ...ctx, cwd: "/first" });
-  const second = await encodeAttachments([text], { ...ctx, cwd: "/second" });
+  const first = encodeAttachments([structuredClone(text)], { ...ctx, cwd: "/first" });
+  const second = await encodeAttachments([structuredClone(text)], { ...ctx, cwd: "/second" });
   expect(JSON.stringify(second.blocks)).toContain("/second/.context/");
   finish({
     ...saved(text.id, text.name, text.mimeType),

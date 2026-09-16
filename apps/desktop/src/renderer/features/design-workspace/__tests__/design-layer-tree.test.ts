@@ -55,7 +55,7 @@ describe("design layer tree", () => {
       deepestNodeId: "hero",
       deepestRect: { x: 0, y: 0, width: 600, height: 400 },
       selectedNodeId: null,
-      intent: "plain" as const,
+      intent: "descend" as const,
       frameSize: { width: 600, height: 400 },
       labeledFrame: true,
       frameRootId: "::zeros-document-body",
@@ -66,7 +66,7 @@ describe("design layer tree", () => {
     });
     expect(
       resolveDesignFrameBodyTarget({ ...input, frameRootId: "hero" }),
-    ).toEqual({ kind: "clear" });
+    ).toEqual({ kind: "frame" });
   });
   it("represents the editable frame root once and exposes only its real children", () => {
     const root = tree[0]!;
@@ -392,7 +392,7 @@ describe("design layer tree", () => {
     ).toEqual([{ oid: "wrap", visible: false }]);
   });
 
-  it("keeps a frame's body-like root out of plain click selection", () => {
+  it("selects the outer frame first and preserves explicit nested selection", () => {
     const frameSize = { width: 400, height: 300 };
     const bodyRect = { x: 0, y: 0, width: 400, height: 300 };
     const seeded = [
@@ -423,7 +423,7 @@ describe("design layer tree", () => {
         ],
       },
     ];
-    // Plain click over content enters at the root's children.
+    // The outer frame owns the first ordinary click, even over nested content.
     expect(
       resolveDesignFrameBodyTarget({
         nodes: seeded,
@@ -431,6 +431,18 @@ describe("design layer tree", () => {
         deepestRect: { x: 40, y: 40, width: 80, height: 20 },
         selectedNodeId: null,
         intent: "plain",
+        frameSize,
+        rootRect: bodyRect,
+        labeledFrame: true,
+      }),
+    ).toEqual({ kind: "frame" });
+    expect(
+      resolveDesignFrameBodyTarget({
+        nodes: seeded,
+        deepestNodeId: "em",
+        deepestRect: { x: 40, y: 40, width: 80, height: 20 },
+        selectedNodeId: null,
+        intent: "descend",
         frameSize,
         rootRect: bodyRect,
         labeledFrame: true,
@@ -474,7 +486,7 @@ describe("design layer tree", () => {
         labeledFrame: true,
       }),
     ).toEqual({ kind: "node", nodeId: "em" });
-    // A root-only hit on a frame-filling root reads as empty canvas.
+    // The empty part of a frame selects that frame, including from a child.
     expect(
       resolveDesignFrameBodyTarget({
         nodes: seeded,
@@ -486,7 +498,7 @@ describe("design layer tree", () => {
         rootRect: bodyRect,
         labeledFrame: true,
       }),
-    ).toEqual({ kind: "clear" });
+    ).toEqual({ kind: "frame" });
     // A small lone root is a real element, not a frame body.
     const lone = [
       {
@@ -504,7 +516,7 @@ describe("design layer tree", () => {
         deepestNodeId: "chip",
         deepestRect: { x: 24, y: 24, width: 80, height: 40 },
         selectedNodeId: null,
-        intent: "plain",
+        intent: "descend",
         frameSize,
         rootRect: null,
         labeledFrame: true,
@@ -529,12 +541,54 @@ describe("design layer tree", () => {
         nodes: seeded,
         deepestNodeId: "gone",
         deepestRect: bodyRect,
-        selectedNodeId: null,
+        selectedNodeId: "heading",
         intent: "plain",
         frameSize,
         rootRect: bodyRect,
         labeledFrame: true,
       }),
     ).toEqual({ kind: "unresolved" });
+  });
+
+  it.each(["plain", "descend", "deepest"] as const)(
+    "maps an explicit frame root to the frame for %s, even without cached geometry",
+    (intent) => {
+      expect(
+        resolveDesignFrameBodyTarget({
+          nodes: [],
+          deepestNodeId: "::zeros-document-body",
+          deepestRect: { x: 0, y: 0, width: 400, height: 300 },
+          selectedNodeId: "heading",
+          intent,
+          frameSize: { width: 400, height: 300 },
+          labeledFrame: true,
+          frameRootId: "::zeros-document-body",
+        }),
+      ).toEqual({ kind: "frame" });
+    },
+  );
+
+  it("descends through document wrappers without hiding an unmarked authored root", () => {
+    const nodes = [
+      { ...tree[0]!, oid: "body", tag: "body", children: [tree[0]!] },
+    ];
+    const input = {
+      nodes,
+      deepestNodeId: "heading",
+      deepestRect: { x: 10, y: 10, width: 100, height: 20 },
+      selectedNodeId: null,
+      intent: "descend" as const,
+      frameSize: { width: 400, height: 300 },
+      labeledFrame: true,
+    };
+    expect(
+      resolveDesignFrameBodyTarget({ ...input, frameRootId: "hero" }),
+    ).toEqual({ kind: "node", nodeId: "heading" });
+    expect(
+      resolveDesignFrameBodyTarget({
+        ...input,
+        frameRootId: "::zeros-document-body",
+      }),
+    ).toEqual({ kind: "node", nodeId: "hero" });
   });
 });

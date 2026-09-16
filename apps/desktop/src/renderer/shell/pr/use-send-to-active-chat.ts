@@ -4,10 +4,9 @@
 //
 // The header "Create PR" button and the PR status island both need to drop a
 // prompt into the chat the user is currently looking at, without being mounted
-// inside a chat view. `useAgentSessions()` exposes the stable, provider-level
-// `sendPrompt(chatId, …)` — the same self-healing send path the composer uses
-// (it queues behind an in-flight turn and respawns a dead session), so this is
-// just a thin, target-the-active-chat wrapper over it.
+// inside a chat view. Prepare the chat just as the composer does: hydrate its
+// history and bind its selected agent before calling the provider sender.
+// The provider can recover an existing slot, but cannot start an unbound one.
 //
 // `text` is what the agent receives; `displayText` + `bubbleAttachments` +
 // `segments` + `autoAction` shape the user bubble (so "Create a PR" shows as
@@ -15,9 +14,12 @@
 // ──────────────────────────────────────────────────────────
 
 import { useCallback } from "react";
+import { legacyProviderBinding } from "@zeros/protocol/identities";
 
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { envForChat } from "../../features/agent/model-catalog";
 import type { AutoActionKind } from "../../features/agent/auto-action";
+import { useBridge } from "../../platform/bridge/use-bridge";
 import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
@@ -27,6 +29,7 @@ import {
   useActiveChatId,
   useWorkspaceStore,
 } from "../../state/store";
+import { folderIsWithinRoot } from "../../state/workspace-resolution";
 import { toast } from "../../shared/ui/primitives/elements";
 
 export interface SendToActiveChatArgs {
@@ -46,8 +49,13 @@ export interface SendToActiveChatArgs {
   onSettled?: () => void;
 }
 
-export function useSendToActiveChat(): (args: SendToActiveChatArgs) => boolean {
+export function useSendToActiveChat(
+  workspacePath: string,
+): (args: SendToActiveChatArgs) => boolean {
   const sessions = useAgentSessions();
+  const bridge = useBridge();
+  // Capture the click's chat across PR preflight awaits. Reading the global
+  // active id when those finish would redirect the action after navigation.
   const activeChatId = useActiveChatId();
 
   return useCallback(
@@ -59,33 +67,107 @@ export function useSendToActiveChat(): (args: SendToActiveChatArgs) => boolean {
       autoAction,
       onSettled,
     }: SendToActiveChatArgs) => {
-      if (!activeChatId) {
-        toast.error("No active chat", {
-          description: "Open or start a chat in this workspace first.",
+      const targetChat = () => {
+        const chat = useWorkspaceStore
+          .getState()
+          .chats.find((chat) => chat.id === activeChatId);
+        if (
+          !chat ||
+          chat.archived ||
+          !folderIsWithinRoot(chat.folder, workspacePath)
+        ) {
+          throw new Error("Open or start a chat in this workspace first.");
+        }
+        if (chat.kind === "terminal") {
+          throw new Error("Open an agent chat to send this PR action.");
+        }
+        if (!chat.agentId) {
+          throw new Error("Choose an agent for this chat first.");
+        }
+        if (!bridge || bridge.status !== "connected") {
+          throw new Error(
+            "The engine is reconnecting. Try again once connected.",
+          );
+        }
+        return { ...chat, agentId: chat.agentId };
+      };
+      const reportError = (error: unknown) => {
+        toast.error("Couldn't send to agent", {
+          description: error instanceof Error ? error.message : String(error),
         });
+      };
+      try {
+        targetChat();
+      } catch (error) {
+        reportError(error);
         return false;
       }
-      const folder = useWorkspaceStore
-        .getState()
-        .chats.find((chat) => chat.id === activeChatId)?.folder;
-      if (folder) recordWorkspaceActivity(folder);
-      sessions
-        .sendPrompt(
-          activeChatId,
+      recordWorkspaceActivity(workspacePath);
+      void (async () => {
+        let chat = targetChat();
+        if (sessions.getSession(chat.id)?.transcriptState !== "resident") {
+          await sessions.hydrateChat(chat.id);
+          chat = targetChat();
+          if (sessions.getSession(chat.id)?.transcriptState !== "resident") {
+            throw new Error(
+              "Couldn't load this chat. Try again once it reconnects.",
+            );
+          }
+        }
+        const slot = sessions.getSession(chat.id);
+        if (slot?.agentId !== chat.agentId) {
+          const options = {
+            agentName: chat.agentName ?? chat.agentId,
+            cwd: chat.folder,
+            env: envForChat(chat, slot?.initialize),
+          };
+          const binding =
+            (chat.providerBinding?.providerId === chat.agentId
+              ? chat.providerBinding
+              : undefined) ??
+            (chat.sessionId
+              ? legacyProviderBinding(chat.agentId, chat.sessionId)
+              : undefined);
+          // A cold existing conversation must re-adopt its provider thread,
+          // including when only the engine still knows its resume identity.
+          const adopted =
+            binding || slot?.hasTranscript
+              ? await sessions.loadIntoChat(
+                  chat.id,
+                  chat.agentId,
+                  binding ?? null,
+                  options,
+                )
+              : false;
+          targetChat();
+          if (!adopted)
+            await sessions.ensureSession(chat.id, chat.agentId, options);
+          const ready = sessions.getSession(chat.id);
+          if (!ready?.sessionId || ready.agentId !== chat.agentId) {
+            throw new Error(
+              ready?.error ?? "Couldn't start this chat's agent. Try again.",
+            );
+          }
+        }
+        if (targetChat().agentId !== chat.agentId) {
+          throw new Error(
+            "This chat's agent changed. Try the PR action again.",
+          );
+        }
+        await sessions.sendPrompt(
+          chat.id,
           text,
           displayText,
           undefined,
           bubbleAttachments,
           segments,
           autoAction,
-        )
-        .catch(() => {
-          // The error surfaces on the chat's own error state; this is a
-          // fire-and-forget from a button.
-        })
+        );
+      })()
+        .catch(reportError)
         .finally(() => onSettled?.());
       return true;
     },
-    [sessions, activeChatId],
+    [sessions, bridge, activeChatId, workspacePath],
   );
 }

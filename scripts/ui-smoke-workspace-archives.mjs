@@ -43,7 +43,7 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   await page.getByRole("tab", { name: "Experimental", exact: true }).click();
   await page
     .getByRole("switch", {
-      name: "Hide the archived workspace after 15 days",
+      name: "Hide archived workspaces after 15 days",
       exact: true,
     })
     .click();
@@ -95,9 +95,11 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
     "aria-disabled",
     "true",
   );
-  // Wait for Radix's opening focus handoff before sending a keyboard action.
+  // Focus arrives before Radix registers the menu as its active dismissable
+  // layer. Wait for that layer to accept input before sending Escape.
   const menu = page.getByRole("menu");
   await expect(menu).toBeFocused();
+  await expect(menu).toHaveCSS("pointer-events", "auto");
   await menu.press("Escape");
   await expect(menu).toHaveCount(0);
   await options("Recent")
@@ -128,6 +130,48 @@ export async function runWorkspaceArchivesSmoke({ page, check }) {
   });
   check(
     "Visibility survives reload, explicit snapshot deletion keeps the archive, and hidden archives can unarchive",
+    true,
+  );
+
+  const liveCard = page.getByRole("button").filter({
+    has: page.getByText("Recent", { exact: true }),
+  });
+  await expect(liveCard).toHaveCount(1);
+  await liveCard.click({ button: "right" });
+  const firstFrame = await menuItem("Archive").evaluate(async (item) => {
+    const card = [...document.querySelectorAll('[role="button"]')].find(
+      (node) => node.textContent.includes("Recent"),
+    );
+    const startedAt = performance.now();
+    item.click();
+    await new Promise(requestAnimationFrame);
+    return {
+      hidden: !card.isConnected,
+      pending: window.archiveFixture.archivePending("recent"),
+      elapsedMs: performance.now() - startedAt,
+    };
+  });
+  expect(firstFrame.hidden).toBe(true);
+  expect(firstFrame.pending).toBe(true);
+  await expect(liveCard).toHaveCount(0);
+  await expect(options("Recent")).toHaveCount(0);
+  await page.evaluate(() =>
+    window.archiveFixture.finishArchive("recent", true),
+  );
+  await expect(liveCard).toHaveCount(1);
+  await expect(
+    page.getByText("Couldn't archive workspace", { exact: true }),
+  ).toBeVisible();
+  await liveCard.click({ button: "right" });
+  await menuItem("Archive").click();
+  await expect(liveCard).toHaveCount(0);
+  await page.evaluate(() => window.archiveFixture.finishArchive("recent"));
+  await expect(options("Recent")).toBeVisible();
+  await expect(
+    page.getByText("Workspace archived", { exact: true }),
+  ).toHaveCount(0);
+  check(
+    `Archive hides by the next frame (${firstFrame.elapsedMs.toFixed(1)}ms), recovers on failure, and confirms quietly`,
     true,
   );
 }

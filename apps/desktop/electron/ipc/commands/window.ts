@@ -47,7 +47,6 @@ import path from "node:path";
 import {
   isAppearanceMode,
   migrateLegacyWindowBackground,
-  nativeThemeSourceForAppearanceMode,
   NEUTRAL_DARK_WINDOW_BACKGROUND,
   type AppearanceMode,
 } from "../../appearance-mode";
@@ -256,9 +255,9 @@ export const windowSetBackground: CommandHandler = async (args, event) => {
 //   • The same report drives `nativeTheme.themeSource`, so native chrome
 //     (context menus, dialogs) follows the APP theme instead of the OS.
 //
-// Native themeSource gets the mode's POLARITY source. System must remain
-// "system" so live OS flips keep working; Orka black maps to native "dark"
-// while its distinct app mode is still persisted verbatim.
+// Native themeSource gets the mode verbatim — the three app modes are exactly
+// Electron's three sources. System must remain "system" so live OS flips keep
+// working.
 
 const APPEARANCE_FILE = "appearance.json";
 
@@ -286,9 +285,8 @@ export function readPersistedAppearanceMode(): AppearanceMode | null {
 export const appearanceSetMode: CommandHandler = async (args) => {
   const mode = (args as { mode?: unknown } | undefined)?.mode;
   if (!isAppearanceMode(mode)) return;
-  const nativeSource = nativeThemeSourceForAppearanceMode(mode);
-  if (nativeTheme.themeSource !== nativeSource) {
-    nativeTheme.themeSource = nativeSource;
+  if (nativeTheme.themeSource !== mode) {
+    nativeTheme.themeSource = mode;
   }
   try {
     fs.writeFileSync(appearancePath(), JSON.stringify({ mode }), "utf8");

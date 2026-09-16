@@ -37,7 +37,10 @@ import {
   useProjects,
 } from "../state/use-projects";
 import { countLiveVisibleBySlug } from "../state/live-workspace-selectors";
-import { usePendingCreatesAll } from "../state/pending-workspaces";
+import {
+  usePendingCreatesAll,
+  usePendingWorkspacesStore,
+} from "../state/pending-workspaces";
 import type { Project } from "../state/projects-store";
 import { useAuth } from "../features/auth";
 import { Button } from "../shared/ui/primitives/button";
@@ -63,6 +66,7 @@ import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { useActiveOrganization } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 
+import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // One shared row shape, mirroring the settings sidebar entry (settings-page.tsx
 // SIDEBAR_ENTRY_CLS) so both nav rails read as the same control: fg2 at rest,
 // fg1 + a lifted --sidebar-bg-hover background when selected, hover lifts only
@@ -186,9 +190,15 @@ export function HomeSidebar() {
   const displayName = session?.user.name ?? null;
   // Live-visible rows + deduped pending creates, computed by the SAME helper the
   // Dashboard uses — badge == that repo's top-bar tab count, including during
-  // the optimistic-create and confirmed-archive transition window. A workspace
-  // remains counted while its destructive operation is visibly in progress.
-  const countBySlug = countLiveVisibleBySlug(accessibleWorkspaces, allPending);
+  // optimistic create and archive transitions.
+  const archiveIntents = usePendingWorkspacesStore(
+    (state) => state.archiveIntents,
+  );
+  const countBySlug = useMemo(
+    () =>
+      countLiveVisibleBySlug(accessibleWorkspaces, allPending, archiveIntents),
+    [accessibleWorkspaces, allPending, archiveIntents],
+  );
 
   return (
     <div
@@ -197,6 +207,7 @@ export function HomeSidebar() {
       style={{ width: `${railWidth}px` }}
     >
       <nav
+        {...popoverBoundaryProps}
         className="bg-sidebar-bg flex min-w-0 flex-1 flex-col overflow-y-auto px-3 py-3"
         role="tablist"
         aria-label="Home navigation"

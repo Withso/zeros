@@ -42,10 +42,12 @@ function reconstructAttachment(
   seg: {
     name: string;
     mimeType: string;
-    kind: "image" | "text";
+    kind: "image" | "text" | "file";
     thumbnailUri?: string;
     diskPath?: string;
     attachmentId?: string;
+    delivery?: "reference";
+    size?: number;
   },
   id: string,
 ): ComposerAttachment {
@@ -61,7 +63,8 @@ function reconstructAttachment(
     kind: seg.kind,
     data,
     text: seg.kind === "text" ? "" : undefined,
-    size: data ? approxBytes(data) : 0,
+    size: seg.size ?? (data ? approxBytes(data) : 0),
+    ...(seg.delivery ? { delivery: seg.delivery } : {}),
     validation: { ok: true },
     ...(seg.diskPath ? { diskPath: seg.diskPath } : {}),
     ...(seg.attachmentId ? { contextAttachmentId: seg.attachmentId } : {}),
@@ -90,6 +93,8 @@ export function messageToEditorContent(opts: {
               thumbnailUri: a.thumbnailUri,
               diskPath: a.diskPath,
               attachmentId: a.attachmentId,
+              delivery: a.delivery,
+              size: a.size,
             }),
           ),
         ];

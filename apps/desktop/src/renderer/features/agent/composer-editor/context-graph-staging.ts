@@ -2,6 +2,10 @@
 // context-graph-staging — attachments hit the graph the moment they're staged
 // ──────────────────────────────────────────────────────────
 //
+// New file references use bounded uploads in file-attachment-transfer.ts and
+// appear in the graph when complete. Send waits for their confirmed paths.
+// The base64 budgets below apply only to legacy inline drafts.
+//
 // The Context tab canvas renders the workspace's `.context/`, and until
 // 2026-08-02(2) the graph only learned about an attachment when a SEND
 // encoded it. Attach a screenshot, look at the Context tab, see nothing — the
@@ -51,6 +55,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { writeContextAttachment } from "../agent-history-client";
+import { ensureFileAttachment } from "../file-attachment-transfer";
 import { utf8ToBase64 } from "../encode-attachments";
 import { HARD_TEXT_CAP_BYTES, MAX_IMAGE_BYTES } from "../agent-attachments";
 import {
@@ -160,7 +165,8 @@ const notifiedFailureCwds = new Set<string>();
  * and repeated attach-time sweeps collapse onto the same durable record. */
 interface QueuedContextGraphWrite {
   attachmentId: string;
-  base64: string;
+  base64?: string;
+  attachment?: ComposerAttachment;
   mimeType: string;
   filename: string;
 }
@@ -218,12 +224,15 @@ function writeStagedAttachment(
   // same reporter as an async rejection — silent-catch was how a full day of
   // skew-rejected writes went unnoticed.
   void Promise.resolve()
-    .then(() =>
-      writeContextAttachment({
-        cwd,
-        ...write,
-      }),
-    )
+    .then(() => write.attachment
+      ? ensureFileAttachment(cwd, write.attachment)
+      : writeContextAttachment({
+          cwd,
+          attachmentId: write.attachmentId,
+          base64: write.base64!,
+          filename: write.filename,
+          mimeType: write.mimeType,
+        }))
     .catch((err) => reportStagingFailure(cwd, write.filename, err));
 }
 
@@ -274,8 +283,9 @@ usePendingWorkspacesStore.subscribe((state, previous) => {
  *  and composer unmount before the checkout lands. */
 export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
   for (const a of plan.stage) {
-    const base64 = stageablePayload(a);
-    if (!base64) continue;
+    const reference = a.delivery === "reference";
+    const base64 = reference ? null : stageablePayload(a);
+    if (!a.validation.ok || (!reference && !base64)) continue;
     let queued = queuedProvisioningWrites.get(cwd);
     if (!queued) {
       queued = new Map();
@@ -287,7 +297,7 @@ export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
     if (!queued.has(a.id)) {
       queued.set(a.id, {
         attachmentId: a.id,
-        base64,
+        ...(reference ? { attachment: a } : { base64: base64! }),
         mimeType: a.mimeType,
         filename: a.name,
       });

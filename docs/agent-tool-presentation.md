@@ -424,3 +424,8 @@ one Total cost with agent/start/end details. Keep unknown distinct from zero,
 mark Claude estimates, and do not render per-model pricing or a separate cost
 icon. See [agent-turn-usage.md](agent-turn-usage.md) for native query/run
 baselines, late updates, analytics and retired Claude fallback/budget settings.
+
+Protocol 18 combines these steering receipts, transcript replacement/fallback
+events and turn-usage snapshots with protocol 17's native attachment sources.
+The desktop and control-plane compatibility ranges advance together; optional
+fields keep older transcript records and supported peers readable.

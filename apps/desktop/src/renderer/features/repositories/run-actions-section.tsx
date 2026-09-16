@@ -314,7 +314,6 @@ export function RunActionsSection({
             size="sm"
             onClick={add}
             disabled={repo.loading || mutatingId !== null}
-            className="gap-1.5"
           >
             <Plus className="size-3.5" strokeWidth={1} aria-hidden="true" />
             Add action
@@ -331,7 +330,6 @@ export function RunActionsSection({
               size="sm"
               onClick={add}
               disabled={mutatingId !== null}
-              className="gap-1.5"
             >
               <Plus className="size-3.5" strokeWidth={1} aria-hidden="true" />
               Add
