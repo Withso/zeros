@@ -28,6 +28,7 @@ import {
   readAgentAttachmentFile,
 } from "./attachment-file-reader";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
+import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-id-resolver";
 import {
   bridgeAttachmentWrite,
@@ -88,8 +89,8 @@ export function fromPersistedMessage(
   }
 }
 
-/** Persist a user prompt blocked before provider admission, without inventing
- * agent output or a tool call. Uses the engine's existing message upsert. */
+/** Persist the exact user row needed for sign-in or failed-send recovery.
+ * Uses the engine's existing message upsert, including before admission. */
 export async function persistAuthenticationPrompt(
   bridge: import("../../platform/bridge/ws-client").RuntimeClient,
   chatId: string,
@@ -107,7 +108,7 @@ export async function persistAuthenticationPrompt(
     ],
   })) as { imported?: number };
   if (result.imported !== 1)
-    throw new Error("Could not save the message waiting for sign-in.");
+    throw new Error("Could not save the message for retry.");
 }
 
 /** Vestigial: the engine persists transcripts on emit (persist-on-emit +
@@ -353,14 +354,8 @@ export async function listChatSummariesForFolder(args: {
   );
 }
 
-export interface AttachmentWriteResult {
-  absolutePath: string;
-  relativePath: string;
-  mimeType: string;
-  bytes: number;
-  /** True when the exact bytes were already staged and disk did not change. */
-  skipped?: boolean;
-}
+export type { AttachmentWriteResult } from "@zeros/protocol/attachment-policy";
+import type { AttachmentWriteResult, AttachmentTransferOptions } from "@zeros/protocol/attachment-policy";
 
 export interface AttachmentReadResult {
   base64: string;
@@ -382,37 +377,45 @@ export { isAgentAttachmentDiskPath } from "./attachment-file-reader";
  *  shows what was attached. `chatId` is provenance only and optional: staging
  *  happens before the first prompt creates the chat. Unrelated to chat
  *  storage — a dedicated file-write IPC. */
-export async function writeContextAttachment(args: {
+type ContextAttachmentWriteArgs = AttachmentTransferOptions & {
   cwd: string;
   chatId?: string | null;
   attachmentId: string;
   base64: string;
   mimeType: string;
   filename: string;
-}): Promise<AttachmentWriteResult> {
+};
+
+/** Capture both transport and destination for the WHOLE import, including
+ * queued chunks. A runtime switch must reject, never redirect a later chunk. */
+export function createContextAttachmentWriter(cwd: string): (args: ContextAttachmentWriteArgs) => Promise<AttachmentWriteResult> {
   const bridge = getActiveBridge();
-  let result: AttachmentWriteResult;
-  if (bridge) {
-    let workspaceId = args.cwd;
-    try {
-      workspaceId =
-        (await resolveBridgeWorkspaceIdForCwd(bridge, args.cwd)) ?? args.cwd;
-    } catch {
-      // A registered primary checkout has no workspace row. Local bridge ops
-      // accept its trusted root; remote workspaces resolve above.
+  const executionKey = bridge ? runtimeExecutionKey(bridge.executionIdentity) : null;
+  let workspace: Promise<string> | undefined;
+  const assertTarget = () => {
+    if (bridge !== getActiveBridge() || (bridge && runtimeExecutionKey(bridge.executionIdentity) !== executionKey)) {
+      throw new Error("The attachment workspace changed — return to its workspace and retry");
     }
-    result = await bridgeAttachmentWrite(bridge, workspaceId, args);
-  } else {
-    result = await nativeInvoke<AttachmentWriteResult>(
-      "agent_attachment_write",
-      args,
-    );
-  }
-  // Neither transport produces the renderer's filesystem intent signal at the
-  // exact write boundary. Nudge the Context tab only when bytes changed; the
-  // send-time idempotent safety net stays quiet.
-  if (!result.skipped) notifyContextGraphChanged(args.cwd);
-  return result;
+  };
+  return async (args) => {
+    assertTarget();
+    let result: AttachmentWriteResult;
+    if (bridge) {
+      workspace ??= resolveBridgeWorkspaceIdForCwd(bridge, cwd).then(id => id ?? cwd);
+      const workspaceId = await workspace;
+      assertTarget();
+      result = await bridgeAttachmentWrite(bridge, workspaceId, args);
+    } else {
+      result = await nativeInvoke<AttachmentWriteResult>("agent_attachment_write", { ...args });
+    }
+    assertTarget();
+    if (!result.skipped && !result.pending) notifyContextGraphChanged(cwd);
+    return result;
+  };
+}
+
+export async function writeContextAttachment(args: ContextAttachmentWriteArgs): Promise<AttachmentWriteResult> {
+  return createContextAttachmentWriter(args.cwd)(args);
 }
 
 /** Resolve a persisted disk reference back to prompt bytes for edit-resend.

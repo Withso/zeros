@@ -12,7 +12,7 @@ export function materializeMcpServerRegistration(
   env: Readonly<Record<string, string | undefined>>,
 ): McpServerRegistration {
   if (
-    registration.transport !== "http" ||
+    registration.transport === "stdio" ||
     !registration.headersFromEnv ||
     Object.keys(registration.headersFromEnv).length === 0
   ) {
@@ -40,7 +40,7 @@ export function materializeMcpServerRegistration(
 
   return {
     name: registration.name,
-    transport: "http",
+    transport: registration.transport,
     url: registration.url,
     headers,
   };

@@ -163,9 +163,10 @@ export function workspaceChangeLinesTarget(
  *  render nothing in either case rather than a placeholder. */
 export function useWorkspaceChangeLines(
   workspace: Workspace | null,
+  active = true,
 ): ChangeLineCounts {
   const target = workspaceChangeLinesTarget(workspace);
-  const refreshKey = useGitRefreshKey(workspace?.path, target);
+  const refreshKey = useGitRefreshKey(workspace?.path, target, active);
   // The resolved pair carries its target so a workspace switch can never show
   // another workspace's numbers for a frame.
   const [live, setLive] = useState<{
@@ -174,12 +175,14 @@ export function useWorkspaceChangeLines(
   } | null>(null);
 
   useEffect(() => {
-    if (!target) return;
+    if (!active || !target) return;
     let cancelled = false;
     void changeLineCountsForGeneration(target, refreshKey)
       .then((counts) => {
-        const canonical = rememberChangeLines(target, counts);
         if (cancelled) return;
+        // A superseded read must not regress the shared snapshot that a
+        // returning Summary or workspace tab restores synchronously.
+        const canonical = rememberChangeLines(target, counts);
         // Same target, same numbers → keep the exact state object so React
         // bails out instead of re-rendering the whole strip on every refresh.
         setLive((current) =>
@@ -194,7 +197,7 @@ export function useWorkspaceChangeLines(
     return () => {
       cancelled = true;
     };
-  }, [target, refreshKey]);
+  }, [active, target, refreshKey]);
 
   if (!target) return NO_CHANGE_LINES;
   if (live && live.target === target) return live.counts;

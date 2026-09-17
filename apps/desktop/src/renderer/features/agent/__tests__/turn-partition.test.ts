@@ -4,7 +4,7 @@
 // ("thought") is working content, never the answer.
 
 import { describe, it, expect } from "vitest";
-import { partitionTurn } from "../turn-partition";
+import { partitionTurn, partitionTurnSequence } from "../turn-partition";
 import type { AgentMessage } from "../use-agent-session";
 
 const tool = (id: string): AgentMessage =>
@@ -40,6 +40,8 @@ const liveTool = (
     kind: "tool",
     id,
     toolCallId: id,
+    title: "Read",
+    rawInput: { path: "src/main.ts" },
     toolKind: "read",
     status,
     createdAt: 1,
@@ -50,6 +52,19 @@ const liveTool = (
 const ids = (xs: AgentMessage[]) => xs.map((m) => (m as { id: string }).id);
 
 describe("partitionTurn", () => {
+  it.each([true, false])("retains report/work/report order with independent working groups (live=%s)", (live) => {
+    const events = [
+      tool("first-tool"), phasedAgentText("first-report", "final_answer"),
+      phasedAgentText("update", "commentary"), tool("second-tool"),
+      phasedAgentText("second-report", "final_answer"),
+    ];
+    const sequence = partitionTurnSequence(events, { live });
+    expect(sequence.map((segment) => [segment.kind, ids(segment.events)])).toEqual([
+      ["working", ["first-tool"]], ["output", ["first-report"]],
+      ["working", ["update", "second-tool"]], ["output", ["second-report"]],
+    ]);
+    expect(sequence.map((segment) => segment.key)).toEqual(events.filter((event) => event.id !== "second-tool").map((event) => event.id));
+  });
   it.each([true, false])("omits retired empty text without breaking the answer boundary (live %s)", (live) => {
     const answer = phasedAgentText("answer", "final_answer");
     const empty = { ...phasedAgentText("retired", "commentary"), text: "" } as AgentMessage;
@@ -150,9 +165,25 @@ describe("partitionTurn", () => {
     const { working, finalOutput } = partitionTurn([
       agentText("provisional"),
       backgroundTask("background-running", "in_progress"),
-    ]);
+    ], { live: true });
     expect(ids(working)).toEqual(["provisional", "background-running"]);
     expect(finalOutput).toEqual([]);
+  });
+
+  it("keeps the settled parent output visible when a background task starts after it", () => {
+    const { working, finalOutput } = partitionTurn([
+      agentText("answer"), backgroundTask("background-running", "in_progress"),
+    ], { live: false });
+    expect(ids(working)).toEqual(["background-running"]);
+    expect(ids(finalOutput)).toEqual(["answer"]);
+  });
+
+  it("keeps the parent output above a later background failure card", () => {
+    const { finalOutput } = partitionTurn([
+      agentText("answer"),
+      { id: "background-error", kind: "error_notice", createdAt: 100, code: "claude-background-transport-closed", severity: "error", recoverable: false, message: "Claude disconnected." },
+    ]);
+    expect(ids(finalOutput)).toEqual(["answer"]);
   });
 
   it("handles an empty turn", () => {

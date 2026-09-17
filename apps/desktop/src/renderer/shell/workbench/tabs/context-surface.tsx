@@ -27,6 +27,7 @@ import { EmptyState } from "./changes-tab";
 import {
   contextGraphKey,
   loadContextGraph,
+  loadContextGraphForRefresh,
   useContextGraphSnapshot,
 } from "./context-graph-data";
 import { ContextGraphCanvas } from "./context-graph-canvas";
@@ -75,7 +76,7 @@ export const ContextSurface = React.memo(function ContextSurface({
   // the last confirmed listing on screen while the re-list runs.
   useEffect(() => {
     if (!active || !cwd) return;
-    void loadContextGraph(cwd, refreshKey > 0 ? { force: true } : {}).catch(
+    void loadContextGraphForRefresh(cwd, refreshKey).catch(
       () => {
         /* snapshot.error carries the failure; retained data stays rendered */
       },
@@ -90,7 +91,8 @@ export const ContextSurface = React.memo(function ContextSurface({
     const key = contextGraphKey(cwd);
     return subscribeContextGraphChanged((changedCwd) => {
       if (contextGraphKey(changedCwd) !== key) return;
-      void loadContextGraph(cwd, { force: true }).catch(() => {});
+      // The shared cache already invalidated this write before notifying views.
+      void loadContextGraph(cwd).catch(() => {});
     });
   }, [active, cwd]);
 
@@ -172,14 +174,6 @@ export const ContextSurface = React.memo(function ContextSurface({
   );
   return (
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
-      {data?.storageError && (
-        <div
-          role="alert"
-          className="text-fg2 border-border1 border-b px-3 py-2 text-xs"
-        >
-          {data.storageError}
-        </div>
-      )}
       {body}
     </div>
   );

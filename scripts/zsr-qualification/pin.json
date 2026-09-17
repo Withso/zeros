@@ -1,9 +1,9 @@
 {
   "package": "@anthropic-ai/sandbox-runtime",
-  "version": "0.0.75",
-  "upstreamTag": "v0.0.75",
-  "upstreamCommit": "40804af269e1616092e9971de12a1f358f58eba9",
+  "version": "0.0.76",
+  "upstreamTag": "v0.0.76",
+  "upstreamCommit": "c392e6cf9f8df957c66d9ab1461e2cfa99b1ab5d",
   "license": "Apache-2.0",
-  "tarballIntegrity": "sha512-oqAKi6QtkT2DpLwFoDCDD757zw2i6ftpLTyV8rNSV9QWF53q2m1JxEs0RYXv2CIXtCoje4RGYQylagn15RKmww==",
-  "patchSha256": "57c1a1602505e3467d5a1b81e79bf363313766222308452aa8e0e13170486f92"
+  "tarballIntegrity": "sha512-wIC++TvCopRPJcX/v/PCp/SjYOWk/cAVq+VF9v6E3WwkriFP9uu2wvPJ2E+wMrNa3i3h3ew9zTpHcmyGLBKo0w==",
+  "patchSha256": "66772ad9b1749d2bcdbdfae3c7573f53d44a74f1cd10cac7e4a18f677af7f82f"
 }

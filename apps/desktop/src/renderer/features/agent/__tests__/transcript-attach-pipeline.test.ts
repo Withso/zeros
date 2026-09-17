@@ -16,8 +16,12 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const copied = vi.hoisted(() => ({ bytes: Buffer.alloc(0) }));
 vi.mock("../agent-history-client", () => ({
-  writeContextAttachment: vi.fn(),
+  createContextAttachmentWriter: () => async (args: { base64: string; filename: string; offset: number; totalBytes: number; attachmentId: string }) => {
+    if (args.base64) copied.bytes = Buffer.concat([copied.bytes, Buffer.from(args.base64, "base64")]);
+    return { absolutePath: `/repo/zeros/.context/local/attachments/${args.attachmentId}/${args.filename}`, relativePath: `.context/local/attachments/${args.attachmentId}/${args.filename}`, mimeType: "text/plain", bytes: copied.bytes.length, pending: copied.bytes.length < args.totalBytes };
+  },
 }));
 
 import { setZerosDbPathForTesting } from "../../../../engine/db";
@@ -94,9 +98,10 @@ describe("attach a chat transcript — the whole path", () => {
   beforeEach(() => {
     setZerosDbPathForTesting(tmpDbFile());
     ord = 0;
+    copied.bytes = Buffer.alloc(0);
   });
 
-  it("produces the <file> block the agent receives, from a real chat row", async () => {
+  it("saves a referenced transcript from a real chat row", async () => {
     // Three chats: one titled, one still on the "Untitled" seed, one closed.
     upsertChat(
       chat("titled", {
@@ -202,13 +207,14 @@ describe("attach a chat transcript — the whole path", () => {
     expect(block.type).toBe("text");
     const payload = block.type === "text" ? block.text : "";
     expect(
-      payload.startsWith('<file name="rework-the-tab-strip.concise.txt">'),
+      payload.startsWith('<attached_file name="rework-the-tab-strip.concise.txt"'),
     ).toBe(true);
-    expect(payload.endsWith("</file>")).toBe(true);
+    expect(payload.endsWith("</attached_file>")).toBe(true);
     // The transcript's own header rides inside, which is what makes the file
     // self-describing and lets the chip's filename stay short.
-    expect(payload).toContain("# Rework the tab strip");
-    expect(payload).toContain("Why is the tab strip re-mounting?");
+    expect(copied.bytes.toString("utf8")).toContain("# Rework the tab strip");
+    expect(copied.bytes.toString("utf8")).toContain("Why is the tab strip re-mounting?");
+    expect(payload).not.toContain("Why is the tab strip re-mounting?");
     // The sent bubble must call it text, not an image — and carry the id
     // that links it back to its context-graph record.
     expect(bubbleAttachments).toEqual([
@@ -217,6 +223,9 @@ describe("attach a chat transcript — the whole path", () => {
         mimeType: "text/plain",
         kind: "text",
         attachmentId: "att-1",
+        delivery: "reference",
+        diskPath: ".context/local/attachments/att-1/rework-the-tab-strip.concise.txt",
+        size: copied.bytes.length,
       },
     ]);
   });

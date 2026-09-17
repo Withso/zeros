@@ -23,8 +23,9 @@ import { EventStripe } from "./renderers/event-stripe";
 import { MessageView } from "./renderers";
 import type { RendererContext } from "./renderers";
 import type { AgentMessage } from "./use-agent-session";
-import type { WorkflowProgress } from "../../platform/bridge/agent-events";
-import { partitionTurn } from "./turn-partition";
+import type { BackgroundTask, WorkflowProgress } from "../../platform/bridge/agent-events";
+import { BackgroundTasksWaitingLine } from "./background-task-activity";
+import { partitionTurnSequence } from "./turn-partition";
 import { tailIndicators } from "./tail-indicators";
 import { WorkflowActivity } from "./workflow-activity";
 
@@ -48,6 +49,9 @@ interface TurnEventListProps {
   /** Provider-turn start fallback for an adopted live turn whose newest visual
    * segment has not received an event yet. */
   activityStartedAt?: number;
+  /** Claude's quiet continuation belongs below the settled output/footer. */
+  backgroundTasks?: BackgroundTask[];
+  surfaceActive?: boolean;
   /** Newest foreground workflow for this exact session. It renders only at
    * the live visual tail, directly above the ordinary agent shimmer. */
   workflow?: WorkflowProgress | null;
@@ -67,6 +71,8 @@ export const TurnEventList = memo(function TurnEventList({
   showActivity = true,
   activityEvents,
   activityStartedAt,
+  backgroundTasks,
+  surfaceActive = true,
   workflow,
   onStopWorkflow,
   footer,
@@ -80,10 +86,12 @@ export const TurnEventList = memo(function TurnEventList({
 
   // Phase-less prose stays in the working feed while live. Explicit final
   // answers keep their output position even if bookkeeping arrives later.
-  const { working, finalOutput } = useMemo(
-    () => partitionTurn(events, { live }),
+  const sequence = useMemo(
+    () => partitionTurnSequence(events, { live }),
     [events, live],
   );
+  const tailId = sequence.at(-1)?.events.at(-1)?.id ?? null;
+  const turnCtx = useMemo(() => ({ ...ctx, isStreaming: live, lastMessageId: tailId }), [ctx, live, tailId]);
 
   // One tail shimmer and elapsed timer cover the live turn, including pauses
   // between tool events. Optional questions do not pause that activity.
@@ -95,7 +103,8 @@ export const TurnEventList = memo(function TurnEventList({
   const awaitingUserInput =
     (ctx.hasBlockingQuestion ?? ctx.pendingQuestionToolCallIds.size > 0) || !!ctx.pendingPermission;
   const tail = tailIndicators({ live, showActivity, awaitingUserInput });
-  const showShimmer = tail.shimmer;
+  const showShimmer = tail.shimmer && surfaceActive;
+  const showBackgroundWaiting = isActive && showActivity && !live && !awaitingUserInput && !!backgroundTasks?.length;
   const workflowRow =
     tail.workflow && workflow && onStopWorkflow
       ? { workflow, onStop: onStopWorkflow }
@@ -123,9 +132,9 @@ export const TurnEventList = memo(function TurnEventList({
   // Render nothing when the turn has no events yet AND isn't streaming, so an
   // empty wrapper doesn't render.
   if (
-    working.length === 0 &&
-    finalOutput.length === 0 &&
+    sequence.length === 0 &&
     !showShimmer &&
+    !showBackgroundWaiting &&
     !workflowRow &&
     !footer
   ) {
@@ -134,16 +143,11 @@ export const TurnEventList = memo(function TurnEventList({
 
   return (
     <div className="flex w-full max-w-[768px] min-w-0 flex-col self-start">
-      {working.length > 0 && (
-        <EventStripe
-          events={working}
-          ctx={ctx}
-          live={live}
-          browserTailClosed={finalOutput.length > 0}
-        />
-      )}
-      {finalOutput.map((event) => (
-        <MessageView key={event.id} message={event} ctx={ctx} />
+      {sequence.map((segment, index) => segment.kind === "working" ? (
+        <EventStripe key={segment.key} events={segment.events} ctx={turnCtx} live={live}
+          browserTailClosed={index < sequence.length - 1} />
+      ) : (
+        <MessageView key={segment.key} message={segment.events[0]} ctx={turnCtx} />
       ))}
       {workflowRow ? <WorkflowActivity {...workflowRow} /> : null}
       {/* Shimmer + live timer at the tail of the active turn while streaming.
@@ -157,6 +161,13 @@ export const TurnEventList = memo(function TurnEventList({
       )}
       {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}
       {footer}
+      {showBackgroundWaiting && (
+        <BackgroundTasksWaitingLine
+          tasks={backgroundTasks!}
+          startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
+          active={surfaceActive}
+        />
+      )}
     </div>
   );
 });

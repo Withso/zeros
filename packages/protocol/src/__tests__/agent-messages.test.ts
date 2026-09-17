@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   applyUpdate,
   type AgentMessage,
@@ -6,6 +6,15 @@ import {
   type AgentToolMessage,
 } from "../agent-messages";
 import type { SessionNotification } from "../agent-events";
+
+it("appends late resource links without replacing captured output and clears them on retraction", () => {
+  const initial = applyUpdate([], { sessionId: "s", update: { sessionUpdate: "tool_call", toolCallId: "report", title: "Report", kind: "mcp", status: "completed", content: [{ type: "content", content: { type: "text", text: "Report ready" } }], rawOutput: { structuredContent: { count: 2 } } } });
+  const update: SessionNotification = { sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "report", resourceLinks: [{ type: "resource_link", uri: ".context/local/artifacts/report.csv", name: "Report" }] } };
+  const next = applyUpdate(applyUpdate(initial, update), update);
+  expect(next[0]).toMatchObject({ content: (initial[0] as AgentToolMessage).content, rawOutput: { structuredContent: { count: 2 } }, resourceLinks: [{ type: "resource_link", uri: ".context/local/artifacts/report.csv", name: "Report" }] });
+  const retracted = applyUpdate(next, { sessionId: "s", update: { sessionUpdate: "tool_result_retraction", toolCallIds: ["report"] } });
+  expect((applyUpdate(retracted, update)[0] as AgentToolMessage).resourceLinks).toBeUndefined();
+});
 
 // The live renderer and persist-on-emit engine share applyUpdate to fold
 // streaming chunks into AgentMessages.
@@ -39,6 +48,35 @@ function userChunk(text: string, messageId?: string): SessionNotification {
 }
 
 describe("applyUpdate — shared agent-message coalescer", () => {
+  it("records the last actual text update without moving the clock on completion replay", () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1000);
+    try {
+      const first = applyUpdate([], agentChunk("Starting", "reply"));
+      clock.mockReturnValue(900000);
+      const last = applyUpdate(first, agentChunk(" and finishing", "reply"));
+      expect(last[0]).toMatchObject({ createdAt: 1000, updatedAt: 900000 });
+      clock.mockReturnValue(950000);
+      const replay: SessionNotification = {
+        sessionId: "s",
+        update: {
+          ...agentChunk("Starting and finishing", "reply").update,
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Starting and finishing" },
+          messageId: "reply",
+          textMode: "replace",
+        },
+      };
+      expect(applyUpdate(last, replay)).toBe(last);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+  it("adopts a late native tool identity without replacing the durable row", () => {
+    const initial = applyUpdate([], { sessionId: "s", update: { sessionUpdate: "tool_call", toolCallId: "local", title: "Read", status: "completed", rawOutput: "file contents" } });
+    const next = applyUpdate(initial, { sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "local", nativeToolCallId: "native" } });
+    expect(next).toEqual([expect.objectContaining({ id: initial[0].id, nativeToolCallId: "native", status: "completed", rawOutput: "file contents" })]);
+  });
+
   it("updates an exact message in place across concurrent tools and keeps replacements durable", () => {
     let messages = applyUpdate([], agentChunk("Draft", "reply"));
     messages = applyUpdate(messages, { sessionId: "s", update: { sessionUpdate: "tool_call", toolCallId: "concurrent", title: "Read" } });
@@ -419,6 +457,38 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
 // attempts, transport warnings) fold into ONE compact row per event — never
 // appended into the agent's prose. Replays dedupe on noticeId.
 describe("applyUpdate — error_notice rows", () => {
+  it("retains autonomous failure classification across persistence and replay", () => {
+    const notification = {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "error_notice", noticeId: "background-verification",
+        severity: "error", recoverable: false, code: "claude-background-failed",
+        message: "Verify at https://example.com/verify", failureKind: "verification-required",
+      },
+    } as SessionNotification;
+    const saved = JSON.parse(JSON.stringify(applyUpdate([], notification)));
+    expect(saved[0]).toMatchObject({ failureKind: "verification-required", message: "Verify at https://example.com/verify" });
+    expect(applyUpdate(saved, notification)).toBe(saved);
+  });
+  it("retains the exact failed turn across persistence and replay", () => {
+    const notification = {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: "turn-failure-u1",
+        severity: "error",
+        message: "Selected model is at capacity.",
+        turnFailure: { turnId: "u1", kind: "protocol-error" },
+      },
+    } as SessionNotification;
+    const saved = JSON.parse(JSON.stringify(applyUpdate([], notification)));
+    expect(saved[0].turnFailure).toEqual({
+      turnId: "u1",
+      kind: "protocol-error",
+    });
+    expect(applyUpdate(saved, notification)).toBe(saved);
+  });
+
   it("appends one AgentErrorNoticeMessage per notice, deduped on noticeId", () => {
     let msgs = applyUpdate([], {
       sessionId: "s",

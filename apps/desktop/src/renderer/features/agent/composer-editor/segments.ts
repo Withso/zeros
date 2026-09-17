@@ -36,5 +36,5 @@ export type ComposerSegment =
       attachmentId: string;
       name: string;
       mimeType: string;
-      kind: "image" | "text";
+      kind: "image" | "text" | "file";
     };

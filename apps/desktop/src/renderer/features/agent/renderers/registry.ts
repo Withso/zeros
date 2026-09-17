@@ -116,8 +116,7 @@ export const defaultRegistry: RendererRegistry = {
     background_task: BackgroundTaskRecord,
     // Subagent keeps its own renderer too (threaded body).
     subagent: SubagentCard,
-    // Cursor's `task` → the RAW task card (Input/Output JSON + live child tool
-    // calls). Distinct from `subagent` so Claude's SubagentCard is unaffected.
+    // Preserve Cursor's stored `task` kind while sharing the Agent group UI.
     task: CursorTaskCard,
   },
   toolFallback: EventRowRenderer as any,

@@ -48,6 +48,34 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("thread lifecycle", () => {
+    it("retains the terminal provider reason, excluding automatic retries and earlier turns", () => {
+      env.t.handle("error", {
+        willRetry: true,
+        error: { message: "Retrying transport" },
+      });
+      expect(env.t.terminalError).toBeNull();
+      env.t.handle("turn/completed", {
+        turn: {
+          id: "u1",
+          status: "failed",
+          error: {
+            message:
+              "Selected model is at capacity. Please try a different model.",
+          },
+        },
+      });
+      expect(env.t.terminalError).toBe(
+        "Selected model is at capacity. Please try a different model.",
+      );
+      env.t.startTurn();
+      expect(env.t.terminalError).toBeNull();
+      env.t.handle("error", {
+        willRetry: false,
+        error: { message: "Please rephrase your request." },
+      });
+      expect(env.t.terminalError).toBe("Please rephrase your request.");
+    });
+
     it("captures threadId from thread/started", () => {
       env.t.handle("thread/started", { thread: { id: "thr_abc123" } });
       expect(env.t.codexThreadId).toBe("thr_abc123");
@@ -1817,7 +1845,7 @@ describe("CodexAppServerTranslator", () => {
         showBufferingUi: true,
       });
       expect(env.out.emitted.map((item) => item.update.sessionUpdate)).toEqual([
-        "tool_call",
+        "model_fallback",
         "tool_call",
         "error_notice",
       ]);

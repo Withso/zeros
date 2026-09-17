@@ -30,12 +30,36 @@ import {
   turnFooterFailureLabel,
   turnFooterFiles,
   turnFooterStatusLabel,
+  turnFooterDuration,
 } from "../turn-footer";
 import { TooltipProvider } from "@/renderer/shared/ui/primitives/tooltip";
 import { pickStartedAt } from "../activity-hud";
 import { ActionsCtx } from "../sessions-context";
 import { turnRowCache, turnRowKey } from "@/renderer/state/read-caches";
 import type { TurnInfo } from "@/renderer/platform/turns";
+
+it("extends the footer through parent background replies, without child bookkeeping inflating it", () => {
+  const record = { startedAt: 1000, endedAt: 124000 };
+  const events = [
+    {
+      kind: "text" as const,
+      id: "answer",
+      role: "agent" as const,
+      text: "Complete",
+      createdAt: 2000,
+      updatedAt: 901000,
+    },
+    {
+      kind: "text" as const,
+      id: "child",
+      parentToolId: "agent",
+      role: "agent" as const,
+      text: "Child",
+      createdAt: 950000,
+    },
+  ];
+  expect(turnFooterDuration(record, events, 1000)).toBe(900000);
+});
 
 describe("TurnFilePill cache ownership", () => {
   beforeEach(() => useWorkspaceFileDiffSnapshot.mockClear());
@@ -91,6 +115,12 @@ describe("turnFooterFiles", () => {
 });
 
 describe("turnFooterFailureLabel", () => {
+  it.each([
+    ["verification-required", "VERIFICATION REQUIRED"],
+    ["cloud-credentials-unavailable", "CLOUD CREDENTIALS UNAVAILABLE"],
+  ] as const)("labels %s without requesting a Claude sign-in", (kind, label) => {
+    expect(turnFooterFailureLabel({ kind, stage: "prompt", message: "Native explanation" })).toBe(label);
+  });
   it("uses the single compact Design-protection failure label", () => {
     expect(
       turnFooterFailureLabel({
@@ -103,6 +133,10 @@ describe("turnFooterFailureLabel", () => {
 });
 
 describe("pickStartedAt", () => {
+  it("retains the original request clock when a later SDK background clock takes over", () => {
+    expect(pickStartedAt([], 5_000, 1_000)).toBe(1_000);
+    expect(pickStartedAt([], 0, null, 1_000)).toBe(1_000);
+  });
   it("keeps the original turn clock while a re-adopted turn has no new events", () => {
     expect(pickStartedAt([], 1234)).toBe(1234);
   });
@@ -388,7 +422,7 @@ describe("turn footer first paint after a reopen", () => {
     ...over,
   });
 
-  const renderFooter = () =>
+  const renderFooter = (over: Partial<Parameters<typeof TurnFooter>[0]> = {}) =>
     renderToStaticMarkup(
       createElement(
         TooltipProvider,
@@ -402,12 +436,38 @@ describe("turn footer first paint after a reopen", () => {
             events: [],
             startedAt: 1_000,
             live: false,
+            ...over,
           }),
         ),
       ),
     );
 
   beforeEach(() => turnRowCache.clear());
+
+  it("paints a reopened failure outside activity and replaces the generic stopped pill", () => {
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
+    const html = renderFooter({
+      recoveryFailure: { kind: "protocol-error", message: "Selected model is at capacity." },
+      isLastTurn: true,
+      onRetry: async () => {},
+    });
+    expect(html).toContain("data-turn-failure-card");
+    expect(html).toContain("Selected model is at capacity.");
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("AGENT STOPPED");
+  });
+
+  it("keeps a historical reason without exposing stale retry actions", () => {
+    turnRowCache.setData(turnRowKey("chat-1", "user-1"), row({ status: "failed", stopReason: null }));
+    const html = renderFooter({
+      recoveryFailure: { kind: "session-expired", message: "Session expired." },
+      isLastTurn: false,
+      onRetry: async () => {},
+      onRetryNewChat: async () => {},
+    });
+    expect(html).toContain("Session expired.");
+    expect(html).not.toContain("Retry");
+  });
 
   it("paints STOPPED BY USER from the retained row, with no fetch first", () => {
     turnRowCache.setData(turnRowKey("chat-1", "user-1"), row());

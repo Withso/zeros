@@ -50,6 +50,9 @@ export interface TurnModelUsage {
  *  the footer's usage popover survives reloads. Mirrors core TurnUsage
  *  (reasoningTokens deliberately never rendered — 2026-07-13 decision). */
 export interface TurnUsageJson {
+  accountingVersion?: 1;
+  revision?: number;
+  costKind?: "estimated" | "reported";
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;
@@ -110,16 +113,32 @@ function parseFiles(raw: string | null): TurnFile[] {
   }
 }
 
-function parseUsage(raw: string | null): TurnUsageJson | null {
+type StoredTurnUsage = TurnUsageJson & {
+  _sources?: Array<{ id: string; usage: TurnUsageJson }>;
+};
+function parseUsage(raw: string | null, includeSources = false): StoredTurnUsage | null {
   if (!raw) return null;
   try {
     const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as TurnUsageJson)
-      : null;
-  } catch {
-    return null;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+    if (includeSources) return parsed as StoredTurnUsage;
+    const { _sources: _receipts, ...usage } = parsed;
+    return usage as TurnUsageJson;
+  } catch { return null; }
+}
+
+const USAGE_COUNTERS = ["inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "reasoningTokens", "totalCostUsd"] as const;
+function sumUsageSources(usages: TurnUsageJson[]): TurnUsageJson {
+  if (usages.length === 1) return { ...usages[0] };
+  const result: TurnUsageJson = { accountingVersion: 1 };
+  for (const key of USAGE_COUNTERS) {
+    if (usages.every((u) => typeof u[key] === "number")) {
+      result[key] = Math.round(usages.reduce((sum, u) => sum + u[key]!, 0) * 1e12) / 1e12;
+    }
   }
+  if (usages.some((u) => u.costKind === "estimated")) result.costKind = "estimated";
+  else if (usages.some((u) => u.costKind === "reported")) result.costKind = "reported";
+  return result;
 }
 
 function toTurnRow(r: TurnDbRow): TurnRow {
@@ -279,6 +298,37 @@ export function repairTurnFiles(
   return result.changes > 0;
 }
 
+/** Apply an absolute usage snapshot to an existing exact owner only. */
+export function updateTurnUsage(chatId: string, turnId: string, agentId: string, usage: TurnUsageJson, executionId = agentId): boolean {
+  if (!usage || usage.accountingVersion !== 1 || !Number.isSafeInteger(usage.revision) || (usage.revision ?? 0) < 1) return false;
+  for (const key of USAGE_COUNTERS) {
+    const value = usage[key];
+    if (value !== undefined && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) return false;
+  }
+  const turn = getTurn(chatId, turnId);
+  if (!turn || turn.agentId !== agentId) return false;
+  const row = openZerosDb().prepare("SELECT usage FROM turns WHERE chat_id = ? AND turn_id = ?").get(chatId, turnId) as { usage: string | null };
+  const stored = parseUsage(row.usage, true);
+  const sources = stored?._sources ?? [];
+  const previous = sources.find((source) => source.id === executionId);
+  if (previous && (previous.usage.revision ?? 0) >= usage.revision!) return false;
+  const sourceUsage = { ...usage } as StoredTurnUsage;
+  delete sourceUsage._sources;
+  if (previous) previous.usage = sourceUsage;
+  else sources.push({ id: executionId, usage: sourceUsage });
+  // The engine rejects retired execution routes. Fold old immutable receipts
+  // to bound pathological repeated rebuilds of the same user prompt.
+  if (sources.length > 16) {
+    const oldest = sources.splice(0, 2);
+    sources.unshift({ id: "retired", usage: sumUsageSources(oldest.map((s) => s.usage)) });
+  }
+  const next: StoredTurnUsage = { ...sumUsageSources(sources.map((s) => s.usage)),
+    revision: Math.max((stored?.revision ?? 0) + 1, usage.revision!), _sources: sources };
+  openZerosDb().prepare("UPDATE turns SET usage = ?, rev = ? WHERE chat_id = ? AND turn_id = ?")
+    .run(JSON.stringify(next), nextRev(), chatId, turnId);
+  return true;
+}
+
 /** Finalize a turn when the agent's `prompt()` resolves (or fails). Sets the end
  *  time, stop reason, status, post-snapshot, and the authored file set. A no-op
  *  if the start row never landed (defensive). */
@@ -292,12 +342,18 @@ export function finishTurn(
     postSnapshot: string | null;
     files: TurnFile[];
     /** Tokens/cost this turn billed; omitted/null when the agent
-     *  reported none (the popover button then simply doesn't render). */
+     *  reported none. Existing newer snapshots survive finalization. */
     usage?: TurnUsageJson | null;
   },
 ): void {
   if (!chatId || !turnId) return;
   const db = openZerosDb();
+  const row = db.prepare("SELECT usage FROM turns WHERE chat_id = ? AND turn_id = ?").get(chatId, turnId) as { usage: string | null } | undefined;
+  const existing = parseUsage(row?.usage ?? null, true);
+  // A result may have been persisted before a failure, or a background result
+  // may have extended it while the post-turn Git snapshot was being captured.
+  const usage = existing?._sources || !patch.usage || (existing?.revision ?? 0) > (patch.usage.revision ?? 0)
+    ? existing : patch.usage;
   db.prepare(
     `UPDATE turns SET ended_at = ?, stop_reason = ?, status = ?, post_snapshot = ?,
        files = ?, usage = ?, rev = ?
@@ -308,7 +364,7 @@ export function finishTurn(
     patch.status,
     patch.postSnapshot,
     JSON.stringify(patch.files ?? []),
-    patch.usage ? JSON.stringify(patch.usage) : null,
+    usage ? JSON.stringify(usage) : null,
     nextRev(),
     chatId,
     turnId,

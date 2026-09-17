@@ -104,21 +104,6 @@ export function WorkspaceContextMenu({
       )
     : children;
 
-  const positionBelowTrigger = (event: MouseEvent<HTMLElement>) => {
-    if (placement !== "below-trigger") return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    // Radix ContextMenu intentionally anchors to the event coordinates and
-    // doesn't expose Popper's side/align props. Its composed handler receives
-    // this same synthetic event after ours, so replace the anchor point with
-    // the trigger's bottom-left for this opt-in placement.
-    const anchorEvent = event as MouseEvent<HTMLElement> & {
-      clientX: number;
-      clientY: number;
-    };
-    anchorEvent.clientX = rect.left;
-    anchorEvent.clientY = rect.bottom;
-  };
-
   return (
     <ContextMenu
       onOpenChange={(open) => {
@@ -131,7 +116,7 @@ export function WorkspaceContextMenu({
         }
       }}
     >
-      <ContextMenuTrigger asChild onContextMenu={positionBelowTrigger}>
+      <ContextMenuTrigger asChild placement={placement}>
         {guardedTrigger}
       </ContextMenuTrigger>
       <ContextMenuContent>

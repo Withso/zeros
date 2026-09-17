@@ -11,13 +11,7 @@ import { BackgroundTaskRecord } from "../renderers/background-task-record";
 import { resolveRenderer } from "../renderers/registry";
 import { TaskToolRecord } from "../renderers/task-tool-record";
 import type { AgentToolMessage } from "../use-agent-session";
-import { TooltipProvider } from "../../../shared/ui/primitives/tooltip";
-import {
-  BackgroundTasksCard,
-  BackgroundTasksWaitingLine,
-  shouldKeepTurnLiveForBackgroundTasks,
-  shouldShowBackgroundTasksCard,
-} from "../background-tasks-card";
+import { BackgroundTasksWaitingLine } from "../background-task-activity";
 
 describe("background task transcript routing", () => {
   it("routes the canonical kind to the quiet expandable record", () => {
@@ -119,109 +113,24 @@ describe("background task live surfaces", () => {
     },
   ];
 
-  it("uses the bg1 surface and exact 36px header/rows without a timer", () => {
-    const html = renderToStaticMarkup(
-      createElement(
-        TooltipProvider,
-        null,
-        createElement(BackgroundTasksCard, {
-          tasks,
-          onStop: vi.fn(),
-        }),
-      ),
-    );
-
-    expect(html).toContain("Background Task");
-    expect(html).toContain("Full test suite");
-    expect(html).toContain("bg-bg1");
-    expect(html.match(/h-9/g)).toHaveLength(2);
-    expect(html).not.toContain("18s");
-    expect(html).toContain('aria-label="Stop Full test suite"');
-    expect(html).not.toMatch(/\b(?:Agent|LIVE|Running)\b/);
-  });
-
-  it("keeps every active task visible and stoppable regardless of effort or streaming", () => {
-    for (const options of [
-      {
-        agentId: "claude",
-        effort: "high",
-        foregroundStreaming: false,
-        taskCount: 1,
-      },
-      {
-        agentId: "claude",
-        effort: "ultracode",
-        foregroundStreaming: true,
-        taskCount: 1,
-      },
-      {
-        agentId: "cursor",
-        effort: null,
-        foregroundStreaming: false,
-        taskCount: 1,
-      },
-    ]) {
-      expect(shouldShowBackgroundTasksCard(options)).toBe(true);
-    }
-    expect(
-      shouldShowBackgroundTasksCard({
-        agentId: "claude",
-        effort: "high",
-        foregroundStreaming: false,
-        taskCount: 0,
-      }),
-    ).toBe(false);
-  });
-
-  it("keeps only a quiet Claude Ultracode continuation logically live", () => {
-    const continuation = {
-      agentId: "claude",
-      effort: "ultracode",
-      foregroundStreaming: false,
-      taskCount: 1,
-    };
-    expect(shouldKeepTurnLiveForBackgroundTasks(continuation)).toBe(true);
-    expect(
-      shouldKeepTurnLiveForBackgroundTasks({
-        ...continuation,
-        foregroundStreaming: true,
-      }),
-    ).toBe(false);
-    expect(
-      shouldKeepTurnLiveForBackgroundTasks({ ...continuation, effort: "max" }),
-    ).toBe(false);
-    expect(
-      shouldKeepTurnLiveForBackgroundTasks({
-        ...continuation,
-        agentId: "codex",
-      }),
-    ).toBe(false);
-    expect(
-      shouldKeepTurnLiveForBackgroundTasks({
-        ...continuation,
-        agentId: "cursor",
-      }),
-    ).toBe(false);
-    expect(
-      shouldKeepTurnLiveForBackgroundTasks({
-        ...continuation,
-        taskCount: 0,
-      }),
-    ).toBe(false);
-  });
-
   it("retains an explicit parked-turn waiting explanation", () => {
     const html = renderToStaticMarkup(
       createElement(BackgroundTasksWaitingLine, {
         tasks,
         startedAt: Date.now() - 24_000,
-        active: false,
+        active: true,
       }),
     );
 
     expect(html).toContain('role="status"');
     expect(html).toContain("Waiting for 1 background task");
     expect(html).toContain("Waiting for background tasks");
+  });
+
+  it("unmounts waiting timers and loaders on a retained hidden chat", () => {
+    expect(renderToStaticMarkup(createElement(BackgroundTasksWaitingLine, {
+      tasks, startedAt: 100, active: false,
+    }))).toBe("");
   });
 });
 

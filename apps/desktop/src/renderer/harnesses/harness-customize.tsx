@@ -23,6 +23,17 @@ if (!getSetting("customize:selection", null))
 upsertProject({ repoRoot: "/fixture/repo-a", name: "Repo A" });
 upsertProject({ repoRoot: "/fixture/repo-b", name: "Repo B" });
 const libraries = new Map<string, ExtensionEntry[]>();
+const gatewayServers = [
+  { name: "gateway-error", transport: "sse", url: "https://reports.example/events", auth: "oauth" },
+  ...(new URLSearchParams(location.search).get("gatewayServers") === "multiple"
+    ? [{ name: "gateway-second", transport: "http", url: "https://second.example/mcp", auth: "oauth" }]
+    : []),
+];
+const settings = new Map<string, Record<string, unknown>>([
+  ["user", { mcp: { servers: gatewayServers } }],
+]);
+const gatewayState = new URLSearchParams(location.search).get("gatewayState") === "needs-auth"
+  ? "needs-auth" : "error";
 const inventoryProviders: string[] = [];
 Object.defineProperty(RuntimeClient.prototype, "status", {
   get: () => "connected",
@@ -43,11 +54,20 @@ RuntimeClient.prototype.request = async function <
     result = { effective: {}, sources: {}, warnings: [] };
   if (request.op === "settings.read")
     result = {
-      doc: {},
+      layer: params.layer,
+      doc: settings.get(scope) ?? {},
       text: "",
-      exists: false,
+      exists: settings.has(scope),
       path: `${scope}/.zeros/settings.local.toml`,
     };
+  if (request.op === "settings.write") {
+    const doc = { ...settings.get(scope), ...(params.patch as Record<string, unknown>) };
+    settings.set(scope, doc);
+    result = { layer: params.layer, path: `${scope}/.zeros/settings.local.toml`, doc, warnings: [] };
+    document.getElementById("last-write")!.textContent = JSON.stringify(params);
+  }
+  if (request.op === "mcp.resolveComposed") result = { servers: [], warnings: [] };
+  if (request.op === "mcp.gateway.status") result = { running: true, error: null, servers: gatewayServers.map(({ name, url }) => ({ name, url, state: gatewayState, toolCount: 0, detail: "Connection unavailable (503)" })) };
   if (request.op === "extensions.list") {
     inventoryProviders.push(String(params.provider));
     document.getElementById("inventory-providers")!.textContent =

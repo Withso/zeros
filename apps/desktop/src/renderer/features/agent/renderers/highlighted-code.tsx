@@ -99,17 +99,21 @@ export const HighlightedCode = memo(function HighlightedCode({
       sync === null ? highlightHead(code, lang, HEAD_HL_LINES, themeName) : null,
     [sync, code, lang, themeName],
   );
-  const [asyncHtml, setAsyncHtml] = useState<string | null>(null);
+  const [asyncResult, setAsyncResult] = useState<{
+    code: string;
+    lang: string;
+    theme: string;
+    html: string;
+  } | null>(null);
 
   useEffect(() => {
     if (sync !== null) return; // already colored synchronously
     // Cold / large path: warm for next time + colour the whole file in the
     // worker (off the main thread), then swap in.
-    setAsyncHtml(null);
     void warmHighlighter();
     let cancelled = false;
     void highlightCode(code, lang, themeName).then((out) => {
-      if (!cancelled) setAsyncHtml(out);
+      if (!cancelled) setAsyncResult({ code, lang, theme: themeName, html: out });
     });
     return () => {
       cancelled = true;
@@ -119,7 +123,13 @@ export const HighlightedCode = memo(function HighlightedCode({
   const cls = cn("[&_pre]:m-0 [&_pre]:!bg-transparent", className);
 
   // Fully coloured: a small file synchronously, or the worker finished the big one.
-  const full = sync ?? asyncHtml;
+  // A previous worker result is valid only for its exact source and theme.
+  // Clearing it in an effect would first commit the new source's gutter next
+  // to the old source's highlighted text during streaming or theme changes.
+  const full = sync ?? (
+    asyncResult?.code === code && asyncResult.lang === lang && asyncResult.theme === themeName
+      ? asyncResult.html : null
+  );
   if (full !== null) {
     return (
       <div
@@ -157,8 +167,6 @@ interface CodeWithGutterProps {
   /** First line number (1-based) — the ACTUAL line the read started at, so a
    *  partial read shows e.g. 1222–1280 instead of 1–60. */
   startLine?: number;
-  /** Height cap before the body scrolls in place. */
-  maxHeightClass?: string;
   className?: string;
 }
 
@@ -169,7 +177,6 @@ export const CodeWithGutter = memo(function CodeWithGutter({
   code,
   lang,
   startLine = 1,
-  maxHeightClass = "max-h-[320px]",
   className,
 }: CodeWithGutterProps) {
   const lineCount = useMemo(() => {
@@ -184,16 +191,15 @@ export const CodeWithGutter = memo(function CodeWithGutter({
   return (
     <div
       className={cn(
-        "flex overflow-auto rounded-md bg-bg2/60 font-mono text-sm",
+        "flex min-w-0 font-mono text-sm",
         CODE_LEADING,
-        maxHeightClass,
         className,
       )}
     >
       <div
         aria-hidden
         className={cn(
-          "sticky left-0 z-10 shrink-0 select-none border-r border-border1 bg-bg2/60 px-2 py-2 text-right tabular-nums text-fg2/45",
+          "sticky left-0 z-10 shrink-0 select-none border-r border-border1 bg-bg2 px-2 py-2 text-right tabular-nums text-fg2/45",
           CODE_LEADING,
         )}
       >

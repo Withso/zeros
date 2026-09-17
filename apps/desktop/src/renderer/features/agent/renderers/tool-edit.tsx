@@ -43,6 +43,7 @@ import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
 import type { EventMeta } from "./event-meta";
 import { DiffHoverPreview } from "./diff-hover-preview";
+import { toolCompletionUnreported } from "./raw-output";
 
 interface DiffSource {
   /** File path the diff applies to. */
@@ -162,19 +163,21 @@ const EditFileRow = memo(function EditFileRow({
   );
   const detail = (
     <>
-      <div className="text-fg2 mb-2 text-xs break-words">
+      <div className="text-fg2 px-3 py-2 text-xs break-words">
         {path}
         {source?.previousPath ? ` (from ${source.previousPath})` : ""}
       </div>
       {!settled && (
-        <div className="text-fg2 mb-2 text-xs">
+        <div className="text-fg2 px-3 pb-2 text-xs">
           {failed
             ? "Edit did not complete."
-            : "Proposed changes — waiting for completion."}
+            : toolCompletionUnreported(tool.rawOutput)
+              ? "Completion not reported — these changes are unconfirmed."
+              : "Proposed changes — waiting for completion."}
         </div>
       )}
       {fallbackText && (
-        <pre className="text-fg1 m-0 mb-2 max-h-[200px] overflow-y-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
+        <pre className="text-fg1 m-0 px-3 pb-2 font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
           {fallbackText}
         </pre>
       )}
@@ -182,7 +185,7 @@ const EditFileRow = memo(function EditFileRow({
         <EditDiff source={source} />
       ) : (
         !fallbackText && (
-          <div className="text-fg2 text-xs italic">
+          <div className="text-fg2 px-3 py-2 text-xs italic">
             No diff was captured for this edit.
           </div>
         )
@@ -248,7 +251,7 @@ function EditDiff({
     );
   }
   return (
-    <DiffHoverPreview path={source.path} patch={patch} compact={compact} />
+    <DiffHoverPreview path={source.path} patch={patch} compact={compact} embedded={!compact} />
   );
 }
 

@@ -35,6 +35,9 @@ export function hasPlanBody(input: unknown): boolean {
  *  RequestPermissionRequest but this module stays dependency-free. */
 export function isPlanReviewRequest(request: unknown): boolean {
   if (!request || typeof request !== "object") return false;
+  // Native approval hints take precedence over the plan-review convenience:
+  // this action needs the same deliberate Yes/No decision as any other gate.
+  if ((request as { requiresExplicitApproval?: unknown }).requiresExplicitApproval === true) return false;
   const tc = (request as { toolCall?: unknown }).toolCall;
   if (!tc || typeof tc !== "object") return false;
   const { title, rawInput } = tc as { title?: unknown; rawInput?: unknown };

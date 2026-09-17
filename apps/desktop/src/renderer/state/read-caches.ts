@@ -85,6 +85,14 @@ export const openPrsCache = new KeyedAsyncCache<PR[]>(32);
  *  pickers that only need branch/name rows, not the live board collections. */
 export const pickerWorkspacesCache = new KeyedAsyncCache<Workspace[]>(16);
 
+/** Transient text for staged transcript hover previews, never draft storage.
+ * Both the number of files and their aggregate decoded size are bounded. */
+export const attachmentTextPreviewsCache = new KeyedAsyncCache<string>({
+  maxEntries: 16,
+  maxWeight: 8 * 1024 * 1024,
+  weightOf: (text) => text.length * 2,
+});
+
 /** The folder Design mode would open (or create) for a checkout — see
  *  state/design-directory-target.ts for the key shape and fetcher. Null data
  *  means the engine could not preview it. */
@@ -355,6 +363,7 @@ export function invalidateDesignDirectoryTargetReadCache(): void {
  *  enrolling it in the reconnect boundary is one edit in one file. */
 export function invalidateAllEngineReadCaches(): void {
   invalidateDesignReviewCache();
+  attachmentTextPreviewsCache.invalidateAll();
   remoteBranchesCache.invalidateAll();
   allBranchesCache.invalidateAll();
   openPrsCache.invalidateAll();
@@ -366,10 +375,22 @@ export function invalidateAllEngineReadCaches(): void {
   filesToCopyPreviewCache.invalidateAll();
   workingDirectoriesCache.invalidateAll();
   designCheckoutStatusCache.invalidateAll();
+  mcpGatewayStatusCache.invalidateAll();
   designDirectoryTargetCache.invalidateAll();
   designDirectoryListingCache.invalidateAll();
 
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
   // device lands while this renderer is deaf to DB_CHANGED.
   turnRowCache.invalidateAll();
+}
+
+/** MCP status belongs to an exact engine connection. Retain confirmed data on
+ * revalidation; WeakMap identities cannot mix local and remote credentials. */
+export const mcpGatewayStatusCache = new KeyedAsyncCache<import("../platform/bridge/workspace-bridge").McpGatewayStatusWire>(16);
+const mcpBridgeKeys = new WeakMap<object, string>();
+let mcpBridgeSequence = 0;
+export function mcpGatewayStatusKey(bridge: object, execution = "local:sidecar"): string {
+  let key = mcpBridgeKeys.get(bridge);
+  if (!key) { key = `mcp:${++mcpBridgeSequence}`; mcpBridgeKeys.set(bridge, key); }
+  return `${key}:${execution}`;
 }

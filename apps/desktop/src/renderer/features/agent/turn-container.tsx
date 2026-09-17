@@ -53,6 +53,7 @@ import {
   PromptInputToolbar,
   PromptInputTools,
   PromptInputSubmit,
+  toast,
 } from "@/renderer/shared/ui/primitives/elements";
 import {
   useEditComposerDraft,
@@ -61,6 +62,8 @@ import {
 } from "../../state/store";
 
 import { editSeedSource } from "./edit-seed";
+import { isPristineEditDraft } from "./edit-draft-content";
+import { registerLiveEditDraft } from "./edit-live-drafts";
 import type { Turn } from "./turn-grouping";
 
 export {
@@ -231,7 +234,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
-  ) => void;
+  ) => void | boolean | Promise<void | boolean>;
   /** Pills (model / effort / permissions) rendered in the edit-mode
    *  toolbar so editing a past message has the same affordances as
    *  the main composer. The component appends its own Cancel/Send
@@ -312,6 +315,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
             (otherwise every TurnPromptHeader on the page would attach
             its own pair). */}
         <TurnPromptEditor
+          key={editStashKey}
+          chatId={chatId}
+          draftKey={editStashKey}
           originalText={originalText ?? ""}
           originalAttachments={originalAttachments}
           originalSegments={originalSegments}
@@ -500,6 +506,8 @@ function UserMessageActions({
 // ──────────────────────────────────────────────────────────
 
 function TurnPromptEditor({
+  chatId,
+  draftKey,
   originalText,
   originalAttachments,
   originalSegments,
@@ -512,6 +520,8 @@ function TurnPromptEditor({
   agentContext,
   surfaceActive,
 }: {
+  chatId?: string;
+  draftKey: string | null;
   originalText: string;
   originalAttachments?: AgentTextMessageAttachment[];
   originalSegments?: MessageContentSegment[];
@@ -522,7 +532,7 @@ function TurnPromptEditor({
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
-  ) => void;
+  ) => void | boolean | Promise<void | boolean>;
   onCancel: () => void;
   editToolbarPills?: React.ReactNode;
   agentContext?: EditAgentContext;
@@ -530,6 +540,15 @@ function TurnPromptEditor({
 }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
+  const submittingRef = useRef(false);
+  const [submitting, setSubmitting] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Seed the editor: a prior in-progress edit (stash json), then its plain-text
   // mirror, then the WHOLE original message reconstructed as inline content —
@@ -537,6 +556,12 @@ function TurnPromptEditor({
   // in place. No separate "originals" row; everything is
   // inline + editable. The choice itself lives in edit-seed.ts, which explains
   // why the middle rung is load-bearing.
+  const originalContentRef = useRef<ComposerInitialContent | null>(null);
+  originalContentRef.current ??= messageToEditorContent({
+    text: originalText,
+    segments: originalSegments,
+    attachments: originalAttachments,
+  });
   const initialContentRef = useRef<ComposerInitialContent>(
     (() => {
       switch (editSeedSource(stash)) {
@@ -546,17 +571,10 @@ function TurnPromptEditor({
           // Chips are gone with the bytes; the words survive.
           return { json: textToDoc(stash!.text), attachments: [] };
         default:
-          return messageToEditorContent({
-            text: originalText,
-            segments: originalSegments,
-            attachments: originalAttachments,
-          });
+          return originalContentRef.current!;
       }
     })(),
   );
-  const originalAttachmentCount = useRef(
-    initialContentRef.current.attachments.length,
-  ).current;
   const submitRef = useRef<() => void>(() => {});
   const persistRef = useRef<() => void>(() => {});
 
@@ -571,7 +589,9 @@ function TurnPromptEditor({
     availableCommands: agentContext?.availableCommands ?? [],
     placeholder: "Edit your message…",
     onSubmit: () => submitRef.current(),
-    onEscape: onCancel,
+    onEscape: () => {
+      if (!submittingRef.current) onCancel();
+    },
     onChange: () => persistRef.current(),
     initialContent: initialContentRef.current,
   });
@@ -596,6 +616,7 @@ function TurnPromptEditor({
   // `contains` check covers the editor, attach button, pills, and overlay).
   useEffect(() => {
     const onDocPointerDown = (e: PointerEvent) => {
+      if (submittingRef.current) return;
       const root = wrapperRef.current;
       if (!root) return;
       const target = e.target;
@@ -621,42 +642,43 @@ function TurnPromptEditor({
     attachments: stash?.newAttachments ?? initialContentRef.current.attachments,
     json: stash?.json ?? initialContentRef.current.json ?? null,
   });
+  const submittedRef = useRef(false);
+  const liveDraftOwnerRef = useRef<ReturnType<typeof registerLiveEditDraft> | null>(null);
+  const readDraft = useCallback((): EditDraftStash | null => {
+    const isPristine = isPristineEditDraft(liveRef.current, originalContentRef.current!);
+    if (submittedRef.current || isPristine) return null;
+    const { text, attachments, json } = liveRef.current;
+    return { text, newAttachments: attachments, keptOriginals: [], json };
+  }, []);
   const persistDraft = useCallback(() => {
     const s = serialize();
+    if (!s) return;
     liveRef.current = {
-      text: s?.displayText ?? "",
-      attachments: s?.attachments ?? [],
-      json: s?.json ?? null,
+      text: s.displayText,
+      attachments: s.attachments,
+      json: s.json,
     };
-  }, [serialize]);
+    liveDraftOwnerRef.current?.update(readDraft());
+  }, [serialize, readDraft]);
   persistRef.current = persistDraft;
 
-  const submittedRef = useRef(false);
   useEffect(() => {
+    const owner = chatId && draftKey
+      ? registerLiveEditDraft(draftKey, chatId, readDraft())
+      : null;
+    liveDraftOwnerRef.current = owner;
     return () => {
-      if (submittedRef.current) {
-        onClearDraft();
-        return;
-      }
-      const { text, attachments, json } = liveRef.current;
-      const isPristine =
-        text.trim() === originalText.trim() &&
-        attachments.length === originalAttachmentCount;
-      if (isPristine) {
-        onClearDraft();
-        return;
-      }
-      onPersistDraft({
-        text,
-        newAttachments: attachments,
-        keptOriginals: [],
-        json,
-      });
+      if (owner && !owner.isCurrent()) return;
+      const draft = readDraft();
+      if (draft) onPersistDraft(draft);
+      else onClearDraft();
+      owner?.dispose();
+      if (liveDraftOwnerRef.current === owner) liveDraftOwnerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [chatId, draftKey, onClearDraft, onPersistDraft, readDraft]);
 
-  const submitEdit = useCallback(() => {
+  const submitEdit = useCallback(async () => {
+    if (submittingRef.current) return;
     const s = serialize();
     const trimmed = (s?.displayText ?? "").trim();
     const attachments = s?.attachments ?? [];
@@ -665,13 +687,32 @@ function TurnPromptEditor({
       onCancel();
       return;
     }
-    submittedRef.current = true;
-    onEdit(trimmed, attachments, s?.segments ?? []);
-    onCancel();
-  }, [serialize, onEdit, onCancel]);
+    submittingRef.current = true;
+    setSubmitting(true);
+    editor?.setEditable(false);
+    try {
+      const accepted = await onEdit(trimmed, attachments, s?.segments ?? []);
+      if (accepted === false) return;
+      submittedRef.current = true;
+      liveDraftOwnerRef.current?.update(null);
+      onClearDraft();
+      // Truncation may already have removed this turn. Do not close a newer edit.
+      if (mountedRef.current) onCancel();
+    } catch (error) {
+      toast.error("Edited message wasn't sent", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      submittingRef.current = false;
+      if (mountedRef.current) {
+        setSubmitting(false);
+        if (editor && !editor.isDestroyed) editor.setEditable(true);
+      }
+    }
+  }, [serialize, onEdit, onCancel, onClearDraft, editor]);
   submitRef.current = submitEdit;
 
-  const sendDisabled = composerEmpty;
+  const sendDisabled = composerEmpty || submitting;
 
   return (
     <div
@@ -696,7 +737,7 @@ function TurnPromptEditor({
           className={`zeros-agent-turn-prompt-edit relative${
             dragActive ? "ring-highlighted-bright/40 ring-2" : ""
           }`}
-          {...dragHandlers}
+          {...(submitting ? {} : dragHandlers)}
         >
           <PromptInputBody className="items-stretch rounded-none border-0 bg-transparent p-0 shadow-none has-[[data-slot=input-group-control]:focus-visible]:border-0 has-[[data-slot=input-group-control]:focus-visible]:shadow-none has-[[data-slot=input-group-control]:focus-visible]:ring-0 dark:bg-transparent">
             {suggestionPopup}
@@ -718,6 +759,7 @@ function TurnPromptEditor({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                     aria-label="Attach file"
+                    disabled={submitting}
                     className="rounded-sm"
                   >
                     <Plus size={14} />
@@ -726,6 +768,7 @@ function TurnPromptEditor({
                 <input
                   ref={fileInputRef}
                   type="file"
+                  disabled={submitting}
                   multiple
                   hidden
                   onChange={(e) => {

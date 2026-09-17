@@ -60,9 +60,11 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.153.4 pin this covers 250 methods: 156 client requests, 11 server
-requests, and 83 server notifications. Relative to 0.149.0, the five new client
-requests (`plugin/reconcile`, `turn/settings/update`, `thread/timeline/list`,
+At the 0.154.0 pin this covers 254 methods: 160 client requests, 11 server
+requests, and 83 server notifications. The four `userVerification/*` client
+methods are generated-only: Zeros does not expose native identity verification.
+Relative to 0.149.0, the five client requests added in 0.153.4
+(`plugin/reconcile`, `turn/settings/update`, `thread/timeline/list`,
 and the MCP event-stream start/stop pair) remain generated-only because Zeros
 does not expose those provider-owned product surfaces. There are no new
 server-initiated request methods. The six new notifications—the MCP event
@@ -78,6 +80,45 @@ the same validated, fail-closed form path as `openai/form`. Run
 `pnpm check:codex-coverage` for the offline drift check.
 
 ## Transcript fidelity
+
+### 0.154.0 compatibility
+
+- A connected MCP transport is not evidence of successful tool discovery.
+  Preserve `toolsError` through the existing bounded, credential-scrubbed status
+  detail. Authentication-required status still takes precedence. A null error
+  with an empty or cached catalog is valid; a later successful refresh clears
+  the error. Existing inventory caches retain entries on partial refreshes.
+- Handle `openai/userVerification` before generic form mapping or permission
+  replay. Cancel its native resolver once and explain the unsupported operation
+  as assistant commentary in the requesting thread, including child groups.
+  Do not create a tool/card or retain its private challenge/display inputs.
+  Stop, disposal and late answers cannot produce a proof. Full native signing
+  and credential enrollment remain a separate feature.
+- Preserve `ordinaryUsageAllowed` as true, false or unknown and
+  `normalModelSlug` as informational quota metadata. Percentage/reset changes
+  cannot imply permission recovery or select a model. Account identity remains
+  engine-only. Merge rolling updates within an account and quota bucket;
+  reject older reads after newer updates, account changes and disposal.
+  Account notifications without an identity invalidate ownership even if the
+  auth mode and plan are unchanged. Do not advertise `supportsLunaReserve`
+  without an implemented automatic reserve-fallback workflow.
+- The quota fields are additive and optional on the shared protocol. Existing
+  clients can ignore them; missing/null permission is not a successful recovery.
+  These diagnostics neither change provider health from percentages nor grant
+  permission to send a turn.
+- New thread environment/originator/Daybreak metadata does not change Zeros
+  execution ownership, model selection or permissions. Configuration reasoning
+  records are provider metadata, not new transcript output. Application-network
+  and WebMCP requirements remain native provider policy, not Zeros overrides.
+  Approval path strings remain native data; Zeros does not reinterpret them as
+  authority to execute on the host. Review already uses inline delivery.
+
+The retired remote-control pairing bindings are still pruned by code generation.
+Terminal UI features do not imply new Zeros product surfaces. Keep the native
+initialization smoke, generated coverage checks, provider-specific regressions
+and transcript/browser suites alongside every pin change.
+
+### Transcript behavior
 
 Native items are keyed by thread, turn, and item identity before translation.
 Child threads have independent completion, error, usage, and replay state;
@@ -103,6 +144,11 @@ the existing working feed. Summary parts retain their native order. Explicit
 `final_answer` messages remain visible across late bookkeeping. Encrypted or
 absent reasoning is never presented as readable thinking.
 Populated reasoning snapshots seed the indexed parts used by later deltas.
+
+A terminal turn with `itemsView: "full"` also reconciles missing item
+notifications, including child-parent associations recovered from a spawn.
+Summary/notLoaded views are not final-answer evidence, and unfinished items
+or commands missing their native status are not inferred to have completed.
 
 Expanded tools expose input, captured output, and available status/exit details.
 Web calls retain search/open/find actions, including URLs and patterns when no

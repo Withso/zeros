@@ -3,28 +3,68 @@
 // (Glob/Read/Grep/Shell), no tool_result blocks, final assistant text = report.
 
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, utimesSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseSubagentTranscript,
   cursorProjectSlug,
-  findSubagentByPrompt,
-  findSubagentTranscriptPath,
   agentTranscriptsRoot,
-  loadSubagentTranscript,
-  loadSubagentTranscriptByPath,
   agentIdFromTranscriptPath,
 } from "../subagent-transcript";
+
+import { findSubagentTranscriptPath, loadSubagentTranscript, loadSubagentTranscriptByPath } from "../subagent-transcript-reader";
 
 const line = (o: unknown) => JSON.stringify(o);
 
 describe("cursorProjectSlug", () => {
-  it("mirrors the SDK sanitizer (non-alnum → '-', collapse, trim)", () => {
+  it("mirrors the SDK sanitizer (non-alnum → '-', collapse, trim)", async () => {
     expect(cursorProjectSlug("/Users/dev/zeros/workspaces/acme-widgets/ws_a4844b-almond")).toBe(
       "Users-dev-zeros-workspaces-acme-widgets-ws-a4844b-almond",
     );
     expect(cursorProjectSlug("/a//b/")).toBe("a-b");
+  });
+});
+
+describe("native child transcript lookup", () => {
+  const home = mkdtempSync(join(tmpdir(), "cursor-child-identity-"));
+  const cwd = "/work/shared";
+  const root = agentTranscriptsRoot(cwd, { home });
+  afterAll(() => rmSync(home, { recursive: true, force: true }));
+
+  function child(parent: string, id: string): string {
+    const folder = join(root, parent, "subagents");
+    mkdirSync(folder, { recursive: true });
+    const path = join(folder, `${id}.jsonl`);
+    writeFileSync(path, line({ role: "assistant", message: { content: [{ type: "text", text: parent }] } }));
+    return path;
+  }
+
+  it("requires the parent identity even when only one matching child file exists", async () => {
+    child("other-chat", "foreign-child");
+    expect(await findSubagentTranscriptPath(cwd, "foreign-child", { home })).toBeNull();
+    expect(await loadSubagentTranscript(cwd, "foreign-child", { home })).toBeNull();
+  });
+
+  it("does not search a sibling chat when the current parent has no transcript", async () => {
+    child("other-chat", "other-child");
+    expect(await findSubagentTranscriptPath(cwd, "other-child", { home, parentAgentId: "current-chat" })).toBeNull();
+  });
+
+  it("does not fall through an existing native directory into a colliding legacy prefix", async () => {
+    child("current", "current-child");
+    child("agent-current", "wrong-child");
+    expect(await findSubagentTranscriptPath(cwd, "wrong-child", { home, parentAgentId: "current" })).toBeNull();
+  });
+
+  it("supports the legacy directory when the exact parent directory does not exist", async () => {
+    const path = child("agent-legacy", "legacy-child");
+    expect(await findSubagentTranscriptPath(cwd, "legacy-child", { home, parentAgentId: "legacy" })).toBe(path);
+  });
+
+  it("does not treat a truncated child ID as an exact identity", async () => {
+    child("long-parent", "a".repeat(200));
+    expect(await findSubagentTranscriptPath(cwd, `${"a".repeat(200)}-other`, { home, parentAgentId: "long-parent" })).toBeNull();
   });
 });
 
@@ -43,7 +83,7 @@ describe("parseSubagentTranscript", () => {
     line({ role: "assistant", message: { content: [{ type: "text", text: "# Research Report\n\nFinal findings." }] } }),
   ].join("\n");
 
-  it("extracts tool calls as steps and the last assistant text as finalText", () => {
+  it("extracts tool calls as steps and the last assistant text as finalText", async () => {
     const { steps, finalText } = parseSubagentTranscript(jsonl);
     expect(finalText).toBe("# Research Report\n\nFinal findings.");
     // narration text + 4 tool calls (the final report is held back from steps)
@@ -62,7 +102,7 @@ describe("parseSubagentTranscript", () => {
     expect(steps.some((s) => s.type === "text" && (s as { text: string }).text.includes("Research Report"))).toBe(false);
   });
 
-  it("normalizes tool inputs to the fields event-meta reads", () => {
+  it("normalizes tool inputs to the fields event-meta reads", async () => {
     const { steps } = parseSubagentTranscript(jsonl);
     const tools = steps.filter((s) => s.type === "tool") as Array<{ toolKind: string; rawInput: any }>;
     expect(tools[0].rawInput.pattern).toBe("**/*"); // Glob glob_pattern → pattern
@@ -70,7 +110,7 @@ describe("parseSubagentTranscript", () => {
     expect(tools[3].rawInput.command).toBe("ls -la"); // Shell → execute
   });
 
-  it("ignores user/tool_result lines and tolerates malformed JSON", () => {
+  it("ignores user/tool_result lines and tolerates malformed JSON", async () => {
     const messy = [
       line({ role: "user", message: { content: [{ type: "tool_result", tool_use_id: "x", content: "out" }] } }),
       "{ not json",
@@ -81,11 +121,11 @@ describe("parseSubagentTranscript", () => {
     expect((steps[0] as { toolKind: string }).toolKind).toBe("read");
   });
 
-  it("returns empty for an empty transcript", () => {
+  it("returns empty for an empty transcript", async () => {
     expect(parseSubagentTranscript("")).toEqual({ steps: [], finalText: "" });
   });
 
-  it("strips Cursor's [REDACTED] reasoning tokens and drops bare-redacted blocks", () => {
+  it("strips Cursor's [REDACTED] reasoning tokens and drops bare-redacted blocks", async () => {
     const redacted = [
       line({ role: "assistant", message: { content: [
         { type: "text", text: "Exploring the codebase. [REDACTED]" }, // real text + token → keep stripped
@@ -104,104 +144,29 @@ describe("parseSubagentTranscript", () => {
   });
 });
 
-// findSubagentByPrompt is how a LIVE run locates a still-running subagent's
-// transcript: Cursor reveals the subagent agentId only in the task RESULT (at
-// completion), so during the run we match the prompt we sent against each
-// transcript's opening `<user_query>` message. These exercise the fs-scanning +
-// matching against a real on-disk layout under a temp root.
-describe("findSubagentByPrompt", () => {
-  const root = mkdtempSync(join(tmpdir(), "cursor-subagents-"));
-  afterAll(() => rmSync(root, { recursive: true, force: true }));
-
-  /** Write `<root>/<dir>/subagents/<id>.jsonl` with a first user message and a
-   *  controlled mtime (seconds). The parent dir name varies (bare UUID vs
-   *  `agent-<id>`) on disk, so we use both. */
-  const writeSub = (dir: string, id: string, userText: string, mtimeSec: number): string => {
-    const subdir = join(root, dir, "subagents");
-    mkdirSync(subdir, { recursive: true });
-    const path = join(subdir, `${id}.jsonl`);
-    writeFileSync(
-      path,
-      [
-        line({ role: "user", message: { content: [{ type: "text", text: userText }] } }),
-        line({ role: "assistant", message: { content: [
-          { type: "tool_use", name: "Read", input: { path: "a.ts" } },
-          { type: "text", text: `# Report ${id}` },
-        ] } }),
-      ].join("\n"),
-    );
-    utimesSync(path, mtimeSec, mtimeSec);
-    return path;
-  };
-
-  const NOW_SEC = 2_000_000_000;
-  const opts = { nowMs: NOW_SEC * 1000, windowMs: 60 * 60 * 1000, root };
-  // Cursor wraps the verbatim prompt in <user_query>…</user_query>.
-  writeSub("agent-A", "sub-A", "<user_query>\nExplore the BACKEND services and API routes thoroughly\n</user_query>", NOW_SEC - 30);
-  writeSub("B", "sub-B", "<user_query>\nExplore the FRONTEND components and routing thoroughly\n</user_query>", NOW_SEC - 20);
-  writeSub("agent-C", "sub-C", "<user_query>\nDocument the DEPLOY and CI configuration thoroughly\n</user_query>", NOW_SEC - 10);
-
-  it("matches a running task to its transcript by the prompt we sent", () => {
-    expect(findSubagentByPrompt("/cwd", "Explore the BACKEND services and API routes thoroughly", new Set(), opts)).toBe("sub-A");
-    expect(findSubagentByPrompt("/cwd", "Explore the FRONTEND components and routing thoroughly", new Set(), opts)).toBe("sub-B");
-  });
-
-  it("never returns an already-claimed transcript", () => {
-    // sub-A is claimed; the BACKEND prompt matches only sub-A. With sub-A
-    // excluded and two other (non-matching) candidates, it declines to guess.
-    const claimed = new Set(["sub-A"]);
-    const got = findSubagentByPrompt("/cwd", "Explore the BACKEND services and API routes thoroughly", claimed, opts);
-    expect(got).not.toBe("sub-A");
-    expect(got).toBeNull();
-  });
-
-  it("falls back to the single recent unclaimed transcript when the prompt doesn't match", () => {
-    // Only sub-A unclaimed (B + C claimed); an unrecognized/rewritten prompt
-    // still resolves to the lone active transcript.
-    const claimed = new Set(["sub-B", "sub-C"]);
-    expect(findSubagentByPrompt("/cwd", "totally different wording", claimed, opts)).toBe("sub-A");
-  });
-
-  it("ignores transcripts older than the recency window", () => {
-    const claimed = new Set(["sub-B", "sub-C"]);
-    // sub-A's mtime is NOW-30s; a 10s window excludes it → no live match.
-    expect(findSubagentByPrompt("/cwd", "totally different wording", claimed, { ...opts, windowMs: 10 * 1000 })).toBeNull();
-  });
-
-  it("streams live with no prompt when a SINGLE transcript is unambiguous", () => {
-    // Cursor often omits the prompt on the streamed running-leg args. With only
-    // one unclaimed candidate (B + C claimed), it's unambiguous → claim sub-A
-    // even without a prompt, so the common single-subagent turn still streams
-    // live.
-    const claimed = new Set(["sub-B", "sub-C"]);
-    expect(findSubagentByPrompt("/cwd", "", claimed, opts)).toBe("sub-A");
-  });
-
-  it("declines to guess with no prompt when MULTIPLE transcripts are ambiguous", () => {
-    // No prompt + ≥2 concurrent transcripts: recency can't tell which belongs
-    // to THIS task, so guessing would stream the wrong subagent's tools into
-    // the card. Defer to flush (which resolves by the authoritative
-    // transcriptPath) rather than mis-attribute.
-    expect(findSubagentByPrompt("/cwd", "", new Set(), opts)).toBeNull();
-  });
-
-  it("scopes candidates to transcripts written since the task started (sinceMs)", () => {
-    // sinceMs just after sub-B's write (NOW-15s): sub-A (NOW-30s) is excluded;
-    // sub-C (NOW-10s) is the only one clearly after → claimed by recency.
-    const got = findSubagentByPrompt("/cwd", "", new Set(), {
-      ...opts,
-      sinceMs: (NOW_SEC - 12) * 1000,
-    });
-    expect(got).toBe("sub-C");
-  });
-});
-
 describe("loadSubagentTranscriptByPath", () => {
   const dir = mkdtempSync(join(tmpdir(), "cursor-tpath-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("reads + parses a transcript at an exact path", () => {
-    const path = join(dir, "sub.jsonl");
+  it("does not read an exact path without an authoritative owner", async () => {
+    const file = join(dir, "unowned.jsonl");
+    writeFileSync(file, line({ role: "assistant", message: { content: [{ type: "text", text: "foreign" }] } }));
+    expect(await loadSubagentTranscriptByPath(file)).toBeNull();
+  });
+
+  it("does not follow child transcript symlinks", async () => {
+    const root = agentTranscriptsRoot("/work/symlink", { home: dir });
+    mkdirSync(join(root, "parent", "subagents"), { recursive: true });
+    const foreign = join(dir, "foreign.jsonl");
+    writeFileSync(foreign, line({ role: "assistant", message: { content: [{ type: "text", text: "foreign" }] } }));
+    symlinkSync(foreign, join(root, "parent", "subagents", "child.jsonl"));
+    expect(await loadSubagentTranscript("/work/symlink", "child", { home: dir, parentAgentId: "parent" })).toBeNull();
+  });
+
+  it("reads + parses a transcript at an exact path", async () => {
+    const folder = join(agentTranscriptsRoot("/work/exact", { home: dir }), "parent", "subagents");
+    mkdirSync(folder, { recursive: true });
+    const path = join(folder, "sub.jsonl");
     writeFileSync(
       path,
       [
@@ -212,18 +177,18 @@ describe("loadSubagentTranscriptByPath", () => {
         ] } }),
       ].join("\n"),
     );
-    const parsed = loadSubagentTranscriptByPath(path);
+    const parsed = await loadSubagentTranscriptByPath(path, { cwd: "/work/exact", home: dir, parentAgentId: "parent" });
     expect(parsed?.finalText).toBe("# Done");
     expect(parsed?.steps.filter((s) => s.type === "tool")).toHaveLength(1);
   });
 
-  it("returns null for a missing path", () => {
-    expect(loadSubagentTranscriptByPath(join(dir, "nope.jsonl"))).toBeNull();
+  it("returns null for a missing path", async () => {
+    expect(await loadSubagentTranscriptByPath(join(dir, "nope.jsonl"))).toBeNull();
   });
 });
 
 describe("agentIdFromTranscriptPath", () => {
-  it("extracts the agentId stem from a transcript path", () => {
+  it("extracts the agentId stem from a transcript path", async () => {
     expect(
       agentIdFromTranscriptPath("/Users/x/.cursor/projects/p/agent-transcripts/agent-A/subagents/sub-123.jsonl"),
     ).toBe("sub-123");
@@ -249,7 +214,7 @@ describe("transcript roots follow the HOME the session actually ran with", () =>
 
   afterAll(() => rmSync(projectedHome, { recursive: true, force: true }));
 
-  it("finds a subagent transcript under the projected HOME", () => {
+  it("finds a subagent transcript under the projected HOME", async () => {
     mkdirSync(join(root, "agent-parent", "subagents"), { recursive: true });
     const file = join(root, "agent-parent", "subagents", "sub-1.jsonl");
     writeFileSync(
@@ -271,18 +236,13 @@ describe("transcript roots follow the HOME the session actually ran with", () =>
     );
 
     expect(agentTranscriptsRoot(cwd, { home: projectedHome })).toBe(root);
-    expect(findSubagentTranscriptPath(cwd, "sub-1", { home: projectedHome })).toBe(
+    expect(await findSubagentTranscriptPath(cwd, "sub-1", { home: projectedHome, parentAgentId: "agent-parent" })).toBe(
       file,
     );
     expect(
-      loadSubagentTranscript(cwd, "sub-1", { home: projectedHome })?.finalText,
+      (await loadSubagentTranscript(cwd, "sub-1", { home: projectedHome, parentAgentId: "agent-parent" }))?.finalText,
     ).toBe("done");
-    expect(
-      findSubagentByPrompt(cwd, "look around", new Set(), {
-        home: projectedHome,
-      }),
-    ).toBe("sub-1");
     // …and the engine's own home is NOT where a contained session's state is.
-    expect(findSubagentTranscriptPath(cwd, "sub-1")).toBeNull();
+    expect(await findSubagentTranscriptPath(cwd, "sub-1")).toBeNull();
   });
 });

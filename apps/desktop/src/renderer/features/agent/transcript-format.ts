@@ -43,6 +43,7 @@ import type { ContentBlock, ToolCallContent } from "@zeros/protocol/agent-events
 import { partitionTurn } from "./turn-partition";
 import { groupMessagesIntoTurns } from "./turn-grouping";
 import { readableTextFromArray } from "./renderers/raw-output";
+import { fallbackProse } from "./model-fallback";
 
 export type TranscriptMode = "full" | "concise";
 
@@ -107,6 +108,7 @@ interface VisibleMessages {
  *  parent tool call isn't in this window) stays top-level rather than
  *  vanishing — the same guard agent-chat.tsx applies via `presentToolIds`. */
 function selectVisible(messages: AgentMessage[]): VisibleMessages {
+  messages = messages.filter((m) => !(m.kind === "text" && m.retracted)).map((m) => fallbackProse(m) ?? m);
   const toolIds = new Set<string>();
   for (const m of messages) {
     if (m.kind === "tool") toolIds.add(m.toolCallId);
@@ -337,8 +339,12 @@ function toolOutputText(tool: AgentToolMessage): string {
     }
   }
   const fromContent = stripInternalNoise(parts.join("\n"));
-  if (fromContent) return fromContent;
-  return stripInternalNoise(payloadText(withoutQuestionStamp(tool.rawOutput)));
+  const output = [fromContent || stripInternalNoise(payloadText(withoutQuestionStamp(tool.rawOutput)))];
+  for (const link of tool.resourceLinks ?? []) {
+    const text = textFromBlock(link);
+    if (!parts.includes(text) && !output.includes(text)) output.push(text);
+  }
+  return output.filter(Boolean).join("\n");
 }
 
 // ── Render context ─────────────────────────────────────────

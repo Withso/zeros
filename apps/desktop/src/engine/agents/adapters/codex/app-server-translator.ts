@@ -1,3 +1,5 @@
+import { boundedStructuredOutput, canonicalToolContent } from "../shared/tool-content";
+import { CodexTurnUsage } from "./usage-accounting";
 // ──────────────────────────────────────────────────────────
 // Codex app-server → SessionNotification translator.
 // ──────────────────────────────────────────────────────────
@@ -36,6 +38,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { normalizeProviderError, type ProviderError } from "../shared/provider-error";
 import { randomUUID } from "node:crypto";
 import type { ToolArtwork } from "@zeros/protocol/tool-artwork";
 import type { CodexToolIdentity } from "./tool-artwork";
@@ -75,6 +78,8 @@ const MAX_STREAMED_TOOL_OUTPUT_CHARS = 20_001;
 
 export interface CodexAppServerTranslatorOptions {
   sessionId: string;
+  /** Resumed threads may deliver restored totals before the first new turn. */
+  resumed?: boolean;
   emit: Emit;
   onAsyncQuestion?: (request: QuestionRequest) => void;
   /** Called for any notification we don't have a mapping for — useful
@@ -102,8 +107,20 @@ export class CodexAppServerTranslator {
   private readonly toolCallIds = new Map<string, string>();
   private readonly emittedToolCallIds = new Set<string>();
   private parentToolId: string | undefined;
+  private isChild = false;
+  private readonly modelFallbacks = new Set<string>();
   private readonly unparentedIds = new Set<string>();
   private readonly completedItemIds = new Set<string>();
+  private agentActivityStopped = false;
+  private readonly agentGroups = new Map<
+    string,
+    {
+      id: string;
+      terminal: boolean;
+      seen: Set<string>;
+      input?: Record<string, unknown>;
+    }
+  >();
   private readonly safetyReviewToolCalls = new Map<string, string>();
   private readonly completedSafetyReviewIds = new Set<string>();
 
@@ -125,6 +142,17 @@ export class CodexAppServerTranslator {
    *  synthesized from the server request. */
   toolCallIdFor(itemId: string): string | undefined {
     return this.toolCallIds.get(itemId);
+  }
+
+  /** A host capability notice belongs to the requesting native thread. It is
+   * commentary, not an agent tool or a successful identity check. */
+  emitUnsupportedVerification(requestId: string): void {
+    this.emitMessageDelta(
+      `unsupported-verification:${requestId}`,
+      false,
+      "Codex requested identity verification, which this version of Zeros cannot complete.",
+      "commentary",
+    );
   }
 
   /** Codex may ask a blocking question through the JSON-RPC request channel
@@ -213,11 +241,23 @@ export class CodexAppServerTranslator {
    *  AgentFailure so the green dot updates instead of the failure living
    *  only as a chat bubble. Null otherwise. */
   private turnFailureLabel: string | null = null;
+  private turnErrorMessage: string | null = null;
+  private turnNativeFailure: ProviderError | null = null;
+
+  get terminalFailure(): ProviderError | null {
+    return this.turnNativeFailure;
+  }
+
+  get terminalError(): string | null {
+    return this.turnErrorMessage;
+  }
   private turnRateLimitLabel: string | null = null;
   /** Per-turn token usage (tokenUsage.last) for analytics. */
   private lastTurnUsage: TurnUsage | undefined;
+  private readonly usageAccounting: CodexTurnUsage;
 
   constructor(opts: CodexAppServerTranslatorOptions) {
+    this.usageAccounting = new CodexTurnUsage(opts.resumed);
     this.onAsyncQuestion = opts.onAsyncQuestion;
     this.sessionId = opts.sessionId;
     this.emit = (event) => {
@@ -236,10 +276,11 @@ export class CodexAppServerTranslator {
       const parentable =
         update.sessionUpdate === "agent_message_chunk" ||
         update.sessionUpdate === "agent_thought_chunk" ||
+        update.sessionUpdate === "model_fallback" ||
         update.sessionUpdate === "tool_call" ||
         update.sessionUpdate === "error_notice";
       opts.emit(
-        this.parentToolId && parentable
+        this.parentToolId && parentable && !("parentToolId" in update && update.parentToolId)
           ? { ...event, update: { ...update, parentToolId: this.parentToolId } }
           : event,
       );
@@ -250,7 +291,7 @@ export class CodexAppServerTranslator {
 
   /** Independent native-thread state sharing only the canonical event sink. */
   childTranslator(): CodexAppServerTranslator {
-    return new CodexAppServerTranslator({
+    const child = new CodexAppServerTranslator({
       sessionId: this.sessionId,
       resolveArtwork: this.resolveArtwork,
       onUnknown: this.onUnknown,
@@ -259,6 +300,8 @@ export class CodexAppServerTranslator {
         if (event.update.sessionUpdate !== "usage_update") this.emit(event);
       },
     });
+    child.isChild = true;
+    return child;
   }
 
   setParentToolId(toolCallId: string): void {
@@ -373,6 +416,8 @@ export class CodexAppServerTranslator {
   /** Reset terminal/streaming state at the start of a new turn. The
    *  thread id is not reset — it persists across turns. */
   startTurn(): void {
+    this.usageAccounting.start();
+    this.agentActivityStopped = false;
     this.turnPrefix = randomUUID();
     this.artworkRequests.clear();
     this.toolCallIds.clear();
@@ -387,6 +432,8 @@ export class CodexAppServerTranslator {
     this.hasSeenTurnTerminal = false;
     this.lastStopReason = "end_turn";
     this.turnFailureLabel = null;
+    this.turnErrorMessage = null;
+    this.turnNativeFailure = null;
     this.turnRateLimitLabel = null;
     this.lastTurnUsage = undefined;
     this.retryBurstNoticed = false;
@@ -407,9 +454,11 @@ export class CodexAppServerTranslator {
       case "thread/started":
         this.onThreadStarted(params);
         break;
-      case "turn/started":
-        // No event — turn boundary is implicit.
+      case "turn/started": {
+        const id = (params as { turn?: { id?: string } })?.turn?.id;
+        if (id) this.usageAccounting.bind(id);
         break;
+      }
       case "turn/completed":
         this.onTurnCompleted(params);
         break;
@@ -537,9 +586,27 @@ export class CodexAppServerTranslator {
     const p = params as {
       turn?: {
         status?: string;
+        itemsView?: string;
+        items?: ThreadItemUnion[];
         error?: { codexErrorInfo?: unknown; message?: string };
       };
     };
+    // A full native snapshot can recover item notifications lost during a
+    // reconnect. Summary/notLoaded payloads are not transcript authority.
+    // A terminal turn does not prove that every child tool finished.
+    if (p?.turn?.itemsView === "full" && Array.isArray(p.turn.items) &&
+        ["completed", "failed", "interrupted"].includes(p.turn.status ?? "")) {
+      for (const item of p.turn.items) {
+        if (!item || typeof item.id !== "string" || typeof item.type !== "string") continue;
+        const status = (item as { status?: string }).status;
+        const requiresStatus = ["commandExecution", "fileChange", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall", "imageGeneration"].includes(item.type);
+        if ((requiresStatus && !status) || (status && !["completed", "failed", "declined"].includes(status))) {
+          this.onItemStarted({ item });
+        } else {
+          this.onItemCompleted({ item });
+        }
+      }
+    }
     this.hasSeenTurnTerminal = true;
     const status = p?.turn?.status;
     // Generated TurnStatus = completed | interrupted | failed | inProgress.
@@ -551,8 +618,12 @@ export class CodexAppServerTranslator {
       // Generated TurnError = { message, codexErrorInfo, additionalDetails }
       // — there is no `.code`. The error identity is in codexErrorInfo.
       const cls = classifyCodexErrorInfo(p?.turn?.error?.codexErrorInfo);
-      if (cls.authQuota) this.turnFailureLabel = cls.label;
-      if (cls.rateLimited) this.turnRateLimitLabel = cls.label;
+      this.turnNativeFailure = p?.turn?.error
+        ? normalizeProviderError("codex", p.turn.error)
+        : this.turnNativeFailure ?? normalizeProviderError("codex", { message: this.turnErrorMessage || cls.label });
+      this.turnErrorMessage = this.turnNativeFailure.message;
+      this.turnFailureLabel = this.turnNativeFailure.category === "auth-required" ? cls.label : null;
+      this.turnRateLimitLabel = this.turnNativeFailure.category === "rate-limited" ? cls.label : null;
       this.lastStopReason = cls.stopReason;
     } else {
       this.lastStopReason = "end_turn";
@@ -578,8 +649,9 @@ export class CodexAppServerTranslator {
    *  the app-server protocol carries token counts but not pricing. */
   private onTokenUsage(params: unknown): void {
     const p = params as {
+      turnId?: string;
       tokenUsage?: {
-        total?: { totalTokens?: number };
+        total?: { totalTokens?: number; inputTokens?: number; outputTokens?: number; cachedInputTokens?: number; cacheWriteInputTokens?: number; reasoningOutputTokens?: number };
         last?: {
           totalTokens?: number;
           inputTokens?: number;
@@ -600,17 +672,9 @@ export class CodexAppServerTranslator {
           ? lastIn + (typeof lastOut === "number" ? lastOut : 0)
           : p?.tokenUsage?.total?.totalTokens;
     const size = p?.tokenUsage?.modelContextWindow;
-    // Capture this turn's usage (tokenUsage.last) for
-    // PromptResponse.usage / $ai_generation. `total` is cumulative across
-    // the thread, so `last` is the right per-turn figure.
+    this.lastTurnUsage = this.usageAccounting.record(p?.turnId, p?.tokenUsage?.total, p?.tokenUsage?.last);
     const last = p?.tokenUsage?.last;
     if (last) {
-      this.lastTurnUsage = {
-        inputTokens: last.inputTokens,
-        outputTokens: last.outputTokens,
-        cacheReadTokens: last.cachedInputTokens,
-        reasoningTokens: last.reasoningOutputTokens,
-      };
       // Dev-only cache-health signal: the fraction of this turn's input
       // tokens OpenAI served from its prompt cache. Codex reports inputTokens
       // as the TOTAL prompt (cachedInputTokens is the cached subset), so the
@@ -634,6 +698,162 @@ export class CodexAppServerTranslator {
     });
   }
 
+  private onSubagentActivity(item: SubagentActivityItem): void {
+    if (!item.agentThreadId || !item.id || this.agentActivityStopped) return;
+    const previous = this.agentGroups.get(item.agentThreadId);
+    const id = previous?.id ?? this.ensureToolCallId(item.id);
+    this.toolCallIds.set(item.id, id);
+    if (previous) this.emittedToolCallIds.add(id);
+    // Completing the activity ITEM only confirms delivery of its event. The
+    // event kind owns the child's lifetime, independent of the parent's turn.
+    const seen = previous?.seen ?? new Set<string>();
+    const activityKey = JSON.stringify([item.id, item.kind]);
+    if (seen.has(activityKey)) return;
+    seen.add(activityKey);
+    if (seen.size > 512) seen.delete(seen.values().next().value!);
+    // A new interaction is positive evidence of a resumed child. Replaying
+    // its old spawn or terminal event must not change that newer lifetime.
+    if (previous?.terminal && item.kind === "started") return;
+    const terminal = item.kind === "completed" || item.kind === "interrupted";
+    const input = {
+      ...previous?.input,
+      agentThreadId: item.agentThreadId,
+      agentPath: item.agentPath,
+    };
+    this.agentGroups.set(item.agentThreadId, { id, terminal, seen, input });
+    if (this.agentGroups.size > 512)
+      this.agentGroups.delete(this.agentGroups.keys().next().value!);
+    const name =
+      item.agentPath
+        ?.split("/")
+        .filter(Boolean)
+        .at(-1)
+        ?.replace(/[_-]+/g, " ") ?? "";
+    this.emitToolCallUpsert(id, {
+      nativeToolCallId: item.id,
+      title: "Agent",
+      kind: "subagent",
+      status:
+        item.kind === "interrupted"
+          ? "failed"
+          : terminal
+            ? "completed"
+            : "in_progress",
+      rawInput: {
+        ...input,
+        description:
+          previous?.input?.description ??
+          (name ? name[0].toUpperCase() + name.slice(1) : undefined),
+      },
+      rawOutput:
+        item.kind === "interrupted"
+          ? {
+              status: "interrupted",
+              report: null,
+              message: "Agent interrupted.",
+            }
+          : {
+              status: terminal ? "completed" : "running",
+              ...(terminal ? {} : { report: null, message: null }),
+            },
+      content: [],
+    });
+  }
+
+  completeAgentThread(threadId: string, status: string): void {
+    const group = this.agentGroups.get(threadId);
+    if (!group || group.terminal || this.agentActivityStopped) return;
+    if (!["completed", "interrupted", "failed"].includes(status)) return;
+    group.terminal = true;
+    this.emittedToolCallIds.add(group.id);
+    this.emitToolCallUpsert(group.id, {
+      status: status === "completed" ? "completed" : "failed",
+      rawOutput: {
+        status,
+        ...(status === "completed"
+          ? {}
+          : { message: "Agent ended before reporting completion." }),
+      },
+    });
+  }
+
+  /** The transport or local Stop ended observation of these children. Never
+   * leave a loader active just because their final activity event was lost. */
+  endAgentActivity(): void {
+    this.agentActivityStopped = true;
+    for (const group of this.agentGroups.values()) {
+      if (group.terminal) continue;
+      group.terminal = true;
+      this.emittedToolCallIds.add(group.id);
+      this.emitToolCallUpsert(group.id, {
+        status: "failed",
+        rawOutput: {
+          status: "interrupted",
+          message: "Agent ended before reporting completion.",
+        },
+        content: [
+          {
+            type: "content",
+            content: {
+              type: "text",
+              text: "Agent ended before reporting completion.",
+            },
+          },
+        ],
+      });
+    }
+  }
+
+  /** Legacy collaboration snapshots describe child state separately from the
+   * successful delivery of a spawn/wait operation. Both native shapes share
+   * the child-thread group, including its model and delegated prompt. */
+  private syncCollabAgents(item: CollabItem, toolCallId: string): void {
+    if (this.agentActivityStopped) return;
+    for (const receiver of item.receiverThreadIds ?? []) {
+      const previous = this.agentGroups.get(receiver);
+      if (!previous && item.tool !== "spawnAgent") continue;
+      const id = previous?.id ?? toolCallId;
+      const input = previous?.input ?? recordValue(toolInput(item));
+      const state = item.agentsStates?.[receiver];
+      if (previous && !state) continue;
+      const status =
+        item.tool === "spawnAgent" && computeStatus(item) === "failed"
+          ? "failed"
+          : collabChildStatus(state?.status);
+      const terminal = status !== "in_progress";
+      if (
+        previous?.terminal &&
+        !terminal &&
+        !["resumeAgent", "sendInput", "followupTask"].includes(item.tool)
+      )
+        continue;
+      if (previous?.seen.has(item.id)) continue;
+      const seen = previous?.seen ?? new Set<string>();
+      seen.add(item.id);
+      if (seen.size > 512) seen.delete(seen.values().next().value!);
+      this.agentGroups.set(receiver, { id, terminal, seen, input });
+      if (this.agentGroups.size > 512)
+        this.agentGroups.delete(this.agentGroups.keys().next().value!);
+      if (item.tool !== "spawnAgent" && state) {
+        this.emittedToolCallIds.add(id);
+        this.emitToolCallUpsert(id, {
+          status,
+          rawOutput: { status, report: state.message ?? null },
+          ...(state.message
+            ? {
+                content: [
+                  {
+                    type: "content",
+                    content: { type: "text", text: state.message },
+                  },
+                ],
+              }
+            : {}),
+        });
+      }
+    }
+  }
+
   private onItemStarted(params: unknown): void {
     const p = params as { item?: ThreadItemUnion };
     const item = p?.item;
@@ -641,6 +861,9 @@ export class CodexAppServerTranslator {
     if (this.completedItemIds.has(item.id)) return;
 
     switch (item.type) {
+      case "subAgentActivity":
+        this.onSubagentActivity(item);
+        return;
       case "agentMessage":
       case "plan":
       case "userMessage":
@@ -787,6 +1010,9 @@ export class CodexAppServerTranslator {
     if (item.type === "agentMessage" && this.emitAsyncQuestion(item)) return;
 
     switch (item.type) {
+      case "subAgentActivity":
+        this.onSubagentActivity(item);
+        return;
       case "agentMessage":
       case "plan":
       case "userMessage":
@@ -828,8 +1054,27 @@ export class CodexAppServerTranslator {
       case "webSearch": {
         const toolCallId = this.toolCallIds.get(item.id);
         if (!toolCallId) return;
-        const status = computeStatus(item);
-        const output = toolOutput(item, streamedOutput);
+        const spawn =
+          item.type === "collabAgentToolCall" && item.tool === "spawnAgent";
+        const childState =
+          item.type === "collabAgentToolCall" &&
+          item.receiverThreadIds?.length === 1
+            ? item.agentsStates?.[item.receiverThreadIds[0]]
+            : undefined;
+        const status =
+          spawn && computeStatus(item) !== "failed"
+            ? collabChildStatus(childState?.status)
+            : computeStatus(item);
+        const output = spawn
+          ? {
+              status,
+              report: childState?.message ?? null,
+              agentsStates:
+                item.type === "collabAgentToolCall"
+                  ? item.agentsStates
+                  : undefined,
+            }
+          : toolOutput(item, streamedOutput);
         // Surface the command's plain text output as a content block (not just
         // the `{exitCode, output}` rawOutput object). This lets the renderer
         // show clean output in the detail body AND derive the "N lines" count
@@ -884,6 +1129,8 @@ export class CodexAppServerTranslator {
           },
         });
         if (item.type === "mcpToolCall") this.enrichArtwork(item, toolCallId);
+        if (item.type === "collabAgentToolCall")
+          this.syncCollabAgents(item, toolCallId);
         return;
       }
 
@@ -1171,28 +1418,27 @@ export class CodexAppServerTranslator {
 
   private onModelRerouted(params: unknown): void {
     const p = params as {
+      threadId?: string;
+      turnId?: string;
       fromModel?: string;
       toModel?: string;
       reason?: string;
     };
-    if (typeof p.toModel !== "string") return;
+    if (typeof p.toModel !== "string" || !p.toModel.trim() || p.toModel.length > 200 || (/\s/.test(p.toModel) || [...p.toModel].some((char) => char.charCodeAt(0) < 32))) return;
+    const key = JSON.stringify([p.threadId, p.turnId, p.fromModel, p.toModel, p.reason]);
+    if (this.modelFallbacks.has(key)) return;
+    this.modelFallbacks.add(key);
+    if (this.modelFallbacks.size > 2_000) this.modelFallbacks.delete(this.modelFallbacks.values().next().value!);
+    const noticeId = randomUUID();
+    if (!this.parentToolId) this.unparentedIds.add(`model-fallback-${noticeId}`);
     this.emit({
       sessionId: this.sessionId,
       update: {
-        sessionUpdate: "tool_call",
-        toolCallId: `model-switch-${randomUUID()}`,
-        title: "Model switched",
-        kind: "model_switch",
-        status: "completed",
-        rawInput: {
-          ...(typeof p.fromModel === "string"
-            ? { fromModel: truncate(p.fromModel, 160) }
-            : {}),
-          toModel: truncate(p.toModel, 160),
-          ...(typeof p.reason === "string"
-            ? { reason: truncate(p.reason, 240) }
-            : {}),
-        },
+        sessionUpdate: "model_fallback", noticeId, provider: "codex",
+        fromModel: typeof p.fromModel === "string" ? truncate(p.fromModel, 160) : null,
+        toModel: p.toModel,
+        scope: this.isChild ? "local" : "session",
+        reason: p.reason === "highRiskCyberActivity" ? "cybersecurity" : "unknown",
       },
     });
   }
@@ -1423,11 +1669,13 @@ export class CodexAppServerTranslator {
       return;
     }
     this.hasSeenTurnTerminal = true;
-    if (cls.authQuota) this.turnFailureLabel = cls.label;
-    if (cls.rateLimited) this.turnRateLimitLabel = cls.label;
+    this.turnNativeFailure = normalizeProviderError("codex", p?.error ?? { message: cls.label });
+    this.turnFailureLabel = this.turnNativeFailure.category === "auth-required" ? cls.label : null;
+    this.turnRateLimitLabel = this.turnNativeFailure.category === "rate-limited" ? cls.label : null;
     this.lastStopReason = cls.stopReason;
 
-    const message = extractErrorMessage(p?.error?.message) || cls.label;
+    const message = this.turnNativeFailure.message;
+    this.turnErrorMessage = message || null;
     if (!message) return;
     // One compact error_notice row per real terminal error. Retry attempts
     // (`willRetry:true`) are internal recovery noise and are filtered above.
@@ -1595,6 +1843,7 @@ type CommandActionLite =
   | { type: "unknown"; command?: string };
 
 type ThreadItemUnion =
+  | SubagentActivityItem
   | { type: "userMessage"; id: string; content?: unknown[] }
   | {
       type: "agentMessage";
@@ -1656,6 +1905,11 @@ type ThreadItemUnion =
   | { type: "enteredReviewMode"; id: string; review: string }
   | { type: "exitedReviewMode"; id: string; review: string }
   | { type: "contextCompaction"; id: string };
+
+type SubagentActivityItem = Extract<
+  import("./generated/v2/ThreadItem").ThreadItem,
+  { type: "subAgentActivity" }
+>;
 
 function asyncQuestions(item: Extract<ThreadItemUnion, { type: "agentMessage" }>): AsyncUserInputQuestion[] {
   if (item.delivery !== "async" || !Array.isArray(item.questions)) return [];
@@ -1885,6 +2139,15 @@ function fileChangePaths(
   );
 }
 
+function collabChildStatus(
+  status?: string,
+): "in_progress" | "completed" | "failed" {
+  if (status === "completed") return "completed";
+  if (["interrupted", "errored", "shutdown", "notFound"].includes(status ?? ""))
+    return "failed";
+  return "in_progress";
+}
+
 function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
   if (["failed", "declined", "cancelled", "interrupted"].includes(String(recordValue(item).status))) return "failed";
   if (item.type === "imageGeneration" && item.failure) return "failed";
@@ -2025,7 +2288,7 @@ function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
     };
   }
   if (item.type === "mcpToolCall") {
-    return item.result ?? item.error ?? null;
+    return boundedStructuredOutput(item.result ?? item.error ?? null);
   }
   if (item.type === "dynamicToolCall") {
     return item.contentItems ?? null;
@@ -2068,85 +2331,7 @@ function mcpToolContent(
 ): ToolCallContent[] | null {
   const result = recordValue(item.result);
   const content = result.content ?? recordValue(result.raw).content;
-  if (!Array.isArray(content)) return null;
-  const blocks: ToolCallContent[] = [];
-  for (const candidate of content.slice(0, 128)) {
-    const value = recordValue(candidate);
-    if (value.type === "text" && typeof value.text === "string") {
-      blocks.push({
-        type: "content",
-        content: { type: "text", text: value.text },
-      });
-    } else if (
-      (value.type === "image" || value.type === "audio") &&
-      typeof value.data === "string" &&
-      typeof value.mimeType === "string" &&
-      value.mimeType.startsWith(`${value.type}/`) &&
-      value.data.length <= 16 * 1024 * 1024 &&
-      /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)
-    ) {
-      blocks.push({
-        type: "content",
-        content: {
-          type: value.type,
-          mimeType: value.mimeType,
-          data: value.data,
-        },
-      });
-    } else if (
-      value.type === "resource_link" &&
-      typeof value.uri === "string"
-    ) {
-      blocks.push({
-        type: "content",
-        content: {
-          type: "resource_link",
-          uri: value.uri,
-          name: typeof value.name === "string" ? value.name : value.uri,
-          ...(typeof value.description === "string"
-            ? { description: value.description }
-            : {}),
-          ...(typeof value.title === "string" ? { title: value.title } : {}),
-          ...(typeof value.mimeType === "string"
-            ? { mimeType: value.mimeType }
-            : {}),
-          ...(typeof value.size === "number" ? { size: value.size } : {}),
-        },
-      });
-    } else if (value.type === "resource") {
-      const resource = recordValue(value.resource);
-      if (typeof resource.uri !== "string") continue;
-      if (typeof resource.text === "string") {
-        blocks.push({
-          type: "content",
-          content: {
-            type: "resource",
-            resource: {
-              uri: resource.uri,
-              text: resource.text,
-              ...(typeof resource.mimeType === "string"
-                ? { mimeType: resource.mimeType }
-                : {}),
-            },
-          },
-        });
-      } else {
-        // Binary resources remain inspectable by identity without copying their
-        // bytes into another durable presentation field.
-        blocks.push({
-          type: "content",
-          content: {
-            type: "resource_link",
-            uri: resource.uri,
-            name: resource.uri,
-            ...(typeof resource.mimeType === "string"
-              ? { mimeType: resource.mimeType }
-              : {}),
-          },
-        });
-      }
-    }
-  }
+  const blocks = canonicalToolContent(content);
   return blocks.length ? blocks : null;
 }
 
@@ -2234,100 +2419,33 @@ function truncate(s: string, n: number): string {
 
 /** Classify a generated `CodexErrorInfo` (string literal OR tagged object,
  *  e.g. "unauthorized" / "usageLimitExceeded" / { httpConnectionFailed }).
- *  Returns the stop reason + whether it's an auth/quota class the adapter
- *  should surface as an AgentFailure, plus a human label. */
+ * Returns only the legacy stop reason/label. Native failure classification
+ * belongs to the shared provider-error normalizer. */
 function classifyCodexErrorInfo(info: unknown): {
-  authQuota: boolean;
-  rateLimited: boolean;
-  stopReason: "end_turn" | "max_turn_requests" | "refusal" | "cancelled";
+  stopReason: "end_turn" | "max_turn_requests";
   label: string;
 } {
-  const tagged =
-    info && typeof info === "object" ? (info as Record<string, unknown>) : null;
-  const tag =
-    typeof info === "string"
-      ? info
-      : tagged
-        ? (Object.keys(tagged)[0] ?? "")
-        : "";
+  const tagged = info && typeof info === "object"
+    ? info as Record<string, unknown>
+    : null;
+  const tag = typeof info === "string"
+    ? info
+    : tagged ? Object.keys(tagged)[0] ?? "" : "";
   const detail = tagged?.[tag];
-  const httpStatusCode =
-    detail && typeof detail === "object"
-      ? (detail as Record<string, unknown>).httpStatusCode
-      : undefined;
-  if (httpStatusCode === 429) {
-    return {
-      authQuota: false,
-      rateLimited: true,
-      stopReason: "end_turn",
-      label: `${tag || "Request"} (HTTP 429)`,
-    };
-  }
-  if (httpStatusCode === 401 || httpStatusCode === 403) {
-    return {
-      authQuota: true,
-      rateLimited: false,
-      stopReason: "end_turn",
-      label: `${tag || "Request"} (HTTP ${httpStatusCode})`,
-    };
-  }
-  switch (tag) {
-    case "unauthorized":
-      return {
-        authQuota: true,
-        rateLimited: false,
-        stopReason: "end_turn",
-        label: "Not signed in (unauthorized)",
-      };
-    case "usageLimitExceeded":
-      return {
-        authQuota: false,
-        rateLimited: true,
-        stopReason: "end_turn",
-        label: "Usage limit exceeded",
-      };
-    case "rateLimitExceeded":
-      return {
-        authQuota: false,
-        rateLimited: true,
-        stopReason: "end_turn",
-        label: "Rate limit exceeded",
-      };
-    case "contextWindowExceeded":
-      return {
-        authQuota: false,
-        rateLimited: false,
-        stopReason: "max_turn_requests",
-        label: "Context window exceeded",
-      };
-    case "serverOverloaded":
-      return {
-        authQuota: false,
-        rateLimited: true,
-        stopReason: "end_turn",
-        label: "Server overloaded",
-      };
-    default:
-      return {
-        authQuota: false,
-        rateLimited: false,
-        stopReason: "end_turn",
-        label: tag || "error",
-      };
-  }
-}
-
-function extractErrorMessage(raw: unknown): string {
-  if (typeof raw !== "string" || raw.length === 0) return "";
-  try {
-    const parsed = JSON.parse(raw) as {
-      error?: { message?: string };
-      message?: string;
-    };
-    if (parsed?.error?.message) return parsed.error.message;
-    if (parsed?.message) return parsed.message;
-  } catch {
-    /* not JSON */
-  }
-  return raw;
+  const status = detail && typeof detail === "object"
+    ? (detail as Record<string, unknown>).httpStatusCode
+    : undefined;
+  const labels: Record<string, string> = {
+    unauthorized: "Not signed in (unauthorized)",
+    usageLimitExceeded: "Usage limit exceeded",
+    rateLimitExceeded: "Rate limit exceeded",
+    contextWindowExceeded: "Context window exceeded",
+    serverOverloaded: "Server overloaded",
+  };
+  return {
+    stopReason: tag === "contextWindowExceeded" ? "max_turn_requests" : "end_turn",
+    label: typeof status === "number"
+      ? `${tag || "Request"} (HTTP ${status})`
+      : labels[tag] ?? (tag || "error"),
+  };
 }

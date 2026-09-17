@@ -207,6 +207,120 @@ describe("codex permission settlement receipts", () => {
     vi.useRealTimers();
   });
 
+  it.each(["stop", "timeout", "dispose"])(
+    "declines unsupported native verification as commentary without a parked card (%s)",
+    async (ending) => {
+      const { adapter, emit } = makeAdapter();
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+      const native: CodexUserInputRequest = {
+        questionId: "verify-1",
+        rpcRequestId: "rpc-verify-1",
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          serverName: "fixture",
+          mode: "openai/userVerification",
+          title: "Private title",
+          description: "Private description",
+          challenge: "private-challenge",
+        },
+      };
+      rt.bootOptions?.onUserInputRequest?.(native);
+      expect(rt.userInputCalls).toEqual([
+        {
+          questionId: "verify-1",
+          response: { action: "cancel", content: null, _meta: null },
+        },
+      ]);
+      expect(emit.onQuestionRequest).not.toHaveBeenCalled();
+      expect(emit.onPermissionRequest).not.toHaveBeenCalled();
+      const updates = emit.onSessionUpdate.mock.calls.map(
+        ([, n]) => n.update,
+      );
+      expect(updates).toContainEqual(
+        expect.objectContaining({
+          sessionUpdate: "agent_message_chunk",
+          phase: "commentary",
+          content: {
+            type: "text",
+            text: "Codex requested identity verification, which this version of Zeros cannot complete.",
+          },
+        }),
+      );
+      expect(JSON.stringify(updates)).not.toMatch(
+        /private-challenge|Private title|Private description|MCP input requested/,
+      );
+      if (ending === "stop")
+        await adapter.cancel({ sessionId: session.sessionId });
+      else if (ending === "dispose") await adapter.dispose();
+      else rt.bootOptions?.onUserInputSettled?.("verify-1");
+      // A late UI answer must not turn cancellation into a successful proof.
+      adapter.respondToQuestion({
+        questionId: "verify-1",
+        response: { outcome: { outcome: "answered", answers: [] } },
+      });
+      expect(rt.userInputCalls).toHaveLength(1);
+      await adapter.dispose();
+    },
+  );
+
+  it("keeps verification feedback in its child group and suppresses duplicate or stopped feedback", async () => {
+    const { adapter, emit } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    for (const handler of rt.notificationHandlers.get("item/completed") ??
+      []) {
+      handler({
+        threadId: "thread-1",
+        item: {
+          type: "collabAgentToolCall",
+          id: "spawn",
+          tool: "spawnAgent",
+          status: "completed",
+          receiverThreadIds: ["child"],
+        },
+      });
+    }
+    const request: CodexUserInputRequest = {
+      questionId: "verify-child",
+      rpcRequestId: "rpc-verify-child",
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "child",
+        mode: "openai/userVerification",
+        challenge: "private",
+      },
+    };
+    rt.bootOptions?.onUserInputRequest?.(request);
+    rt.bootOptions?.onUserInputRequest?.(request);
+    const messages = emit.onSessionUpdate.mock.calls.reduce(
+      (current, [, event]) => applyUpdate(current, event),
+      [] as AgentMessage[],
+    );
+    const spawn = messages.find(
+      (m) => m.kind === "tool" && m.nativeToolCallId === "spawn",
+    );
+    expect(messages.filter((m) => m.kind === "text")).toEqual([
+      expect.objectContaining({
+        parentToolId: spawn?.kind === "tool" ? spawn.toolCallId : "missing",
+        text: expect.stringContaining("identity verification"),
+      }),
+    ]);
+    const count = emit.onSessionUpdate.mock.calls.length;
+    await adapter.cancel({ sessionId: session.sessionId });
+    const afterStop = emit.onSessionUpdate.mock.calls.length;
+    rt.bootOptions?.onUserInputRequest?.({
+      ...request,
+      questionId: "late-verify",
+    });
+    expect(emit.onSessionUpdate).toHaveBeenCalledTimes(afterStop);
+    expect(afterStop).toBeGreaterThanOrEqual(count);
+    expect(rt.userInputCalls.at(-1)?.response).toMatchObject({
+      action: "cancel",
+    });
+    await adapter.dispose();
+  });
+
   it("forwards a runtime timeout settlement so the renderer can advance its queue", async () => {
     const { adapter, emit } = makeAdapter();
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });

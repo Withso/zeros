@@ -49,6 +49,8 @@ export interface SafeFetchOptions {
   allowLoopback?: boolean;
   /** Max redirect hops before refusing (default 5). */
   maxRedirects?: number;
+  /** Additional brokered header names to strip on redirects (e.g. X-Api-Key). */
+  sensitiveHeaders?: readonly string[];
   /** Injectable fetch (default global fetch). */
   fetchImpl?: FetchFn;
   /** Injectable DNS resolver (default node:dns lookup, all addresses). */
@@ -89,10 +91,11 @@ async function dnsResolvesToReserved(
 
 /** Strip an `Authorization` header from a HeadersInit (case-insensitive), so a
  *  credential is never replayed to a redirect target. */
-function stripAuthorization(headers: HeadersInit | undefined): HeadersInit | undefined {
+function stripAuthorization(headers: HeadersInit | undefined, sensitiveHeaders: readonly string[] = []): HeadersInit | undefined {
   if (!headers) return headers;
   const h = new Headers(headers);
   h.delete("authorization");
+  for (const name of sensitiveHeaders) h.delete(name);
   return h;
 }
 
@@ -134,6 +137,6 @@ export async function safeAuthFetch(
       throw new Error(`MCP gateway refused to follow a ${res.status} redirect on a ${method} OAuth request: ${url}`);
     }
     url = new URL(location, url).toString();
-    headers = stripAuthorization(headers); // never replay a credential to a redirect target
+    headers = stripAuthorization(headers, opts.sensitiveHeaders); // never replay a credential to a redirect target
   }
 }

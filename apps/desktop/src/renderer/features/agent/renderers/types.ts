@@ -140,6 +140,9 @@ export interface RendererContext {
    *  Returns true when handled (caller preventDefaults); false lets the
    *  link open externally as usual. Wired by agent-chat. */
   openPrUrl?: (url: string) => boolean;
+  /** Opens loopback links in this chat's workspace Browser tab. */
+  openPreviewUrl?: (url: string) => boolean;
+  warmFile?: (path: string) => void;
 }
 
 export type Renderer<M extends AgentMessage> = ComponentType<{

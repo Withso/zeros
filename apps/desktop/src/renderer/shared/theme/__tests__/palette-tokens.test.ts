@@ -108,13 +108,13 @@ const FORMER_WARM_DARK = {
  *    bg2      — a point higher so the composer and raised cards lift further
  *               off the canvas.
  *    fg1/fg2  — raised for stronger text contrast on the neutral canvas.
- *    fg3      — the RESERVED middle tier. Neutral Dark places it at L60 (the
+ *    fg3      — the RESERVED middle tier. Neutral Dark places it at L63 (the
  *               former palette sat at L44 before the tier consolidation). */
 const NEUTRAL_DARK_LIGHTNESS_OVERRIDES: Record<string, number> = {
   bg2: 13,
   fg1: 94,
   fg2: 72,
-  fg3: 60,
+  fg3: 63,
 };
 
 /** Structural primitives neutral Dark defines as an ALIAS rather than a literal

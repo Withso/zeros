@@ -207,6 +207,30 @@ Global fades delay a ready UI and expose blank intermediate states. Context swit
 
 A busy indicator may be delayed roughly 100–120 ms to avoid a flash for a fast cold read. If the delay expires, show the honest loading state. Never use a fixed one-second fade or spinner as a substitute for caching and prefetching.
 
+### 6.1 Floating menus and pickers
+
+Context menus keep a pointer offset relative to their live source element, in
+renderer CSS pixels. Moving or resizing a pane recomputes that point; canvas
+anchors also scale with zoom. Do not retain an event's client coordinates as a
+permanent anchor or mutate the event to position a menu below its trigger.
+
+Use the shared menu, popover and Select primitives for portals, viewport
+collision handling, and available width/height limits. Feature-specific maximum
+sizes must take the minimum of their preferred size and the primitive's available
+size. Submenus portal out of the parent menu's scroll container. Select preserves
+its layout-column boundary and dismisses on window resize.
+
+External surfaces such as the file tree retain ownership of selection and
+dismissal, but supply the shared context menu with a live row anchor. Mark a
+portaled file menu with `data-file-tree-context-menu-root="true"` so the tree
+recognizes internal clicks. Disappearing, hidden or inactive owners dismiss their
+menus; anchor tracking runs only while open. The canvas invalidates pending hit
+tests when its workspace or active state changes.
+
+`scripts/ui-smoke-overlay-positioning.mjs`, included in `pnpm test:ui-smoke`,
+exercises pane movement, window resizing, constrained menu scrolling, submenus,
+keyboard focus, retained file-tree owners and canvas anchors in Chromium.
+
 ## Zeros implementation map
 
 - Workspace route + target: `OPEN_WORKSPACE` in `apps/desktop/src/renderer/state/workspace-store.ts`.
@@ -223,6 +247,7 @@ A busy indicator may be delayed roughly 100–120 ms to avoid a flash for a fast
 - File content/diff cache: `apps/desktop/src/renderer/shell/workspace-file-data-cache.ts`.
 - Workspace intent warming: `apps/desktop/src/renderer/shell/prefetch-workspace-surface.ts`.
 - Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
+- Conversation Summary: `apps/desktop/src/renderer/shell/conversation/conversation-summary.tsx` owns the chat strip's Summary popover and the island beside its top-right pane when Workbench is collapsed. Narrow panes and layouts with side-by-side chat columns keep the popover, bounded inside its owning pane with a 16px right inset; the island reserves body space without remounting chat. Both presentations share Context, run-preview and All Changes data, dismiss on owner changes, and stop active reads when hidden. Starting an Environment action leaves Summary visible; its preview opens the exact URL in the workspace's Browser.
 - Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
 - Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
 - Terminal retention: the bounded folder/session deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`, with stable portal hosts across main-tab and bottom-panel placement (see `docs/terminal-workbench.md`).

@@ -9,6 +9,7 @@ import type {
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus,
 } from "@zeros/protocol/provider-auth";
+import { QueueFixture } from "./queue-fixture";
 import { ProvidersPanel } from "../features/settings/providers-panel";
 import {
   requestProviderSettings,
@@ -46,6 +47,10 @@ import { useWorkspaceStore } from "../state/workspace-store";
 
 const ids = ["claude", "codex", "cursor"] as const;
 const params = new URLSearchParams(location.search);
+const queueFixture = ids.find((id) => id === params.get("queue"));
+const queueTurns = new Map<string, (reason: string) => void>();
+const queueSteers = new Map<string, (outcome: string) => void>();
+const queuePrompts: string[] = [];
 const usageFixture = ids.find((id) => id === params.get("usage"));
 let holdUsage = params.has("holdUsage");
 const pendingUsage = new Set<() => void>();
@@ -74,7 +79,7 @@ const statuses = new Map<
   BrowserSubscriptionProvider,
   ProviderSubscriptionStatus
 >();
-if (usageFixture) {
+if (usageFixture || queueFixture) {
   for (const [index, provider] of ids.entries()) {
     const id = `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`;
     setProviderPrefs(provider, { authMethod: "cli", ...(provider === "cursor" ? { cursorSubscription: true } : {}) });
@@ -285,6 +290,7 @@ Object.defineProperty(RuntimeClient.prototype, "status", {
 });
 RuntimeClient.prototype.connect = () => Promise.resolve();
 RuntimeClient.prototype.send = (message) => {
+  if (queueFixture && message.type === "AGENT_CANCEL" && message.sessionId) queueTurns.get(message.sessionId)?.("cancelled");
   if (message.type === "PTY_WRITE") {
     counts.lastTerminalInput = (message as { data: string }).data;
     counts.terminalWrites++;
@@ -305,6 +311,20 @@ RuntimeClient.prototype.request = async function <
     op: string;
     params: Record<string, unknown>;
   };
+  if (queueFixture && request.type === "AGENT_PROMPT") {
+    queuePrompts.push(request.prompt[0]?.text ?? "");
+    window.dispatchEvent(new Event("queue-fixture-change"));
+    return new Promise<T>((resolve) => queueTurns.set(request.sessionId, (stopReason) => {
+      queueTurns.delete(request.sessionId);
+      resolve({ type: "AGENT_PROMPT_COMPLETE", sessionId: request.sessionId, result: { stopReason } } as unknown as T);
+    }));
+  }
+  if (queueFixture && request.type === "AGENT_STEER") {
+    return new Promise<T>((resolve) => queueSteers.set(request.sessionId, (outcome) => {
+      queueSteers.delete(request.sessionId);
+      resolve({ type: "AGENT_STEERED", sessionId: request.sessionId, outcome } as unknown as T);
+    }));
+  }
   if (request.type === "AGENT_LIST_AGENTS")
     return { type: "AGENT_AGENTS_LIST", agents: registry() } as unknown as T;
   if (request.type === "AGENT_VALIDATE_KEY")
@@ -340,7 +360,7 @@ RuntimeClient.prototype.request = async function <
     return {
       type: "AGENT_SESSION_CREATED",
       agentId: request.agentId,
-      initialize: { protocolVersion: 1, agentCapabilities: {} },
+      initialize: { protocolVersion: 1, agentCapabilities: queueFixture ? { steering: true } : {} },
       session: {
         sessionId: `execution-${request.agentId}`,
         executionId: `execution-${request.agentId}`,
@@ -631,7 +651,9 @@ createRoot(document.getElementById("root")!).render(
   <TooltipProvider>
     <BridgeProvider>
       <AgentSessionsProvider>
-        <Harness />
+        {queueFixture ? <QueueFixture provider={queueFixture} prompts={queuePrompts}
+          finish={(sessionId) => queueTurns.get(sessionId)?.("end_turn")}
+          acknowledge={(sessionId, outcome) => queueSteers.get(sessionId)?.(outcome)} /> : <Harness />}
       </AgentSessionsProvider>
     </BridgeProvider>
   </TooltipProvider>,

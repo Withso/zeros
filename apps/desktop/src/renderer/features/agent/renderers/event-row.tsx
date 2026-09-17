@@ -1,29 +1,10 @@
-// ──────────────────────────────────────────────────────────
-// EventRow — one inline row per non-text event
-// ──────────────────────────────────────────────────────────
-//
-// Per-tool card variants collapse into ONE inline row. Borderless,
-// with no card chrome. The row is a 20px
-// content line (text-sm's line-height) with `py-1` → 4px top +
-// 4px bottom padding INSIDE the hover target (so the tint wraps
-// the breathing room); spacing between rows is that padding, not
-// an outer-wrapper gap.
-//
-//   [icon] Read package.json                       200 lines  read  ✓
-//
-// On hover, the leading icon swaps to + (collapsed) or −
-// (open) — the expand affordance. Click toggles the
-// detail body inline below the row at pl-7.
-//
-// The detail body is rendered by `renderDetail(message)` —
-// per-kind extension point that delegates to the existing
-// preview components (shiki edit diff, xterm shell output,
-// search-by-file groupings, etc.) without their old card
-// wrappers.
-// ──────────────────────────────────────────────────────────
+// Shared transcript disclosure: a compact tool name and target, followed by
+// one bounded detail surface while expanded. Native/durable identity belongs
+// to the adapter and caller; output or status changes never own expansion.
+// File identities stay visible when open; command/query previews do not.
 
-import { memo, useState } from "react";
-import { Minus, Plus } from "lucide-react";
+import { memo, useId, useState } from "react";
+import { CircleX, Minus, Plus } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
@@ -33,6 +14,7 @@ import {
   statusTone,
   type EventMeta,
 } from "./event-meta";
+import { ToolDetailSurface } from "./tool-detail-surface";
 import { FileTag } from "./file-tag";
 import type { RendererContext } from "./types";
 import { DiffHoverCard } from "./diff-hover-preview";
@@ -63,6 +45,9 @@ interface EventRowProps {
    *  after the row's first commit, and every remount (summary-chip
    *  re-expand, chat reopen) would re-apply it over the user's collapse. */
   defaultOpen?: boolean;
+  /** Batched native actions share one disclosure without remounting their rows. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   /** Override the status-derived row tone. The question record uses "ok":
    *  its tool status is "failed" because Claude's answer is DELIVERED via a
    *  deny tool_result — a transport detail, not a failure; the red tint +
@@ -74,17 +59,23 @@ interface EventRowProps {
 // the only status signal.
 const TONE_ROW_TINT: Record<ReturnType<typeof statusTone>, string> = {
   ok: "",
-  fail: "text-red-primary/90",
+  fail: "text-red-primary",
   run: "",
-  pending: "opacity-60",
+  pending: "",
 };
 
+// Collapsed-row chrome (icon, target pill) sits at `--fg3`, 12px, weight 500;
+// the tool NAME stays `fg1` / 14px. Only the failed tone overrides to red.
 const TONE_ICON_COLOR: Record<ReturnType<typeof statusTone>, string> = {
-  ok: "text-fg2",
-  fail: "text-red-primary/80",
-  run: "text-fg1",
-  pending: "text-muted-fg",
+  ok: "text-fg3",
+  fail: "text-red-primary [&_*]:text-red-primary!",
+  run: "text-fg3",
+  pending: "text-fg3",
 };
+
+/** Vertical rhythm of a working feed: 8px between every entry, at every
+ *  depth (top-level stripe, nested agent bodies, multi-row commands). */
+export const WORKING_FEED_GAP = "gap-y-2";
 
 export const EventRow = memo(function EventRow({
   message,
@@ -95,31 +86,32 @@ export const EventRow = memo(function EventRow({
   hoverPreview,
   defaultOpen,
   toneOverride,
+  open: controlledOpen,
+  onOpenChange,
 }: EventRowProps) {
   const meta = metaOverride ?? metaForEvent(message);
-  const [open, setOpen] = useState(defaultOpen ?? false);
+  const [localOpen, setLocalOpen] = useState(defaultOpen ?? false);
+  const open = controlledOpen ?? localOpen;
+  const detailId = useId();
+  const isThinking = message.kind === "text" && message.role === "thought";
   const isTool = message.kind === "tool";
   const transportTruncated =
     isTool && hasTransportTruncation(message as AgentToolMessage);
   const status = isTool ? (message as AgentToolMessage).status : undefined;
   const sTone =
     toneOverride ?? (isTool ? statusTone(status as any) : undefined);
-  // 01g: ALL tool rows are expandable because renderDetail always supplies a
-  // useful fallback. Non-tool rows only expand when their meta says there is
-  // detail and the renderer actually supplied it; this prevents blank expanded
-  // panels for short warning/error/mode rows.
-  const hasDetail = detail !== undefined && detail !== null;
-  const expandable = isTool ? hasDetail : meta.expandable && hasDetail;
-  const Icon = meta.Icon;
+  const expandable = meta.expandable && detail !== undefined && detail !== null;
+  const Icon = sTone === "fail" ? CircleX : meta.Icon;
   const surface = isTool
     ? nativeToolSurface(message as AgentToolMessage)
     : null;
   const artwork = isTool
     ? toolRecord((message as AgentToolMessage).rawInput)._zerosToolArtwork
     : undefined;
-  const iconTone = sTone ? TONE_ICON_COLOR[sTone] : "text-fg2";
+  const iconTone = sTone ? TONE_ICON_COLOR[sTone] : "text-fg3";
   const rowTint = sTone ? TONE_ROW_TINT[sTone] : "";
 
+  const accessibleTarget = meta.targetFile ? meta.target?.replace(/\/+$/, "").split("/").pop() : meta.target;
   const row = (
     <button
       type="button"
@@ -132,8 +124,14 @@ export const EventRow = memo(function EventRow({
         rowTint,
       )}
       onClick={() => {
-        if (expandable) setOpen((v) => !v);
+        if (expandable) {
+          setLocalOpen(!open);
+          onOpenChange?.(!open);
+        }
       }}
+      aria-label={[meta.label, accessibleTarget, meta.trailing].filter(Boolean).join(" ")}
+      aria-description={status === "failed" ? "Tool failed" : undefined}
+      aria-controls={expandable && open ? detailId : undefined}
       aria-expanded={expandable ? open : undefined}
       disabled={!expandable}
     >
@@ -156,8 +154,12 @@ export const EventRow = memo(function EventRow({
           )}
         >
           <ToolIdentityIcon
-            artwork={artwork}
-            appId={surface?.kind === "computer" ? surface.appId : undefined}
+            artwork={sTone === "fail" ? undefined : artwork}
+            appId={
+              sTone !== "fail" && surface?.kind === "computer"
+                ? surface.appId
+                : undefined
+            }
             fallback={Icon}
             active={ctx.attachmentImagesActive !== false}
             className={cn("size-3", meta.iconClassName)}
@@ -181,33 +183,25 @@ export const EventRow = memo(function EventRow({
         )}
       </span>
 
-      {/* Label — the tool NAME, at full `fg1` (the focal item the user
-          scans for) and the larger tier: `text-sm` (14px), with content at
-          12px. It can be long (e.g. a Claude
-          Bash description), so it is capped at `60ch` + truncated: a long
-          label ellipsizes there instead of shoving the command off the row.
-          The cap is in `ch` (not `%`) because the row is now content-width —
-          a `%` cap would resolve against the row's own shrunk width and could
-          clip even a short label. A short label ("Read"/"Bash") stays its
-          natural width and the command follows. */}
+      {/* Stable operation name; a long native/MCP name must still fit the lane. */}
       <span
         className={cn(
-          "max-w-[60ch] shrink-0 truncate text-sm",
+          "max-w-[60ch] min-w-0 truncate text-sm",
           sTone === "fail" ? "text-red-primary" : "text-fg1",
         )}
       >
-        {meta.label}
+        {sTone === "fail" ? "Error" : meta.label}
       </span>
 
       {/* Target — a file/image TAG (FileTypeIcon + bg1/border3 pill) for file
           tools (Read/Edit/List), else a plain command/query/thought pill. The
           tag carries the same glyph as the Files tab so a Read of `foo.tsx`
           and an Edit of it match. min-w-0 + truncate ellipsize a long name. */}
-      {meta.target &&
+      {meta.target && (meta.targetFile || !open) &&
         (meta.targetFile ? (
-          <FileTag name={meta.target} kind={meta.targetKind} />
+          <FileTag name={meta.target} kind={meta.targetKind} className={sTone === "fail" ? "border-red-primary/25 bg-red-bg text-red-primary hover:bg-red-bg [&_*]:text-red-primary!" : undefined} />
         ) : (
-          <span className="bg-bg1-hover text-fg2 max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs">
+          <span data-tool-preview="" className={cn("max-w-[440px] min-w-0 truncate rounded-sm px-1.5 py-0.5 text-xs font-medium", sTone === "fail" ? "bg-red-bg text-red-primary" : "bg-bg1-hover text-fg3")}>
             {meta.target}
           </span>
         ))}
@@ -234,35 +228,22 @@ export const EventRow = memo(function EventRow({
   return (
     <div className="flex flex-col">
       {hoverPreview ? (
-        <DiffHoverCard trigger={row}>{hoverPreview}</DiffHoverCard>
+        <DiffHoverCard trigger={row} enabled={!open && ctx.attachmentImagesActive !== false}>{hoverPreview}</DiffHoverCard>
       ) : (
         row
       )}
       {expandable && open && (
-        // Expanded detail is LEFT-ALIGNED with the row content — no pl-7 indent
-        // under the label and no permanent left inset — so a thinking/bash/grep
-        // body fills the lane width. The detail's own box
-        // (pre/diff) supplies its bg.
-        <div className="pt-1.5 pr-2 pb-2">
-          {/* 01t (2026-05-20) — failed-tool output gets a very subtle
-              red tint so the user can recognise an error at a glance
-              without the icon being the only signal. Zeros Foundation anti-pattern
-              says no solid red fills — bg-red-primary/5 + a faint ring
-              hit the right tone. The Failed icon (already destructive)
-              still leads. */}
-          <div
-            className={cn(
-              // Tool output renders at fg1 and shiki-highlighted contextually
-              // (event-row-renderer's HighlightedCode: Read by file language,
-              // Bash/Grep/Glob as shell) — so it reads like code. Plain or
-              // unhighlightable output inherits fg1.
-              "text-fg1 text-sm",
-              sTone === "fail" &&
-                "bg-red-primary/5 ring-red-primary/15 rounded-md px-2.5 py-1.5 ring-1",
-            )}
-          >
-            {detail}
-          </div>
+        <div id={detailId} className={cn("min-w-0 pr-2", isThinking ? "py-1" : "pt-1.5 pb-2")}>
+          {isThinking ? (
+            detail
+          ) : (
+            <ToolDetailSurface
+              label={`${meta.label} details`}
+              failed={sTone === "fail"}
+            >
+              {detail}
+            </ToolDetailSurface>
+          )}
         </div>
       )}
     </div>

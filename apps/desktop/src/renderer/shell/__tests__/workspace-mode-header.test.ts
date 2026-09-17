@@ -257,7 +257,7 @@ describe("Code seats its column controls in the chat strip", () => {
   it("keeps the collapsed-workbench control in the strip's trailing slot", () => {
     expect(conversationPaneSource).toContain("<WorkbenchToggleButton");
     expect(conversationPaneSource).toMatch(
-      /stripTrailing=\{\s*workbenchCollapsed && onToggleWorkbench \? \(/,
+      /stripTrailing=\{[\s\S]*?<ConversationSummaryTrigger\s*\/>[\s\S]*?workbenchCollapsed && onToggleWorkbench \? \(/,
     );
     // Ownership stays with the column (the strip is a dumb slot host).
     expect(paneLayoutSource).not.toContain("<WorkbenchToggleButton");

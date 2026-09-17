@@ -9,9 +9,14 @@
 // plan-review composer treatment. This is the latent bug the guard closes.
 
 import { describe, it, expect } from "vitest";
-import { readPlan, hasPlanBody } from "../renderers/plan-body";
+import { readPlan, hasPlanBody, isPlanReviewRequest } from "../renderers/plan-body";
 
 describe("readPlan / hasPlanBody", () => {
+  it("keeps an explicit native approval on the Yes/No card even for ExitPlanMode", () => {
+    const request = { toolCall: { title: "ExitPlanMode", rawInput: { plan: "1. Review changes" } } };
+    expect(isPlanReviewRequest(request)).toBe(true);
+    expect(isPlanReviewRequest({ ...request, requiresExplicitApproval: true })).toBe(false);
+  });
   it("reads a non-empty plan string (Claude ExitPlanMode)", () => {
     expect(readPlan({ plan: "1. do X\n2. do Y" })).toBe("1. do X\n2. do Y");
     expect(hasPlanBody({ plan: "1. do X" })).toBe(true);

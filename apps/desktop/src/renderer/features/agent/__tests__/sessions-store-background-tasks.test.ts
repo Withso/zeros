@@ -24,6 +24,28 @@ const note = (
 });
 
 describe("sessions-store background task snapshots", () => {
+  it("keeps the request clock through waiting, resumption, and empty task sets without changing turn settlement", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", { ...BLANK, agentId: "claude", sessionId: "session-a", status: "ready" });
+    for (const state of ["idle", "running", "idle"] as const) {
+      const notification = note("session-a", state === "running" ? [] : [task("one")], state === "idle");
+      store.applyBridgeUpdate({ ...notification, update: { ...notification.update, activity: { state, startedAt: 50 } } } as SessionNotification);
+      expect(useSessionsStore.getState().sessions["chat-a"]).toMatchObject({
+        status: "ready", backgroundActivity: { state, startedAt: 50 },
+        backgroundTasksWaitingSince: state === "idle" ? 50 : null,
+      });
+    }
+    const previous = useSessionsStore.getState().sessions["chat-a"];
+    store.applyBridgeUpdate({ sessionId: "session-a", update: { sessionUpdate: "background_tasks_update", tasks: [task("one")], waiting: true, activity: { state: "idle", startedAt: 50 } } });
+    expect(useSessionsStore.getState().sessions["chat-a"]).toBe(previous);
+  });
+
+  it("rejects a late snapshot for an old execution even with an authoritative chat id", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", { ...BLANK, agentId: "claude", sessionId: "session-new", executionId: "session-new" });
+    store.applyBridgeUpdate({ ...note("session-old", [task("late")], true), chatId: "chat-a" } as SessionNotification);
+    expect(useSessionsStore.getState().sessions["chat-a"].backgroundTasks).toEqual([]);
+  });
   beforeEach(() => {
     useSessionsStore.getState().clearAll();
   });
@@ -166,6 +188,13 @@ describe("sessions-store background task snapshots", () => {
       backgroundTasks: [],
       waitingForBackgroundTasks: false,
     });
+  });
+
+  it("clears an autonomous parent on exit even after its task set is empty", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-a", { ...BLANK, agentId: "claude", sessionId: "session-a", status: "ready", backgroundActivity: { state: "running", startedAt: 100 } });
+    store.applyBridgeAgentExit("claude", "session-a");
+    expect(useSessionsStore.getState().sessions["chat-a"].backgroundActivity).toBeNull();
   });
 });
 

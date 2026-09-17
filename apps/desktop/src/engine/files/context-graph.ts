@@ -2,8 +2,8 @@
 // context-graph — the workspace's shareable context folder
 // ──────────────────────────────────────────────────────────
 //
-// Every workspace uses `.context/` (scaffolded at worktree creation and lazily
-// on first use). Existing scratch and legacy transcript files coexist with
+// Context writes create `.context/` when needed. Workspace creation and reads
+// leave the repository untouched. Existing scratch and transcript files coexist with
 // the graph's two scopes. `.context-graph/` migrates without overwriting files.
 //
 //   .context/
@@ -30,6 +30,8 @@ import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
+import { createAttachmentTemporaryDirectory } from "./attachment-temporary-directory";
+import { cleanupLegacyAttachmentStaging } from "./attachment-legacy-staging";
 import {
   assertContextDirectory,
   CONTEXT_DIR,
@@ -62,10 +64,9 @@ const GITIGNORE_BODY = [
 
 /** Same id alphabet the composer generates and the attachment IPC enforces. */
 const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
-/** Keep remote/local graph writes on the same image budget as the composer and
- * read-file bridge. The encoded ceiling is checked before Buffer allocation so
- * a hostile relay cannot use an enormous invalid base64 string as a transient
- * memory spike either. */
+/** Legacy single-call base64 ceiling. New 500 MB imports use the chunked
+ * transfer path; never raise this limit to fit a whole file in one frame.
+ * Check the encoded ceiling before allocating a Buffer. */
 export const MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES = 5 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_ATTACHMENT_BASE64_CHARS =
   Math.ceil(MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES / 3) * 4;
@@ -237,6 +238,7 @@ async function scaffoldContextGraph(
     }
     const migration = await migrateLegacyContextDirectory(workspaceRoot);
     created ||= migration;
+    await cleanupLegacyAttachmentStaging(root);
     return { ok: true, created };
   } catch (err) {
     return {
@@ -445,9 +447,24 @@ export interface ContextGraphStageResult {
 
 /** Read and compare through one no-follow handle. A stable inode check keeps a
  * concurrent replacement from being mistaken for the bytes we inspected. */
+type AttachmentContents = Buffer | { file: fs.FileHandle; length: number; verify?: () => Promise<void> };
+
+async function readAttachmentChunk(contents: AttachmentContents, offset: number): Promise<Buffer> {
+  const length = Math.min(1024 * 1024, contents.length - offset);
+  if (Buffer.isBuffer(contents)) return contents.subarray(offset, offset + length);
+  const bytes = Buffer.allocUnsafe(length);
+  let received = 0;
+  while (received < length) {
+    const read = await contents.file.read(bytes, received, length - received, offset + received);
+    if (read.bytesRead === 0) throw new Error("incomplete attachment upload");
+    received += read.bytesRead;
+  }
+  return bytes;
+}
+
 async function existingFileMatches(
   filePath: string,
-  expected: Buffer,
+  expected: AttachmentContents,
 ): Promise<boolean> {
   let handle: fs.FileHandle | null = null;
   try {
@@ -458,8 +475,13 @@ async function existingFileMatches(
     const openedStat = await handle.stat();
     if (!openedStat.isFile() || openedStat.size !== expected.length)
       return false;
-    const actual = await handle.readFile();
-    if (!actual.equals(expected)) return false;
+    for (let offset = 0; offset < expected.length;) {
+      const chunk = await readAttachmentChunk(expected, offset);
+      const actual = Buffer.allocUnsafe(chunk.length);
+      const read = await handle.read(actual, 0, actual.length, offset);
+      if (read.bytesRead !== actual.length || !actual.equals(chunk)) return false;
+      offset += chunk.length;
+    }
     const currentStat = await fs.lstat(filePath).catch(() => null);
     return (
       currentStat?.isFile() === true &&
@@ -473,15 +495,17 @@ async function existingFileMatches(
   }
 }
 
-/** Write beside the destination and rename into place. Rename replaces a
+/** Stage outside the public graph scopes and rename into place. Rename replaces a
  * symlink entry itself instead of following it, eliminating the lstat/write
  * race at the predictable attachment filename. */
 async function atomicWriteAttachment(
   filePath: string,
-  contents: Buffer,
+  contents: AttachmentContents,
+  workspaceRoot: string,
 ): Promise<void> {
+  const temporary = await createAttachmentTemporaryDirectory(workspaceRoot);
   const temporaryPath = path.join(
-    path.dirname(filePath),
+    temporary.path,
     `.${path.basename(filePath)}.${randomUUID()}.staging`,
   );
   let handle: fs.FileHandle | null = null;
@@ -494,9 +518,14 @@ async function atomicWriteAttachment(
         fsConstants.O_NOFOLLOW,
       0o600,
     );
-    await handle.writeFile(contents);
+    for (let offset = 0; offset < contents.length;) {
+      const chunk = await readAttachmentChunk(contents, offset);
+      await handle.writeFile(chunk);
+      offset += chunk.length;
+    }
     await handle.close();
     handle = null;
+    if (!Buffer.isBuffer(contents)) await contents.verify?.();
     try {
       await fs.rename(temporaryPath, filePath);
     } catch (err) {
@@ -517,30 +546,15 @@ async function atomicWriteAttachment(
     }
   } finally {
     await handle?.close().catch(() => {});
-    await fs.rm(temporaryPath, { force: true }).catch(() => {});
+    await temporary.dispose().catch(() => {});
   }
 }
 
 /** Strip directory parts, replace shell-hostile characters, cap the length.
  *  The one filename sanitiser for attachment writes — the IPC used to own a
  *  copy; it lives here so every writer and every test agree on the layout. */
-export function safeAttachmentFilename(raw: string): string {
-  const base = path.basename(raw);
-  const cleaned = base.replace(/[^a-zA-Z0-9._-]+/g, "_");
-  const extension = path.extname(cleaned);
-  const capped =
-    cleaned.length <= 80
-      ? cleaned
-      : extension.length > 0 && extension.length < 80
-        ? `${cleaned.slice(0, 80 - extension.length)}${extension}`
-        : cleaned.slice(0, 80);
-  // basename("..") === ".." and a fully-hostile name can clean to "" — both
-  // would corrupt the one-folder-one-file layout. Park such names on a
-  // constant instead of failing the write.
-  return capped === "" || capped === "." || capped === ".."
-    ? "attachment"
-    : capped;
-}
+import { safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
+export { safeAttachmentFilename } from "@zeros/protocol/attachment-policy";
 
 /** Write one attachment's bytes into the graph — the composer's attach-time
  *  staging AND the send path's safety net, so it must be idempotent and
@@ -575,6 +589,29 @@ export async function stageContextGraphAttachment(
       error: "attachment exceeds the 5 MiB size limit",
     };
   }
+  return stageAttachmentContents(workspaceRoot, args, buf);
+}
+
+/** Internal, engine-owned upload handle. Never accepts a renderer-supplied
+ * source path. Chunks and completed copies stay bounded in memory. */
+export async function stageContextGraphAttachmentFile(
+  workspaceRoot: string,
+  args: { attachmentId: string; filename: string; file: fs.FileHandle; size: number; verify?: () => Promise<void> },
+): Promise<ContextGraphStageResult> {
+  const { MAX_ATTACHMENT_BYTES } = await import("@zeros/protocol/attachment-policy");
+  if (!ID_OK.test(args.attachmentId) || !Number.isSafeInteger(args.size) || args.size < 0 || args.size > MAX_ATTACHMENT_BYTES) {
+    return { ok: false, error: "invalid attachment id or size" };
+  }
+  const stat = await args.file.stat();
+  if (!stat.isFile() || stat.size !== args.size) return { ok: false, error: "incomplete attachment upload" };
+  return stageAttachmentContents(workspaceRoot, args, { file: args.file, length: args.size, verify: args.verify });
+}
+
+async function stageAttachmentContents(
+  workspaceRoot: string,
+  args: { attachmentId: string; filename: string },
+  buf: AttachmentContents,
+): Promise<ContextGraphStageResult> {
   try {
     const scaffold = await ensureContextGraph(workspaceRoot);
     if (!scaffold.ok) {
@@ -626,9 +663,10 @@ export async function stageContextGraphAttachment(
       bytes: buf.length,
     };
     if (await existingFileMatches(finalPath, buf)) {
+      if (!Buffer.isBuffer(buf)) await buf.verify?.();
       return { ...result, skipped: true };
     }
-    await atomicWriteAttachment(finalPath, buf);
+    await atomicWriteAttachment(finalPath, buf, workspaceRoot);
     // A share toggle can move this id between the scope pin above and the
     // write — the rename lands in the OTHER scope and the write re-creates
     // the folder the move just emptied, the divergent two-scope state the

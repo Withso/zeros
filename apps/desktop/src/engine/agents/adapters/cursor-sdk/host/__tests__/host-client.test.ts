@@ -121,6 +121,23 @@ describe("toHostError", () => {
 });
 
 describe("CursorHostClient proxy", () => {
+  it("binds operations to the native handle even when resume reuses agentId", async () => {
+    const { client, fake } = makeClient();
+    const creating = client.module().Agent.create({});
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "same", handleId: "old" } });
+    const old = await creating;
+    const resuming = client.module().Agent.resume("same", {});
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "same", handleId: "new" } });
+    const fresh = await resuming;
+    old.close?.();
+    expect(fake.lastReq().args).toEqual({ agentId: "same", handleId: "old" });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: null });
+    const sending = fresh.send("next");
+    expect(fake.lastReq().args).toMatchObject({ agentId: "same", handleId: "new" });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { sdkRunId: "run-new" } });
+    await sending;
+    client.dispose();
+  });
   it("registers one exit callback per host generation", () => {
     const transport = {
       send: vi.fn(),
@@ -230,6 +247,44 @@ describe("CursorHostClient proxy", () => {
     expect((waitReq.args as { runId: string }).runId).toBe(runId);
     fake.emit({ k: "res", id: waitReq.id, ok: true, result: { status: "completed" } });
     expect(await pWait).toEqual({ status: "completed" });
+  });
+
+  it.each(["complete_delivered", "revert_to_followup"])("steering waits for %s without a control timeout", async (outcome) => {
+    vi.useFakeTimers();
+    const { client, fake } = makeClient();
+    try {
+      const create = client.module().Agent.create({});
+      fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "a1" } });
+      const agent = await create;
+      const send = agent.send({ text: "A" }, {});
+      const runId = (fake.lastReq().args as { runId: string }).runId;
+      fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { sdkRunId: "native" } });
+      const run = await send;
+      const settled = vi.fn();
+      const steer = run.steer!("C\nRead .context/local/attachments/report.md").then(settled);
+      const request = fake.lastReq();
+      expect(request).toMatchObject({ op: "run.steer", args: { runId, text: "C\nRead .context/local/attachments/report.md" } });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(settled).not.toHaveBeenCalled();
+      fake.emit({ k: "res", id: request.id, ok: true, result: outcome });
+      await steer;
+      expect(settled).toHaveBeenCalledExactlyOnceWith(outcome);
+    } finally { client.dispose(); vi.useRealTimers(); }
+  });
+
+  it("rejects a pending steering request when its host dies", async () => {
+    const { client, fake } = makeClient();
+    const create = client.module().Agent.create({});
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "a1" } });
+    const agent = await create;
+    const send = agent.send({ text: "A" }, {});
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { sdkRunId: "native" } });
+    const run = await send;
+    const steering = run.steer!("C");
+    const rejected = expect(steering).rejects.toThrow();
+    fake.die();
+    await rejected;
+    client.dispose();
   });
 
   it("marshals onDelta/onStep in stream order and keeps functions off the wire", async () => {

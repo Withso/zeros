@@ -7,6 +7,7 @@
 
 // --- IMPORTS ---
 
+import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
 import React, {
   useCallback,
   useEffect,
@@ -41,7 +42,7 @@ import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-
 import { useAgentSessions } from "../features/agent/sessions-hooks";
 import {
   useAnyChatAwaitingKind,
-  useAnyChatAgentWorking,
+  useAnyChatAgentActivity,
 } from "../features/agent/sessions-store";
 import {
   isLocalMainWorkspace,
@@ -83,7 +84,7 @@ import {
 } from "../state/use-projects";
 import {
   dedupePendingCreates,
-  selectLiveVisible,
+  useLiveVisible,
 } from "../state/live-workspace-selectors";
 import {
   prefetchSettingsForRepo,
@@ -126,6 +127,11 @@ import { filterRowsForOrganization } from "../features/team/organization-capabil
 import { toast } from "../shared/ui/primitives/elements";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { RepositoryIcon } from "../features/repositories/repository-icon";
+import { ComposerDraftIndicator } from "../features/agent/composer-draft-indicator";
+import {
+  draftChatIdsByWorkspace,
+  useAnyChatHasDraft,
+} from "../state/composer-draft-presence";
 import { WorkspaceContextMenu } from "../shared/ui/workspace-context-menu";
 import { formatCompactAge } from "../features/agent/format-age";
 import { RunWave, ZerosSpinner } from "../shared/ui/loading";
@@ -329,12 +335,13 @@ const GROUPED_STICKY_LEAD_CLS =
 // above still shapes hover and focus like every other top-bar control.
 const GROUPED_PINNED_LEAD_MASK_CLS =
   "pointer-events-none absolute inset-y-0 left-0 -right-1 -z-20 hidden bg-sidebar-bg group-data-[workspace-pin-lead]/lane:block";
-// `flex-auto`, never `flex-1`: flex-1 pins the basis at 0, which would erase
-// this button's contents from the tab's intrinsic width and collapse every tab
-// onto the 120px floor. `w-auto` undoes the Button base's `w-fit` for the same
-// reason. Keep this free of any `font-*` — the weight is inherited.
+// The open target covers the pill; its visible contents and archive action are
+// siblings so Archive can replace a pencil beside the name without nesting
+// buttons. The content keeps an auto basis so tabs still size to their labels.
 const WORKSPACE_OPEN_BUTTON_CLS =
-  "h-full w-auto min-w-0 flex-auto justify-start gap-2.5 border-0 bg-transparent p-0 text-left text-xs text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit [&_svg]:size-3.5";
+  "absolute inset-0 size-full border-0 bg-transparent p-0 text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit";
+const WORKSPACE_TAB_CONTENT_CLS =
+  "pointer-events-none relative inline-flex h-full w-auto min-w-0 flex-auto items-center justify-start gap-2.5 whitespace-nowrap text-left text-xs leading-4.5 text-inherit [&_svg]:shrink-0 [&_svg:not([data-draft-icon])]:size-3.5";
 // Hover and selection share the same opaque pill fill, so one gradient serves
 // both archive-overlay states without a hard band behind the icon.
 // `rounded-r-md` matters only in Grouped mode and is not cosmetic there: this
@@ -346,6 +353,8 @@ const WORKSPACE_OPEN_BUTTON_CLS =
 // it stays unconditional instead of branching on the filter.
 const WORKSPACE_ACTION_OVERLAY_CLS =
   "pointer-events-none absolute inset-y-0 right-0 z-20 flex w-10 items-center justify-end rounded-r-md bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1 opacity-0 transition-none group-data-[hovered=true]/workspace:opacity-100 focus-within:opacity-100";
+const WORKSPACE_DRAFT_ACTION_OVERLAY_CLS =
+  "pointer-events-none absolute -inset-1 flex items-center justify-center rounded-sm bg-sidebar-bg-hover opacity-0 transition-none group-data-[hovered=true]/workspace:opacity-100 focus-within:opacity-100";
 const WORKSPACE_ACTION_CLS =
   "pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1";
 // A mixed lane hands its leading glyph to the repository icon, so whatever the
@@ -598,6 +607,8 @@ interface WorkspaceTabProps {
   active: boolean;
   /** Live coding-chat ids in this worktree, used for agent activity state. */
   chatIds: readonly string[];
+  /** Includes closed chats whose unsent drafts are still recoverable. */
+  draftChatIds?: readonly string[];
   /** Owner icon painted when repositories share one mixed lane. */
   project: Project | null;
   /** Moves agent state to a zero-layout trailing overlay in mixed lanes. */
@@ -616,6 +627,7 @@ interface WorkspaceTabProps {
   tabRef?: (node: HTMLDivElement | null) => void;
 }
 
+const EMPTY_WORKSPACE_CHAT_IDS: readonly string[] = Object.freeze([]);
 
 type TopBarNavItem =
   | {
@@ -708,7 +720,7 @@ function WorkspaceProjectIcon({ project }: { project: Project }) {
             positionMenuBelowTrigger(event);
           }}
         >
-          <span className="inline-flex size-4 shrink-0 items-center justify-center">
+          <span className="pointer-events-auto inline-flex size-4 shrink-0 items-center justify-center">
             <RepositoryIcon project={project} className="size-4 rounded-sm" />
           </span>
         </ContextMenuTrigger>
@@ -742,10 +754,11 @@ function WorkspaceProjectIcon({ project }: { project: Project }) {
   );
 }
 
-function WorkspaceTab({
+export function WorkspaceTab({
   workspace,
   active,
   chatIds,
+  draftChatIds = chatIds,
   project,
   mixedRepositories,
   groupedRepository,
@@ -759,12 +772,15 @@ function WorkspaceTab({
   const modeSwitching = requestedMode !== null;
   const designWorkspace = workspace.kind === "design";
   const agentChatIds = chatIds;
-  const working = useAnyChatAgentWorking(agentChatIds);
+  const activity = useAnyChatAgentActivity(agentChatIds);
+  const working = activity !== null;
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
   const changeLines = useWorkspaceChangeLines(workspace);
   const label = workspaceLabel(workspace);
+  const hasDraft = useAnyChatHasDraft(draftChatIds);
+  const showDraft = hasDraft && !active;
   const archiving = useWorkspaceArchiving(workspace.id);
   const trailingAgentState =
     mixedRepositories &&
@@ -774,6 +790,30 @@ function WorkspaceTab({
   const trailingDesignMark =
     mixedRepositories && !!project && !archiving && !working && awaitingKind === null && designWorkspace;
   const trailingTabState = trailingAgentState || trailingDesignMark;
+  const archiveAction = !archiving && !modeSwitching && (
+    <span
+      className={
+        showDraft
+          ? WORKSPACE_DRAFT_ACTION_OVERLAY_CLS
+          : WORKSPACE_ACTION_OVERLAY_CLS
+      }
+    >
+      <Tooltip label="Archive workspace" side="bottom">
+        <button
+          type="button"
+          className={WORKSPACE_ACTION_CLS}
+          aria-label={`Archive workspace ${label}`}
+          onClick={(event) => {
+            event.stopPropagation();
+            onArchive(workspace);
+          }}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          <Archive className="size-3.5" strokeWidth={1.25} />
+        </button>
+      </Tooltip>
+    </span>
+  );
 
   const tab = (
     <div
@@ -788,9 +828,15 @@ function WorkspaceTab({
       )}
       data-active={active}
       data-workspace-tab="true"
+      data-workspace-id={workspace.id}
       data-top-bar-flow-item="true"
       data-streaming={working || undefined}
       aria-busy={archiving || modeSwitching || undefined}
+      onPointerEnter={() => onPrefetch(workspace)}
+      onFocus={() => onPrefetch(workspace)}
+      onClick={() => {
+        if (!archiving) onSelect(workspace);
+      }}
     >
       {groupedRepository && active && (
         <span
@@ -805,23 +851,27 @@ function WorkspaceTab({
         type="button"
         variant="ghost"
         size="default"
-        className={cn(
-          WORKSPACE_OPEN_BUTTON_CLS,
-          // Make room by borrowing from the elastic label, then cancel that
-          // padding's outer contribution. The tab's measured width therefore
-          // stays identical when the trailing state appears or disappears.
-          trailingTabState && "-mr-5 pr-5",
-        )}
+        className={WORKSPACE_OPEN_BUTTON_CLS}
         aria-current={active ? "page" : undefined}
         aria-label={workspaceTabDescription({
           label,
           runActionRunning,
           changeLines,
+          hasDraft,
         })}
         disabled={archiving}
-        onPointerEnter={() => onPrefetch(workspace)}
-        onFocus={() => onPrefetch(workspace)}
-        onClick={() => onSelect(workspace)}
+      />
+      <span
+        className={cn(
+          WORKSPACE_TAB_CONTENT_CLS,
+          // Borrow from the elastic name and cancel the padding's outer
+          // contribution to preserve intrinsic width as agent state changes.
+          trailingTabState && "-mr-5 pr-5",
+          // The status overlay may fade a long name, but must not cover the
+          // draft/action slot. Reserve its 20px target only when both exist.
+          showDraft && trailingTabState && "pr-10",
+          archiving && "opacity-50",
+        )}
       >
         {mixedRepositories && project && !archiving ? (
           <WorkspaceProjectIcon project={project} />
@@ -842,7 +892,7 @@ function WorkspaceTab({
                 strokeWidth={1.25}
               />
             ) : working ? (
-              <ZerosSpinner size={16} variant="agent" label="Agent working" />
+              <AgentActivityIndicator activity={activity} />
             ) : (
               (prTabIcon(workspace, islandKind) ?? (
                 <GitBranch className="size-3.5" strokeWidth={1.25} />
@@ -850,11 +900,18 @@ function WorkspaceTab({
             )}
           </span>
         )}
-        {/* The ONLY elastic child. Everything after it is shrink-0, so the tab's
-            180px cap is spent truncating the branch name and never the numbers
-            or the wave. `flex-auto` (basis auto) is what lets the name's real
-            width reach the tab's intrinsic size — see WORKSPACE_OPEN_BUTTON_CLS. */}
-        <span className="min-w-0 flex-auto truncate text-left">{label}</span>
+        {/* The name group absorbs the cap; only its text truncates. The draft
+            pencil stays beside the name, ahead of the counts, at its full size.
+            `flex-auto` preserves the group's intrinsic width. */}
+        <span className="inline-flex min-w-0 flex-auto items-center gap-2 text-left">
+          <span className="min-w-0 truncate">{label}</span>
+          {showDraft && (
+            <span className="relative inline-flex size-3 shrink-0 items-center justify-center">
+              <ComposerDraftIndicator />
+              {archiveAction}
+            </span>
+          )}
+        </span>
         {/* Both indicators, counts then wave, so a running workspace still
             reports what it changed. Each is independently optional and the tab
             is content-sized, so it only pays for the ones actually present.
@@ -866,7 +923,7 @@ function WorkspaceTab({
         {runActionRunning && (
           <RunWave size={12} className="text-blue-primary" />
         )}
-      </Button>
+      </span>
       {trailingTabState && (
         <span className={WORKSPACE_TRAILING_STATE_CLS} aria-hidden="true">
           {trailingDesignMark ? (
@@ -879,28 +936,11 @@ function WorkspaceTab({
               strokeWidth={1.25}
             />
           ) : (
-            <ZerosSpinner size={16} variant="agent" label="Agent working" />
+            <AgentActivityIndicator activity={activity} />
           )}
         </span>
       )}
-      {!archiving && !modeSwitching && (
-        <div className={WORKSPACE_ACTION_OVERLAY_CLS}>
-          <Tooltip label="Archive workspace" side="bottom">
-            <button
-              type="button"
-              className={WORKSPACE_ACTION_CLS}
-              aria-label={`Archive workspace ${label}`}
-              onClick={(event) => {
-                event.stopPropagation();
-                onArchive(workspace);
-              }}
-              onKeyDown={(event) => event.stopPropagation()}
-            >
-              <Archive className="size-3.5" strokeWidth={1.25} />
-            </button>
-          </Tooltip>
-        </div>
-      )}
+      {!showDraft && archiveAction}
     </div>
   );
 
@@ -1427,10 +1467,7 @@ export function TopBar() {
     [activeProject, activeProjectAccessibleWorkspaces],
   );
   const mainWorkspace = activeProjectDestinations[0] ?? null;
-  const realWorkspaces = useMemo(
-    () => selectLiveVisible(accessibleWorkspaces),
-    [accessibleWorkspaces],
-  );
+  const realWorkspaces = useLiveVisible(accessibleWorkspaces);
   useWorkspaceRunActivitySync(realWorkspaces);
 
   // File indexes are the most visible cold-workspace waterfall. Warm a bounded
@@ -1457,8 +1494,8 @@ export function TopBar() {
     [activeOrganization, rawPendingCreates],
   );
   const dedupedPendingCreates = useMemo(
-    () => dedupePendingCreates(allPendingCreates, realWorkspaces),
-    [allPendingCreates, realWorkspaces],
+    () => dedupePendingCreates(allPendingCreates, accessibleWorkspaces),
+    [allPendingCreates, accessibleWorkspaces],
   );
 
   const chatIdsByWorkspace = useMemo(() => {
@@ -1472,6 +1509,10 @@ export function TopBar() {
     }
     return ids;
   }, [chats, realWorkspaces]);
+  const draftIdsByWorkspace = useMemo(
+    () => draftChatIdsByWorkspace(chats, realWorkspaces),
+    [chats, realWorkspaces],
+  );
   const workspaceActivity = useMemo<WorkspaceTabActivity>(() => {
     const activeAtByWorkspaceId = new Map<string, number>();
     for (const [folder, activeAt] of Object.entries(
@@ -2510,6 +2551,10 @@ export function TopBar() {
                           active={active}
                           chatIds={
                             chatIdsByWorkspace.get(item.workspace.id) ?? []
+                          }
+                          draftChatIds={
+                            draftIdsByWorkspace.get(item.workspace.id) ??
+                            EMPTY_WORKSPACE_CHAT_IDS
                           }
                           onSelect={handleSelectWorkspace}
                           onPrefetch={handlePrefetchWorkspace}

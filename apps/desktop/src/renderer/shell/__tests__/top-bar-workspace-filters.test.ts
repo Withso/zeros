@@ -47,7 +47,7 @@ describe("multi-repository top-bar controls", () => {
       /const WORKSPACE_ACTION_OVERLAY_CLS =\s*\n\s*"[^"]*\bz-20\b[^"]*"/,
     );
     expect(source).toContain("isMixedWorkspaceListFilter(workspaceListFilter)");
-    expect(source).toContain("useAnyChatAgentWorking");
+    expect(source).toContain("useAnyChatAgentActivity");
     expect(source).not.toContain("useAnyChatWorking(agentChatIds)");
   });
 

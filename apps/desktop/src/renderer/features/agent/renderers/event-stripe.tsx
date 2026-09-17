@@ -21,7 +21,7 @@
 // Borderless. No card. No shadow. Just rows.
 // ──────────────────────────────────────────────────────────
 
-import { Fragment, memo, useState } from "react";
+import { memo, useState } from "react";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { nativeToolSurface, toolRecord } from "./native-tool-presentation";
 import { safeToolImageSource } from "@zeros/protocol/tool-artwork";
@@ -36,6 +36,7 @@ import { cn } from "@/renderer/shared/ui/cn";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import type { RendererContext } from "./types";
 import { isVisibleTranscriptEvent } from "../turn-partition";
+import { fallbackProse } from "../model-fallback";
 import {
   countEventSummary,
   formatEventSummary,
@@ -43,6 +44,7 @@ import {
   iconForToolKind,
 } from "./tool-summary";
 import { MessageView } from "./message-view";
+import { WORKING_FEED_GAP } from "./event-row";
 import {
   browserActivityTailClosed,
   browserActivityUsesWebsiteIcon,
@@ -75,7 +77,7 @@ interface EventStripeProps {
 // `.zeros-working-feed`):
 // tool-row NAMES and OUTPUT markdown (the top-level answer, and a sub-agent's
 // result/"Output" — a bare `.zeros-agent-md`) read at full `fg1`; only the
-// in-between NARRATION (TextMessage, carrying `[data-role]`) is muted to `fg2`,
+// in-between NARRATION (TextMessage, carrying `[data-role]`) is muted to `fg3`,
 // uniformly down to bold/headings/links. So output reads like our own output
 // markdown at every depth. The working-vs-answer
 // split is also structural: the feed collapses to one summary chip on settle.
@@ -88,7 +90,11 @@ export const EventStripe = memo(function EventStripe({
   browserTailClosed = false,
 }: EventStripeProps) {
   const [userExpanded, setUserExpanded] = useState(false);
-  events = events.filter(isVisibleTranscriptEvent);
+  events = events.filter(isVisibleTranscriptEvent).map((message) =>
+    message.kind === "tool" && message.toolKind === "model_switch"
+      ? fallbackProse(message) ?? message
+      : message,
+  );
 
   // Force the group open while it holds a pending permission, so the gated
   // row (e.g. Claude's "Plan ready for review") is never hidden inside a
@@ -165,20 +171,21 @@ export const EventStripe = memo(function EventStripe({
         </button>
       )}
       {expanded && (
-        // `zeros-working-feed` tags the group so runtime-content.css mutes it to fg2 and
+        // `zeros-working-feed` tags the group so runtime-content.css mutes it to fg3 and
         // flattens narration padding. Each row owns its OWN 4px top/bottom
         // padding (`py-1` on the hover target itself, not an outer wrapper).
         //
-        // A TOP-LEVEL feed adds a 4px gap BETWEEN entries (`gap-y-1`) for
-        // breathing room; a NESTED agent / task body (`alwaysExpanded`) keeps
-        // its many tool calls tight, with no gap. Top-level entries are wrapped
-        // in a plain div so the gap
-        // lands between entries and a row's inline permission cluster keeps
-        // hugging its card; nested rows render directly, unchanged.
+        // Every feed — top-level AND nested agent / task bodies alike — puts
+        // one uniform 8px gap (`gap-y-2`, see WORKING_FEED_GAP) between
+        // entries. Entries are wrapped in a plain div so the gap lands between
+        // entries and a row's inline permission cluster keeps hugging its
+        // card. A renderer that emits several rows for ONE event (a command
+        // reading many files) must repeat WORKING_FEED_GAP inside itself so
+        // its rows keep the same rhythm.
         <div
           className={cn(
             "zeros-working-feed flex flex-col",
-            !alwaysExpanded && "gap-y-1",
+            WORKING_FEED_GAP,
             showHeader && "py-1",
           )}
         >
@@ -194,10 +201,21 @@ export const EventStripe = memo(function EventStripe({
               ) : (
                 <MessageView message={item.event} ctx={ctx} />
               );
-            return alwaysExpanded ? (
-              <Fragment key={item.id}>{content}</Fragment>
-            ) : (
-              <div key={item.id}>{content}</div>
+            return (
+              <div
+                key={item.id}
+                data-live-narration={
+                  live &&
+                  !browserTailClosed &&
+                  item.kind !== "browser-activity" &&
+                  item.event.kind === "text" &&
+                  item.event.id === events.at(-1)?.id
+                    ? true
+                    : undefined
+                }
+              >
+                {content}
+              </div>
             );
           })}
         </div>

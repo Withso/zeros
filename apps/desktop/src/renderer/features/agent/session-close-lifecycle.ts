@@ -34,6 +34,7 @@ interface CloseActivitySlot {
   backgroundTasks: readonly unknown[];
   workflows: readonly unknown[];
   waitingForBackgroundTasks: boolean;
+  backgroundActivity?: { state: string } | null;
 }
 
 /** Fresh close-boundary activity snapshot. `localSendInFlight` covers the
@@ -52,6 +53,8 @@ export function closeActivityForSession(
     running:
       local.localSendInFlight ||
       slot?.status === "streaming" ||
+      slot?.backgroundActivity?.state === "running" ||
+      slot?.backgroundActivity?.state === "requires_action" ||
       slot?.waitingForBackgroundTasks === true ||
       (slot?.backgroundTasks.length ?? 0) > 0 ||
       (slot?.workflows.length ?? 0) > 0,

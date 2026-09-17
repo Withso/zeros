@@ -91,10 +91,7 @@ import {
   pathExists,
 } from "./setup-hooks";
 import { resolveFilesToCopy, resolvePatternSource } from "./files-to-copy";
-import {
-  contextGraphArchivePaths,
-  ensureContextGraph,
-} from "../files/context-graph";
+import { contextGraphArchivePaths } from "../files/context-graph";
 import { resolveRepoScript } from "../settings/repo-scripts";
 import { resolveRepoGit } from "../settings/repo-git";
 import {
@@ -126,6 +123,7 @@ import {
   snapshotWorkingTree,
   restoreWorktreeFromSnapshot,
   deleteArchiveSnapshotRef,
+  type SnapshotTimings,
 } from "./turns-git";
 import { listTurnsForWorkspace } from "../db/turns";
 import type {
@@ -1776,17 +1774,6 @@ async function createWorkspaceInner(
     if (internal?.provision) {
       await internal.provision(provisionContext!);
     }
-    // Every workspace gets a `.context/` skeleton (Context tab canvas +
-    // composer-attachment store). Best-effort and quiet: the scaffold is
-    // self-gitignoring, and a failure here must never roll back the worktree —
-    // the attachment IPC and the Context tab both re-scaffold lazily.
-    const graph = await ensureContextGraph(workspacePath);
-    if (!graph.ok) {
-      console.warn(
-        `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
-      );
-    }
-
     if (kind === "design") {
       // Design-at-birth: the identical checkout opens on the design surface.
       // Resolve WHICH folder is the design folder (the `[design] directory`
@@ -2740,6 +2727,23 @@ async function archiveWorkspaceInner(
   let checkpointMs = 0;
   let hookMs = 0;
   let removalMs = 0;
+  let scanMs = 0;
+  let designRecoveryMs = 0;
+  let contextMs = 0;
+  const snapshotTimings: SnapshotTimings = {
+    seedMs: 0,
+    stageMs: 0,
+    forceAddMs: 0,
+    writeMs: 0,
+    reusedIndex: false,
+  };
+  const recordSnapshotTiming = (value: SnapshotTimings) => {
+    snapshotTimings.seedMs += value.seedMs;
+    snapshotTimings.stageMs += value.stageMs;
+    snapshotTimings.forceAddMs += value.forceAddMs;
+    snapshotTimings.writeMs += value.writeMs;
+    snapshotTimings.reusedIndex ||= value.reusedIndex;
+  };
   let stagedWorktree: PreparedDirectoryEviction | null = null;
   let ws = getWorkspace(opts.workspaceId);
   let journal = getWorkspaceLifecycle(opts.workspaceId);
@@ -2828,6 +2832,7 @@ async function archiveWorkspaceInner(
     // pattern list, which is the overwhelmingly common case (nobody edits
     // `.worktreeinclude` on a feature branch); the comparison is two file
     // reads against one more tree walk.
+    const scanStartedAt = Date.now();
     const patternsDiffer =
       path.resolve(ws.repoRoot) !== path.resolve(ws.path) &&
       JSON.stringify(
@@ -2864,7 +2869,11 @@ async function archiveWorkspaceInner(
           "The workspace is unchanged and still live. Repair the repository's Git metadata, then retry.",
       });
     }
+    scanMs += Date.now() - scanStartedAt;
+    const designStartedAt = Date.now();
     await recoverDesignStorageForArchive(ws.path);
+    designRecoveryMs += Date.now() - designStartedAt;
+    const contextStartedAt = Date.now();
     const archiveIncludePaths = [
       ...new Set([
         ...DESIGN_METADATA_PROTECTED_PATHS,
@@ -2893,12 +2902,14 @@ async function archiveWorkspaceInner(
       ]),
     ];
     backupWorkspaceSettings(ws.id, ws.path);
+    contextMs += Date.now() - contextStartedAt;
     const archiveSnapshot = await snapshotWorkingTree(
       ws.path,
       pendingArchiveSnapshotRef(ws.id),
       {
         ...(archivedHead ? { parent: archivedHead } : {}),
         forceAddPaths: archiveIncludePaths,
+        onTiming: recordSnapshotTiming,
         excludePaths: [
           path.relative(
             personalWorkspaceRoot(ws.path),
@@ -3052,7 +3063,9 @@ async function archiveWorkspaceInner(
         )
       : [];
     if (existsSync(ws.path)) {
+      const designStartedAt = Date.now();
       await recoverDesignStorageForArchive(ws.path);
+      designRecoveryMs += Date.now() - designStartedAt;
       archiveIncludePaths.push(
         ...DESIGN_METADATA_PROTECTED_PATHS,
         ...Object.values(
@@ -3067,6 +3080,7 @@ async function archiveWorkspaceInner(
       {
         ...(finalHead ? { parent: finalHead } : {}),
         forceAddPaths: archiveIncludePaths,
+        onTiming: recordSnapshotTiming,
         excludePaths: [
           path.relative(
             personalWorkspaceRoot(ws.path),
@@ -3137,6 +3151,13 @@ async function archiveWorkspaceInner(
     `[worktree] archived ${ws.id} in ${Date.now() - archiveStartedAt}ms ` +
       `(reap=${reaperMs}ms, checkpoint=${checkpointMs}ms, ` +
       `hook=${hookMs}ms, remove=${removalMs}ms)`,
+  );
+  console.log(
+    `[worktree] archive checkpoint ${ws.id} ` +
+      `(scan=${scanMs}ms, design=${designRecoveryMs}ms, context=${contextMs}ms, ` +
+      `seed=${snapshotTimings.seedMs}ms, stage=${snapshotTimings.stageMs}ms, ` +
+      `force-add=${snapshotTimings.forceAddMs}ms, write=${snapshotTimings.writeMs}ms, ` +
+      `cached-index=${snapshotTimings.reusedIndex})`,
   );
   return {
     archivedAt,

@@ -134,13 +134,37 @@
      popover: bg-bg3, items hover bg-bg3-hover
    ============================================================ */
 
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 @import "tw-animate-css";
 
-/* Explicit renderer source for utilities that appear in dynamically composed
- * class lists. Tailwind also discovers imported modules automatically; this
- * path keeps the intended application boundary visible and testable. */
+/* SOURCES — an explicit allowlist, NOT Tailwind's default.
+ *
+ * `source(none)` above turns OFF automatic source detection. Left on, v4
+ * walks up to the nearest .git and scans the ENTIRE repository for anything
+ * shaped like a class name, then ships what it finds. That was adding 155
+ * rules (~15 KB, 7% of the bundle) that no renderer file asks for:
+ *   - `sm:*` / `lg:*` / `max-w-[1240px]` from apps/marketing — a separate
+ *     app with its own Tailwind entry, whose breakpoints the fixed-size
+ *     Electron window has no use for;
+ *   - `[data-unmodified-lines]:visible` and friends — Playwright LOCATORS
+ *     in scripts/ui-smoke-*.mjs, compiled as though they were utilities;
+ *   - `!contents` / `!relative` — the TypeScript `if (!contents || …)` in
+ *     electron/ipc, read as the `!` important modifier plus a utility;
+ *   - `[electron:rebuild]`, `[updater:debug]` — package.json script names;
+ *   - `bg-white`, `text-gray-500`, `space-y-5`, `mt-3.5` — classes BANNED
+ *     by zeros-foundation.md §14/§8 and enforced by check:ui, present only
+ *     because the docs and the design prototypes under styles/Artifacts
+ *     name them. Prose describing a class compiled that class, so the ban
+ *     was enforced at the call site and quietly undone at build time.
+ * Nothing errors when this happens — the CSS just grows.
+ *
+ * So the app's own sources are listed instead. Keep this list tight: a
+ * directory here is a promise that everything under it is production
+ * markup. Docs, prototypes, tests and scripts never qualify, however many
+ * class names they contain — which is also what makes it safe for the
+ * files above to go on naming classes in prose. */
 @source "../apps/desktop/src/renderer";
+@source "../index.html"; /* boot splash — bespoke zeros-boot-* markup */
 
 /* Geist Variable + Geist Mono Variable — self-hosted offline fonts.
  * Family names "Geist Variable" / "Geist Mono Variable" come from
@@ -189,6 +213,18 @@
   --text-2xxs: 0.6875rem;
   --text-3xxs: 0.75rem;
   --text-xs: 0.8125rem;
+
+  /* ── FONT WEIGHTS — softened from Tailwind's defaults ──
+   * Wired to the --weight-* primitives in :root rather than written as
+   * literals, because `@theme inline` does NOT emit its keys as runtime
+   * custom properties — it substitutes their text into the utility. A
+   * literal here would make `font-medium` correct but leave
+   * `var(--font-weight-medium)` undefined for the hand-written CSS in
+   * styles/global/, which also needs these weights. Going through a
+   * primitive keeps one source of truth for both consumers. */
+  --font-weight-medium: var(--weight-medium);
+  --font-weight-semibold: var(--weight-semibold);
+  --font-weight-bold: var(--weight-bold);
 
   /* ── RADII — fixed 3-step scale ──
    * The whole app uses exactly three corner radii; pick by use case,
@@ -375,6 +411,24 @@
    * The light block flips this to `light`. */
   color-scheme: dark;
 
+  /* ── FONT WEIGHTS — softened one notch from Tailwind's defaults ──
+   * Geist Variable is a true variable font (100-900 axis), so the weight
+   * axis is continuous and these can sit off the usual 100-step grid.
+   * Tailwind ships 500/600/700 for medium/semibold/bold; at the app's
+   * 13-14px chrome sizes those render heavier than the design calls for,
+   * so each step drops a notch and `medium` lands on the half-step:
+   *   --weight-medium     450  (was 500) — titles, focal labels
+   *   --weight-semibold   500  (was 600)
+   *   --weight-bold       600  (was 700)
+   * `font-normal` keeps Tailwind's 400. These are theme-INDEPENDENT —
+   * unlike the colors below they are NOT repeated in the light block.
+   * Consume them as the Tailwind utilities (`font-medium`) from JSX, or
+   * as `var(--weight-medium)` from the hand-written CSS in styles/global/;
+   * never as a bare number, which silently opts out of the scale. */
+  --weight-medium: 450;
+  --weight-semibold: 500;
+  --weight-bold: 600;
+
   /* ── BACKGROUNDS ── */
   --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
   --bg1: hsl(
@@ -414,7 +468,7 @@
    * re-derives the SAME relative position in its own band rather than
    * copying this lightness — in Light a higher L means LESS contrast, so
    * copying `60` there would invert the tier order. */
-  --fg3: hsl(0 0% 60%); /* #999999 — middle tier (one step below fg2) */
+  --fg3: hsl(0 0% 63%); /* #A1A1A1 — middle tier (one step below fg2) */
   --muted-fg: hsl(0 0% 44%); /* #707070 — quietest tier (app-wide 3rd tier) */
 
   /* ── REPOSITORY NAVIGATION (not the settings sidebar) ── */
@@ -487,7 +541,7 @@
                                         * fills. THEME-STATIC (white in both themes —
                                         * the red fill stays vivid in light, so fg1,
                                         * which flips dark, can't sit on it). */
-  --red-bg: hsl(13 81% 14%); /* #421407 — error container surface */
+  --red-bg: hsl(3 26% 13.7%); /* #2C1B1A — error container surface */
   --red-fg: hsl(20 97% 72%); /* #FDA274 — text/icon on --red-bg */
 
   --green-primary: hsl(142 69% 58%); /* #4ADE80 — +N counts, success accents */
@@ -521,7 +575,9 @@
    * The ramps are LITERALS, deliberately NOT aliased to the anchors: the
    * anchors re-theme per [data-theme] while a 50→950 scale must keep its
    * light→dark direction in every theme. (In the dark theme the anchors happen
-   * to coincide: 500 ≈ primary, 900 ≈ bg, red 700 ≈ secondary.) */
+   * to coincide: 500 ≈ primary, 900 ≈ bg, red 700 ≈ secondary — except red,
+   * whose --red-bg was retuned to a desaturated brown-red while --red-900
+   * keeps its place in the 50→950 scale. Do NOT resync them.) */
   --red-50: hsl(0 85% 97%);
   --red-100: hsl(0 85% 93%);
   --red-200: hsl(0 85% 86%);

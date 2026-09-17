@@ -220,7 +220,7 @@ describe("worktree lifecycle (integration)", () => {
     // because
     // seeing the real app is the point of designing in-repo.
     expect(existsSync(path.join(workspace.path, "src", "code.ts"))).toBe(true);
-    expect(existsSync(path.join(workspace.path, ".context"))).toBe(true);
+    expect(existsSync(path.join(workspace.path, ".context"))).toBe(false);
     expect(existsSync(path.join(workspace.path, "README.md"))).toBe(true);
     // Files-to-copy seeded the gitignored .env like any code create.
     expect(existsSync(path.join(workspace.path, ".env"))).toBe(true);
@@ -3320,8 +3320,10 @@ printf ran > '${sentinel}'
     expect(after).toBe("");
   });
 
-  it("scaffolds the context graph at create without dirtying git status", async () => {
+  it("leaves context storage absent until the first explicit write", async () => {
     const created = await createWorkspace({ repoRoot });
+    expect(existsSync(path.join(created.path, ".context"))).toBe(false);
+    await ensureContextGraph(created.path);
     const ignore = await readFile(
       path.join(created.path, ".context", ".gitignore"),
       "utf8",
@@ -3348,10 +3350,23 @@ printf ran > '${sentinel}'
     expect(stdout.trim()).toBe("");
   });
 
+  it("preserves existing context contents without adding generated folders during workspace creation", async () => {
+    await mkdir(path.join(repoRoot, ".context"));
+    await writeFile(path.join(repoRoot, ".context", "notes.txt"), "user-owned context\n");
+    await execFileAsync("git", ["-C", repoRoot, "add", ".context/notes.txt"]);
+    await execFileAsync("git", ["-C", repoRoot, "commit", "-m", "add context notes"]);
+    await execFileAsync("git", ["-C", repoRoot, "push", "-q", "origin", "main"]);
+    const created = await createWorkspace({ repoRoot });
+    expect(await fs.readdir(path.join(created.path, ".context"))).toEqual(["notes.txt"]);
+    expect(await readFile(path.join(created.path, ".context", "notes.txt"), "utf8")).toBe("user-owned context\n");
+  });
+
   it.each([".context", ".context-graph"])(
     "round-trips private %s attachments without archiving unrelated scratch",
     async (directory) => {
       const created = await createWorkspace({ repoRoot });
+      // A real attachment write prepares its private storage on demand.
+      await ensureContextGraph(created.path);
       // A composer attachment staged into the PRIVATE (gitignored) scope — the
       // exact material `git add -A` alone would drop from the snapshot.
       const attachmentDir = path.join(

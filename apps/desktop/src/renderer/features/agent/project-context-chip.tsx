@@ -120,7 +120,7 @@ export function ProjectContextChip({ agentId, cwd }: Props) {
       <PopoverContent
         align="end"
         sideOffset={6}
-        className="max-h-[60vh] w-[360px] max-w-[calc(100vw-32px)] overflow-auto p-0 py-1 text-xs"
+        className="max-h-[min(60vh,var(--radix-popover-content-available-height))] w-[360px] max-w-[min(calc(100vw-32px),var(--radix-popover-content-available-width))] overflow-auto p-0 py-1 text-xs"
       >
         <div className="border-border1 text-fg2 mb-1 border-b px-2.5 pt-1.5 pb-1 text-xs">
           Files {agentId} loads at this cwd

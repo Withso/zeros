@@ -10,6 +10,14 @@ import { fileRefPath } from "../markdown-file-path";
 // become clickable "open in workbench" references — and is the safety boundary:
 // absolute paths, drive letters and `..` traversal must never resolve.
 describe("fileRefPath", () => {
+  it("opens generated artifacts, including encoded spaces, without accepting traversal or URLs", () => {
+    expect(fileRefPath(".context/local/artifacts/report/overview.png")).toBe(".context/local/artifacts/report/overview.png");
+    expect(fileRefPath(".context/local/artifacts/Project%20report.pdf")).toBe(".context/local/artifacts/Project report.pdf");
+    expect(fileRefPath("file:///workspace/Generated%20image.webp")).toBe("/workspace/Generated image.webp");
+    for (const value of [".context/%2e%2e/secret.png", "file://other-host/report.png", "https://example.com/image.png", "data:image/png;base64,AA==", "a%00.png"]) {
+      expect(fileRefPath(value)).toBeNull();
+    }
+  });
   it("accepts workspace-relative file paths", () => {
     for (const p of [
       "src/styles/variables.css",

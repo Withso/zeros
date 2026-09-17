@@ -12,6 +12,12 @@ import {
 } from "../index";
 
 describe("buildWorkspacePreamble", () => {
+  it("gives code agents shared, private artifact and scratch conventions", () => {
+    const out = buildWorkspacePreamble({ workspaceDir: "/ws" });
+    expect(out).toContain(".context/local/artifacts/");
+    expect(out).toContain(".context/local/scratch/");
+    expect(out).toContain("workspace-relative Markdown links");
+  });
   it("fills workspace dir + target branch", () => {
     const out = buildWorkspacePreamble({
       workspaceDir: "/ws/foo",

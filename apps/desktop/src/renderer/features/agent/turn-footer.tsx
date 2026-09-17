@@ -1,3 +1,4 @@
+import { TurnUsageCard } from "./turn-usage-card";
 // ──────────────────────────────────────────────────────────
 // TurnFooter — the footer below a settled turn's answer
 // ──────────────────────────────────────────────────────────
@@ -19,7 +20,6 @@ import { memo, useCallback, useMemo, useRef, useState } from "react";
 import {
   Copy,
   Check,
-  CircleDollarSign,
   GitFork,
   MoreHorizontal,
   Play,
@@ -39,9 +39,6 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -51,7 +48,6 @@ import {
   turnReset,
   turnUndoReset,
   type TurnInfo,
-  type TurnUsageInfo,
 } from "@/renderer/platform/turns";
 import {
   invalidateTurnRows,
@@ -60,12 +56,11 @@ import {
 } from "@/renderer/state/read-caches";
 import { useCachedRead } from "@/renderer/state/use-cached-read";
 import { FileTypeIcon } from "./composer-editor/file-type-icon";
-import { formatElapsed } from "@/renderer/shared/ui/loading";
 import { partitionTurn } from "./turn-partition";
+import { TurnFailureCard } from "./turn-failure-card";
+import { turnFailureForCard } from "./turn-failure";
 import { useSessionsStore } from "./sessions-store";
 import { useAgentSessions } from "./sessions-hooks";
-import { formatTokens } from "./context-gauge";
-import { displayNameForModelValue } from "./model-catalog";
 import type { AgentFailure } from "../../platform/bridge/failure";
 import type { AgentMessage } from "./use-agent-session";
 import {
@@ -80,8 +75,8 @@ import {
 
 const PILL_PAGE = 10;
 
-/** A settled turn row is effectively immutable — one write at finishTurn, then
- *  only reset/undo, which invalidate the key explicitly. This window exists to
+/** Turn completion, reset/undo and late usage invalidate the exact key.
+ *  This freshness window exists to
  *  catch out-of-band edits (another device, retention nulling an old snapshot
  *  oid) without making the common case pay for them. */
 const TURN_ROW_MAX_AGE_MS = 30_000;
@@ -124,6 +119,10 @@ export function turnFooterFailureLabel(
       return "AGENT STOPPED - DESIGN PROTECTION FAILED";
     case "auth-required":
       return "SIGN IN REQUIRED";
+    case "verification-required":
+      return "VERIFICATION REQUIRED";
+    case "cloud-credentials-unavailable":
+      return "CLOUD CREDENTIALS UNAVAILABLE";
     case "subprocess-exited":
       return "AGENT EXITED";
     case "session-expired":
@@ -205,44 +204,6 @@ function baseName(p: string): string {
   return i >= 0 ? p.slice(i + 1) : p;
 }
 
-// ── Per-turn usage helpers ────────────────────────────────
-
-/** True when the recorded turn carries anything worth itemizing — the
- *  circle-dollar button renders only then (Cursor reports no usage, so the
- *  button simply never appears there, same rule as the context gauge). */
-function hasTurnUsage(usage: TurnUsageInfo | null | undefined): boolean {
-  if (!usage) return false;
-  return (
-    (usage.totalCostUsd ?? 0) > 0 ||
-    (usage.inputTokens ?? 0) > 0 ||
-    (usage.outputTokens ?? 0) > 0 ||
-    (usage.perModel?.length ?? 0) > 0
-  );
-}
-
-function formatUsd(v: number): string {
-  return v >= 100 ? `$${v.toFixed(0)}` : `$${v.toFixed(2)}`;
-}
-
-/** One popover row's numbers: prompt-side total (incl. cache), output, cost. */
-function usageLineParts(u: {
-  inputTokens?: number;
-  outputTokens?: number;
-  cacheReadTokens?: number;
-  cacheWriteTokens?: number;
-  costUsd?: number;
-}): string {
-  const promptIn =
-    (u.inputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0);
-  const parts = [
-    `${formatTokens(promptIn)} in`,
-    `${formatTokens(u.outputTokens ?? 0)} out`,
-  ];
-  if (typeof u.costUsd === "number" && u.costUsd > 0)
-    parts.push(formatUsd(u.costUsd));
-  return parts.join(" · ");
-}
-
 function lastEventTime(events: AgentMessage[]): number {
   let t = 0;
   for (const e of events) {
@@ -251,6 +212,23 @@ function lastEventTime(events: AgentMessage[]): number {
     t = Math.max(t, c, u);
   }
   return t;
+}
+
+/** Parent continuation output can outlive the engine's first settled send.
+ * Ignore child and tool bookkeeping when extending that recorded duration. */
+export function turnFooterDuration(
+  turn: { startedAt: number; endedAt?: number | null } | null | undefined,
+  events: AgentMessage[],
+  startedAt: number,
+): number {
+  const parentOutput = events.filter(
+    (e) => e.kind === "text" && e.role === "agent" && !e.parentToolId,
+  );
+  const end = Math.max(
+    turn?.endedAt ?? 0,
+    lastEventTime(turn?.endedAt != null ? parentOutput : events),
+  );
+  return Math.max(0, end - (turn?.startedAt ?? startedAt));
 }
 
 const ICON_BTN =
@@ -358,6 +336,7 @@ export const TurnFilePill = memo(function TurnFilePill({
 });
 
 interface TurnFooterProps {
+  surfaceActive?: boolean;
   chatId: string;
   /** Opening user-message id = the turn id. */
   turnId: string;
@@ -371,6 +350,11 @@ interface TurnFooterProps {
   fallbackStopReason?: string | null;
   /** Active-turn terminal status before the persisted turn row is fetched. */
   fallbackStatusLabel?: string | null;
+  failure?: AgentFailure | null;
+  recoveryFailure?: { kind: string; message: string };
+  onRetry?: () => Promise<void>;
+  onRetryNewChat?: () => Promise<void>;
+  onRetryNewChatIntent?: () => void;
   /** True while an auto-rebuild is re-running this chat's last turn — hides
    *  the "AGENT STOPPED" pill for a failed row that's about to be retried. */
   retrying?: boolean;
@@ -388,6 +372,7 @@ interface TurnFooterProps {
 }
 
 export const TurnFooter = memo(function TurnFooter({
+  surfaceActive = true,
   chatId,
   turnId,
   events,
@@ -395,6 +380,11 @@ export const TurnFooter = memo(function TurnFooter({
   live,
   fallbackStopReason,
   fallbackStatusLabel,
+  failure,
+  recoveryFailure,
+  onRetry,
+  onRetryNewChat,
+  onRetryNewChatIntent,
   retrying,
   isLastTurn,
   onContinue,
@@ -427,7 +417,7 @@ export const TurnFooter = memo(function TurnFooter({
     turnRowCache,
     turnId ? turnRowKey(chatId, turnId) : null,
     () => turnGet(chatId, turnId),
-    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live },
+    { maxAgeMs: TURN_ROW_MAX_AGE_MS, enabled: !live && surfaceActive },
   );
   const turn = turnRead.data ?? null;
 
@@ -594,10 +584,7 @@ export const TurnFooter = memo(function TurnFooter({
   // The footer appears once the turn settles.
   if (live) return null;
 
-  const durationMs =
-    turn?.endedAt != null && turn?.startedAt != null
-      ? Math.max(0, turn.endedAt - turn.startedAt)
-      : Math.max(0, lastEventTime(events) - startedAt);
+  const durationMs = turnFooterDuration(turn, events, startedAt);
   // File pills are deliberately disk-authoritative. A rendered tool call is a
   // proposal, not proof that anything landed (permission may be denied, a tool
   // may fail, or an edit may be a no-op). Only the engine's persisted
@@ -616,118 +603,42 @@ export const TurnFooter = memo(function TurnFooter({
     fallbackStatusLabel,
     retrying,
   );
+  const cardFailure = turnFailureForCard({
+    events,
+    turnId,
+    fallback: failure,
+    recoveryFailure,
+    live,
+    retrying,
+    status: turn?.status,
+    stopReason: fallbackStopReason ?? turn?.stopReason,
+  });
   // The below-footer Continue row (last turn only).
   const continueReason =
     isLastTurn && onContinue
       ? continuableStopReason(turn, fallbackStopReason)
       : null;
-  // The itemized bill behind the circle-dollar button.
-  const usage = turn?.usage ?? null;
-  const showUsage = hasTurnUsage(usage);
-  // Per-model rows only when the agent itemized (Claude modelUsage). An
-  // agent that bills as one lump (Codex) gets just the Total line.
-  const usageRows = (usage?.perModel ?? []).map((m) => ({
-    name: displayNameForModelValue(turn?.agentId ?? null, m.model),
-    line: usageLineParts(m),
-  }));
-  const usageTotalLine = usage
-    ? usageLineParts({
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        cacheReadTokens: usage.cacheReadTokens,
-        cacheWriteTokens: usage.cacheWriteTokens,
-        costUsd: usage.totalCostUsd,
-      })
-    : "";
-
   return (
     <>
+      {cardFailure && (
+        <TurnFailureCard
+          failure={cardFailure}
+          onRetry={isLastTurn ? onRetry : undefined}
+          onRetryNewChat={isLastTurn ? onRetryNewChat : undefined}
+          onRetryNewChatIntent={onRetryNewChatIntent}
+        />
+      )}
       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs">
-        {statusLabel && (
+        {statusLabel && !cardFailure && (
           <div className="basis-full">
             <span className="border-border3 bg-bg1 text-fg1 inline-flex w-fit rounded-sm border px-2 py-0.5 text-xs tracking-wide">
               {statusLabel}
             </span>
           </div>
         )}
-        <Tooltip label="Agent run time">
-          <span className="text-fg2 tabular-nums">
-            {formatElapsed(durationMs)}
-          </span>
-        </Tooltip>
-        {showUsage && (
-          <Popover>
-            <Tooltip label="Turn usage">
-              <PopoverTrigger asChild>
-                <button
-                  type="button"
-                  aria-label="Turn usage"
-                  className={ICON_BTN}
-                >
-                  <CircleDollarSign className="size-3.5" strokeWidth={2} />
-                </button>
-              </PopoverTrigger>
-            </Tooltip>
-            {/* Opens ABOVE the icon; Radix collision
-              detection flips it below only when there's no room above. */}
-            <PopoverContent side="top" align="start" className="w-72 p-3.5">
-              <div className="flex items-baseline justify-between pb-2">
-                <span className="text-fg1 text-xs font-semibold">
-                  Turn usage
-                </span>
-                {typeof usage?.totalCostUsd === "number" &&
-                  usage.totalCostUsd > 0 && (
-                    <span className="text-fg2 text-2xxs font-mono">
-                      {formatUsd(usage.totalCostUsd)}
-                    </span>
-                  )}
-              </div>
-              {usageRows.map((r) => (
-                <div
-                  key={r.name}
-                  className="flex items-baseline justify-between gap-2.5 py-1"
-                >
-                  <span className="text-fg2 min-w-0 truncate text-[12.5px]">
-                    {r.name}
-                  </span>
-                  <span className="text-fg2 text-2xxs font-mono whitespace-nowrap tabular-nums">
-                    {r.line}
-                  </span>
-                </div>
-              ))}
-              <div
-                className={cn(
-                  "flex items-baseline justify-between gap-2.5 py-1",
-                  usageRows.length > 0 && "border-border2 mt-1.5 border-t pt-2",
-                )}
-              >
-                <span className="text-fg1 text-[12.5px]">Total</span>
-                <span className="text-fg1 text-2xxs font-mono whitespace-nowrap tabular-nums">
-                  {usageTotalLine}
-                </span>
-              </div>
-              <div className="border-border2 mt-2 border-t pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    const lines = [
-                      "| Model | Usage |",
-                      "| --- | --- |",
-                      ...usageRows.map((r) => `| ${r.name} | ${r.line} |`),
-                      `| Total | ${usageTotalLine} |`,
-                    ];
-                    void navigator.clipboard
-                      .writeText(lines.join("\n"))
-                      .catch(() => {});
-                  }}
-                  className="hover:bg-bg3-hover text-fg2 w-full rounded-sm px-1.5 py-1 text-left text-xs font-medium"
-                >
-                  Copy breakdown
-                </button>
-              </div>
-            </PopoverContent>
-          </Popover>
-        )}
+        <TurnUsageCard agentId={turn?.agentId} usage={turn?.usage}
+          startedAt={turn?.startedAt ?? startedAt} endedAt={(turn?.startedAt ?? startedAt) + durationMs}
+          durationMs={durationMs} enabled={surfaceActive} />
         <Tooltip label={copied ? "Copied" : "Copy output"}>
           <button
             type="button"

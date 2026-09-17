@@ -68,7 +68,7 @@ import {
 } from "../../state/use-projects";
 import {
   dedupePendingCreates,
-  selectLiveVisible,
+  useLiveVisible,
 } from "../../state/live-workspace-selectors";
 import {
   usePendingCreatesAll,
@@ -147,12 +147,7 @@ export function DashboardPage() {
     () => filterRowsForOrganization(liveWorkspaces, activeOrganization),
     [activeOrganization, liveWorkspaces],
   );
-  // Destructive membership is confirmed-only: a busy row stays in its current
-  // status column until the engine publishes the archive/delete result.
-  const workspaces = useMemo(
-    () => selectLiveVisible(accessibleLiveWorkspaces),
-    [accessibleLiveWorkspaces],
-  );
+  const workspaces = useLiveVisible(accessibleLiveWorkspaces);
   const rawPending = usePendingCreatesAll();
   const allPending = useMemo(
     () => filterRowsForOrganization(rawPending, activeOrganization),

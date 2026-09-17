@@ -24,7 +24,7 @@
       "!**/*.db-wal"
     ]
   },
-  "codexProtocolVersion": "0.153.4",
+  "codexProtocolVersion": "0.154.0",
   "scripts": {
     "postinstall": "node scripts/fix-node-pty-helper.cjs",
     "codegen:codex": "node scripts/codegen-codex.mjs",
@@ -35,6 +35,8 @@
     "stage:claude-cli": "node scripts/stage-claude-cli.mjs",
     "stage:codex-cli": "node scripts/stage-codex-cli.mjs",
     "smoke:engine": "node scripts/smoke-engine.mjs",
+    "smoke:attachment-storage": "tsx scripts/smoke-attachment-storage.mts",
+    "smoke:attachment-electron": "node scripts/smoke-attachment-electron.mjs",
     "smoke:browser-service": "node scripts/browser-service-smoke.mjs",
     "smoke:packaged-pty": "node scripts/packaged-pty-smoke.mjs",
     "version:current": "node scripts/compute-version.mjs",
@@ -105,8 +107,8 @@
     "test:control-plane": "pnpm --dir apps/control-plane test"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "0.3.266",
-    "@anthropic-ai/sandbox-runtime": "0.0.75",
+    "@anthropic-ai/claude-agent-sdk": "0.3.274",
+    "@anthropic-ai/sandbox-runtime": "0.0.76",
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.10.3",
     "@codemirror/language": "^6.12.3",
@@ -121,7 +123,7 @@
     "@lezer/highlight": "^1.2.3",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@octokit/rest": "^22.0.0",
-    "@openai/codex": "0.153.4",
+    "@openai/codex": "0.154.0",
     "@pierre/diffs": "1.4.1",
     "@pierre/trees": "1.0.0-beta.4",
     "@radix-ui/react-avatar": "^1.1.11",
@@ -129,6 +131,7 @@
     "@radix-ui/react-dialog": "^1.1.15",
     "@radix-ui/react-dropdown-menu": "^2.1.16",
     "@radix-ui/react-label": "^2.1.8",
+    "@radix-ui/react-menu": "2.1.16",
     "@radix-ui/react-popover": "^1.1.15",
     "@radix-ui/react-scroll-area": "^1.2.0",
     "@radix-ui/react-separator": "^1.1.8",

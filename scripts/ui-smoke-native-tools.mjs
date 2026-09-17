@@ -36,8 +36,10 @@ export async function runNativeToolsSmoke({ page, check }) {
   ).toBeVisible();
   await expect(row("Click Calculator")).toHaveClass(/text-red-primary/);
   await expect(
-    row("Click Calculator").getByText("Click Calculator", { exact: true }),
+    row("Click Calculator").getByText("Error", { exact: true }),
   ).toHaveClass(/text-red-primary/);
+  await expect(row("Click Calculator").locator(".lucide-circle-x")).toHaveCount(1);
+  await expect(row("Click Calculator").locator("img")).toHaveCount(0);
   check(
     "Native screenshots expand and actual tool failures remain visible",
     true,

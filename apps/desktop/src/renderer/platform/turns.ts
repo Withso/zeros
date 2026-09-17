@@ -32,7 +32,7 @@ export interface TurnFile {
 
 export type TurnStatus = "running" | "completed" | "failed" | "cancelled";
 
-/** One model's share of a turn's bill (usage popover rows). */
+/** One model's share retained for accounting and serialized compatibility. */
 export interface TurnModelUsage {
   model: string;
   inputTokens?: number;
@@ -45,6 +45,9 @@ export interface TurnModelUsage {
 /** Per-turn token/cost usage (mirrors engine db/turns.TurnUsageJson).
  *  reasoningTokens is never rendered (2026-07-13 decision). */
 export interface TurnUsageInfo {
+  accountingVersion?: 1;
+  revision?: number;
+  costKind?: "estimated" | "reported";
   inputTokens?: number;
   outputTokens?: number;
   cacheReadTokens?: number;

@@ -10,13 +10,13 @@
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import path from "node:path";
+import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 
 import {
   CursorSdkAdapter,
   resolveValidModelId,
   applyCursorReasoning,
   isCursorModelGatedError,
-  cursorAgentUsageDelta,
   cursorAdvertisedModel,
   cursorModelStateFingerprint,
   cursorRipgrepPathFromEnvironment,
@@ -884,6 +884,24 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     ).toContain("PINGOK");
   });
 
+  it.each(["I will inspect this.", "Final "])("recovers the final answer after %j", async (initial) => {
+    sendSpy.mockResolvedValueOnce({
+      id: "run-recovery", stream: async function* () {
+        yield { type: "assistant", message: { role: "assistant", content: [{ type: "text", text: initial }] } };
+      }, wait: async () => ({ status: "finished", result: "Final answer" }), cancel: async () => {},
+    });
+    const ctx = makeCtx();
+    let messages: AgentMessage[] = [];
+    ctx.emit.onSessionUpdate = (_agent, notification) => { messages = applyUpdate(messages, notification); };
+    const adapter = new CursorSdkAdapter(ctx);
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" } });
+      await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+      const text = messages.filter((m) => m.kind === "text").map((m) => m.text);
+      expect(text).toEqual(initial === "Final " ? ["Final answer"] : [initial, "Final answer"]);
+    } finally { await adapter.dispose(); }
+  });
+
   it("does not duplicate wait().result after assistant text was streamed", async () => {
     sendSpy.mockResolvedValueOnce({
       id: "run-stream-and-final",
@@ -910,13 +928,12 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
 
     await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
 
-    expect(
-      updateSpy.mock.calls.flatMap(([, notification]) =>
-        notification.update.sessionUpdate === "agent_message_chunk"
-          ? [notification.update.content.text]
-          : [],
-      ),
-    ).toEqual(["PINGOK"]);
+    const messages = updateSpy.mock.calls.reduce<AgentMessage[]>(
+      (state, [, notification]) => applyUpdate(state, notification), [],
+    );
+    expect(messages.filter((m) => m.kind === "text")).toEqual([
+      expect.objectContaining({ text: "PINGOK", phase: "final_answer" }),
+    ]);
   });
 
   it("returns the SDK's per-turn token usage from the stream", async () => {
@@ -950,46 +967,22 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     });
 
     expect(completed.response.usage).toEqual({
-      inputTokens: 120,
+      inputTokens: 204,
       outputTokens: 30,
       cacheReadTokens: 80,
       cacheWriteTokens: 4,
       reasoningTokens: 7,
+      accountingVersion: 1,
+      costKind: "reported",
     });
   });
 
-  it("merges provider-billed cost from getUsage into the common turn usage", async () => {
-    usageSpy.mockResolvedValueOnce(EMPTY_AGENT_USAGE).mockResolvedValueOnce({
-      usage: {
-        inputTokens: 120,
-        outputTokens: 30,
-        cacheReadTokens: 80,
-        cacheWriteTokens: 4,
-        totalTokens: 150,
-        reasoningTokens: 7,
-      },
-      cost: { rawCostCents: 19, chargedCents: 12.5 },
-      runs: [],
-    });
+  it("does not attribute another run's late aggregate bill to this turn", async () => {
+    usageSpy.mockResolvedValue({ ...EMPTY_AGENT_USAGE, cost: { rawCostCents: 19, chargedCents: 12.5 } });
     const adapter = new CursorSdkAdapter(makeCtx());
-    const { session } = await adapter.newSession({
-      cwd: "/tmp/proj",
-      env: { CURSOR_API_KEY: "key_test" },
-    });
-
-    const completed = await adapter.prompt({
-      sessionId: session.sessionId,
-      prompt: TEXT,
-    });
-
-    expect(completed.response.usage).toEqual({
-      inputTokens: 120,
-      outputTokens: 30,
-      cacheReadTokens: 80,
-      cacheWriteTokens: 4,
-      reasoningTokens: 7,
-      totalCostUsd: 0.125,
-    });
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" } });
+    const completed = await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+    expect(completed.response.usage).toBeUndefined();
   });
 
   it("never lets a hung billing lookup delay the agent turn", async () => {
@@ -1240,46 +1233,6 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
   });
 });
 
-describe("cursorAgentUsageDelta (pure)", () => {
-  it("clamps cumulative counter regressions and converts charged cents to USD", () => {
-    expect(
-      cursorAgentUsageDelta(
-        {
-          usage: {
-            inputTokens: 100,
-            outputTokens: 20,
-            cacheReadTokens: 10,
-            cacheWriteTokens: 5,
-            totalTokens: 120,
-            reasoningTokens: 4,
-          },
-          cost: { rawCostCents: 8, chargedCents: 6 },
-          runs: [],
-        },
-        {
-          usage: {
-            inputTokens: 140,
-            outputTokens: 35,
-            cacheReadTokens: 8,
-            cacheWriteTokens: 9,
-            totalTokens: 175,
-            reasoningTokens: 7,
-          },
-          cost: { rawCostCents: 13, chargedCents: 9.5 },
-          runs: [],
-        },
-      ),
-    ).toEqual({
-      inputTokens: 40,
-      outputTokens: 15,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 4,
-      reasoningTokens: 3,
-      totalCostUsd: 0.035,
-    });
-  });
-});
-
 describe("Cursor modes — Ask / Auto / Full access + autoReview rebuild", () => {
   const NEW = { cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" } };
 
@@ -1445,6 +1398,42 @@ describe("isCursorModelGatedError (pure)", () => {
 });
 
 describe("CursorSdkAdapter — reject-recovery on a model the account can't run", () => {
+  it.each(["create", "send", "wait"])("uses a native model code for one confirmed fallback at %s", async (stage) => {
+    modelsListSpy.mockResolvedValue([
+      { id: "composer-2.5", displayName: "Composer 2.5" },
+      { id: "composer-2", displayName: "Composer 2" },
+    ]);
+    const error = { code: "invalid_model", message: "Selection rejected." };
+    if (stage === "create") createSpy.mockRejectedValueOnce(error);
+    else if (stage === "send") sendSpy.mockRejectedValueOnce(error);
+    else sendSpy.mockResolvedValueOnce({ ...makeRun("error"), wait: async () => ({ status: "error", error }) });
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" } });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(sendSpy.mock.calls.at(-1)?.[1].model).toEqual({ id: "composer-2" });
+      expect(stage === "create" ? createSpy : sendSpy).toHaveBeenCalledTimes(2);
+      expect(storeGetSpy).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); }
+  });
+
+  it("does not replay model-gated work after callback output already ran", async () => {
+    modelsListSpy.mockResolvedValue([
+      { id: "composer-2.5", displayName: "Composer 2.5" },
+      { id: "composer-2", displayName: "Composer 2" },
+    ]);
+    sendSpy.mockImplementationOnce(async (_message, options) => {
+      options.onDelta({ update: { type: "text-delta", text: "Partial work" } });
+      return { ...makeRun("error"), wait: async () => ({ status: "error", error: { code: "invalid_model", message: "Selection rejected." } }) };
+    });
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" } });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toMatchObject({ failure: { kind: "protocol-error" } });
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+    } finally { await adapter.dispose(); }
+  });
+
   it("reads the store's real error, then retries once with a confirmed-good model", async () => {
     // Account catalog includes composer-2.5 (so it's the picked default) AND
     // composer-2 (the retry target).

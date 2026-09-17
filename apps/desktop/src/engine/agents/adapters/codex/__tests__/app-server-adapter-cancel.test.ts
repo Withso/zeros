@@ -519,20 +519,10 @@ describe("prompt holds open while collab subagent turns still run", () => {
         update.nativeToolCallId === "activity-1",
     );
     expect(lifecycleStart).toMatchObject({
-      title: "subAgentActivity",
-      kind: "other",
-      status: "in_progress",
+      title: "Agent",
+      kind: "subagent",
+      status: "completed",
     });
-    expect(updates).toContainEqual(
-      expect.objectContaining({
-        sessionUpdate: "tool_call_update",
-        toolCallId:
-          lifecycleStart?.sessionUpdate === "tool_call"
-            ? lifecycleStart.toolCallId
-            : undefined,
-        status: "completed",
-      }),
-    );
 
     // Only the normal grace remains. The lifecycle marker must not re-add
     // the already-completed parent turn and wedge the collaboration drain.

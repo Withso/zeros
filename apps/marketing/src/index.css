@@ -122,7 +122,7 @@
 
   --fg1: hsl(0 0% 94%); /* #F0F0F0 */
   --fg2: hsl(0 0% 72%); /* #B8B8B8 */
-  --fg3: hsl(0 0% 60%); /* #999999 */
+  --fg3: hsl(0 0% 63%); /* #A1A1A1 */
   --muted-fg: hsl(0 0% 44%); /* #707070 */
 
   --sidebar-bg: hsl(0 0% 9%); /* #171717 */
@@ -150,7 +150,7 @@
   --red-primary: hsl(0 91% 71%);
   --red-secondary: hsl(7 83% 39%);
   --red-secondary-fg: hsl(0 0% 100%);
-  --red-bg: hsl(13 81% 14%);
+  --red-bg: hsl(3 26% 13.7%);
   --red-fg: hsl(20 97% 72%);
 
   --green-primary: hsl(142 69% 58%);

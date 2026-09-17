@@ -37,6 +37,18 @@ describe("InputQueue", () => {
     expect(await collectN(it, 3)).toEqual([1, 2, 3]);
   });
 
+  it("discards unconsumed messages on Stop while leaving the input usable", async () => {
+    const q = new InputQueue<number>();
+    q.push(1); q.push(2); q.push(3);
+    const iterator = q[Symbol.asyncIterator]();
+    expect((await iterator.next()).value).toBe(1);
+    expect(q.discardPending()).toEqual([2, 3]);
+    expect(q.pendingCount).toBe(0);
+    q.push(4);
+    expect((await iterator.next()).value).toBe(4);
+    q.end();
+  });
+
   it("end() completes a parked next() with done:true and marks closed", async () => {
     const q = new InputQueue<number>();
     const it = q[Symbol.asyncIterator]();

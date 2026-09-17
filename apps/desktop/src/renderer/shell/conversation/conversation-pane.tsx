@@ -30,6 +30,11 @@ import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
+import {
+  ConversationSummaryProvider,
+  ConversationSummaryTrigger,
+  ConversationSummaryIsland,
+} from "./conversation-summary";
 // ── Conversation pane className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-conversation pane family
 // (lines 97-270 of the original app-shell.css) is now inline
@@ -178,6 +183,9 @@ export function ConversationPane({
   // User-resizable Conversation pane. Drag from the right edge updates conversation pane's
   // share of the row; localStorage persists across reload.
   const sectionRef = useRef<HTMLElement | null>(null);
+  const revealWorkbench = useCallback(() => {
+    if (workbenchCollapsed) onToggleWorkbench?.();
+  }, [workbenchCollapsed, onToggleWorkbench]);
   const { ratio: colRatio, persist: persistColRatio } =
     useConversationRatio(sectionRef);
   const { hintHandlers, hint } = useResizeHint("Drag to resize");
@@ -402,17 +410,26 @@ export function ConversationPane({
             never tears down xterm; its layers portal into pane hosts. */}
         <div className={BODY_STACK_CLS}>
           <div className={PANE_TREE_ROOT_CLS}>
-            <ConversationPaneLayout
-              onMinimumSizeChange={setPaneMinimumSize}
-              stripTrailing={
-                workbenchCollapsed && onToggleWorkbench ? (
-                  <WorkbenchToggleButton
-                    workbenchCollapsed
-                    onToggle={onToggleWorkbench}
-                  />
-                ) : null
-              }
-            />
+            <ConversationSummaryProvider
+              workbenchCollapsed={workbenchCollapsed}
+              onRevealWorkbench={revealWorkbench}
+            >
+              <ConversationPaneLayout
+                onMinimumSizeChange={setPaneMinimumSize}
+                stripTrailing={
+                  <>
+                    <ConversationSummaryTrigger />
+                    {workbenchCollapsed && onToggleWorkbench ? (
+                      <WorkbenchToggleButton
+                        workbenchCollapsed
+                        onToggle={onToggleWorkbench}
+                      />
+                    ) : null}
+                  </>
+                }
+                bodyAside={<ConversationSummaryIsland />}
+              />
+            </ConversationSummaryProvider>
           </div>
           <ChatDeck />
           {/* Terminal-agent deck — every `kind: "terminal"` chat lives

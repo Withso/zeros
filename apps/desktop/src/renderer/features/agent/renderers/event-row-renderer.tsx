@@ -1,3 +1,7 @@
+import { ToolResourceLink } from "./tool-resource-link";
+import { generatedImagePath, structuredToolOutput } from "./tool-artifacts";
+import { fileRefPath } from "../markdown-file-path";
+import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
 // EventRowRenderer — adapter from registry's Renderer<M> to EventRow
 // ──────────────────────────────────────────────────────────
@@ -14,13 +18,15 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, useState } from "react";
-import { Globe2, SquareMousePointer } from "lucide-react";
+import { FileText, Globe2, SquareMousePointer } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { Button } from "@/renderer/shared/ui";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
-import { EventRow } from "./event-row";
+import { commandReadActions, displayCommand, type CommandReadAction } from "./tool-command";
+import { EventRow, WORKING_FEED_GAP } from "./event-row";
+import { cn } from "@/renderer/shared/ui/cn";
 import { ToolIdentityIcon } from "./tool-identity-icon";
 import { isImagePath, nativeCodexBrowserPresentation } from "./event-meta";
 import {
@@ -34,8 +40,14 @@ import {
 } from "../../browser/browser-tool-activity";
 import { CodeWithGutter, HighlightedCode } from "./highlighted-code";
 import { parseReadBody } from "./read-lines";
-import { asDisplayString } from "./raw-output";
-import { toolRecord } from "./native-tool-presentation";
+import { readLabel, readLineCount, readToolText } from "./read-output";
+import {
+  asDisplayString,
+  commandResultOutput,
+  toolCompletionUnreported,
+} from "./raw-output";
+import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
+import { AgentNotice } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -46,7 +58,7 @@ import type { Renderer, RendererContext } from "./types";
  *  source code, and `bash`-coloring them reads as noisy. */
 function langForTool(tool: AgentToolMessage): string {
   const kind = tool.toolKind;
-  if (kind !== "read" && kind !== "edit") return "text";
+  if (tool.status === "failed" || (kind !== "read" && kind !== "edit")) return "text";
   const input = (
     tool.rawInput && typeof tool.rawInput === "object" ? tool.rawInput : {}
   ) as Record<string, unknown>;
@@ -64,7 +76,7 @@ function langForTool(tool: AgentToolMessage): string {
 // Shared chrome for an expandable output body: the surrounding card + a wrapping,
 // monospace, fg1 code surface (shiki tokens override fg1 when highlighted).
 const OUTPUT_CLASS =
-  "rounded-md bg-bg2/60 p-2 font-mono text-sm leading-relaxed text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
+  "px-3 py-2 font-mono text-sm leading-relaxed text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words";
 
 function readPathOf(tool: AgentToolMessage): string | null {
   const input = (
@@ -79,28 +91,6 @@ function readPathOf(tool: AgentToolMessage): string | null {
     if (typeof v === "string" && v) return v;
   }
   return null;
-}
-
-/** Extract a read's text body from canonical content blocks, else rawOutput. */
-function readToolText(tool: AgentToolMessage): string | null {
-  if (tool.content) {
-    const parts: string[] = [];
-    for (const block of tool.content) {
-      const b = block as any;
-      if (
-        b.type === "content" &&
-        b.content?.type === "text" &&
-        typeof b.content.text === "string"
-      ) {
-        parts.push(b.content.text);
-      } else if (b.type === "text" && typeof b.text === "string") {
-        parts.push(b.text);
-      }
-    }
-    if (parts.length > 0) return parts.join("\n");
-  }
-  const out = asDisplayString(capturedOutput(tool));
-  return out || null;
 }
 
 export const EventRowRenderer: Renderer<AgentMessage> = memo(
@@ -132,7 +122,12 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
         </div>
       );
     }
+    if (message.kind === "error_notice" && message.code !== "api_retry") {
+      return <AgentNotice message={message.message} />;
+    }
     if (message.kind === "tool") {
+      const reads = commandReadActions(message);
+      if (reads.length > 1) return <CommandReadRows tool={message} reads={reads} ctx={ctx} />;
       const safetyReview = readSafetyReview(message as AgentToolMessage);
       if (safetyReview) {
         const retryId = ctx.safetyReviewRetries?.[message.toolCallId];
@@ -164,6 +159,40 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );
+
+/** Every file action stays visible, but only one shared execution result can
+ * be open. The SDK does not provide output boundaries for a batched command. */
+function CommandReadRows({ tool, reads, ctx }: {
+  tool: AgentToolMessage;
+  reads: CommandReadAction[];
+  ctx: RendererContext;
+}) {
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const label = readLabel(readLineCount(tool), true);
+  const detail = (
+    <>
+      <div className="text-fg2 px-3 pt-2 text-xs">One command reading {reads.length} files; the result below belongs to the whole command.</div>
+      {renderDetail(tool, ctx)}
+    </>
+  );
+  // One event → several rows: repeat the feed's gap so these rows space
+  // exactly like independent tool calls around them.
+  return (
+    <div className={cn("flex flex-col", WORKING_FEED_GAP)}>
+      {reads.map((read) => (
+        <EventRow
+          key={read.key}
+          message={tool}
+          ctx={ctx}
+          meta={{ Icon: FileText, label, target: read.path, targetFile: true, targetKind: "file", expandable: true }}
+          open={expanded === read.key}
+          onOpenChange={(open) => setExpanded(open ? read.key : null)}
+          detail={detail}
+        />
+      ))}
+    </div>
+  );
+}
 
 interface SafetyReviewView {
   status: string;
@@ -299,25 +328,27 @@ export function NativeBrowserToolRow({
   );
 }
 
-/** Max-height for tool detail bodies (~8 lines of mono). Beyond this,
- *  the body becomes its own scroll container so long bash output /
- *  grep dumps don't push the rest of the conversation off-screen.
- *  User-feedback driven: "max height ~7-8 lines is enough." */
-const DETAIL_MAX_H = "max-h-[200px]";
-
 export function renderDetail(
   message: AgentMessage,
   ctx: RendererContext,
 ): React.ReactNode {
   if (message.kind === "tool") return <ToolDetail tool={message} ctx={ctx} />;
-  if (message.kind === "text" && (message as any).role === "thought") {
-    const text = (message as any).text as string;
-    if (!text) return null;
+  if (message.kind === "text" && message.role === "thought") {
+    // Provider boundary/paragraph blanks must not become full-height empty
+    // lines. Keep the native text intact; preserve single breaks and indentation.
+    const paragraphs = message.text
+      .replace(/\r\n?/g, "\n")
+      .replace(/^(?:[ \t]*\n)+|(?:\n[ \t]*)+$/g, "")
+      .split(/\n(?:[ \t]*\n)+/)
+      .filter((paragraph) => paragraph.trim());
+    if (paragraphs.length === 0) return null;
     return (
-      <div
-        className={`${DETAIL_MAX_H} text-fg2 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap`}
-      >
-        {text}
+      <div className="text-fg2 flex flex-col gap-2 px-3 text-sm leading-normal">
+        {paragraphs.map((paragraph, index) => (
+          <p key={index} className="m-0 wrap-anywhere whitespace-pre-wrap">
+            {paragraph}
+          </p>
+        ))}
       </div>
     );
   }
@@ -327,95 +358,74 @@ export function renderDetail(
     const m = message as { message?: string };
     if (!m.message) return null;
     return (
-      <div className="text-fg2 text-sm whitespace-pre-wrap">{m.message}</div>
+      <div className="text-fg2 px-3 py-2 text-sm whitespace-pre-wrap">{m.message}</div>
     );
   }
   return null;
 }
 
 function capturedOutput(tool: AgentToolMessage): unknown {
-  const output = toolRecord(tool.rawOutput);
-  if ("exitCode" in output)
-    return (
-      output.output ??
-      [output.stdout, output.stderr]
-        .filter((v) => typeof v === "string")
-        .join("\n")
-    );
-  if (tool.toolKind === "web_search" && "results" in output)
-    return output.results;
-  return tool.rawOutput;
+  const raw = commandResultOutput(tool.rawOutput);
+  const output = toolRecord(raw);
+  if ("exitCode" in output || (tool.toolKind === "execute" && ("stdout" in output || "stderr" in output || typeof output.output === "string")))
+    return (typeof output.output === "string" && output.output) ||
+      [output.stdout, output.stderr].filter((v) => typeof v === "string" && v).join("\n");
+  if (tool.toolKind === "web_search" && "results" in output) return output.results;
+  if (tool.toolKind === "read") {
+    const value = toolRecord(output.value ?? output.success);
+    if (typeof value.content === "string") return value.content;
+    if (typeof output.content === "string") return output.content;
+  }
+  return raw;
 }
 
-/** Mounted only while the existing row is expanded. Input remains visible
- * beside output so an empty result can never conceal the operation itself. */
-function ToolDetail({
-  tool,
-  ctx,
-}: {
-  tool: AgentToolMessage;
-  ctx: RendererContext;
-}) {
-  const input = asDisplayString(tool.rawInput);
-  const output = toolRecord(tool.rawOutput);
-  const status =
-    typeof output.status === "string" &&
-    ["declined", "cancelled", "interrupted"].includes(output.status)
-      ? output.status
-      : tool.status;
-  const label =
-    {
-      completed: "Completed",
-      failed: "Failed",
-      in_progress: "Running",
-      pending: "Pending",
-      declined: "Declined",
-      cancelled: "Cancelled",
-      interrupted: "Interrupted",
-    }[status] ?? status;
+/** Meaningful operation text; transport metadata remains in the stored event. */
+function operationText(tool: AgentToolMessage): string | null {
+  const input = toolRecord(tool.rawInput);
+  if (
+    tool.toolKind === "execute" ||
+    (["list", "search"].includes(tool.toolKind ?? "") &&
+      typeof input.command === "string")
+  )
+    return displayCommand(input) ?? asDisplayString(input);
+  if (tool.toolKind === "read") return readPathOf(tool);
+  if (["search", "list", "fetch", "web_search"].includes(tool.toolKind ?? "")) {
+    const action = toolRecord(input.action);
+    const values = [input.globPattern ?? input.pattern ?? input.query ?? input.regex ?? action.query ?? action.pattern,
+      input.file_path ?? input.path ?? input.targetDirectory ?? input.url ?? action.url];
+    const text = values.filter((value): value is string => typeof value === "string" && !!value).join("\n");
+    if (text) return text;
+  }
+  return asDisplayString(tool.rawInput);
+}
+
+/** Mounted only while expanded. One operation and its actual result share the
+ * surrounding detail surface; no status/JSON-envelope panels or nested scroll. */
+function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContext }) {
+  const wait = nativeAgentWait(tool);
+  if (wait) return wait.result ? <HighlightedCode code={wait.result} lang="text" className={OUTPUT_CLASS} /> : null;
+  const input = operationText(tool);
+  const output = toolRecord(commandResultOutput(tool.rawOutput));
+  const unreported = toolCompletionUnreported(tool.rawOutput);
+  const nativeEnding = typeof output.status === "string" && ["cancelled", "declined", "interrupted"].includes(output.status)
+    ? output.status : null;
   const body = renderToolOutput(tool, ctx);
-  const extra =
-    (tool.content?.length || capturedOutput(tool) !== tool.rawOutput) &&
-    asDisplayString(
-      Object.fromEntries(
-        Object.entries(output).filter(
-          ([key]) =>
-            ![
-              "exitCode",
-              "status",
-              "durationMs",
-              "output",
-              "stdout",
-              "stderr",
-              "content",
-              "results",
-              "zerosQuestion",
-            ].includes(key),
-        ),
-      ),
-    );
   return (
-    <div className={`${DETAIL_MAX_H} space-y-2 overflow-y-auto`}>
-      <div className="text-fg2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
-        <span>{label}</span>
-        {typeof output.exitCode === "number" && (
-          <span>{`Exit code: ${output.exitCode}`}</span>
-        )}
-        {typeof output.durationMs === "number" && (
-          <span>{`Duration: ${output.durationMs} ms`}</span>
-        )}
-      </div>
+    <div className="min-w-0">
       {input && (
-        <div>
-          <div className="text-fg2 mb-1 text-xs">Input</div>
-          <HighlightedCode code={input} lang="text" className={OUTPUT_CLASS} />
-        </div>
+        <HighlightedCode
+          code={tool.toolKind === "execute" ? `$ ${asDisplayString(input)}` : input}
+          lang={tool.toolKind === "execute" ? "shellscript" : "text"}
+          className={`${OUTPUT_CLASS} ${body ? "border-border2 border-b" : ""}`}
+        />
       )}
-      <div>
-        <div className="text-fg2 mb-1 text-xs">Output</div>
-        {body ?? (
-          <div className="text-fg2 text-xs italic">
-            {tool.status === "pending" || tool.status === "in_progress"
+      {unreported && <div className="text-fg2 px-3 py-2 text-xs">Completion not reported. The provider did not report whether this tool completed.</div>}
+      {nativeEnding && <div className="text-fg2 px-3 py-2 text-xs">The tool was {nativeEnding}.</div>}
+      {body ?? (!unreported && !nativeEnding && (
+        <div className="text-fg2 px-3 py-2 text-xs italic">
+          {tool.status === "failed"
+            ? "The tool failed without an explanation."
+            : tool.status === "pending" || tool.status === "in_progress"
               ? "Waiting for output."
               : tool.toolKind === "web_search"
                 ? Array.isArray(output.results)
@@ -424,25 +434,56 @@ function ToolDetail({
                     ? "The provider did not include search results."
                     : "No search results were captured for this call."
                 : "No output was captured."}
-          </div>
-        )}
-      </div>
-      {body && extra && (
-        <HighlightedCode code={extra} lang="text" className={OUTPUT_CLASS} />
-      )}
+        </div>
+      ))}
     </div>
   );
 }
 
-function renderToolOutput(
+function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.ReactNode {
+  const resources = new Map<string, { label: string; description?: string }>();
+  const path = generatedImagePath(tool);
+  for (const block of tool.content ?? []) {
+    if (block.type !== "content") continue;
+    const content = block.content;
+    if (content.type === "resource_link") resources.set(content.uri, { label: content.title ?? content.name, description: content.description });
+    else if (content.type === "resource") resources.set(content.resource.uri, { label: content.resource.uri });
+  }
+  for (const link of tool.resourceLinks ?? []) resources.set(link.uri, { label: link.title ?? link.name, description: link.description });
+  if (path && ![...resources.keys()].some(uri => fileRefPath(uri, true) === path)) resources.set(path, { label: path.split("/").pop() ?? path });
+  const structured = tool.content?.length && !["read", "execute", "search", "list"].includes(tool.toolKind ?? "") ? asDisplayString(structuredToolOutput(tool.rawOutput)) : null;
+  const body = renderToolBody(tool, ctx, !!structured);
+  if (!resources.size && !structured) return body;
+  return <div className="min-w-0">
+    {resources.size > 0 && <div className="zeros-agent-md space-y-1 px-3 py-2">{[...resources].map(([uri, resource]) => (
+      <div key={uri}><ToolResourceLink uri={uri} label={resource.label} ctx={ctx} />
+        {resource.description && <p>{resource.description}</p>}
+      </div>
+    ))}</div>}
+    {body}
+    {structured && <HighlightedCode code={structured} lang="json" className={OUTPUT_CLASS} />}
+  </div>;
+}
+
+function renderToolBody(
   tool: AgentToolMessage,
   ctx: RendererContext,
+  hasStructuredOutput: boolean,
 ): React.ReactNode {
+  if (tool.toolKind === "search") {
+    const text = cursorSearchOutput(tool.rawOutput);
+    if (text !== null)
+      return (
+        <HighlightedCode code={text} lang="text" className={OUTPUT_CLASS} />
+      );
+  }
   // READ of a text file → a line-numbered, syntax-highlighted code view with
   // the ACTUAL lines read (e.g. 1222–1280, not 1–60). Image reads fall through
   // to the generic content handler below (which renders the <img>).
-  if (tool.toolKind === "read" && !isImagePath(readPathOf(tool))) {
+  if (tool.toolKind === "read" && tool.status !== "failed" && !isImagePath(readPathOf(tool))) {
     const text = readToolText(tool);
+    if (text === "" && tool.status === "completed")
+      return <div className="text-fg2 px-3 py-2 text-sm">No lines returned.</div>;
     if (text && text.length > 0) {
       const { code, startLine } = parseReadBody(text, tool.rawInput);
       return (
@@ -454,6 +495,7 @@ function renderToolOutput(
       );
     }
   }
+
 
   if (tool.content && tool.content.length > 0) {
     const texts: string[] = [];
@@ -467,7 +509,7 @@ function renderToolOutput(
           texts.push(c.text);
         } else if (
           c?.type === "image" &&
-          typeof c.data === "string" &&
+          typeof c.data === "string" && c.data.length > 0 &&
           typeof c.mimeType === "string"
         ) {
           // A tool returning an image (screenshot, MCP image result).
@@ -476,26 +518,13 @@ function renderToolOutput(
           images.push(c.uri);
         } else if (
           c?.type === "audio" &&
-          typeof c.data === "string" &&
+          typeof c.data === "string" && c.data.length > 0 &&
           typeof c.mimeType === "string" &&
           c.mimeType.startsWith("audio/")
         ) {
           audio.push(`data:${c.mimeType};base64,${c.data}`);
-        } else if (c?.type === "resource_link" && typeof c.uri === "string") {
-          texts.push(
-            [
-              c.title ?? c.name,
-              c.description,
-              `@${c.uri.replace(/^file:\/\//, "")}`,
-            ]
-              .filter((value) => typeof value === "string" && value)
-              .join("\n"),
-          );
         } else if (c?.type === "resource" && c.resource) {
-          // Embedded resource — show its inline text or a path marker.
           if (typeof c.resource.text === "string") texts.push(c.resource.text);
-          else if (typeof c.resource.uri === "string")
-            texts.push(`@${String(c.resource.uri).replace(/^file:\/\//, "")}`);
         }
       } else if (b.type === "text" && typeof b.text === "string") {
         // Defensive: a FLAT (un-wrapped) text block from a non-conformant
@@ -513,7 +542,7 @@ function renderToolOutput(
     }
     if (texts.length > 0 || images.length > 0 || audio.length > 0) {
       return (
-        <div className={`${DETAIL_MAX_H} overflow-y-auto`}>
+        <div className="min-w-0">
           {ctx.attachmentImagesActive !== false &&
             images.map((src, i) => (
               <img
@@ -545,17 +574,21 @@ function renderToolOutput(
       );
     }
   }
+  if (hasStructuredOutput) return null;
   // Fall back to captured OUTPUT before raw input — fixes adapters that
   // populate `rawOutput` (or emit only a terminal block) instead of
   // canonical content blocks. The renderer never read rawOutput before,
   // so shell/terminal output silently vanished for some agents.
-  const outStr = asDisplayString(capturedOutput(tool));
+  const captured = capturedOutput(tool);
+  const hasArtifacts = generatedImagePath(tool) || tool.content?.some(block => block.type === "content" && (block.content.type === "resource_link" || block.content.type === "resource"));
+  const outStr = asDisplayString(hasArtifacts && tool.status !== "failed" && captured && typeof captured === "object" && !Array.isArray(captured)
+    ? structuredToolOutput(captured) : captured);
   if (outStr) {
     return (
       <HighlightedCode
         code={outStr}
         lang={langForTool(tool)}
-        className={`${DETAIL_MAX_H} overflow-y-auto ${OUTPUT_CLASS}`}
+        className={OUTPUT_CLASS}
       />
     );
   }

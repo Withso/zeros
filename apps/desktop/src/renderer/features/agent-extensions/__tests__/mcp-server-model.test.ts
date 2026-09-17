@@ -57,6 +57,7 @@ const stdioDraft = (over: Partial<Draft> = {}): Draft => ({
   headerName: "Authorization",
   headerSecret: "",
   oauthClientId: "",
+  cwd: "", oauthScopes: "", oauthClientSecret: "", clearOAuthClientSecret: false,
   ...over,
 });
 
@@ -73,6 +74,7 @@ const httpDraft = (over: Partial<Draft> = {}): Draft => ({
   headerName: "Authorization",
   headerSecret: "",
   oauthClientId: "",
+  cwd: "", oauthScopes: "", oauthClientSecret: "", clearOAuthClientSecret: false,
   ...over,
 });
 

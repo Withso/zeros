@@ -515,6 +515,9 @@ export class CursorHostClient {
           { runId },
           0,
         ).then((r) => r ?? undefined),
+      steer: (text) => this.request<"complete_delivered" | "revert_to_followup">(
+        "run.steer", { runId, text }, 0,
+      ),
       cancel: async () => {
         try {
           await this.request<void>("run.cancel", { runId });
@@ -529,7 +532,8 @@ export class CursorHostClient {
     };
   }
 
-  private makeAgent(agentId: string): SdkAgent {
+  private makeAgent(agentId: string, handleId?: string): SdkAgent {
+    const identity = { agentId, ...(handleId ? { handleId } : {}) };
     return {
       agentId,
       send: async (
@@ -546,7 +550,7 @@ export class CursorHostClient {
           const res = await this.request<{ sdkRunId: string | null }>(
             "agent.send",
             {
-              agentId,
+              ...identity,
               runId,
               message,
               options: wireOptions,
@@ -567,12 +571,12 @@ export class CursorHostClient {
       },
       getUsage: (options) =>
         this.request<CursorAgentUsage>("agent.getUsage", {
-          agentId,
+          ...identity,
           options: options ?? {},
         }),
       close: () => {
         // Fire-and-forget; swallow rejection (host may already be gone).
-        void this.request("agent.close", { agentId }).catch(() => {});
+        void this.request("agent.close", identity).catch(() => {});
       },
     };
   }
@@ -600,18 +604,18 @@ export class CursorHostClient {
     return {
       Agent: {
         create: async (opts) => {
-          const res = await this.request<{ agentId: string }>(
+          const res = await this.request<{ agentId: string; handleId?: string }>(
             "agent.create",
             opts,
           );
-          return this.makeAgent(res.agentId);
+          return this.makeAgent(res.agentId, res.handleId);
         },
         resume: async (agentId, opts) => {
-          const res = await this.request<{ agentId: string }>("agent.resume", {
+          const res = await this.request<{ agentId: string; handleId?: string }>("agent.resume", {
             agentId,
             opts: opts ?? {},
           });
-          return this.makeAgent(res.agentId);
+          return this.makeAgent(res.agentId, res.handleId);
         },
         list: (opts) =>
           this.request<{ items?: Array<Record<string, unknown>> }>(

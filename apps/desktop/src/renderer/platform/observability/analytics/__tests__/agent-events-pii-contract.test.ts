@@ -29,6 +29,7 @@ import {
   trackGitOp,
   trackAgentFailed,
   trackAiGeneration,
+  trackAgentTurnUsage,
   trackAgentPromptStarted,
   trackAgentPromptFinished,
   adoptAgentPromptCorrelation,
@@ -348,4 +349,22 @@ describe("agent-events PII contract — emits scalar metadata only", () => {
       (capture.mock.calls.at(-1)?.[1] as Record<string, unknown>).message_hash,
     ).toBeUndefined();
   });
+});
+
+it("marks canonical input as cache-inclusive and keeps native cost separate from analytics estimates", () => {
+  trackAiGeneration({ agentId: "claude", model: "claude-opus-5", latencyMs: 10, inputTokens: 150, cacheReadTokens: 100, costUsd: 0.05, accountingVersion: 1, costKind: "estimated" });
+  expect(capture.mock.calls.at(-1)?.[1]).toMatchObject({ $ai_input_tokens: 150, $ai_cache_reporting_exclusive: false, $ai_total_cost_usd: 0.05, $ai_cost_passthrough: true, agent_cost_source: "estimated" });
+  trackAiGeneration({ agentId: "codex", model: "gpt-5.6-sol", latencyMs: 10, inputTokens: 100, accountingVersion: 1 });
+  expect(capture.mock.calls.at(-1)?.[1]).toMatchObject({ agent_cost_source: "unavailable" });
+  expect(capture.mock.calls.at(-1)?.[1].$ai_total_cost_usd).toBeUndefined();
+});
+
+it("records absolute late usage revisions without duplicating generation events", () => {
+  const update = { executionId: "usage-execution", turnId: "usage-turn", agentId: "claude", usage: { accountingVersion: 1 as const, revision: 1, totalCostUsd: 0.1, costKind: "estimated" as const } };
+  trackAgentTurnUsage(update);
+  trackAgentTurnUsage(update);
+  trackAgentTurnUsage({ ...update, usage: { ...update.usage, revision: 2, totalCostUsd: 0.15 } });
+  expect(capture.mock.calls.map(([name]) => name)).toEqual(["agent_turn_usage_updated", "agent_turn_usage_updated"]);
+  expect(capture.mock.calls.at(-1)?.[1]).toMatchObject({ turn_id: "usage-turn", usage_revision: 2, cost_usd: 0.15 });
+  for (const [, props] of capture.mock.calls) assertCleanProps(props);
 });

@@ -46,8 +46,6 @@ import type {
 import { getSetting } from "../../platform/settings";
 import {
   getClaudeAutoMemoryEnabled,
-  getClaudeBudgetCapUsd,
-  getClaudeFallbackModel,
   getClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
 import catalogJson from "../../../../../../catalogs/models-v1.json";
@@ -1300,16 +1298,6 @@ export function effortAdoptedEnvKey(
  *  it never perturbs the respawn key for chats without extra dirs. */
 export const ADDITIONAL_DIRS_ENV_VAR = "ZEROS_ADDITIONAL_DIRS";
 
-/** Environment variable carrying the Settings → Models fallback model. Read by
- *  the Claude SDK adapter (→ `Options.fallbackModel`). Only emitted when a
- *  fallback is configured and differs from the chat's own model. */
-export const FALLBACK_MODEL_ENV_VAR = "CLAUDE_FALLBACK_MODEL";
-
-/** Environment variable carrying the Settings → Models per-turn budget cap in
- *  USD. Read by the Claude SDK adapter (→ `Options.maxBudgetUsd`). Only
- *  emitted when the cap is on. */
-export const BUDGET_CAP_ENV_VAR = "CLAUDE_MAX_BUDGET_USD";
-
 /** Renderer→engine carriage for the bounded persistent-query idle lifetime. */
 export const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
 
@@ -1376,17 +1364,9 @@ export function envForChatSettings(args: {
   );
   if (dirs.length > 0) env[ADDITIONAL_DIRS_ENV_VAR] = JSON.stringify(dirs);
   if (args.permissionMode) env[PERMISSION_MODE_ENV_VAR] = args.permissionMode;
-  // The global reliability knobs ride the same env channel, Claude-only (the
-  // other adapters expose no fallback/budget/idle hook). Optional knobs are
-  // emitted by omission when off. Idle is always explicit so config drift and
-  // live timeout changes are exact, including the 30-minute default.
+  // Claude process lifetime and memory settings remain explicit, including
+  // the 30-minute idle default. Model fallback and spend caps are retired.
   if (agentFamily(args.agentId) === "claude") {
-    const fallback = getClaudeFallbackModel();
-    if (fallback && fallback !== args.model) {
-      env[FALLBACK_MODEL_ENV_VAR] = fallback;
-    }
-    const cap = getClaudeBudgetCapUsd();
-    if (cap != null) env[BUDGET_CAP_ENV_VAR] = String(cap);
     env[CLAUDE_IDLE_TIMEOUT_ENV_VAR] = String(getClaudeIdleTimeoutMinutes());
     env.ZEROS_CLAUDE_AUTO_MEMORY = getClaudeAutoMemoryEnabled() ? "1" : "0";
   }

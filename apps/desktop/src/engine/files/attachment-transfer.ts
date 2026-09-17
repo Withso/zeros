@@ -1,0 +1,292 @@
+import fs from "node:fs/promises";
+import { constants } from "node:fs";
+import path from "node:path";
+import { withAttachmentSource } from "./attachment-source";
+import {
+  createAttachmentTemporaryDirectory,
+  type AttachmentTemporaryDirectory,
+} from "./attachment-temporary-directory";
+import {
+  ATTACHMENT_CHUNK_BYTES,
+  validateAttachmentFile,
+  type AttachmentWriteResult,
+} from "@zeros/protocol/attachment-policy";
+import {
+  safeAttachmentFilename,
+  stageContextGraphAttachment,
+  stageContextGraphAttachmentFile,
+} from "./context-graph";
+import {
+  assertContextDirectory,
+  CONTEXT_DIR,
+  LEGACY_CONTEXT_DIR,
+} from "./context-paths";
+
+const ID_OK = /^[a-zA-Z0-9_-]{1,128}$/;
+const MAX_ACTIVE_UPLOADS = 16;
+const UPLOAD_IDLE_MS = 5 * 60_000;
+interface Upload {
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+  totalBytes: number;
+  offset: number;
+  temporary?: AttachmentTemporaryDirectory;
+  file?: fs.FileHandle;
+  busy: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+}
+const uploads = new Map<string, Upload>();
+
+async function disposeUpload(key: string, upload: Upload): Promise<void> {
+  if (uploads.get(key) === upload) uploads.delete(key);
+  clearTimeout(upload.timer);
+  await upload.file?.close().catch(() => {});
+  await upload.temporary?.dispose();
+}
+
+export async function resetAttachmentTransfersForTests(): Promise<void> {
+  await Promise.all(
+    [...uploads].map(([key, upload]) => disposeUpload(key, upload)),
+  );
+}
+
+function requiredString(args: Record<string, unknown>, key: string): string {
+  const value = args[key];
+  if (typeof value !== "string" || value.length === 0)
+    throw new Error(`attachment: missing ${key}`);
+  return value;
+}
+
+async function resolveAttachment(
+  root: string,
+  attachmentId: string,
+  filename: string,
+  mimeType: string,
+  diskPath: unknown,
+): Promise<AttachmentWriteResult> {
+  let safeFilename = safeAttachmentFilename(filename);
+  const candidates = new Set<string>();
+  if (diskPath !== undefined) {
+    const graph = typeof diskPath === "string" &&
+      /^(\.context(?:-graph)?)\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/.exec(diskPath);
+    if (graph) {
+      if (graph[3] !== attachmentId || graph[4] === "." || graph[4] === "..")
+        throw new Error("invalid attachment path identity");
+      safeFilename = graph[4];
+      candidates.add(diskPath as string);
+    } else if (
+      typeof diskPath !== "string" ||
+      !/^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/.test(diskPath)
+    ) {
+      throw new Error("invalid attachment path");
+    }
+    // Old chat-scoped paths still use the encoder's explicit migration read.
+  }
+  // Try the confirmed path first. If it moved, accept only one surviving
+  // identity; conflicting scopes must never silently substitute other bytes.
+  for (const directory of [CONTEXT_DIR, LEGACY_CONTEXT_DIR]) {
+    for (const scope of ["local", "shared"]) {
+      candidates.add(`${directory}/${scope}/attachments/${attachmentId}/${safeFilename}`);
+    }
+  }
+  let resolved: AttachmentWriteResult | undefined;
+  for (const relativePath of candidates) {
+    const target = path.join(root, relativePath);
+    await assertContextDirectory(path.dirname(target), root);
+    const stat = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!stat) continue;
+    if (!stat.isFile()) throw new Error("invalid attachment file path");
+    const validation = validateAttachmentFile({ name: safeFilename, mimeType, size: stat.size });
+    if (!validation.ok) throw new Error(validation.reason);
+    if (resolved) throw new Error("The saved attachment is ambiguous — attach it again");
+    resolved = { absolutePath: target, relativePath, mimeType, bytes: stat.size, skipped: true };
+    if (relativePath === diskPath) return resolved;
+  }
+  if (resolved) return resolved;
+  throw new Error("The saved attachment is not available — attach it again");
+}
+
+/** Shared trust-boundary implementation for Electron IPC and the authenticated
+ * workspace bridge. The caller authorizes root; no client-supplied source path
+ * is accepted. Incomplete uploads live in private temporary directories, never
+ * among completed graph records. Only the final operation changes the graph. */
+export async function transferContextAttachment(
+  workspaceRoot: string,
+  args: Record<string, unknown>,
+  options: { allowNativeSource?: boolean } = {},
+): Promise<AttachmentWriteResult> {
+  const attachmentId = requiredString(args, "attachmentId");
+  if (!ID_OK.test(attachmentId)) throw new Error("invalid attachment id");
+  const filename = requiredString(args, "filename");
+  const mimeType = requiredString(args, "mimeType");
+  if (typeof args.base64 !== "string")
+    throw new Error("attachment: missing base64");
+  const root = await fs.realpath(workspaceRoot);
+  if (args.resolve === true)
+    return resolveAttachment(root, attachmentId, filename, mimeType, args.diskPath);
+
+  if (args.nativeSourceId !== undefined) {
+    if (!options.allowNativeSource) throw new Error("Native attachments require a local workspace");
+    if (args.uploadId !== undefined || args.base64 !== "") throw new Error("Invalid native attachment transfer");
+    return withAttachmentSource(args.nativeSourceId, async (file, size, verify) => {
+      const validation = validateAttachmentFile({ name: filename, mimeType, size });
+      if (!validation.ok) throw new Error(validation.reason);
+      const result = await stageContextGraphAttachmentFile(root, { attachmentId, filename, file, size, verify });
+      if (!result.ok) throw new Error(result.error);
+      return { absolutePath: result.absolutePath!, relativePath: result.relativePath!, mimeType, bytes: result.bytes!, skipped: result.skipped };
+    });
+  }
+
+  if (args.uploadId === undefined) {
+    if (
+      args.offset !== undefined ||
+      args.totalBytes !== undefined ||
+      args.abort !== undefined
+    )
+      throw new Error("attachment: missing upload id");
+    const verdict = validateAttachmentFile({
+      name: filename,
+      mimeType,
+      size: 0,
+    });
+    if (!verdict.ok) throw new Error(verdict.reason);
+    const result = await stageContextGraphAttachment(root, {
+      attachmentId,
+      filename,
+      base64: args.base64,
+    });
+    if (!result.ok) throw new Error(result.error);
+    return {
+      absolutePath: result.absolutePath!,
+      relativePath: result.relativePath!,
+      mimeType,
+      bytes: result.bytes!,
+      ...(result.skipped ? { skipped: true } : {}),
+    };
+  }
+
+  const uploadId = requiredString(args, "uploadId");
+  if (!ID_OK.test(uploadId)) throw new Error("invalid upload id");
+  const key = JSON.stringify([root, uploadId]);
+  let upload = uploads.get(key);
+  if (upload?.busy) throw new Error("attachment upload is busy");
+  if (args.abort === true) {
+    if (upload) {
+      if (upload.attachmentId !== attachmentId)
+        throw new Error("attachment metadata changed");
+      await disposeUpload(key, upload);
+    }
+    return {
+      absolutePath: "",
+      relativePath: "",
+      mimeType,
+      bytes: 0,
+      pending: true,
+    };
+  }
+  const totalBytes = args.totalBytes as number;
+  const offset = args.offset as number;
+  const verdict = validateAttachmentFile({
+    name: filename,
+    mimeType,
+    size: totalBytes,
+  });
+  if (!verdict.ok) throw new Error(verdict.reason);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > totalBytes)
+    throw new Error("invalid attachment offset");
+  if (
+    args.base64.length > Math.ceil(ATTACHMENT_CHUNK_BYTES / 3) * 4 ||
+    args.base64.length % 4 !== 0 ||
+    !/^[A-Za-z0-9+/]*={0,2}$/.test(args.base64)
+  ) {
+    throw new Error("invalid attachment chunk");
+  }
+  const chunk = Buffer.from(args.base64, "base64");
+  if (
+    chunk.length > ATTACHMENT_CHUNK_BYTES ||
+    offset + chunk.length > totalBytes ||
+    (chunk.length === 0 && offset !== 0)
+  )
+    throw new Error("invalid attachment chunk size");
+  if (
+    upload &&
+    (upload.attachmentId !== attachmentId ||
+      upload.filename !== filename ||
+      upload.mimeType !== mimeType ||
+      upload.totalBytes !== totalBytes)
+  )
+    throw new Error("attachment metadata changed");
+  if (upload && upload.offset !== offset)
+    throw new Error("unexpected attachment offset");
+  if (!upload) {
+    if (offset !== 0) throw new Error("attachment upload not found");
+    if (uploads.size >= MAX_ACTIVE_UPLOADS)
+      throw new Error(
+        "Too many attachment uploads; try again after another finishes",
+      );
+    upload = {
+      attachmentId,
+      filename,
+      mimeType,
+      totalBytes,
+      offset: 0,
+      busy: false,
+    };
+    uploads.set(key, upload);
+  }
+  upload.busy = true;
+  clearTimeout(upload.timer);
+  try {
+    if (!upload.file) {
+      upload.temporary = await createAttachmentTemporaryDirectory(root);
+      upload.file = await fs.open(
+        path.join(upload.temporary.path, "contents"),
+        constants.O_RDWR |
+          constants.O_CREAT |
+          constants.O_EXCL |
+          constants.O_NOFOLLOW,
+        0o600,
+      );
+    }
+    await upload.file.writeFile(chunk);
+    upload.offset += chunk.length;
+    if (upload.offset < upload.totalBytes) {
+      const pending = upload;
+      upload.timer = setTimeout(() => {
+        void disposeUpload(key, pending).catch(() => {});
+      }, UPLOAD_IDLE_MS);
+      upload.timer.unref();
+      return {
+        absolutePath: "",
+        relativePath: "",
+        mimeType,
+        bytes: upload.offset,
+        pending: true,
+      };
+    }
+    const staged = await stageContextGraphAttachmentFile(root, {
+      attachmentId,
+      filename,
+      file: upload.file,
+      size: totalBytes,
+    });
+    if (!staged.ok) throw new Error(staged.error);
+    await disposeUpload(key, upload);
+    return {
+      absolutePath: staged.absolutePath!,
+      relativePath: staged.relativePath!,
+      mimeType,
+      bytes: staged.bytes!,
+      ...(staged.skipped ? { skipped: true } : {}),
+    };
+  } catch (error) {
+    await disposeUpload(key, upload);
+    throw error;
+  } finally {
+    upload.busy = false;
+  }
+}

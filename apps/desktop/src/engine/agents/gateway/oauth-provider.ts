@@ -35,6 +35,8 @@ import type {
 
 /** Per-backend stored credentials, keyed by canonical resource URI. */
 export interface BackendCredentials {
+  oauthConfig?: string;
+  oauthSecret?: { clientId: string; value: string };
   tokens?: OAuthTokens;
   /** A dynamically-registered client (RFC 7591), to reuse across reconnects. */
   client?: OAuthClientInformationFull;
@@ -49,6 +51,7 @@ export interface BackendCredentials {
  *  this never touches disk itself. */
 export class OAuthVault {
   private readonly creds = new Map<string, BackendCredentials>();
+  private readonly revisions = new Map<string, number>();
   constructor(private readonly onChange?: () => void) {}
 
   private entry(resourceUri: string): BackendCredentials {
@@ -62,6 +65,44 @@ export class OAuthVault {
 
   getTokens(resourceUri: string): OAuthTokens | undefined {
     return this.creds.get(resourceUri)?.tokens;
+  }
+  revision(resourceUri: string): number { return this.revisions.get(resourceUri) ?? 0; }
+  private advance(resourceUri: string): void { this.revisions.set(resourceUri, this.revision(resourceUri) + 1); }
+  bindOAuth(resourceUri: string, clientId?: string, scope?: string): number {
+    const entry = this.entry(resourceUri);
+    const config = JSON.stringify([clientId ?? "", [...new Set((scope ?? "").split(/\s+/).filter(Boolean))].sort()]);
+    // Legacy default registrations remain usable. Explicit new configuration
+    // must never reuse another client's tokens or broader authorization.
+    if (entry.oauthConfig !== config) {
+      if (entry.oauthConfig !== undefined || clientId || scope) {
+        delete entry.tokens;
+        delete entry.client;
+        this.advance(resourceUri);
+      }
+      entry.oauthConfig = config;
+      this.onChange?.();
+    }
+    return this.revision(resourceUri);
+  }
+  getOAuthSecret(resourceUri: string, clientId: string): string | undefined {
+    const saved = this.creds.get(resourceUri)?.oauthSecret;
+    return saved?.clientId === clientId ? saved.value : undefined;
+  }
+  setOAuthSecret(resourceUri: string, clientId: string, value: string): void {
+    const entry = this.entry(resourceUri);
+    if (value) entry.oauthSecret = { clientId, value };
+    else delete entry.oauthSecret;
+    delete entry.tokens;
+    delete entry.client;
+    this.advance(resourceUri);
+    this.onChange?.();
+  }
+  invalidateOAuth(resourceUri: string, scope: "all" | "client" | "tokens" | "verifier"): void {
+    const entry = this.creds.get(resourceUri);
+    if (!entry) return;
+    if (scope === "all" || scope === "tokens") delete entry.tokens;
+    if (scope === "all" || scope === "client") delete entry.client;
+    this.onChange?.();
   }
   setTokens(resourceUri: string, tokens: OAuthTokens): void {
     this.entry(resourceUri).tokens = tokens;
@@ -82,7 +123,7 @@ export class OAuthVault {
     const entry = this.creds.get(resourceUri);
     if (!entry?.client) return;
     delete entry.client;
-    if (!entry.tokens && !entry.header) this.creds.delete(resourceUri);
+    if (!entry.tokens && !entry.header && !entry.oauthConfig && !entry.oauthSecret) this.creds.delete(resourceUri);
     this.onChange?.();
   }
   hasTokens(resourceUri: string): boolean {
@@ -99,19 +140,21 @@ export class OAuthVault {
     this.onChange?.();
   }
   clear(resourceUri: string): void {
+    this.advance(resourceUri);
     if (this.creds.delete(resourceUri)) this.onChange?.();
   }
 
   /** A serializable copy for the durable store. Contains SECRETS — the caller
    *  MUST encrypt at rest (safeStorage) + never log it. */
   snapshot(): Record<string, BackendCredentials> {
-    return Object.fromEntries(this.creds);
+    return structuredClone(Object.fromEntries(this.creds));
   }
   /** Re-seed from the durable store at boot (no onChange — this isn't a write). */
   restore(data: Record<string, BackendCredentials> | null | undefined): void {
+    for (const key of this.creds.keys()) this.advance(key);
     this.creds.clear();
     if (!data) return;
-    for (const [k, v] of Object.entries(data)) if (v) this.creds.set(k, v);
+    for (const [k, v] of Object.entries(data)) if (v) this.creds.set(k, structuredClone(v));
   }
 }
 
@@ -134,12 +177,25 @@ export interface ZerosOAuthProviderDeps {
 /** Implements the SDK's OAuthClientProvider against the vault. One instance per
  *  backend (its `resourceUri` is the vault key). */
 export class ZerosOAuthProvider implements OAuthClientProvider {
+  private readonly revision: number;
+  private cancelled = false;
   private interactive = false;
   private verifier: string | null = null;
   private currentState: string | null = null;
   private lastAuthorizationUrl: string | null = null;
 
-  constructor(private readonly deps: ZerosOAuthProviderDeps) {}
+  constructor(private readonly deps: ZerosOAuthProviderDeps) {
+    this.revision = deps.vault.bindOAuth(deps.resourceUri, deps.staticClientId, deps.scope);
+  }
+  cancel(): void { this.cancelled = true; this.interactive = false; this.verifier = null; }
+  private assertCurrent(): void {
+    if (this.cancelled || this.deps.vault.revision(this.deps.resourceUri) !== this.revision) throw new Error("MCP authorization changed or was cancelled. Start sign-in again.");
+  }
+  invalidateCredentials(scope: "all" | "client" | "tokens" | "verifier"): void {
+    this.assertCurrent();
+    this.deps.vault.invalidateOAuth(this.deps.resourceUri, scope);
+    if (scope === "all" || scope === "verifier") this.verifier = null;
+  }
 
   /** Allow `redirectToAuthorization` to open the browser. Set true only for a
    *  user-triggered Sign-in; false on passive connect so boot never opens one. */
@@ -177,6 +233,11 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
   }
 
   clientInformation(): OAuthClientInformationMixed | undefined {
+    this.assertCurrent();
+    if (this.deps.staticClientId) {
+      const secret = this.deps.vault.getOAuthSecret(this.deps.resourceUri, this.deps.staticClientId);
+      return { client_id: this.deps.staticClientId, ...(secret ? { client_secret: secret } : {}) };
+    }
     const stored = this.deps.vault.getClient(this.deps.resourceUri);
     if (stored) {
       // A DCR client is bound to the redirect URI registered with the
@@ -192,13 +253,11 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
       }
       this.deps.vault.clearClient(this.deps.resourceUri);
     }
-    // A pre-registered (no-DCR) client id, if configured.
-    if (this.deps.staticClientId)
-      return { client_id: this.deps.staticClientId };
     return undefined;
   }
 
   saveClientInformation(info: OAuthClientInformationMixed): void {
+    this.assertCurrent();
     // Only a full registration (with client_id) is worth persisting for reuse.
     if ("client_id" in info && info.client_id) {
       this.deps.vault.setClient(
@@ -240,16 +299,20 @@ export class ZerosOAuthProvider implements OAuthClientProvider {
   }
 
   tokens(): OAuthTokens | undefined {
+    this.assertCurrent();
     return this.deps.vault.getTokens(this.deps.resourceUri);
   }
 
   saveTokens(tokens: OAuthTokens): void {
-    // The SDK calls this after the code exchange AND after every refresh — so a
-    // A rotated refresh_token is persisted atomically here.
+    this.assertCurrent();
+    // The SDK calls this after the code exchange and every refresh, persisting
+    // a rotated refresh_token atomically here.
     this.deps.vault.setTokens(this.deps.resourceUri, tokens);
   }
 
   redirectToAuthorization(authorizationUrl: URL): void {
+    this.assertCurrent();
+    if (this.deps.scope) authorizationUrl.searchParams.set("scope", this.deps.scope);
     // Always capture the URL — the headless paste-code flow returns it to the UI.
     this.lastAuthorizationUrl = authorizationUrl.toString();
     if (this.interactive) {

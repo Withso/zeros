@@ -53,7 +53,7 @@ import {
 } from "../../shared/ui/primitives/select";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useBridge } from "../../platform/bridge/use-bridge";
-import { bridgeMcpGatewaySetHeaderSecret } from "../../platform/bridge/workspace-bridge";
+import { bridgeMcpGatewaySetHeaderSecret, bridgeMcpGatewaySetOAuthSecret, bridgeMcpValidateWorkingDirectory } from "../../platform/bridge/workspace-bridge";
 import { useSettingsLayer } from "../settings/use-settings";
 import {
   MCP_SECRET_SENTINEL,
@@ -409,12 +409,15 @@ export function McpServerFormPage({
       : [],
   );
   const [busy, setBusy] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const editing = initial !== null;
   const bridge = useBridge();
 
-  const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
+  const set = <K extends keyof Draft>(key: K, value: Draft[K]) => {
+    setSaveError(null);
     setDraft((d) => ({ ...d, [key]: value }));
+  };
 
   // Names taken by OTHER servers in THIS scope (collision guard).
   const takenNames = useMemo(() => {
@@ -433,7 +436,7 @@ export function McpServerFormPage({
     () => ({ ...draft, argsText: argRows.map((r) => r.value).join("\n") }),
     [draft, argRows],
   );
-  const error = draftError(effectiveDraft, takenNames);
+  const error = saveError ?? draftError(effectiveDraft, takenNames);
   // A repo server with a user server's name deliberately overrides it there —
   // allowed, but said out loud.
   const overridesUser =
@@ -471,6 +474,15 @@ export function McpServerFormPage({
   const handleSave = async () => {
     setBusy(true);
     try {
+      if (effectiveDraft.transport === "stdio" && effectiveDraft.cwd.trim()) {
+        if (!bridge) throw new Error("Connect to the engine to validate the working directory.");
+        await bridgeMcpValidateWorkingDirectory(bridge, effectiveDraft.cwd.trim(), scope.kind === "repo" ? scope.project.repoRoot : undefined);
+      }
+      if (isUser && effectiveDraft.transport !== "stdio" && effectiveDraft.auth === "oauth" &&
+        (effectiveDraft.oauthClientSecret || effectiveDraft.clearOAuthClientSecret)) {
+        if (!bridge) throw new Error("Connect to the engine to store OAuth credentials.");
+        await bridgeMcpGatewaySetOAuthSecret(bridge, effectiveDraft.url.trim(), effectiveDraft.oauthClientId.trim(), effectiveDraft.clearOAuthClientSecret ? "" : effectiveDraft.oauthClientSecret);
+      }
       // Freshly-typed Keychain secrets FIRST (scope-aware accounts), so the
       // file only ever carries the sentinel.
       for (const { name, value } of newSecretsFromDraft(effectiveDraft)) {
@@ -508,6 +520,8 @@ export function McpServerFormPage({
         toast.success(editing ? "MCP server saved" : "MCP server added");
         onBack();
       }
+    } catch (error) {
+      setSaveError(error instanceof Error ? error.message : "Couldn't save MCP configuration.");
     } finally {
       setBusy(false);
     }
@@ -538,7 +552,7 @@ export function McpServerFormPage({
       }
       return { ...s, ...(Object.keys(env).length ? { env } : { env: undefined }) };
     }
-    if (s.transport === "http" && s.headers && typeof s.headers === "object") {
+    if (s.transport !== "stdio" && s.headers && typeof s.headers === "object") {
       const headers: Record<string, string> = {};
       const dropped: string[] = [];
       for (const [k, v] of Object.entries(s.headers as Record<string, string>)) {
@@ -561,6 +575,10 @@ export function McpServerFormPage({
   /** Import-JSON with several servers: append them all (skipping names this
    *  scope already has) and return to the list. */
   const handleImportMany = async (imported: RawServer[]) => {
+    if (!isUser && imported.some((server) => server.auth === "oauth")) {
+      toast.error("Add OAuth servers at User scope so Zeros can manage their authorization.");
+      return;
+    }
     const seen = new Set(
       servers.map((s) => asString(s.name).trim()).filter(Boolean),
     );
@@ -625,8 +643,7 @@ export function McpServerFormPage({
             : "Create a custom MCP server"}
         </h1>
         <p className="text-fg2 m-0 text-sm">
-          Its tools become available to agents in {scopeLabel}. Claude, Codex,
-          and Cursor all use it.
+          Its tools become available to compatible agents in {scopeLabel}.
         </p>
       </div>
 
@@ -712,18 +729,21 @@ export function McpServerFormPage({
         <div className={CARD_ROWS_CLS}>
           <FormRow
             label="Transport type"
-            hint="Configure how agents connect to this MCP server"
+            hint={draft.transport === "sse" && (!isUser || draft.auth === "none")
+              ? "Direct SSE is available for Claude and Cursor. Codex requires Streamable HTTP."
+              : "Configure how agents connect to this MCP server"}
           >
             <Select
               value={draft.transport}
               onValueChange={(v) => set("transport", v as Transport)}
             >
-              <SelectTrigger>
+              <SelectTrigger aria-label="Transport type">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="stdio">STDIO</SelectItem>
-                <SelectItem value="http">HTTP</SelectItem>
+                <SelectItem value="http">Streamable HTTP</SelectItem>
+                <SelectItem value="sse">SSE</SelectItem>
               </SelectContent>
             </Select>
           </FormRow>
@@ -776,19 +796,23 @@ export function McpServerFormPage({
                   </DashedListBox>
                 </div>
               </FormRow>
+              <FormRow label="Working directory" htmlFor="mcp-form-cwd"
+                hint="Optional folder on the machine running this server. Relative paths use the chat workspace; leave blank to keep the default.">
+                <Input id="mcp-form-cwd" value={draft.cwd} onChange={(e) => set("cwd", e.target.value)} placeholder="Default" className="max-w-sm font-mono text-sm" />
+              </FormRow>
             </>
           ) : (
             <>
               <FormRow
                 label="URL"
-                hint="Streamable-HTTP endpoint"
+                hint={draft.transport === "sse" ? "SSE endpoint" : "Streamable HTTP endpoint"}
                 htmlFor="mcp-form-url"
               >
                 <Input
                   id="mcp-form-url"
                   value={draft.url}
                   onChange={(e) => set("url", e.target.value)}
-                  placeholder="https://mcp.example.com/mcp"
+                  placeholder={draft.transport === "sse" ? "https://mcp.example.com/sse" : "https://mcp.example.com/mcp"}
                   className="max-w-sm font-mono text-sm"
                 />
               </FormRow>
@@ -807,7 +831,7 @@ export function McpServerFormPage({
                     value={draft.auth}
                     onValueChange={(v) => set("auth", v as Draft["auth"])}
                   >
-                    <SelectTrigger>
+                    <SelectTrigger aria-label="Authentication">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
@@ -860,11 +884,14 @@ export function McpServerFormPage({
                 </>
               )}
               {isUser && draft.auth === "oauth" && (
+                <>
                 <FormRow
                   label="Client ID"
+                  htmlFor="mcp-form-oauth-client"
                   hint="Advanced — only for servers that require a pre-registered OAuth client. Leave blank to auto-register."
                 >
                   <Input
+                    id="mcp-form-oauth-client"
                     value={draft.oauthClientId}
                     onChange={(e) => set("oauthClientId", e.target.value)}
                     placeholder="(optional) client_id"
@@ -872,6 +899,16 @@ export function McpServerFormPage({
                     autoComplete="off"
                   />
                 </FormRow>
+                <FormRow label="Scopes" htmlFor="mcp-form-oauth-scopes" hint="Optional permissions, separated by spaces. Leave blank to use the service's defaults.">
+                  <Input id="mcp-form-oauth-scopes" value={draft.oauthScopes} onChange={(e) => set("oauthScopes", e.target.value)} placeholder="e.g. read write" className="max-w-sm text-sm" />
+                </FormRow>
+                <FormRow label="Client secret" htmlFor="mcp-form-oauth-secret" hint="Only for services requiring a registered client secret. Stored separately from settings. Leave blank to keep a saved secret.">
+                  <div className="flex w-full max-w-sm flex-col gap-2">
+                    <Input id="mcp-form-oauth-secret" type="password" autoComplete="new-password" value={draft.oauthClientSecret} disabled={draft.clearOAuthClientSecret} onChange={(e) => set("oauthClientSecret", e.target.value)} placeholder="Optional" className="text-sm" />
+                    {editing && draft.oauthClientId && <Button variant="ghost" size="sm" onClick={() => set("clearOAuthClientSecret", !draft.clearOAuthClientSecret)}>{draft.clearOAuthClientSecret ? "Keep saved secret" : "Remove saved secret on save"}</Button>}
+                  </div>
+                </FormRow>
+                </>
               )}
               {(!isUser || draft.auth === "none") && (
                 <FormRow
@@ -1018,6 +1055,10 @@ export function McpServerFormPage({
         open={importOpen}
         onClose={() => setImportOpen(false)}
         onSingle={(server) => {
+          if (!isUser && server.auth === "oauth") {
+            toast.error("Add OAuth servers at User scope so Zeros can manage their authorization.");
+            return;
+          }
           // Seed the whole form from the pasted config; keep an existing
           // typed name if the paste has none. Secret-looking env values seed
           // as SECRET rows (Keychain on save, sentinel in the file) — the

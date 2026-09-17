@@ -55,9 +55,9 @@ export function dedupeMcpServers(
     // Endpoint identity: the URL for http, the command line for stdio — two
     // entries pointing at the same server (under different names) are dupes.
     const target =
-      s.transport === "http"
-        ? `http:${s.url}`
-        : `stdio:${JSON.stringify([s.command, ...(s.args ?? [])])}`;
+      s.transport !== "stdio"
+        ? `${s.transport}:${s.url}`
+        : `stdio:${JSON.stringify([s.command, s.args ?? [], s.cwd ?? ""])}`;
     if (seenNames.has(s.name) || seenTargets.has(target)) continue;
     seenNames.add(s.name);
     seenTargets.add(target);
@@ -102,6 +102,7 @@ function toRegistration(s: McpSettingsServer): McpServerRegistration {
       name: s.name,
       transport: "stdio",
       command: s.command,
+      ...(s.cwd ? { cwd: s.cwd } : {}),
       ...(s.args ? { args: s.args } : {}),
       ...(env ? { env } : {}),
     };
@@ -109,7 +110,7 @@ function toRegistration(s: McpSettingsServer): McpServerRegistration {
   const headers = stripSecretSentinels(s.headers);
   return {
     name: s.name,
-    transport: "http",
+    transport: s.transport,
     url: s.url,
     ...(headers ? { headers } : {}),
   };
@@ -139,7 +140,7 @@ export function mcpServersFromSettings(
     // not injected directly — keep them out of the direct registry (mirrors the
     // resolveMcpServers partition).
     if (
-      parsed.data.transport === "http" &&
+      parsed.data.transport !== "stdio" &&
       (parsed.data.auth === "oauth" || parsed.data.auth === "header")
     ) {
       continue;
@@ -169,6 +170,8 @@ const MCP_LAYER_PRECEDENCE: readonly SettingsLayerName[] = [
  *  surfaced here so the partition stays stable and testable. */
 export interface GatewayBackend {
   name: string;
+  /** Omitted by older callers: Streamable HTTP. */
+  transport?: "http" | "sse";
   url: string;
   /** "oauth" = the gateway brokers OAuth 2.1; "header" = the gateway adds a static
    *  auth header whose VALUE lives in the engine vault (never in settings). */
@@ -181,6 +184,7 @@ export interface GatewayBackend {
   headers?: Record<string, string>;
   /** For auth:"oauth": a pre-registered client_id (no-DCR providers). Non-secret. */
   clientId?: string;
+  scopes?: string[];
   /** Tool NAMES to hide from agents (the Cursor 40-cap allowlist). The gateway
    *  filters these out of the aggregated set it serves. */
   disabledTools?: string[];
@@ -411,7 +415,7 @@ function composeMcpRegistry(
       // them out (same name/url dedup namespace as direct servers, so a name
       // can't be both).
       if (
-        s.transport === "http" &&
+        s.transport !== "stdio" &&
         (s.auth === "oauth" || s.auth === "header")
       ) {
         // The gateway is user-global (boot-loaded with no repo context), so a
@@ -428,12 +432,13 @@ function composeMcpRegistry(
           seenNames.add(s.name);
           continue;
         }
-        const target = `http:${s.url}`;
+        const target = `${s.transport}:${s.url}`;
         if (seenNames.has(s.name) || seenTargets.has(target)) continue;
         seenNames.add(s.name);
         seenTargets.add(target);
         gatewayBackends.push({
           name: s.name,
+          ...(s.transport === "sse" ? { transport: "sse" as const } : {}),
           url: s.url,
           auth: s.auth,
           ...(s.auth === "header"
@@ -447,6 +452,7 @@ function composeMcpRegistry(
           ...(s.auth === "oauth" && s.oauth_client_id
             ? { clientId: s.oauth_client_id }
             : {}),
+          ...(s.auth === "oauth" && s.oauth_scopes?.length ? { scopes: s.oauth_scopes } : {}),
           ...(s.disabled_tools && s.disabled_tools.length
             ? { disabledTools: s.disabled_tools }
             : {}),
@@ -461,9 +467,9 @@ function composeMcpRegistry(
       }
       const reg = toRegistration(s);
       const target =
-        reg.transport === "http"
-          ? `http:${reg.url}`
-          : `stdio:${JSON.stringify([reg.command, ...(reg.args ?? [])])}`;
+        reg.transport !== "stdio"
+          ? `${reg.transport}:${reg.url}`
+          : `stdio:${JSON.stringify([reg.command, reg.args ?? [], reg.cwd ?? ""])}`;
       if (seenNames.has(reg.name) || seenTargets.has(target)) continue; // first-wins = higher precedence
       seenNames.add(reg.name);
       seenTargets.add(target);

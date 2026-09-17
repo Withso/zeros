@@ -11,6 +11,22 @@ import { classifyCursorSdkError, resolveCursorModelId } from "../adapter";
 import { AgentFailureError } from "../../../types";
 
 describe("classifyCursorSdkError", () => {
+  it.each([
+    [{ code: "rate_limit_exceeded", message: "Request refused. Check your API key settings." }, "rate-limited"],
+    [{ code: "unauthenticated", message: "The credential has expired." }, "auth-required"],
+    [{ code: "model_not_found", status: 403, message: "Access denied for this selection." }, "protocol-error"],
+    [{ code: "agent_not_found", message: "Stored state was removed." }, "session-expired"],
+    [{ code: "ECONNRESET", message: "Request interrupted." }, "transport-closed"],
+    [{ message: "Unknown failure. Check your API key settings." }, "protocol-error"],
+    [{ status: 403, code: "repository_access", message: "Repository permission denied." }, "protocol-error"],
+    [{ status: 429, message: "Authentication request timed out." }, "rate-limited"],
+  ])("classifies native evidence before advice: %j", (native, kind) => {
+    const failure = classifyCursorSdkError(native, "prompt").failure;
+    expect(failure.kind).toBe(kind);
+    expect(failure.message).toContain(native.message);
+    if ("code" in native && native.code === "model_not_found") expect(failure.advice).toMatch(/model menu/);
+  });
+
   const missingAgentFixtures = [
     "Agent 896fa66e-4bcc-4786-9571-f042b857cd06 not found",
     "Agent not found",
@@ -46,11 +62,14 @@ describe("classifyCursorSdkError", () => {
     for (const msg of [
       "401 Unauthorized",
       "Invalid API key",
-      "forbidden: 403",
     ]) {
       const result = classifyCursorSdkError(new Error(msg), "newSession");
       expect(result.failure.kind).toBe("auth-required");
     }
+  });
+
+  it("does not interpret a generic forbidden response as invalid credentials", () => {
+    expect(classifyCursorSdkError(new Error("forbidden: 403"), "prompt").failure.kind).toBe("protocol-error");
   });
 
   it("classifies Cursor's typed 429 as a calm rate-limit failure", () => {
@@ -98,6 +117,30 @@ describe("classifyCursorSdkError", () => {
       const result = classifyCursorSdkError(value, "prompt");
       expect(result.failure.kind).toBe("protocol-error");
     }
+  });
+
+  it.each([
+    ["[unknown] Server error during API key exchange: Service unavailable", "transport-closed"],
+    ["Failed to connect to API key exchange endpoint: Unknown error", "transport-closed"],
+    ["Provider explanation: Server error during API key exchange: no details", "protocol-error"],
+    ["API key exchange succeeded but returned no access token", "protocol-error"],
+    [{ code: "unauthenticated", message: "Server error during API key exchange: rejected" }, "auth-required"],
+    [{ status: 401, message: "Server error during API key exchange: rejected" }, "auth-required"],
+    [{ status: 429, message: "Server error during API key exchange: rejected" }, "rate-limited"],
+    [{ status: 403, message: "Server error during API key exchange: rejected" }, "protocol-error"],
+    [{ code: "permission_denied", message: "Server error during API key exchange: rejected" }, "protocol-error"],
+    [{ code: "configuration_error", message: "Server error during API key exchange: rejected" }, "protocol-error"],
+  ])("limits the erased-refresh-code fallback to SDK connection errors: %j", (error, kind) => {
+    expect(classifyCursorSdkError(error, "prompt").failure.kind).toBe(kind);
+  });
+
+  it("preserves TLS guidance for a failed credential exchange", () => {
+    const failure = classifyCursorSdkError(
+      "[unknown] Failed to connect to API key exchange endpoint: self-signed certificate in certificate chain",
+      "prompt",
+    ).failure;
+    expect(failure.kind).toBe("protocol-error");
+    expect(failure.message).toContain("NODE_EXTRA_CA_CERTS");
   });
 
   it("classifies TLS / certificate failures with actionable guidance (HTTPS interception)", () => {

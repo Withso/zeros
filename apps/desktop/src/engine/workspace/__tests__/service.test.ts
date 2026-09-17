@@ -16,6 +16,7 @@ import { runSessionId } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { createDesignWebDocumentState } from "@zeros/design-web";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
+import * as mcpRegistry from "../../agents/mcp-registry";
 import {
   setStateRootForTesting,
   closeState,
@@ -56,11 +57,13 @@ const PNG_1X1_BASE64 =
 
 describe("WorkspaceService", () => {
   let dir: string;
+  let stateDir: string;
   let svc: WorkspaceService;
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ws-"));
-    setStateRootForTesting(path.join(dir, "state"));
+    stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-ws-state-"));
+    setStateRootForTesting(stateDir);
     fs.writeFileSync(path.join(dir, "hello.txt"), "hi there", "utf-8");
     try {
       execFileSync("git", ["init", "-q"], { cwd: dir });
@@ -72,12 +75,7 @@ describe("WorkspaceService", () => {
   afterEach(() => {
     resetWorkspaceDesignApisForTests();
     closeState();
-    const contextCache = path.join(
-      dir,
-      "state",
-      ".appdata",
-      "isolation-context",
-    );
+    const contextCache = path.join(stateDir, ".appdata", "isolation-context");
     const makeOwnerWritable = (root: string): void => {
       try {
         fs.chmodSync(root, 0o700);
@@ -96,6 +94,7 @@ describe("WorkspaceService", () => {
     };
     makeOwnerWritable(contextCache);
     fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(stateDir, { recursive: true, force: true });
   });
 
   it("lists workspaces including the synthetic local-main entry", async () => {
@@ -221,31 +220,43 @@ describe("WorkspaceService", () => {
     }
   });
 
-  it("writes an image attachment into the workspace context graph", async () => {
-    const result = (await svc.handle("attachment.write", {
-      workspaceId: LOCAL_MAIN_WORKSPACE_ID,
-      chatId: "chat-1",
-      attachmentId: "att-1",
-      base64: Buffer.from("full-resolution-image").toString("base64"),
-      mimeType: "image/png",
-      filename: "../../shot.png",
-    })) as {
-      absolutePath: string;
-      relativePath: string;
-      bytes: number;
-    };
+  it.each([false, true])(
+    "writes an image attachment into the workspace context graph (symlinked root: %s)",
+    async (symlinked) => {
+      const workspaceRoot = symlinked
+        ? path.join(stateDir, "workspace-link")
+        : dir;
+      if (symlinked) fs.symlinkSync(dir, workspaceRoot, "dir");
+      const service = new WorkspaceService(workspaceRoot);
+      const result = (await service.handle("attachment.write", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        chatId: "chat-1",
+        attachmentId: "att-1",
+        base64: Buffer.from("full-resolution-image").toString("base64"),
+        mimeType: "image/png",
+        filename: "../../shot.png",
+      })) as {
+        absolutePath: string;
+        relativePath: string;
+        bytes: number;
+      };
 
-    expect(result.relativePath).toBe(
-      ".context/local/attachments/att-1/shot.png",
-    );
-    expect(result.absolutePath).toBe(path.join(dir, result.relativePath));
-    expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
-      "full-resolution-image",
-    );
-    expect(
-      fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
-    ).toContain("/local/");
-  });
+      expect(result.relativePath).toBe(
+        ".context/local/attachments/att-1/shot.png",
+      );
+      // The attachment boundary returns canonical paths, including macOS's
+      // /var → /private/var alias and explicitly symlinked workspace roots.
+      expect(result.absolutePath).toBe(
+        path.join(fs.realpathSync(workspaceRoot), result.relativePath),
+      );
+      expect(fs.readFileSync(result.absolutePath, "utf8")).toBe(
+        "full-resolution-image",
+      );
+      expect(
+        fs.readFileSync(path.join(dir, ".context/.gitignore"), "utf8"),
+      ).toContain("/local/");
+    },
+  );
 
   it("rejects an oversized attachment from a paired remote client before writing", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
@@ -4070,6 +4081,12 @@ describe("WorkspaceService", () => {
 
     // Presentation does not gate generic workspace machinery. Sparse changes
     // independently preserve the Design directories.
+    // The first explicit context write prepares storage on demand.
+    await expect(
+      svc.handle("context.graph.scaffold", {
+        workspaceId: workspace.workspaceId,
+      }),
+    ).resolves.toMatchObject({ ok: true, created: true });
     await expect(
       svc.handle("context.graph.scaffold", {
         workspaceId: workspace.workspaceId,
@@ -4555,6 +4572,7 @@ describe("WorkspaceService", () => {
       "workspace.runLog",
       "mcp.resolveComposed",
       "mcp.gateway.status",
+      "mcp.validateWorkingDirectory",
     ]) {
       expect(svc.remoteReadable(op)).toBe(true);
       expect(svc.isRemoteAllowed(op)).toBe(true);
@@ -4583,6 +4601,9 @@ describe("WorkspaceService", () => {
       "mcp.gateway.completeAuth",
       "mcp.gateway.disconnect",
       "mcp.gateway.setHeaderSecret",
+      "mcp.gateway.setOAuthSecret",
+      "mcp.gateway.cancelAuth",
+      "mcp.gateway.reconnect",
     ]) {
       expect(svc.isRemoteAllowed(op)).toBe(true);
     }
@@ -4757,13 +4778,19 @@ describe("WorkspaceService", () => {
       disconnect: async (server: string) => {
         calls.push(`disconnect:${server}`);
       },
+      cancelAuthorization: async (server?: string) => {
+        calls.push(`cancel:${server ?? "all"}`);
+      },
+      reconnect: async () => { calls.push("reconnect"); },
     };
     const headerSecrets: Array<{
       url: string;
       headerName: string;
       value: string;
     }> = [];
+    const oauthSecret = vi.fn();
     svc.setGatewayAccessor(() => gateway as never);
+    svc.setGatewayOAuthSecretSetter(oauthSecret);
     svc.setGatewayHeaderSecretSetter((url, headerName, value) => {
       headerSecrets.push({ url, headerName, value });
     });
@@ -4797,6 +4824,16 @@ describe("WorkspaceService", () => {
         { remote: true },
       ),
     ).resolves.toEqual({ ok: true });
+    await expect(svc.handle("mcp.gateway.setOAuthSecret", {
+      url: connected.url, clientId: "registered", value: "fixture-client-secret",
+    }, { remote: true })).resolves.toEqual({ ok: true });
+    expect(oauthSecret).toHaveBeenCalledWith(connected.url, "registered", "fixture-client-secret");
+    await expect(svc.handle("mcp.gateway.setOAuthSecret", {
+      url: "https://name:secret@example.test", clientId: "registered", value: "invalid",
+    }, { remote: true })).rejects.toThrow(/invalid/i);
+    expect(oauthSecret).toHaveBeenCalledTimes(1);
+    await svc.handle("mcp.gateway.cancelAuth", { server: "docs" }, { remote: true });
+    await svc.handle("mcp.gateway.reconnect", {}, { remote: true });
     await expect(
       svc.handle(
         "mcp.gateway.disconnect",
@@ -4808,6 +4845,9 @@ describe("WorkspaceService", () => {
     expect(calls).toEqual([
       "begin:docs",
       "complete:docs:auth-code",
+      "cancel:all",
+      "cancel:docs",
+      "reconnect",
       "disconnect:docs",
     ]);
     expect(headerSecrets).toEqual([
@@ -4817,6 +4857,25 @@ describe("WorkspaceService", () => {
         value: "Bearer secret",
       },
     ]);
+  });
+
+  it("validates MCP directories on the engine and defers user-wide relative folders", async () => {
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: dir })).resolves.toEqual({ ok: true });
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: "tools" })).resolves.toEqual({ deferred: true });
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: path.join(dir, "hello.txt") })).rejects.toThrow(/folder/i);
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: "tools", workspace: "/unregistered-repo" }, { remote: true })).rejects.toThrow(/unknown workspace/i);
+  });
+
+  it("keeps public OAuth configuration in inherited server overrides", async () => {
+    const resolve = vi.spyOn(mcpRegistry, "resolveMcpServers").mockReturnValue({
+      servers: [], sources: [], warnings: [],
+      gatewayBackends: [{ name: "docs", url: "https://example.test/mcp", auth: "oauth", source: "managed", clientId: "registered", scopes: ["read"] }],
+    });
+    try {
+      await expect(svc.handle("mcp.resolveComposed", {}, { remote: true })).resolves.toMatchObject({
+        servers: [{ name: "docs", oauth_client_id: "registered", oauth_scopes: ["read"] }],
+      });
+    } finally { resolve.mockRestore(); }
   });
 
   // ── Path redaction for remote clients (FIX 3) ──────────────────────────────

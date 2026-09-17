@@ -31,6 +31,7 @@ import Text from "@tiptap/extension-text";
 const writeContextAttachment = vi.fn();
 
 vi.mock("../agent-history-client", () => ({
+  createContextAttachmentWriter: () => writeContextAttachment,
   writeContextAttachment: (...args: unknown[]) =>
     writeContextAttachment(...args),
 }));
@@ -42,6 +43,8 @@ vi.mock("../../../shared/ui/primitives/elements", () => ({
   toast: { error: (...args: unknown[]) => toastError(...args) },
 }));
 vi.mock("../../../platform/runtime", () => ({
+  onNativeBeforeQuit: () => () => {},
+  prepareNativeAttachmentFile: async () => null,
   isNativeRuntime: () => true,
 }));
 

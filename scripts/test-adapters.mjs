@@ -106,6 +106,9 @@ async function runFixture(fixtureBase) {
     emit: (n) => actualUpdates.push(n?.update?.sessionUpdate ?? "<no-update>"),
     onUnknown: (e) => unknown.push(e),
   });
+  // Mirror the adapter's actual query boundary. A per-turn system/init frame
+  // only updates metadata and cannot stand in for starting a new process.
+  translator.beginProcess?.();
 
   const fixture = fs.readFileSync(fixturePath, "utf-8");
   for (const line of fixture.split(/\r?\n/)) {

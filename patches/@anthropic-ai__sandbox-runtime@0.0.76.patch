@@ -2,7 +2,7 @@ diff --git a/dist/cli.js b/dist/cli.js
 old mode 100644
 new mode 100755
 diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
-index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..d6e34e4c9bfa82e157e53de14c75ee9bb94ffd89 100644
+index 88cc67f..d6e34e4 100644
 --- a/dist/sandbox/linux-sandbox-utils.d.ts
 +++ b/dist/sandbox/linux-sandbox-utils.d.ts
 @@ -45,6 +45,14 @@ export interface LinuxSandboxParams {
@@ -30,7 +30,7 @@ index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..d6e34e4c9bfa82e157e53de14c75ee9b
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
 diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
-index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c78b9c2e62 100644
+index 2a2d53c..a56a567 100644
 --- a/dist/sandbox/linux-sandbox-utils.js
 +++ b/dist/sandbox/linux-sandbox-utils.js
 @@ -30,7 +30,7 @@ function findSymlinkInPath(targetPath, allowedWritePaths) {
@@ -53,7 +53,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
      const cwd = process.cwd();
      // Use provided signal or create a fallback controller
      const fallbackController = new AbortController();
-@@ -578,6 +580,25 @@ function resolveApplySeccompPrefix(applyPath, argv0) {
+@@ -616,6 +618,25 @@ function resolveApplySeccompPrefix(applyPath, argv0) {
      const binary = getApplySeccompBinaryPath(applyPath);
      return binary ? `${quote([binary])} ` : undefined;
  }
@@ -79,7 +79,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
  /**
   * Build the command that runs inside the sandbox.
   * Sets up HTTP proxy on port 3128 and SOCKS proxy on port 1080
-@@ -670,7 +691,7 @@ function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllo
+@@ -708,7 +729,7 @@ function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllo
  /**
   * Generate filesystem bind mount arguments for bwrap
   */
@@ -88,7 +88,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
      const args = [];
      // fs already imported
      // Collect normalized allowed write paths. Populated in the writeConfig
-@@ -855,12 +876,12 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -896,12 +917,12 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
          // directory missing from the record only costs an abort). No spelling
          // handling is needed here: allowedWritePaths entries are recorded with
          // trailing slashes stripped, and candidates are resolved deny dests.
@@ -103,7 +103,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
          ];
          // Duplicate deny entries must be collapsed: a duplicate
          // --ro-bind /dev/null <dest> hits a char device on the second pass and
-@@ -1250,6 +1271,31 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -1333,6 +1354,31 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
          if (rawDest !== dest)
              emittedDenyWriteDests.push(rawDest);
      }
@@ -135,7 +135,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
      // The inverse stacking problem: a denyWrite ro-bind whose dest strictly
      // contains a read-denied dir re-exposes that dir's real contents (the bind
      // landed after the tmpfs). Re-apply the tmpfs on top, with the same write
-@@ -1337,7 +1383,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -1422,7 +1468,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
   * Dependencies are checked by checkLinuxDependencies() before enabling the sandbox.
   */
  export async function wrapCommandWithSandboxLinux(params) {
@@ -144,7 +144,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
      // Determine if we have restrictions to apply
      // Read: denyOnly pattern - empty array means no restrictions
      // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
-@@ -1352,9 +1398,29 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1437,9 +1483,29 @@ export async function wrapCommandWithSandboxLinux(params) {
          !hasReadRestrictions &&
          !hasWriteRestrictions &&
          !hasEnvRestrictions &&
@@ -175,7 +175,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
      // Mark this sandbox invocation as active. cleanupBwrapMountPoints() will
      // defer file deletion until this (and every other concurrent) invocation
      // has been cleaned up. The matching decrement happens in
-@@ -1490,10 +1556,12 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1575,10 +1641,12 @@ export async function wrapCommandWithSandboxLinux(params) {
              // If no sockets provided, network is completely blocked (--unshare-net without proxy)
          }
          // ========== FILESYSTEM RESTRICTIONS ==========
@@ -191,34 +191,59 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
          // ========== PID NAMESPACE ISOLATION ==========
          // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
          // By default, always unshare PID namespace and mount fresh /proc.
-@@ -1501,8 +1569,15 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1586,27 +1654,32 @@ export async function wrapCommandWithSandboxLinux(params) {
          // If we don't have --proc, it is possible to read host /proc and leak information about code running
          // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
          // so we support running without it if explicitly requested.
 -        bwrapArgs.push('--unshare-pid');
+-        // --unshare-user in both modes: bwrap only auto-creates a userns when
+-        // EUID != 0. A root parent in an unprivileged container (Docker's
+-        // default: EUID=0 without CAP_SYS_ADMIN) would otherwise try a direct
+-        // clone and EPERM; a root parent WITH capabilities would leave the
+-        // command holding them, CAP_SYS_ADMIN included, which unmounts any deny
+-        // in this namespace — hence capabilityArgs in both modes as well.
+-        // apply-seccomp creates its own nested userns to obtain CAP_SYS_ADMIN
+-        // for its PID+mount unshare (see below); for a root caller that needs
+-        // the one capability capabilityArgs keeps.
+-        bwrapArgs.push('--unshare-user', ...capabilityArgs(applySeccompPrefix !== undefined));
 -        if (!enableWeakerNestedSandbox) {
-+        if (!hostParity)
-+            bwrapArgs.push('--unshare-pid');
+-            // Mount fresh /proc if PID namespace is isolated (secure mode).
+-            bwrapArgs.push('--proc', '/proc');
 +        if (linuxPrivilegedWorker) {
-+            // Keep only the capabilities needed by setpriv to irreversibly
-+            // enter the dedicated uid/gid. The workload receives none.
++            // The trusted cloud supervisor needs only these capabilities to
++            // enter the exact worker uid/gid. setpriv then clears all sets and
++            // locks securebits before running the workload.
 +            bwrapArgs.push('--cap-drop', 'ALL', '--cap-add', 'CAP_SETUID',
 +                '--cap-add', 'CAP_SETGID', '--cap-add', 'CAP_SETPCAP');
 +        }
-+        else if (!hostParity && !enableWeakerNestedSandbox) {
-             // Mount fresh /proc if PID namespace is isolated (secure mode).
-             // --unshare-user + --cap-drop ALL: bwrap only auto-creates a userns
-             // when EUID != 0, so a root parent would otherwise leave the sandboxed
-@@ -1513,7 +1588,7 @@ export async function wrapCommandWithSandboxLinux(params) {
-             // userns to obtain CAP_SYS_ADMIN for its PID+mount unshare (see below).
-             bwrapArgs.push('--unshare-user', '--cap-drop', 'ALL', '--proc', '/proc');
++        else if (hostParity) {
++            // Preserve host process visibility without passing ambient
++            // capabilities into the workload. Retain upstream's seccomp-helper
++            // exception only when that helper is actually used.
++            bwrapArgs.push(...capabilityArgs(applySeccompPrefix !== undefined));
          }
--        else {
-+        else if (!hostParity) {
-             // --unshare-user: bwrap only auto-adds this when EUID != 0. In an
-             // unprivileged container (Docker's default: EUID=0 without
-             // CAP_SYS_ADMIN), bwrap assumes it has caps, tries direct clone,
-@@ -1546,11 +1621,12 @@ export async function wrapCommandWithSandboxLinux(params) {
+         else {
+-            // --bind /proc /proc: apply-seccomp's nested-userns path writes
+-            // /proc/self/setgroups and uid_map. Without --proc above, the
+-            // --ro-bind / / leaves /proc read-only and those writes EROFS; a
+-            // fresh proc mount is what an unprivileged container refuses.
+-            bwrapArgs.push('--bind', '/proc', '/proc');
++            bwrapArgs.push('--unshare-pid');
++            // Retain upstream's root-caller protection in BOTH normal and
++            // weaker nesting modes, including the seccomp-helper exception.
++            bwrapArgs.push('--unshare-user', ...capabilityArgs(applySeccompPrefix !== undefined));
++            if (!enableWeakerNestedSandbox) {
++                bwrapArgs.push('--proc', '/proc');
++            }
++            else {
++                // apply-seccomp's nested namespace needs writable uid_map and
++                // setgroups entries when a fresh proc mount is unavailable.
++                bwrapArgs.push('--bind', '/proc', '/proc');
++            }
+         }
+         // apply-seccomp obtains CAP_SYS_ADMIN for its nested PID+mount unshare
+         // by creating a nested user namespace. This requires the host to permit
+@@ -1630,11 +1703,12 @@ export async function wrapCommandWithSandboxLinux(params) {
              bwrapArgs.push(sandboxCommand);
          }
          else if (applySeccompPrefix) {
@@ -233,7 +258,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
          }
          const wrappedCommand = quote([bwrapPath ?? 'bwrap', ...bwrapArgs]);
          const restrictions = [];
-@@ -1562,6 +1638,8 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1646,6 +1720,8 @@ export async function wrapCommandWithSandboxLinux(params) {
              restrictions.push('env');
          if (applySeccompPrefix)
              restrictions.push('seccomp(unix-block)');
@@ -243,7 +268,7 @@ index 185a9bd6a092041c24190a9216d2aa88ef910dd4..a062cdd8755ea84a640e1d631d99e9c7
          return wrappedCommand;
      }
 diff --git a/dist/sandbox/macos-sandbox-utils.d.ts b/dist/sandbox/macos-sandbox-utils.d.ts
-index 93b1106305aa7ffb37f04867cd343f94ff411350..ac95e3be1c8bf8f4b749a72b439414742bf9e601 100644
+index 93b1106..ac95e3b 100644
 --- a/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/dist/sandbox/macos-sandbox-utils.d.ts
 @@ -42,6 +42,7 @@ export interface MacOSSandboxParams {
@@ -271,7 +296,7 @@ index 93b1106305aa7ffb37f04867cd343f94ff411350..ac95e3be1c8bf8f4b749a72b43941474
      line: string;
      command?: string;
 diff --git a/dist/sandbox/macos-sandbox-utils.js b/dist/sandbox/macos-sandbox-utils.js
-index 70de07c6837687fdec53f8db60225f4df5ea8776..6bae3ffa6f154db51ac2b231db53a75aed54fb4f 100644
+index 70de07c..17303c9 100644
 --- a/dist/sandbox/macos-sandbox-utils.js
 +++ b/dist/sandbox/macos-sandbox-utils.js
 @@ -10,7 +10,9 @@ import { shouldIgnoreViolation } from './sandbox-violation-store.js';
@@ -459,10 +484,10 @@ index 70de07c6837687fdec53f8db60225f4df5ea8776..6bae3ffa6f154db51ac2b231db53a75a
      });
      // Generate proxy environment variables using shared utility
 diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
-index 3f3ed8efb9f3cbd965d2d35f21faa04130ca1aeb..a0374bdf08cb634d940c81d460ade7f9931892a5 100644
+index 42b8e0c..6e591ac 100644
 --- a/dist/sandbox/sandbox-config.d.ts
 +++ b/dist/sandbox/sandbox-config.d.ts
-@@ -718,21 +718,27 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
+@@ -721,21 +721,27 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
      allowRead: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
      allowWrite: z.ZodArray<z.ZodString, "many">;
      denyWrite: z.ZodArray<z.ZodString, "many">;
@@ -490,7 +515,7 @@ index 3f3ed8efb9f3cbd965d2d35f21faa04130ca1aeb..a0374bdf08cb634d940c81d460ade7f9
  }>;
  /**
   * Configuration schema for ignoring specific sandbox violations
-@@ -964,22 +970,29 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+@@ -970,22 +976,29 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
          allowRead: z.ZodOptional<z.ZodArray<z.ZodString, "many">>;
          allowWrite: z.ZodArray<z.ZodString, "many">;
          denyWrite: z.ZodArray<z.ZodString, "many">;
@@ -520,7 +545,7 @@ index 3f3ed8efb9f3cbd965d2d35f21faa04130ca1aeb..a0374bdf08cb634d940c81d460ade7f9
      credentials: z.ZodOptional<z.ZodObject<{
          files: z.ZodOptional<z.ZodArray<z.ZodObject<{
              path: z.ZodString;
-@@ -1201,6 +1214,19 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
+@@ -1207,6 +1220,19 @@ export declare const SandboxRuntimeConfigSchema: z.ZodEffects<z.ZodObject<{
      }>>;
      ignoreViolations: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodArray<z.ZodString, "many">>>;
      enableWeakerNestedSandbox: z.ZodOptional<z.ZodBoolean>;
@@ -540,7 +565,7 @@ index 3f3ed8efb9f3cbd965d2d35f21faa04130ca1aeb..a0374bdf08cb634d940c81d460ade7f9
      enableWeakerNetworkIsolation: z.ZodOptional<z.ZodBoolean>;
      allowAppleEvents: z.ZodOptional<z.ZodBoolean>;
      ripgrep: z.ZodOptional<z.ZodObject<{
-@@ -1680,6 +1706,14 @@ export type GitConfig = z.infer<typeof GitConfigSchema>;
+@@ -1690,6 +1716,14 @@ export type GitConfig = z.infer<typeof GitConfigSchema>;
  export type SeccompConfig = z.infer<typeof SeccompConfigSchema>;
  export type SrtWinConfig = z.infer<typeof SrtWinConfigSchema>;
  export type WindowsConfig = z.infer<typeof WindowsConfigSchema>;
@@ -558,10 +583,10 @@ index 3f3ed8efb9f3cbd965d2d35f21faa04130ca1aeb..a0374bdf08cb634d940c81d460ade7f9
  //# sourceMappingURL=sandbox-config.d.ts.map
 \ No newline at end of file
 diff --git a/dist/sandbox/sandbox-config.js b/dist/sandbox/sandbox-config.js
-index f486c8e0ebf111b9998ce61afaa3d7a08f177c9a..c12f4dd5d867644233fc10a16a204e397f3d814f 100644
+index f5f3f04..c08107f 100644
 --- a/dist/sandbox/sandbox-config.js
 +++ b/dist/sandbox/sandbox-config.js
-@@ -761,10 +761,18 @@ export const FilesystemConfigSchema = z.object({
+@@ -776,10 +776,18 @@ export const FilesystemConfigSchema = z.object({
      denyWrite: z
          .array(filesystemPathSchema)
          .describe('Paths denied for writing (takes precedence over allowWrite)'),
@@ -580,7 +605,7 @@ index f486c8e0ebf111b9998ce61afaa3d7a08f177c9a..c12f4dd5d867644233fc10a16a204e39
  });
  /**
   * Configuration schema for ignoring specific sandbox violations
-@@ -887,6 +895,14 @@ export const SeccompConfigSchema = z.object({
+@@ -902,6 +910,14 @@ export const SeccompConfigSchema = z.object({
          'applyPath resolves inside the bwrap namespace and that the target ' +
          'binary implements the apply-seccomp interface when ARGV0 matches.'),
  });
@@ -595,7 +620,7 @@ index f486c8e0ebf111b9998ce61afaa3d7a08f177c9a..c12f4dd5d867644233fc10a16a204e39
  /**
   * Main configuration schema for Sandbox Runtime validation
   */
-@@ -894,6 +910,10 @@ export const SandboxRuntimeConfigSchema = z
+@@ -909,6 +925,10 @@ export const SandboxRuntimeConfigSchema = z
      .object({
      network: NetworkConfigSchema.describe('Network restrictions configuration'),
      filesystem: FilesystemConfigSchema.describe('Filesystem restrictions configuration'),
@@ -606,7 +631,7 @@ index f486c8e0ebf111b9998ce61afaa3d7a08f177c9a..c12f4dd5d867644233fc10a16a204e39
      credentials: CredentialsConfigSchema.optional().describe('Credential handling configuration. Only the explicitly declared files ' +
          'and environment variables are restricted.'),
      ignoreViolations: IgnoreViolationsConfigSchema.optional().describe('Optional configuration for ignoring specific violations'),
-@@ -901,6 +921,7 @@ export const SandboxRuntimeConfigSchema = z
+@@ -916,6 +936,7 @@ export const SandboxRuntimeConfigSchema = z
          .boolean()
          .optional()
          .describe('Enable weaker nested sandbox mode (for Docker environments)'),
@@ -614,7 +639,7 @@ index f486c8e0ebf111b9998ce61afaa3d7a08f177c9a..c12f4dd5d867644233fc10a16a204e39
      enableWeakerNetworkIsolation: z
          .boolean()
          .optional()
-@@ -951,6 +972,13 @@ export const SandboxRuntimeConfigSchema = z
+@@ -966,6 +987,13 @@ export const SandboxRuntimeConfigSchema = z
          '`safe.directory` without adding them to `filesystem.allowWrite`.'),
  })
      .superRefine((cfg, ctx) => {
@@ -629,10 +654,10 @@ index f486c8e0ebf111b9998ce61afaa3d7a08f177c9a..c12f4dd5d867644233fc10a16a204e39
      if (!creds)
          return;
 diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
-index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f46af52608 100644
+index 753c754..371416f 100644
 --- a/dist/sandbox/sandbox-manager.js
 +++ b/dist/sandbox/sandbox-manager.js
-@@ -664,6 +664,15 @@ async function initialize(runtimeConfig, sandboxAskCallback, enableLogMonitor =
+@@ -677,6 +677,15 @@ async function initialize(runtimeConfig, sandboxAskCallback, enableLogMonitor =
      // Initialize network infrastructure
      initializationPromise = (async () => {
          try {
@@ -648,7 +673,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
              // On Windows the WFP loopback permit covers a fixed port
              // range, so the proxies must bind inside it. Other platforms
              // bake the actual ephemeral port into the sandbox profile, so
-@@ -973,6 +982,7 @@ function getFsWriteConfig() {
+@@ -986,6 +995,7 @@ function getFsWriteConfig() {
      return {
          allowOnly,
          denyWithinAllow: denyPaths,
@@ -656,7 +681,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
      };
  }
  /**
-@@ -1102,12 +1112,18 @@ function getIgnoreViolations() {
+@@ -1115,12 +1125,18 @@ function getIgnoreViolations() {
  function getEnableWeakerNestedSandbox() {
      return config?.enableWeakerNestedSandbox;
  }
@@ -675,7 +700,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
  function getRipgrepConfig() {
      return config?.ripgrep ?? { command: 'rg' };
  }
-@@ -1117,6 +1133,9 @@ function getMandatoryDenySearchDepth() {
+@@ -1130,6 +1146,9 @@ function getMandatoryDenySearchDepth() {
  function getAllowGitConfig() {
      return config?.filesystem?.allowGitConfig ?? false;
  }
@@ -685,7 +710,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
  /**
   * Union of session-level and per-call `git.safeDirectories`. Marks
   * paths as `safe.directory` (dubious-ownership bypass) WITHOUT
-@@ -1213,6 +1232,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1226,6 +1245,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
              denyWithinAllow: stripWriteGlobs(customConfig?.filesystem?.denyWrite ??
                  config?.filesystem.denyWrite ??
                  []),
@@ -695,7 +720,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
          };
          // Credential deny paths are unioned with the caller's denyRead — never
          // replacing it — so explicit filesystem restrictions always survive.
-@@ -1258,8 +1280,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1271,8 +1293,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
      // 1. customConfig has network.allowedDomains defined (even if empty array = block all)
      // 2. OR config has network.allowedDomains defined (even if empty array = block all)
      // An empty allowedDomains array means "no domains allowed" = block all network access
@@ -707,7 +732,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
      // Network RESTRICTION is needed whenever network config is specified
      // This includes empty allowedDomains which means "block all network"
      const needsNetworkRestriction = hasNetworkConfig;
-@@ -1300,9 +1323,11 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1313,9 +1336,11 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
                  ignoreViolations: getIgnoreViolations(),
                  allowPty,
                  allowGitConfig: getAllowGitConfig(),
@@ -719,7 +744,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
                  binShell,
              });
          case 'linux':
-@@ -1333,11 +1358,14 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1346,11 +1371,14 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
                  maskedFileBinds: credentialRestrictions.maskedFileBinds,
                  maskedFileStoreDir: credentialRestrictions.maskedFileStoreDir,
                  enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
@@ -734,7 +759,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
                  gitSafeDirectories,
                  seccompConfig: getSeccompConfig(),
                  bwrapPath: config?.bwrapPath,
-@@ -1382,8 +1410,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1395,8 +1423,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
  async function wrapWithSandboxArgv(command, binShell, customConfig, abortSignal, cwd, options) {
      const platform = getPlatform();
      if (platform === 'windows') {
@@ -747,7 +772,7 @@ index 3a2d9c8abd01fefff36edea0cd76e9c31a3ed411..06c4564c8650a70b78660d06b30c74f4
              await waitForNetworkInitialization();
          }
 diff --git a/dist/sandbox/sandbox-schemas.d.ts b/dist/sandbox/sandbox-schemas.d.ts
-index d753a3a3a500be8c485f511ec5a94d5921094b91..743e2cb71b1ce5d15aa70553abd18ddab23dd01c 100644
+index d753a3a..743e2cb 100644
 --- a/dist/sandbox/sandbox-schemas.d.ts
 +++ b/dist/sandbox/sandbox-schemas.d.ts
 @@ -34,6 +34,7 @@ export interface FsReadRestrictionConfig {

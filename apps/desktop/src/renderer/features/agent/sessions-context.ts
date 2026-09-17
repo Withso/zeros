@@ -82,6 +82,8 @@ export interface QueuedEditPayload {
  *  using `useContext(ActionsCtx)` don't re-render on every token. */
 export interface SessionsActions {
   getSession(chatId: string): AgentSessionState | undefined;
+  /** Cancellation/close epoch for explicit retry preparation before send. */
+  getSendGeneration(chatId: string): number;
   /** Fresh close-boundary work snapshot. Includes local sends still awaiting a
    * route, adopted provider turns, active background work, and queued prompts. */
   getCloseActivity(chatId: string): {

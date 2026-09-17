@@ -138,6 +138,19 @@ describe("formatTranscript — full", () => {
     expect(out).toContain("shell output here");
   });
 
+  it("keeps raw output beside late artifact links without repeating a link", () => {
+    const link = { type: "resource_link" as const, uri: ".context/local/artifacts/report.html", name: "Report" };
+    const out = run([
+      tool({
+        content: [{ type: "terminal", terminalId: "t1" }],
+        rawOutput: "Report generated with two warnings",
+        resourceLinks: [link, link],
+      }),
+    ]).text;
+    expect(out).toContain("Report generated with two warnings");
+    expect(out.match(/\.context\/local\/artifacts\/report\.html/g)).toHaveLength(1);
+  });
+
   it("names image and audio blocks instead of splatting their base64", () => {
     const out = run([
       tool({

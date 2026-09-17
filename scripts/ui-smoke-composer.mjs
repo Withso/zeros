@@ -71,8 +71,16 @@ import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
 import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runComposerEditorSmoke } from "./ui-smoke-composer-editor.mjs";
+import { runAttachmentPersistenceSmoke } from "./ui-smoke-attachment-persistence.mjs";
+import { runAttachmentLayoutSmoke } from "./ui-smoke-attachment-layout.mjs";
 import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
 import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
+import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
+import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
+import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
+import { runPermissionHintsSmoke } from "./ui-smoke-permission-hints.mjs";
+import { runContextGaugeSmoke } from "./ui-smoke-context-gauge.mjs";
+import { runConversationSummarySmoke } from "./ui-smoke-conversation-summary.mjs";
 import {
   expectDiffSeparatorCards,
   runEditDiffSeparatorsSmoke,
@@ -137,6 +145,21 @@ try {
   await waitForHttp(pageUrl);
 
   browser = await chromium.launch();
+  const contextPage = await browser.newPage();
+  await runContextGaugeSmoke({ page: contextPage, harnessBase });
+  await contextPage.close();
+  const permissionPage = await browser.newPage();
+  await runPermissionHintsSmoke({ page: permissionPage, harnessBase });
+  await permissionPage.close();
+  const summaryPage = await browser.newPage();
+  await runConversationSummarySmoke({ page: summaryPage, check, harnessBase });
+  await summaryPage.close();
+  const overlayPage = await browser.newPage();
+  await runOverlayPositioningSmoke({ page: overlayPage, check, harnessBase });
+  await overlayPage.close();
+  const draftPage = await browser.newPage();
+  await runDraftIndicatorsSmoke({ page: draftPage, check, harnessBase });
+  await draftPage.close();
   const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
   const consoleLines = [];
   const pageErrors = [];
@@ -145,6 +168,8 @@ try {
 
   await page.goto(pageUrl, { waitUntil: "networkidle" });
   await runComposerEditorSmoke({ page, check });
+  await runAttachmentPersistenceSmoke({ page, check });
+  await runAttachmentLayoutSmoke({ page, check });
   await page.goto(pageUrl, { waitUntil: "networkidle" });
   const pill = page.getByRole("button", { name: /^Model:/ });
   await pill.waitFor({ state: "visible", timeout: 10_000 });
@@ -2505,6 +2530,7 @@ try {
 
   await runPersonalOrganizationSmoke({ page, check });
   await runMentionsSmoke({ page, check });
+  await runComposerAttachmentsSmoke({ page, check });
   await runCustomizeSmoke({ page, check });
   await runToolsSmoke({ page, check });
   await runNativeToolsSmoke({ page, check });

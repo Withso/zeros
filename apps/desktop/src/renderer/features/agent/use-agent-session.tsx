@@ -21,6 +21,7 @@ import type {
   AgentGoal,
   BackgroundTask,
   ContentBlock,
+  ContextUsageCategory,
   InitializeResponse,
   NewSessionResponse,
   QuestionRequest,
@@ -78,15 +79,9 @@ export type SessionStatus =
  *  (context window view); `inputTokens`/`outputTokens` come from the
  *  PromptResponse.usage at turn end. */
 export interface AgentUsage {
-  /** Model's prompt context window in tokens. Informational only —
-   *  This is not used in the headline ratio because
-   *  `used` (tokens billed across the turn's tool-use loop) is *not*
-   *  the same metric as "current window fill"; comparing the two
-   *  produced 100%+ alarms on perfectly normal turns. */
+  /** Provider-reported context window, independent of turn billing. */
   size: number;
-  /** Tokens billed for the most recent turn (cumulative across the
-   *  agent's internal tool-use loop). The headline pill renders
-   *  this verbatim, no ratio. */
+  /** Current context occupancy. May exceed size; only the ring is clamped. */
   used: number;
   /** Lifetime input tokens sent to the agent this session. */
   inputTokens: number;
@@ -104,10 +99,12 @@ export interface AgentUsage {
   costUsd?: number;
   /** Per-category context breakdown for the gauge popover.
    *  Claude only (getContextUsage); absent for Codex → Used/Free rows. */
-  categories?: Array<{ name: string; tokens: number }>;
+  categories?: ContextUsageCategory[];
 }
 
 export interface AgentSessionState {
+  /** Stop preserves follow-ups until the next explicit send resumes FIFO. */
+  queuePaused?: boolean;
   /** The provider resumed into an empty conversation; carry visible context on
    * the next actual send, and retain the marker across failed authentication. */
   needsConversationReplay?: boolean;
@@ -200,6 +197,7 @@ export interface AgentSessionState {
   /** Active background work owned by this exact session. Engine snapshots
    * replace the set; completed tasks move into persisted tool-call history. */
   backgroundTasks: BackgroundTask[];
+  backgroundActivity: import("@zeros/protocol/agent-events").BackgroundTasksUpdate["activity"];
   /** Foreground multi-agent workflows owned by this exact session. Full
    * engine snapshots replace this ephemeral list; narrator lines live in the
    * ordinary tool-call transcript instead. */
@@ -211,8 +209,8 @@ export interface AgentSessionState {
   safetyReviewRetries: Record<string, string>;
   /** Parent session is parked and waiting for the active task set to wake it. */
   waitingForBackgroundTasks: boolean;
-  /** Start of the current continuous parked interval. Session-owned so a
-   * retained-view eviction/remount cannot restart the visible timer. */
+  /** Original request start while parked. Session-owned so waiting/resuming
+   * and retained-view remounts cannot restart the visible timer. */
   backgroundTasksWaitingSince: number | null;
   /** Settings-drift guard (2026-07-13): JSON of the CHAT-derived env
    *  (envForChat — model/effort/fast/dirs) this session was actually created
@@ -223,6 +221,9 @@ export interface AgentSessionState {
    *  turn on the stale model (the "pill says Haiku, turn ran Opus" bug).
    *  Undefined = unknown (legacy slot) → the reconcile skips it. */
   appliedChatEnvKey?: string;
+  /** Local revisions avoid comparing renderer and remote-engine wall clocks. */
+  modelSelectionRevision?: number;
+  modelSelectionRevisionAtRequest?: number;
 }
 
 export interface StartSessionOptions {

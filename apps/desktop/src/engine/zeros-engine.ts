@@ -16,6 +16,7 @@ import type { DesignCaptureService } from "./design/capture-service";
 //
 // ──────────────────────────────────────────────────────────
 
+import { SteeringReceiptCapacityError, SteeringReceipts } from "./agents/steering-receipts";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomBytes } from "node:crypto";
@@ -197,6 +198,7 @@ import { providerLoginCommand } from "./pty/provider-login";
 import { applyUserProviderConfig } from "./settings/provider-env";
 import { resolveClaudeBinary } from "./agents/claude-binary";
 import { AgentFailureError, type AgentGatewayOptions } from "./agents/types";
+import { redactLogSecrets } from "@zeros/protocol/scrub";
 import {
   detectFramework,
   findProjectRoot,
@@ -240,6 +242,7 @@ import {
 import {
   PTY_AGENT_AUTH_CWD,
   type AgentPromptBubble,
+  type SteerOutcome,
 } from "@zeros/protocol/messages";
 import {
   coerceProviderBinding,
@@ -252,6 +255,8 @@ import { upsertChatMessagesBulk } from "./db/messages";
 import {
   startTurn as startTurnRow,
   finishTurn as finishTurnRow,
+  updateTurnUsage,
+  getTurn as getTurnRow,
   turnsWithSnapshotsBeyond,
   clearTurnSnapshots,
   type TurnFile,
@@ -262,6 +267,7 @@ import {
   getChat,
   getChatLocation,
   updateChatProviderIdentity,
+  upsertChat,
 } from "./db/chats";
 import {
   authoredPathsFromMessages,
@@ -880,6 +886,7 @@ export class ZerosEngine {
   /** Agent sessionId → the authoritative provider turn currently recording.
    *  A mid-turn steer uses this owner instead of opening a second turn row. */
   private readonly activeTurnSnapshots = new Map<string, TurnSnapshotContext>();
+  private readonly steeringReceipts = new SteeringReceipts<{ outcome: SteerOutcome; turnId?: string }>();
   /** Workspace process/session starts and checkout mutations that have crossed
    *  the caller-side gate but have not settled. Archive/delete wait for these
    *  promises before enumerating processes and snapshotting. Without this
@@ -1181,6 +1188,10 @@ export class ZerosEngine {
     this.workspace.setGatewayHeaderSecretSetter((url, name, value) =>
       this.setMcpHeaderSecret(url, name, value),
     );
+    this.workspace.setGatewayOAuthSecretSetter((url, clientId, value) => {
+      this.ensureMcpVault().setOAuthSecret(canonicalResourceUri(url), clientId, value);
+      this.reloadGateway();
+    });
     this.workspace.setDesignTerritoryTransitioner((targets, mutation) =>
       this.withDesignTerritoryTransition(targets, mutation, {
         // WorkspaceService may discover the transition only after an async
@@ -1866,6 +1877,37 @@ export class ZerosEngine {
             executionId,
             sessionId: executionId,
           };
+          if (notification.update.sessionUpdate === "turn_usage_update") {
+            try {
+              const update = notification.update;
+              const chatId = this.sessionChat.get(executionId);
+              const currentExecution = chatId ? this.conversationExecution.get(chatId) : undefined;
+              if (!chatId || executionAgentId !== agentId || (currentExecution && currentExecution !== executionId) ||
+                  !updateTurnUsage(chatId, update.turnId, agentId, update.usage, executionId)) return;
+              const usage = getTurnRow(chatId, update.turnId)?.usage;
+              if (usage) normalizedNotification.update = { ...update, usage };
+            } catch (error) {
+              console.warn("[agents] could not persist turn usage", error);
+              return;
+            }
+          }
+          if (notification.update.sessionUpdate === "current_model_update") {
+            const update = notification.update;
+            const chatId = this.sessionChat.get(executionId);
+            const chat = chatId ? getChat(chatId) : null;
+            // Preserve a later explicit selection and every unrelated chat
+            // field. Persist before delivery, including with no UI connected.
+            if (chat && chat.agentId === agentId && executionAgentId === agentId && (!chat.model || chat.model === update.previousModel)) {
+              upsertChat({ ...chat, model: update.model, updatedAt: Date.now() });
+              this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }));
+            }
+          }
+          if (notification.update.sessionUpdate === "background_tasks_update" && executionAgentId) {
+            this.sessionLoadResponses.set(executionId, {
+              ...this.sessionLoadResponses.get(executionId),
+              backgroundTasks: notification.update,
+            });
+          }
           if (notification.update.sessionUpdate === "current_mode_update") {
             const cached = this.sessionLoadResponses.get(executionId);
             if (cached?.modes) {
@@ -1970,7 +2012,7 @@ export class ZerosEngine {
               );
             }
           }
-          this.touchActivePrompt(executionId);
+          if (notification.update.sessionUpdate !== "turn_usage_update") this.touchActivePrompt(executionId);
           this.routeSessionScoped(
             executionId,
             createMessage({
@@ -1990,7 +2032,7 @@ export class ZerosEngine {
             }),
           );
           // Persist the transcript as it streams; the engine is the source.
-          this.persistSessionUpdate(executionId, normalizedNotification);
+          if (notification.update.sessionUpdate !== "turn_usage_update") this.persistSessionUpdate(executionId, normalizedNotification);
         },
         onPermissionRequest: (
           agentId: string,
@@ -2206,7 +2248,7 @@ export class ZerosEngine {
       await gw.start(gatewayBackends);
       this.mcpGateway = gw;
       this.gatewayError = null;
-      this.agents.setGatewayServer(gw.url);
+      this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
       console.log(
         `[Zeros] MCP gateway on ${gw.url} fronting ${gatewayBackends.length} backend(s): ` +
           gw
@@ -2222,8 +2264,9 @@ export class ZerosEngine {
 
   /** Re-resolve the gateway's backend set on a settings change (fire-and-forget;
    *  the agent-facing endpoint stays stable so live sessions aren't dropped).
-   *  Starts the gateway if a backend was just added, stops it if the last one
-   *  was removed. */
+   *  Starts the gateway if a backend was just added. Removing the last backend
+   *  publishes an empty catalog to existing clients; engine shutdown owns the
+   *  listener's lifetime. New sessions omit an empty gateway. */
   private reloadGateway(): void {
     // Serialize onto the chain: re-read this.mcpGateway AFTER each await so two
     // queued reloads can never both construct a gateway on the fixed port.
@@ -2232,8 +2275,7 @@ export class ZerosEngine {
         const { gatewayBackends } = resolveMcpServers();
         if (gatewayBackends.length === 0) {
           if (this.mcpGateway) {
-            await this.mcpGateway.stop();
-            this.mcpGateway = null;
+            await this.mcpGateway.reload([]);
             this.agents.setGatewayServer(null);
           }
           this.gatewayError = null;
@@ -2243,6 +2285,8 @@ export class ZerosEngine {
           await this.startGateway();
         } else {
           await this.mcpGateway.reload(gatewayBackends);
+          const gw = this.mcpGateway;
+          this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
           this.gatewayError = null;
         }
       } catch (err) {
@@ -2257,8 +2301,8 @@ export class ZerosEngine {
    *  host's durable store (safeStorage) — pushed over stdin as `host.mcpVault`
    *  before this ran (buffered in `mcpVaultSeed`). Its onChange persists every
    *  mint/refresh/clear back to the host via the control fd, so tokens survive an
-   *  engine restart. One vault for the whole process: a gateway stop/start
-   *  (last oauth server removed, then re-added) keeps the live tokens. */
+   *  engine restart. One vault for the whole process: removing and re-adding
+   *  gateway backends keeps their live tokens. */
   private ensureMcpVault(): OAuthVault {
     if (!this.mcpVault) {
       this.mcpVault = new OAuthVault(() => this.scheduleVaultPersist());
@@ -4030,6 +4074,7 @@ export class ZerosEngine {
     opts: { preservePrompt?: boolean } = {},
   ): void {
     const conversationId = this.sessionChat.get(executionId);
+    this.steeringReceipts.delete(executionId);
     this.router.clearOwner(executionId);
     this.sessionAgent.delete(executionId);
     this.sessionChat.delete(executionId);
@@ -5251,6 +5296,14 @@ export class ZerosEngine {
                 response.usage ?? null,
               );
             }
+            if (turnCtx) {
+              try {
+                const usage = getTurnRow(turnCtx.chatId, turnCtx.turnId)?.usage;
+                if (usage?.accountingVersion === 1) response.usage = usage;
+              } catch {
+                // Accounting reads cannot fail a completed provider response.
+              }
+            }
             if (!activePrompt.terminalPublished) {
               this.emitTurnState(
                 activePrompt,
@@ -5277,6 +5330,44 @@ export class ZerosEngine {
             const wasCancelled =
               activePrompt.cancelledByUser === true ||
               this.cancelRequested.has(msg.sessionId);
+            // Persist the cause independently of the request socket, so an
+            // adopted/reopened chat has the same recovery card. A cancelled or
+            // superseded turn must never attach a late error to newer work.
+            if (
+              !wasCancelled && !activePrompt.terminalPublished &&
+              this.activePromptContexts.get(msg.sessionId) === activePrompt
+            ) {
+              const failure =
+                err instanceof AgentFailureError ? err.failure : undefined;
+              const notification: SessionNotification = {
+                sessionId: msg.sessionId,
+                update: {
+                  sessionUpdate: "error_notice",
+                  noticeId: `turn-failure-${activePrompt.turnId}-${msg.id}`,
+                  severity: "error",
+                  recoverable: false,
+                  message: redactLogSecrets(
+                    failure?.message ?? (err instanceof Error ? err.message : String(err)),
+                  ).slice(0, 8000) || "The agent stopped before confirming completion.",
+                  turnFailure: {
+                    turnId: activePrompt.turnId,
+                    kind: failure?.kind ?? "protocol-error",
+                  },
+                },
+              };
+              this.persistSessionUpdate(msg.sessionId, notification);
+              this.routeSessionScoped(
+                msg.sessionId,
+                createMessage({
+                  type: "AGENT_SESSION_UPDATE",
+                  source: "engine",
+                  agentId: msg.agentId,
+                  executionId: msg.sessionId,
+                  ...(activePrompt.chatId ? { chatId: activePrompt.chatId } : {}),
+                  notification,
+                }),
+              );
+            }
             if (turnCtx && !activePrompt.turnRowSettled) {
               // A user cancel can surface as a rejection instead of a clean
               // stopReason:"cancelled" (e.g. the SIGTERM'd subprocess tears
@@ -5375,26 +5466,94 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          this.assertAgentSessionProcessStartAllowed(
-            msg.sessionId,
-            this.workspaceIdForAgentSession(msg.sessionId),
-          );
-          // Deliver FIRST, persist after: if the adapter refuses (no turn in
-          // flight, non-steerable turn, old codex CLI), the message stays
-          // queued client-side and must NOT appear in the transcript. No
-          // beginTurn/enterPrompt — the steered input rides the in-flight
-          // AGENT_PROMPT's turn, which is still awaited above.
-          await this.agents.steer(msg.agentId, msg.sessionId, msg.prompt);
-          const steeredTurnId = this.activeTurnSnapshots.get(
-            msg.sessionId,
-          )?.turnId;
-          this.persistSteeredUserPrompt(
-            msg.sessionId,
-            msg.prompt,
-            msg.bubble,
-            msg.userMessageId,
-            steeredTurnId,
-          );
+          const attemptId = msg.attemptId ?? msg.userMessageId ?? msg.id;
+          // Replay is a read. Admit only new deliveries, before recording an
+          // attempt, so a transient admission rejection can be retried later.
+          if (
+            this.sessionAgent.has(msg.sessionId) &&
+            !this.steeringReceipts.has(msg.sessionId, attemptId)
+          ) {
+            this.assertAgentSessionProcessStartAllowed(
+              msg.sessionId,
+              this.workspaceIdForAgentSession(msg.sessionId),
+            );
+          }
+          const acceptingTurn = this.activeTurnSnapshots.get(msg.sessionId);
+          // Receipts are bounded to live executions. Once a route is retired
+          // (or the engine restarts), a missing receipt cannot prove that an
+          // earlier attempt was never delivered. Do not make it resendable or
+          // allocate a new ledger for arbitrary historical execution ids.
+          const receipt = !this.sessionAgent.has(msg.sessionId)
+            ? { outcome: "interrupted" as const }
+            : await this.steeringReceipts
+                .run(
+                  msg.sessionId,
+                  attemptId,
+                  async () => {
+                    // Disposal can race the microtask that dispatches this attempt.
+                    if (!this.sessionAgent.has(msg.sessionId))
+                      return { outcome: "interrupted" as const };
+                    // Capture the accepting turn before awaiting provider delivery.
+                    // Stop or a subsequent prompt may replace the active snapshot.
+                    const turnId = acceptingTurn?.turnId;
+                    if (
+                      !turnId ||
+                      this.activeTurnSnapshots.get(msg.sessionId) !==
+                        acceptingTurn ||
+                      this.cancelRequested.has(msg.sessionId)
+                    ) {
+                      return { outcome: "queued" as const };
+                    }
+                    let outcome: SteerOutcome;
+                    try {
+                      outcome =
+                        (await this.agents.steer(
+                          msg.agentId,
+                          msg.sessionId,
+                          msg.prompt,
+                          () =>
+                            this.activeTurnSnapshots.get(msg.sessionId) ===
+                              acceptingTurn &&
+                            !this.cancelRequested.has(msg.sessionId),
+                        )) ?? "delivered";
+                    } catch {
+                      outcome = "interrupted";
+                    }
+                    if (outcome !== "queued") {
+                      this.persistSteeredUserPrompt(
+                        msg.sessionId,
+                        msg.prompt,
+                        msg.bubble,
+                        msg.userMessageId,
+                        turnId,
+                      );
+                    }
+                    return { outcome, turnId };
+                  },
+                )
+                .catch((error: unknown) => {
+                  if (error instanceof SteeringReceiptCapacityError)
+                    return { outcome: "queued" as const };
+                  throw error;
+                });
+          // Legacy renderers interpret every AGENT_STEERED as delivered.
+          // Only receipt-aware requests opt in to non-delivered outcomes.
+          if (!msg.attemptId && receipt.outcome !== "delivered") {
+            client.send(
+              createMessage({
+                type: "AGENT_ERROR",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                code: "STEER_NOT_DELIVERED",
+                message:
+                  receipt.outcome === "queued"
+                    ? "This instruction was not delivered and remains queued."
+                    : "Delivery could not be confirmed. Review the turn before sending again.",
+              }),
+            );
+            return;
+          }
           client.send(
             createMessage({
               type: "AGENT_STEERED",
@@ -5403,7 +5562,7 @@ export class ZerosEngine {
               agentId: msg.agentId,
               executionId: msg.sessionId,
               sessionId: msg.sessionId,
-              ...(steeredTurnId ? { turnId: steeredTurnId } : {}),
+              ...receipt,
             }),
           );
           return;
@@ -6980,8 +7139,6 @@ export class ZerosEngine {
       "ANTHROPIC_MODEL",
       "OPENAI_MODEL",
       "CURSOR_MODEL",
-      "CLAUDE_FALLBACK_MODEL",
-      "CLAUDE_MAX_BUDGET_USD",
     ]);
     const out: Record<string, string> = {};
     for (const [name, value] of Object.entries(env)) {
@@ -7058,6 +7215,7 @@ export class ZerosEngine {
             .map((block) => (block.type === "text" ? block.text : ""))
             .join(""),
         createdAt: startedAt ?? tail.createdAt,
+        ...(bubble?.retryText != null ? { retryText: bubble.retryText } : {}),
         ...(bubble?.segments?.length ? { segments: bubble.segments } : {}),
         ...(bubble?.attachments?.length
           ? { attachments: bubble.attachments }
@@ -7085,6 +7243,7 @@ export class ZerosEngine {
       ((bubble.segments != null && bubble.segments.length > 0) ||
         (bubble.attachments != null && bubble.attachments.length > 0) ||
         bubble.displayText != null ||
+        bubble.retryText != null ||
         bubble.autoAction != null);
     if (hasRich && bubble) {
       // Rich-bubble path: persist ONE user message that mirrors the composer
@@ -7118,6 +7277,7 @@ export class ZerosEngine {
                 // matches turn.userPrompt.id in the live session.
                 ...(userMessageId ? { id: userMessageId } : {}),
                 ...(startedAt !== undefined ? { createdAt: startedAt } : {}),
+                ...(bubble.retryText != null ? { retryText: bubble.retryText } : {}),
                 ...(m.segments == null &&
                 bubble.segments != null &&
                 bubble.segments.length > 0

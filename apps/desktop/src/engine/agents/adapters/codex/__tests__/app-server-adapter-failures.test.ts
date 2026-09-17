@@ -127,6 +127,22 @@ describe("session-expired regex source parity", () => {
 });
 
 describe("classifyThreadFailure", () => {
+  it.each([
+    [{ codexErrorInfo: "rateLimitExceeded", message: "Authentication request rejected." }, "rate-limited"],
+    [{ codexErrorInfo: "unauthorized", message: "Credentials expired." }, "auth-required"],
+    [{ codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 403 } }, message: "The model `private-model` is not available." }, "protocol-error"],
+    [{ codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } }, message: "Request interrupted." }, "transport-closed"],
+    [{ codexErrorInfo: "cyberPolicy", message: "Sign-in required documentation was blocked." }, "protocol-error"],
+    [{ code: "thread_not_found", message: "Stored state was removed." }, "session-expired"],
+    [{ code: "model_not_found", message: "Access denied for this selection." }, "protocol-error"],
+    [{ code: "something_new", message: "Unknown failure. Check your API key settings." }, "protocol-error"],
+  ])("retains native error evidence: %j", (native, kind) => {
+    const result = classifyThreadFailure(native, "prompt") as AgentFailureError;
+    expect(result.failure?.kind).toBe(kind);
+    expect(result.message).toContain(native.message);
+    if ("code" in native && native.code === "model_not_found") expect(result.failure.advice).toMatch(/model menu/);
+  });
+
   it("returns AgentFailureError(session-expired) for stale fixtures on prompt stage", () => {
     for (const fixture of STALE_FIXTURES) {
       const result = classifyThreadFailure(new Error(fixture), "prompt");
@@ -210,10 +226,10 @@ describe("classifyThreadFailure", () => {
     }
   });
 
-  it("returns the raw error untouched when no pattern matches", () => {
+  it("classifies a native network failure without dropping its explanation", () => {
     const original = new Error("ECONNREFUSED 127.0.0.1:8080");
     const result = classifyThreadFailure(original, "prompt");
-    expect(result).not.toBeInstanceOf(AgentFailureError);
-    expect(result.message).toBe("ECONNREFUSED 127.0.0.1:8080");
+    expect((result as AgentFailureError).failure.kind).toBe("transport-closed");
+    expect(result.message).toContain("ECONNREFUSED 127.0.0.1:8080");
   });
 });

@@ -148,6 +148,10 @@ export interface CodexRateLimitWindowLike {
 }
 
 export interface CodexRateLimitSnapshotLike {
+  /** Internal ownership only; never returned in AgentProviderQuota. */
+  accountId?: string | null;
+  ordinaryUsageAllowed?: boolean | null;
+  normalModelSlug?: string | null;
   limitId: string | null;
   limitName: string | null;
   primary: CodexRateLimitWindowLike | null;
@@ -163,15 +167,38 @@ export interface CodexRateLimitSnapshotLike {
   rateLimitReachedType: unknown | null;
 }
 
-/** Merge a sparse rolling notification into the last authoritative read.
- * Null means unavailable in this update and therefore does not erase the last
- * confirmed account/window value. */
+/** Merge sparse rolling metadata within its account and quota bucket. Null
+ * window/model fields are unavailable and retain the last confirmed value.
+ * Ordinary-usage permission is separate: explicit null remains unknown. */
 export function mergeCodexRateLimitSnapshot(
   previous: CodexRateLimitSnapshotLike | null,
   incoming: CodexRateLimitSnapshotLike,
 ): CodexRateLimitSnapshotLike {
   if (!previous) return incoming;
+  if (
+    incoming.accountId &&
+    previous.accountId &&
+    incoming.accountId !== previous.accountId
+  )
+    return incoming;
+  const account = {
+    accountId: incoming.accountId ?? previous.accountId,
+    ordinaryUsageAllowed:
+      incoming.ordinaryUsageAllowed === undefined
+        ? previous.ordinaryUsageAllowed
+        : incoming.ordinaryUsageAllowed,
+  };
+  // A rolling update for a different bucket cannot borrow the last bucket's
+  // windows, credits or model alias. Included-usage permission is account-wide.
+  if (
+    incoming.limitId &&
+    previous.limitId &&
+    incoming.limitId !== previous.limitId
+  )
+    return { ...incoming, ...account };
   return {
+    ...account,
+    normalModelSlug: incoming.normalModelSlug ?? previous.normalModelSlug,
     limitId: incoming.limitId ?? previous.limitId,
     limitName: incoming.limitName ?? previous.limitName,
     primary: incoming.primary ?? previous.primary,
@@ -213,6 +240,12 @@ export function normalizeCodexQuota(
   const secondary = normalizedWindow(snapshot.secondary);
   return {
     providerId: "codex",
+    ...(snapshot.ordinaryUsageAllowed !== undefined
+      ? { ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed }
+      : {}),
+    ...(snapshot.normalModelSlug !== undefined
+      ? { normalModelSlug: snapshot.normalModelSlug }
+      : {}),
     ...(primary ? { primary } : {}),
     ...(secondary ? { secondary } : {}),
     ...(snapshot.credits

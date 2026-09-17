@@ -2,6 +2,7 @@ import { expect } from "@playwright/test";
 
 export async function runSubscriptionSmoke({ page, check }) {
   const base = new URL(page.url()).origin;
+  await runQueueSmoke({ page, check });
   await page.goto(
     `${base}/apps/desktop/src/renderer/harnesses/harness-model-menu.html?disconnected=claude`,
   );
@@ -439,4 +440,46 @@ export async function runUsageSmoke({ page, check }) {
   await page.clock.fastForward(31 * 60_000);
   expect((await counts()).usageReads).toBe(hiddenReads);
   check("Usage refreshes every 30 minutes while visible and pauses while hidden", true);
+}
+
+export async function runQueueSmoke({ page, check }) {
+  const base = new URL(page.url()).origin;
+  for (const provider of ["claude", "codex", "cursor"]) {
+    await page.goto(`${base}/apps/desktop/src/renderer/harnesses/harness-subscription.html?queue=${provider}`);
+    const prompt = page.getByLabel("Message", { exact: true });
+    const send = async (text) => { await prompt.fill(text); await page.getByRole("button", { name: "Send message", exact: true }).click(); };
+    const row = (text) => page.locator("[data-queued-id]").filter({ has: page.getByText(text, { exact: true }) });
+    const action = async (text, label) => { await row(text).hover(); await row(text).getByRole("button", { name: label, exact: true }).click(); };
+    await send("A");
+    await expect(page.locator("#queue-status")).toHaveText("streaming");
+    for (const text of ["B", "C", "D"]) await send(text);
+    await expect(page.locator("[data-queued-id]")).toHaveCount(3);
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await expect(page.getByRole("button", { name: /3 queued messages.*Paused/ })).toBeVisible();
+    await expect(page.locator("#queue-status")).toHaveText("ready");
+    await action("B", "Edit"); await prompt.fill("edited B");
+    await page.getByRole("button", { name: "Save message", exact: true }).click();
+    await expect(page.locator("#queue-prompts")).toHaveText('["A"]');
+    await action("C", "Send now");
+    await expect(page.locator("#queue-prompts")).toHaveText('["A","C"]');
+    await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+    await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B"]');
+    await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+    await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D"]');
+    await expect(page.locator("[data-queued-id]")).toHaveCount(0);
+    await send("E"); await action("E", "Send now");
+    await expect(row("E").getByRole("button", { name: "Sending…", exact: true })).toBeDisabled();
+    await expect(row("E").getByRole("button", { name: "Edit", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "Stop", exact: true }).click();
+    await page.getByRole("button", { name: "Return to queue", exact: true }).click();
+    await expect(row("E").getByRole("button", { name: "Send now", exact: true })).toBeEnabled();
+    await expect(page.getByRole("button", { name: /1 queued message.*Paused/ })).toBeVisible();
+    await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D"]');
+    // A newly composed message also releases Stop and drains remaining work.
+    await send("F");
+    await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D","F"]');
+    await page.getByRole("button", { name: "Finish turn", exact: true }).click();
+    await expect(page.locator("#queue-prompts")).toHaveText('["A","C","edited B","D","F","E"]');
+    check(`${provider}: Stop preserves edits; selected C resumes C → B → D; late steering keeps Stop paused`, true);
+  }
 }
