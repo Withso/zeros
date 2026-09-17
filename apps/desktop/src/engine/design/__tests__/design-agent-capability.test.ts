@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DesignAgentCapabilityError,
@@ -16,7 +16,7 @@ import {
   initializeDesignDocument,
   readDesignWebDocumentState,
 } from "../document";
-import { getWorkspaceDesignApi } from "../design-api";
+import { DesignDraftStore, getWorkspaceDesignApi } from "../design-api";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,6 +39,7 @@ describe("Design-agent capability", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -102,9 +103,13 @@ describe("Design-agent capability", () => {
     await execFileAsync("git", ["config", "user.name", "Zeros Test"], {
       cwd: root,
     });
-    await execFileAsync("git", ["config", "user.email", "test@example.invalid"], {
-      cwd: root,
-    });
+    await execFileAsync(
+      "git",
+      ["config", "user.email", "test@example.invalid"],
+      {
+        cwd: root,
+      },
+    );
     await execFileAsync("git", ["add", "-A"], { cwd: root });
     await execFileAsync("git", ["commit", "-q", "-m", "initial"], {
       cwd: root,
@@ -132,9 +137,11 @@ describe("Design-agent capability", () => {
         .stdout,
     ).toContain(`Zeros Design/${frame}`);
     expect(
-      (await execFileAsync("git", ["rev-list", "--count", "HEAD"], {
-        cwd: root,
-      })).stdout.trim(),
+      (
+        await execFileAsync("git", ["rev-list", "--count", "HEAD"], {
+          cwd: root,
+        })
+      ).stdout.trim(),
     ).toBe("1");
   });
 
@@ -300,6 +307,46 @@ describe("Design-agent capability", () => {
     await expect(manager.open("0".repeat(64))).rejects.toMatchObject({
       code: "DESIGN_AGENT_CAPABILITY_INVALID",
     });
+  });
+
+  it("rechecks revoked authority after an awaited draft read before committing", async () => {
+    const manager = new DesignAgentCapabilityManager({ now: () => now });
+    const capability = await grant(manager);
+    const read = DesignDraftStore.prototype.read;
+    let readStarted!: () => void;
+    let releaseRead!: () => void;
+    const started = new Promise<void>((resolve) => {
+      readStarted = resolve;
+    });
+    const released = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    vi.spyOn(DesignDraftStore.prototype, "read").mockImplementationOnce(
+      async function (this: DesignDraftStore, documentId) {
+        const state = await read.call(this, documentId);
+        readStarted();
+        await released;
+        return state;
+      },
+    );
+    const pending = manager
+      .apply(
+        capability.token,
+        transaction({ id: "revoked-in-flight", baseRevision: revision }),
+      )
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await started;
+    manager.revoke(capability.token);
+    releaseRead();
+    expect(await pending).toMatchObject({
+      code: "DESIGN_AGENT_CAPABILITY_INVALID",
+    });
+    expect((await readDesignWebDocumentState(root, frame)).revision).toBe(
+      revision,
+    );
   });
 
   it("exposes every granted read action and renews the same hot run explicitly", async () => {

@@ -58,6 +58,8 @@ export function safeDesignWorkspaceBootSnapshot(
 ): DesignWorkspaceSnapshotWire | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Partial<DesignWorkspaceSnapshotWire>;
+  if (candidate.directoryId !== undefined && (typeof candidate.directoryId !== "string" || !/^design_[a-zA-Z0-9_-]{1,64}$/.test(candidate.directoryId))) return null;
+  if (candidate.directory !== undefined && (typeof candidate.directory !== "string" || !candidate.directory || candidate.directory.length > 4096)) return null;
   if (
     !Array.isArray(candidate.frames) ||
     candidate.frames.length > MAX_FRAMES ||
@@ -257,6 +259,8 @@ export function safeDesignWorkspaceBootSnapshot(
     // Capabilities derive from an engine-process secret and must never survive
     // that process or cross launches.
     protocolCapability: null,
+    ...(candidate.directoryId ? { directoryId: candidate.directoryId } : {}),
+    ...(candidate.directory ? { directory: candidate.directory } : {}),
     frames,
     tokens,
     tokenSourceVersion,

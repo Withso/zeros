@@ -2,7 +2,7 @@
 // boundary where setup, run actions, terminals, and agent sessions are brought
 // to rest before a managed checkout can be moved or removed.
 
-import { chown, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { chown, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -16,10 +16,6 @@ import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worke
 import type { CloudReplicaHostSession } from "../cloud-replica-host-control";
 import { NODE_DESIGN_WATCH_GUARD_FILENAME } from "../agents/containment/design-watch-isolation";
 import * as gitState from "../git/state";
-import {
-  createDesignFrame,
-  initializeDesignDocument,
-} from "../design/document";
 
 interface ReaperInternals {
   cloudReplicaRuntime: {
@@ -140,7 +136,7 @@ interface ReaperInternals {
   agents: {
     ensureAgent(...args: unknown[]): Promise<unknown>;
     newSession(...args: unknown[]): Promise<unknown>;
-    newDesignSession(...args: unknown[]): Promise<unknown>;
+    revokeSessionTools(workspaceId?: string): Promise<void>;
     markBoundaryDraining(
       executionId: string,
       transition: "territory-restart",
@@ -192,11 +188,8 @@ interface ReaperInternals {
     { token: number; controller: AbortController }
   >;
   workspaceProcessStarts: Map<string, Set<Promise<unknown>>>;
-  designAgentStartsByWorkspace: Map<string, Set<Promise<unknown>>>;
   globalDesignAuthorityStarts: Set<Promise<unknown>>;
   globalDesignTerritoryTransitionCount: number;
-  designAgentAdmissions: { activeCount(): number };
-  designAgentRunByExecution: Map<string, string>;
   cloudWorker: CloudWorkerConfiguration | null;
   cancelLiveAgentSessions(sessionIds: ReadonlySet<string>): Promise<boolean>;
   workspaceAllowsProcessStart(workspaceId: string | null): boolean;
@@ -576,7 +569,10 @@ describe("workspace process reaper", () => {
 
 describe("actor-scoped Design identity lifecycle", () => {
   it("scopes a hand-edited workspace settings file to that workspace", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-settings-scope-"));
+    // Settings identity uses canonical paths; macOS temp paths can be aliases.
+    const root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-settings-scope-")),
+    );
     const checkout = path.join(root, "worktree");
     await mkdir(path.join(root, ".git", "worktrees", "one"), {
       recursive: true,
@@ -615,7 +611,7 @@ describe("actor-scoped Design identity lifecycle", () => {
     }
   });
 
-  it("retires only the affected Design agent while native Code, Setup, and Run stay live", async () => {
+  it("revokes scoped Design tools while the shared agent, Setup, and Run stay live", async () => {
     const root = await mkdtemp(
       path.join(tmpdir(), "zeros-design-identity-local-"),
     );
@@ -634,15 +630,7 @@ describe("actor-scoped Design identity lifecycle", () => {
       );
     state.sessionWorkspace.set("code-execution", workspace.id);
     state.sessionAgent.set("code-execution", "codex");
-    state.sessionWorkspace.set("design-execution", workspace.id);
-    state.sessionAgent.set("design-execution", "codex");
-    vi.spyOn(state.agents, "sessionActor").mockImplementation((sessionId) =>
-      sessionId === "design-execution" ? "design-agent" : "agent-code",
-    );
-    vi.spyOn(state.agents, "workspaceSessionIds").mockImplementation(
-      (_workspaceId, _workspaceRoot, options) =>
-        options?.actor === "design-agent" ? ["design-execution"] : [],
-    );
+    const revokeTools = vi.spyOn(state.agents, "revokeSessionTools");
     const cancelled: string[][] = [];
     vi.spyOn(state, "cancelLiveAgentSessions").mockImplementation(
       async (sessionIds) => {
@@ -676,21 +664,13 @@ describe("actor-scoped Design identity lifecycle", () => {
               workspace.id,
             ),
           ).not.toThrow();
-          expect(() =>
-            state.assertAgentSessionProcessStartAllowed(
-              "design-execution",
-              workspace.id,
-            ),
-          ).toThrow(/Design territory is being updated/i);
+          expect(revokeTools).toHaveBeenCalledWith(workspace.id);
         },
       );
 
-      expect(cancelled).toEqual([["design-execution"]]);
-      expect(endSession).toHaveBeenCalledWith("codex", "design-execution", {
-        failClosed: true,
-      });
+      expect(cancelled).toEqual([]);
+      expect(endSession).not.toHaveBeenCalled();
       expect(state.sessionAgent.has("code-execution")).toBe(true);
-      expect(state.sessionAgent.has("design-execution")).toBe(false);
       expect(stopSetup).not.toHaveBeenCalled();
       expect(stopRun).not.toHaveBeenCalled();
       expect(retireUtilities).not.toHaveBeenCalled();
@@ -753,59 +733,7 @@ describe("actor-scoped Design identity lifecycle", () => {
     }
   });
 
-  it("waits for an already-admitted Design start before changing its document identity", async () => {
-    const root = await mkdtemp(
-      path.join(tmpdir(), "zeros-design-start-handoff-"),
-    );
-    const workspace = {
-      id: "ws_design_start_handoff",
-      path: path.join(root, "worktree"),
-      repoRoot: path.join(root, "main"),
-      archivedAt: null,
-    };
-    await mkdir(workspace.path, { recursive: true });
-    const state = internals(new ZerosEngine({ root, port: 29_948 }));
-    const getWorkspace = vi
-      .spyOn(gitState, "getWorkspaceById")
-      .mockReturnValue(
-        workspace as ReturnType<typeof gitState.getWorkspaceById>,
-      );
-    let releaseDesign!: () => void;
-    const designStart = new Promise<void>((resolve) => {
-      releaseDesign = resolve;
-    });
-    state.designAgentStartsByWorkspace.set(
-      workspace.id,
-      new Set([designStart]),
-    );
-    let mutated = false;
-
-    try {
-      const transition = state.withDesignTerritoryTransition(
-        [
-          {
-            workspaceId: workspace.id,
-            designDirectory: path.join(workspace.path, "Zeros Design"),
-          },
-        ],
-        async () => {
-          mutated = true;
-        },
-      );
-      await Promise.resolve();
-      expect(mutated).toBe(false);
-      releaseDesign();
-      await transition;
-      expect(mutated).toBe(true);
-    } finally {
-      releaseDesign();
-      state.designAgentStartsByWorkspace.delete(workspace.id);
-      getWorkspace.mockRestore();
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects a Design actor at the engine boundary when Design-agent execution is disabled", async () => {
+  it("rejects the retired Design actor before workspace or provider admission", async () => {
     const state = internals(
       new ZerosEngine({
         root: "/tmp/zeros-disabled-design-agent",
@@ -814,7 +742,6 @@ describe("actor-scoped Design identity lifecycle", () => {
     );
     const resolveSpawn = vi.spyOn(state, "agentSpawnOpts");
     const ensureAgent = vi.spyOn(state.agents, "ensureAgent");
-    const designStart = vi.spyOn(state.agents, "newDesignSession");
     const receiver = client("local");
 
     await state.handleAgentMessage(
@@ -835,25 +762,25 @@ describe("actor-scoped Design identity lifecycle", () => {
 
     expect(resolveSpawn).not.toHaveBeenCalled();
     expect(ensureAgent).not.toHaveBeenCalled();
-    expect(designStart).not.toHaveBeenCalled();
     expect(receiver.send).toHaveBeenCalledWith(
       expect.objectContaining({
         type: "AGENT_ERROR",
         requestId: "disabled-design-agent-start",
         code: "AGENT_PROTOCOL_ERROR",
-        message: expect.stringContaining("Design-agent execution is disabled"),
+        message: expect.stringContaining(
+          "Separate Design-agent sessions are retired",
+        ),
       }),
     );
   });
 
-  it("cannot enable the dormant Design actor in a production runtime", async () => {
+  it("also rejects the retired Design actor in a production runtime", async () => {
     vi.stubEnv("NODE_ENV", "production");
     try {
       const state = internals(
         new ZerosEngine({
           root: "/tmp/zeros-production-design-agent",
           port: 29_951,
-          enableDesignAgentExecutionForTesting: true,
         }),
       );
       const resolveSpawn = vi.spyOn(state, "agentSpawnOpts");
@@ -885,88 +812,6 @@ describe("actor-scoped Design identity lifecycle", () => {
       );
     } finally {
       vi.unstubAllEnvs();
-    }
-  });
-
-  it("admits an explicit Design actor without entering Code-authority lifecycle", async () => {
-    const root = await mkdtemp(
-      path.join(tmpdir(), "zeros-design-agent-engine-"),
-    );
-    try {
-      await initializeDesignDocument(root);
-      const frame = await createDesignFrame(root, { title: "Agent draft" });
-      const state = internals(
-        new ZerosEngine({
-          root,
-          port: 29_949,
-          enableDesignAgentExecutionForTesting: true,
-        }),
-      );
-      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({
-        workspaceId: "workspace-1",
-        cwd: root,
-      });
-      vi.spyOn(state, "workspaceIdForProcess").mockReturnValue("workspace-1");
-      vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
-      const codeStart = vi.spyOn(state.agents, "newSession");
-      const designStart = vi
-        .spyOn(state.agents, "newDesignSession")
-        .mockImplementation(async (...args: unknown[]) => {
-          const options = args[2] as {
-            onExecutionCreated?: (executionId: string) => void;
-          };
-          options.onExecutionCreated?.("design-execution");
-          return {
-            executionId: "design-execution",
-            sessionId: "design-execution",
-          };
-        });
-      const codeAuthority = vi.spyOn(
-        state,
-        "trackRepositoryCodeAuthorityStart",
-      );
-      const receiver = client("local");
-
-      await state.handleAgentMessage(
-        {
-          type: "AGENT_NEW_SESSION",
-          id: "design-agent-start",
-          source: "browser",
-          timestamp: 1,
-          agentId: "codex",
-          agentRole: "design",
-          designDocumentId: `frame:${frame.file}`,
-          chatId: "design-chat",
-          workspaceId: "workspace-1",
-          cwd: root,
-        },
-        receiver,
-      );
-
-      expect(codeStart).not.toHaveBeenCalled();
-      expect(codeAuthority).not.toHaveBeenCalled();
-      expect(designStart).toHaveBeenCalledOnce();
-      expect(designStart.mock.calls[0]?.[1]).toMatchObject({
-        actor: "design-agent",
-        agentRunId: expect.stringMatching(/^design-[a-f0-9]{32}$/),
-      });
-      expect(state.designAgentAdmissions.activeCount()).toBe(1);
-      expect(state.designAgentRunByExecution.has("design-execution")).toBe(
-        true,
-      );
-      expect(receiver.send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: "AGENT_SESSION_CREATED",
-          requestId: "design-agent-start",
-        }),
-      );
-
-      state.clearAgentExecutionRoute("design-execution");
-      await vi.waitFor(() =>
-        expect(state.designAgentAdmissions.activeCount()).toBe(0),
-      );
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
   });
 });

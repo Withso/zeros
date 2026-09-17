@@ -1,5 +1,4 @@
 import { isNativeRuntime, nativeInvoke } from "./runtime";
-
 export interface DesignPngExportResult {
   saved: boolean;
   path?: string;

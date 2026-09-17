@@ -1,3 +1,4 @@
+import { designBackgroundWork } from "./design-background-work";
 import { create } from "zustand";
 
 const MAX_LIVE_NODES = 96;
@@ -160,6 +161,7 @@ export function publishDesignGestureLivePreview(
   styles: Readonly<Record<string, string | null>>,
   options: { settle?: boolean } = {},
 ): void {
+  designBackgroundWork.touch();
   const key = ownerKey(workspaceId, frame, nodeId);
   const now = Date.now();
   const elapsed = now - (gesturePublishedAt.get(key) ?? 0);
@@ -290,6 +292,15 @@ export function designLivePreviewValue(
   return useDesignLivePreviewStore.getState().byOwner[
     ownerKey(workspaceId, frame, nodeId)
   ]?.styles[property];
+}
+
+export function useDesignLivePreviewStyles(
+  workspaceId: string,
+  frame: string,
+  nodeId: string,
+) {
+  const key = ownerKey(workspaceId, frame, nodeId);
+  return useDesignLivePreviewStore((state) => state.byOwner[key]?.styles);
 }
 
 export function useDesignLivePreviewValue(

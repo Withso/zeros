@@ -17,6 +17,19 @@ function deferred<T>(): {
 }
 
 describe("KeyedAsyncCache", () => {
+  it("forgets a removed owner without resurrecting its late response or queued refresh", async () => {
+    const cache = new KeyedAsyncCache<string>();
+    const response = deferred<string>(); const fetch = vi.fn(() => response.promise);
+    const flight = cache.load("deleted", fetch);
+    await Promise.resolve(); cache.invalidate("deleted");
+    const queued = cache.load("deleted", fetch).catch(() => undefined);
+    cache.forget("deleted"); response.resolve("old content");
+    await Promise.all([flight, queued]);
+    expect(cache.peekSnapshot("deleted").data).toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await cache.load("deleted", async () => "new owner");
+    expect(cache.peekSnapshot("deleted").data).toBe("new owner");
+  });
   it("restores an exact-key snapshot synchronously without resetting its freshness", async () => {
     const updatedAt = Date.now() - 29 * 60_000;
     const initialSnapshot = vi.fn((key: string) =>

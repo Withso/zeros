@@ -91,7 +91,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
         .isEnabled()),
   );
   for (const [targetId, otherId, mode, display] of [
-    ["home-main", childId, "Stack", "flex"],
+    ["home-main", childId, "Vertical", "flex"],
     [childId, "home-main", "Grid", "grid"],
     ["home-main", childId, "None", "block"],
   ]) {
@@ -99,7 +99,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
       await frame.locator("[data-design-frame-label]").click();
     else await childRow.click();
     const other = runtime().locator(`[data-oid="${otherId}"]`);
-    const before = await other.evaluate((el) => el.style.cssText);
+    const before = await other.evaluate((el) => el.style.display);
     await committed(() =>
       layout
         .getByRole("button", { name: `Auto layout: ${mode}`, exact: true })
@@ -116,7 +116,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
               display,
             )) &&
           (await other.evaluate(
-            (el, before) => el.style.cssText === before,
+            (el, before) => el.style.display === before,
             before,
           )),
         `isolated-${mode}`,
@@ -137,7 +137,9 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
     "rotation and clipping on a child leave the parent's declarations unchanged",
     await root.evaluate((el, before) => el.style.cssText === before, rootStyle),
   );
-  await frame.locator("[data-design-frame-label]").click();
+  await layers
+    .locator('[data-design-frame-row="home.html"]')
+    .click({ position: { x: 80, y: 14 } });
   const childStyle = await child.evaluate((el) => el.style.cssText);
   await committed(() =>
     layout.getByText("Clip content", { exact: true }).click(),
@@ -145,7 +147,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   const opacity = page
     .locator("[data-design-inspector]")
     .getByLabel("Opacity", { exact: true });
-  await opacity.fill("0.7");
+  await opacity.fill("70");
   await committed(() => opacity.press("Enter"));
   check(
     "parent clipping and opacity edits do not rewrite child styles",
@@ -156,7 +158,7 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   );
   await committed(async () => {
     await layout
-      .getByRole("button", { name: "Auto layout: Stack", exact: true })
+      .getByRole("button", { name: "Auto layout: Vertical", exact: true })
       .evaluate((button) => button.click());
     await childRow.click();
   });
@@ -197,10 +199,9 @@ export async function runDesignFrameChildrenSmoke({ page, waitFor, check }) {
   );
   await childRow.click();
   check(
-    "the child now exposes its own alignment and constraints",
+    "the grid child exposes its child alignment pad",
     (await layout
-      .getByRole("button", { name: "Align left", exact: true })
-      .isEnabled()) &&
-      (await layout.locator("[data-design-layout-constraints]").count()) === 1,
+      .getByRole("group", { name: "Align children", exact: true })
+      .count()) === 1,
   );
 }

@@ -40,8 +40,8 @@ describe("design workspace agent isolation", () => {
     // Concurrent duality: agents and terminals run in every workspace
     // regardless of view mode — the retired workspace-level bans must not
     // creep back in. Native Code execution has no filesystem reshaping or
-    // rewrite wrapper; Design-agent authority is enforced by ZSR and the
-    // capability-scoped Design API instead.
+    // rewrite wrapper. Provider mode gating is a separate integration;
+    // the shared workspace must not depend on the legacy presentation kind.
     expect(engine).not.toContain("assertAgentWorkspaceNotDesign");
     expect(engine).not.toContain("isDesignWorkspaceProcessTarget");
     expect(engine).not.toContain("removeDesignAdditionalDirectories");
@@ -60,6 +60,7 @@ describe("design workspace agent isolation", () => {
       "apps/desktop/src/engine/git/design-mode.ts",
       "apps/desktop/src/engine/git/worktree.ts",
       "apps/desktop/src/engine/workspace/service.ts",
+      "apps/desktop/src/engine/design/routes.ts",
       "apps/desktop/src/engine/zeros-engine.ts",
     ]
       .map(read)
@@ -108,7 +109,7 @@ describe("design workspace agent isolation", () => {
     expect(service).toContain("assertNoDesignPathWrites");
   });
 
-  it("renders design beside its own sidebar instead of inside coding chat", () => {
+  it("renders Design in the shared workbench beside the existing chat", () => {
     const codingRenderer = [
       "apps/desktop/src/renderer/shell/conversation/conversation-pane.tsx",
       "apps/desktop/src/renderer/shell/conversation/pane-layout.tsx",
@@ -125,17 +126,19 @@ describe("design workspace agent isolation", () => {
     expect(appShell).not.toContain(
       'useInternalFeatureActive("designWorkspaces")',
     );
-    expect(appShell).toContain("<DesignWorkspaceSidebar");
+    expect(appShell).toContain("<ConversationPane");
+    expect(appShell).toContain("<WorkbenchPane");
+    const workbench = read("apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx");
+    expect(workbench).toContain("<RetainedDesignDeck");
     expect(appShell).toContain(
-      'useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested)',
+      'useNewTabHotkeys(activePage === "workspace")',
     );
-    // Design is a normal public presentation mode. It must not fall through
-    // to coding chat or a rollout-disabled placeholder.
+    // Design is a public workbench destination sharing the same conversation.
     expect(appShell).not.toContain("shouldShowBlockedDesignModePlaceholder");
     expect(appShell).not.toContain("DesignModeDisabledPanel");
     expect(appShell).not.toContain("designWorkspaceBlocked");
     expect(appShell).toContain(
-      "useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace)",
+      "useWorkspacePrSync(activeWorkspace)",
     );
     expect(appShell).toMatch(
       /worktreeMissing\s*&&\s*activeWorkspace\s*&&\s*activePage === "workspace"/,
@@ -194,7 +197,8 @@ describe("design workspace agent isolation", () => {
       "apps/desktop/src/renderer/shared/ui/workspace-mode-header.tsx",
     );
     expect(contextMenu).not.toContain("designModeSwitchAvailable");
-    expect(contextMenu).toContain("useWorkspaceModeSwitch(workspace)");
+    expect(contextMenu).not.toContain("useWorkspaceModeSwitch(workspace)");
+    expect(contextMenu).toContain("useWorkspaceArchiving");
     expect(modeHeader).toContain(
       "const canSwitch = !isLocalMainWorkspace(workspace)",
     );

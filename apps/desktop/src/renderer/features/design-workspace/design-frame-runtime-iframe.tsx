@@ -249,6 +249,7 @@ function DesignFrameDocumentBuffer({
       documentSourceVersion,
       node,
       {
+        isActive: () => latestRef.current.runtimeActive,
         onReady: clearHandshakeTimer,
         onSnapshot: (snapshot, event) => {
           if (event !== "ready") {

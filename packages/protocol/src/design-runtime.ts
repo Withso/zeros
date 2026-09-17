@@ -115,6 +115,13 @@ export interface DesignRuntimeNodeLayout {
   parentHeight: number;
   parentDisplay: string;
   parentPosition: string;
+  /** Inspector-only context. Optional for compatibility with older runtimes. */
+  parentFlexDirection?: string;
+  parentAlignItems?: string;
+  parentJustifyItems?: string;
+  /** Computed CSS before used-value resolution turns intrinsic sizes into px. */
+  widthValue?: string;
+  heightValue?: string;
   isContainingBlock: boolean;
 }
 
@@ -290,7 +297,25 @@ export interface DesignRuntimeTokenUpdate {
 }
 
 /** Non-element CSS changes that can be adopted without document navigation. */
+export interface DesignRuntimeNodeMove {
+  nodeId: string;
+  parentId: string;
+  beforeId: string | null;
+}
+
+export interface DesignRuntimeLayoutPreview {
+  /** Paint is handed to a cached canvas image while this layer crosses frames. */
+  suppressNodeId?: string | null;
+  /** Dragging a layer only needs that layer's box; gap tools request children. */
+  children?: boolean;
+  updates: DesignRuntimeStyleUpdate[];
+  nodeIds: string[];
+  moves?: DesignRuntimeNodeMove[];
+  cancelMoves?: boolean;
+}
+
 export interface DesignRuntimeGenerationPatch {
+  moves?: DesignRuntimeNodeMove[];
   keyframes?: DesignRuntimeKeyframesUpdate[];
   tokens?: DesignRuntimeTokenUpdate[];
 }
@@ -313,6 +338,9 @@ export type DesignRuntimeMethod =
   | "setNodeVisibility"
   | "setTheme"
   | "previewStyles"
+  | "getLayoutTargets"
+  | "previewLayout"
+  | "restoreGeneration"
   | "previewGeometry"
   | "commitStyles"
   | "previewText"
@@ -355,6 +383,9 @@ const DESIGN_RUNTIME_METHODS = new Set<DesignRuntimeMethod>([
   "setNodeVisibility",
   "setTheme",
   "previewStyles",
+  "getLayoutTargets",
+  "previewLayout",
+  "restoreGeneration",
   "previewGeometry",
   "commitStyles",
   "previewText",
@@ -501,6 +532,17 @@ export function isRuntimeNodeLayout(
     value.parentHeight >= 0 &&
     typeof value.parentDisplay === "string" &&
     typeof value.parentPosition === "string" &&
+    [
+      "parentFlexDirection",
+      "parentAlignItems",
+      "parentJustifyItems",
+      "widthValue",
+      "heightValue",
+    ].every(
+      (key) =>
+        value[key] === undefined ||
+        (typeof value[key] === "string" && value[key].length <= 1024),
+    ) &&
     typeof value.isContainingBlock === "boolean"
   );
 }
@@ -782,7 +824,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   ]);
   var METHODS = [
     "getSnapshot", "getElementAtLoc", "getElementsInRect", "getNodeDetails", "getMatchedStyles",
-    "setNodeVisibility", "setTheme", "previewStyles", "previewGeometry", "commitStyles", "previewText", "clearPreviewText", "previewMotion", "clearPreviewStyles",
+    "setNodeVisibility", "setTheme", "previewStyles", "previewGeometry", "getLayoutTargets", "previewLayout", "restoreGeneration", "commitStyles", "previewText", "clearPreviewText", "previewMotion", "clearPreviewStyles",
     "captureScreenshot"
   ];
   // Everything one frame of direct manipulation paints from. Deliberately tiny:
@@ -1478,6 +1520,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       parentHeight: Math.max(0, parentSize ? parentSize.height - computedEdgeTotal(parentComputed, ["borderTopWidth", "borderBottomWidth"]) : parent ? parent.clientHeight || 0 : window.innerHeight),
       parentDisplay: parentComputed ? parentComputed.display : "block",
       parentPosition: parentComputed ? parentComputed.position : "static",
+      parentFlexDirection: parentComputed ? parentComputed.flexDirection : "row",
+      parentAlignItems: parentComputed ? parentComputed.alignItems : "normal",
+      parentJustifyItems: parentComputed ? parentComputed.justifyItems : "normal",
+      widthValue: typedSizingValue(element, "width"),
+      heightValue: typedSizingValue(element, "height"),
       isContainingBlock: !!parent && (element.offsetParent === parent || parentComputed.position !== "static")
     };
   }
@@ -1533,7 +1580,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     return result;
   }
 
-  function detailsOf(element) {
+  function detailsOf(element, layoutOnly) {
     var oid = targetOidOf(element);
     if (!oid) throw new Error("The selected element has no stable data-oid.");
     var escaped = window.CSS && typeof window.CSS.escape === "function"
@@ -1541,7 +1588,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       : oid.replace(/["\\]/g, "\\$&");
     var textEditable = textEditableOf(element);
     var computed = getComputedStyle(element);
-    var authoredStyleProperties = authoredStylePropertiesOf(element);
+    var authoredStyleProperties = layoutOnly ? [] : authoredStylePropertiesOf(element);
     var rect = rectOf(element);
     var result = {
       sourceVersion: SOURCE_VERSION,
@@ -1552,16 +1599,16 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       textEditable: textEditable,
       selector: element === document.body ? "body" : "[data-oid=\"" + escaped + "\"]",
       visible: visibleOf(element, computed),
-      breadcrumb: breadcrumbOf(element),
+      breadcrumb: layoutOnly ? [] : breadcrumbOf(element),
       rect: rect,
       box: boxOf(element, computed, rect),
       layout: layoutOf(element, computed),
-      childrenLayout: childrenLayoutOf(element, computed),
+      childrenLayout: layoutOnly ? undefined : childrenLayoutOf(element, computed),
       childCoordinateSpace: childCoordinateSpaceOf(element, computed, rect),
-      styles: stylesOf(computed, authoredStyleProperties),
+      styles: layoutOnly ? Object.fromEntries(["display", "position", "width", "height", "boxSizing", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft", "borderTopWidth", "borderRightWidth", "borderBottomWidth", "borderLeftWidth", "flexDirection", "flexWrap", "direction", "order", "gridColumnStart", "gridColumnEnd", "gridRowStart", "gridRowEnd"].map(function (key) { return [key, computed[key] || ""]; })) : stylesOf(computed, authoredStyleProperties),
       authoredStyleProperties: authoredStyleProperties
     };
-    if (textEditable) result.textSizing = textSizingOf(element);
+    if (textEditable && !layoutOnly) result.textSizing = textSizingOf(element);
     return result;
   }
 
@@ -1786,7 +1833,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     authoredStylePropertiesCache = new WeakMap();
     authoredStyleRuleMetadata = null;
     oidStyleRuleIndex = null;
-    refreshElementMap();
+    ensureElementMap();
     var result = {
       sourceVersion: SOURCE_VERSION,
       revision: revision,
@@ -2037,6 +2084,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           });
         }
         var prior = priorByProperty.get(property);
+        prior.latestValue = value;
         if (prior.rule) {
           element.style.removeProperty(property);
           if (value === null) prior.rule.style.removeProperty(property);
@@ -2081,7 +2129,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var children = [];
     if (includeChildren) {
       for (var index = 0; index < element.children.length; index += 1) {
-        if (children.length >= GEOMETRY_CHILD_LIMIT) break;
+        if (children.length >= GEOMETRY_CHILD_LIMIT || index >= ${DESIGN_LAYOUT_CHILD_LIMIT}) break;
         var child = element.children[index];
         var childOid = oidOf(child);
         if (!childOid || !visibleOf(child)) continue;
@@ -2499,15 +2547,196 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
    * Every update is validated before the first write so malformed input cannot
    * leave a partially adopted canvas.
    */
+  var previewMovesByOid = new Map();
+  var generationHistory = [];
+  var paintedSourceVersion = SOURCE_VERSION;
+  var dragPaintStyle = null;
+
+  function suppressDragPaint(oid) {
+    if (oid === undefined) return;
+    var element = oid === null ? null : elementForOid(oid);
+    if (dragPaintStyle) dragPaintStyle.remove();
+    dragPaintStyle = null;
+    if (!element) return;
+    var style = document.createElement("style");
+    var selector = element === document.body ? "body" : '[data-oid="' + CSS.escape(oid) + '"]';
+    style.textContent = selector + "{opacity:0!important}";
+    document.head.appendChild(style);
+    dragPaintStyle = style;
+  }
+
+  /** A gesture needs containers and siblings, never thousands of SVG paths.
+   * Prioritize its exact selected ancestry before the bounded context scan so
+   * document order cannot make a late selected layer uneditable. */
+  function layoutTargets(args) {
+    ensureElementMap();
+    var selected = args.nodeId ? elementForOid(args.nodeId) : null;
+    var found = new Set();
+    function add(element) {
+      if (!element || found.size >= 512 || found.has(element) || !targetOidOf(element)) return;
+      if (!(element instanceof HTMLElement) && element.tagName.toLowerCase() !== "svg") return;
+      if (visibleOf(element)) found.add(element);
+    }
+    for (var ancestor = selected, depth = 0; ancestor && depth < MAX_TRANSFORM_CHAIN; ancestor = ancestor.parentElement, depth += 1) add(ancestor);
+    // Nearby siblings have priority in a large flow. Their DOM order is
+    // restored below, independently of the order in which they were found.
+    if (selected) {
+      var previous = selected.previousElementSibling, next = selected.nextElementSibling;
+      for (var index = 0; index < 128 && (previous || next); index += 1) {
+        add(previous); add(next);
+        previous = previous && previous.previousElementSibling;
+        next = next && next.nextElementSibling;
+      }
+    }
+    add(document.body);
+    var root = document.body;
+    var current = root;
+    var visited = 0;
+    while (current && visited < 2048 && found.size < 512) {
+      visited += 1;
+      var visible = visibleOf(current);
+      if (visible) add(current);
+      // SVG is an atomic layout item; its internal drawing commands cannot
+      // contain HTML frames. Hidden subtrees need no geometry readback.
+      if (visible && current instanceof HTMLElement && current !== selected && current.firstElementChild) {
+        current = current.firstElementChild;
+        continue;
+      }
+      while (current && current !== root && !current.nextElementSibling) current = current.parentElement;
+      current = current && current !== root ? current.nextElementSibling : null;
+    }
+    return Array.from(found).sort(function (a, b) {
+      return a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    }).map(function (element) { return detailsOf(element, true); });
+  }
+
+  function prepareMoves(moves) {
+    if (moves === undefined) return [];
+    if (!Array.isArray(moves) || moves.length > 32) throw new Error("Too many layer moves.");
+    var seen = new Set();
+    var plans = moves.map(function (move) {
+      if (!move || typeof move.nodeId !== "string" || typeof move.parentId !== "string") throw new Error("Invalid layer move.");
+      var element = elementForOid(move.nodeId);
+      var parent = elementForOid(move.parentId);
+      var before = move.beforeId ? elementForOid(move.beforeId) : null;
+      if (seen.has(element) || element === document.body || element === parent || element.contains(parent) || (before && (before.parentElement !== parent || before === element))) throw new Error("Invalid layer destination.");
+      if (/^(AREA|BASE|BR|COL|EMBED|HR|IMG|INPUT|LINK|META|PARAM|SOURCE|TRACK|WBR|SELECT|OPTION|TABLE|THEAD|TBODY|TFOOT|TR|UL|OL|DL)$/.test(parent.tagName)) throw new Error("This layer cannot contain a frame.");
+      seen.add(element);
+      return { oid: move.nodeId, element: element, parent: parent, before: before };
+    });
+    // Validate the resulting ancestry too (two individually valid moves can
+    // otherwise create a cycle together).
+    plans.forEach(function (plan) {
+      var current = plan.parent;
+      var visited = new Set([plan.element]);
+      while (current) {
+        if (visited.has(current)) throw new Error("Layer moves cannot create a cycle.");
+        visited.add(current);
+        var next = plans.find(function (candidate) { return candidate.element === current; });
+        current = next ? next.parent : current.parentElement;
+      }
+    });
+    return plans;
+  }
+
+  function cancelMovePreviews() {
+    withoutObservedMutations(function () {
+      Array.from(previewMovesByOid.values()).reverse().forEach(function (prior) {
+        prior.parent.insertBefore(prior.element, prior.before && prior.before.parentElement === prior.parent ? prior.before : null);
+      });
+      previewMovesByOid.clear();
+    });
+  }
+
+  function previewLayout(args) {
+    var updates = args.updates || [];
+    var nodeIds = args.nodeIds || [];
+    if (!Array.isArray(updates) || updates.length > ${DESIGN_LAYOUT_CHILD_LIMIT + 1} || !Array.isArray(nodeIds) || nodeIds.length > 32) throw new Error("Layout preview is too large.");
+    var moves = prepareMoves(args.moves);
+    // All targets and values are checked before the first DOM write.
+    var elements = updates.map(function (update) {
+      if (!update || !update.styles || typeof update.styles !== "object" || Array.isArray(update.styles)) throw new Error("Invalid layout styles.");
+      var entries = Object.entries(update.styles);
+      if (entries.length > 64 || entries.some(function (entry) { return !/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(entry[0]) || (entry[1] !== null && (typeof entry[1] !== "string" || entry[1].length > 2048)); })) throw new Error("Invalid layout styles.");
+      return elementForOid(update.nodeId);
+    });
+    var measured = nodeIds.map(elementForOid);
+    if (args.suppressNodeId !== undefined && args.suppressNodeId !== null) elementForOid(args.suppressNodeId);
+    withoutObservedMutations(function () {
+      suppressDragPaint(args.suppressNodeId);
+      if (args.cancelMoves) cancelMovePreviews();
+      moves.forEach(function (move) {
+        if (!previewMovesByOid.has(move.oid)) previewMovesByOid.set(move.oid, { element: move.element, parent: move.element.parentElement, before: move.element.nextSibling });
+        if (move.element.parentElement !== move.parent || move.element.nextElementSibling !== move.before) move.parent.insertBefore(move.element, move.before);
+      });
+      updates.forEach(function (update, index) {
+        if (Object.keys(update.styles).length) applyPreviewStyles(elements[index], update.nodeId, update.styles);
+      });
+    });
+    return measured.map(function (element) { return geometryOf(element, args.children !== false); });
+  }
+
+  function restoreGeneration(target, commit) {
+    if (!/^[a-f0-9]{24}$/.test(target)) throw new Error("Invalid history generation.");
+    var versions = generationHistory.length ? [generationHistory[0].from].concat(generationHistory.map(function (entry) { return entry.to; })) : [SOURCE_VERSION];
+    var touched = new Set();
+    var treeUnchanged = true;
+    var from = versions.lastIndexOf(paintedSourceVersion);
+    var to = versions.lastIndexOf(target);
+    if (from < 0 || to < 0) throw new Error("History generation is no longer retained.");
+    // A speculative inverse may already be painted. Confirmation must still
+    // publish every node (and structural change) between the saved versions.
+    var confirmedFrom = versions.lastIndexOf(SOURCE_VERSION);
+    for (var index = Math.min(from, to, confirmedFrom); index < Math.max(from, to, confirmedFrom); index += 1) {
+      var entry = generationHistory[index];
+      if (!entry) continue;
+      entry.nodeIds.forEach(function (oid) { touched.add(oid); });
+      if (entry.moves.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+    }
+    withoutObservedMutations(function () {
+      cancelMovePreviews();
+      Array.from(previewStyleOverridesByOid.keys()).forEach(clearPreviewStyles);
+      var apply = function (entry, forward) {
+        if (entry.moves.length || entry.changes.some(function (change) { return /^(display|visibility|flex-direction|flex-flow|all)$/.test(change.property); })) treeUnchanged = false;
+        entry.nodeIds.forEach(function (oid) { touched.add(oid); });
+        var moves = forward ? entry.moves : entry.moves.slice().reverse();
+        moves.forEach(function (move) {
+          var parent = forward ? move.parent : move.oldParent;
+          var before = forward ? move.before : move.oldBefore;
+          parent.insertBefore(move.element, before && before.parentNode === parent ? before : null);
+        });
+        entry.changes.forEach(function (change) {
+          var value = forward ? change.after : change.before;
+          var priority = forward ? change.afterPriority : change.beforePriority;
+          if (value) change.target.setProperty(change.property, value, priority);
+          else change.target.removeProperty(change.property);
+        });
+      };
+      while (from > to) { from -= 1; apply(generationHistory[from], false); }
+      while (from < to) { apply(generationHistory[from], true); from += 1; }
+    });
+    paintedSourceVersion = target;
+    if (commit) {
+      SOURCE_VERSION = target;
+      window.__zerosDesignSourceVersion = SOURCE_VERSION;
+    }
+    revision += 1;
+    var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();
+    return { sourceVersion: SOURCE_VERSION, treeUnchanged: treeUnchanged,
+      snapshot: treeUnchanged ? Object.assign({}, nextSnapshot, { tree: [] }) : nextSnapshot,
+      details: Array.from(touched).slice(0, 256).map(function (oid) { return detailsOf(elementForOid(oid)); }) };
+  }
+
   function commitStyles(updates, nextSourceVersion, patch) {
     if (!/^[a-f0-9]{24}$/.test(nextSourceVersion)) {
       throw new Error("nextSourceVersion must be a valid source generation.");
     }
-    var generationPatch = prepareGenerationPatch(patch);
+    var moves = prepareMoves(patch && patch.moves);
+    var generationPatch = prepareGenerationPatch(patch && { keyframes: patch.keyframes, tokens: patch.tokens });
     if (
       !Array.isArray(updates) ||
-      updates.length > 32 ||
-      (updates.length < 1 && !generationPatch.changed)
+      updates.length > ${DESIGN_LAYOUT_CHILD_LIMIT + 1} ||
+      (updates.length < 1 && !generationPatch.changed && moves.length === 0)
     ) {
       throw new Error("A commit must contain styles or a generation patch.");
     }
@@ -2555,6 +2784,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return {
           property: property,
           value: entry[1],
+          prior: prior,
+          newerPreview: prior && prior.latestValue !== entry[1] ? prior.latestValue : undefined,
+          inlineValue: inlineValue,
           inlinePriority: inlinePriority,
           rule: prior && prior.rule
             ? prior.rule
@@ -2563,9 +2795,24 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       });
       return { oid: oid, element: element, preview: preview, plans: plans };
     });
+    var changes = [];
+    var historyMoves = moves.map(function (move) {
+      var prior = previewMovesByOid.get(move.oid);
+      return Object.assign({}, move, { oldParent: prior ? prior.parent : move.element.parentElement, oldBefore: prior ? prior.before : move.element.nextSibling });
+    }).filter(function (move) {
+      var before = move.oldBefore;
+      while (before && before.nodeType !== Node.ELEMENT_NODE) before = before.nextSibling;
+      return move.oldParent !== move.parent || before !== move.before;
+    });
     withoutObservedMutations(function () {
       prepared.forEach(function (update) {
         update.plans.forEach(function (plan) {
+          var target = plan.rule ? plan.rule.style : update.element.style;
+          changes.push({ target: target, property: plan.property,
+            before: plan.rule ? (plan.prior ? plan.prior.ruleValue : target.getPropertyValue(plan.property)) : plan.inlineValue,
+            beforePriority: plan.rule ? (plan.prior ? plan.prior.rulePriority : target.getPropertyPriority(plan.property)) : plan.inlinePriority,
+            after: plan.value || "", afterPriority: target.getPropertyPriority(plan.property) });
+
           if (plan.rule) {
             // Auto-scope edits one unambiguous top-level data-oid rule. Remove
             // the speculative inline preview before mirroring that exact CSSOM
@@ -2586,18 +2833,43 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
             );
           }
           if (update.preview) update.preview.delete(plan.property);
+          if (plan.newerPreview !== undefined) {
+            applyPreviewStyles(update.element, update.oid, { [plan.property]: plan.newerPreview });
+          }
         });
         if (update.preview && update.preview.size === 0) {
           previewStyleOverridesByOid.delete(update.oid);
         }
       });
+      moves.forEach(function (move) {
+        var prior = previewMovesByOid.get(move.oid);
+        var currentParent = move.element.parentElement;
+        var currentBefore = move.element.nextSibling;
+        var newer = prior && (currentParent !== move.parent || move.element.nextElementSibling !== move.before);
+        if (currentParent !== move.parent || move.element.nextElementSibling !== move.before) move.parent.insertBefore(move.element, move.before);
+        previewMovesByOid.delete(move.oid);
+        if (newer) {
+          previewMovesByOid.set(move.oid, { element: move.element, parent: move.parent, before: move.before });
+          currentParent.insertBefore(move.element, currentBefore);
+        }
+      });
       if (generationPatch.changed) applyCommittedGenerationPatch(generationPatch);
     });
+    if (generationPatch.changed) generationHistory = [];
+    else {
+      var branch = generationHistory.findIndex(function (entry) { return entry.from === SOURCE_VERSION; });
+      if (branch >= 0) generationHistory.splice(branch);
+      generationHistory.push({ from: SOURCE_VERSION, to: nextSourceVersion, changes: changes, moves: historyMoves, nodeIds: prepared.map(function (update) { return update.oid; }).concat(moves.map(function (move) { return move.oid; })) });
+      var bytes = function (entry) { return entry.changes.reduce(function (total, change) { return total + (change.before.length + change.after.length + change.property.length) * 2 + 128; }, 0) + entry.moves.length * 256; };
+      var historyBytes = generationHistory.reduce(function (total, entry) { return total + bytes(entry); }, 0);
+      while (generationHistory.length > 64 || historyBytes > 4 * 1024 * 1024) historyBytes -= bytes(generationHistory.shift());
+    }
+    paintedSourceVersion = nextSourceVersion;
     suspendAuthoredMotion();
     revision += 1;
     SOURCE_VERSION = nextSourceVersion;
     window.__zerosDesignSourceVersion = SOURCE_VERSION;
-    var treeUnchanged = prepared.every(function (update) {
+    var treeUnchanged = historyMoves.length === 0 && prepared.every(function (update) {
       return update.plans.every(function (plan) {
         return plan.property !== "display" &&
           plan.property !== "visibility" &&
@@ -2894,6 +3166,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   }
 
   function captureScreenshot(args) {
+    var captureSourceVersion = SOURCE_VERSION;
     var requestedCrop = args && typeof args.crop === "object" ? args.crop : null;
     var requestedOutput = args && typeof args.outputSize === "object"
       ? args.outputSize
@@ -3013,7 +3286,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
           context.drawImage(image, 0, 0, outputWidth, outputHeight);
           encodeCanvasPng(canvas, function (dataUrl) {
             resolve({
-              sourceVersion: SOURCE_VERSION,
+              sourceVersion: captureSourceVersion,
               dataUrl: dataUrl,
               mimeType: "image/png",
               width: outputWidth,
@@ -3057,6 +3330,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
         return setTheme(args.theme === null ? null : args.theme);
       case "previewStyles":
         return previewStyles(args.nodeId, args.styles);
+      case "getLayoutTargets":
+        return layoutTargets(args);
+      case "previewLayout":
+        return previewLayout(args);
+      case "restoreGeneration":
+        return restoreGeneration(args.targetSourceVersion, args.commit === true);
       case "previewGeometry":
         return previewGeometry(args.nodeId, args.styles, args.children);
       case "commitStyles":

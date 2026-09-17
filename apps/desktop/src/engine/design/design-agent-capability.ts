@@ -17,6 +17,8 @@ import {
 } from "@zeros/design-web";
 
 import { DesignDraftStore } from "./design-api";
+import { designDirectoryNameFor } from "./directory-registry";
+import { designDirectoryEntry } from "./metadata";
 
 export const DESIGN_AGENT_CAPABILITY_VERSION = 1 as const;
 const DEFAULT_TTL_MS = 60 * 60_000;
@@ -58,6 +60,7 @@ export const DESIGN_AGENT_SAFE_OPERATION_TYPES = Object.freeze<
   "node.set-text",
   "node.set-attribute",
   "node.set-html",
+  "node.move",
   "node.duplicate",
   "node.delete",
   "frame.set-geometry",
@@ -205,10 +208,9 @@ function authorizeContext(
   );
 }
 
-/** In-engine capability adapter for one persistent Design-agent run. The map is
- * intentionally process-local: the trusted orchestrator recreates grants after
- * an engine restart, while durable draft bytes/revisions remain in
- * DesignDraftStore. */
+/** Scoped document API adapter retained independently of provider sessions.
+ * Its historical name does not imply a separate Design execution lifecycle.
+ * Grants are process-local; durable checkout revisions remain in DesignDraftStore. */
 export class DesignAgentCapabilityManager {
   private readonly entries = new Map<string, CapabilityEntry>();
   private readonly now: () => number;
@@ -247,7 +249,27 @@ export class DesignAgentCapabilityManager {
     while (this.entries.has(token));
 
     const entryRef: { current: CapabilityEntry | null } = { current: null };
-    const api = new DesignApi(new DesignDraftStore(input.workspacePath), {
+    const directory = designDirectoryNameFor(input.workspacePath);
+    const directoryId = designDirectoryEntry(
+      input.workspacePath,
+      directory,
+    )?.id;
+    const store = new DesignDraftStore(input.workspacePath, {
+      directory,
+      assertAuthorized: () => {
+        this.require(token);
+        if (
+          designDirectoryEntry(input.workspacePath, directory)?.id !==
+          directoryId
+        ) {
+          this.revoke(token);
+          throw new DesignAgentCapabilityError(
+            "DESIGN_AGENT_CAPABILITY_INVALID",
+          );
+        }
+      },
+    });
+    const api = new DesignApi(store, {
       authorization: {
         kind: "authorize",
         actor,

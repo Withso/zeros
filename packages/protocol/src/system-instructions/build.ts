@@ -41,6 +41,7 @@ export interface FirstTurnInstructionInput {
   agentRole?: "code" | "design";
 }
 
+/** Legacy role formatter, not the planned composer Design-mode notice. */
 export function buildDesignAgentNotice(
   designDirectory?: string | null,
 ): string {

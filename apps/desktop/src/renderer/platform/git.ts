@@ -22,7 +22,10 @@ import type {
 } from "@zeros/protocol/github-auth";
 import { refreshDetectedOpenApps } from "./open-apps";
 import { getActiveBridge } from "./bridge/active-bridge";
-import type { WorkingDirectoriesWire, WorkspaceFileListing } from "./bridge/workspace-bridge";
+import type {
+  WorkingDirectoriesWire,
+  WorkspaceFileListing,
+} from "./bridge/workspace-bridge";
 import {
   bridgeFileTree,
   bridgeWorkspaceFileListing,
@@ -124,6 +127,8 @@ import {
   bridgeDesignUpdateToken,
   bridgeDesignUpdateCanvas,
   bridgeDesignUpdateStyles,
+  bridgeDesignTransferNode,
+  type DesignNodeTransferInput,
   bridgeDesignWriteHtml,
   bridgeDesignInsertAsset,
   isDesignWorkspaceSnapshotWire,
@@ -681,6 +686,17 @@ export async function designDeleteFrame(
     requireBridge("delete a design frame"),
     workspaceId,
     frame,
+  );
+}
+
+export async function designTransferNode(
+  workspaceId: string,
+  input: DesignNodeTransferInput,
+) {
+  return bridgeDesignTransferNode(
+    requireBridge("move a design layer"),
+    workspaceId,
+    input,
   );
 }
 
@@ -1353,7 +1369,11 @@ async function readWorkspaceFileListing(
   cwd: string,
   limit: number | undefined,
   includeDesignDirectories: boolean,
-  options: { includeIgnored?: boolean; query?: string; mentionRevision?: string } = {},
+  options: {
+    includeIgnored?: boolean;
+    query?: string;
+    mentionRevision?: string;
+  } = {},
 ): Promise<WorkspaceFileListing> {
   if (!cwd) return { files: [] };
   const listViaBridge = async (): Promise<WorkspaceFileListing> => {

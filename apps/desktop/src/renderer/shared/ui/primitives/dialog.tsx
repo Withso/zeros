@@ -49,6 +49,8 @@ const DialogContent = React.forwardRef<
     /** Render the top-right close (X) button. Default true; pass false for
      *  dialogs that own their own chrome (e.g. the full create-from picker). */
     showCloseButton?: boolean;
+    /** Keep modal focus and scroll isolation without dimming the background. */
+    backdrop?: "dimmed" | "clear";
     /** Allow dismissing by clicking the overlay / interacting outside the
      *  content. Default FALSE — a modal should only close via an explicit
      *  Cancel / close button / Escape, so an accidental backdrop click can't
@@ -63,6 +65,7 @@ const DialogContent = React.forwardRef<
       className,
       children,
       showCloseButton = true,
+      backdrop = "dimmed",
       dismissable = false,
       onPointerDownOutside,
       onInteractOutside,
@@ -80,7 +83,9 @@ const DialogContent = React.forwardRef<
 
     return (
       <DialogPortal>
-        <DialogOverlay />
+        <DialogOverlay
+          className={backdrop === "clear" ? "bg-transparent" : undefined}
+        />
         <DialogPrimitive.Content
           ref={ref}
           {...popoverBoundaryProps}

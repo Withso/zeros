@@ -3,10 +3,18 @@
 **Status:** Current implementation and compatibility contract. Foundation
 schema v1, Design API v1, and DOM renderer protocol v2 are frozen interfaces.
 
-This is the single durable guide for the Zeros Design workspace. It describes
-the behavior implemented in the repository, the dormant foundation retained
-for a future autonomous Design agent, and the evidence required before either
-path can ship. It is not an implementation diary or roadmap.
+This guide describes the implemented editor, checkout-backed Design API,
+shared native agent tools, and compatibility contracts. The
+[shared-session v1 plan](design-v1-implementation-plan.md) describes the agreed
+composer modes and provider integration that still need implementation. The
+Design tab and shared managed Git foundation are implemented.
+The [roadmap](design-mode-roadmap.md) retains the later feature phases.
+
+The unused private authored backend and separate Design-session admission have
+been removed. Current authored source remains in the checkout. Autosave stays
+silent, failures use actionable feedback, and review stays compact and undimmed.
+Private journals, receipts, and evidence remain engine-owned recovery/cache
+state; they are not a second authored source store.
 
 ## Product and workspace model
 
@@ -15,19 +23,54 @@ Git index. Code and Design are concurrent views of that checkout; they are not
 separate worktrees, branches, copies, projections, or execution backends.
 
 ```text
-Code agents (native host) ───────────────► shared worktree
-
-Human Design surface ─────────────────────────┐
-                                              ├──► Design API ─► DesignDraftStore
-Future Design agent (ZSR, disabled) ──────────┘
+Shared native agent session ───────────► Code files in shared worktree
+         │ scoped Design tools
+         ▼
+Human Design surface ────────────────► Design API ─► DesignDraftStore
+                                                       │
+                                                       ▼
+                                            Design files in same worktree
 ```
 
 The active Design directory comes from the private `[design] directory_id`
 selection and the `design.toml` manifests in this checkout. Legacy `[design]
 directory` paths remain readable. `Zeros Design/` is the unconfigured pointer
-default; first Design use creates `<repo name> - Design/` when no Design folder
-exists. A single discovered folder is reused. Multiple folders can be selected
-in Settings. Source remains materialized and readable in Code and Design views.
+default; the explicit Create Design directory action creates `<repo name> -
+Design/` when no Design folder exists. Opening the tab alone does not create
+files. A single discovered folder is reused. The Design directory menu selects
+a workspace-local stable ID; Settings manages repository defaults and rename.
+Source remains materialized and readable from both surfaces.
+
+### Shared workbench navigation
+
+The permanent Design tab sits beside Files, Changes, Review and Context in the
+existing workbench. The same conversation column stays present. Its directory
+header, Layers and Inspector belong inside Design; Layers/Inspector visibility
+is adjustable for narrow layouts. Selecting a tab changes no agent mode.
+
+`workspace.kind`/`viewMode` and `workspace.setMode` remain serialized legacy
+contracts, including existing creation flows. On first use, a legacy Design
+selection opens Design once; subsequent choices survive reload without forcing
+Design again. These fields do not authorize human Design editing. Composer
+modes and provider tool gating are a separate pending integration.
+
+Frame/node selection, camera, layer disclosure and panel visibility are keyed
+by workspace. A stable directory ID survives rename; replacing it resets the
+old document selection/camera and runtime foundations. Switching back to an
+older directory starts a fresh document view; it does not restore a second
+per-directory editor history. Existing app-wide panel width preferences remain.
+At most two visited Design canvases are retained. Inactive tabs/owners and a
+collapsed workbench are inert, hidden and inactive, with stable iframe DOM order.
+
+`design.initialize` is an explicit local managed-workspace operation. It creates
+or adopts metadata without changing workspace kind, HEAD or the index. Directory
+selection waits for pending edits, changes only the workspace-local pointer and
+invalidates exact-owner reads. Mutations carrying an old directory ID are
+rejected, and queued local edits retain the directory identity they started in.
+Missing, ambiguous, conflicted or unsupported manifests show recovery
+feedback instead of silently creating a replacement document. Repository Settings
+rename remains an explicit main-checkout rename commit: live checkouts keep their
+own paths through a compatible stable ID; legacy/incompatible pointers block it.
 
 ### Source, metadata and personal state
 
@@ -44,9 +87,10 @@ in Settings. Source remains materialized and readable in Code and Design views.
 ```
 
 Every Design folder, including its manifest and rules, belongs to the Design
-API. Code agents may read it, but generic file and Git operations cannot mutate
-it. Zeros Settings and Design mode manage it. Commit the folder and its
-`design.toml` together; uncommitted work remains on disk but is not available to
+API. Code agents may read it. Generic file editing/discard/restore operations
+cannot author it; approved managed Git stage/unstage/commit and branch
+integration may include it. Zeros Settings and the Design surface manage its
+authored content. Commit the folder, `design.toml`, and `rules.md` together; uncommitted work remains on disk but is not available to
 other clones or branches until committed.
 
 Repository Settings → Design → Directory scans the main checkout, including
@@ -62,8 +106,9 @@ and forgets this checkout's remembered registration. Custom rules are preserved.
 The preserved source becomes ordinary Code, including a folder named `Zeros
 Design`; the legacy default read path alone does not establish Design ownership.
 Tracked metadata removal is committed separately from staged source changes so
-HEAD/index discovery cannot immediately restore the removed registration. Open
-Design workspaces must switch to Code before removal. The operation is local-only
+HEAD/index discovery cannot immediately restore the removed registration. All
+open workspaces for this repository must be archived before removal; every
+workspace may now be editing Design, regardless of its legacy kind. The operation is local-only
 and uses the engine's Design-owner handoff and workspace mutation lane. Other
 worktrees retain their own committed copies until updated through normal Git.
 Choosing the folder again rebuilds metadata from its preserved source; removed
@@ -94,8 +139,9 @@ frame titles and kinds; `foundation` stores parameters, variants and components.
 Unknown JSON document extensions survive migration and edits. TOML has no null,
 so an optional envelope `nulls` array records JSON pointers into `document`;
 empty-string placeholders at those exact locations decode to null. No document
-keys are reserved for this encoding. Canvas viewport state, recovery journals
-and transaction history stay in private engine storage, outside Git.
+keys are reserved for this encoding. Canvas viewport state and recovery journals
+stay in private engine storage, outside Git. Undo/redo history is bounded
+in-memory session state, separate from durable request receipts and Git history.
 
 Discovery validates `format = "zeros-design"`; a file named `design.toml` alone
 does not make a folder Design territory. Working-tree discovery is bounded,
@@ -179,10 +225,10 @@ user-selected sparse-checkout, but it is unrelated to Design containment and is
 unavailable while the Design surface is active so it cannot hide an open
 document.
 
-The current Design workspace has no coding-agent prompt. Production also
-rejects autonomous Design-agent admission. The Design-agent API, capability,
-and ZSR paths described below are intentionally dormant, testable foundation
-for a future explicit delegation experience.
+The current Design surface has no shared composer yet. Separate
+`agentRole: "design"` session requests are rejected before provider admission.
+The old top view switch is still UI state; the planned composer mode and Design
+tab must not be described as implemented permissions.
 
 ## Canonical Design foundation
 
@@ -295,6 +341,29 @@ The active draft is durable repository content, but durability is not a Git
 commit. `design.save` validates the live draft only. Stage and commit remain
 separate, explicit actions.
 
+Confirmed edits are written to `<workspace>/<selected Design folder>` by the
+engine: authored HTML, CSS, assets, `design.toml`, and `rules.md` are ordinary
+versioned source. A gesture previews locally until release; typed fields publish
+on their editor's commit boundary (usually Enter/blur). An unsubmitted field is
+not yet a durable edit. Cmd/Ctrl+S publishes the focused field and waits behind
+pending edits before validating the draft; it does **not** stage any files.
+Private journals, view state, review receipts and result bundles live under
+`<Zeros app data>/design-storage/<workspace-path hash>/`; quarantined recovery
+records use the adjacent `design-transaction-recovery/` directory. The stable
+macOS app-data default is `~/Library/Application Support/com.zeros/`, with
+separate beta/dev/instance directories and a `ZEROS_DATA_DIR` override for cloud
+and tests. Repository `.zeros/` holds private settings and compatibility state;
+it is not the authored autosave store. Undo/redo history is bounded in memory.
+For a cloud workspace, the workspace engine writes the cloud worktree and its
+own configured app-data directory.
+
+Stage Design snapshots the selected folder into Git's index, including its
+manifest and rules. It does not stage Code or other Design folders. Later edits
+continue autosaving to the worktree and can leave the same file both staged and
+unstaged. Commit staged Design records only the staged version; push subsequently
+publishes the branch's commits. A proposal awaiting acceptance has not changed
+authored source; its request/evidence records are private.
+
 Desktop, headless, CI, and future agent adapters use the same Design API
 schemas. MCP is a transport adapter, not the core model. A headless caller can
 open an exact revision, query bounded projections/provenance, apply or dry-run
@@ -384,20 +453,44 @@ Escape restores the exact baseline.
 - **Layout inspector:** the fixed Layout section presents whole-pixel parent-local
   positions and border-box dimensions, clockwise quarter turns, independent flips,
   alignment, constraint pins, and Clip content. Viewing or cancelling a rounded
-  value never rewrites authored CSS. New frames explicitly use normal block flow;
-  choosing None disables auto layout without hiding the element. Other style
-  sections and the CSS editor retain their existing precision and semantics.
-  Ratios, flex factors, and relative CSS units in Layout also retain fractions.
-  All three geometry columns grow with the inspector; the transform tools keep
-  a 72px minimum so their three targets remain usable at the narrowest width.
+  value never rewrites authored CSS. New frames start with normal block flow,
+  an opaque white fill, and explicit dimensions. Opacity is displayed as a
+  percentage. Text layers keep text semantics: Fill edits `color`, and the
+  inspector does not offer conversion into a layout container or a background.
+  The CSS editor continues to accept the full supported CSS vocabulary.
+  Layout exposes None, vertical/horizontal flex, and Grid. Padding, gap, and
+  the child-alignment pad appear only on automatic layouts. Free-layout
+  containers retain their arrangement and constraint controls. Margins and raw
+  flex factors belong in CSS, not the designer controls.
+  Automatic layouts and their in-flow children expose per-axis Fixed, Hug
+  contents, and optional min/max fields. Only in-flow children of flex/grid
+  parents expose Fill container. Hug uses intrinsic CSS sizing; Fill uses flex
+  growth on the parent's main axis and self-alignment stretch on its cross axis
+  or a grid cell. Switching to Fixed releases growth and preserves the measured
+  border box. Switching parent flow preserves child resizing intent. Enabling
+  layout brings drawn children into flow; removing it freezes their measured
+  positions and dimensions in the same undoable transaction.
+  Paired horizontal/vertical padding can expand to independent sides. Grid
+  track counts author equal fractional tracks only on an explicit edit; custom
+  authored tracks remain untouched when viewing the inspector.
+  Optional `layout.widthValue`, `heightValue`, and parent alignment/direction
+  fields retain sizing intent in the exact node snapshot before computed
+  geometry resolves it to pixels. Older runtimes can omit these fields.
+  Layout edits that change an explicitly Hug-sized canvas root update its
+  viewport bounds in the same transaction. Ordinary styles, flow, resizing,
+  and history share the inspector's ordered lane; geometry preparation waits
+  for runtime adoption, while immediate previews stay responsive.
+  Sizing-menu drafts are scoped to workspace, frame, and selected node IDs.
+  Geometry uses three columns at normal widths and reflows to two columns in
+  narrow inspectors, keeping dimension values and resizing menus readable.
   Pins author standard insets (including `calc()` for center offsets); the directly
   authored `--zeros-layout-x` / `--zeros-layout-y` custom properties retain the
   start/center/end/stretch intent for the editor and canvas gestures. These names
   are serialized compatibility contracts. Optional runtime `layout` context is
   measured with node details and validated at the frame bridge, so the inspector
   does not infer parent coordinates from a transformed screen rectangle.
-  Alignment and constraints appear only for containers with direct authored
-  children, including top-level canvas frames. They arrange visible direct
+  Free-layout alignment and constraints appear only for containers with direct
+  authored children, including top-level canvas frames. They arrange visible direct
   children; hidden layers and grandchildren are left alone. The optional,
   validated `childrenLayout` aggregate supplies presence, eligible child IDs,
   and shared or mixed pin intent in the existing exact-key runtime readback.
@@ -429,8 +522,9 @@ unpainted incoming buffer.
 
 Native frame resources, snapshot reads, and Design mutations resolve the same
 active directory in an operation-scoped lease. They do not depend on an earlier
-mode switch priming the legacy directory name. Code view retains read access;
-document mutations still require Design mode. Capability, path, symlink and
+mode switch priming the legacy directory name. Human reads and mutations are
+independent of workspace presentation. The future agent mode gate is not yet
+implemented. Capability, path, symlink and
 source-generation checks remain in force on native resource reads.
 
 Only a successful private runtime handshake publishes a connection for canvas
@@ -502,9 +596,8 @@ reduced motion; unpinned host pixels are never treated as a stable baseline.
 | Actor                    | Code/repository authority                                                                                      | Design authority                                        | Execution                         |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------- |
 | Human Code workflow      | Normal native files and Git                                                                                    | Readable; Zeros Code routes reject Design writes        | Native host                       |
-| Code agent               | Normal native tools, hooks, plugins, MCP, credentials, network, containers, Git, and allowed extra directories | Live readable context plus an instruction not to mutate | Native host process lifecycle     |
+| Code agent               | Normal native tools, hooks, plugins, MCP, credentials, network, containers, Git, and allowed extra directories | Readable context; scoped semantic tools when admitted   | Native host process lifecycle     |
 | Human Design surface     | Read-only Code context                                                                                         | Semantic Design API transactions                        | Trusted application process       |
-| Future Design agent      | Read-only Code, Design, and Git metadata; temporary scratch only                                               | Scoped semantic Design API transactions                 | ZSR; production disabled          |
 | External terminal/editor | Normal same-user authority                                                                                     | Normal same-user authority                              | Outside the Zeros actor guarantee |
 
 Native Code deliberately has no ZSR, VM, OrbStack machine, local container,
@@ -514,71 +607,104 @@ graceful/forced teardown, and stale-process recovery while preserving normal
 provider and host behavior.
 
 Code agents receive every recognized Design root as readable context and an
-explicit cooperative instruction not to mutate it. Zeros-owned generic file and
-Git handlers also reject Design paths. These workflow guards do not change the
+explicit instruction to make Design writes through admitted semantic tools.
+Zeros-owned generic file and Git handlers still reject Design paths. These
+workflow guards do not change the
 native permissions of the Code process or external same-user tools and are not
 a hostile-process filesystem security claim.
 
-View identity never selects execution posture. Starting or stopping a future
-Design agent cannot retire native Code sessions, and switching views cannot
-restart, migrate, narrow, or widen any running actor.
+View identity never selects execution posture. Design identity changes revoke
+scoped tool authority while preserving the native provider session. The planned
+composer modes likewise do not select a sandbox or make Code files read-only;
+Design API mode admission is a separate, pending capability gate.
 
-## Future autonomous Design-agent boundary
+### Native Code-session Design tools
 
-`agentRole: "design"` is rejected at the engine dispatcher before workspace
-resolution, provider initialization, process creation, or capability minting.
-No production setting or environment variable enables it. A constructor seam
-works only with `NODE_ENV === "test"`; this keeps the complete admission path
-testable without exposing an unfinished product workflow.
+`engine/design/code-tool-admission.ts` resolves a registered workspace and exact
+manifest directory independently of the selected view. New and resumed native
+Code sessions receive an execution-scoped `design-draft` MCP server through
+`agents/session-tools.ts`; the repository's MCP files are not written. Missing,
+ambiguous, unmigrated, or remotely owned Design directories do not receive a
+grant. A cloud row is admitted only on a cloud engine worker. This policy is
+tested locally; it does not qualify a deployed cloud worker.
 
-One admitted run receives an expiring, process-local capability bound to exact
-workspace id/path, document and expected revision, run/actor identity, action
-and operation allowlists, issue time, and expiry. An ephemeral loopback MCP
-endpoint validates Host, Origin, bearer, route, schemas, bounds, and tool names.
-The bearer travels through the provider environment or in-memory adapter—not
-argv, persisted configuration, logs, MCP literals, or tool output.
+The Code tools expose discovery, exact-revision reads, semantic apply/dry-run,
+durable proposals/request status, session-local undo/redo, frame lifecycle,
+authored lint, sanitized HTML, and bounded source-bound result bundles. PNG
+capture is available through the private Electron host or a qualified cloud
+capture worker; absence of a host leaves source tools usable.
 
-The capability exposes bounded open/read, transaction apply/dry-run, undo, and
-redo. It lasts for the persistent provider session, renews without broadening
-authority, and is revoked when that session stops. A later prompt uses the same
-provider, sandbox generation, capability, and MCP endpoint instead of paying a
-new admission.
+The **Review Design changes** dialog lives inside the Design tab. It is a compact
+640 × 480 dialog, bounded by the window, with an undimmed background. It retains
+modal focus/scroll isolation, explicit close/Escape, and protection against
+accidental outside dismissal; the background canvas does not become interactive
+while review is open. Narrow windows hide the canvas sidebar and keep the
+comparison, scrollable changes, and checkpoint controls available. Its left side
+shows the current canvas until pages exist; its right side provides independent
+All, Uncommitted, Staged, Unstaged and Agent proposals comparisons, source diffs,
+and saved before/after images. Accept/Reject records trusted human review
+separately from the originating agent receipt. Accept applies an exact-revision
+proposal; it does not stage it. Stage, Unstage and Commit staged Design are
+separate actions. Commit pins the reviewed index fingerprint and refuses changed
+staging. Its Design-only commit scope preserves staged Code; workspace Git
+commit can deliberately include the shared staged snapshot.
 
-ZSR is operating-system isolation: macOS Sandbox Runtime/Seatbelt or Linux
-Bubblewrap. It is not a VM, OrbStack machine, local container image, repository
-clone, or separate worktree. A Design policy permits normal provider/runtime
-reads plus writes only to generation-private provider state, generation-private
-scratch/artifacts, and the exact loopback capability endpoint. It write-denies
-Code worktrees, every recognized Design directory, `.git`, durable engine and
-draft authority, sibling workspaces, requested extra roots, ambient container
-daemon sockets, and unrelated Zeros control ports.
+Results preserve source, composed HTML, hashes, revisions, viewport and renderer
+identity. Retention is bounded to 16 bundles / 64 MiB per workspace, at most 32
+MiB per bundle and seven days. Capture has one browser slot per engine, two
+aggregate evidence-preparation/read slots, and a 20-second host deadline. Slow
+browser work releases the document write lane; later source edits do not rewrite
+saved evidence. The review dialog has bounded exact-key caches and no closed
+polling. Evidence is displayed as PNG, never executable authored HTML.
 
-Only the trusted Design API writes the durable draft. Admission resolves and
-validates identity/revision/territory, binds the capability endpoint, installs
-and attests the exact ZSR policy, then starts and owns the provider process
-domain. Any failure closes the endpoint, revokes the bearer, proves the
-generation empty, and reports a terminal admission error. It never retries on
-the native host or in a provider sandbox.
+`document.ts` retains its public exports while storage, journal transactions,
+frame lifecycle, source/asset helpers and render preparation have focused owners.
+The renderer shell composes separate canvas, overlay, frame-host, camera, inline
+text, inspector and review modules. See [surface contracts](design-surface-contracts.md)
+for the compatibility matrix and native-host limitations.
 
-### Readiness and latency evidence
+The existing `ZEROS_DESIGN_AGENT_CAPABILITY` environment-header contract carries
+the private bearer. Each grant expires after 24 hours and is revoked on execution
+retirement, shutdown, or authority change. Reopening/resuming the Code session
+mints a new bearer. Authorization is checked again at the journal admission
+boundary; a transaction already durably admitted finishes recovery. Cancellation
+therefore requires status reconciliation when it races a commit.
 
-Opening Design view never launches ZSR or a provider. Cold session readiness
-may include identity/revision validation, capability/listener setup, ZSR policy
-installation and attestation, provider/auth checks, process startup, protocol
-initialization, and model/account discovery. ZSR has no VM boot, but provider
-startup is still real and often dominant; the architecture makes no fixed
-seconds-to-ready promise.
+Request/proposal records live in engine-private Design storage, bounded to 512
+records and 4 MiB per directory. Resolved receipts are retained for **up to** seven
+days within those limits; a persisted timestamp cutoff prevents replay of evicted
+requests. Started/indeterminate records are not automatically evicted or replayed.
+The store fails closed if unresolved records fill its budget. This is a bounded
+local retry contract, not replicated cloud job persistence. Tool discovery
+reports the clock, expiry, supported operations, and budgets. The
+[implementation report](design-phase-0-1-report.md) describes the API and tests.
 
-Measure capability/MCP setup, ZSR admission, provider startup, total session
-readiness, warm prompt dispatch, and stop-to-proven-empty independently. Record
-provider, auth state, OS, architecture, source/package build, cache state,
-sample count, and percentiles. Never attribute provider latency to ZSR or cite a
-single best-case sample as the release result.
+## Scoped API compatibility
 
-The renderer may overlap cold work with typing and queue a prompt behind that
-exact in-flight session. A pristine unused provider switch may defer admission
-until user intent. Neither optimization may weaken revision checks, capability
-scope, policy installation, attestation, or proven teardown.
+The serialized `agentRole: "design"` value remains parseable, but the engine
+rejects it before workspace resolution, provider startup, or capability minting.
+The test-only activation seam, separate gateway constructor, admission renewal,
+and session retirement maps have been removed. There is no alternate Design
+provider lifecycle to enable.
+
+`design-agent-capability.ts` and `design-agent-mcp.ts` retain their internal
+names as tested API/transport primitives. A scoped grant binds workspace,
+document, run identity, revision, action/operation allowlists, and expiry.
+Loopback MCP validates Host, Origin, bearer, route, schemas, bounds, and tool
+names. Credentials stay out of argv, source, logs, and persisted MCP config.
+These primitives do not establish an OS boundary or a second agent session.
+
+The shared-session tool registry remains the production integration. The v1
+mode gate will reuse its revocation/write-authority checks; current native Code
+sessions still have the Phase 1 Design tool authority. Opening Design view
+starts neither a provider nor a sandbox.
+
+Experimental private-store ownership markers remain recognized in metadata
+recovery. They block checkout writes with a recovery message; this version
+cannot activate, publish, or export that retired store. Preserve its app data
+and recover through the experimental build before deliberately importing into
+the checkout. Never remove the marker to bypass the error. Ordinary workspaces
+continue using the checkout-backed store without migration.
 
 ## Git and concurrency
 
@@ -590,11 +716,16 @@ Design editing and Git publication are separate:
 4. `design.commit` commits the already-staged, Design-only lane and accepts no
    arbitrary pathspec or implicit amend.
 
-Code commits refuse recognized Design content; Design commits refuse Code
-content. Boundary-crossing renames are rejected. Code pathspec commits may
-select Code files without consuming staged Design work, but there remains one
-shared index, so staged state from both lanes must be committed separately or
-unstaged deliberately.
+The managed `git.stage` and `git.unstage` routes accept literal Code and Design
+paths. `git.commit` uses workspace authority, capturing the exact staged lane
+(or explicit selected files) in a private index before updating HEAD with CAS.
+Internal callers with Code-only authority still refuse Design content; Design
+review retains its narrower lane. Boundary-crossing Design-only renames remain
+rejected. No action silently stages missing metadata companions. A touched
+portable Design folder must include regular `design.toml` and `rules.md` files
+in that captured index; full-folder deletion and recognized legacy metadata
+remain supported. Validation does not read a newer unstaged draft to decide
+whether an earlier staged checkpoint is valid.
 
 Pull, merge, rebase, checkout, reset, cherry-pick, revert, and push are
 branch-wide operations performed once against the shared checkout. An open
@@ -613,9 +744,40 @@ command through another backend.
 
 Paths are normalized as repository-relative POSIX paths and validated against
 traversal, case aliases, symlinks, hard links, and Git pathspec ambiguity before
-Zeros publishes authority. Generic Zeros file, stage, discard, restore, clean,
-reset, and Code-commit routes refuse Design targets and direct the user to the
-Design surface or dedicated actions.
+Zeros publishes authority. Generic file/discard/restore/clean and destructive
+reset paths still refuse Design targets. Managed integration is deliberately
+separate from authored editing; it is not an unrestricted native-shell sandbox.
+
+Files provides a Design section and read-only source. Workspace Changes and
+Design Review observe the same index. Direct Create PR publishes existing branch
+commits, preserving staged, unstaged and untracked Code and Design; if no branch
+commits exist it asks the user to review and commit first. The agent PR brief
+uses the same publication scope and no longer instructs commit-all. Push/pull
+also do not implicitly commit local changes. The current Review Changes tab
+compares the branch's committed HEAD with its base; it can include unpushed
+commits and is not yet a comparison pinned to the published remote PR head.
+Richer Design ownership badges/action handoff and remote visual evidence remain
+follow-ups in the [v1 plan](design-v1-implementation-plan.md).
+
+### Conflict status and read-only context
+
+`design.status` reads unmerged paths and the current merge/rebase/cherry-pick/
+revert without parsing authored metadata. Any unmerged path pauses the Design
+canvas conservatively, including Code-only conflicts. Read/mutation admission
+checks this before resolving a potentially conflicted manifest. Retry rechecks
+the checkout; Cancel integration explicitly confirms and invokes managed
+`git.abort`. A conflict with no abortable operation offers Retry only. Existing
+managed integration may refuse overlapping Design changes before creating any
+conflict at all. This is pause/recovery, not automatic conflict resolution.
+
+`design.context.create` and `design.context.inspect` are local, read-only routes.
+The version-1 reference contains workspace ID, stable directory ID, portable
+HTML frame, optional node ID and exact semantic revision. Inspection returns
+`ready` with source/geometry, `stale` with the current revision, `missing`, or
+`wrong-directory`; it rejects a mismatched outer workspace. Reads never heal or
+write metadata, and an external source race cannot return newer bytes as the
+referenced revision. The renderer bridge exposes this contract; composer pill
+delivery, agent mode transitions and API permission changes are deferred.
 
 ## Cloud, packaging, and compatibility
 
@@ -626,7 +788,8 @@ desktop VM path and must not be staged into desktop resources.
 
 Desktop packages retain only active execution assets: the native host process
 supervisor plus the pinned ZSR supervisor/runtime tools and process-domain
-helpers required by a future local Design agent. They must not include the
+helpers still used by supported contained execution paths. Composer Design
+mode does not select those assets or make them a new release dependency. They must not include the
 retired local container worker, OrbStack relay/host, cloud-init asset,
 controller, machine bundle, or sidecar variables that locate them.
 
@@ -690,11 +853,10 @@ Acceptance must prove, independently:
   exact bounded authority without changing Git automatically;
 - Code and Design Git actions remain territory-pure and branch-wide rewrites
   protect live drafts;
-- a future Design agent can mutate only through its exact API capability while
-  direct worktree, Design, Git, engine, sibling, extra-root, socket, and control
-  paths remain non-writable;
-- admission failure has no native fallback, and teardown removes every
-  descendant and revokes the endpoint;
+- scoped Design tools reject stale identity/revision/authority and are revoked
+  when their owning execution or document identity is retired;
+- contained cloud admission has no native fallback; native and contained
+  execution teardown retain their respective process-lifecycle guarantees;
 - desktop packaging includes active native/ZSR assets and excludes every
   retired local VM/OrbStack/container asset.
 
@@ -704,10 +866,98 @@ Foundation v1 does not claim mobile authoring, multiplayer transport,
 breakpoint/pseudo-state authoring, deep component-internal overrides, vector
 pen/boolean operations, 3D/shader renderers, multiple coordinated animations,
 advanced motion paths/springs, rich variable dependency tooling, semantic
-Design conflict resolution, or an agent proposal/delegation UI.
+Design conflict resolution, or advanced multi-agent orchestration. Proposal
+review is implemented; composer modes and shared conflict handling are the
+next architecture gate.
 
 Those features require explicit source, protocol, authority, or interaction
 contracts. They must reuse stable identity, transactions, provenance,
 parameters, revisions, exact-owner state, bounded speculative work,
 single-commit gestures, Escape restoration, and real-browser regression
 evidence rather than introducing another durable document model.
+
+### Layout interaction and visual history
+
+The Layout inspector offers content-aware sizing: Hug requires child layers;
+Fill requires an in-flow child of flex/grid. Padding, gap and dimensions present
+whole pixels, and Shift scrubbing uses ten-pixel steps. Advisory lint stays in
+the diagnostics data rather than the inspector chrome.
+
+A single layer dragged inside flex/grid changes authored sibling order with an
+insertion marker. Crossing a container boundary changes its parent and resets
+positional pins; a free container uses its local coordinate space. Moving out
+of the document creates a canvas frame, and moving a frame into another transfers
+its subtree. `node.move` preserves exact source spans and stable identities.
+`design.node.transfer` performs the two-document change through the engine's
+Design metadata journal, including geometry and exact structural history.
+Transfers retain local stylesheet dependencies within the Design directory.
+Trusted in-process API history checkpoints preserve edits before and after a
+transfer. They reattach only to the exact restored document revision and count
+toward the workspace history's 16 MiB bound; they are never transport inputs.
+Numeric fields retain their DOM identity when reparenting changes sizing
+eligibility, so an arriving layout snapshot cannot discard a focused draft.
+Each numeric commit paints immediately and advances its local baseline before
+saving. Escape in a new draft leaves the preceding committed preview intact;
+unit-menu close and blur cannot register the same edit twice.
+
+`previewLayout` applies a bounded batch before measuring, avoiding a reflow and
+round trip for every child. Drag targets are measured once, with a bounded lean
+style catalog; pointer handlers use those frozen bounds and one preview in
+flight. Inspector previews and committed generations preserve newer pending
+values rather than letting an older save repaint them.
+
+Moving a layer out of an iframe retains available exact-generation captured
+pixels in one canvas overlay until the destination's displayed document is ready.
+The source paint is suppressed without changing authored CSS. A failed or
+cancelled transfer restores it; a confirmed transfer never restores the old
+position first. Destination selection waits for the new document before reading
+the transferred node, and does not replace a selection made during saving.
+Whole-frame gestures retain their visible geometry through overlapping save
+replies, including React renders triggered by those replies.
+
+Layout preparation and durable writes have separate queues. A second sizing
+choice or undo can paint while the first write is saving; persistence remains
+ordered. Style-only commits, positional moves with unchanged sibling order, and
+their history inverses reuse the retained tree and element index. Clicks racing
+an in-place source adoption retry the exact live frame, with a bounded retry.
+The runtime port holds subsequent commands through its local version handoff,
+so a concurrent layout preview carries the accepted generation. Rejected
+adoptions release that lane and cancelled commands remain unsent.
+
+For larger documents, target collection starts only after drag intent, includes
+the selected ancestry, treats SVG drawings as atomic layout items, and bounds
+context scanning. Sibling order and ancestor membership are indexed once per
+gesture. Geometry requests bound inspected children as well as returned children,
+so thousands of hidden elements cannot turn an inline-gap drag into a full scan.
+The browser tests cover 4,000 SVG paths and 6,000 hidden children.
+
+Optional audits, thumbnails, and high-resolution captures share one background
+lane, with at most 32 pending owners and only the latest request for each owner.
+Active layout gestures pause that lane; other direct manipulation defers it until
+input is quiet. Queued work rechecks the retained surface's active state before
+reading or capturing its document. Raster capture carries the generation at
+capture start. Cached screenshots have a global 24 MiB budget, accounting for encoded
+strings and decoded pixels, while geometry and layer trees remain retained.
+The 12-frame live-runtime ceiling is a maximum: unused slots do not load distant
+documents. Explicit selection and open Layers trees retain priority.
+
+A runtime retains up to 64 reversible layout generations, capped at 4 MiB of
+style history. The renderer predicts known layout undo/redo against exact
+workspace snapshot identities, while the engine remains authoritative. Unknown
+or externally changed history falls back to the confirmed document. The browser
+regression harness deliberately delays history replies by 500 ms and verifies
+that layout inverses paint first without replacing the iframe or element.
+It also delays frame movement and transfer by 700 ms, and style saves by
+1,500 ms, checking repeated sizing, rapid undo/redo, transfer handoff, rollback,
+and consecutive whole-frame drags independently of persistence latency. These
+are browser regression bounds, not a hardware-independent speedup claim.
+
+Interaction references: [auto-layout flow and spacing](https://help.figma.com/hc/en-us/articles/31289464393751-Use-the-horizontal-and-vertical-flows-in-auto-layout),
+[grid layout](https://help.figma.com/hc/en-us/articles/31289469907863-Use-the-grid-auto-layout-flow),
+and [position and dimensions](https://help.figma.com/hc/en-us/articles/360039956914).
+These inform interaction behavior; the implementation uses the app's own controls
+and CSS layout semantics.
+
+Performance references: [incremental frame loading](https://www.figma.com/blog/incremental-frame-loading/),
+[performance regression testing](https://www.figma.com/blog/keeping-figma-fast/),
+and [avoiding layout thrashing](https://web.dev/articles/avoid-large-complex-layouts-and-layout-thrashing).

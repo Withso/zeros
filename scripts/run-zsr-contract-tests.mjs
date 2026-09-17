@@ -16,6 +16,7 @@ import { runExplicitVitest } from "./run-explicit-vitest.mjs";
 export const ZSR_CONTRACT_TEST_FILES = Object.freeze([
   "apps/desktop/src/engine/__tests__/agent-cancel-stop.test.ts",
   "apps/desktop/src/engine/__tests__/agent-session-reload.test.ts",
+  "apps/desktop/src/engine/__tests__/code-design-tool-host.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-adapter-recovery.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-account-switch.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-boundary-ports.test.ts",
@@ -34,6 +35,8 @@ export const ZSR_CONTRACT_TEST_FILES = Object.freeze([
   "apps/desktop/src/engine/agents/__tests__/gateway-native-instructions.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-provider-oneshot-boundary.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-provider-probe-boundary.test.ts",
+  "apps/desktop/src/engine/agents/__tests__/gateway-product-tools.test.ts",
+  "apps/desktop/src/engine/agents/__tests__/session-tools.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-session-readiness.test.ts",
   "apps/desktop/src/engine/agents/__tests__/gateway-warm-session-boundary.test.ts",
   "apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts",

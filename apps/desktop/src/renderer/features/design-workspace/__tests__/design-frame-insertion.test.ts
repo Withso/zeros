@@ -20,6 +20,14 @@ const parent: DesignRuntimeNodeDetails = {
 };
 
 describe("child frame insertion", () => {
+  it("creates an opaque white frame with no auto layout", () => {
+    const operation = designFrameInsertionOperations(parent, "child", {
+      x: 10,
+      y: 20,
+    }).find((entry) => entry.type === "node.set-html");
+    expect(operation?.html).toContain("display:block;");
+    expect(operation?.html).toContain("background-color:#ffffff;opacity:1;"); // check:ui ignore-line -- authored canvas frame color, not editor chrome.
+  });
   it("keeps the click-created default size inside a rotated and scaled parent", () => {
     const operations = designFrameInsertionOperations(
       { ...parent, childCoordinateSpace: [1, 1, -1, 1, 10, 20] },

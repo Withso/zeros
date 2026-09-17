@@ -43,11 +43,6 @@ import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
-import {
-  usePendingWorkspaceKind,
-  usePendingWorkspaceMode,
-} from "../../state/pending-workspaces";
-import { resolveWorkspacePresentationKind } from "../../state/workspace-resolution";
 import { Button, ScrollArea, Tooltip, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import {
@@ -221,7 +216,7 @@ export function DesignWorkspaceSidebarPanels({
   folder: folderOverride,
   panelId = "design-layers-panel",
 }: DesignWorkspaceSidebarPanelsProps) {
-  if (workspaceOverride?.kind === "design" && folderOverride) {
+  if (workspaceOverride && folderOverride) {
     return (
       <OwnedDesignWorkspaceSidebarPanels
         surfaceActive={surfaceActive}
@@ -248,15 +243,7 @@ function ActiveDesignWorkspaceSidebarPanels({
   panelId: string;
 }) {
   const { workspace, folder } = useActiveWorkspace();
-  const pendingKind = usePendingWorkspaceKind(folder);
-  const requestedKind = usePendingWorkspaceMode(workspace?.id);
-  const isDesign =
-    resolveWorkspacePresentationKind({
-      confirmedKind: workspace?.kind,
-      requestedKind,
-      pendingKind,
-      folder,
-    }) === "design";
+  const isDesign = Boolean(workspace?.id);
   return (
     <OwnedDesignWorkspaceSidebarPanels
       surfaceActive={surfaceActive}
@@ -275,7 +262,7 @@ function OwnedDesignWorkspaceSidebarPanels({
   panelId,
   isDesign,
 }: OwnedDesignWorkspaceSidebarPanelsProps) {
-  const workspaceId = workspace?.kind === "design" ? workspace.id : null;
+  const workspaceId = workspace?.id ?? null;
   const snapshot = useDesignWorkspaceSnapshot(
     workspaceId,
     folder,

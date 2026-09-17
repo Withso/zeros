@@ -12,13 +12,10 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     .locator('[data-design-frame="home.html"] [data-design-frame-label]')
     .click();
   check(
-    "a canvas frame with children exposes alignment and constraints",
+    "a canvas auto layout frame exposes child alignment",
     (await layout
-      .getByRole("button", { name: "Pin right", exact: true })
-      .count()) === 1 &&
-      (await layout
-        .getByRole("button", { name: "Align left", exact: true })
-        .isEnabled()),
+      .getByRole("group", { name: "Align children", exact: true })
+      .count()) === 1,
   );
   await layers.locator('[data-design-layer-id="home-heading"]').click();
   check(
@@ -32,33 +29,13 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
   );
   const heading = runtime.locator('[data-oid="home-heading"]');
-  await layout
-    .getByRole("button", { name: "Sizing limits", exact: true })
-    .click();
-  for (const [label, value, property, expected] of [
-    ["Ratio", "1.5", "aspectRatio", "1.5 / 1"],
-    ["Grow", "0.25", "flexGrow", "0.25"],
-    ["Shrink", "0.5", "flexShrink", "0.5"],
-    ["Min W", "0.5rem", "minWidth", "0.5rem"],
-  ]) {
-    const field = layout.getByLabel(label, { exact: true });
-    await field.fill(value);
-    await field.press("Enter");
-    check(
-      `Layout preserves fractional ${label} values`,
-      await waitFor(
-        () =>
-          heading.evaluate(
-            (element, [key, result]) => element.style[key] === result,
-            [property, expected],
-          ),
-        `layout-fractional-${property}`,
-      ),
-    );
-  }
-  await layout
-    .getByRole("button", { name: "Hide sizing limits", exact: true })
-    .click();
+  check(
+    "the design inspector omits raw flex factors and margins",
+    (await layout.getByLabel("Grow", { exact: true }).count()) === 0 &&
+      (await layout
+        .locator('[data-design-style-property="margin-top"]')
+        .count()) === 0,
+  );
   await heading.evaluate((element) => {
     element.parentElement.style.cssText =
       "position:relative;display:block;width:400px;height:300px;padding:0;border:0;box-sizing:border-box";
@@ -248,17 +225,19 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
       "layout-center",
     ),
   );
-  await layers.locator('[data-design-layer-id="home-heading"]').click();
+  await layers.locator('[data-design-layer-id="home-hero"]').click();
   await layout.getByText("Clip content", { exact: true }).click();
   check(
     "Clip content clips both axes",
     await waitFor(
       () =>
-        heading.evaluate(
-          (element) =>
-            getComputedStyle(element).overflowX === "hidden" &&
-            getComputedStyle(element).overflowY === "hidden",
-        ),
+        runtime
+          .locator('[data-oid="home-hero"]')
+          .evaluate(
+            (element) =>
+              getComputedStyle(element).overflowX === "hidden" &&
+              getComputedStyle(element).overflowY === "hidden",
+          ),
       "layout-clip",
     ),
   );
@@ -267,20 +246,22 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     "unchecking Clip content reveals overflow",
     await waitFor(
       () =>
-        heading.evaluate(
-          (element) => getComputedStyle(element).overflow === "visible",
-        ),
+        runtime
+          .locator('[data-oid="home-hero"]')
+          .evaluate(
+            (element) => getComputedStyle(element).overflow === "visible",
+          ),
       "layout-unclip",
     ),
   );
   await layout
-    .getByRole("button", { name: "Auto layout: Stack", exact: true })
+    .getByRole("button", { name: "Auto layout: Vertical", exact: true })
     .click();
   await waitFor(
     () =>
-      heading.evaluate(
-        (element) => getComputedStyle(element).display === "flex",
-      ),
+      runtime
+        .locator('[data-oid="home-hero"]')
+        .evaluate((element) => getComputedStyle(element).display === "flex"),
     "layout-stack",
   );
   await layout
@@ -290,14 +271,17 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     "None disables automatic layout while keeping the layer visible",
     await waitFor(
       () =>
-        heading.evaluate(
-          (element) =>
-            getComputedStyle(element).display === "block" &&
-            element.getBoundingClientRect().width > 0,
-        ),
+        runtime
+          .locator('[data-oid="home-hero"]')
+          .evaluate(
+            (element) =>
+              getComputedStyle(element).display === "block" &&
+              element.getBoundingClientRect().width > 0,
+          ),
       "layout-none-visible",
     ),
   );
+  await layers.locator('[data-design-layer-id="home-heading"]').click();
   const copy = runtime.locator('[data-oid="home-copy"]');
   const headingRotation = await heading.evaluate(
     (element) => parseFloat(element.style.rotate) || 0,
@@ -362,9 +346,8 @@ export async function runDesignLayoutSmoke({ page, waitFor, check }) {
     );
   }
   check(
-    "rotation and transform tools grow with the other Layout columns",
-    widths[1][2] > widths[0][2] &&
-      widths[2][2] > widths[1][2] &&
+    "geometry reflows at narrow widths and grows with the panel",
+    widths[2][2] > widths[1][2] &&
       widths.every((row) => Math.abs(row[2] - row[5]) < 1 && row[5] >= 72) &&
       widths.slice(1).every((row) => Math.abs(row[0] - row[2]) < 1),
     JSON.stringify(widths),

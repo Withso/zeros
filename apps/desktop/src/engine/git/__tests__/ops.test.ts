@@ -1,3 +1,12 @@
+import {
+  readDesignReviewSnapshot,
+  readDesignReviewFile,
+} from "../../design/review-git";
+import {
+  initializeDesignDocument,
+  createDesignFrame,
+  deleteDesignFrame,
+} from "../../design/document";
 // Git write-operation acceptance coverage.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
@@ -21,7 +30,9 @@ import {
   stagePaths,
   stashPop,
   stashSave,
+  unstagePaths,
 } from "..";
+import { gitIndexFingerprint } from "../index-fingerprint";
 import { designDirectoryNameFor } from "../../design/directory-registry";
 
 const execFileAsync = promisify(execFile);
@@ -83,6 +94,110 @@ describe("write ops", () => {
     }
   });
 
+  it("reviews Design-only comparisons with independent AD counts and bounded pages", async () => {
+    const ws = getWorkspace(workspaceId);
+    await initializeDesignDocument(ws.path);
+    const directory = designDirectoryNameFor(ws.path);
+    await stagePaths({ workspaceId, paths: [directory], force: true });
+    await commit({
+      workspaceId,
+      message: "Initialize Design",
+      authority: "design",
+    });
+    const frame = await createDesignFrame(ws.path, { title: "Abandoned" });
+    await stagePaths({ workspaceId, paths: [directory], force: true });
+    await deleteDesignFrame(ws.path, frame.file);
+    await writeFile(
+      path.join(ws.path, "code-only.txt"),
+      "Not a Design change\n",
+    );
+    const scopes = ["all", "uncommitted", "staged", "unstaged"] as const;
+    const snapshots = await Promise.all(
+      scopes.map((scope) =>
+        readDesignReviewSnapshot(workspaceId, ws.path, {
+          scope,
+          offset: 0,
+          limit: 128,
+        }),
+      ),
+    );
+    expect(
+      snapshots.map((snapshot) =>
+        Number(
+          snapshot.files.some(
+            (file) => file.path === `${directory}/${frame.file}`,
+          ),
+        ),
+      ),
+    ).toEqual([0, 0, 1, 1]);
+    expect(
+      snapshots.every(
+        (snapshot) =>
+          !snapshot.files.some((file) => file.path === "code-only.txt"),
+      ),
+    ).toBe(true);
+    const page = await readDesignReviewSnapshot(workspaceId, ws.path, {
+      scope: "staged",
+      offset: 0,
+      limit: 1,
+    });
+    expect(page.files.length).toBe(1);
+    expect(page.nextOffset).toBe(1);
+    await expect(
+      readDesignReviewFile(workspaceId, ws.path, {
+        directoryId: page.directoryId,
+        scope: "unstaged",
+        path: "code-only.txt",
+      }),
+    ).rejects.toThrow(/outside/);
+    const detail = await readDesignReviewFile(workspaceId, ws.path, {
+      directoryId: page.directoryId,
+      scope: "staged",
+      path: `${directory}/${frame.file}`,
+    });
+    expect(detail.patch).toContain("Abandoned");
+  });
+
+  it("keeps both sides of a Design rename in review and rejects an outside old path", async () => {
+    const ws = getWorkspace(workspaceId);
+    await initializeDesignDocument(ws.path);
+    const directory = designDirectoryNameFor(ws.path);
+    const frame = await createDesignFrame(ws.path, { title: "Rename review" });
+    await stagePaths({ workspaceId, paths: [directory], force: true });
+    await commit({
+      workspaceId,
+      message: "Initialize Design",
+      authority: "design",
+    });
+    const oldPath = `${directory}/${frame.file}`;
+    const renamedPath = `${directory}/renamed.html`;
+    // Simulate a source rename in this disposable repository fixture.
+    await execFileAsync("git", ["mv", "--", oldPath, renamedPath], {
+      cwd: ws.path,
+    });
+    const snapshot = await readDesignReviewSnapshot(workspaceId, ws.path, {
+      scope: "staged",
+      offset: 0,
+      limit: 128,
+    });
+    expect(
+      snapshot.files.find((file) => file.path === renamedPath)?.oldPath,
+    ).toBe(oldPath);
+    const input = {
+      directoryId: snapshot.directoryId,
+      scope: "staged" as const,
+      path: renamedPath,
+      oldPath,
+    };
+    const detail = await readDesignReviewFile(workspaceId, ws.path, input);
+    expect(detail.patch).toContain(`rename from ${oldPath}`);
+    expect(detail.patch).toContain(`rename to ${renamedPath}`);
+    const outside = { ...input, oldPath: "README.md" };
+    await expect(
+      readDesignReviewFile(workspaceId, ws.path, outside),
+    ).rejects.toThrow(/outside/);
+  });
+
   it("commits staged changes (status stays in-progress — no draft→active step in v18)", async () => {
     const ws = getWorkspace(workspaceId);
     expect(ws.status).toBe("in-progress");
@@ -94,6 +209,55 @@ describe("write ops", () => {
     const refreshed = getWorkspace(workspaceId);
     expect(refreshed.status).toBe("in-progress");
     expect(refreshed.lastActiveAt).not.toBeNull();
+  });
+
+  it("rejects a commit when staging changed after review and preserves the newer index", async () => {
+    const ws = getWorkspace(workspaceId);
+    await writeFile(path.join(ws.path, "review.txt"), "reviewed\n");
+    await stagePaths({ workspaceId, paths: ["review.txt"] });
+    const fingerprint = await gitIndexFingerprint(ws.path);
+    await writeFile(path.join(ws.path, "review.txt"), "newer staging\n");
+    await stagePaths({ workspaceId, paths: ["review.txt"] });
+    await expect(
+      commit({
+        workspaceId,
+        message: "stale review",
+        expectedIndexFingerprint: fingerprint,
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(
+      (await execFileAsync("git", ["show", ":review.txt"], { cwd: ws.path }))
+        .stdout,
+    ).toBe("newer staging\n");
+    await expect(
+      commit({
+        workspaceId,
+        message: "current review",
+        expectedIndexFingerprint: await gitIndexFingerprint(ws.path),
+      }),
+    ).resolves.toMatchObject({ sha: expect.any(String) });
+  });
+
+  it("unstages selected files before the first commit without deleting their contents", async () => {
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync(
+      "git",
+      ["update-ref", "-d", `refs/heads/${ws.branch}`],
+      { cwd: ws.path },
+    );
+    await writeFile(path.join(ws.path, "first.txt"), "keep this draft\n");
+    await stagePaths({ workspaceId, paths: ["first.txt"] });
+    await unstagePaths({ workspaceId, paths: ["first.txt"] });
+    expect(
+      (
+        await execFileAsync("git", ["ls-files", "--", "first.txt"], {
+          cwd: ws.path,
+        })
+      ).stdout,
+    ).toBe("");
+    expect(await readFile(path.join(ws.path, "first.txt"), "utf8")).toBe(
+      "keep this draft\n",
+    );
   });
 
   it("keeps exact filenames containing Git pathspec metacharacters usable", async () => {

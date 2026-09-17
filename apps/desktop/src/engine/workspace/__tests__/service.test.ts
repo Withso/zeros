@@ -29,8 +29,10 @@ import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import {
   commitDesignWebDocumentState,
   createDesignFrame,
+  readDesignFrame,
   readDesignWebDocumentState,
   readDesignWorkspaceSnapshot,
+  writeDesignNodeHtml,
 } from "../../design/document";
 import {
   DESIGN_CANVAS_FILE,
@@ -998,7 +1000,7 @@ describe("WorkspaceService", () => {
           releaseOriginal = () => resolve(original.snapshot);
         },
       );
-      const baseKey = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000write`;
+      const baseKey = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000read`;
       // Seed the historical, directory-aware, and host-resource-aware keys so
       // this test exercises the same blocked lower flight across every key
       // generation.
@@ -1138,6 +1140,114 @@ describe("WorkspaceService", () => {
       });
     }
   });
+
+  it.each(["detach", "into-frame", "root-into-frame"])(
+    "preserves edits on both sides of a %s transfer through undo and redo",
+    async (mode) => {
+      execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+      execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+      execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+      const workspace = await createWorkspace({
+        repoRoot: dir,
+        repoSlug: "design-transfer-history",
+        kind: "design",
+      });
+      const workspaceId = workspace.workspaceId;
+      try {
+        const source = await createDesignFrame(workspace.path);
+        const original = await readDesignFrame(workspace.path, source.file);
+        const rootId = original.source.match(/data-oid="([^"]+)"/)![1]!;
+        const nodeId = mode === "root-into-frame" ? rootId : "moving-child";
+        if (nodeId !== rootId) {
+          await writeDesignNodeHtml(workspace.path, {
+            frame: source.file,
+            sourceVersion: original.sourceVersion,
+            nodeId: rootId,
+            html: '<div data-oid="moving-child" style="width:100px;height:80px"></div>',
+            mode: "append",
+          });
+        }
+        const target =
+          mode === "detach" ? null : await createDesignFrame(workspace.path);
+        const destination = target
+          ? await readDesignFrame(workspace.path, target.file)
+          : null;
+        const snapshotSources = async () => {
+          const snapshot = await readDesignWorkspaceSnapshot(workspace.path);
+          const files: Record<string, string> = {};
+          for (const frame of snapshot.frames) {
+            // The real inspector refreshes its API session after every edit.
+            await svc.handle("design.foundation.open", {
+              workspaceId,
+              frame: frame.file,
+            });
+            const state = await readDesignWebDocumentState(
+              workspace.path,
+              frame.file,
+            );
+            files[frame.file] = state.files[frame.file]!;
+          }
+          return files;
+        };
+        const style = async (frame: string, color: string) => {
+          const identity = await readDesignFrame(workspace.path, frame);
+          await svc.handle("design.node.styles", {
+            workspaceId,
+            frame,
+            nodeId,
+            sourceVersion: identity.sourceVersion,
+            styles: { background: color },
+          });
+        };
+        const states = [await snapshotSources()];
+        await style(source.file, "red");
+        states.push(await snapshotSources());
+        const identity = await readDesignFrame(workspace.path, source.file);
+        const moved = (await svc.handle("design.node.transfer", {
+          workspaceId,
+          frame: source.file,
+          sourceVersion: identity.sourceVersion,
+          nodeId,
+          ...(destination
+            ? {
+                destinationFrame: destination.file,
+                destinationSourceVersion: destination.sourceVersion,
+                parentId: destination.source.match(/data-oid="([^"]+)"/)![1]!,
+                styles: {
+                  position: "relative",
+                  width: "100px",
+                  height: "80px",
+                },
+              }
+            : {}),
+          x: 700,
+          y: 50,
+          w: 100,
+          h: 80,
+          z: 1,
+        })) as { frame: string };
+        states.push(await snapshotSources());
+        await style(moved.frame, "blue");
+        states.push(await snapshotSources());
+        for (let cycle = 0; cycle < 2; cycle++) {
+          for (const index of [2, 1, 0]) {
+            await svc.handle("design.history.undo", { workspaceId });
+            expect(await snapshotSources()).toEqual(states[index]);
+          }
+          for (const index of [1, 2, 3]) {
+            await svc.handle("design.history.redo", { workspaceId });
+            expect(await snapshotSources()).toEqual(states[index]);
+          }
+        }
+      } finally {
+        await svc.handle("workspace.delete", {
+          workspaceId,
+          includeBranch: true,
+        });
+      }
+    },
+  );
 
   it("undoes metadata-only frame renames without recording unchanged names", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
@@ -1569,7 +1679,7 @@ describe("WorkspaceService", () => {
         git("commit", "-q", "-m", "Existing Design metadata");
 
         // Read-only observation must preserve the old checkout. A local Design
-        // snapshot performs the upgrade even when the workspace is already open.
+        // initialization explicitly upgrades metadata; snapshots stay observational.
         await readDesignWorkspaceSnapshot(workspace.path, {
           writeBack: false,
         });
@@ -1579,7 +1689,7 @@ describe("WorkspaceService", () => {
         expect(fs.existsSync(path.join(workspace.path, legacyRegistry))).toBe(
           true,
         );
-        const snapshot = await svc.handle("design.snapshot", params);
+        const snapshot = await svc.handle("design.initialize", params);
         expect(snapshot).toMatchObject({
           snapshot: {
             frames: [
@@ -2053,37 +2163,31 @@ describe("WorkspaceService", () => {
             selectionVersion: 1,
             updatedAt: Date.now(),
           });
-        if (mode === "design") {
-          await expect(select()).resolves.toEqual({ ok: true });
-          expect(getDesignSelection(created.workspaceId)?.filePath).toBe(
-            `${directory}/${frame.file}`,
-          );
-          forgetDesignDirectoryName(created.path);
-          await expect(
-            svc.handle("design.canvas.update", {
-              workspaceId: created.workspaceId,
-              frame: frame.file,
-              x: 10,
-              y: 20,
-              w: 420,
-              h: 320,
-              z: 0,
-            }),
-          ).resolves.toMatchObject({
-            geometry: { x: 10, y: 20, w: 420, h: 320 },
-          });
-          forgetDesignDirectoryName(created.path);
-          await expect(
-            svc.handle("design.save", { workspaceId: created.workspaceId }),
-          ).resolves.toEqual({ ok: true });
-          expect(fs.existsSync(path.join(created.path, "Zeros Design"))).toBe(
-            false,
-          );
-        } else {
-          await expect(select()).rejects.toThrow(
-            "Design mutations are available only in Design mode.",
-          );
-        }
+        await expect(select()).resolves.toEqual({ ok: true });
+        expect(getDesignSelection(created.workspaceId)?.filePath).toBe(
+          `${directory}/${frame.file}`,
+        );
+        forgetDesignDirectoryName(created.path);
+        await expect(
+          svc.handle("design.canvas.update", {
+            workspaceId: created.workspaceId,
+            frame: frame.file,
+            x: 10,
+            y: 20,
+            w: 420,
+            h: 320,
+            z: 0,
+          }),
+        ).resolves.toMatchObject({
+          geometry: { x: 10, y: 20, w: 420, h: 320 },
+        });
+        forgetDesignDirectoryName(created.path);
+        await expect(
+          svc.handle("design.save", { workspaceId: created.workspaceId }),
+        ).resolves.toEqual({ ok: true });
+        expect(fs.existsSync(path.join(created.path, "Zeros Design"))).toBe(
+          false,
+        );
       } finally {
         primeDesignDirectoryName(created.path, directory);
         await svc.handle("workspace.delete", {
@@ -2124,10 +2228,7 @@ describe("WorkspaceService", () => {
         svc.handle("design.history.undo", {
           workspaceId: created.workspaceId,
         }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        message: expect.stringMatching(/Design mode/i),
-      });
+      ).resolves.toMatchObject({ result: null });
       expect(
         fs.readFileSync(path.join(liveDesign, "untracked-draft.txt"), "utf8"),
       ).toBe("keep\n");
@@ -2424,17 +2525,14 @@ describe("WorkspaceService", () => {
         remediation: designGitAction,
       });
       expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
-      // Staging, hunk-staging, discard, commit-with-files, and the file
-      // editor all refuse design paths — design files have ONE write path.
+      // Managed index operations accept Design; authored-file operations
+      // still require the Design API.
       await expect(
         svc.handle("git.stage", {
           workspaceId: created.workspaceId,
           paths: [designFile],
         }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        remediation: designGitAction,
-      });
+      ).resolves.toEqual({ ok: true });
       await expect(
         svc.handle("git.discard", {
           workspaceId: created.workspaceId,
@@ -2459,10 +2557,7 @@ describe("WorkspaceService", () => {
           workspaceId: created.workspaceId,
           paths: [designFile],
         }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        remediation: designGitAction,
-      });
+      ).resolves.toEqual({ ok: true });
       // `--` stops option parsing, not Git pathspec expansion. A magic-looking
       // exact filename must be literalized rather than expanding back onto
       // protected content inside the trusted Git bridge.
@@ -2479,10 +2574,7 @@ describe("WorkspaceService", () => {
           message: "mixed",
           files: ["hello.txt", designFile],
         }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        remediation: designGitAction,
-      });
+      ).rejects.toThrow("design.toml");
       await expect(
         svc.handle("git.unstageHunk", {
           workspaceId: created.workspaceId,
@@ -2545,7 +2637,7 @@ describe("WorkspaceService", () => {
             workspaceId: created.workspaceId,
             paths: [metadata],
           }),
-        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+        ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
       }
       // A pathless clean is refused while unsaved (untracked) design files
       // exist — it would silently destroy not-yet-saved frames.
@@ -2623,6 +2715,7 @@ describe("WorkspaceService", () => {
         );
       }
       fs.writeFileSync(path.join(created.path, renamed, "tokens.css"), "a{}\n");
+      fs.writeFileSync(path.join(created.path, nested, "frame.html"), "<html></html>\n");
       const designGitAction = expect.stringMatching(/stage and commit/i);
       for (const designPath of [
         `${renamed}/tokens.css`,
@@ -2644,21 +2737,17 @@ describe("WorkspaceService", () => {
             workspaceId: created.workspaceId,
             paths: [designPath],
           }),
-        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+        ).resolves.toEqual({ ok: true });
       }
 
-      // Git treats an exact directory path as its complete subtree. A code
-      // actor must not stage a writable ancestor and sweep a nested Design
-      // document into the index indirectly.
+      // An explicitly selected directory stages its complete subtree through
+      // the managed Git service, including Design documents.
       await expect(
         svc.handle("git.stage", {
           workspaceId: created.workspaceId,
           paths: ["apps"],
         }),
-      ).rejects.toMatchObject({
-        code: "VALIDATION_FAILED",
-        remediation: designGitAction,
-      });
+      ).resolves.toEqual({ ok: true });
 
       // A sibling under the same parent as a nested design folder stays
       // writable — recognition is per-folder, never per-ancestor, and the
@@ -3413,7 +3502,7 @@ describe("WorkspaceService", () => {
         workspaceId: LOCAL_MAIN_WORKSPACE_ID,
         paths: ["Product Design/tokens.css"],
       }),
-    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    ).resolves.toEqual({ ok: true });
     await expect(
       svc.handle("git.clean", {
         workspaceId: LOCAL_MAIN_WORKSPACE_ID,
@@ -3504,7 +3593,10 @@ describe("WorkspaceService", () => {
   it("searches ignored mention paths locally while keeping the remote file-tree boundary", async () => {
     fs.writeFileSync(path.join(dir, ".gitignore"), ".context/\n");
     fs.mkdirSync(path.join(dir, ".context/attachments"), { recursive: true });
-    fs.writeFileSync(path.join(dir, ".context/attachments/rollout.jsonl"), "fixture");
+    fs.writeFileSync(
+      path.join(dir, ".context/attachments/rollout.jsonl"),
+      "fixture",
+    );
     const params = {
       workspaceId: LOCAL_MAIN_WORKSPACE_ID,
       includeIgnored: true,
@@ -3514,11 +3606,12 @@ describe("WorkspaceService", () => {
     expect(await svc.handle("file.tree", params)).toEqual({
       files: [".context/attachments/rollout.jsonl"],
     });
-    await expect(svc.handle("file.tree", params, { remote: true }))
-      .rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
-    const ordinary = await svc.handle("file.tree", {
+    await expect(
+      svc.handle("file.tree", params, { remote: true }),
+    ).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    const ordinary = (await svc.handle("file.tree", {
       workspaceId: LOCAL_MAIN_WORKSPACE_ID,
-    }) as { files: string[] };
+    })) as { files: string[] };
     expect(ordinary.files).not.toContain(".context/attachments/rollout.jsonl");
   });
 
@@ -3975,10 +4068,8 @@ describe("WorkspaceService", () => {
     expect(afterCanvasFoundation.summary.history.canUndo).toBe(true);
     expect(afterCanvasFoundation.summary.history.undoDepth).toBe(1);
 
-    // Concurrent duality: generic workspace machinery keeps working in
-    // design mode (agents/terminals live in code territory) — only the
-    // sparse-checkout picker stays blocked, since hiding folders could
-    // remove the design directory from disk under the open canvas.
+    // Presentation does not gate generic workspace machinery. Sparse changes
+    // independently preserve the Design directories.
     await expect(
       svc.handle("context.graph.scaffold", {
         workspaceId: workspace.workspaceId,
@@ -3989,10 +4080,7 @@ describe("WorkspaceService", () => {
         workspaceId: workspace.workspaceId,
         directories: [],
       }),
-    ).rejects.toMatchObject({
-      code: "VALIDATION_FAILED",
-      message: expect.stringMatching(/design mode/i),
-    });
+    ).resolves.toBeDefined();
 
     const tokenSnapshot = (await svc.handle("design.snapshot", {
       workspaceId: workspace.workspaceId,
@@ -4539,11 +4627,20 @@ describe("WorkspaceService", () => {
       svc.setSessionToolAccess({ list, authenticate });
       const query = { workspaceId: cwd, sessionId: "session-a", agentId };
       await expect(svc.handle("tools.session.list", query)).resolves.toEqual({
-        state: "ready", entries: [],
+        state: "ready",
+        entries: [],
       });
       expect(list).toHaveBeenCalledWith(agentId, "session-a", cwd);
-      await svc.handle("tools.session.authenticate", { ...query, toolId: "tool" });
-      expect(authenticate).toHaveBeenCalledWith(agentId, "session-a", cwd, "tool");
+      await svc.handle("tools.session.authenticate", {
+        ...query,
+        toolId: "tool",
+      });
+      expect(authenticate).toHaveBeenCalledWith(
+        agentId,
+        "session-a",
+        cwd,
+        "tool",
+      );
       list.mockClear();
       await expect(
         svc.handle("tools.session.list", query, { remote: true }),
@@ -4582,16 +4679,45 @@ describe("WorkspaceService", () => {
   it("opts into grouped inventory while retaining the legacy list and removing remote authentication actions", async () => {
     const list = vi.fn().mockResolvedValue({ state: "ready", entries: [] });
     const inventory = vi.fn().mockResolvedValue({
-      state: "ready", entries: [{ id: "tool", name: "Tool", status: "needs-auth", canAuthenticate: true }],
-      groups: [{ kind: "mcp", state: "ready", entries: [{ id: "tool", name: "Tool", status: "needs-auth", canAuthenticate: true }] }],
+      state: "ready",
+      entries: [
+        {
+          id: "tool",
+          name: "Tool",
+          status: "needs-auth",
+          canAuthenticate: true,
+        },
+      ],
+      groups: [
+        {
+          kind: "mcp",
+          state: "ready",
+          entries: [
+            {
+              id: "tool",
+              name: "Tool",
+              status: "needs-auth",
+              canAuthenticate: true,
+            },
+          ],
+        },
+      ],
     });
     svc.setSessionToolAccess({ list, inventory, authenticate: vi.fn() });
     vi.spyOn(svc, "resolveReadCwd").mockReturnValue("/fixture/a");
-    const query = { workspaceId: "a", sessionId: "session-a", agentId: "codex" };
+    const query = {
+      workspaceId: "a",
+      sessionId: "session-a",
+      agentId: "codex",
+    };
     expect(svc.isRemoteAllowed("tools.session.inventory")).toBe(true);
-    await expect(svc.handle("tools.session.list", query, { remote: true })).resolves.toEqual({ state: "ready", entries: [] });
+    await expect(
+      svc.handle("tools.session.list", query, { remote: true }),
+    ).resolves.toEqual({ state: "ready", entries: [] });
     expect(inventory).not.toHaveBeenCalled();
-    const result = await svc.handle("tools.session.inventory", query, { remote: true });
+    const result = await svc.handle("tools.session.inventory", query, {
+      remote: true,
+    });
     expect(result).toMatchObject({
       entries: [{ canAuthenticate: false }],
       groups: [{ entries: [{ canAuthenticate: false }] }],

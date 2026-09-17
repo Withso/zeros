@@ -25,6 +25,7 @@ import {
 } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
 import { DesignColorPicker, DesignColorSwatch } from "./design-color-picker";
+import { formatDesignColor, parseDesignColor } from "./design-color-values";
 import {
   classifyDesignFill,
   DEFAULT_DESIGN_GRADIENT,
@@ -60,6 +61,10 @@ export function DesignFillEditor({
   onCommit,
 }: DesignFillEditorProps) {
   const initialType = classifyDesignFill(image);
+  const solidColor = parseDesignColor(color);
+  const colorLabel = solidColor
+    ? formatDesignColor({ ...solidColor, a: 1 }).toUpperCase()
+    : color;
   const [open, setOpen] = useState(false);
   const [type, setType] = useState<DesignFillType>(initialType);
   const [draftColor, setDraftColor] = useState(color);
@@ -226,10 +231,19 @@ export function DesignFillEditor({
               />
             ) : null}
           </span>
-          <span className="text-fg2 flex-1 text-[11px]">Fill</span>
-          <span className="text-muted-fg max-w-32 truncate font-mono text-[9px]">
-            {initialType === "solid" ? color : initialType}
+          <span className="text-fg1 min-w-0 flex-1 truncate text-xs">
+            {initialType === "solid"
+              ? colorLabel
+              : initialType === "gradient"
+                ? "Gradient"
+                : "Image"}
           </span>
+          {initialType === "solid" && solidColor && (
+            <span className="text-fg2 text-xs tabular-nums">
+              {Math.round(solidColor.a * 100)}
+              <span className="text-muted-fg ml-1">%</span>
+            </span>
+          )}
           <ChevronRight className="text-muted-fg size-3" />
         </button>
       </PopoverTrigger>

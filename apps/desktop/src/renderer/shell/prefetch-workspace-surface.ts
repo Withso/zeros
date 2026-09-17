@@ -9,11 +9,10 @@ import {
 } from "@/renderer/state/workspace-store";
 import {
   findProjectForFolder,
-  resolveWorkspacePresentationKind,
   workspaceIdFromWorktreePath,
 } from "@/renderer/state/workspace-resolution";
 import { loadProjects } from "@/renderer/state/projects-store";
-import { defaultScopeFor } from "./workbench/tab-model";
+import { defaultScopeFor, migrateDesignPresentation } from "./workbench/tab-model";
 import { warmWorkspaceFiles } from "./workspace-files-cache";
 import {
   prefetchWorkspaceFileDiff,
@@ -24,7 +23,6 @@ import { warmIgnoredRoots } from "./workbench/tabs/ignored-entries-cache";
 import { resolveReviewProvider } from "./pr/review-provider";
 import { parseRemote } from "./pr/github-url";
 import { warmDesignWorkspaceSnapshot } from "@/renderer/features/design-workspace/state/design-workspace-cache";
-import { pendingWorkspaceMode } from "@/renderer/state/pending-workspaces";
 
 /** Complete identity needed to navigate before an authoritative workspace list
  * is warm. Engine Workspace rows satisfy this shape directly. */
@@ -39,22 +37,6 @@ export function prefetchWorkspaceSurface(
 ): void {
   const folder = workspace.path;
   if (!folder) return;
-  const requestedKind = pendingWorkspaceMode(workspace.id);
-  if (
-    resolveWorkspacePresentationKind({
-      confirmedKind: workspace.kind,
-      requestedKind,
-      folder,
-    }) === "design"
-  ) {
-    // First Design entry has published its surface intent but has not created
-    // the document yet. Do not race an eager snapshot read into that gap; the
-    // active Design surface starts the exact-key read after setMode confirms.
-    if (workspace.kind === "design" && workspace.id) {
-      warmDesignWorkspaceSnapshot(workspace.id);
-    }
-    return;
-  }
   warmWorkspaceFiles(folder);
   // Both halves of the Files tree or neither: an ignored listing that lands
   // after the tracked one splices `.env`/`node_modules/` into the middle of the
@@ -63,9 +45,15 @@ export function prefetchWorkspaceSurface(
 
   const state = useWorkspaceStore.getState();
   const scopeKey = workbenchScopeForFolder(folder);
-  const scope = state.workbenchByScope[scopeKey] ?? defaultScopeFor(scopeKey);
+  const scope = migrateDesignPresentation(
+    state.workbenchByScope[scopeKey] ?? defaultScopeFor(scopeKey),
+    workspace.kind === "design" ? "design" : "code",
+  );
   const activeTab =
     scope.tabs.find((tab) => tab.id === scope.activeId) ?? scope.tabs[0];
+  if (activeTab?.type === "design" && workspace.id) {
+    warmDesignWorkspaceSnapshot(workspace.id);
+  }
   if (
     activeTab?.type === "review" &&
     workspace.id &&

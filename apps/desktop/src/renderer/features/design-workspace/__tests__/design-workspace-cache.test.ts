@@ -70,6 +70,7 @@ import {
   fetchDesignWorkspaceSnapshot,
   fetchDesignFoundation,
   invalidateDesignWorkspaceSnapshot,
+  observeDesignDirectory,
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
   resetDesignWorkspaceCacheForTests,
@@ -647,6 +648,28 @@ describe("design workspace cache", () => {
       designWorkspaceSnapshotCache.getSnapshot(workspaceId).data?.frames[0]
         ?.sourceVersion,
     ).toBe("b".repeat(24));
+  });
+
+  it("does not retarget a queued edit when a different directory has identical frame source", async () => {
+    const workspaceId = "ws_replaced_directory_queue";
+    const current = { ...snapshot(), directoryId: "design_original" };
+    const frame = current.frames[0]!;
+    designWorkspaceSnapshotCache.setData(workspaceId, current);
+    observeDesignDirectory(workspaceId, current);
+    runtimeMocks.designFrameRuntime.mockReturnValue(null);
+    platformMocks.updateStyles.mockResolvedValue({
+      mutation: { changed: false, frame: { ...frame, source: "<main></main>", srcDoc: "<main></main>", tree: [] }, lint: current.lint },
+      snapshot: current,
+    });
+
+    const edit = updateDesignNodeStylesCached(workspaceId, {
+      frame: frame.file, nodeId: "hero", sourceVersion: frame.sourceVersion,
+      styles: { color: "red" },
+    });
+    observeDesignDirectory(workspaceId, { ...current, directoryId: "design_replacement" });
+
+    await expect(edit).rejects.toThrow("Design directory changed");
+    expect(platformMocks.updateStyles).not.toHaveBeenCalled();
   });
 
   it("publishes one exact structural snapshot for a canvas text insertion", async () => {
@@ -1819,4 +1842,12 @@ describe("design workspace cache", () => {
     };
     expect(safeDesignWorkspaceBootSnapshot(unsafeGeometry)).toBeNull();
   });
+  it("preserves directory identity across boot and refuses to share a replacement's snapshot", () => {
+    const previous = { ...snapshot(), directoryId: "design_first", directory: "First Design" };
+    const next = { ...snapshot(), directoryId: "design_second", directory: "Second Design" };
+    expect(stabilizeDesignWorkspaceSnapshot(previous, next)).toBe(next);
+    expect(safeDesignWorkspaceBootSnapshot(next)).toMatchObject({ directoryId: "design_second", directory: "Second Design", protocolCapability: null });
+    expect(safeDesignWorkspaceBootSnapshot({ ...next, directoryId: "bad\0id" })).toBeNull();
+  });
+
 });

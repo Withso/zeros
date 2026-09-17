@@ -8,6 +8,7 @@ import {
   designDirectoryFromSettings,
   recoverWorkspaceDesignMetadata,
   validateDesignSettings,
+  assertLegacyDesignDraftWritable,
 } from "./metadata";
 
 /** Serialize a mutation that changes the Design document or its ownership
@@ -30,6 +31,7 @@ export async function withDesignDocumentWrite<T>(
   run: () => Promise<T>,
 ): Promise<T> {
   return withDesignWorkspaceMutation(workspacePath, async () => {
+    assertLegacyDesignDraftWritable(workspacePath);
     recoverWorkspaceDesignMetadata(workspacePath);
     if (existsSync(path.join(workspacePath, ".git"))) {
       const resolved = opSettingsResolve(workspacePath);

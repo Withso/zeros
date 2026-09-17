@@ -656,6 +656,10 @@ export interface DiffOptions {
    *  line totals first, while the selected file can fetch its exact patch on
    *  demand. Omit to preserve the historical always-materialize behavior. */
   summaryLimit?: number;
+  /** Internal bounded consumers (Design review) can use a smaller patch cap. */
+  maxPatchBytes?: number;
+  /** Internal limit for each metadata stream; ordinary Git callers retain the default. */
+  maxMetadataBytes?: number;
 }
 
 export interface DiffFileSummary extends FileChange {
@@ -772,6 +776,7 @@ async function diffFileSummary(
   worktreePath: string,
   rangeArgs: readonly string[],
   filePaths: string[] = [],
+  maxMetadataBytes = DIFF_MAX_BUFFER_BYTES,
 ): Promise<DiffFileSummary[]> {
   const suffix = filePaths.length ? ["--", ...filePaths] : [];
   const [{ stdout: numstat }, { stdout: names }] = await Promise.all([
@@ -787,7 +792,7 @@ async function diffFileSummary(
         ...rangeArgs,
         ...suffix,
       ],
-      { maxBufferBytes: DIFF_MAX_BUFFER_BYTES },
+      { maxBufferBytes: maxMetadataBytes },
     ),
     runGitRead(
       worktreePath,
@@ -801,7 +806,7 @@ async function diffFileSummary(
         ...rangeArgs,
         ...suffix,
       ],
-      { maxBufferBytes: DIFF_MAX_BUFFER_BYTES },
+      { maxBufferBytes: maxMetadataBytes },
     ),
   ]);
   const stats = new Map(
@@ -1086,6 +1091,12 @@ async function headOrEmptyTree(worktreePath: string): Promise<string> {
 }
 
 export async function diff(opts: DiffOptions): Promise<DiffResult> {
+  if (opts.maxMetadataBytes !== undefined && (!Number.isSafeInteger(opts.maxMetadataBytes) || opts.maxMetadataBytes < 1024 || opts.maxMetadataBytes > DIFF_MAX_BUFFER_BYTES))
+    throw new GitError({ code: "VALIDATION_FAILED", message: "Invalid diff metadata byte limit." });
+  if (opts.maxPatchBytes !== undefined && (!Number.isSafeInteger(opts.maxPatchBytes) ||
+    opts.maxPatchBytes < 1024 || opts.maxPatchBytes > DIFF_MAX_BUFFER_BYTES)) {
+    throw new Error("Invalid Git patch byte limit.");
+  }
   if (
     opts.fullContext &&
     !opts.filePath &&
@@ -1162,7 +1173,7 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
     // a generated tree would make the unified patch exceed the RPC/buffer cap.
     // Preflight before materializing any file content so the fallback is fast,
     // deterministic, and identical under Node and the production Bun runtime.
-    summaryFiles = await diffFileSummary(ws.path, rangeArgs, filePaths);
+    summaryFiles = await diffFileSummary(ws.path, rangeArgs, filePaths, opts.maxMetadataBytes);
     if (summaryFiles.length > opts.summaryLimit) {
       return { hunks: [], files: summaryFiles, summary: true };
     }
@@ -1179,7 +1190,7 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
   let stdout: string;
   try {
     ({ stdout } = await runGitRead(ws.path, args, {
-      maxBufferBytes: DIFF_MAX_BUFFER_BYTES,
+      maxBufferBytes: opts.maxPatchBytes ?? DIFF_MAX_BUFFER_BYTES,
     }));
   } catch (err) {
     // A patch bigger than the buffer used to surface as a bare

@@ -1212,6 +1212,11 @@ let engineSpawnBarrier: Promise<void> = Promise.resolve();
  * updater, and other main-process children cannot inherit the browser bearer.
  * The engine captures and scrubs these two names before it spawns an agent. */
 let browserServiceEnvironment: { url: string; token: string } | null = null;
+let designCaptureEnvironment: { url: string; token: string } | null = null;
+export function setDesignCaptureEnvironment(value: { url: string; token: string } | null): void {
+  designCaptureEnvironment = value;
+}
+
 
 export function setBrowserServiceEnvironment(
   value: { url: string; token: string } | null,
@@ -1405,6 +1410,11 @@ async function doSpawnEngine(
   }
 
   const extraEnv: Record<string, string> = {};
+  if (designCaptureEnvironment) {
+    extraEnv.ZEROS_DESIGN_CAPTURE_URL = designCaptureEnvironment.url;
+    extraEnv.ZEROS_DESIGN_CAPTURE_TOKEN = designCaptureEnvironment.token;
+  }
+
   if (browserServiceEnvironment) {
     extraEnv.ZEROS_BROWSER_SERVICE_URL = browserServiceEnvironment.url;
     extraEnv.ZEROS_BROWSER_SERVICE_TOKEN = browserServiceEnvironment.token;

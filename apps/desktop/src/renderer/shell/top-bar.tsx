@@ -616,7 +616,6 @@ interface WorkspaceTabProps {
   tabRef?: (node: HTMLDivElement | null) => void;
 }
 
-const EMPTY_WORKSPACE_CHAT_IDS: readonly string[] = Object.freeze([]);
 
 type TopBarNavItem =
   | {
@@ -759,7 +758,7 @@ function WorkspaceTab({
   const requestedMode = usePendingWorkspaceMode(workspace.id);
   const modeSwitching = requestedMode !== null;
   const designWorkspace = workspace.kind === "design";
-  const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
+  const agentChatIds = chatIds;
   const working = useAnyChatAgentWorking(agentChatIds);
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
@@ -770,18 +769,10 @@ function WorkspaceTab({
   const trailingAgentState =
     mixedRepositories &&
     !archiving &&
-    !designWorkspace &&
     (awaitingKind !== null || working);
-  // A mixed lane spends the leading glyph on repository identity, so the mode
-  // marker has to move rather than disappear: design is a different KIND of
-  // workspace, and its branch name (the same colour-word allocation code
-  // workspaces get) says nothing about that. Design rows never hold agent
-  // chats, so the two trailing states are mutually exclusive by construction.
-  // The condition mirrors the leading-glyph swap below EXACTLY — including
-  // `project` — so a row the lane could not attribute to a repository keeps its
-  // PenTool in the leading slot rather than painting one in both.
+  // Legacy workspace kinds remain a visual hint; every workspace has agents.
   const trailingDesignMark =
-    mixedRepositories && !!project && !archiving && designWorkspace;
+    mixedRepositories && !!project && !archiving && !working && awaitingKind === null && designWorkspace;
   const trailingTabState = trailingAgentState || trailingDesignMark;
 
   const tab = (
@@ -798,7 +789,7 @@ function WorkspaceTab({
       data-active={active}
       data-workspace-tab="true"
       data-top-bar-flow-item="true"
-      data-streaming={(!designWorkspace && working) || undefined}
+      data-streaming={working || undefined}
       aria-busy={archiving || modeSwitching || undefined}
     >
       {groupedRepository && active && (
@@ -841,7 +832,7 @@ function WorkspaceTab({
           >
             {archiving ? (
               <ZerosSpinner size={16} label="Archiving workspace" />
-            ) : designWorkspace ? (
+            ) : designWorkspace && !working && awaitingKind === null ? (
               <PenTool className="size-3.5" strokeWidth={1.25} />
             ) : awaitingKind === "plan" ? (
               <ClipboardList className="size-3.5" strokeWidth={1.25} />
@@ -2185,12 +2176,8 @@ export function TopBar() {
 
   const handlePrefetchWorkspace = useCallback(
     (workspace: Workspace) => {
-      // Design rows are ordinary destinations, so warm the surface for them
-      // too — but never their coding chat.
+      // Warm the workbench and the existing conversation together.
       prefetchWorkspaceSurface(workspace);
-      if (workspace.kind === "design") {
-        return;
-      }
       const chatId = selectChatToRestoreForFolder(
         useWorkspaceStore.getState(),
         workspace.path,

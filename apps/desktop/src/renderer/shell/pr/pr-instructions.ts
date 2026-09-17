@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // The Create PR split-button's primary action hands the agent a fully-formed,
-// step-by-step brief (inspect, review, commit when needed, push, `gh pr
+// step-by-step brief (inspect, review committed changes, push, `gh pr
 // create`). An explicitly labelled dropdown option retains the deterministic
 // engine path for users who want an immediate direct write.
 //
@@ -91,16 +91,6 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-function commitStep(uncommittedCount: number | null): string {
-  if (uncommittedCount == null) {
-    return "- If the inspection finds uncommitted changes, commit them. Follow any instructions the user gave you about writing commit messages.";
-  }
-  if (uncommittedCount === 0) {
-    return "- The worktree was reported clean. Do not create an empty commit.";
-  }
-  return "- Commit them. Follow any instructions the user gave you about writing commit messages.";
-}
-
 /** Build the agent-facing PR-creation brief. Pure — no I/O — so it's unit
  *  tested directly. */
 export function buildPrInstructions(input: PrInstructionInputs): string {
@@ -126,7 +116,7 @@ export function buildPrInstructions(input: PrInstructionInputs): string {
   ].join(" ");
 
   return [
-    "The user likes the current state of the code.",
+    "The user requested publication of the current branch commits.",
     "",
     uncommittedSentence(uncommittedCount),
     `The current branch is ${branch}.`,
@@ -140,11 +130,11 @@ export function buildPrInstructions(input: PrInstructionInputs): string {
     "",
     "- If you have any skills related to creating PRs, invoke them now. Instructions there should take precedence over these instructions.",
     "- Inspect `git status` and run `git diff` to review uncommitted changes.",
-    commitStep(uncommittedCount),
+    "- Preserve staged, unstaged, and untracked Code and Design work. Do not stage files or create a commit as part of this PR request. Do not create an empty commit. If there are no branch commits, explain that changes need to be reviewed and committed first.",
     `- Push with \`git push -u ${shellQuote(remote)} HEAD:${shellQuote(branch)}\`.`,
-    "- Review the full PR diff (all committed and uncommitted changes vs the target branch) before writing the description.",
+    "- Review the full PR diff (committed base-to-head changes only) before writing the description.",
     "- Before creating anything, check whether this branch already has an open PR. If it does, report its URL and do not create a duplicate.",
-    `- Use \`${createCmd}\` with non-interactive \`--title\` and \`--body\` arguments to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL changes in the workspace diff.`,
+    `- Use \`${createCmd}\` with non-interactive \`--title\` and \`--body\` arguments to create a PR onto the target branch. Keep the title under 80 characters. Keep the description under five sentences, unless the user instructed you otherwise. Describe not just changes made in this session but ALL committed changes in the branch diff.`,
     "",
     "If any of these steps fail, ask the user for help.",
   ].join("\n");

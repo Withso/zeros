@@ -1,3 +1,5 @@
+import { assertDesignCommitMetadata } from "./design-checkpoint";
+import { gitIndexFingerprint } from "./index-fingerprint";
 import {
   DESIGN_METADATA_PROTECTED_PATHS,
   isDesignMetadataRepoPath,
@@ -73,6 +75,8 @@ async function listConflictedPaths(worktreePath: string): Promise<string[]> {
 // ── commit ───────────────────────────────────────────────
 
 export interface CommitOptions {
+  /** Optional exact review guard, checked against the immutable index copy. */
+  expectedIndexFingerprint?: string;
   workspaceId: string;
   message: string;
   /** Optional explicit list of paths to commit. When omitted, commits
@@ -86,7 +90,7 @@ export interface CommitOptions {
    * complementary staged lane. Neither can absorb concurrent staging from the
    * other. Omission is Code authority so a new caller cannot bypass territory
    * checks accidentally. */
-  authority?: "code" | "design";
+  authority?: "code" | "design" | "workspace";
 }
 
 export interface CommitResult {
@@ -595,6 +599,10 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
   );
   let sha: string;
   try {
+    if (opts.expectedIndexFingerprint !== undefined &&
+      opts.expectedIndexFingerprint !== await gitIndexFingerprint(ws.path, snapshot.env, expectedHead)) {
+      throw new GitError({ code: "VALIDATION_FAILED", message: "Staged changes changed after review. Refresh and review them before committing." });
+    }
     const unmerged = await runGit(ws.path, ["ls-files", "--unmerged", "-z"], {
       env: snapshot.env,
       readOnly: true,
@@ -633,7 +641,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
         : [];
     const capturedStaged = await stagedPaths(ws.path, snapshot.env);
     const belongsToSelectedLane = (candidate: string): boolean =>
-      authority === "design"
+      authority === "workspace" ? true : authority === "design"
         ? repoPathOverlapsDesignRoot(candidate, activeDesignDir) ||
           metadataPaths.some((root) =>
             repoPathOverlapsDesignRoot(candidate, root),
@@ -667,7 +675,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
       throw new GitError({
         code: "VALIDATION_FAILED",
         message:
-          authority === "design"
+          authority === "workspace" ? "Nothing to commit — no changes are staged." : authority === "design"
             ? "Nothing to commit — no Design changes are staged."
             : otherLane
               ? "Nothing to commit — only Design changes are staged."
@@ -679,6 +687,7 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
       });
     }
     await resetSnapshotPaths(ws.path, snapshot, expectedHead, excluded);
+    if (authority !== "code") await assertDesignCommitMetadata(ws.path, snapshot.env, selected);
     sha = await updateHeadFromSnapshot({
       cwd: ws.path,
       snapshot,

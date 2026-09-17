@@ -154,7 +154,6 @@ describe("repository layout contracts", () => {
     expect(files.filter((file) => !existsSync(file))).toEqual([]);
     for (const lightweightContract of [
       "apps/desktop/src/engine/design/__tests__/design-agent-capability.test.ts",
-      "apps/desktop/src/engine/design/__tests__/design-agent-admission.test.ts",
       "apps/desktop/src/engine/design/__tests__/design-agent-mcp.test.ts",
       "apps/desktop/src/engine/git/__tests__/mutation-lock.test.ts",
     ]) {

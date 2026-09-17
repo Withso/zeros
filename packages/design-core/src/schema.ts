@@ -616,6 +616,14 @@ export const designOperationSchema = z.discriminatedUnion("type", [
     .strict(),
   operationBase
     .extend({
+      type: z.literal("node.move"),
+      nodeId: designNodeIdSchema,
+      parentId: designNodeIdSchema,
+      beforeId: designNodeIdSchema.nullable().default(null),
+    })
+    .strict(),
+  operationBase
+    .extend({
       type: z.literal("node.duplicate"),
       nodeId: designNodeIdSchema,
       duplicateNodeId: designNodeIdSchema,

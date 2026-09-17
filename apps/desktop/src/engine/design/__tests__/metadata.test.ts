@@ -30,6 +30,7 @@ import {
   writePrivateDesignState,
   DESIGN_DIRECTORY_REGISTRY_FILES,
 } from "../metadata";
+import { withDesignDocumentWrite } from "../document-write-lock";
 import { parseDesignManifest, serializeDesignManifest } from "../manifest";
 
 const directory = "Product - Design";
@@ -77,6 +78,29 @@ describe("portable Design metadata", () => {
   afterEach(() => {
     delete process.env.ZEROS_DATA_DIR;
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("retains experimental private-store ownership and refuses checkout writes", async () => {
+    commitDesignMetadata(root, directory, json);
+    const before = read(`${directory}/design.toml`);
+    const fence = JSON.stringify({
+      version: 2,
+      workspace: path.resolve(root),
+      directory: "private-draft-migration",
+      owner: "experimental-workspace",
+    });
+    const file = writePrivateDesignState(
+      root,
+      `metadata-${createHash("sha256").update("private-draft-migration").digest("hex").slice(0, 24)}.json`,
+      fence,
+    );
+    let invoked = false;
+    await expect(withDesignDocumentWrite(root, async () => {
+      invoked = true;
+    })).rejects.toThrow(/retired private.*recovery/i);
+    expect(invoked).toBe(false);
+    expect(read(`${directory}/design.toml`)).toBe(before);
+    expect(readFileSync(file, "utf8")).toBe(fence);
   });
 
   it("keeps identity, complete metadata and short ownership rules with the source", () => {

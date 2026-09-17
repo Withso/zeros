@@ -43,7 +43,7 @@ const ALLOWLIST = new Set([
   // Portable design-document boundary. This module emits an authored
   // `Zeros Design/tokens.css` seed whose palette cannot consume app-chrome
   // custom properties (the resulting files also render outside Zeros).
-  "apps/desktop/src/engine/design/document.ts",
+  "apps/desktop/src/engine/design/document-seeds.ts",
 ]);
 
 // Skip entire directories

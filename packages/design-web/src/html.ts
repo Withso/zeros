@@ -348,6 +348,61 @@ export function mutateDesignNodeDuplicateSource(
   return `${source.slice(0, location.endOffset)}${duplicate}${source.slice(location.endOffset)}`;
 }
 
+/** Move the exact authored span; do not serialize and normalize its subtree. */
+export function mutateDesignNodeMoveSource(
+  source: string,
+  nodeId: string,
+  parentId: string,
+  beforeId: string | null,
+): string {
+  if (parentId === DESIGN_DOCUMENT_BODY_ID)
+    source = withExplicitDesignBody(source);
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const records = elements(document);
+  const find = (id: string): Element => {
+    const element =
+      id === DESIGN_DOCUMENT_BODY_ID
+        ? designDocumentBody(document)
+        : records.find((record) => oid(record) === id);
+    if (!element) throw new Error(`Design element not found: ${id}`);
+    return element;
+  };
+  const element = find(nodeId);
+  const parent = find(parentId);
+  const before = beforeId ? find(beforeId) : null;
+  const span = element.sourceCodeLocation;
+  const container = parent.sourceCodeLocation;
+  if (
+    !span ||
+    !container?.startTag ||
+    !container.endTag ||
+    element.tagName === "body"
+  )
+    throw new Error("The layer destination has no editable source span.");
+  if (
+    element === parent ||
+    (container.startOffset >= span.startOffset &&
+      container.endOffset <= span.endOffset)
+  )
+    throw new Error("A layer cannot be moved inside itself.");
+  if (before && (before === element || before.parentNode !== parent))
+    throw new Error("The insertion sibling must belong to the destination.");
+  if (
+    /^(select|option|table|thead|tbody|tfoot|tr|ul|ol|dl)$/.test(parent.tagName)
+  )
+    throw new Error("This layer cannot contain a frame.");
+  const insertion =
+    before?.sourceCodeLocation?.startOffset ?? container.endTag.startOffset;
+  if (insertion === span.startOffset || insertion === span.endOffset)
+    return source;
+  const content = source.slice(span.startOffset, span.endOffset);
+  const removed =
+    source.slice(0, span.startOffset) + source.slice(span.endOffset);
+  const offset =
+    insertion > span.startOffset ? insertion - content.length : insertion;
+  return removed.slice(0, offset) + content + removed.slice(offset);
+}
+
 /** Remove exactly one authored element subtree, preserving all neighboring
  * whitespace and bytes. */
 export function mutateDesignNodeDeleteSource(

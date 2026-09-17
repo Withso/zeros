@@ -241,3 +241,20 @@ ZSR keeps its environment outside code views and projects only the active
 provider's bounded values into that provider session. Still use short-lived,
 narrowly scoped values, never bake credentials into the image, and run the
 delete step when validation finishes.
+
+## Design capture qualification
+
+The image now includes pinned Playwright Core/Chromium and a dedicated
+`zeros-capture` user (UID/GID 10002), separate from the agent. The root-owned
+engine admits `/opt/zeros/dist-engine/design-capture-worker.js` only after a
+sandboxed render canary succeeds. The worker receives composed HTML on stdin,
+returns one bounded PNG on stdout, and exits. It receives no provider or capture
+service credentials. Chromium sandboxing is mandatory; there is no no-sandbox
+fallback. Source tools remain available when capture admission fails.
+
+Build the normal engine bundle and run `scripts/design-cloud-capture-qualification.ts`
+with the image's TypeScript runner as its coordinator user. This fixture checks
+render admission, blocked network/scripts, exact dimensions, global capacity,
+cancellation/cleanup, and source-bound result generation. Its report explicitly
+identifies a local worker fixture; it does not replace the provider validation
+sequence above or prove authenticated bridge reconnect/replication.

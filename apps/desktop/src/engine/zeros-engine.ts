@@ -1,3 +1,6 @@
+import { startCloudDesignCapture } from "./design/capture-cloud";
+import { setDesignCaptureConfig } from "./design/capture-client";
+import type { DesignCaptureService } from "./design/capture-service";
 // ──────────────────────────────────────────────────────────
 // ZerosEngine — The heart of Zeros V2
 // ──────────────────────────────────────────────────────────
@@ -65,8 +68,7 @@ import {
   DESIGN_METADATA_PROTECTED_PATHS,
   isDesignMetadataRepoPath,
 } from "./design/metadata";
-import { getWorkspaceDesignApi } from "./design/design-api";
-import { DesignAgentAdmissionManager } from "./design/design-agent-admission";
+import { DesignCodeToolAdmissions } from "./design/code-tool-admission";
 import {
   DESIGN_CANVAS_FILE,
   designDirectoryNameFor,
@@ -494,12 +496,12 @@ function clampRemoteAdditionalDirectories(
 }
 
 /** Operations that can change Design-owner registration. An external/main
- * owner requires a global Design-agent handoff on desktop; qualified cloud
- * Code also carries an immutable registered-owner policy. Managed operations
- * are narrowed to the affected Design sessions whenever possible. */
+ * owner revokes scoped Design tools on desktop; qualified cloud Code also
+ * carries an immutable registered-owner policy. Managed operations narrow
+ * revocation to the affected workspace whenever possible. */
 const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   // These keep the physical project registered but can establish or rename
-  // the semantic Design roots consumed by ZSR Design admission.
+  // the semantic Design roots consumed by scoped tool admission.
   "design.renameDirectory",
   "design.removeDirectory",
   "design.adoptDirectory",
@@ -687,11 +689,6 @@ export interface EngineOptions {
   /** Test/platform injection. Production constructs the native/sandbox router
    * and shares it across agents and repository-controlled tasks. */
   executionBoundary?: ExecutionBoundary;
-  /** Keeps the unfinished Design-agent transport testable without exposing it
-   * through a runtime setting or environment variable. Production entrypoints
-   * deliberately omit this option, so `agentRole: "design"` fails closed at
-   * the engine dispatcher before cwd, provider, or capability admission. */
-  enableDesignAgentExecutionForTesting?: boolean;
 }
 
 /** Expected, user-correctable git/workspace outcomes — control flow, not bugs.
@@ -893,14 +890,6 @@ export class ZerosEngine {
     string,
     Set<Promise<unknown>>
   >();
-  /** Design-agent admissions that crossed the workspace lifecycle gate but have
-   * not yet published an execution. A Design-identity mutation waits for these
-   * exact starts, then retires the resulting scoped capabilities. Native Code
-   * starts are deliberately absent and never participate in this handoff. */
-  private readonly designAgentStartsByWorkspace = new Map<
-    string,
-    Set<Promise<unknown>>
-  >();
   /** Enter-Design requests can discover first-use territory only after an
    * asynchronous Git/settings preview. Their outer workspace promise is
    * already in `workspaceProcessStarts` by the time that preview asks for the
@@ -927,12 +916,12 @@ export class ZerosEngine {
    * instead of the coordinator-private engine runtime directory. */
   private cloudTerminalDesignWatchGuardsRoot: Promise<string> | null = null;
   /** Workspace ids whose active Design identity is being created or moved.
-   * This gates only Design-agent admission on desktop. Cloud code actors retain
-   * their qualified immutable-boundary handoff. Native Code never stops or
-   * changes backend for this set. */
+   * Desktop revokes scoped tools; cloud actors retain their qualified
+   * immutable-boundary handoff. Native sessions never stop or change backend
+   * for this set. */
   private readonly designTerritoryTransitions = new Set<string>();
-  /** Serializes changes to the app-wide Design owner map. Desktop Design-agent
-   * admission observes this count; only cloud Code authority is also gated. */
+  /** Serializes changes to the app-wide Design owner map and tool authority.
+   * Only cloud Code process admission depends on this count. */
   private globalDesignTerritoryTransitionCount = 0;
   private globalDesignTerritoryTransitionTail: Promise<void> =
     Promise.resolve();
@@ -1015,12 +1004,6 @@ export class ZerosEngine {
   // Native per-CLI adapter runtime — multiplexes the per-agent
   // adapter implementations behind a single gateway surface.
   private agents: AgentGateway;
-  /** Engine-owned semantic authority for persistent Design-agent sessions.
-   * Provider processes receive only an expiring bearer + loopback MCP route;
-   * this coordinator alone owns the durable draft writer. */
-  private readonly designAgentAdmissions = new DesignAgentAdmissionManager();
-  private readonly designAgentRunByExecution = new Map<string, string>();
-
   private root: string;
   private port: number;
   private portStart: number;
@@ -1028,7 +1011,6 @@ export class ZerosEngine {
   private actualPort = 0;
   private framework: Framework = "unknown";
   private running = false;
-  private readonly designAgentExecutionEnabled: boolean;
 
   constructor(options?: EngineOptions) {
     this.cloudRuntimeConfig = consumeCloudRuntimeEnvironment();
@@ -1042,9 +1024,6 @@ export class ZerosEngine {
       ? new CloudWorkspaceRecordRuntime(this.root)
       : null;
     this.port = options?.port ?? engineBasePort();
-    this.designAgentExecutionEnabled =
-      process.env.NODE_ENV === "test" &&
-      options?.enableDesignAgentExecutionForTesting === true;
     const requestedPortStart = options?.portStart ?? this.port;
     this.portStart =
       Number.isInteger(requestedPortStart) &&
@@ -1477,11 +1456,6 @@ export class ZerosEngine {
         );
         for (const { sessionId, ended } of endedAgents) {
           if (!ended) continue;
-          const designRunId = this.designAgentRunByExecution.get(sessionId);
-          this.designAgentRunByExecution.delete(sessionId);
-          if (designRunId) {
-            await this.designAgentAdmissions.stop(designRunId);
-          }
           const conversationId = this.sessionChat.get(sessionId);
           this.router.clearOwner(sessionId);
           this.sessionAgent.delete(sessionId);
@@ -1785,6 +1759,20 @@ export class ZerosEngine {
     const backendOpts: AgentGatewayOptions = {
       projectRoot: this.root,
       executionBoundary: this.executionBoundary,
+      sessionToolFactory: new DesignCodeToolAdmissions({
+        cloudWorker: this.cloudWorker !== null,
+        resolveWorkspace: (id) => this.workspace.designAgentWorkspace(id),
+        workspaceIdForCwd: (cwd) => this.workspace.workspaceIdForCwd(cwd),
+        onChanged: (workspaceId) =>
+          this.router.broadcast(
+            createMessage({
+              type: "DB_CHANGED",
+              source: "engine",
+              kinds: ["workspaces"],
+              workspaceIds: [workspaceId],
+            }),
+          ),
+      }).admit,
       ...(this.cloud
         ? { previewGatewayFactory: new CloudPreviewGatewayFactory() }
         : {}),
@@ -2344,6 +2332,7 @@ export class ZerosEngine {
   /**
    * Start the engine. Builds indexes, starts server, starts watcher.
    */
+  private designCaptureService: DesignCaptureService | undefined;
   async start(): Promise<void> {
     if (this.running) return;
 
@@ -2452,6 +2441,17 @@ export class ZerosEngine {
     // disconnect re-connect on the next refresh/restart.
     this.setupHostControlChannel();
     this.setupParentDeathWatchdog();
+
+    // Only the attested cloud execution posture may admit the immutable
+    // renderer worker. A transport environment variable is not authority.
+    if (this.cloudWorker) {
+      try {
+        this.designCaptureService = await startCloudDesignCapture();
+        if (this.designCaptureService) setDesignCaptureConfig(this.designCaptureService);
+      } catch {
+        console.warn("[Design] Cloud capture unavailable; source tools remain available.");
+      }
+    }
 
     // 1a. One-time fold-in of the legacy ~/.zeros/state.db (workspaces + meta +
     // detach_state) into the unified zeros.db. Runs before seedFromDisk
@@ -2841,6 +2841,15 @@ export class ZerosEngine {
       }
     };
 
+    // Revoke product tool authority before slow cloud/provider cleanup can
+    // yield. The registry aborts every grant synchronously, then drains them.
+    const productToolsRetired = settle(() => this.agents.revokeSessionTools());
+    const captureService = this.designCaptureService;
+    this.designCaptureService = undefined;
+    if (captureService) {
+      setDesignCaptureConfig(undefined);
+      await settle(() => captureService.stop());
+    }
     if (this.cloudRuntimeRegistration) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
@@ -2864,9 +2873,8 @@ export class ZerosEngine {
       clearInterval(this.parentWatchTimer);
       this.parentWatchTimer = null;
     }
+    await productToolsRetired;
     await settle(() => this.agents.dispose());
-    await settle(() => this.designAgentAdmissions.stopAll());
-    this.designAgentRunByExecution.clear();
     if (this.vaultPersistTimer) {
       // Flush a pending debounced persist so a clean stop never drops a token.
       clearTimeout(this.vaultPersistTimer);
@@ -3043,13 +3051,9 @@ export class ZerosEngine {
       const previous = this.globalDesignTerritoryTransitionTail;
       this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
       this.globalDesignTerritoryTransitionCount += 1;
-      const starts = [...this.designAgentStartsByWorkspace.values()].flatMap(
-        (entries) => [...entries],
-      );
       try {
         await previous;
-        await Promise.allSettled(starts);
-        await this.retireAllDesignAgentSessionsForTerritoryChange();
+        await this.agents.revokeSessionTools();
         return await mutation();
       } finally {
         release();
@@ -3171,15 +3175,9 @@ export class ZerosEngine {
           this.designTerritoryTransitions.add(target.workspaceId);
           validated.push(target);
         }
-        const starts = ordered.flatMap((target) => [
-          ...(this.designAgentStartsByWorkspace.get(target.workspaceId) ?? []),
-        ]);
         await previous;
-        await Promise.allSettled(starts);
         for (const target of ordered) {
-          await this.retireDesignAgentSessionsForTerritoryChange(
-            target.workspaceId,
-          );
+          await this.agents.revokeSessionTools(target.workspaceId);
         }
         return await mutation();
       } finally {
@@ -3317,72 +3315,9 @@ export class ZerosEngine {
     }
   }
 
-  /** Retire only autonomous Design executions whose scoped API/document
-   * identity belongs to this workspace. Native Code sessions keep running: on
-   * desktop their territory is a behavioral instruction, not immutable kernel
-   * authority. */
-  private async retireDesignAgentSessionsForTerritoryChange(
-    workspaceId: string,
-  ): Promise<void> {
-    const workspace = getWorkspaceById(workspaceId);
-    const sessionIds = new Set<string>();
-    for (const [sessionId, owner] of this.sessionWorkspace) {
-      if (
-        owner === workspaceId &&
-        this.agents.sessionActor(sessionId) === "design-agent"
-      ) {
-        sessionIds.add(sessionId);
-      }
-    }
-    if (workspace) {
-      for (const sessionId of this.agents.workspaceSessionIds(
-        workspaceId,
-        workspace.path,
-        { actor: "design-agent" },
-      )) {
-        sessionIds.add(sessionId);
-      }
-    }
-    await this.retireDesignAgentSessionSet(sessionIds);
-  }
-
-  private async retireAllDesignAgentSessionsForTerritoryChange(): Promise<void> {
-    const candidates = new Set([
-      ...this.sessionAgent.keys(),
-      ...this.sessionWorkspace.keys(),
-      ...this.sessionChat.keys(),
-    ]);
-    await this.retireDesignAgentSessionSet(
-      new Set(
-        [...candidates].filter(
-          (sessionId) => this.agents.sessionActor(sessionId) === "design-agent",
-        ),
-      ),
-    );
-  }
-
-  private async retireDesignAgentSessionSet(
-    sessionIds: ReadonlySet<string>,
-  ): Promise<void> {
-    if (sessionIds.size === 0) return;
-    if (!(await this.cancelLiveAgentSessions(sessionIds))) {
-      throw new Error(
-        "Couldn't stop Design agents admitted under the previous Design identity.",
-      );
-    }
-    for (const sessionId of sessionIds) {
-      const agentId = this.sessionAgent.get(sessionId);
-      if (agentId) {
-        await this.agents.endSession(agentId, sessionId, { failClosed: true });
-      }
-      this.clearAgentExecutionRoute(sessionId);
-      this.cancelRequested.delete(sessionId);
-    }
-  }
-
   /** Qualified-cloud Code authority is creation-time state. The local desktop
-   * path returns through the Design-only retirement methods above; this method
-   * is retained for cloud territory handoff. */
+   * path revokes scoped tools while preserving the provider session; this
+   * method is retained for cloud territory handoff. */
   private async retireCodeAgentSessionsForTerritoryChange(
     workspaceId: string,
     options: { retirePooledUtilities?: boolean } = {},
@@ -3523,9 +3458,8 @@ export class ZerosEngine {
   /** Reconcile a prospective pointer/recognized-Design set after an external
    * settings, Git, or Design-recognition mutation. Pure preview first:
    * ordinary source edits, fetches, commits, and unrelated settings saves do
-   * not disturb agents. When identity did change, desktop retires only scoped
-   * Design agents before publication; qualified cloud also retires affected
-   * Code authority. Resolution failures never block native Code work. */
+   * not disturb agents. When identity changes, desktop revokes scoped tools
+   * before publication; qualified cloud also retires affected Code authority. Resolution failures never block native Code work. */
   /** Reconcile candidates for a settings-file change, or null when the change
    *  demands the full fan-out. User and managed settings feed every
    *  workspace's stack, so they keep the app-wide sweep; a repo-scoped
@@ -3861,7 +3795,7 @@ export class ZerosEngine {
               continue;
             }
 
-            // External/main owners contribute to every Design-agent read-only
+            // External/main owners contribute to the registered Design context
             // policy (and to cloud Code's immutable deny union). Keep the
             // global Design gate closed through the rest of the batch.
             await this.withGlobalDesignTerritoryTransition(() =>
@@ -3874,7 +3808,7 @@ export class ZerosEngine {
       })
       .catch((error) => {
         console.warn(
-          `[design-territory] ${source} reconciliation failed; Design-agent admission remains fail-closed while native Code stays available: ${
+          `[design-territory] ${source} reconciliation failed; scoped Design authority remains fail-closed while native Code stays available: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
@@ -3934,41 +3868,6 @@ export class ZerosEngine {
     return !signal?.aborted;
   }
 
-  /** Design-agent admission waits for both global owner publication and its
-   * exact document identity. Native Code never calls this desktop-only gate. */
-  private async waitForDesignAgentTerritoryTransition(
-    workspaceId: string | null | undefined,
-    signal?: AbortSignal,
-  ): Promise<boolean> {
-    while (
-      this.globalDesignTerritoryTransitionCount > 0 ||
-      (workspaceId !== null &&
-        workspaceId !== undefined &&
-        this.designTerritoryTransitions.has(workspaceId))
-    ) {
-      if (signal?.aborted) return false;
-      const transition = this.globalDesignTerritoryTransitionTail;
-      if (!signal) {
-        await transition;
-        continue;
-      }
-      const completed = await new Promise<boolean>((resolve) => {
-        let settled = false;
-        const finish = (result: boolean) => {
-          if (settled) return;
-          settled = true;
-          signal.removeEventListener("abort", onAbort);
-          resolve(result);
-        };
-        const onAbort = () => finish(false);
-        signal.addEventListener("abort", onAbort, { once: true });
-        void transition.then(() => finish(true));
-        if (signal.aborted) finish(false);
-      });
-      if (!completed) return false;
-    }
-    return !signal?.aborted;
-  }
 
   private designTransitionInterruptedProcessStart(error: unknown): boolean {
     return (
@@ -4048,30 +3947,6 @@ export class ZerosEngine {
     });
     this.globalDesignAuthorityStarts.add(tracked);
     if (!workspaceId) return tracked;
-    return this.trackWorkspaceProcessStart(workspaceId, tracked);
-  }
-
-  /** Track only Design-agent admission for Design-identity handoff. It also
-   * participates in the ordinary workspace lifecycle barrier so archive/delete
-   * cannot race a provider that has not published its execution yet. */
-  private trackDesignAgentStart<T>(
-    workspaceId: string | null | undefined,
-    start: Promise<T>,
-  ): Promise<T> {
-    if (!workspaceId) return start;
-    let starts = this.designAgentStartsByWorkspace.get(workspaceId);
-    if (!starts) {
-      starts = new Set<Promise<unknown>>();
-      this.designAgentStartsByWorkspace.set(workspaceId, starts);
-    }
-    const tracked = start.finally(() => {
-      const current = this.designAgentStartsByWorkspace.get(workspaceId);
-      current?.delete(tracked);
-      if (current?.size === 0) {
-        this.designAgentStartsByWorkspace.delete(workspaceId);
-      }
-    });
-    starts.add(tracked);
     return this.trackWorkspaceProcessStart(workspaceId, tracked);
   }
 
@@ -4155,17 +4030,6 @@ export class ZerosEngine {
     opts: { preservePrompt?: boolean } = {},
   ): void {
     const conversationId = this.sessionChat.get(executionId);
-    const designRunId = this.designAgentRunByExecution.get(executionId);
-    this.designAgentRunByExecution.delete(executionId);
-    if (designRunId) {
-      void this.designAgentAdmissions.stop(designRunId).catch((error) => {
-        console.warn(
-          `[design-agent] couldn't retire ${designRunId}: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
-    }
     this.router.clearOwner(executionId);
     this.sessionAgent.delete(executionId);
     this.sessionChat.delete(executionId);
@@ -4766,12 +4630,12 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_NEW_SESSION": {
-          if (msg.agentRole === "design" && !this.designAgentExecutionEnabled) {
+          if (msg.agentRole === "design") {
             throw new AgentFailureError({
               kind: "protocol-error",
               stage: "newSession",
               message:
-                "Design-agent execution is disabled until the Design delegation workflow is available.",
+                "Separate Design-agent sessions are retired. Use the shared agent session; composer Design mode is planned.",
             });
           }
           const bindToken = this.beginConversationBind(msg.chatId);
@@ -4796,13 +4660,7 @@ export class ZerosEngine {
             msg.chatId,
             bindToken,
           );
-          const admissionOpened =
-            msg.agentRole === "design"
-              ? await this.waitForDesignAgentTerritoryTransition(
-                  lifecycleWorkspaceId,
-                  admissionSignal,
-                )
-              : this.cloudWorker
+          const admissionOpened = this.cloudWorker
                 ? await this.waitForGlobalDesignTerritoryTransition(
                     admissionSignal,
                   )
@@ -4813,34 +4671,19 @@ export class ZerosEngine {
           ) {
             throw this.staleConversationBindFailure("newSession");
           }
-          if (msg.agentRole === "design") {
-            this.assertDesignAgentWorkspaceProcessStartAllowed(
-              lifecycleWorkspaceId,
-            );
-          } else {
-            this.assertAgentWorkspaceProcessStartAllowed(
-              lifecycleWorkspaceId,
-              spawnOpts.workspaceId,
-              spawnOpts.cwd,
-            );
-          }
+          this.assertAgentWorkspaceProcessStartAllowed(
+            lifecycleWorkspaceId,
+            spawnOpts.workspaceId,
+            spawnOpts.cwd,
+          );
           let provisionalExecutionId: string | undefined;
-          let designRunId: string | undefined;
           const startSession = (async () => {
             const initialize = await this.agents.ensureAgent(msg.agentId, {
               env: spawnOpts.env,
             });
             // ensureAgent may spawn/initialize asynchronously. Re-check
             // before the workspace-scoped session itself is created.
-            if (msg.agentRole === "design") {
-              this.assertDesignAgentWorkspaceProcessStartAllowed(
-                lifecycleWorkspaceId,
-              );
-            } else {
-              this.assertAgentWorkspaceProcessStartAllowed(
-                lifecycleWorkspaceId,
-              );
-            }
+            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
             if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
               throw this.staleConversationBindFailure("newSession");
             }
@@ -4865,12 +4708,6 @@ export class ZerosEngine {
                     lifecycleWorkspaceId,
                   );
                   provisionalExecutionId = executionId;
-                  if (designRunId) {
-                    this.designAgentRunByExecution.set(
-                      executionId,
-                      designRunId,
-                    );
-                  }
                   this.registerAgentExecutionRoute({
                     executionId,
                     agentId: msg.agentId,
@@ -4880,50 +4717,10 @@ export class ZerosEngine {
                   });
                 },
               };
-              if (msg.agentRole === "design") {
-                const designWorkspacePath = spawnOpts.cwd;
-                if (
-                  !msg.designDocumentId ||
-                  !spawnOpts.workspaceId ||
-                  !designWorkspacePath
-                ) {
-                  throw new AgentFailureError({
-                    kind: "protocol-error",
-                    stage: "newSession",
-                    message:
-                      "A Design agent requires an exact workspace and Design document.",
-                  });
-                }
-                const summary = await getWorkspaceDesignApi(
-                  designWorkspacePath,
-                ).open(msg.designDocumentId);
-                designRunId = `design-${randomBytes(16).toString("hex")}`;
-                const admission = await this.designAgentAdmissions.start({
-                  workspaceId: spawnOpts.workspaceId,
-                  workspacePath: designWorkspacePath,
-                  agentRunId: designRunId,
-                  documentId: msg.designDocumentId,
-                  expectedRevision: summary.revision,
-                });
-                session = await this.agents.newDesignSession(
-                  msg.agentId,
-                  admission,
-                  sessionOptions,
-                );
-              } else {
-                session = await this.agents.newSession(
-                  msg.agentId,
-                  sessionOptions,
-                );
-              }
+              session = await this.agents.newSession(msg.agentId, sessionOptions);
             } catch (err) {
               if (provisionalExecutionId) {
                 this.clearAgentExecutionRoute(provisionalExecutionId);
-              }
-              if (designRunId) {
-                await this.designAgentAdmissions
-                  .stop(designRunId)
-                  .catch(() => undefined);
               }
               throw err;
             }
@@ -4952,9 +4749,6 @@ export class ZerosEngine {
             // concurrently-starting reaper can discover and dispose it.
             if (!provisionalExecutionId) {
               provisionalExecutionId = executionId;
-              if (designRunId) {
-                this.designAgentRunByExecution.set(executionId, designRunId);
-              }
               this.registerAgentExecutionRoute({
                 executionId,
                 agentId: msg.agentId,
@@ -4967,17 +4761,6 @@ export class ZerosEngine {
               executionId,
               session,
             );
-            if (msg.agentRole === "design") {
-              // Design capabilities are engine-process authority, not a
-              // durable provider-resume credential. A restarted engine
-              // creates a fresh run against the latest draft revision.
-              const {
-                providerBinding: _providerBinding,
-                providerMetadata: _providerMetadata,
-                ...ephemeralDesignSession
-              } = session;
-              session = ephemeralDesignSession;
-            }
             this.sessionLoadResponses.set(executionId, {
               ...(this.sessionLoadResponses.get(executionId) ?? {}),
               // A reload before the first prompt still needs the chat's prior
@@ -5012,7 +4795,7 @@ export class ZerosEngine {
             // crossed the spawn will dispose this execution and retry the
             // bind; persisting first would leave an unused provider thread
             // as the chat's resume target if that retry were then closed.
-            if (msg.chatId && msg.agentRole !== "design") {
+            if (msg.chatId) {
               this.persistProviderIdentityForChat(
                 msg.chatId,
                 msg.agentId,
@@ -5022,16 +4805,10 @@ export class ZerosEngine {
             }
             return { initialize, session };
           })();
-          const { initialize, session } =
-            msg.agentRole === "design"
-              ? await this.trackDesignAgentStart(
-                  lifecycleWorkspaceId,
-                  startSession,
-                )
-              : await this.trackRepositoryCodeAuthorityStart(
-                  lifecycleWorkspaceId,
-                  startSession,
-                );
+          const { initialize, session } = await this.trackRepositoryCodeAuthorityStart(
+            lifecycleWorkspaceId,
+            startSession,
+          );
           this.assertAgentSessionProcessStartAllowed(
             session.executionId,
             lifecycleWorkspaceId,
@@ -5149,9 +4926,9 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          // A Design identity handoff invalidates a Design-agent capability.
-          // Qualified cloud Code retains the same immutable-owner rule. Native
-          // desktop Code is independent and continues without reconnecting.
+          // Qualified cloud Code depends on immutable owner authority. Native
+          // desktop sessions continue; scoped tools are independently revoked.
+          // Retain the legacy actor check for compatibility with old state.
           if (
             this.globalDesignTerritoryTransitionCount > 0 &&
             (this.cloudWorker ||
@@ -7133,26 +6910,6 @@ export class ZerosEngine {
     }
   }
 
-  private assertDesignAgentWorkspaceProcessStartAllowed(
-    workspaceId: string | null | undefined,
-  ): void {
-    this.assertWorkspaceProcessStartAllowed(workspaceId);
-    if (
-      this.globalDesignTerritoryTransitionCount > 0 ||
-      (workspaceId && this.designTerritoryTransitions.has(workspaceId))
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: workspaceId
-          ? WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE
-          : GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE,
-        remediation:
-          "Wait for the Design identity update to finish, then retry the Design agent.",
-        context: { workspaceId },
-      });
-    }
-  }
-
   /** A session can depend on a managed sibling through `/add-dir` even though
    * its chat and cwd belong elsewhere. Prompt/steer admission therefore checks
    * the gateway's immutable contribution map, not only the primary owner. */
@@ -7160,13 +6917,6 @@ export class ZerosEngine {
     sessionId: string,
     workspaceId: string | null | undefined,
   ): void {
-    if (
-      !this.cloudWorker &&
-      this.agents.sessionActor(sessionId) === "design-agent"
-    ) {
-      this.assertDesignAgentWorkspaceProcessStartAllowed(workspaceId);
-      return;
-    }
     this.assertAgentWorkspaceProcessStartAllowed(workspaceId);
     if (!this.cloudWorker) return;
     for (const transitioningWorkspaceId of this.designTerritoryTransitions) {

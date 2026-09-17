@@ -16,6 +16,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   captureDesignFrameRestorePoint,
   createDesignFrame,
+  transferDesignNode,
+  restoreDesignFrameChanges,
   deleteDesignFrame,
   DESIGN_DIRECTORY_NAME,
   duplicateDesignFrame,
@@ -56,6 +58,62 @@ describe("design document", () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("detaches and reattaches a child atomically with exact structural undo", async () => {
+    const frame = await createDesignFrame(root);
+    const before = await readDesignFrame(root, frame.file);
+    const rootId = before.source.match(/data-oid="([^"]+)"/)?.[1];
+    expect(rootId).toBeTruthy();
+    await writeDesignNodeHtml(root, {
+      frame: frame.file,
+      sourceVersion: before.sourceVersion,
+      nodeId: rootId!,
+      html: '<div data-oid="moving" style="width:100px;height:80px;background:red"><span data-oid="label">Keep</span></div>',
+      mode: "append",
+    });
+    const original = await captureDesignFrameRestorePoint(root, frame.file);
+    const identity = await readDesignFrameRenderIdentity(root, frame.file);
+    const detached = await transferDesignNode(root, {
+      frame: frame.file,
+      sourceVersion: identity.sourceVersion,
+      nodeId: "moving",
+      geometry: { x: 700, y: 50, w: 100, h: 80, z: 1 },
+    });
+    expect((await listDesignFrames(root)).length).toBe(2);
+    expect(
+      (await captureDesignFrameRestorePoint(root, frame.file)).source,
+    ).not.toContain('data-oid="moving"');
+    expect(
+      (await captureDesignFrameRestorePoint(root, detached.frame)).source,
+    ).toContain('data-oid="label"');
+    await restoreDesignFrameChanges(root, detached.changes, "undo");
+    expect(await captureDesignFrameRestorePoint(root, frame.file)).toEqual(
+      original,
+    );
+    expect((await listDesignFrames(root)).length).toBe(1);
+    await restoreDesignFrameChanges(root, detached.changes, "redo");
+    const movedIdentity = await readDesignFrameRenderIdentity(
+      root,
+      detached.frame,
+    );
+    const destination = await readDesignFrameRenderIdentity(root, frame.file);
+    const attached = await transferDesignNode(root, {
+      frame: detached.frame,
+      sourceVersion: movedIdentity.sourceVersion,
+      nodeId: "moving",
+      destinationFrame: frame.file,
+      destinationSourceVersion: destination.sourceVersion,
+      parentId: rootId!,
+      styles: { position: "relative", width: "100px", height: "80px" },
+      geometry: { x: 0, y: 0, w: 100, h: 80, z: 1 },
+    });
+    expect((await listDesignFrames(root)).length).toBe(1);
+    expect(
+      (await captureDesignFrameRestorePoint(root, frame.file)).source,
+    ).toContain('data-oid="moving"');
+    await restoreDesignFrameChanges(root, attached.changes, "undo");
+    expect((await listDesignFrames(root)).length).toBe(2);
   });
 
   it("seeds the portable HTML/CSS document and discovers stable frame geometry", async () => {
@@ -101,6 +159,7 @@ describe("design document", () => {
     expect(source).toContain('href="./tokens.css"');
     expect(source).toMatch(/<main\b[^>]*style="[^"]*display:block/);
     expect(source).toContain("height:100vh;");
+    expect(source).toContain("background-color:#ffffff; opacity:1;"); // check:ui ignore-line -- authored frame defaults.
     expect(source).toContain("data-zeros-frame-root");
     expect(source).not.toContain("<script");
     expect(source).toMatch(/<main\b[^>]*>\s*<\/main>/);
@@ -939,8 +998,8 @@ describe("design document", () => {
     expect(mutation.frame.sourceVersion).not.toBe(before.sourceVersion);
     expect(mutation.frame.source).toBe(
       sourceBefore.replace(
-        "height:100vh;",
-        "height:100vh; padding:32px; background-color:var(--bg2);",
+        "background-color:#ffffff; opacity:1;", // check:ui ignore-line -- authored frame defaults.
+        "background-color:var(--bg2); opacity:1; padding:32px;",
       ),
     );
     expect(

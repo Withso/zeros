@@ -151,6 +151,17 @@ interface SessionEntry {
   lastAccess: number;
 }
 
+/** In-memory history owned by the trusted desktop structural-edit lane. This
+ * is never serialized or accepted by a transport/agent API. */
+export interface DesignLocalHistoryCheckpoint {
+  readonly documentId: string;
+  readonly session: ReturnType<
+    DesignTransactionSession<DesignWebDocumentState>["checkpoint"]
+  >;
+  readonly lastValidState: DesignWebDocumentState | null;
+  readonly bytes: number;
+}
+
 function estimatedJsonMemory(value: unknown): number {
   const seen = new WeakSet<object>();
   const visit = (current: unknown): number => {
@@ -455,6 +466,49 @@ export class DesignApi {
       await this.authorizeRead(exactDocumentId, "document.open");
       const entry = await this.load(exactDocumentId);
       return this.summary(entry);
+    });
+  }
+
+  /** Keep history across a trusted multi-document source transaction. Ordinary
+   * external edits still reconcile and invalidate history in load(). */
+  async captureLocalHistory(
+    documentId: string,
+  ): Promise<DesignLocalHistoryCheckpoint> {
+    if (this.options.authorization?.kind !== "trusted-in-process") {
+      throw new DesignApiAuthorizationError();
+    }
+    const exactDocumentId = validatedDocumentId(documentId);
+    return this.withDocumentTurn(exactDocumentId, async () => {
+      const entry = await this.load(exactDocumentId);
+      return {
+        documentId: exactDocumentId,
+        session: entry.session.checkpoint(),
+        lastValidState: entry.lastValidState,
+        bytes: estimatedSessionMemory(entry),
+      };
+    });
+  }
+
+  /** Reattach a checkpoint only to its exact restored source revision. A
+   * concurrent external change must never regain stale undo authority. */
+  async restoreLocalHistory(
+    checkpoint: DesignLocalHistoryCheckpoint,
+  ): Promise<boolean> {
+    if (this.options.authorization?.kind !== "trusted-in-process") {
+      throw new DesignApiAuthorizationError();
+    }
+    const documentId = validatedDocumentId(checkpoint.documentId);
+    return this.withDocumentTurn(documentId, async () => {
+      const entry = await this.load(documentId);
+      if (
+        checkpoint.session.state.documentId !== documentId ||
+        entry.session.currentState().revision !==
+          checkpoint.session.state.revision
+      )
+        return false;
+      entry.session.restore(checkpoint.session);
+      entry.lastValidState = checkpoint.lastValidState;
+      return true;
     });
   }
 

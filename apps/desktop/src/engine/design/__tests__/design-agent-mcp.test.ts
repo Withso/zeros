@@ -1,10 +1,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import http from "node:http";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { DesignAgentCapabilityManager } from "../design-agent-capability";
 import { DesignAgentMcpServer } from "../design-agent-mcp";
@@ -62,6 +63,46 @@ describe("Design-agent MCP boundary", () => {
     return next;
   }
 
+  it("delivers cancellation while four tool calls are in flight", async () => {
+    await server.stop();
+    const started: AbortSignal[] = [];
+    const finish: Array<() => void> = [];
+    server = new DesignAgentMcpServer({
+      token,
+      handler: {
+        assertActive() {},
+        listTools: () => [{ name: "hold", inputSchema: { type: "object" } }],
+        callTool: async (_name, _input, signal) => {
+          started.push(signal);
+          await new Promise<void>((resolve) => {
+            finish.push(resolve);
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          return { content: [] };
+        },
+      },
+    });
+    await server.start();
+    const connected = await connect();
+    const controllers = Array.from({ length: 4 }, () => new AbortController());
+    const requests = controllers.map((controller) =>
+      connected
+        .callTool({ name: "hold" }, undefined, { signal: controller.signal })
+        .catch(() => null),
+    );
+    try {
+      await vi.waitFor(() => expect(started).toHaveLength(4));
+      controllers[0]!.abort();
+      await vi.waitFor(() =>
+        expect(started.some((signal) => signal.aborted)).toBe(true),
+      );
+    } finally {
+      controllers.forEach((controller) => controller.abort());
+      finish.forEach((resolve) => resolve());
+      await Promise.all(requests);
+    }
+  });
+
   it("exposes only semantic draft tools to the exact run capability", async () => {
     const connected = await connect();
     const tools = await connected.listTools();
@@ -96,6 +137,36 @@ describe("Design-agent MCP boundary", () => {
     await expect(connect("0".repeat(64))).rejects.toThrow();
     expect(manager.revoke(token)).toBe(true);
     await expect(connect(token)).rejects.toThrow();
+  });
+
+  it("bounds simultaneous request bodies before buffering them", async () => {
+    const held: http.ClientRequest[] = [];
+    try {
+      for (let index = 0; index < 4; index++) {
+        const request = http.request(server.url, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            "Content-Type": "application/json",
+          },
+        });
+        request.on("error", () => {});
+        request.write("{");
+        held.push(request);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      const response = await fetch(server.url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+      expect(response.status).toBe(429);
+    } finally {
+      held.forEach((request) => request.destroy());
+    }
   });
 
   it("binds loopback host/origin and does not disclose the bearer in its registration", async () => {

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { assertDesignWriteAuthorized } from "./write-authority";
 import {
   closeSync,
   constants,
@@ -181,7 +182,9 @@ export function readDesignStorageFile(
   try {
     target = assertSafeDesignStoragePath(root, relative);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
     throw error;
   }
   let fd: number;
@@ -192,7 +195,9 @@ export function readDesignStorageFile(
       0o600,
     );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
     throw error;
   }
   try {
@@ -216,7 +221,8 @@ export function readDesignStorageFile(
       current.nlink !== 1
     )
       throw new Error("Design metadata changed during read.");
-    return bytes.subarray(0, offset).toString("utf8");
+    const content = bytes.subarray(0, offset);
+    return content.toString("utf8");
   } finally {
     closeSync(fd);
   }
@@ -650,6 +656,17 @@ const migrationSchema = z
   .strict();
 const journalName = (directory: string) =>
   `metadata-${createHash("sha256").update(directory).digest("hex").slice(0, 24)}.json`;
+// Compatibility only: experimental builds could move authored files out of the
+// checkout. Never erase that ownership marker or silently fall back to writes.
+const privateDraftFenceName = journalName("private-draft-migration");
+const privateDraftFenceSchema = z.object({ version: z.literal(2), workspace: z.string(), directory: z.literal("private-draft-migration"), owner: z.string().min(1).max(128) }).strict();
+export function assertLegacyDesignDraftWritable(workspace: string): void {
+  const source = readDesignStorageFile(designPrivateStorageDirectory(workspace), privateDraftFenceName);
+  if (source !== null) {
+    privateDraftFenceSchema.parse(JSON.parse(source));
+    throw new Error("This workspace has a retired private Design draft. Preserve its data and use a recovery-capable build to export it before editing the checkout.");
+  }
+}
 
 function applyStorageChanges(
   workspace: string,
@@ -713,6 +730,7 @@ export function recoverWorkspaceDesignMetadata(workspace: string): void {
   )) {
     const source = readDesignStorageFile(root, name, MAX_JOURNAL_BYTES);
     if (source === null) continue;
+    if (name === privateDraftFenceName) { privateDraftFenceSchema.parse(JSON.parse(source)); continue; }
     const journal = migrationSchema.parse(JSON.parse(source));
     if (journalName(journal.directory) !== name)
       throw new Error("Invalid Design recovery record identity.");
@@ -750,6 +768,7 @@ export function commitDesignMetadata(
   expected?: DesignMetadataSnapshot,
   restoredId?: string,
 ): string[] {
+  assertDesignWriteAuthorized();
   if (sanitizeDesignDirectoryName(directory) !== directory)
     throw new Error("Invalid Design directory.");
   recoverDesignMetadataMigration(workspace, directory);

@@ -28,7 +28,6 @@ import { useResizeHint } from "../use-resize-hint";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
-import { WorkspaceModeToggle } from "../../shared/ui/workspace-mode-header";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 // ── Conversation pane className constants ───────────────────────────
@@ -170,7 +169,7 @@ function useConversationRatio(sectionRef: React.RefObject<HTMLElement | null>) {
 export function ConversationPane({
   workbenchCollapsed = false,
   onToggleWorkbench,
-  workspace = null,
+  workspace: _workspace = null,
 }: {
   workbenchCollapsed?: boolean;
   onToggleWorkbench?: () => void;
@@ -405,7 +404,6 @@ export function ConversationPane({
           <div className={PANE_TREE_ROOT_CLS}>
             <ConversationPaneLayout
               onMinimumSizeChange={setPaneMinimumSize}
-              stripLeading={<WorkspaceModeToggle workspace={workspace} />}
               stripTrailing={
                 workbenchCollapsed && onToggleWorkbench ? (
                   <WorkbenchToggleButton

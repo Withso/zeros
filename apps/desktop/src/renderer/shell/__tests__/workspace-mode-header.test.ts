@@ -234,33 +234,24 @@ describe("workspace mode header row", () => {
     expect(markup).toContain("collapse-control");
   });
 
-  it("is Design's Layers header only — Code owns no such row", () => {
-    const designHeader = designSidebarSource.indexOf("<WorkspaceModeHeader");
+  it("labels the Design directory above Layers without a workspace-mode control", () => {
+    const designHeader = designSidebarSource.indexOf("data-design-directory-header");
     const designPanels = designSidebarSource.indexOf(
       "<DesignWorkspaceSidebarPanels",
     );
 
     expect(designHeader).toBeGreaterThanOrEqual(0);
     expect(designHeader).toBeLessThan(designPanels);
-    expect(designSidebarSource).toContain("separator");
-    // Code's conversation column dropped the row on 2026-09-01: no name row, no
-    // 40px band above the chat strip.
+    expect(designSidebarSource).not.toContain("<WorkspaceModeHeader");
     expect(conversationPaneSource).not.toContain("<WorkspaceModeHeader");
     expect(conversationPaneSource).not.toContain("WorkspaceModeHeader }");
   });
 });
 
 describe("Code seats its column controls in the chat strip", () => {
-  it("hands the mode toggle to the strip's fixed leading slot", () => {
-    expect(conversationPaneSource).toContain(
-      "stripLeading={<WorkspaceModeToggle workspace={workspace} />}",
-    );
-    // The pane tree is the only consumer, so the toggle rides the strip rather
-    // than any surviving row of its own.
-    const leadingProp = conversationPaneSource.indexOf("stripLeading=");
-    const layoutTag = conversationPaneSource.indexOf("<ConversationPaneLayout");
-    expect(layoutTag).toBeGreaterThanOrEqual(0);
-    expect(leadingProp).toBeGreaterThan(layoutTag);
+  it("leaves agent-mode controls to the future composer integration", () => {
+    expect(conversationPaneSource).not.toContain("WorkspaceModeToggle");
+    expect(conversationPaneSource).toContain("<ConversationPaneLayout");
   });
 
   it("keeps the collapsed-workbench control in the strip's trailing slot", () => {

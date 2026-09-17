@@ -176,6 +176,7 @@ describe("workbench default slice", () => {
 
     expect(tabs.map((tab) => [tab.type, tab.title])).toEqual([
       ["files", "Open file"],
+      ["design", "Design"],
       ["changes", "Changes"],
       ["review", "Review"],
       ["context", "Context"],
@@ -183,6 +184,7 @@ describe("workbench default slice", () => {
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
+      true,
       true,
       true,
       true,
@@ -205,6 +207,7 @@ describe("workbench default slice", () => {
 
     expect(slice().tabs.map((tab) => tab.title)).toEqual([
       "Open file",
+      "Design",
       "Changes",
       "Review",
       "Context",
@@ -299,10 +302,15 @@ describe("Active workspace action clock", () => {
 });
 
 describe("ADD_WORKBENCH_TAB", () => {
-  it("keeps only Changes and Review singleton", () => {
+  it("keeps Design, Changes and Review singleton", () => {
     freshScope();
+    const design = slice().tabs.find((tab) => tab.type === "design")!;
     const changes = slice().tabs.find((tab) => tab.type === "changes")!;
     const review = slice().tabs.find((tab) => tab.type === "review")!;
+
+    dispatch({ type: "ADD_WORKBENCH_TAB", tab: { ...design, id: "duplicate-design-home" } });
+    expect(slice().tabs.filter((tab) => tab.type === "design")).toHaveLength(1);
+    expect(slice().activeId).toBe(design.id);
 
     dispatch({ type: "ADD_WORKBENCH_TAB", tab: createReviewTab() });
     expect(slice().tabs.filter((tab) => tab.type === "review")).toHaveLength(1);
@@ -345,6 +353,7 @@ describe("ADD_WORKBENCH_TAB", () => {
 
     expect(slice().tabs.map((tab) => tab.type)).toEqual([
       "files",
+      "design",
       "changes",
       "review",
       "context",
@@ -385,6 +394,7 @@ describe("ADD_WORKBENCH_TAB", () => {
       activeId: fileA.id,
       tabs: [
         { id: homeA.id },
+        { type: "design" },
         { type: "changes" },
         { type: "review" },
         { type: "context" },
@@ -518,10 +528,11 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
     ).toBe(true);
   });
 
-  it("protects Changes/Review/Context and the fixed home; extras close fully", () => {
+  it("protects Design/Changes/Review/Context and the fixed home; extras close fully", () => {
     freshScope();
     const initial = slice().tabs;
     const home = initial.find((tab) => tab.type === "files")!;
+    const design = initial.find((tab) => tab.type === "design")!;
     const changes = initial.find((tab) => tab.type === "changes")!;
     const review = initial.find((tab) => tab.type === "review")!;
     const context = initial.find((tab) => tab.type === "context")!;
@@ -532,6 +543,8 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
       updates: { pinned: false },
     });
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: changes.id });
+    dispatch({ type: "REMOVE_WORKBENCH_TAB", id: design.id });
+    expect(slice().tabs.some((tab) => tab.id === design.id)).toBe(true);
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: review.id });
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: context.id });
     expect(slice().tabs.some((tab) => tab.id === changes.id)).toBe(true);
@@ -555,6 +568,7 @@ describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: browser.id });
     expect(slice().tabs.map((tab) => tab.type)).toEqual([
       "files",
+      "design",
       "changes",
       "review",
       "context",
@@ -959,7 +973,7 @@ describe("RECONCILE_WORKBENCH_FILE_DISCARD", () => {
 });
 
 describe("REORDER_WORKBENCH_TABS", () => {
-  it("keeps the fixed home first and Changes/Review immediately next", () => {
+  it("keeps the fixed home first and Design/Changes/Review immediately next", () => {
     freshScope();
     const first = createFilesTab("a.ts");
     const second = createFilesTab("b.ts");
@@ -990,6 +1004,7 @@ describe("REORDER_WORKBENCH_TABS", () => {
     const context = slice().tabs.find((tab) => tab.type === "context")!;
     expect(slice().tabs.map((tab) => tab.id)).toEqual([
       initialBlank.id,
+      slice().tabs.find((tab) => tab.type === "design")!.id,
       changes.id,
       review.id,
       context.id,

@@ -12,15 +12,12 @@ import { designMetadataIndexPaths } from "../design/metadata-git";
 // files, commits, or retires Code processes. Design files remain ordinary
 // uncommitted work until the user performs an explicit Git action.
 //
-// Isolation is TERRITORIAL and ACTOR-SCOPED:
-//
-//   • code actors run natively and receive an explicit behavioral contract
-//     that treats the live Design root as read-only context;
-//   • Design agents run in ZSR and mutate only through the Design API;
-//   • the codebase is writable only by code actors — the design surface
-//     can't reach outside the design dir by construction
-//     (assertSafeDesignWriteTarget); external tools retain normal access to the
-//     shared checkout.
+// Authored Design changes use the API and native-session scoped tools. Generic
+// file/Git handlers retain their current Design path guards. The human Design
+// surface cannot write outside its directory (assertSafeDesignWriteTarget);
+// native agent tools and external editors retain normal host authority.
+// The planned composer mode gate is separate from this legacy view lifecycle;
+// it does not introduce Code-write isolation or another provider process.
 //
 // Pre-concurrency builds DID lock the whole tracked tree while a workspace
 // was in design mode, and wrote a sparse cone before that. Both are treated
@@ -63,6 +60,7 @@ import {
   designDirectoryNameFor,
   primeDesignDirectoryName,
   sanitizeDesignDirectoryName,
+  withDesignDirectoryNameLease,
 } from "../design/directory-registry";
 import { initializeDesignDocument } from "../design/document";
 import { unlockLegacyDesignWorkspaceLock } from "../design/workspace-lock";
@@ -70,7 +68,7 @@ import {
   rememberRecognizedDesignDirectories,
   stickyRecognizedDesignDirectories,
 } from "../design/recognition-store";
-import { opSettingsPreviewWrite, opSettingsWrite, opSettingsResolve } from "../settings/ops";
+import { opSettingsPreviewWrite, opSettingsWrite, opSettingsResolve, opSettingsResolveWithOverride } from "../settings/ops";
 import { GitError } from "./errors";
 import { runGit } from "./git-exec";
 import { withWorkspaceGitMutation } from "./mutation-lock";
@@ -126,6 +124,24 @@ export async function ensureDesignDocumentInitialized(
 ): Promise<{ created: string[] }> {
   primeDesignDirectoryName(workspacePath, designDir);
   return initializeDesignDocument(workspacePath);
+}
+
+/** Explicit first-use action for the Design tab. The document belongs to the
+ * checkout; preparing it never changes the conversation or legacy view mode. */
+export async function initializeWorkspaceDesign<T>(
+  workspace: Workspace,
+  read: () => Promise<T>,
+): Promise<T> {
+  recoverWorkspaceDesignMetadata(workspace.path);
+  const sticky = await stickyRecognizedDesignDirectories(workspace.path);
+  const directory = await previewDesignDirectoryForEnter(workspace, {
+    additionalRecognized: sticky,
+  });
+  return withDesignDirectoryNameLease(workspace.path, directory, async () => {
+    await ensureDesignDocumentInitialized(workspace.path, directory);
+    await rememberRecognizedDesignDirectories(workspace.path, [directory]);
+    return read();
+  });
 }
 
 /** Enter Design view without changing Git or process authority. A caller may
@@ -228,7 +244,7 @@ export async function exitDesignMode(workspace: Workspace): Promise<void> {
 
 /** Prime the active Design identity for a workspace that already carries one.
  * Historical name retained for compatibility; Code admission uses the identity
- * for instructions and lifecycle checks, while Design agents use it in ZSR. */
+ * for instructions, scoped tool authority, and lifecycle checks. */
 export async function fenceWorkspaceDesignDirectoryIfPresent(workspace: {
   path: string;
   repoRoot: string;
@@ -260,7 +276,7 @@ export async function reconcileDesignDirAfterExternalGit(workspace: {
 
 /** Rename committed Design content in the main checkout and update the
  * personal repository pointer. Only the directory rename enters Git history;
- * settings remain locally excluded. Refuse live Design workspaces and dirty
+ * settings remain locally excluded. Refuse incompatible directory identities and dirty
  * Design content, and validate the personal file before moving anything. */
 export async function renameDesignDirectory(opts: {
   repoRoot: string;
@@ -288,19 +304,16 @@ async function renameDesignDirectoryAdmitted(opts: {
   if (from === to) return { committedPointer: false };
   recoverWorkspaceDesignMetadata(opts.repoRoot);
   validateDesignSettings(opts.repoRoot, { design: { directory: to } });
-  const liveDesign = listWorkspaces({ archived: false }).filter(
-    (workspace) =>
-      workspace.kind === "design" &&
-      path.resolve(workspace.repoRoot) === path.resolve(opts.repoRoot),
+  const liveWorkspaces = listWorkspaces({ archived: false }).filter(
+    (workspace) => path.resolve(workspace.repoRoot) === path.resolve(opts.repoRoot),
   );
-  if (liveDesign.length > 0) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${liveDesign.length} design workspace${liveDesign.length === 1 ? " is" : "s are"} still open on this repo.`,
-      remediation:
-        "Archive them (or switch them to code mode), rename the folder, then restore.",
-    });
-  }
+  // Presentation does not own another checkout. A portable stable ID allows
+  // live workspaces to keep their old path until their branch integrates the move.
+  const existingEntry = designDirectoryEntry(opts.repoRoot, from);
+  if (liveWorkspaces.length && !existingEntry) throw new GitError({
+    code: "VALIDATION_FAILED",
+    message: "Upgrade and commit the Design folder metadata before renaming while workspaces are open.",
+  });
   ensureLocalSettingsIgnored(opts.repoRoot);
   opSettingsPreviewWrite(
     "repo-local",
@@ -348,6 +361,14 @@ async function renameDesignDirectoryAdmitted(opts: {
     opSettingsResolve(opts.repoRoot).effective,
   );
   const renameSelected = !selected || selected === from;
+  if (renameSelected && existingEntry && liveWorkspaces.length) {
+    const preview = opSettingsPreviewWrite("repo-local", { design: { directory_id: existingEntry.id, directory: null } }, opts.repoRoot);
+    for (const workspace of liveWorkspaces) {
+      const projected = opSettingsResolveWithOverride(workspace.path, workspace.repoRoot, preview);
+      try { designDirectoryFromSettings(workspace.path, projected.effective); }
+      catch { throw new GitError({ code: "VALIDATION_FAILED", message: "An open workspace has a different Design directory identity. Select its Design directory in workspace settings before renaming this repository folder." }); }
+    }
+  }
   if (!readDirectoryDesignManifest(opts.repoRoot, from)) {
     if (renameSelected)
       await ensureDesignDocumentInitialized(opts.repoRoot, from);

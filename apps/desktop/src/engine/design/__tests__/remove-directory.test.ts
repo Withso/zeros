@@ -303,12 +303,12 @@ describe("remove Design registration", () => {
     ).toBe('{"version":3,"frames":{}}');
   });
 
-  it("keeps user-authored rules and refuses unsafe or live removals", async () => {
+  it.each(["code", "design"])("keeps user-authored rules and refuses unsafe or live removals (%s)", async (kind) => {
     writeFileSync(path.join(root, "Brand/rules.md"), "My project instructions");
     await expect(
       removeDesignDirectory({ repoRoot: root, directory: "../outside" }),
     ).rejects.toThrow();
-    live.workspaces = [{ kind: "design", repoRoot: root }];
+    live.workspaces = [{ kind, repoRoot: root }];
     await expect(
       removeDesignDirectory({ repoRoot: root, directory: "Brand" }),
     ).rejects.toThrow(/still open/);

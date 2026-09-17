@@ -68,7 +68,7 @@ describe("buildPrInstructions", () => {
       draft: false,
     });
     expect(out).toContain("2 files have unresolved merge conflicts");
-    expect(out.indexOf("conflict")).toBeLessThan(out.indexOf("Commit them"));
+    expect(out.indexOf("conflict")).toBeLessThan(out.indexOf("Preserve staged"));
     expect(out).toContain("Resolve them first");
   });
 
@@ -126,7 +126,7 @@ describe("buildPrInstructions", () => {
     expect(out).toContain("could not be read");
     expect(out).toContain("Inspect the worktree for unresolved conflicts");
     expect(out).toContain(
-      "If the inspection finds uncommitted changes, commit them",
+      "Preserve staged, unstaged, and untracked Code and Design work",
     );
     expect(out).not.toContain("There are no uncommitted changes.");
     expect(out).not.toContain("There is no upstream branch yet.");

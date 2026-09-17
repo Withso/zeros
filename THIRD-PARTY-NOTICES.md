@@ -119,6 +119,14 @@ available.
   generated bundle. Marketing uses the public `gsap` package only (no Club
   plugins).
 
+### Cloud Design capture
+
+`playwright-core` 1.59.1 is Apache-2.0 and is included in the generated runtime
+inventory. The cloud validation image installs its matching Chromium revision
+in `/opt/zeros/design-browsers`. Preserve the downloaded browser's license and
+third-party credits files when producing or distributing that image. This
+browser is a cloud image dependency; desktop Design capture uses Electron.
+
 ## Maintenance policy
 
 Any change that adds, removes, upgrades, vendors, generates, or packages a

@@ -1,5 +1,4 @@
 import path from "node:path";
-import { workspaceViewMode } from "../git/types";
 import { listWorkspaces } from "../git/state";
 import { refExists } from "../git/default-branch";
 import { runGit } from "../git/git-exec";
@@ -33,12 +32,11 @@ export async function removeDesignDirectory(opts: {
     if (
       listWorkspaces({ archived: false }).some(
         (ws) =>
-          workspaceViewMode(ws) === "design" &&
           path.resolve(ws.repoRoot) === path.resolve(repoRoot),
       )
     )
       throw new Error(
-        "Design workspaces are still open on this repo. Switch them to Code mode before removing a Design registration.",
+        "Workspaces are still open on this repo. Archive them before removing a Design registration; any workspace can be editing this Design directory.",
       );
     await assertGitCheckpointReady(repoRoot);
     const removal = prepareDesignMetadataRemoval(repoRoot, directory);

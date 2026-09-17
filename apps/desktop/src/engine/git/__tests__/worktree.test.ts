@@ -968,7 +968,7 @@ printf ran > '${sentinel}'
     }
   });
 
-  it("renameDesignDirectory commits the folder and keeps its pointer personal, refusing live design workspaces", async () => {
+  it("renameDesignDirectory commits the folder and keeps its pointer personal, refusing incompatible legacy metadata", async () => {
     // Seed a committed design folder in the MAIN checkout.
     const designDir = path.join(repoRoot, "Zeros Design");
     await mkdir(designDir, { recursive: true });
@@ -991,7 +991,7 @@ printf ran > '${sentinel}'
         to: "Brand",
       }),
     ).rejects.toMatchObject({
-      message: expect.stringContaining("design workspace"),
+      message: expect.stringContaining("Design folder metadata"),
     });
     await deleteWorkspace({
       workspaceId: live.workspaceId,
@@ -1036,6 +1036,21 @@ printf ran > '${sentinel}'
     expect(readDesignDirectoryRegistry(repoRoot)?.directories).toEqual({
       [id]: { path: "Product" },
     });
+  });
+
+  it("renames the repository Design folder without changing a live workspace's checkout or presentation", async () => {
+    const folder = "Shared Design";
+    await mkdir(path.join(repoRoot, folder));
+    commitDesignMetadata(repoRoot, folder, '{"version":3,"frames":{}}');
+    await execFileAsync("git", ["add", folder, ".gitignore"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-qm", "Design metadata"], { cwd: repoRoot });
+    const live = await createWorkspace({ repoRoot, kind: "design", baseBranch: "main" });
+    const before = await readFile(path.join(live.path, folder, "design.toml"), "utf8");
+    try {
+      await renameDesignDirectory({ repoRoot, from: folder, to: "Renamed Design" });
+      expect(await readFile(path.join(live.path, folder, "design.toml"), "utf8")).toBe(before);
+      expect(existsSync(path.join(live.path, "Renamed Design"))).toBe(false);
+    } finally { await deleteWorkspace({ workspaceId: live.workspaceId, includeBranch: true }); }
   });
 
   it("renames only the chosen Design folder and retains other staged changes", async () => {

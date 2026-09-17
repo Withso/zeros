@@ -37,8 +37,7 @@ const WORKSPACE_MUTATIONS = new Set([
   // Workspace metadata, worktree lifecycle, and local-main Git bootstrap.
   "workspace.create",
   "workspace.setStatus",
-  // Mode switch (code ⇄ design) — flips the row's mode AND rewrites the
-  // checkout's writability, so surfaces keyed on either must re-read.
+  // Legacy presentation receipt; opening the Design tab no longer flips it.
   "workspace.setMode",
   "workspace.setRemoteRestricted",
   "workspace.reassignLocalOrganization",
@@ -56,16 +55,24 @@ const WORKSPACE_MUTATIONS = new Set([
   // app-owned canvas document, so every preview/lint consumer must advance in
   // the same exact workspace generation as Files and Changes.
   "design.frame.create",
+  "design.initialize",
+  "design.transaction.apply",
+  "design.history.undo",
+  "design.history.redo",
   "design.frame.rename",
   "design.frame.duplicate",
   "design.frame.delete",
   "design.canvas.update",
   "design.node.styles",
+  "design.node.transfer",
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
   "design.token.update",
   "design.stage",
+  "design.unstage",
+  "design.review.resolve",
+  "design.review.capture",
   "design.save",
   "design.commit",
   "git.initInPlace",
@@ -141,6 +148,7 @@ const WORKSPACE_MUTATIONS = new Set([
  *  the merged PR) — e.g. a >60s "Merge PR" showed "Couldn't merge PR" and left
  *  a stale card even though GitHub merged it. */
 export const LONG_LIFECYCLE_OPS = new Set([
+
   // Worktree lifecycle.
   // Unlinks or materializes every file in the affected folders, so it can run
   // for many seconds. Listed here so the DB_CHANGED goes to the ORIGINATOR
@@ -201,6 +209,8 @@ export function dbChangedIncludesOriginator(op: string): boolean {
 
 /** Which renderer server-state collections a successful operation changed. */
 export function dbChangedKinds(op: string, result?: unknown): string[] | null {
+  if (op === "design.transaction.apply" && result && typeof result === "object" &&
+      (result as { result?: { dryRun?: boolean } }).result?.dryRun === true) return null;
   if (CHAT_MUTATIONS.has(op)) return ["chats"];
   if (PROJECT_MUTATIONS.has(op)) return ["projects"];
   if (SETTINGS_MUTATIONS.has(op)) return ["settings"];

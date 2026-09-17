@@ -1,3 +1,5 @@
+import { useDesignWorkspaceUiStore } from "./design-workspace-ui";
+import { rememberDesignDirectoryIdentity } from "../../../platform/bridge/design-bridge";
 // ──────────────────────────────────────────────────────────
 // Design workspace cache — exact workspace snapshot server state
 // ──────────────────────────────────────────────────────────
@@ -7,6 +9,7 @@
 // issuing independent bridge requests and preserves the last confirmed canvas
 // while a disk edit revalidates in the background.
 
+import { designBackgroundWork } from "./design-background-work";
 import {
   designApplyTransaction,
   designCommit,
@@ -25,6 +28,7 @@ import {
   designUpdateToken,
   designUpdateCanvas,
   designUpdateStyles,
+  designTransferNode,
   designWriteHtml,
   type DesignFrameGeometryWire,
   type DesignTextFrameSeedWire,
@@ -43,6 +47,7 @@ import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
 import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
+import { DesignHistoryPreview } from "./design-history-preview";
 import { clearCommittedDesignLivePreviewStyles } from "./design-live-preview";
 import {
   designRuntimeFrameState,
@@ -157,15 +162,44 @@ function beginLocalDesignMutation(workspaceId: string): () => void {
   };
 }
 
+const historyPreview = new DesignHistoryPreview();
+const historyStateKey = (
+  snapshot: DesignWorkspaceSnapshotWire | null | undefined,
+) =>
+  JSON.stringify(
+    snapshot?.frames.map((frame) => [
+      frame.file,
+      frame.sourceVersion,
+      frame.x,
+      frame.y,
+      frame.width,
+      frame.height,
+    ]) ?? [],
+  );
+
+/** Review admission waits for already-submitted editor/gesture transactions.
+ * No timer, network write, or autosave status is introduced. */
+export async function waitForPendingDesignEdits(workspaceId: string): Promise<void> {
+  while (localMutationTailByWorkspace.has(workspaceId)) {
+    await localMutationTailByWorkspace.get(workspaceId);
+  }
+}
+
 async function runLocalDesignMutation<T>(
   workspaceId: string,
   mutation: () => Promise<T>,
 ): Promise<T> {
+  const directoryId = useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId;
   const finishMutation = beginLocalDesignMutation(workspaceId);
   const previous = localMutationTailByWorkspace.get(workspaceId);
   const result = (previous ?? Promise.resolve())
     .catch(() => undefined)
-    .then(mutation);
+    .then(() => {
+      if (directoryId && useDesignWorkspaceUiStore.getState().byWorkspace[workspaceId]?.directoryId !== directoryId) {
+        throw new Error("The active Design directory changed. Refresh before editing.");
+      }
+      return mutation();
+    });
   const tail = result.then(
     () => undefined,
     () => undefined,
@@ -330,9 +364,15 @@ function scheduleAdoptedFrameSettlement(
   let cancelled = false;
   const settleAudit = async () => {
     const runtime = designFrameRuntime(workspaceId, frame);
-    if (!runtime || runtime.sourceVersion !== sourceVersion) return;
+    if (
+      !runtime ||
+      runtime.isActive?.() === false ||
+      runtime.sourceVersion !== sourceVersion
+    )
+      return;
     const snapshot = await runtime.getSnapshot();
     if (
+      runtime.isActive?.() === false ||
       snapshot.sourceVersion !== sourceVersion ||
       designFrameRuntime(workspaceId, frame) !== runtime ||
       designRuntimeFrameState(workspaceId, frame)?.sourceVersion !==
@@ -353,10 +393,14 @@ function scheduleAdoptedFrameSettlement(
   const run = () => {
     if (cancelled) return;
     pendingAdoptedSettlementByFrame.delete(key);
-    void settleAudit().catch(() => {
-      // The retained exact-generation audit stays visible until a later full
-      // runtime snapshot or workspace refresh can confirm its replacement.
-    });
+    void designBackgroundWork
+      .schedule(`audit:${key}`, async () => {
+        if (!cancelled) await settleAudit();
+      })
+      .catch(() => {
+        // The retained exact-generation audit stays visible until a later full
+        // runtime snapshot or workspace refresh can confirm its replacement.
+      });
     void captureDesignRuntimeScreenshot(
       workspaceId,
       folder,
@@ -829,7 +873,7 @@ export function stabilizeDesignWorkspaceSnapshot(
   previous: DesignWorkspaceSnapshotWire | undefined,
   next: DesignWorkspaceSnapshotWire,
 ): DesignWorkspaceSnapshotWire {
-  if (!previous) return next;
+  if (!previous || previous.directoryId !== next.directoryId) return next;
   const frames = stableArray(previous.frames, next.frames, sameFrame);
   const tokens = stableArray(previous.tokens, next.tokens, sameToken);
   const assets = stableArray(previous.assets, next.assets, sameAsset);
@@ -849,6 +893,7 @@ export function stabilizeDesignWorkspaceSnapshot(
       ? previous.lint
       : { ...next.lint, violations };
   return frames === previous.frames &&
+    next.directory === previous.directory &&
     next.protocolCapability === previous.protocolCapability &&
     tokens === previous.tokens &&
     next.tokenSourceVersion === previous.tokenSourceVersion &&
@@ -856,6 +901,8 @@ export function stabilizeDesignWorkspaceSnapshot(
     lint === previous.lint
     ? previous
     : {
+        directoryId: next.directoryId,
+        directory: next.directory,
         protocolCapability: next.protocolCapability,
         frames,
         tokens,
@@ -863,6 +910,19 @@ export function stabilizeDesignWorkspaceSnapshot(
         assets,
         lint,
       };
+}
+
+/** Called after a cache publication, never from an unadmitted fetch result. */
+export function observeDesignDirectory(workspaceId: string, snapshot: DesignWorkspaceSnapshotWire): void {
+  if (!snapshot.directoryId) return;
+  const ui = useDesignWorkspaceUiStore.getState();
+  const previous = ui.byWorkspace[workspaceId]?.directoryId;
+  if (previous && previous !== snapshot.directoryId) {
+    useDesignRuntimeStore.getState().forgetWorkspace(workspaceId);
+    invalidateWorkspaceDesignFoundations(workspaceId);
+  }
+  rememberDesignDirectoryIdentity(workspaceId, snapshot.directoryId);
+  ui.bindDirectory(workspaceId, snapshot.directoryId);
 }
 
 function publishDesignWorkspaceSnapshot(
@@ -1063,6 +1123,38 @@ export async function deleteDesignFrameCached(
   });
 }
 
+export async function transferDesignNodeCached(
+  workspaceId: string,
+  input: Parameters<typeof designTransferNode>[1],
+) {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designTransferNode(workspaceId, {
+      ...input,
+      sourceVersion: resolveLocalFrameSourceVersion(
+        workspaceId,
+        input.frame,
+        input.sourceVersion,
+      ),
+      ...(input.destinationFrame && input.destinationSourceVersion
+        ? {
+            destinationSourceVersion: resolveLocalFrameSourceVersion(
+              workspaceId,
+              input.destinationFrame,
+              input.destinationSourceVersion,
+            ),
+          }
+        : {}),
+    });
+    historyPreview.clear(workspaceId);
+    const snapshot = publishDesignWorkspaceSnapshot(
+      workspaceId,
+      result.snapshot,
+    );
+    settleFoundationMutation(workspaceId, null, snapshot);
+    return result;
+  });
+}
+
 export async function updateDesignNodeStylesCached(
   workspaceId: string,
   input: {
@@ -1082,6 +1174,9 @@ export async function updateDesignNodeStylesCached(
         input.sourceVersion,
       ),
       async (sourceVersion) => {
+        const beforeState = historyStateKey(
+          designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+        );
         const result = await designUpdateStyles(workspaceId, {
           ...input,
           sourceVersion,
@@ -1095,13 +1190,22 @@ export async function updateDesignNodeStylesCached(
           sourceVersion,
           nextSourceVersion,
         );
-        await adoptDesignStyleGeneration(
+        const adopted = await adoptDesignStyleGeneration(
           workspaceId,
           input.frame,
           sourceVersion,
           nextSourceVersion,
           [{ nodeId: input.nodeId, styles: input.styles }],
         );
+        if (adopted && nextSourceVersion)
+          historyPreview.record(
+            workspaceId,
+            input.frame,
+            sourceVersion,
+            nextSourceVersion,
+            beforeState,
+            historyStateKey(result.snapshot),
+          );
         const snapshot = publishDesignWorkspaceSnapshot(
           workspaceId,
           result.snapshot,
@@ -1505,6 +1609,9 @@ async function applyPreparedDesignTransactionCached(
       const previousSourceVersion =
         currentFrameSourceVersion(workspaceId, frame) ??
         designFrameRuntime(workspaceId, frame)?.sourceVersion;
+      const beforeState = historyStateKey(
+        designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+      );
       const result = await designApplyTransaction(
         workspaceId,
         frame,
@@ -1528,7 +1635,7 @@ async function applyPreparedDesignTransactionCached(
         );
         const adoption = transactionRuntimeAdoption(rebasedTransaction);
         if (adoption && previousSourceVersion) {
-          await adoptDesignStyleGeneration(
+          const adopted = await adoptDesignStyleGeneration(
             workspaceId,
             frame,
             previousSourceVersion,
@@ -1536,6 +1643,17 @@ async function applyPreparedDesignTransactionCached(
             adoption.styleUpdates,
             adoption.patch,
           );
+          if (adopted && nextSourceVersion)
+            historyPreview.record(
+              workspaceId,
+              frame,
+              previousSourceVersion,
+              nextSourceVersion,
+              beforeState,
+              historyStateKey(result.snapshot),
+              rebasedTransaction.coalesceKey,
+              rebasedTransaction.createdAt,
+            );
         }
         const snapshot = publishDesignWorkspaceSnapshot(
           workspaceId,
@@ -1594,18 +1712,30 @@ function transactionRuntimeAdoption(transaction: DesignTransaction): {
 } | null {
   if (
     !Array.isArray(transaction.operations) ||
-    transaction.operations.length > 32 ||
+    transaction.operations.length > 256 ||
     transaction.operations.some(
       (operation) =>
         operation.type !== "node.set-styles" &&
+        operation.type !== "node.move" &&
+        operation.type !== "frame.set-geometry" &&
         operation.type !== "keyframes.set",
     )
   ) {
     return null;
   }
+  const moves: NonNullable<DesignRuntimeGenerationPatch["moves"]> = [];
   const stylesByNode = new Map<string, Record<string, string | null>>();
   const keyframes: NonNullable<DesignRuntimeGenerationPatch["keyframes"]> = [];
   for (const operation of transaction.operations) {
+    if (operation.type === "frame.set-geometry") continue;
+    if (operation.type === "node.move") {
+      moves.push({
+        nodeId: operation.nodeId,
+        parentId: operation.parentId,
+        beforeId: operation.beforeId,
+      });
+      continue;
+    }
     if (operation.type === "keyframes.set") {
       keyframes.push({
         name: operation.name,
@@ -1628,10 +1758,18 @@ function transactionRuntimeAdoption(transaction: DesignTransaction): {
     nodeId,
     styles,
   }));
-  if (styleUpdates.length === 0 && keyframes.length === 0) return null;
+  if (styleUpdates.length === 0 && keyframes.length === 0 && moves.length === 0)
+    return null;
   return {
     styleUpdates,
-    ...(keyframes.length > 0 ? { patch: { keyframes } } : {}),
+    ...(keyframes.length > 0 || moves.length > 0
+      ? {
+          patch: {
+            ...(keyframes.length ? { keyframes } : {}),
+            ...(moves.length ? { moves } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -1726,6 +1864,18 @@ export async function applyDesignHistoryCached(
   frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
+  const prediction = historyPreview.take(
+    workspaceId,
+    historyStateKey(
+      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+    ),
+    direction,
+  );
+  if (prediction) {
+    const runtime = designFrameRuntime(workspaceId, prediction.frame);
+    if (runtime?.supports("restoreGeneration"))
+      void runtime.restoreGeneration(prediction.target, false).catch(() => {});
+  }
   return runLocalDesignMutation(workspaceId, async () => {
     const previousSourceVersions = new Map(
       (
@@ -1760,6 +1910,47 @@ export async function applyDesignHistoryCached(
           )?.sourceVersion,
         );
       }
+      const restoredFrame = historyFrame ?? prediction?.frame;
+      const target = result.snapshot.frames.find(
+        (candidate) => candidate.file === restoredFrame,
+      )?.sourceVersion;
+      if (prediction) {
+        if (restoredFrame === prediction.frame && target === prediction.target)
+          historyPreview.confirm(
+            workspaceId,
+            prediction,
+            historyStateKey(result.snapshot),
+          );
+        else historyPreview.clear(workspaceId);
+      }
+      if (restoredFrame && target) {
+        const runtime = designFrameRuntime(workspaceId, restoredFrame);
+        if (runtime?.supports("restoreGeneration")) {
+          const previous = runtime.sourceVersion;
+          try {
+            const restored = await runtime.restoreGeneration(target, true);
+            useDesignRuntimeStore
+              .getState()
+              .adoptFrameGeneration(
+                workspaceId,
+                restoredFrame,
+                previous,
+                target,
+                restored.snapshot,
+                restored.details,
+                restored.treeUnchanged,
+              );
+            const pendingTarget = historyPreview.pendingTarget(
+              workspaceId,
+              restoredFrame,
+            );
+            if (pendingTarget)
+              await runtime.restoreGeneration(pendingTarget, false);
+          } catch {
+            /* Unknown generations fall back to the authoritative document. */
+          }
+        }
+      }
       const snapshot = publishDesignWorkspaceSnapshot(
         workspaceId,
         result.snapshot,
@@ -1780,11 +1971,22 @@ export async function applyDesignHistoryCached(
     }
     if (!result.snapshot) invalidateWorkspaceDesignFoundations(workspaceId);
     return result;
+  }).catch(async (error) => {
+    historyPreview.clear(workspaceId);
+    if (prediction) {
+      const runtime = designFrameRuntime(workspaceId, prediction.frame);
+      if (runtime?.supports("restoreGeneration"))
+        await runtime
+          .restoreGeneration(runtime.sourceVersion, false)
+          .catch(() => {});
+    }
+    throw error;
   });
 }
 
 /** Test-only reset for exact-key/reference-stability coverage. */
 export function resetDesignWorkspaceCacheForTests(): void {
+  historyPreview.clear();
   for (const cancel of pendingAdoptedSettlementByFrame.values()) cancel();
   pendingAdoptedSettlementByFrame.clear();
   pendingLocalMutationByWorkspace.clear();

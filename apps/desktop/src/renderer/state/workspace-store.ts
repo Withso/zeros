@@ -48,6 +48,7 @@ import {
   saveScopes,
   defaultScopeFor,
   defaultTabs,
+  migrateDesignPresentation,
   MAX_PERSISTED_WORKBENCH_SCOPES,
   orderWorkbenchTabs,
   recordRecentBrowser,
@@ -295,6 +296,7 @@ export type Action =
       actionsReady: boolean;
     }
   | { type: "RESET_WORKBENCH_TABS" }
+  | { type: "MIGRATE_DESIGN_PRESENTATION"; scope: string; kind: "code" | "design" }
   | {
       type: "ADD_WORKBENCH_TAB";
       tab: WorkbenchTab;
@@ -1663,6 +1665,16 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         ),
       };
     }
+    case "MIGRATE_DESIGN_PRESENTATION": {
+      const scope = workbenchScopeForFolder(action.scope);
+      const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+      const next = migrateDesignPresentation(current, action.kind);
+      if (next === current) return state;
+      return {
+        ...state,
+        workbenchByScope: setWorkbenchScope(state.workbenchByScope, scope, next),
+      };
+    }
     case "ADD_WORKBENCH_TAB": {
       const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
@@ -1673,7 +1685,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
-        action.tab.type === "context"
+        action.tab.type === "context" || action.tab.type === "design"
       ) {
         const existing = cur.tabs.find((t) => t.type === action.tab.type);
         if (existing) {
@@ -1697,7 +1709,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const tab =
         action.tab.type === "changes" ||
         action.tab.type === "review" ||
-        action.tab.type === "context"
+        action.tab.type === "context" || action.tab.type === "design"
           ? { ...action.tab, pinned: true }
           : action.tab.pinned || action.tab.fixed
             ? { ...action.tab, pinned: false, fixed: undefined }
@@ -1740,7 +1752,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (
         target.type === "changes" ||
         target.type === "review" ||
-        target.type === "context"
+        target.type === "context" || target.type === "design"
       )
         return state;
       // The FIXED Files home is permanent too, but its ✕ means "close the
@@ -1925,7 +1937,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         pinned:
           target.type === "changes" ||
           target.type === "review" ||
-          target.type === "context",
+          target.type === "context" || target.type === "design",
         // Permanence is born with the slice (defaultTabs/normalizeWorkbenchTabs):
         // updates can neither demote the fixed Files home nor mint a new one.
         fixed: target.fixed,

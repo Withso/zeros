@@ -287,6 +287,7 @@ describe("defaultTabs", () => {
     const { tabs, activeId, recentBrowsers } = defaultTabs();
     expect(tabs.map((tab) => tab.type)).toEqual([
       "files",
+      "design",
       "changes",
       "review",
       "context",
@@ -294,6 +295,7 @@ describe("defaultTabs", () => {
     ]);
     expect(tabs.map((tab) => tab.title)).toEqual([
       "Open file",
+      "Design",
       "Changes",
       "Review",
       "Context",
@@ -301,6 +303,7 @@ describe("defaultTabs", () => {
     ]);
     expect(tabs.map((tab) => Boolean(tab.pinned))).toEqual([
       false,
+      true,
       true,
       true,
       true,
@@ -330,6 +333,7 @@ describe("normalizeWorkbenchTabs", () => {
     // permanent now — a persisted slice without one is legacy state.
     expect(out.map((tab) => tab.type)).toEqual([
       "files",
+      "design",
       "changes",
       "review",
       "context",
@@ -365,6 +369,7 @@ describe("normalizeWorkbenchTabs", () => {
     ]);
     expect(out.map((tab) => tab.id)).toEqual([
       "blank",
+      expect.stringMatching(/^design-/),
       expect.stringMatching(/^changes-/),
       expect.stringMatching(/^review-/),
       expect.stringMatching(/^context-/),
@@ -811,6 +816,7 @@ describe("migrateScopes", () => {
     // including the fixed Files home a pre-flag slice couldn't have kept.
     expect(out["/repo/feature"].tabs.map((tab) => tab.type)).toEqual([
       "files",
+      "design",
       "changes",
       "review",
       "context",
@@ -858,6 +864,7 @@ describe("workbench persistence compatibility", () => {
     );
     expect(loadScopes()["/repo/main"].tabs.map((tab) => tab.type)).toEqual([
       "files",
+      "design",
       "changes",
       "review",
       "context",

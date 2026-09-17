@@ -217,12 +217,14 @@ export interface AgentGatewayOptions {
   projectRoot: string;
   events: AgentGatewayEvents;
   /** Production injects the engine-wide actor router: local Code runs on the
-   * native host, local Design runs in ZSR, and cloud may force its qualified
-   * worker boundary. Standalone callers receive the same local actor routing. */
+   * native host and cloud may force its qualified worker boundary. Composer
+   * mode does not select an execution backend. */
   executionBoundary?: ExecutionBoundary;
   /** Browser-preview ingress. Local sessions use loopback; a qualified cloud
    * coordinator injects a root-owned signed-port factory. */
   previewGatewayFactory?: BoundaryPreviewGatewayFactory;
+  /** Engine-owned product tools, scoped to one native Code execution. */
+  sessionToolFactory?: import("./session-tools").AgentSessionToolFactory;
 }
 
 // ── AgentAdapter — the per-CLI contract ──────────────────
@@ -274,8 +276,8 @@ export interface AgentFilesystemTerritory {
    * lifecycle comparison and Design identity checks. */
   designRecognitionPaths: readonly string[];
   /** Complete semantic Design protection set discovered for this Code
-   * territory. It also supplies the denied-path input to a Design-agent ZSR
-   * policy; canonical Git metadata remains writable to a native Code actor. */
+   * territory and qualified contained policies. Canonical Git metadata
+   * remains writable to a native Code actor. */
   writeCapabilities: AgentWriteCapabilities;
 }
 

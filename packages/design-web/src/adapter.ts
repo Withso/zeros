@@ -30,6 +30,7 @@ import {
   mutateDesignNodeDeleteSource,
   mutateDesignNodeDuplicateSource,
   mutateDesignNodeHtmlSource,
+  mutateDesignNodeMoveSource,
   mutateDesignNodeTextSource,
   parseDesignWebProjection,
 } from "./html";
@@ -415,6 +416,20 @@ function applyOperation(
       operation,
       { ...state.files, [state.entryFile]: healed },
       [operation.nodeId],
+    );
+  }
+  if (operation.type === "node.move") {
+    const updated = mutateDesignNodeMoveSource(
+      state.files[state.entryFile]!,
+      operation.nodeId,
+      operation.parentId,
+      operation.beforeId,
+    );
+    return withFiles(
+      state,
+      operation,
+      { ...state.files, [state.entryFile]: updated },
+      [operation.nodeId, operation.parentId],
     );
   }
   if (operation.type === "node.duplicate") {

@@ -319,6 +319,16 @@ export class KeyedAsyncCache<T> {
   public keys(): string[] {
     return [...this.entries.keys()];
   }
+  /** Owner removal is a stronger boundary than revalidation. Invalidate any
+   * in-flight generation and its queued refresh before dropping its content. */
+  public forget(key: string): void {
+    const entry = this.entries.get(key);
+    this.pending.delete(key); this.queuedRefreshes.delete(key);
+    if (!entry) return;
+    entry.generation += 1; entry.stale = false;
+    this.replaceSnapshot(key, entry, { ...INITIAL_SNAPSHOT, invalidationVersion: entry.snapshot.invalidationVersion + 1 });
+    if (entry.listeners.size === 0) this.entries.delete(key);
+  }
 
   /** Drop every retained snapshot. Intended for deterministic test isolation;
    * production invalidation should preserve usable data via invalidate(All). */

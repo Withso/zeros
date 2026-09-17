@@ -1,3 +1,4 @@
+import type { DesignCheckoutStatus } from "@zeros/protocol/design-context";
 // ──────────────────────────────────────────────────────────
 // Shared read caches for pickers, dialogs, and settings probes
 // ──────────────────────────────────────────────────────────
@@ -27,6 +28,30 @@ import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge
 import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
 import type { bridgeDesignListDirectories } from "../platform/bridge/design-bridge";
+import type { DesignReviewEvidence, DesignReviewSnapshot, DesignProposalReview, DesignReviewFileDetail } from "@zeros/protocol/design-review";
+
+
+export const designReviewCache = new KeyedAsyncCache<DesignReviewSnapshot>({
+  maxEntries: 32, maxWeight: 4 * 1024 * 1024, weightOf: value => JSON.stringify(value).length * 2,
+});
+export const designReviewDetailCache = new KeyedAsyncCache<DesignProposalReview | DesignReviewFileDetail>({
+  maxEntries: 8, maxWeight: 4 * 1024 * 1024, weightOf: value => JSON.stringify(value).length * 2,
+});
+export const designReviewEvidenceCache = new KeyedAsyncCache<DesignReviewEvidence>({
+  maxEntries: 2, maxWeight: 6 * 1024 * 1024, weightOf: value => (value.before.length + value.after.length) * 2 + 2048,
+});
+export function invalidateDesignReviewCache(workspaceId?: string): void {
+  for (const cache of [designReviewCache, designReviewDetailCache, designReviewEvidenceCache]) {
+    for (const key of cache.keys()) {
+      if (!workspaceId || JSON.parse(key)[0] === workspaceId) cache.invalidate(key);
+    }
+  }
+}
+export function forgetDesignReviewCache(workspaceId: string): void {
+  for (const cache of [designReviewCache, designReviewDetailCache, designReviewEvidenceCache]) {
+    for (const key of cache.keys()) if (JSON.parse(key)[0] === workspaceId) cache.forget(key);
+  }
+}
 
 /** Local git reads (bridge round-trip, no network): branches move often, so
  *  revalidate after a short window — still instant within a browsing burst. */
@@ -63,6 +88,8 @@ export const pickerWorkspacesCache = new KeyedAsyncCache<Workspace[]>(16);
 /** The folder Design mode would open (or create) for a checkout — see
  *  state/design-directory-target.ts for the key shape and fetcher. Null data
  *  means the engine could not preview it. */
+export const designCheckoutStatusCache = new KeyedAsyncCache<DesignCheckoutStatus>(32);
+
 export const designDirectoryTargetCache = new KeyedAsyncCache<{
   directory: string;
   exists: boolean;
@@ -313,6 +340,7 @@ export function invalidateExternalGitRefCaches(
  * nor project slugs, so their safe exact semantic boundary is the bounded
  * cache itself. */
 export function invalidateDesignDirectoryTargetReadCache(): void {
+  designCheckoutStatusCache.invalidateAll();
   designDirectoryTargetCache.invalidateAll();
   designDirectoryListingCache.invalidateAll();
 }
@@ -326,6 +354,7 @@ export function invalidateDesignDirectoryTargetReadCache(): void {
  *  the reconnect call site in use-git-refresh-key) so adding a cache above and
  *  enrolling it in the reconnect boundary is one edit in one file. */
 export function invalidateAllEngineReadCaches(): void {
+  invalidateDesignReviewCache();
   remoteBranchesCache.invalidateAll();
   allBranchesCache.invalidateAll();
   openPrsCache.invalidateAll();
@@ -336,6 +365,7 @@ export function invalidateAllEngineReadCaches(): void {
   providerMemorySettingsCache.invalidateAll();
   filesToCopyPreviewCache.invalidateAll();
   workingDirectoriesCache.invalidateAll();
+  designCheckoutStatusCache.invalidateAll();
   designDirectoryTargetCache.invalidateAll();
   designDirectoryListingCache.invalidateAll();
 

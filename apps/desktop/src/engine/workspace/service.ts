@@ -1,23 +1,42 @@
+import { designDirectoryEntry } from "../design/metadata";
+import { assertDesignCheckoutReadable, readDesignCheckoutStatus } from "../design/checkout-status";
+import {
+  reqStr,
+  reqNum,
+  optStr,
+  optNum,
+  optBool,
+  optStrArr,
+  type Params,
+} from "./params";
+import {
+  handleDesignWorkspaceRoute,
+  isDesignWorkspaceRoute,
+  type DesignWorkspaceRouteHost,
+  type DesignReadWorkspace,
+} from "../design/routes";
+import {
+  MAX_DESIGN_HISTORY_WORKSPACES,
+  pruneWorkspaceDesignHistory,
+  type WorkspaceDesignHistoryEntry,
+  type WorkspaceDesignHistoryState,
+} from "../design/workspace-history";
 import {
   changesHistorySchema,
   turnHistoryCursorSchema,
 } from "@zeros/protocol/changes-history";
 import { historyDiff, listHistoryTurns } from "../git/history-diff";
+
 import {
   sessionToolQuerySchema,
   sessionToolAuthSchema,
   type SessionToolsSnapshot,
   type SessionToolsInventorySnapshot,
 } from "@zeros/protocol/agent-extensions";
-import { removeDesignDirectory } from "../design/remove-directory";
+
 import { listWorkspaceFilesWithDesign } from "../design/file-listing";
 import { parseDesignManifest } from "../design/manifest";
-import { designMetadataIndexPaths } from "../design/metadata-git";
-import {
-  adoptExistingDesignDirectory,
-  previewExistingDesignDirectory,
-} from "../design/adopt-directory";
-import { stageDesignRegistry } from "../design/metadata-git";
+
 import {
   readDesignProtocolResource as readDesignResource,
   type DesignProtocolResource,
@@ -43,7 +62,7 @@ import {
 // exports are handed directly to the desktop save surface.
 // ──────────────────────────────────────────────────────────
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   extensionQuerySchema,
   saveZerosSkillSchema,
@@ -73,7 +92,6 @@ import * as nodePath from "node:path";
 import { parse as parseToml } from "smol-toml";
 import {
   GitError,
-  assertGitCheckpointReady,
   changeTargetBranch,
   checkoutBranch,
   commit,
@@ -97,7 +115,6 @@ import {
   prepareWorkspaceCreate,
   enterDesignMode,
   exitDesignMode,
-  renameDesignDirectory,
   getWorkspace,
   getWorkspaceLifecycleStatus,
   getWorkspaceById,
@@ -143,12 +160,9 @@ import {
 } from "../git";
 import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
-import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+
 import { sameProviderBinding } from "@zeros/protocol/identities";
-import {
-  designTransactionSchema,
-  type DesignOperation,
-} from "@zeros/design-core";
+
 import type {
   RunActionStatus,
   RunStartArgs,
@@ -237,42 +251,15 @@ import {
   personalRepoRoot,
   personalWorkspaceRoot,
 } from "../settings/personal-repo";
+import { forgetWorkspaceDesignApi } from "../design/design-api";
 import {
-  designDocumentIdForFrame,
-  forgetWorkspaceDesignApi,
-  getWorkspaceDesignApi,
-} from "../design/design-api";
-import {
-  captureDesignFrameRestorePoint,
-  createDesignFrame,
-  deleteDesignFrame,
   designDirectoryNameFor,
   DESIGN_CANVAS_FILE,
-  DESIGN_TOKENS_FILE,
-  duplicateDesignFrame,
-  lintDesignDocument,
-  listDesignFrames,
-  readDesignFrame,
-  readDesignMutationResult,
-  recoverPendingDesignTransaction,
-  readDesignElementOffsetMap,
-  readDesignFrameRenderIdentity,
-  readDesignFrameSelectionIdentity,
   readDesignWorkspaceSnapshot,
-  readDesignTokens,
-  readDesignTokensDocument,
-  prepareDesignAssetInsertion,
-  renameDesignFrame,
-  replaceDesignFrameFromHistory,
-  restoreDesignFrame,
-  sameDesignFrameRestorePoint,
-  type DesignFrameRestorePoint,
-  type DesignLintViolation,
   type DesignWorkspaceSnapshot,
 } from "../design/document";
 import {
   discoverDesignDirectories,
-  previewDesignDirectoryForEnter,
   resolveDesignDirectoryPointerState,
   validateDesignDirectoryPointerTarget,
 } from "../design/directory";
@@ -286,15 +273,12 @@ import {
 import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 import { repoPathOverlapsDesignRoot as sharedRepoPathOverlapsDesignRoot } from "../design/path-authority";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
+import { initializeWorkspaceDesign } from "../git/design-mode";
 import { withWorkspaceGitMutation } from "../git/mutation-lock";
 import { unfenceDesignDirectory } from "../design/workspace-lock";
-import { setDesignRuntimeAudit } from "../design/runtime-audits";
-import {
-  forgetDesignScreenshots,
-  normalizeDesignScreenshot,
-  setDesignScreenshot,
-} from "../design/screenshots";
-import { forgetDesignSelection, setDesignSelection } from "../design/selection";
+
+import { forgetDesignScreenshots } from "../design/screenshots";
+import { forgetDesignSelection } from "../design/selection";
 import { scanNativeMcpConfigs } from "../agents/mcp-scan";
 import { resolveMcpServers } from "../agents/mcp-registry";
 import { releaseZerosBrowserConversation } from "../browser/browser-tool-client";
@@ -593,6 +577,7 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
+  "design.initialize",
   "file.write",
   "attachment.write",
   // These are normally reads, but a window containing a legacy transcript
@@ -606,9 +591,12 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.frame.delete",
   "design.canvas.update",
   "design.node.styles",
+  "design.node.transfer",
   "design.node.text",
   "design.node.html",
   "design.transaction.apply",
+  "design.review.resolve",
+  "design.review.capture",
   "design.history.undo",
   "design.history.redo",
   "design.asset.insert",
@@ -677,6 +665,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
  * on Git's own lock files, so callers must still surface a lock conflict rather
  * than retrying through another execution backend. */
 const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
+  "design.initialize",
   "design.stage",
   "design.unstage",
   "design.commit",
@@ -724,21 +713,11 @@ const SERIALIZED_GIT_MUTATION_OPS = new Set<string>([
   "detach.start",
 ]);
 
-/** Concurrent duality: a design-MODE workspace is an ordinary workspace whose
- * codebase stays fully live (agents/terminals/git keep working), so generic
- * mutations are NOT blocked anymore. The design document's protection is
- * territorial instead — Code-agent instructions plus path fences in the
- * individual handlers. The one survivor: hiding
- * folders via sparse-checkout could remove the design directory from disk
- * underneath an open canvas, so the picker stays unavailable while the
- * design surface owns the workspace's presentation. */
-const DESIGN_WORKSPACE_BLOCKED_MUTATIONS = new Set<string>([
-  "workspace.setWorkingDirectories",
-]);
 /** These handlers write the active document or its canvas context. Resolve
  * their directory for the whole async operation, just like Design reads. */
 const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.transaction.apply",
+  "design.review.resolve",
   "design.history.undo",
   "design.history.redo",
   "design.token.update",
@@ -751,6 +730,7 @@ const DESIGN_DOCUMENT_MUTATIONS = new Set<string>([
   "design.frame.delete",
   "design.canvas.update",
   "design.node.styles",
+  "design.node.transfer",
   "design.node.text",
   "design.node.html",
   "design.asset.insert",
@@ -1238,372 +1218,6 @@ function preserveHostOnlyFields(c: ChatRow): ChatRow {
   };
 }
 
-type Params = Record<string, unknown>;
-
-function reqStr(p: Params, key: string): string {
-  const v = p[key];
-  if (typeof v !== "string" || v.length === 0) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `missing required string '${key}'`,
-    });
-  }
-  return v;
-}
-function reqNum(p: Params, key: string): number {
-  const v = p[key];
-  if (typeof v !== "number" || !Number.isFinite(v)) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `missing required number '${key}'`,
-    });
-  }
-  return v;
-}
-const optStr = (p: Params, k: string): string | undefined =>
-  typeof p[k] === "string" && (p[k] as string).length > 0
-    ? (p[k] as string)
-    : undefined;
-
-const optStrArr = (p: Params, k: string): string[] | undefined => {
-  const v = p[k];
-  if (!Array.isArray(v)) return undefined;
-  const arr = v.filter((x): x is string => typeof x === "string");
-  return arr.length > 0 ? arr : undefined;
-};
-const optNum = (p: Params, k: string): number | undefined =>
-  typeof p[k] === "number" && Number.isFinite(p[k] as number)
-    ? (p[k] as number)
-    : undefined;
-const optBool = (p: Params, k: string): boolean | undefined =>
-  typeof p[k] === "boolean" ? (p[k] as boolean) : undefined;
-
-function hasAsciiControl(value: string, allowTextWhitespace = false): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 127) return true;
-    if (
-      code < 32 &&
-      (!allowTextWhitespace || (code !== 9 && code !== 10 && code !== 13))
-    ) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function designSelectionStrings(
-  value: unknown,
-  label: string,
-  limit: number,
-  maxLength: number,
-  keepMostSpecific = false,
-): string[] {
-  if (!Array.isArray(value) || (!keepMostSpecific && value.length > limit)) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${label} must be an array of at most ${limit} strings`,
-    });
-  }
-  const candidates = keepMostSpecific ? value.slice(-limit) : value;
-  const strings = candidates.filter(
-    (item): item is string =>
-      typeof item === "string" &&
-      item.length > 0 &&
-      item.trim().length > 0 &&
-      item.length <= maxLength &&
-      !hasAsciiControl(item),
-  );
-  if (strings.length !== candidates.length) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `${label} contains an invalid string`,
-    });
-  }
-  return strings;
-}
-
-function designSelectionRects(
-  value: unknown,
-): Array<{ x: number; y: number; width: number; height: number }> {
-  if (!Array.isArray(value) || value.length > DESIGN_SELECTION_NODE_LIMIT) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: `rects must be an array of at most ${DESIGN_SELECTION_NODE_LIMIT} rectangles`,
-    });
-  }
-  return value.map((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "rects contains an invalid rectangle",
-      });
-    }
-    const rect = item as Record<string, unknown>;
-    const values = [rect.x, rect.y, rect.width, rect.height];
-    if (
-      !values.every(
-        (entry) => typeof entry === "number" && Number.isFinite(entry),
-      ) ||
-      (rect.width as number) < 0 ||
-      (rect.height as number) < 0
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "rects contains non-finite or negative geometry",
-      });
-    }
-    return {
-      x: rect.x as number,
-      y: rect.y as number,
-      width: rect.width as number,
-      height: rect.height as number,
-    };
-  });
-}
-
-function designSelectionStyles(value: unknown): Record<string, string> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  const entries = Object.entries(value);
-  if (entries.length > 64) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: "keyComputedStyles contains too many properties",
-    });
-  }
-  const styles: Record<string, string> = {};
-  for (const [key, item] of entries) {
-    if (
-      !/^[A-Za-z][A-Za-z0-9-]{0,63}$/.test(key) ||
-      typeof item !== "string" ||
-      item.length > 512 ||
-      hasAsciiControl(item, true)
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "keyComputedStyles contains an invalid property",
-      });
-    }
-    styles[key] = item;
-  }
-  return styles;
-}
-
-function designMatchedDeclarations(value: unknown): Array<{
-  property: string;
-  value: string;
-  important?: boolean;
-  selector?: string;
-  sourceFile?: string;
-  sourceLine?: number;
-  inherited?: boolean;
-  active?: boolean;
-}> {
-  if (!Array.isArray(value) || value.length > 256) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: "matched must contain at most 256 declarations",
-    });
-  }
-  return value.map((candidate) => {
-    if (
-      !candidate ||
-      typeof candidate !== "object" ||
-      Array.isArray(candidate)
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "matched contains an invalid declaration",
-      });
-    }
-    const declaration = candidate as Record<string, unknown>;
-    const property = declaration.property;
-    const declarationValue = declaration.value;
-    if (
-      typeof property !== "string" ||
-      property.length > 128 ||
-      !/^(?:--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property) ||
-      typeof declarationValue !== "string" ||
-      declarationValue.length > 2_048 ||
-      hasAsciiControl(declarationValue, true)
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "matched contains an invalid declaration",
-      });
-    }
-    const optionalString = (key: "selector" | "sourceFile", max: number) => {
-      const item = declaration[key];
-      if (item === undefined) return undefined;
-      if (
-        typeof item !== "string" ||
-        item.length < 1 ||
-        item.length > max ||
-        hasAsciiControl(item, true)
-      ) {
-        throw new GitError({
-          code: "VALIDATION_FAILED",
-          message: `matched contains an invalid ${key}`,
-        });
-      }
-      return item;
-    };
-    const optionalBoolean = (key: "important" | "inherited" | "active") => {
-      const item = declaration[key];
-      if (item === undefined) return undefined;
-      if (typeof item !== "boolean") {
-        throw new GitError({
-          code: "VALIDATION_FAILED",
-          message: `matched contains an invalid ${key}`,
-        });
-      }
-      return item;
-    };
-    const sourceLine = declaration.sourceLine;
-    if (
-      sourceLine !== undefined &&
-      (!Number.isSafeInteger(sourceLine) || (sourceLine as number) < 1)
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "matched contains an invalid sourceLine",
-      });
-    }
-    const selector = optionalString("selector", 1_024);
-    const sourceFile = optionalString("sourceFile", 512);
-    const important = optionalBoolean("important");
-    const inherited = optionalBoolean("inherited");
-    const active = optionalBoolean("active");
-    return {
-      property,
-      value: declarationValue,
-      ...(selector ? { selector } : {}),
-      ...(sourceFile ? { sourceFile } : {}),
-      ...(sourceLine !== undefined ? { sourceLine: sourceLine as number } : {}),
-      ...(important !== undefined ? { important } : {}),
-      ...(inherited !== undefined ? { inherited } : {}),
-      ...(active !== undefined ? { active } : {}),
-    };
-  });
-}
-
-function designMutationStyles(value: unknown): Record<string, string | null> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: "styles must be an object",
-    });
-  }
-  const entries = Object.entries(value);
-  if (entries.length === 0 || entries.length > 64) {
-    throw new GitError({
-      code: "VALIDATION_FAILED",
-      message: "styles must contain between 1 and 64 properties",
-    });
-  }
-  const styles: Record<string, string | null> = {};
-  for (const [property, item] of entries) {
-    if (
-      property.length === 0 ||
-      property.length > 128 ||
-      (typeof item !== "string" && item !== null) ||
-      (typeof item === "string" &&
-        (item.length > 2_048 || hasAsciiControl(item, true)))
-    ) {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "styles contains an invalid property or value",
-      });
-    }
-    styles[property] = item;
-  }
-  return styles;
-}
-
-async function applyDesktopDesignOperation(
-  workspacePath: string,
-  frame: string,
-  intent: string,
-  operation: DesignOperation,
-  coalesceKey?: string,
-  expectedRevision?: string,
-) {
-  const api = getWorkspaceDesignApi(workspacePath);
-  const documentId = designDocumentIdForFrame(frame);
-  const baseRevision =
-    expectedRevision ?? (await api.open(documentId)).revision;
-  return api.apply({
-    schemaVersion: 1,
-    transactionId: `desktop:${randomUUID()}`,
-    documentId,
-    baseRevision,
-    actor: { kind: "human", id: "desktop" },
-    intent,
-    createdAt: Date.now(),
-    ...(coalesceKey ? { coalesceKey } : {}),
-    operations: [operation],
-  });
-}
-
-type WorkspaceDesignHistoryEntry =
-  | {
-      kind: "document";
-      frame: string;
-      coalesceKey?: string;
-      createdAt: number;
-      bytes: number;
-    }
-  | {
-      kind: "frame";
-      before: DesignFrameRestorePoint | null;
-      after: DesignFrameRestorePoint | null;
-      bytes: number;
-    };
-
-interface WorkspaceDesignHistoryState {
-  undo: WorkspaceDesignHistoryEntry[];
-  redo: WorkspaceDesignHistoryEntry[];
-  bytes: number;
-}
-
-const MAX_DESIGN_HISTORY_WORKSPACES = 16;
-const MAX_DESIGN_HISTORY_ENTRIES = 100;
-const MAX_DESIGN_HISTORY_BYTES = 16 * 1024 * 1024;
-
-function documentDesignHistoryEntry(
-  frame: string,
-  coalesceKey?: string,
-  createdAt = Date.now(),
-): WorkspaceDesignHistoryEntry {
-  return {
-    kind: "document",
-    frame,
-    ...(coalesceKey ? { coalesceKey } : {}),
-    createdAt,
-    bytes: (frame.length + (coalesceKey?.length ?? 0) + 32) * 2,
-  };
-}
-
-function frameDesignHistoryEntry(
-  before: DesignFrameRestorePoint | null,
-  after: DesignFrameRestorePoint | null,
-): WorkspaceDesignHistoryEntry {
-  const file = before?.file ?? after?.file;
-  if (!file || (before && after && before.file !== after.file)) {
-    throw new Error("Design frame history requires one stable file identity.");
-  }
-  return {
-    kind: "frame",
-    before,
-    after,
-    bytes:
-      (before ? Buffer.byteLength(before.source, "utf8") : 0) +
-      (after ? Buffer.byteLength(after.source, "utf8") : 0) +
-      file.length * 2 +
-      128,
-  };
-}
-
 const workspaceKind = (
   p: Params,
   key = "kind",
@@ -1635,14 +1249,24 @@ interface DesignTerritoryTransitionTarget {
   designDirectory: string;
 }
 
-interface DesignReadWorkspace {
-  workspace: Workspace;
-  root: string;
-  writeBack: boolean;
-  designDirectory: string;
-}
-
 export class WorkspaceService {
+  private readonly designRouteHost: DesignWorkspaceRouteHost = {
+    resolveDesignWorkspace: (workspaceId, remote) =>
+      this.resolveDesignWorkspace(workspaceId, remote),
+    resolveReadCwd: (workspaceId, remote) =>
+      this.resolveReadCwd(workspaceId, remote),
+    withDesignReadWorkspace: (workspaceId, remote, read) =>
+      this.withDesignReadWorkspace(workspaceId, remote, read),
+    designHistoryState: (workspacePath, create) =>
+      this.designHistoryState(workspacePath, create),
+    recordDesignHistory: (workspacePath, entry) =>
+      this.recordDesignHistory(workspacePath, entry),
+    readDesignSnapshot: (workspace, remote, options) =>
+      this.readDesignSnapshot(workspace, remote, options),
+    readDesignSnapshotRequest: (workspaceId, remote, hostLocalResources) =>
+      this.readDesignSnapshotRequest(workspaceId, remote, hostLocalResources),
+  };
+
   /** Engine-owned authority transition around a mutation that changes the
    * active Design territory. The service owns the settings/document operation;
    * the engine owns spawned agents, so neither side can close this race alone.
@@ -1775,15 +1399,7 @@ export class WorkspaceService {
     }
     state.undo.push(entry);
     state.bytes += entry.bytes;
-    while (
-      state.undo.length > MAX_DESIGN_HISTORY_ENTRIES ||
-      state.bytes > MAX_DESIGN_HISTORY_BYTES
-    ) {
-      const removed = state.undo.shift();
-      if (!removed) break;
-      state.bytes -= removed.bytes;
-    }
-    state.bytes = Math.max(0, state.bytes);
+    pruneWorkspaceDesignHistory(state);
   }
 
   private forgetDesignHistory(workspacePath: string): void {
@@ -1869,9 +1485,9 @@ export class WorkspaceService {
   }
 
   /** A Design identity change is serialized with the engine so affected
-   * Design-agent capabilities can be retired before the new pointer is
+   * scoped Design capabilities can be retired before the new pointer is
    * published. Native Code processes are not part of this handoff. Unit-level
-   * service users that never spawn Design agents may leave the hook unwired. */
+   * service users without agent tools may leave the hook unwired. */
   private async withDesignTerritoryTransition<T>(
     targets: readonly DesignTerritoryTransitionTarget[],
     mutation: () => Promise<T>,
@@ -2029,7 +1645,7 @@ export class WorkspaceService {
   }
 
   isWriteOp(op: string): boolean {
-    return WRITE_OPS.has(op);
+    return WRITE_OPS.has(op) || op === "design.initialize";
   }
 
   /** Resolve the managed workspace whose checkout/refs an operation may mutate.
@@ -2205,6 +1821,14 @@ export class WorkspaceService {
   }
 
   /** Resolve the semantic workspace owner without trusting a caller path. */
+  designAgentWorkspace(workspaceId: string): Workspace | null {
+    const workspace = workspaceId === LOCAL_MAIN_WORKSPACE_ID
+      ? this.localMainEntry()
+      : getWorkspaceById(workspaceId);
+    if (!workspace || workspace.archivedAt != null) return null;
+    return workspace.path === this.resolveReadCwd(workspaceId, false) ? workspace : null;
+  }
+
   private resolveDesignWorkspaceRecord(
     workspaceId: string,
     remote: boolean,
@@ -2226,22 +1850,13 @@ export class WorkspaceService {
     return workspace;
   }
 
-  /** Resolve a writable Design document. The checkout shape is identical in
-   * Code and Design views; this semantic mutation surface is enabled only
-   * while the trusted Design UI owns the visible mode. */
+  /** Resolve the trusted Design surface's document independently of tab or
+   * legacy presentation. Agent tool admission remains a separate boundary. */
   private resolveDesignWorkspace(
     workspaceId: string,
     remote: boolean,
   ): Workspace {
     const workspace = this.resolveDesignWorkspaceRecord(workspaceId, remote);
-    if (workspace.kind !== "design") {
-      throw new GitError({
-        code: "VALIDATION_FAILED",
-        message: "Design mutations are available only in Design mode.",
-        remediation:
-          "Switch to Design mode before changing the Design document.",
-      });
-    }
     if (
       !fs.existsSync(
         nodePath.join(
@@ -2253,24 +1868,23 @@ export class WorkspaceService {
       throw new GitError({
         code: "VALIDATION_FAILED",
         message:
-          "This workspace does not have a writable Design document in the current view.",
+          "This workspace does not have an initialized Design document.",
         remediation:
-          "Switch to Design mode before changing the Design document.",
+          "Open the Design tab and create or select a Design directory.",
       });
     }
     return workspace;
   }
 
-  /** Read the live Design draft independently of which surface is visible.
-   * Code view is read-only at this API boundary; Design view may perform the
-   * document's normal healing writes. No committed projection or alternate
-   * checkout is involved, so uncommitted draft revisions stay visible. */
+  /** Reads never heal authored files. Initialization and semantic mutations
+   * own writes; changing tabs cannot change the result or grant authority. */
   private async withDesignReadWorkspace<T>(
     workspaceId: string,
     remote: boolean,
     read: (target: DesignReadWorkspace) => Promise<T>,
   ): Promise<T> {
     const workspace = this.resolveDesignWorkspaceRecord(workspaceId, remote);
+    await assertDesignCheckoutReadable(workspace.path);
     const pointer = await resolveDesignDirectoryPointerState({
       repoRoot: workspace.repoRoot,
       workspacePath: workspace.path,
@@ -2324,7 +1938,7 @@ export class WorkspaceService {
       read({
         workspace,
         root: workspace.path,
-        writeBack: workspace.kind === "design" && !remote,
+        writeBack: false,
         designDirectory,
       }),
     );
@@ -2387,7 +2001,9 @@ export class WorkspaceService {
       });
       return {
         ...snapshot,
-        lint: { ...snapshot.lint, workspacePath: workspace.path },
+        directoryId: designDirectoryEntry(root, designDirectory)?.id,
+        directory: designDirectory,
+        lint: { ...snapshot.lint, workspacePath: nodePath.resolve(root) },
         protocolCapability: hostLocalResources
           ? (this.designProtocolCapabilityProvider?.(workspace.id) ?? null)
           : null,
@@ -2409,9 +2025,7 @@ export class WorkspaceService {
     hostLocalResources: boolean,
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }> {
     const workspace = this.resolveDesignWorkspaceRecord(workspaceId, remote);
-    const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000${
-      workspace.kind === "design" && !remote ? "write" : "read"
-    }\u0000${designDirectoryNameFor(workspace.path)}\u0000${
+    const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000read\u0000${designDirectoryNameFor(workspace.path)}\u0000${
       hostLocalResources ? "host-resources" : "bridge-resources"
     }`;
     const current = this.designSnapshotRequestFlights.get(key);
@@ -2668,16 +2282,7 @@ export class WorkspaceService {
         if (!isTranscriptWindow) {
           this.assertWorkspaceProcessStartAllowed(workspace);
         }
-        if (
-          workspace.kind === "design" &&
-          DESIGN_WORKSPACE_BLOCKED_MUTATIONS.has(op)
-        ) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `${op} is unavailable while this workspace is in design mode.`,
-            remediation: "Switch to code mode first.",
-          });
-        }
+
       }
     }
     // A remote client may freely edit its own chat metadata, but it must not
@@ -2757,7 +2362,36 @@ export class WorkspaceService {
           this.handle(op, params, { ...opts, designDirectoryResolved: true }),
       );
     }
+    if (opts.designDirectoryResolved && DESIGN_DOCUMENT_MUTATIONS.has(op) && typeof params.directoryId === "string") {
+      const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), remote);
+      if (designDirectoryEntry(workspace.path, designDirectoryNameFor(workspace.path))?.id !== params.directoryId) {
+        throw new GitError({ code: "VALIDATION_FAILED", message: "The active Design directory changed. Refresh before editing." });
+      }
+    }
+    if (isDesignWorkspaceRoute(op)) {
+      return handleDesignWorkspaceRoute(this.designRouteHost, op, params, {
+        remote,
+        hostLocalResources,
+      });
+    }
     switch (op) {
+      case "design.status": {
+        const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), remote);
+        return readDesignCheckoutStatus(workspace.path);
+      }
+      case "design.initialize": {
+        const workspace = this.resolveDesignWorkspaceRecord(
+          reqStr(params, "workspaceId"), remote,
+        );
+        await assertDesignCheckoutReadable(workspace.path);
+        return withDesignWorkspaceMutation(workspace.path, () =>
+          initializeWorkspaceDesign(workspace, async () => ({
+            snapshot: await this.readDesignSnapshot(workspace, remote, {
+              hostLocalResources,
+            }),
+          })),
+        );
+      }
       // ── Read: workspaces + files ──────────────────────────
       case "workspace.list": {
         const archived = optBool(params, "archived");
@@ -2803,1340 +2437,6 @@ export class WorkspaceService {
           params.restricted === true || params.restricted === "true",
         );
         return { ok: true };
-      }
-      // ── Design document ────────────────────────────────────
-      // Renderer and first-party MCP calls share this exact interpretation.
-      // Every operation starts from an opaque workspace id and kind check; no
-      // caller-supplied host path can escape into the filesystem layer.
-      case "design.foundation.open": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root }) => {
-            const documentId = designDocumentIdForFrame(
-              reqStr(params, "frame"),
-            );
-            const api = getWorkspaceDesignApi(root);
-            const summary = await api.open(documentId);
-            return {
-              summary,
-              foundation: await api.readFoundation({
-                documentId,
-                expectedRevision: summary.revision,
-              }),
-            };
-          },
-        );
-      }
-      case "design.projection": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root }) => {
-            const documentId = designDocumentIdForFrame(
-              reqStr(params, "frame"),
-            );
-            return {
-              projection: await getWorkspaceDesignApi(root).readProjection({
-                documentId,
-                expectedRevision: optStr(params, "expectedRevision"),
-                cursor: optStr(params, "cursor"),
-                limit: optNum(params, "limit"),
-                maxDepth: optNum(params, "maxDepth"),
-              }),
-            };
-          },
-        );
-      }
-      case "design.provenance": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root }) => {
-            const documentId = designDocumentIdForFrame(
-              reqStr(params, "frame"),
-            );
-            return {
-              provenance: await getWorkspaceDesignApi(root).readProvenance({
-                documentId,
-                nodeId: reqStr(params, "nodeId"),
-                property: reqStr(params, "property"),
-                expectedRevision: optStr(params, "expectedRevision"),
-                computedValue:
-                  params.computedValue === null
-                    ? null
-                    : optStr(params, "computedValue"),
-                ...(params.matched === undefined
-                  ? {}
-                  : { matched: designMatchedDeclarations(params.matched) }),
-              }),
-            };
-          },
-        );
-      }
-      case "design.source": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root }) => {
-            const documentId = designDocumentIdForFrame(
-              reqStr(params, "frame"),
-            );
-            return {
-              source: await getWorkspaceDesignApi(root).readSource({
-                documentId,
-                file: reqStr(params, "file"),
-                expectedRevision: optStr(params, "expectedRevision"),
-              }),
-            };
-          },
-        );
-      }
-      case "design.transaction.apply": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
-        let transaction;
-        try {
-          transaction = designTransactionSchema.parse(params.transaction);
-        } catch (error) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design transaction is invalid.",
-            cause: error,
-          });
-        }
-        if (transaction.documentId !== documentId) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design transaction does not target the selected frame.",
-          });
-        }
-        const dryRun = params.dryRun === true;
-        const api = getWorkspaceDesignApi(workspace.path);
-        if (dryRun) {
-          return { result: await api.apply(transaction, { dryRun: true }) };
-        }
-
-        const result = await api.apply(transaction);
-        if (result.receipt.status === "applied") {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(
-              reqStr(params, "frame"),
-              transaction.coalesceKey,
-              transaction.createdAt,
-            ),
-          );
-        }
-        return {
-          result,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-        };
-      }
-      case "design.history.undo":
-      case "design.history.redo": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const direction = op === "design.history.undo" ? "undo" : "redo";
-        const history = this.designHistoryState(workspace.path);
-        const source = history?.[direction];
-        const entry = source?.pop();
-        if (history && source && entry) {
-          const destination =
-            direction === "undo" ? history.redo : history.undo;
-          if (entry.kind === "frame") {
-            const expected = direction === "undo" ? entry.after : entry.before;
-            const replacement =
-              direction === "undo" ? entry.before : entry.after;
-            try {
-              if (expected && replacement) {
-                await replaceDesignFrameFromHistory(
-                  workspace.path,
-                  expected,
-                  replacement,
-                );
-              } else if (expected) {
-                await deleteDesignFrame(
-                  workspace.path,
-                  expected.file,
-                  expected,
-                );
-              } else if (replacement) {
-                await restoreDesignFrame(workspace.path, replacement);
-              } else {
-                throw new Error("Design frame history entry is empty.");
-              }
-            } catch (error) {
-              source.push(entry);
-              throw error;
-            }
-            destination.push(entry);
-            const snapshot = await this.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-            });
-            return {
-              result: null,
-              snapshot,
-              historySelection:
-                replacement?.file ?? snapshot.frames[0]?.file ?? null,
-            };
-          }
-
-          const api = getWorkspaceDesignApi(workspace.path);
-          const documentId = designDocumentIdForFrame(entry.frame);
-          let result;
-          try {
-            result =
-              direction === "undo"
-                ? await api.undo(documentId)
-                : await api.redo(documentId);
-          } catch (error) {
-            source.push(entry);
-            throw error;
-          }
-          if (result) destination.push(entry);
-          else history.bytes = Math.max(0, history.bytes - entry.bytes);
-          return {
-            result,
-            snapshot: await this.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-            }),
-            ...(result ? { historyFrame: entry.frame } : {}),
-          };
-        }
-
-        // Compatibility fallback for a history session created before this
-        // service began tracking workspace-wide ordering. An empty canvas has
-        // no fallback document, but a structural deletion above still works.
-        const frame = optStr(params, "frame");
-        if (!frame) {
-          return {
-            result: null,
-            snapshot: await this.readDesignSnapshot(workspace, remote, {
-              hostLocalResources,
-            }),
-          };
-        }
-        const documentId = designDocumentIdForFrame(frame);
-        const api = getWorkspaceDesignApi(workspace.path);
-        const result =
-          direction === "undo"
-            ? await api.undo(documentId)
-            : await api.redo(documentId);
-        return {
-          result,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-        };
-      }
-      case "design.frames": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root, writeBack }) => ({
-            frames: await listDesignFrames(root, { writeBack }),
-          }),
-        );
-      }
-      case "design.frame": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root, writeBack }) => ({
-            frame: await readDesignFrame(
-              root,
-              reqStr(params, "frame"),
-              optNum(params, "depth") ?? 4,
-              { writeBack },
-            ),
-          }),
-        );
-      }
-      case "design.snapshot": {
-        return {
-          snapshot: await this.readDesignSnapshotRequest(
-            reqStr(params, "workspaceId"),
-            remote,
-            hostLocalResources,
-          ),
-        };
-      }
-      case "design.tokens": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ root }) => ({ tokens: await readDesignTokens(root) }),
-        );
-      }
-      case "design.token.update": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const theme = params.theme;
-        if (theme !== null && typeof theme !== "string") {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design token theme must be a string or null.",
-          });
-        }
-        const requestedFrame = optStr(params, "frame");
-        const frame =
-          requestedFrame ??
-          (
-            await listDesignFrames(workspace.path, {
-              writeBack: !remote,
-            })
-          )[0]?.file;
-        if (!frame) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "A design frame is required to own token history.",
-          });
-        }
-        const api = getWorkspaceDesignApi(workspace.path);
-        const documentId = designDocumentIdForFrame(frame);
-        const summary = await api.open(documentId);
-        const current = await readDesignTokensDocument(workspace.path);
-        if (current.sourceVersion !== reqStr(params, "sourceVersion")) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message:
-              "Design tokens changed before the mutation. Re-read them and retry.",
-          });
-        }
-        const name = reqStr(params, "name");
-        if (!current.tokens.some((token) => token.name === name)) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design token not found: ${name}`,
-          });
-        }
-        const operationId = randomUUID();
-        const applied = await applyDesktopDesignOperation(
-          workspace.path,
-          frame,
-          `Change ${name}${theme ? ` for ${theme}` : ""}`,
-          {
-            operationId,
-            type: "token.set",
-            file: DESIGN_TOKENS_FILE,
-            name,
-            theme,
-            value: reqStr(params, "value"),
-          },
-          `token:${theme ?? "base"}:${name}`,
-          summary.revision,
-        );
-        const mutation = {
-          changed: applied.receipt.status === "applied",
-          document: await readDesignTokensDocument(workspace.path),
-        };
-        if (mutation.changed) {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(
-              frame,
-              `token:${theme ?? "base"}:${name}`,
-            ),
-          );
-        }
-        return {
-          mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-          foundationRevision: {
-            before: applied.receipt.beforeRevision,
-            after: applied.receipt.afterRevision,
-          },
-        };
-      }
-      case "design.lint": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ workspace, root, writeBack }) => {
-            const report = await lintDesignDocument(
-              root,
-              optStr(params, "frame"),
-              { healOids: writeBack },
-            );
-            return {
-              report: { ...report, workspacePath: workspace.path },
-            };
-          },
-        );
-      }
-      case "design.selection.set": {
-        if (remote) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Canvas selection is local to the desktop.",
-          });
-        }
-        const workspaceId = reqStr(params, "workspaceId");
-        const workspace = this.resolveDesignWorkspace(workspaceId, false);
-        const selectionVersion = reqNum(params, "selectionVersion");
-        if (!Number.isSafeInteger(selectionVersion) || selectionVersion <= 0) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "selectionVersion must be a positive safe integer.",
-          });
-        }
-        const frameFile = optStr(params, "frame");
-        if (!frameFile) {
-          setDesignSelection(workspaceId, null, selectionVersion);
-          return { ok: true };
-        }
-        const frame = await readDesignFrameSelectionIdentity(
-          workspace.path,
-          frameFile,
-        );
-        const sourceVersion = reqStr(params, "sourceVersion");
-        if (
-          !/^[a-f0-9]{24}$/.test(sourceVersion) ||
-          sourceVersion !== frame.sourceVersion
-        ) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design selection source changed before publication: ${frame.file}`,
-          });
-        }
-        const nodeIds = designSelectionStrings(
-          params.nodeIds ?? [],
-          "nodeIds",
-          DESIGN_SELECTION_NODE_LIMIT,
-          256,
-        );
-        if (nodeIds.length > 0) {
-          const validNodeIds = new Set(frame.nodeIds);
-          const missing = nodeIds.find((nodeId) => !validNodeIds.has(nodeId));
-          if (missing) {
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message: `Design element not found in ${frame.file}: ${missing}`,
-            });
-          }
-        }
-        const breadcrumb = designSelectionStrings(
-          params.breadcrumb ?? [],
-          "breadcrumb",
-          16,
-          160,
-          true,
-        );
-        const rects = designSelectionRects(params.rects ?? []);
-        const updatedAt = reqNum(params, "updatedAt");
-        if (!Number.isSafeInteger(updatedAt) || updatedAt <= 0) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "updatedAt must be a positive safe integer.",
-          });
-        }
-        if (nodeIds.length > 0 && rects.length !== nodeIds.length) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Element selections require one rectangle per nodeId.",
-          });
-        }
-        setDesignSelection(
-          workspaceId,
-          {
-            frame: frame.file,
-            filePath: `${designDirectoryNameFor(workspace.path)}/${frame.file}`,
-            sourceVersion,
-            nodeIds,
-            breadcrumb: breadcrumb.length > 0 ? breadcrumb : [frame.title],
-            rects:
-              rects.length > 0
-                ? rects
-                : [
-                    {
-                      x: frame.x,
-                      y: frame.y,
-                      width: frame.width,
-                      height: frame.height,
-                    },
-                  ],
-            keyComputedStyles: designSelectionStyles(params.keyComputedStyles),
-            updatedAt,
-          },
-          selectionVersion,
-        );
-        return { ok: true };
-      }
-      case "design.screenshot.set": {
-        if (remote) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design screenshots are local to the desktop canvas.",
-          });
-        }
-        const workspaceId = reqStr(params, "workspaceId");
-        const workspace = this.resolveDesignWorkspace(workspaceId, false);
-        const frameFile = reqStr(params, "frame");
-        const frame = await readDesignFrameRenderIdentity(
-          workspace.path,
-          frameFile,
-        );
-        const sourceVersion = reqStr(params, "sourceVersion");
-        if (
-          !/^[a-f0-9]{24}$/.test(sourceVersion) ||
-          sourceVersion !== frame.sourceVersion
-        ) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design screenshot source changed before capture completed: ${frame.file}`,
-          });
-        }
-        const nodeId = optStr(params, "nodeId") ?? null;
-        if (nodeId) {
-          const validNodeIds = new Set(
-            (await readDesignElementOffsetMap(workspace.path, frame.file)).map(
-              (offset) => offset.oid,
-            ),
-          );
-          if (!validNodeIds.has(nodeId)) {
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message: `Design element not found in ${frame.file}: ${nodeId}`,
-            });
-          }
-        }
-        const mimeType = reqStr(params, "mimeType");
-        if (
-          mimeType !== "image/png" &&
-          mimeType !== "image/jpeg" &&
-          mimeType !== "image/webp"
-        ) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Unsupported design screenshot type: ${mimeType}`,
-          });
-        }
-        setDesignScreenshot(
-          normalizeDesignScreenshot({
-            workspaceId,
-            frame: frame.file,
-            nodeId,
-            mimeType,
-            data: reqStr(params, "data"),
-            width: reqNum(params, "width"),
-            height: reqNum(params, "height"),
-            scale: reqNum(params, "scale"),
-            capturedAt: Date.now(),
-            sourceVersion,
-          }),
-        );
-        return { ok: true };
-      }
-      case "design.runtime.audit": {
-        if (remote) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design runtime audits are local to the desktop canvas.",
-          });
-        }
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          false,
-        );
-        const frame = await readDesignFrameRenderIdentity(
-          workspace.path,
-          reqStr(params, "frame"),
-        );
-        const sourceVersion = reqStr(params, "sourceVersion");
-        if (sourceVersion !== frame.sourceVersion) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design runtime audit source changed before publication: ${frame.file}`,
-          });
-        }
-        if (!Array.isArray(params.warnings) || params.warnings.length > 128) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design runtime warnings must be a bounded array.",
-          });
-        }
-        const offsets = new Map(
-          (await readDesignElementOffsetMap(workspace.path, frame.file)).map(
-            (offset) => [offset.oid, offset],
-          ),
-        );
-        const allowed = new Set([
-          "contrast",
-          "overflow",
-          "spacing-scale",
-          "audit-limit",
-          "layer-tree-limit",
-        ]);
-        const warnings: DesignLintViolation[] = [];
-        for (const rawWarning of params.warnings) {
-          if (
-            !rawWarning ||
-            typeof rawWarning !== "object" ||
-            Array.isArray(rawWarning)
-          ) {
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message: "Design runtime warning is malformed.",
-            });
-          }
-          const warning = rawWarning as Record<string, unknown>;
-          const ruleId = reqStr(warning, "ruleId");
-          const oid = reqStr(warning, "oid");
-          const message = reqStr(warning, "message");
-          const fix = reqStr(warning, "fix");
-          if (
-            !allowed.has(ruleId) ||
-            message.length > 1_000 ||
-            fix.length > 1_000
-          ) {
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message: "Design runtime warning is invalid.",
-            });
-          }
-          const offset = offsets.get(oid);
-          if (!offset) continue;
-          warnings.push({
-            ruleId: ruleId as DesignLintViolation["ruleId"],
-            severity: "warning",
-            message,
-            file: frame.file,
-            line: offset.startLine,
-            column: offset.startColumn,
-            oid,
-            fix,
-          });
-        }
-        setDesignRuntimeAudit({
-          workspacePath: workspace.path,
-          frame: frame.file,
-          sourceVersion,
-          warnings,
-        });
-        return { ok: true };
-      }
-      case "design.frame.create": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const geometryKeys = ["x", "y", "w", "h", "z"] as const;
-        const suppliedGeometryKeys = geometryKeys.filter(
-          (key) => params[key] !== undefined,
-        );
-        if (
-          suppliedGeometryKeys.length > 0 &&
-          suppliedGeometryKeys.length !== geometryKeys.length
-        ) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Initial frame geometry requires x, y, w, h, and z.",
-          });
-        }
-        const frame = await createDesignFrame(workspace.path, {
-          title: optStr(params, "title"),
-          ...(suppliedGeometryKeys.length === geometryKeys.length
-            ? {
-                geometry: {
-                  x: reqNum(params, "x"),
-                  y: reqNum(params, "y"),
-                  w: reqNum(params, "w"),
-                  h: reqNum(params, "h"),
-                  z: reqNum(params, "z"),
-                },
-              }
-            : {}),
-          ...(params.kind === "text"
-            ? {
-                seed: {
-                  kind: "text" as const,
-                  nodeId: reqStr(params, "textNodeId"),
-                  text: reqStr(params, "text"),
-                  fixedSize: optBool(params, "textFixedSize") ?? false,
-                },
-              }
-            : {}),
-        });
-        this.recordDesignHistory(
-          workspace.path,
-          frameDesignHistoryEntry(
-            null,
-            await captureDesignFrameRestorePoint(workspace.path, frame.file),
-          ),
-        );
-        return {
-          frame,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-        };
-      }
-      case "design.frame.rename": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const file = reqStr(params, "frame");
-        const before = await captureDesignFrameRestorePoint(
-          workspace.path,
-          file,
-        );
-        const frame = await renameDesignFrame(
-          workspace.path,
-          file,
-          reqStr(params, "title"),
-        );
-        const after = await captureDesignFrameRestorePoint(
-          workspace.path,
-          file,
-        );
-        if (!sameDesignFrameRestorePoint(before, after)) {
-          this.recordDesignHistory(
-            workspace.path,
-            frameDesignHistoryEntry(before, after),
-          );
-        }
-        return {
-          frame,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-        };
-      }
-      case "design.frame.duplicate": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const frame = await duplicateDesignFrame(
-          workspace.path,
-          reqStr(params, "frame"),
-        );
-        this.recordDesignHistory(
-          workspace.path,
-          frameDesignHistoryEntry(
-            null,
-            await captureDesignFrameRestorePoint(workspace.path, frame.file),
-          ),
-        );
-        return {
-          frame,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-        };
-      }
-      case "design.frame.delete": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const restorePoint = await deleteDesignFrame(
-          workspace.path,
-          reqStr(params, "frame"),
-        );
-        this.recordDesignHistory(
-          workspace.path,
-          frameDesignHistoryEntry(restorePoint, null),
-        );
-        return {
-          deleted: { file: restorePoint.file },
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-        };
-      }
-      case "design.canvas.update": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const frame = reqStr(params, "frame");
-        const geometry = {
-          x: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "x"))),
-          y: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "y"))),
-          w: Math.min(16_384, Math.max(1, reqNum(params, "w"))),
-          h: Math.min(16_384, Math.max(1, reqNum(params, "h"))),
-          z: Math.round(Math.min(256, Math.max(0, reqNum(params, "z")))),
-        };
-        const operationId = randomUUID();
-        const applied = await applyDesktopDesignOperation(
-          workspace.path,
-          frame,
-          `Move or resize ${frame}`,
-          {
-            operationId,
-            type: "frame.set-geometry",
-            frame,
-            geometry: {
-              x: geometry.x,
-              y: geometry.y,
-              width: geometry.w,
-              height: geometry.h,
-              z: geometry.z,
-            },
-          },
-          `frame-geometry:${frame}`,
-        );
-        if (applied.receipt.status === "applied") {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(frame, `frame-geometry:${frame}`),
-          );
-        }
-        return {
-          geometry,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-          foundationRevision: {
-            before: applied.receipt.beforeRevision,
-            after: applied.receipt.afterRevision,
-          },
-        };
-      }
-      case "design.node.styles": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const frame = reqStr(params, "frame");
-        const sourceVersion = reqStr(params, "sourceVersion");
-        const api = getWorkspaceDesignApi(workspace.path);
-        const documentId = designDocumentIdForFrame(frame);
-        // The authored revision (files, manifest, and geometry) and rendered
-        // sourceVersion (composed HTML/CSS/assets/viewport) are distinct CAS
-        // identities. Compatibility mutation handlers must validate both before
-        // adapting the request into a Foundation transaction.
-        const summary = await api.open(documentId);
-        const render = await readDesignFrameRenderIdentity(
-          workspace.path,
-          frame,
-        );
-        if (render.sourceVersion !== sourceVersion) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
-          });
-        }
-        const operationId = randomUUID();
-        const nodeId = reqStr(params, "nodeId");
-        const applied = await applyDesktopDesignOperation(
-          workspace.path,
-          frame,
-          `Change styles on ${nodeId}`,
-          {
-            operationId,
-            type: "node.set-styles",
-            nodeId,
-            styles: designMutationStyles(params.styles),
-            scope: "auto",
-            responsiveContext: "base",
-            stateContext: "default",
-          },
-          undefined,
-          summary.revision,
-        );
-        const mutation = await readDesignMutationResult(
-          workspace.path,
-          frame,
-          applied.receipt.status === "applied",
-        );
-        if (applied.receipt.status === "applied") {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(frame),
-          );
-        }
-        return {
-          mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-          foundationRevision: {
-            before: applied.receipt.beforeRevision,
-            after: applied.receipt.afterRevision,
-          },
-        };
-      }
-      case "design.node.text": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const frame = reqStr(params, "frame");
-        const sourceVersion = reqStr(params, "sourceVersion");
-        const api = getWorkspaceDesignApi(workspace.path);
-        const documentId = designDocumentIdForFrame(frame);
-        const summary = await api.open(documentId);
-        const render = await readDesignFrameRenderIdentity(
-          workspace.path,
-          frame,
-        );
-        if (render.sourceVersion !== sourceVersion) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
-          });
-        }
-        const text =
-          typeof params.text === "string"
-            ? params.text
-            : reqStr(params, "text");
-        if (text.length > 10_000) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "Design text is too long.",
-          });
-        }
-        const operationId = randomUUID();
-        const nodeId = reqStr(params, "nodeId");
-        const applied = await applyDesktopDesignOperation(
-          workspace.path,
-          frame,
-          `Change text on ${nodeId}`,
-          {
-            operationId,
-            type: "node.set-text",
-            nodeId,
-            text,
-          },
-          undefined,
-          summary.revision,
-        );
-        const mutation = await readDesignMutationResult(
-          workspace.path,
-          frame,
-          applied.receipt.status === "applied",
-        );
-        if (applied.receipt.status === "applied") {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(frame),
-          );
-        }
-        return {
-          mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-          foundationRevision: {
-            before: applied.receipt.beforeRevision,
-            after: applied.receipt.afterRevision,
-          },
-        };
-      }
-      case "design.node.html": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const mode = optStr(params, "mode");
-        if (mode && mode !== "append" && mode !== "replace-inner") {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Unsupported design HTML write mode: ${mode}`,
-          });
-        }
-        const writeMode = mode === "append" ? "append" : "replace-inner";
-        const frame = reqStr(params, "frame");
-        const sourceVersion = reqStr(params, "sourceVersion");
-        const api = getWorkspaceDesignApi(workspace.path);
-        const documentId = designDocumentIdForFrame(frame);
-        const summary = await api.open(documentId);
-        const render = await readDesignFrameRenderIdentity(
-          workspace.path,
-          frame,
-        );
-        if (render.sourceVersion !== sourceVersion) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
-          });
-        }
-        const html = reqStr(params, "html");
-        if (!html || html.length > 200_000) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: "html must contain between 1 and 200000 characters.",
-          });
-        }
-        const operationId = randomUUID();
-        const nodeId = reqStr(params, "nodeId");
-        const applied = await applyDesktopDesignOperation(
-          workspace.path,
-          frame,
-          `${writeMode === "append" ? "Append" : "Replace"} HTML on ${nodeId}`,
-          {
-            operationId,
-            type: "node.set-html",
-            nodeId,
-            html,
-            mode: writeMode,
-          },
-          undefined,
-          summary.revision,
-        );
-        const mutation = await readDesignMutationResult(
-          workspace.path,
-          frame,
-          applied.receipt.status === "applied",
-        );
-        if (applied.receipt.status === "applied") {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(frame),
-          );
-        }
-        return {
-          mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-          foundationRevision: {
-            before: applied.receipt.beforeRevision,
-            after: applied.receipt.afterRevision,
-          },
-        };
-      }
-      case "design.asset.insert": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        const frame = reqStr(params, "frame");
-        const sourceVersion = reqStr(params, "sourceVersion");
-        const api = getWorkspaceDesignApi(workspace.path);
-        const documentId = designDocumentIdForFrame(frame);
-        const summary = await api.open(documentId);
-        const render = await readDesignFrameRenderIdentity(
-          workspace.path,
-          frame,
-        );
-        if (render.sourceVersion !== sourceVersion) {
-          throw new GitError({
-            code: "VALIDATION_FAILED",
-            message: `Design frame changed before the mutation: ${render.file}. Re-read it and retry.`,
-          });
-        }
-        const prepared = await prepareDesignAssetInsertion(workspace.path, {
-          frame,
-          sourceVersion,
-          assetPath: reqStr(params, "assetPath"),
-          x: reqNum(params, "x"),
-          y: reqNum(params, "y"),
-        });
-        const operationId = randomUUID();
-        const applied = await applyDesktopDesignOperation(
-          workspace.path,
-          frame,
-          `Insert ${reqStr(params, "assetPath")}`,
-          {
-            operationId,
-            type: "node.set-html",
-            nodeId: prepared.nodeId,
-            html: prepared.html,
-            mode: "append",
-          },
-          undefined,
-          summary.revision,
-        );
-        const mutation = await readDesignMutationResult(
-          workspace.path,
-          frame,
-          applied.receipt.status === "applied",
-        );
-        if (applied.receipt.status === "applied") {
-          this.recordDesignHistory(
-            workspace.path,
-            documentDesignHistoryEntry(frame),
-          );
-        }
-        return {
-          mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote, {
-            hostLocalResources,
-          }),
-          foundationRevision: {
-            before: applied.receipt.beforeRevision,
-            after: applied.receipt.afterRevision,
-          },
-        };
-      }
-      case "design.stage": {
-        const workspaceId = reqStr(params, "workspaceId");
-        const workspace = this.resolveDesignWorkspace(workspaceId, remote);
-        // Stage is an explicit Git-index checkpoint, separate from Command-S
-        // (`design.save`) and Commit. Take the same semantic document lane as
-        // Design API writes so the index receives one exact durable snapshot.
-        return withDesignWorkspaceMutation(workspace.path, async () => {
-          await assertGitCheckpointReady(workspace.path);
-          await recoverPendingDesignTransaction(workspace.path);
-          const designDir = designDirectoryNameFor(workspace.path);
-          await stagePaths({
-            workspaceId,
-            paths: [
-              designDir,
-              ...(await designMetadataIndexPaths(workspace.path, designDir)),
-            ],
-            force: true,
-          });
-          await stageDesignRegistry(workspace.path, designDir);
-          return { ok: true };
-        });
-      }
-      case "design.unstage": {
-        const workspaceId = reqStr(params, "workspaceId");
-        const workspace = this.resolveDesignWorkspace(workspaceId, remote);
-        return withDesignWorkspaceMutation(workspace.path, async () => {
-          await assertGitCheckpointReady(workspace.path);
-          await unstagePaths({
-            workspaceId,
-            paths: [
-              designDirectoryNameFor(workspace.path),
-              ...(await designMetadataIndexPaths(
-                workspace.path,
-                designDirectoryNameFor(workspace.path),
-                true,
-              )),
-            ],
-          });
-          await stageDesignRegistry(
-            workspace.path,
-            designDirectoryNameFor(workspace.path),
-            true,
-          );
-          return { ok: true };
-        });
-      }
-      case "design.save": {
-        const workspace = this.resolveDesignWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-        );
-        return withDesignWorkspaceMutation(workspace.path, async () => {
-          const report = await lintDesignDocument(workspace.path, undefined, {
-            healOids: false,
-          });
-          const errors = report.violations.filter(
-            (violation) => violation.severity === "error",
-          );
-          if (errors.length > 0) {
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message: `Fix ${errors.length} design ${errors.length === 1 ? "error" : "errors"} before saving: ${errors[0]!.ruleId}`,
-              remediation: errors[0]!.message,
-            });
-          }
-          // Design transactions are already crash-safe durable writes. "Save"
-          // validates that live draft only; it never mutates the Git index,
-          // creates a commit, or changes refs. Staging remains the separate
-          // explicit `design.stage` action.
-          return { ok: true };
-        });
-      }
-      case "design.commit": {
-        const workspaceId = reqStr(params, "workspaceId");
-        const workspace = this.resolveDesignWorkspace(workspaceId, remote);
-        return withDesignWorkspaceMutation(workspace.path, async () => {
-          const report = await lintDesignDocument(workspace.path, undefined, {
-            healOids: false,
-          });
-          const errors = report.violations.filter(
-            (violation) => violation.severity === "error",
-          );
-          if (errors.length > 0) {
-            throw new GitError({
-              code: "VALIDATION_FAILED",
-              message: `Fix ${errors.length} design ${errors.length === 1 ? "error" : "errors"} before committing: ${errors[0]!.ruleId}`,
-              remediation: errors[0]!.message,
-            });
-          }
-          return commit({
-            workspaceId,
-            message: optStr(params, "message") ?? "Commit Design checkpoint",
-            authority: "design",
-          });
-        });
-      }
-      // ── Design directory discovery (settings picker + adoption) ──
-      // LOCAL-ONLY (off every remote allowlist). Lists every design folder in
-      // a checkout — recognized by its COMMITTED `.zeros-canvas.json` marker —
-      // plus the resolved pointer, so the repo settings picker can offer
-      // "which folder is active" without guessing. Accepts a workspace id or
-      // a known repo root (the settings page targets the main checkout).
-      //
-      // `target` previews the folder Design mode WOULD use here (the same
-      // non-strict resolution mode entry runs) and whether its Design marker
-      // already exists, so the mode toggle and the Create page can say
-      // "creates <repo> - Design" before anything is written. Null when the
-      // preview refuses (an unrecognized configured pointer) — callers then
-      // fall back to the plain switch and let mode entry report the error.
-      case "design.listDirectories": {
-        const target = reqStr(params, "workspaceId");
-        const cwd = this.resolveReadCwd(target, remote);
-        if (remote) {
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message: "Design workspaces are available only in the desktop app.",
-          });
-        }
-        const workspace = getWorkspaceById(target);
-        const repoRoot = workspace?.repoRoot ?? cwd;
-        const [directories, pointerState, sticky] = await Promise.all([
-          discoverDesignDirectories(cwd),
-          resolveDesignDirectoryPointerState(
-            workspace
-              ? { repoRoot, workspacePath: workspace.path }
-              : { repoRoot },
-          ),
-          stickyRecognizedDesignDirectories(cwd),
-        ]);
-        const pointer = pointerState.directory;
-        let entryTarget: { directory: string; exists: boolean } | null = null;
-        try {
-          const directory = await previewDesignDirectoryForEnter(
-            { path: cwd, repoRoot },
-            { strict: false, additionalRecognized: sticky },
-          );
-          entryTarget = {
-            directory,
-            // Code-agent admission may reserve an empty directory so a future
-            // Design switch cannot race its sandbox boundary. That vnode is
-            // not a Design document yet: only the canvas marker means the
-            // requested "Create design directory" action has completed.
-            exists: fs.existsSync(designDocumentMetadataPath(cwd, directory)),
-          };
-        } catch {
-          entryTarget = null;
-        }
-        return {
-          directories,
-          directoryIds: Object.fromEntries(
-            Object.entries(
-              readDesignDirectoryRegistry(cwd)?.directories ?? {},
-            ).map(([id, entry]) => [entry.path, id]),
-          ),
-          pointer,
-          active: designDirectoryNameFor(cwd),
-          target: entryTarget,
-        };
-      }
-
-      case "design.previewExistingDirectory":
-      case "design.adoptDirectory": {
-        if (remote)
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message: "Design folders are managed in the desktop app.",
-          });
-        const repoRoot = reqStr(params, "repoRoot");
-        if (!isKnownRepoRoot(repoRoot))
-          throw new GitError({
-            code: "WORKSPACE_NOT_FOUND",
-            message: "Open this repository in Zeros first.",
-          });
-        const folder = reqStr(params, "folder");
-        return op === "design.previewExistingDirectory"
-          ? previewExistingDesignDirectory(repoRoot, folder)
-          : adoptExistingDesignDirectory(
-              repoRoot,
-              folder,
-              reqStr(params, "revision"),
-              (id) => {
-                // Registration must not invalidate inherited selections in older
-                // worktrees. A later "Use this folder" goes through settings.write
-                // and its complete live-territory transition once Git carries it.
-                const preview = opSettingsPreviewWrite(
-                  "repo-local",
-                  { design: { directory: null, directory_id: id } },
-                  repoRoot,
-                );
-                return listWorkspaces({ archived: false })
-                  .filter(
-                    (workspace) =>
-                      personalRepoRoot(workspace.repoRoot) ===
-                      personalRepoRoot(repoRoot),
-                  )
-                  .every((workspace) => {
-                    try {
-                      const projected = opSettingsResolveWithOverride(
-                        workspace.path,
-                        workspace.repoRoot,
-                        preview,
-                      );
-                      const next =
-                        designDirectoryFromSettings(
-                          workspace.path,
-                          projected.effective,
-                        ) ?? DEFAULT_DESIGN_DIRECTORY_NAME;
-                      return next === designDirectoryNameFor(workspace.path);
-                    } catch {
-                      return false;
-                    }
-                  });
-              },
-            );
-      }
-
-      case "design.removeDirectory": {
-        if (remote) {
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message: "Design folders are managed in the desktop app.",
-          });
-        }
-        const repoRoot = reqStr(params, "repoRoot");
-        if (!isKnownRepoRoot(repoRoot)) {
-          throw new GitError({
-            code: "WORKSPACE_NOT_FOUND",
-            message: "Open this repository in Zeros first.",
-          });
-        }
-        await removeDesignDirectory({
-          repoRoot,
-          directory: reqStr(params, "directory"),
-        });
-        return { removed: true };
-      }
-
-      // ── Design directory rename (repo settings → Design tab) ──
-      // LOCAL-ONLY. Renames the committed folder AND the committed pointer in
-      // one commit, in the repo's MAIN checkout. The engine refuses it while
-      // live design-mode workspaces exist (their locks and open documents are
-      // rooted at the old name).
-      case "design.renameDirectory": {
-        if (remote) {
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message: "Design workspaces are available only in the desktop app.",
-          });
-        }
-        const repoRoot = reqStr(params, "repoRoot");
-        if (!isKnownRepoRoot(repoRoot)) {
-          throw new GitError({
-            code: "WORKSPACE_NOT_FOUND",
-            message:
-              "That repository isn't open in Zeros — open the folder first.",
-          });
-        }
-        return renameDesignDirectory({
-          repoRoot,
-          from: reqStr(params, "from"),
-          to: reqStr(params, "to"),
-        });
       }
       // ── Working directories (per-worktree sparse-checkout) ──
       // LOCAL-ONLY for the same reason as the restriction list above: applying
@@ -4928,7 +3228,7 @@ export class WorkspaceService {
         }
 
         // Hold every affected workspace's Design mutation lane in stable order
-        // while one shared settings file is replaced. Design-agent admission
+        // while one shared settings file is replaced. Scoped tool admission
         // stays paused until the new pointer is durable.
         const ordered = [...changedPointers].sort((left, right) =>
           nodePath
@@ -4970,7 +3270,7 @@ export class WorkspaceService {
             transitionTargets,
             async () => {
               // Remove any ACL left by an older build from the old territory
-              // after affected Design agents are gone. Do this before the
+              // after affected Design tool grants are revoked. Do this before the
               // settings write so a cleanup failure leaves the pointer unchanged.
               for (const transition of ordered) {
                 primeDesignDirectoryName(
@@ -5034,7 +3334,7 @@ export class WorkspaceService {
           });
         }
         // Raw editing deliberately bypasses the structured patch path. Until a
-        // raw-document preview can run the same multi-workspace Design-agent
+        // raw-document preview can run the same multi-workspace scoped-tool
         // identity transition atomically, it may not change the pointer.
         let rawDocument: Record<string, unknown>;
         try {
@@ -5080,7 +3380,7 @@ export class WorkspaceService {
             message:
               "The active Design directory cannot be changed in the raw settings editor.",
             remediation:
-              "Use the structured Design settings so Zeros can update Design-agent capabilities safely.",
+              "Use the structured Design settings so Zeros can update scoped Design capabilities safely.",
           });
         }
         return this.settingsOp(() =>
@@ -5141,7 +3441,7 @@ export class WorkspaceService {
           throw new Error("Session tools are unavailable.");
         const read =
           op === "tools.session.inventory"
-            ? this.sessionToolAccess.inventory ?? this.sessionToolAccess.list
+            ? (this.sessionToolAccess.inventory ?? this.sessionToolAccess.list)
             : this.sessionToolAccess.list;
         const result: SessionToolsInventorySnapshot = await read.call(
           this.sessionToolAccess,
@@ -5515,7 +3815,10 @@ export class WorkspaceService {
               code: "REMOTE_RESTRICTED",
               message: "Ignored files can only be listed from the desktop app.",
             });
-          const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+          const cwd = this.resolveReadCwd(
+            reqStr(params, "workspaceId"),
+            remote,
+          );
           return {
             files: await listWorkspaceFiles(cwd, optNum(params, "limit"), {
               includeIgnored: true,
@@ -5891,12 +4194,7 @@ export class WorkspaceService {
         const workspaceId = reqStr(params, "workspaceId");
         const paths = strArr(params, "paths");
         assertLiteralGitMutationPaths(paths, "Staging");
-        await assertNoDesignPathWrites(
-          workspaceId,
-          paths,
-          "staging",
-          this.resolveReadCwd(workspaceId, remote),
-        );
+        this.resolveReadCwd(workspaceId, remote);
         await stagePaths({ workspaceId, paths });
         return { ok: true };
       }
@@ -5904,12 +4202,7 @@ export class WorkspaceService {
         const workspaceId = reqStr(params, "workspaceId");
         const paths = strArr(params, "paths");
         assertLiteralGitMutationPaths(paths, "Unstaging");
-        await assertNoDesignPathWrites(
-          workspaceId,
-          paths,
-          "unstaging",
-          this.resolveReadCwd(workspaceId, remote),
-        );
+        this.resolveReadCwd(workspaceId, remote);
         await unstagePaths({
           workspaceId,
           paths,
@@ -5939,24 +4232,16 @@ export class WorkspaceService {
         const files = Array.isArray(params.files)
           ? strArr(params, "files")
           : undefined;
-        // Territory purity is what makes the one-branch/one-PR story clean:
-        // Code commits carry only Code. Design uses its explicit stage and
-        // commit operations, never `design.save`.
-        if (files) {
-          assertLiteralGitMutationPaths(files, "Committing");
-          await assertNoDesignPathWrites(
-            workspaceId,
-            files,
-            "committing",
-            this.resolveReadCwd(workspaceId, remote),
-          );
-        }
+        // Managed Git snapshots explicitly staged Code and Design together.
+        // Generic file/patch/discard operations retain their authoring fences.
+        this.resolveReadCwd(workspaceId, remote);
+        if (files) assertLiteralGitMutationPaths(files, "Committing");
         return commit({
           workspaceId,
           message: reqStr(params, "message"),
           files,
           amend: optBool(params, "amend") ?? false,
-          authority: "code",
+          authority: "workspace",
         });
       }
       case "git.push":
@@ -6011,16 +4296,11 @@ export class WorkspaceService {
           newBranchName: reqStr(params, "newBranchName"),
         });
         return { ok: true };
-      case "git.renameBranch":
-        return {
-          ok: true,
-          // The resulting ref, so the caller doesn't have to re-derive a
-          // prefix it can't see (see renameBranch's contract).
-          branch: await renameBranch({
-            workspaceId: reqStr(params, "workspaceId"),
-            newName: reqStr(params, "newName"),
-          }),
-        };
+      case "git.renameBranch": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const branch = await renameBranch({ workspaceId, newName: reqStr(params, "newName") });
+        return { ok: true, branch };
+      }
       case "git.changeTarget":
         return changeTargetBranch({
           workspaceId: reqStr(params, "workspaceId"),

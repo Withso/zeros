@@ -69,13 +69,14 @@ describe("design frame runtime client", () => {
   it("publishes only ready connections and keeps the painted runtime during replacement", async () => {
     const host = { setTimeout: vi.fn(() => 7), clearTimeout: vi.fn() };
     const source = { postMessage: vi.fn() };
+    let active = true;
     const connect = (version: string) =>
       connectDesignFrameRuntime(
         "ready-workspace",
         "home.html",
         version,
         { contentWindow: source } as unknown as HTMLIFrameElement,
-        {},
+        { isActive: () => active },
         host,
       );
     const ready = (version: string) => {
@@ -104,6 +105,11 @@ describe("design frame runtime client", () => {
           first,
         ),
       );
+      expect(first.isActive?.()).toBe(true);
+      active = false;
+      expect(first.isActive?.()).toBe(false);
+      expect(designFrameRuntime("ready-workspace", "home.html")).toBe(first);
+      active = true;
       next = connect(NEXT_SOURCE_VERSION);
       expect(designFrameRuntime("ready-workspace", "home.html")).toBe(first);
       expect(designFrameRuntime("another-workspace", "home.html")).toBeNull();
@@ -424,6 +430,174 @@ describe("design frame runtime client", () => {
       }),
     );
     framePort.close();
+  });
+
+  it.each(["commitStyles", "restoreGeneration"] as const)(
+    "keeps layout reads and previews on the adopted generation during %s",
+    async (method) => {
+      const source = { postMessage: vi.fn() };
+      const connection = connectDesignFrameRuntime(
+        "generation-race",
+        `${method}.html`,
+        SOURCE_VERSION,
+        { contentWindow: source } as unknown as HTMLIFrameElement,
+        {},
+        { setTimeout: vi.fn(() => 11), clearTimeout: vi.fn() },
+      );
+      const port = source.postMessage.mock.calls[0]?.[1]
+        ?.transfer?.[0] as MessagePort;
+      let adoptionRequest: string | null = null;
+      const requests: Array<{ method: string; sourceVersion: string }> = [];
+      const respond = (requestId: string, result: unknown) =>
+        port.postMessage({
+          protocol: DESIGN_RUNTIME_PROTOCOL,
+          version: DESIGN_RUNTIME_VERSION,
+          type: "response",
+          requestId,
+          ok: true,
+          result,
+        });
+      port.onmessage = ({ data }) => {
+        if (data.type !== "request") return;
+        requests.push(data);
+        if (data.method === method) adoptionRequest = data.requestId;
+        else if (data.sourceVersion !== NEXT_SOURCE_VERSION)
+          port.postMessage({
+            protocol: DESIGN_RUNTIME_PROTOCOL,
+            version: DESIGN_RUNTIME_VERSION,
+            type: "response",
+            requestId: data.requestId,
+            ok: false,
+            error: {
+              code: "SOURCE_VERSION_MISMATCH",
+              message: "Document already adopted the next generation.",
+              retryable: true,
+            },
+          });
+        else
+          respond(
+            data.requestId,
+            data.method === "getNodeDetails"
+              ? snapshot(2, NEXT_SOURCE_VERSION).frame
+              : [],
+          );
+      };
+      port.start();
+      try {
+        const adopting =
+          method === "commitStyles"
+            ? connection.commitStyles(
+                [{ nodeId: "frame", styles: { width: "240px" } }],
+                NEXT_SOURCE_VERSION,
+              )
+            : connection.restoreGeneration(NEXT_SOURCE_VERSION, true);
+        await vi.waitFor(() => expect(adoptionRequest).not.toBeNull());
+        // The document has changed, but its confirmation has not reached the
+        // host. The next interaction must retain its intent across that gap.
+        const interacting = Promise.allSettled([
+          connection.getNodeDetails("frame"),
+          connection.previewLayout({
+            updates: [{ nodeId: "frame", styles: { width: "280px" } }],
+            nodeIds: [],
+          }),
+        ]);
+        respond(adoptionRequest!, {
+          sourceVersion: NEXT_SOURCE_VERSION,
+          treeUnchanged: true,
+          snapshot: snapshot(2, NEXT_SOURCE_VERSION),
+          details: [],
+        });
+        await adopting;
+        expect(await interacting).toEqual([
+          {
+            status: "fulfilled",
+            value: snapshot(2, NEXT_SOURCE_VERSION).frame,
+          },
+          { status: "fulfilled", value: [] },
+        ]);
+        expect(requests.slice(1)).toEqual([
+          expect.objectContaining({
+            method: "getNodeDetails",
+            sourceVersion: NEXT_SOURCE_VERSION,
+          }),
+          expect.objectContaining({
+            method: "previewLayout",
+            sourceVersion: NEXT_SOURCE_VERSION,
+          }),
+        ]);
+      } finally {
+        connection.destroy();
+        port.close();
+      }
+    },
+  );
+
+  it("releases queued reads after a rejected adoption and drops cancelled previews", async () => {
+    const source = { postMessage: vi.fn() };
+    const connection = connectDesignFrameRuntime(
+      "generation-failure",
+      "home.html",
+      SOURCE_VERSION,
+      { contentWindow: source } as unknown as HTMLIFrameElement,
+      {},
+      { setTimeout: vi.fn(() => 11), clearTimeout: vi.fn() },
+    );
+    const port = source.postMessage.mock.calls[0]?.[1]
+      ?.transfer?.[0] as MessagePort;
+    const requests: Array<Record<string, unknown>> = [];
+    port.onmessage = ({ data }) => {
+      if (data.type !== "request") return;
+      requests.push(data);
+      if (data.method === "getNodeDetails")
+        port.postMessage({
+          protocol: DESIGN_RUNTIME_PROTOCOL,
+          version: DESIGN_RUNTIME_VERSION,
+          type: "response",
+          requestId: data.requestId,
+          ok: true,
+          result: snapshot(1).frame,
+        });
+    };
+    port.start();
+    try {
+      const adopting = connection.commitStyles(
+        [{ nodeId: "missing", styles: { width: "240px" } }],
+        NEXT_SOURCE_VERSION,
+      );
+      const rejected = expect(adopting).rejects.toMatchObject({
+        code: "NODE_NOT_FOUND",
+      });
+      const controller = new AbortController();
+      const preview = connection.previewLayout(
+        { updates: [], nodeIds: [] },
+        controller.signal,
+      );
+      const cancelled = expect(preview).rejects.toMatchObject({
+        code: "CANCELLED",
+      });
+      const reading = connection.getNodeDetails("frame");
+      controller.abort();
+      await vi.waitFor(() => expect(requests).toHaveLength(1));
+      port.postMessage({
+        protocol: DESIGN_RUNTIME_PROTOCOL,
+        version: DESIGN_RUNTIME_VERSION,
+        type: "response",
+        requestId: requests[0]!.requestId,
+        ok: false,
+        error: { code: "NODE_NOT_FOUND", message: "Missing", retryable: false },
+      });
+      await Promise.all([rejected, cancelled]);
+      await expect(reading).resolves.toEqual(snapshot(1).frame);
+      expect(connection.sourceVersion).toBe(SOURCE_VERSION);
+      expect(requests.map((request) => request.method)).toEqual([
+        "commitStyles",
+        "getNodeDetails",
+      ]);
+      expect(requests[1]!.sourceVersion).toBe(SOURCE_VERSION);
+    } finally {
+      connection.destroy();
+      port.close();
+    }
   });
 
   it("accepts a token-only generation without manufacturing node details", async () => {

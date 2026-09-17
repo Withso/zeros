@@ -52,6 +52,65 @@ function styleTransaction() {
 }
 
 describe("headless Design API", () => {
+  it("restores local history only at its exact repository revision", async () => {
+    const storage = repository();
+    const api = trustedApi(storage);
+    const first = await api.apply(styleTransaction());
+    const checkpoint = await api.captureLocalHistory("document-1");
+    const next = {
+      ...styleTransaction(),
+      transactionId: "second-edit",
+      baseRevision: first.revision,
+    };
+    next.operations = [
+      {
+        operationId: "second-color",
+        type: "node.set-styles",
+        nodeId: "card",
+        styles: { color: "blue" },
+        scope: "auto",
+        responsiveContext: "base",
+        stateContext: "default",
+      },
+    ];
+    const second = await api.apply(next);
+    expect(await api.restoreLocalHistory(checkpoint)).toBe(false);
+    expect((await api.open("document-1")).history.undoDepth).toBe(2);
+    await storage.commit({
+      documentId: "document-1",
+      expectedRevision: second.revision,
+      state: checkpoint.session.state,
+    });
+    expect((await api.open("document-1")).history.undoDepth).toBe(0);
+    expect(await api.restoreLocalHistory(checkpoint)).toBe(true);
+    expect((await api.open("document-1")).history.undoDepth).toBe(1);
+    expect(await api.undo("document-1")).not.toBeNull();
+    expect((await storage.read("document-1")).files["styles.css"]).toBe(
+      FRAME_CSS,
+    );
+  });
+
+  it("never gives policy-authorized or unauthenticated callers local history authority", async () => {
+    const storage = repository();
+    const checkpoint =
+      await trustedApi(storage).captureLocalHistory("document-1");
+    const api = new DesignApi(storage, {
+      authorization: {
+        kind: "authorize",
+        actor: { kind: "human", id: "test" },
+        authorize: () => true,
+      },
+    });
+    for (const denied of [api, new DesignApi(storage)]) {
+      await expect(
+        denied.captureLocalHistory("document-1"),
+      ).rejects.toBeInstanceOf(DesignApiAuthorizationError);
+      await expect(
+        denied.restoreLocalHistory(checkpoint),
+      ).rejects.toBeInstanceOf(DesignApiAuthorizationError);
+    }
+  });
+
   it("fails closed for mutations when a caller does not declare its authority", async () => {
     const storage = repository();
     const api = new DesignApi(storage);
@@ -283,7 +342,10 @@ describe("headless Design API", () => {
         kind: "authorize",
         actor: { kind: "agent", id: "design-child" },
         authorize: ({ actor, operationTypes }) => {
-          seen.push({ actor: `${actor.kind}:${actor.id}`, operations: operationTypes });
+          seen.push({
+            actor: `${actor.kind}:${actor.id}`,
+            operations: operationTypes,
+          });
           return true;
         },
       },

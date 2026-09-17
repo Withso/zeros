@@ -43,6 +43,22 @@ import {
   zoomDesignViewportAtPoint,
 } from "../design-canvas-math";
 
+it("releases all automatic gap distributions when scrubbing a concrete gap", () => {
+  for (const justifyContent of [
+    "space-between",
+    "space-around",
+    "space-evenly",
+  ])
+    expect(
+      designInlineGapDistributionStyles({
+        display: "flex",
+        flexDirection: "row",
+        axis: "x",
+        justifyContent,
+      }),
+    ).toEqual({ "justify-content": "flex-start" });
+});
+
 describe("design canvas viewport math", () => {
   it("rebases extreme zoom into one bounded device-resolution viewport tile", () => {
     const zoom = 256;
@@ -328,6 +344,25 @@ describe("design canvas viewport math", () => {
     expect(withOpenLayers.has("frame-0.html")).toBe(true);
     expect(withOpenLayers.has("missing.html")).toBe(false);
     expect(withOpenLayers.size).toBe(4);
+  });
+
+  it("does not fill unused live slots with distant heavy documents", () => {
+    const frames = Array.from({ length: 1000 }, (_, index) => ({
+      file: `frame-${index}.html`,
+      x: index * 10_000,
+      y: 0,
+      width: 400,
+      height: 300,
+    }));
+    expect([
+      ...selectLiveDesignFrameFiles({
+        frames,
+        viewport: { width: 1000, height: 700 },
+        view: { zoom: 1, panX: 0, panY: 0 },
+        selectedFrame: null,
+        maxLive: 12,
+      }),
+    ]).toEqual(["frame-0.html"]);
   });
 
   it("retains a bounded live iframe window while the design surface is hidden", () => {

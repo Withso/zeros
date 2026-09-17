@@ -103,7 +103,8 @@ export function designFrameInsertionOperations(
     type: "node.set-html",
     nodeId: parent.oid,
     mode: "append",
-    html: `<div data-oid="${escapedId}" style="display:block;position:${flow ? "relative" : "absolute"};${flow ? "" : `left:${x}px;top:${y}px;`}width:${width}px;height:${height}px;box-sizing:border-box;flex-shrink:0;"></div>`,
+    // check:ui ignore-next -- authored canvas frame color, independent of the editor theme.
+    html: `<div data-oid="${escapedId}" style="display:block;position:${flow ? "relative" : "absolute"};${flow ? "" : `left:${x}px;top:${y}px;`}width:${width}px;height:${height}px;box-sizing:border-box;flex-shrink:0;background-color:#ffffff;opacity:1;"></div>`,
   });
   return operations;
 }

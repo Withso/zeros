@@ -1,15 +1,10 @@
+import { readDesignWorkspaceSource } from "./workspace-source";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(
-  resolve(
-    process.cwd(),
-    "apps/desktop/src/renderer/features/design-workspace/design-workspace.tsx",
-  ),
-  "utf8",
-);
+const source = readDesignWorkspaceSource();
 const themeSource = readFileSync(
   resolve(
     process.cwd(),
@@ -230,9 +225,7 @@ describe("design workspace interaction wiring", () => {
     );
     expect(source).toContain("const text = event.target.value;");
     expect(source).toContain("setPresentedDraft(text);");
-    expect(source).toContain(
-      "if (!previewDirtyRef.current) preview(resolvedDraft);",
-    );
+    // Commit/Escape ordering is exercised with delayed writes in the browser.
     // The scrub drag is direct manipulation and must stay live.
     expect(source).toContain("scrub.latestValue = resolved;");
     expect(source).toContain("preview(resolved);");
@@ -333,32 +326,18 @@ describe("design workspace interaction wiring", () => {
   });
 
   it("retains a bounded inert MRU deck for design-workspace switches", () => {
-    expect(appShellSource).toContain("designWorkspaceIdsToRender");
-    expect(appShellSource).toContain("data-design-retained-workspace");
-    expect(appShellSource).toContain("surfaceActive={entryActive && !isHome}");
-    // The active deck must not re-enable painting under the Home shell's
-    // hidden wrapper — `visible` on a child beats `invisible` on an ancestor
-    // and lets z-indexed layer rows bleed through the Home sidebar.
-    expect(appShellSource).toContain(
-      "const entryVisible = entryActive && !isHome;",
-    );
-    expect(appShellSource).toContain(
-      '{...(!entryVisible ? { inert: "" } : {})}',
-    );
+    const deck = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/shell/workbench/design-deck.tsx"), "utf8");
+    expect(deck).toContain("useRetainedViewKeys(active ? currentKey : null, 2, available)");
+    expect(deck).toContain("data-design-retained-workspace");
+    expect(deck).toContain("active={visible}");
+    expect(deck).toContain('inert: ""');
+    expect(deck).toContain('"pointer-events-none invisible"');
+    expect(appShellSource).toContain("surfaceActive={!isHome && !workbenchCollapsed}");
   });
 
-  it("keeps the persisted code-column collapse out of design workspaces", () => {
-    const sidebarWiring = appShellSource.match(
-      /<DesignWorkspaceSidebar[\s\S]*?\/>/,
-    )?.[0];
-    const columnWiring = appShellSource.match(
-      /<DesignWorkspaceColumn[\s\S]*?\/>/,
-    )?.[0];
-
-    expect(sidebarWiring).toBeDefined();
-    expect(columnWiring).toBeDefined();
-    expect(sidebarWiring).not.toContain("workbenchCollapsed");
-    expect(columnWiring).not.toContain("workbenchCollapsed");
+  it("keeps column collapse in the shared workbench and makes hidden Design inactive", () => {
+    const workbench = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx"), "utf8");
+    expect(workbench).toContain('active={surfaceActive && !collapsed && activeWorkbenchTab?.type === "design"}');
     expect(source).not.toContain("WorkbenchToggleButton");
     expect(source).not.toContain("onToggleWorkbench");
   });
@@ -740,11 +719,12 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain('if (event.key === "Alt") {');
   });
 
-  it("exposes structured grid flow, alignment, and implicit-track controls", () => {
-    expect(styleEditorSource).toContain('"grid-auto-flow"');
-    expect(styleEditorSource).toContain('"grid-auto-columns"');
-    expect(styleEditorSource).toContain('"grid-auto-rows"');
-    expect(styleEditorSource).toContain('"justify-items"');
+  it("keeps the layout inspector separate from unrestricted CSS editing", () => {
+    expect(styleEditorSource).toContain("DesignAutoLayoutControls");
+    expect(styleEditorSource).not.toContain('"margin-top"');
+    expect(styleEditorSource).not.toContain('"flex-grow"');
+    expect(styleEditorSource).not.toContain('"grid-auto-columns"');
+    expect(source).toContain("DesignComputedCssEditor");
   });
 
   it("groups common style controls while retaining independent and advanced CSS properties", () => {

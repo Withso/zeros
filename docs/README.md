@@ -25,7 +25,19 @@ contributors after the change that introduced them has shipped.
   identity, isolation, policy, artifact, and provider-adapter boundaries.
 - [Design workspace](design-workspace.md) is the consolidated contract for the
   current editor, Foundation schemas, shared-worktree Git behavior, native Code
-  execution, and the production-disabled Design-agent/ZSR foundation.
+  execution, and scoped Design tools in the shared agent lifecycle.
+- [Design mode roadmap](design-mode-roadmap.md) is the active status report
+  and phased plan for surface kinds (media, web, code, tool), the Code-agent
+  Design API, controls, and lite components. It is retained until every phase
+  ships or moves to another owned roadmap.
+- [Design surface contracts](design-surface-contracts.md) records surface identity,
+  compatibility, adapter lifecycle, accepted host restrictions, and resource probes.
+- [Shared Code/Design v1 plan](design-v1-implementation-plan.md) records the
+  delivered pre-agent Design workbench/backend foundation, pending composer
+  modes, API/Git boundaries, edge cases, cleanup,
+  and remaining implementation gates. It replaces the private-store and
+  separate Design-session plans; later roadmap phases remain in place.
+
 - [Color names](color-names.md) records the stable workspace-name palette used
   by the local engine.
 - [Agent capability roadmap](agent-capabilities-parity-and-ui-consolidated-2026-07-01.md)

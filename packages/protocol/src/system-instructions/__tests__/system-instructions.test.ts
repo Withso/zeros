@@ -61,9 +61,10 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
     expect(out).toContain("read-only to you");
     expect(out).toContain("shell, patch, editor, filesystem, or generic Git");
     expect(out).toContain("even if the user asks");
-    expect(out).toContain("Design agent using the Design API");
-    expect(out).toContain("has no Design mutation capability");
-    expect(out).toContain("cannot turn itself into a Design agent");
+    expect(out).toContain("When Design tools are unavailable, use the Design surface");
+    expect(out).toContain("begin with design_capabilities");
+    expect(out).toContain("unknown or indeterminate retry status is not permission to replay");
+    expect(out).toContain("You remain a Code agent.");
     expect(out).toContain(
       "exclude the Design directories from its watched paths",
     );

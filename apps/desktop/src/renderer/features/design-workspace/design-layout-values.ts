@@ -9,6 +9,8 @@ import {
 export type DesignLayoutAxis = "x" | "y";
 export type DesignLayoutConstraint = "start" | "center" | "end" | "stretch";
 export type DesignLayoutAction =
+  | { type: "auto-layout"; flow: "none" | "row" | "column" | "grid" }
+  | { type: "sizing"; axis: DesignLayoutAxis; mode: "fixed" | "hug" | "fill" }
   | { type: "reset"; property: string }
   | { type: "clip" }
   | { type: "center" }
@@ -33,6 +35,11 @@ export interface DesignLayoutFieldOptions {
   whole?: boolean;
   compact?: boolean;
   geometry?: boolean;
+  linkedProperties?: readonly string[];
+  percentage?: boolean;
+  icon?: "padding-x" | "padding-y" | "gap" | "opacity";
+  shortLabel?: string;
+  sizing?: "hug" | "fill";
 }
 
 export function roundDesignLayoutValue(value: string): string {
@@ -287,7 +294,12 @@ export function designLayoutActionStyles(
   details: DesignRuntimeNodeDetails,
   action: DesignLayoutAction,
 ): Record<string, string | null> {
-  if (action.type === "distribute" || action.type === "resize-fit")
+  if (
+    action.type === "distribute" ||
+    action.type === "resize-fit" ||
+    action.type === "auto-layout" ||
+    action.type === "sizing"
+  )
     throw new Error("This action needs the frame's children.");
   if (action.type === "resize-fill") {
     if (!details.layout?.parentId)
@@ -395,6 +407,19 @@ export function designLayoutActionStyles(
     const result: Record<string, string | null> = {
       [keys.size]: cssSize(details, axis, Math.round(action.value)),
     };
+    if (
+      designLayoutMode(details.layout?.parentDisplay ?? "") === "flex" &&
+      !["absolute", "fixed"].includes(style(details, "position")) &&
+      (details.layout?.parentFlexDirection?.startsWith("column")
+        ? "y"
+        : "x") === axis
+    ) {
+      Object.assign(result, {
+        "flex-grow": "0",
+        "flex-shrink": "0",
+        "flex-basis": "auto",
+      });
+    }
     if (designLayoutConstraint(details, axis) === "stretch") {
       result[keys.end] = "auto";
       result[`--zeros-layout-${axis}`] = "start";

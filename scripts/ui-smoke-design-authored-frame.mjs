@@ -68,12 +68,12 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
       (await layout.locator("[data-design-layout-constraints]").count()) === 0,
   );
   for (const [target, other, mode, display] of [
-    ["canvas", red, "Stack", "flex"],
+    ["canvas", red, "Vertical", "flex"],
     ["red", body, "Grid", "grid"],
     ["canvas", red, "None", "block"],
   ]) {
     await (target === "canvas" ? label : row).click();
-    const before = await other.evaluate((el) => el.style.cssText);
+    const before = await other.evaluate((el) => el.style.display);
     await committed(() =>
       layout
         .getByRole("button", { name: `Auto layout: ${mode}`, exact: true })
@@ -86,7 +86,7 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
         display,
       )) &&
         (await other.evaluate(
-          (el, before) => el.style.cssText === before,
+          (el, before) => el.style.display === before,
           before,
         )),
     );
@@ -105,6 +105,9 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
       (await row.isVisible()) &&
       (await childRow.isVisible()),
   );
+  const grandchildBefore = await runtime
+    .locator('[data-oid="red-child"]')
+    .evaluate((el) => el.style.cssText);
   await committed(() =>
     layout.getByRole("button", { name: "Align top", exact: true }).click(),
   );
@@ -115,7 +118,10 @@ export async function runDesignAuthoredFrameSmoke({ page, waitFor, check }) {
     )) &&
       (await runtime
         .locator('[data-oid="red-child"]')
-        .evaluate((el) => el.style.left === "40px" && el.style.top === "10px")),
+        .evaluate(
+          (el, before) => el.style.cssText === before,
+          grandchildBefore,
+        )),
   );
   await row.click();
   const height = layout.getByLabel("H", { exact: true });

@@ -140,6 +140,7 @@ import {
   resolveAgentCapabilityPorts,
 } from "./capabilities";
 import { dedupeMcpServers, resolveMcpServersForRepo } from "./mcp-registry";
+import { AgentSessionToolRegistry } from "./session-tools";
 import {
   coerceProviderBinding,
   legacyProviderBinding,
@@ -1382,101 +1383,12 @@ export interface NewAgentSessionOptions {
   admissionSignal?: AbortSignal;
 }
 
-export interface DesignAgentSessionAdmission {
-  readonly actor: "design-agent";
-  readonly agentRunId: string;
-  readonly env: Readonly<Record<string, string>>;
-  readonly mcpServers: readonly Extract<
-    McpServerRegistration,
-    { transport: "http" }
-  >[];
-  readonly trustedLocalPorts: readonly number[];
-}
-
-type SessionExecutionProfile =
-  | { readonly actor: "agent-code" }
-  | {
-      readonly actor: "design-agent";
-      readonly mcpServers: readonly Extract<
-        McpServerRegistration,
-        { transport: "http" }
-      >[];
-      readonly trustedLocalPorts: readonly number[];
-    };
-
-function checkedDesignSessionProfile(
-  admission: DesignAgentSessionAdmission,
-): Extract<SessionExecutionProfile, { actor: "design-agent" }> {
-  if (
-    admission.actor !== "design-agent" ||
-    !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(admission.agentRunId) ||
-    admission.mcpServers.length !== 1
-  ) {
-    throw new Error("The Design-agent admission is invalid.");
-  }
-  const ports = new Set<number>();
-  for (const server of admission.mcpServers) {
-    let parsed: URL;
-    try {
-      parsed = new URL(server.url);
-    } catch {
-      throw new Error("The Design-agent MCP endpoint is invalid.");
-    }
-    if (
-      parsed.protocol !== "http:" ||
-      (parsed.hostname !== "127.0.0.1" && parsed.hostname !== "localhost") ||
-      parsed.pathname !== "/mcp" ||
-      parsed.username ||
-      parsed.password ||
-      parsed.search ||
-      parsed.hash ||
-      !parsed.port
-    ) {
-      throw new Error("The Design-agent MCP endpoint is not scoped loopback.");
-    }
-    const port = Number(parsed.port);
-    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-      throw new Error("The Design-agent MCP endpoint port is invalid.");
-    }
-    if (
-      Object.keys(server.headers ?? {}).some(
-        (name) => name.toLowerCase() === "authorization",
-      )
-    ) {
-      throw new Error(
-        "The Design-agent bearer must not be embedded in MCP config.",
-      );
-    }
-    const references = Object.values(server.headersFromEnv ?? {});
-    if (
-      references.length < 1 ||
-      references.some(
-        (name) => !/^Bearer [a-f0-9]{64}$/.test(admission.env[name] ?? ""),
-      )
-    ) {
-      throw new Error("The Design-agent MCP credential reference is invalid.");
-    }
-    ports.add(port);
-  }
-  const trusted = [...new Set(admission.trustedLocalPorts)].sort(
-    (left, right) => left - right,
-  );
-  const derived = [...ports].sort((left, right) => left - right);
-  if (JSON.stringify(trusted) !== JSON.stringify(derived)) {
-    throw new Error("The Design-agent loopback authority is inconsistent.");
-  }
-  return {
-    actor: "design-agent",
-    mcpServers: admission.mcpServers,
-    trustedLocalPorts: trusted,
-  };
-}
-
 export class AgentGateway {
   private readonly projectRoot: string;
   private readonly events: AgentGatewayEvents;
   private readonly executionBoundary: ExecutionBoundary;
   private readonly previewGatewayFactory: BoundaryPreviewGatewayFactory;
+  private readonly sessionTools: AgentSessionToolRegistry;
 
   /** The raw MCP registry (may hold dupes; deduped into the view below). */
   private readonly mcpServers: McpServerRegistration[] = [];
@@ -1966,6 +1878,9 @@ export class AgentGateway {
     this.provisionalExecutionActors.set(executionId, actor);
     try {
       return await run();
+    } catch (error) {
+      await this.sessionTools.stop(executionId);
+      throw error;
     } finally {
       this.provisionalTerritoryContributions.delete(executionId);
       this.provisionalExecutionActors.delete(executionId);
@@ -3828,6 +3743,7 @@ export class AgentGateway {
       });
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;
+    this.sessionTools = new AgentSessionToolRegistry(opts.sessionToolFactory);
   }
 
   /** Replace the MCP server registry. The engine boot-loads this from the
@@ -4783,34 +4699,22 @@ export class AgentGateway {
     agentId: string,
     opts: NewAgentSessionOptions = {},
   ): Promise<NewSessionResponse> {
-    return this.startNewSession(agentId, opts, { actor: "agent-code" });
+    return this.startNewSession(agentId, opts);
   }
 
-  /** Start one persistent autonomous Design session. It uses the same provider
-   * lifecycle as Code, but its immutable actor profile selects ZSR and replaces
-   * the user MCP registry with the single scoped Design API endpoint. */
-  async newDesignSession(
-    agentId: string,
-    admission: DesignAgentSessionAdmission,
-    opts: NewAgentSessionOptions = {},
-  ): Promise<NewSessionResponse> {
-    const profile = checkedDesignSessionProfile(admission);
-    return this.startNewSession(
-      agentId,
-      { ...opts, env: { ...(opts.env ?? {}), ...admission.env } },
-      profile,
-    );
+  /** Retire scoped product authority while the native Code process stays live. */
+  revokeSessionTools(workspaceId?: string): Promise<void> {
+    return this.sessionTools.revoke(workspaceId);
   }
 
   private async startNewSession(
     agentId: string,
     opts: NewAgentSessionOptions,
-    profile: SessionExecutionProfile,
   ): Promise<NewSessionResponse> {
     this.assertSelectedAccountConnected(agentId);
     const sessionStartedAt = Date.now();
     const authFingerprint = this.providerAuthConfigFingerprint(agentId);
-    const actor = profile.actor;
+    const actor = "agent-code";
     const adapter = await this.adapterFor(agentId);
     // The prior silent fallback
     // `opts.cwd ?? this.projectRoot` was a critical footgun. When a
@@ -4873,8 +4777,8 @@ export class AgentGateway {
       },
     );
     // The actor router owns the complete provider lifecycle before any wrapper,
-    // MCP server, hook, plugin, or `/add-dir` child starts. Code selects native
-    // host execution with its normal environment; Design selects ZSR.
+    // MCP server, hook, plugin, or `/add-dir` child starts. Local sessions use
+    // native host execution; qualified cloud workers retain their own policy.
     const sessionEnv = spawn.env;
     const territorySet = await this.resolveTerritorySet(
       primaryTerritory,
@@ -4886,7 +4790,7 @@ export class AgentGateway {
     );
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
-    const providerEnv = this.sanitizeProviderEnv(sessionEnv);
+    const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
     // Native-instruction adapters (Codex and Claude) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
@@ -4896,8 +4800,7 @@ export class AgentGateway {
         territory?.designDirectory,
         territory?.protectedDesignDirectories,
       ),
-      agentRole:
-        actor === "design-agent" ? ("design" as const) : ("code" as const),
+      agentRole: "code" as const,
     };
     const systemInstruction = this.nativeInstructionFor(
       adapter,
@@ -4910,10 +4813,20 @@ export class AgentGateway {
         executionId,
         territorySet.contributions,
         async () => {
-          const mcpServers =
-            actor === "design-agent"
-              ? [...profile.mcpServers]
-              : await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+          let mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+          if (actor === "agent-code") {
+            mcpServers = await this.sessionTools.admit(
+              {
+                executionId,
+                cwd,
+                workspaceId: opts.workspaceId,
+                conversationId: opts.conversationId,
+                signal: opts.admissionSignal,
+              },
+              mcpServers,
+              providerEnv,
+            );
+          }
           const preparedBoundary = await this.prepareExecutionBoundary(
             executionId,
             cwd,
@@ -4939,9 +4852,6 @@ export class AgentGateway {
                   }
                 : {}),
               actor,
-              ...(actor === "design-agent"
-                ? { trustedLocalPorts: profile.trustedLocalPorts }
-                : {}),
               contextTerritories: territorySet.contextTerritories,
             },
           );
@@ -4983,18 +4893,15 @@ export class AgentGateway {
       );
     const boundary = preparedBoundary.status;
     const browserUse =
-      actor === "design-agent"
-        ? null
-        : await this.resolveBrowserUse(
+      await this.resolveBrowserUse(
             agentId,
             cwd,
             opts.workspaceId,
             opts.conversationId,
             mainRepoRoot,
           );
-    // Local MCP, hooks, plugins, and subagents are descendants of the selected
-    // actor boundary. Native Code keeps the normal registry; Design receives
-    // only the scoped endpoint assembled above.
+    // Keep the provider, user MCP registry, hooks and plugins in the same
+    // session. Product tools have separately revocable engine authority.
     try {
       opts.onExecutionCreated?.(executionId);
     } catch (error) {
@@ -5194,7 +5101,7 @@ export class AgentGateway {
     );
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
-    const providerEnv = this.sanitizeProviderEnv(sessionEnv);
+    const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
     const instructionCtx = this.parseInstructionCtx(
       providerEnv,
       territory?.designDirectory,
@@ -5210,10 +5117,21 @@ export class AgentGateway {
         executionId,
         territorySet.contributions,
         async () => {
-          const mcpServers = await this.resolveSessionMcp(
+          const configuredMcpServers = await this.resolveSessionMcp(
             agentId,
             cwd,
             mainRepoRoot,
+          );
+          const mcpServers = await this.sessionTools.admit(
+            {
+              executionId,
+              cwd,
+              workspaceId: opts.workspaceId,
+              conversationId: opts.conversationId,
+              signal: opts.admissionSignal,
+            },
+            configuredMcpServers,
+            providerEnv,
           );
           const preparedBoundary = await this.prepareExecutionBoundary(
             executionId,
@@ -5630,6 +5548,11 @@ export class AgentGateway {
       this.executionToBoundaryStatus.delete(executionId);
       this.stopObservingBoundaryPorts(executionId);
       const failures: unknown[] = [];
+      try {
+        await this.sessionTools.stop(executionId);
+      } catch (error) {
+        failures.push(error);
+      }
       // Each step is independent and teardown is fail-closed: an adapter
       // cleanup failure must never skip the kernel-boundary kill/proof, while
       // a lease-revocation failure must not leave the provider process alive.
@@ -5713,6 +5636,11 @@ export class AgentGateway {
     this.executionToBoundaryStatus.delete(sessionId);
     const adapter = this.adapters.get(resolvedAgentId);
     let failure: unknown;
+    try {
+      await this.sessionTools.stop(sessionId);
+    } catch (err) {
+      failure = err;
+    }
     try {
       // Revoke boundary-owned integration and port capabilities before asking
       // provider code to unwind.
@@ -6555,6 +6483,7 @@ export class AgentGateway {
         if (result.status === "rejected") failures.push(result.reason);
       }
     };
+    await settle([() => this.sessionTools.dispose()]);
     for (const executionId of this.boundaryPortSubscriptions.keys()) {
       this.stopObservingBoundaryPorts(executionId);
     }

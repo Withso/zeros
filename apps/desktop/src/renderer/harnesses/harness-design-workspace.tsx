@@ -30,22 +30,27 @@ function withDesignRuntime(source: string, sourceVersion: string): string {
   return source.replace(/<\/body>/i, () => `${runtime}</body>`);
 }
 
-const homeSource = new URLSearchParams(window.location.search).has(
-  "authoredFrame",
-)
-  ? `<!doctype html><html><head><style>* { box-sizing:border-box; }</style></head>
+const layoutGestureHarness = new URLSearchParams(window.location.search).has(
+  "layoutGestures",
+);
+const homeSource = new URLSearchParams(window.location.search).has("autoLayout")
+  ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0;background:white;color:black;font-family:system-ui}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;min-height:100vh;padding:72px"><div data-oid="home-hero" style="position:relative;display:block;width:300px;height:240px;max-width:none;padding:0;box-sizing:border-box">${["h1", "p", "span"].map((tag, index) => `<${tag} data-oid="${["home-heading", "home-copy", "home-action"][index]}" style="position:absolute;left:${16 + index * 90}px;top:20px;width:80px;height:40px;min-width:0;max-width:none;margin:0;padding:0;box-sizing:border-box;font-size:12px">${["Heading", "Copy", "Action"][index]}</${tag}>`).join("")}</div></main></body></html>`
+  : layoutGestureHarness
+  ? `<!doctype html><html><head><style>*{box-sizing:border-box}body{margin:0} [data-oid]{margin:0}</style></head><body><main data-oid="home-main" data-zeros-frame-root style="position:relative;display:block;width:100%;height:100vh;background:white"><div data-oid="home-hero" style="position:absolute;left:80px;top:80px;display:flex;width:600px;height:300px;gap:20px;padding:20px;align-items:flex-start"><div data-oid="home-heading" style="width:100px;height:80px;flex-shrink:0;background:red"></div><div data-oid="home-copy" style="width:100px;height:80px;flex-shrink:0;background:blue"></div><div data-oid="home-action" style="width:100px;height:80px;flex-shrink:0;background:green"></div></div></main></body></html>`
+  : new URLSearchParams(window.location.search).has("authoredFrame")
+    ? `<!doctype html><html><head><style>* { box-sizing:border-box; }</style></head>
     <body style="margin:0;display:block;position:relative;height:100vh;background:white">
       <main data-oid="home-main" style="display:block;position:absolute;left:0;top:400px;width:100%;height:64px;background:red;rotate:180deg">
         <div data-oid="red-child" style="display:block;position:absolute;left:40px;top:10px;width:100px;height:30px"></div>
       </main>
     </body></html>`
-  : new URLSearchParams(window.location.search).has("emptyFrame")
-    ? `<!doctype html><html><head><style>
+    : new URLSearchParams(window.location.search).has("emptyFrame")
+      ? `<!doctype html><html><head><style>
       * { box-sizing:border-box; }
       body { margin:0; background:white; }
       body [data-oid] { display:block; position:relative; margin:0; }
     </style></head><body><main data-oid="home-main" data-zeros-frame-root style="display:block;position:relative;height:100vh;"></main></body></html>`
-    : `<!doctype html>
+      : `<!doctype html>
 <html data-oid="home-html">
   <head>
     <style>
@@ -108,6 +113,7 @@ const pricingSource = `<!doctype html>
 </html>`;
 
 async function main() {
+  const workbenchHarness = new URLSearchParams(location.search).has("workbench");
   const workspaceId = "ws_design_harness";
   const workspacePath =
     "/Users/demo/zeros/design workspaces/north-one/launch-system";
@@ -120,7 +126,7 @@ async function main() {
     baseBranch: "main",
     path: workspacePath,
     status: "in-progress" as const,
-    createdAt: Date.now(),
+    createdAt: workbenchHarness ? 0 : Date.now(),
     archivedAt: null,
     stashRef: null,
     prNumber: 42,
@@ -129,6 +135,9 @@ async function main() {
     agentId: null,
     lastActiveAt: Date.now(),
   };
+  const workspaces = workbenchHarness ? [workspace, ...["second", "third"].map((suffix) => ({ ...workspace, id: `${workspaceId}_${suffix}`, path: `${workspacePath}-${suffix}`, branch: `${workspace.branch}-${suffix}` }))] : [workspace];
+  const workbenchOperations: string[] = [];
+  (window as Window & { __zerosHarnessWorkbenchOperations?: string[] }).__zerosHarnessWorkbenchOperations = workbenchOperations;
   localStorage.setItem(
     "zeros-projects-v1",
     JSON.stringify([
@@ -144,6 +153,9 @@ async function main() {
   );
 
   const React = await import("react");
+  const WorkbenchPane = workbenchHarness ? (await import("../shell/workbench/workbench-pane")).WorkbenchPane : null;
+  const ConversationPane = workbenchHarness ? (await import("../shell/conversation/conversation-pane")).ConversationPane : null;
+  const { ActionsCtx } = await import("../features/agent/sessions-context");
   const { createRoot } = await import("react-dom/client");
   const { TooltipProvider } = await import("../shared/ui/primitives/tooltip");
   const { Toaster } = await import("../shared/ui/primitives/elements/toast");
@@ -171,7 +183,7 @@ async function main() {
   const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
 
-  setWorkspaceRowsForTesting(workspace.repoSlug, [workspace]);
+  setWorkspaceRowsForTesting(workspace.repoSlug, workspaces);
   useWorkspaceStore.setState({
     activeChatId: null,
     newAgentFolder: workspacePath,
@@ -511,6 +523,16 @@ async function main() {
   };
   const styleMutationSources: string[] = [];
   const designShortcutOperations: string[] = [];
+  let reviewStaged = false;
+  let reviewCommitted = false;
+  let reviewCaptured = false;
+  const evidence = () => ({ id: "c".repeat(64), baseRevision: "harness-review-base", revision: "harness-review-after", createdAt: Date.now(), viewport: { width: 1, height: 1, deviceScaleFactor: 1 }, renderer: "harness" });
+  let reviewProposalStatus: "proposed" | "committed" | "rejected" = "proposed";
+  const reviewProposal = () => ({ id: "proposal-review", actorId: "Design agent", signature: "a".repeat(64),
+    createdAt: 1_700_000_000_000, status: reviewProposalStatus, intent: "Refine the heading spacing", documentId: "frame:home.html",
+    baseRevision: "harness-review-base", operationCount: 1,
+    ...(reviewProposalStatus !== "proposed" ? { review: { decision: reviewProposalStatus === "committed" ? "accept" : "reject", reviewerId: "desktop", reviewedAt: 1_700_000_000_001 } } : {}) });
+
   (
     window as Window & {
       __zerosHarnessStyleMutationSources?: string[];
@@ -521,6 +543,11 @@ async function main() {
       __zerosHarnessDesignShortcutOperations?: string[];
     }
   ).__zerosHarnessDesignShortcutOperations = designShortcutOperations;
+  const layoutUndo: Array<{
+    source: string;
+    snapshot: typeof currentWorkspaceSnapshot;
+  }> = [];
+  const layoutRedo: typeof layoutUndo = [];
   setActiveBridge({
     status: "connected",
     on: () => () => {},
@@ -530,6 +557,176 @@ async function main() {
       op?: string;
       params?: Record<string, unknown>;
     }) => {
+      if (message.op) workbenchOperations.push(message.op);
+      if (workbenchHarness && message.op === "file.tree") return { type: "WORKSPACE_RESPONSE", result: { files: [], truncated: false, designDirectories: ["North One - Design"] } };
+      if (workbenchHarness && message.op === "file.ignored") return { type: "WORKSPACE_RESPONSE", result: { files: [], truncated: false } };
+      if (workbenchHarness && message.op === "settings.resolve") return { type: "WORKSPACE_RESPONSE", result: { effective: { scripts: {}, design: {} }, sources: {}, warnings: [] } };
+      if (workbenchHarness && message.op === "workspace.setupInfo") return { type: "WORKSPACE_RESPONSE", result: { state: "not-configured", hasCommand: false, command: null, truncated: false, log: "" } };
+      if (message.op === "design.status") return { type: "WORKSPACE_RESPONSE", result: { conflicts: new URLSearchParams(location.search).has("conflicts") ? ["North One - Design/design.toml"] : [], operation: new URLSearchParams(location.search).has("conflicts") ? "merge" : null } };
+      if (message.op === "design.listDirectories") return { type: "WORKSPACE_RESPONSE", result: { directories: ["North One - Design"], directoryIds: { "North One - Design": "design_harness" }, active: "North One - Design", pointer: "North One - Design", target: { directory: "North One - Design", exists: true } } };
+      if (workbenchHarness && message.op === "workspace.list") return { type: "WORKSPACE_RESPONSE", result: workspaces };
+      if (workbenchHarness && message.op === "git.status") return { type: "WORKSPACE_RESPONSE", result: { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, branch: workspace.branch, upstream: null, ahead: 0, behind: 0 } };
+      if (workbenchHarness && message.op === "git.changeCounts") return { type: "WORKSPACE_RESPONSE", result: { all: 0, uncommitted: 0, staged: 0, unstaged: 0 } };
+      if (layoutGestureHarness && message.op === "design.canvas.update") {
+        const params = message.params!;
+        designShortcutOperations.push("canvas:waiting");
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+        const geometry = {
+          x: Number(params.x),
+          y: Number(params.y),
+          w: Number(params.w),
+          h: Number(params.h),
+          z: Number(params.z),
+        };
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.map((frame) =>
+            frame.file === params.frame
+              ? {
+                  ...frame,
+                  x: geometry.x,
+                  y: geometry.y,
+                  width: geometry.w,
+                  height: geometry.h,
+                  z: geometry.z,
+                }
+              : frame,
+          ),
+        };
+        designShortcutOperations.push("canvas:confirmed");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { geometry, snapshot: currentWorkspaceSnapshot },
+        };
+      }
+      if (layoutGestureHarness && message.op === "design.node.transfer") {
+        const params = message.params!;
+        designShortcutOperations.push("transfer:waiting");
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+        if (new URLSearchParams(location.search).has("rejectTransfer"))
+          throw new Error("Transfer failed in the delayed regression fixture.");
+        const parsed = new DOMParser().parseFromString(
+          currentHomeSource,
+          "text/html",
+        );
+        const nodeId = String(params.nodeId);
+        const element = parsed.querySelector<HTMLElement>(
+          `[data-oid="${CSS.escape(nodeId)}"]`,
+        )!;
+        const file = "detached.html";
+        const sourceVersion = nextStyleSourceVersion();
+        const sourceFrame = currentWorkspaceSnapshot.frames[0]!;
+        const detached = {
+          ...sourceFrame,
+          file,
+          title: "Detached",
+          sourceVersion,
+          x: Number(params.x),
+          y: Number(params.y),
+          width: Number(params.w),
+          height: Number(params.h),
+          z: Number(params.z),
+          nodeCount: 1,
+        };
+        element.remove();
+        element.setAttribute("data-zeros-frame-root", "");
+        Object.assign(element.style, {
+          position: "relative",
+          left: "auto",
+          top: "auto",
+          width: "100%",
+          height: "100vh",
+        });
+        const source = `<!doctype html><html>${parsed.head.outerHTML}<body>${element.outerHTML}</body></html>`;
+        currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: [
+            { ...sourceFrame, sourceVersion },
+            ...currentWorkspaceSnapshot.frames.slice(1),
+            detached,
+          ],
+        };
+        for (const frame of [currentWorkspaceSnapshot.frames[0]!, detached]) {
+          const html = frame.file === file ? source : currentHomeSource;
+          designFrameDocumentCache.setData(
+            designFrameDocumentKey(workspaceId, frame.file, sourceVersion),
+            {
+              ...frame,
+              source: html,
+              srcDoc: withDesignRuntime(html, sourceVersion),
+              tree: [],
+            },
+          );
+          const foundation = foundationReplies.get(
+            designFoundationKey(
+              workspaceId,
+              "home.html",
+              sourceFrame.sourceVersion,
+            ),
+          );
+          if (foundation)
+            publishFoundation(
+              designFoundationKey(workspaceId, frame.file, sourceVersion),
+              foundation,
+            );
+        }
+        designShortcutOperations.push("transfer:confirmed");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { frame: file, nodeId, snapshot: currentWorkspaceSnapshot },
+        };
+      }
+      if (
+        layoutGestureHarness &&
+        (message.op === "design.node.styles" ||
+          message.op === "design.transaction.apply")
+      ) {
+        layoutUndo.push({
+          source: currentHomeSource,
+          snapshot: currentWorkspaceSnapshot,
+        });
+        layoutRedo.length = 0;
+      }
+      if (
+        layoutGestureHarness &&
+        (message.op === "design.history.undo" ||
+          message.op === "design.history.redo")
+      ) {
+        const undo = message.op.endsWith("undo");
+        const source = undo ? layoutUndo : layoutRedo;
+        const destination = undo ? layoutRedo : layoutUndo;
+        const previous = currentWorkspaceSnapshot;
+        const restored = source.pop();
+        designShortcutOperations.push("history:waiting");
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+        if (restored) {
+          destination.push({
+            source: currentHomeSource,
+            snapshot: currentWorkspaceSnapshot,
+          });
+          currentHomeSource = restored.source;
+          currentWorkspaceSnapshot = restored.snapshot;
+        }
+        designShortcutOperations.push("history:confirmed");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            result: restored
+              ? {
+                  revision: `harness:${currentWorkspaceSnapshot.frames[0]!.sourceVersion}`,
+                  receipt: {
+                    beforeRevision: `harness:${previous.frames[0]!.sourceVersion}`,
+                    afterRevision: `harness:${currentWorkspaceSnapshot.frames[0]!.sourceVersion}`,
+                    status: "applied",
+                  },
+                }
+              : null,
+            historyFrame: "home.html",
+            snapshot: currentWorkspaceSnapshot,
+          },
+        };
+      }
       if (message.op === "design.node.styles") {
         const requestedSourceVersion = String(
           message.params?.sourceVersion ?? "",
@@ -610,7 +807,13 @@ async function main() {
         // Model the real worktree watcher seeing the file before this bridge
         // reply reaches updateDesignNodeStylesCached.
         applyDesignWorkspaceRefreshVersion(workspaceId, 1);
-        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        await new Promise((resolve) =>
+          window.setTimeout(
+            resolve,
+            (window as Window & { __zerosHarnessStyleDelay?: number })
+              .__zerosHarnessStyleDelay ?? 50,
+          ),
+        );
         designShortcutOperations.push("style:end");
         return {
           type: "WORKSPACE_RESPONSE",
@@ -643,6 +846,8 @@ async function main() {
                 operationId?: string;
                 type?: string;
                 nodeId?: string;
+                parentId?: string;
+                beforeId?: string | null;
                 text?: string;
                 html?: string;
                 mode?: string;
@@ -716,6 +921,24 @@ async function main() {
               if (operation.mode === "append")
                 target.insertAdjacentHTML("beforeend", operation.html ?? "");
               else target.innerHTML = operation.html ?? "";
+            }
+            if (
+              operation.type === "node.move" &&
+              operation.nodeId &&
+              operation.parentId
+            ) {
+              const find = (id: string) =>
+                id === DESIGN_RUNTIME_DOCUMENT_BODY_ID
+                  ? parsed.body
+                  : parsed.querySelector(`[data-oid="${CSS.escape(id)}"]`);
+              const target = find(operation.nodeId);
+              const parent = find(operation.parentId);
+              if (!target || !parent)
+                throw new Error("Missing layer move target");
+              parent.insertBefore(
+                target,
+                operation.beforeId ? find(operation.beforeId) : null,
+              );
             }
             if (operation.type !== "node.set-styles" || !operation.nodeId)
               continue;
@@ -1092,10 +1315,21 @@ async function main() {
         return { type: "WORKSPACE_RESPONSE", result: foundation };
       }
       if (message.op === "design.snapshot") {
+        if ((window as unknown as { __zerosHarnessDesignSnapshotFailure?: boolean }).__zerosHarnessDesignSnapshotFailure)
+          throw new Error("Design snapshot temporarily unavailable");
         return {
           type: "WORKSPACE_RESPONSE",
-          result: { snapshot: currentWorkspaceSnapshot },
+          result: { snapshot: workbenchHarness ? { ...currentWorkspaceSnapshot, lint: { ...currentWorkspaceSnapshot.lint, workspacePath: workspaces.find((row) => row.id === message.params?.workspaceId)?.path ?? workspacePath } } : currentWorkspaceSnapshot },
         };
+      }
+      if (message.op === "design.frame") {
+        const file = String(message.params?.frame ?? "");
+        const frame = currentWorkspaceSnapshot.frames.find((item) => item.file === file);
+        if (!frame) throw new Error("The harness frame is unavailable.");
+        const retained = designFrameDocumentCache.peekSnapshot(designFrameDocumentKey(workspaceId, file, frame.sourceVersion)).data;
+        const source = file === "home.html" ? currentHomeSource : file === "pricing.html" ? pricingSource : retained?.source;
+        if (!source) throw new Error("The harness frame source is unavailable.");
+        return { type: "WORKSPACE_RESPONSE", result: { frame: { ...frame, source, srcDoc: withDesignRuntime(source, frame.sourceVersion), tree: [] } } };
       }
       if (message.op === "design.frame.delete") {
         const frameFile = String(message.params?.frame ?? "");
@@ -1163,7 +1397,33 @@ async function main() {
           },
         };
       }
+      if (message.op === "design.review.snapshot") {
+        const scope = String(message.params?.scope ?? "uncommitted");
+        const counts = { all: 1, uncommitted: reviewCommitted ? 0 : 1, staged: reviewStaged ? 1 : 0, unstaged: reviewStaged || reviewCommitted ? 0 : 1, proposals: 1 };
+        const files = scope !== "proposals" && counts[scope as keyof typeof counts] > 0 ? [{ path: "Design/home.html", status: "modified", additions: 1, deletions: 1, binary: false }] : [];
+        return { type: "WORKSPACE_RESPONSE", result: { directory: "Design", directoryId: "harness-review", indexFingerprint: reviewStaged ? "b".repeat(64) : "a".repeat(64), scope, counts, files, proposals: scope === "proposals" ? [reviewProposal()] : [], nextOffset: null, conflict: false } };
+      }
+      if (message.op === "design.review.file") return { type: "WORKSPACE_RESPONSE", result: { path: "Design/home.html", patch: "--- Before\n+++ After\n@@ -1 +1 @@\n-<h1>Draft</h1>\n+<h1>Refined</h1>", truncated: false, binary: false } };
+      if (message.op === "design.review.proposal") return { type: "WORKSPACE_RESPONSE", result: { captureAvailable: true, evidence: reviewCaptured ? evidence() : null, proposal: reviewProposal(), currentRevision: "harness-review-base", applicable: reviewProposalStatus === "proposed", reason: reviewProposalStatus === "proposed" ? null : "This proposal has already been resolved.", patch: "--- Before\n+++ Proposed\n@@ -1 +1 @@\n-margin: 8px;\n+margin: 12px;", truncated: false, operations: [{ type: "node.set-styles", nodeId: "heading" }] } };
+      if (message.op === "design.review.capture") { reviewCaptured = true; return { type: "WORKSPACE_RESPONSE", result: evidence() }; }
+      if (message.op === "design.review.evidence") {
+        const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1XcAAAAASUVORK5CYII=";
+        return { type: "WORKSPACE_RESPONSE", result: { ...evidence(), before: png, after: png } };
+      }
+      if (message.op === "design.review.resolve") {
+        const decision = String(message.params?.decision);
+        reviewProposalStatus = decision === "accept" ? "committed" : "rejected";
+        if (decision === "accept") { reviewStaged = false; reviewCommitted = false; }
+        designShortcutOperations.push(`proposal:${decision}`);
+        return { type: "WORKSPACE_RESPONSE", result: reviewProposal() };
+      }
+      if (message.op === "design.unstage") {
+        reviewStaged = false;
+        designShortcutOperations.push("unstage");
+        return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
+      }
       if (message.op === "design.stage") {
+        reviewStaged = true;
         designShortcutOperations.push("stage:start");
         await new Promise((resolve) => window.setTimeout(resolve, 50));
         designShortcutOperations.push("stage:end");
@@ -1182,6 +1442,9 @@ async function main() {
         };
       }
       if (message.op === "design.commit") {
+        if ((window as unknown as { __zerosHarnessDesignCommitFailure?: boolean }).__zerosHarnessDesignCommitFailure)
+          throw new Error("Staging changed after review. Refresh before committing.");
+        reviewStaged = false; reviewCommitted = true;
         designShortcutOperations.push("commit");
         return {
           type: "WORKSPACE_RESPONSE",
@@ -1316,17 +1579,24 @@ async function main() {
 
   function Harness() {
     return (
+      <ActionsCtx.Provider value={new Proxy({
+        setRetainedChatIds: () => {}, getSession: () => undefined, getCloseActivity: () => ({ running: false, queuedCount: 0 }),
+        hydrateChat: async () => {}, listAgents: async () => [],
+      }, { get: (target, key) => key in target ? target[key as keyof typeof target] : () => Promise.resolve() }) as unknown as import("../features/agent/sessions-context").SessionsCtx}>
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
         <main className="bg-bg1 flex h-screen min-h-0 overflow-hidden">
+          {WorkbenchPane && ConversationPane ? <><ConversationPane workspace={workspace} /><WorkbenchPane surfaceActive onToggleWorkbench={() => {}} /></> : <>
           <DesignWorkspaceSidebar surfaceActive />
           <DesignWorkspaceColumn
             workspace={workspace}
             folder={workspacePath}
             surfaceActive
           />
+          </>}
         </main>
         <Toaster />
       </TooltipProvider>
+      </ActionsCtx.Provider>
     );
   }
 

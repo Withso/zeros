@@ -7,6 +7,9 @@ import {
 } from "../change-events";
 
 describe("dbChangedKinds", () => {
+  it("does not invalidate workspace views for a Design dry-run", () => {
+    expect(dbChangedKinds("design.transaction.apply", { result: { dryRun: true } })).toBeNull();
+  });
   it.each([
     "chats.upsert",
     "chats.delete",
@@ -41,6 +44,9 @@ describe("dbChangedKinds", () => {
     "workspace.adoptExisting",
     "workspace.proposeBranchName",
     "design.frame.create",
+    "design.transaction.apply",
+    "design.history.undo",
+    "design.history.redo",
     "design.frame.rename",
     "design.frame.duplicate",
     "design.frame.delete",
@@ -51,6 +57,9 @@ describe("dbChangedKinds", () => {
     "design.asset.insert",
     "design.token.update",
     "design.stage",
+    "design.unstage",
+    "design.review.resolve",
+    "design.review.capture",
     "design.save",
     "git.fetch",
     "git.reset",

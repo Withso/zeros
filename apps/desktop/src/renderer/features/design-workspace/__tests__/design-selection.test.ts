@@ -25,6 +25,8 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
 
 import {
   captureDesignRuntimeScreenshot,
+  previewDesignNodeGeometry,
+  clearDesignNodeStylePreviewTransient,
   hoverDesignNode,
   inspectDesignNodesInRect,
   inspectDesignNodeStyleProvenance,
@@ -56,6 +58,7 @@ import {
   designFrameDisclosure,
   resetDesignLayerDisclosureForTests,
 } from "../state/design-layer-disclosure";
+import { designBackgroundWork } from "../state/design-background-work";
 
 function details(
   oid: string,
@@ -99,6 +102,164 @@ describe("design selection workflows", () => {
     resetDesignWorkspaceUiForTests();
     resetDesignLayerDisclosureForTests();
     vi.clearAllMocks();
+  });
+
+  it("retries a click against the adopted generation when a style save settles during hit testing", async () => {
+    const nextVersion = "2".repeat(24);
+    const node = details("clicked", nextVersion);
+    const runtime = {
+      sourceVersion: FRAME.sourceVersion,
+      getElementAtLoc: vi.fn(async () => node),
+      captureScreenshot: vi.fn(async () => {
+        throw new Error("capture unused");
+      }),
+    };
+    runtime.getElementAtLoc.mockImplementationOnce(async () => {
+      runtime.sourceVersion = nextVersion;
+      return details("clicked", FRAME.sourceVersion);
+    });
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    const selected = await selectDesignFrameBodyAtLocation({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      x: 10,
+      y: 10,
+      intent: "deepest",
+    });
+    expect(selected?.oid).toBe("clicked");
+    expect(selected?.sourceVersion).toBe(nextVersion);
+    expect(runtime.getElementAtLoc).toHaveBeenCalledTimes(2);
+  });
+
+  it("serializes raster captures across frames instead of cloning several documents together", async () => {
+    const releases: Array<() => void> = [];
+    const captureScreenshot = vi.fn(
+      () =>
+        new Promise((resolve) =>
+          releases.push(() =>
+            resolve({
+              sourceVersion: FRAME.sourceVersion,
+              nodeId: null,
+              mimeType: "image/png",
+              dataUrl: "data:image/png;base64,iVBORw==",
+              width: 100,
+              height: 100,
+              scale: 1,
+            }),
+          ),
+        ),
+    );
+    mocks.designFrameRuntime.mockReturnValue({
+      sourceVersion: FRAME.sourceVersion,
+      captureScreenshot,
+    });
+    const first = captureDesignRuntimeScreenshot(
+      "workspace-a",
+      "/design/a",
+      "home.html",
+      FRAME.sourceVersion,
+      null,
+      1,
+    );
+    const second = captureDesignRuntimeScreenshot(
+      "workspace-a",
+      "/design/a",
+      "other.html",
+      FRAME.sourceVersion,
+      null,
+      1,
+    );
+    try {
+      await vi.waitFor(() =>
+        expect(captureScreenshot).toHaveBeenCalledTimes(1),
+      );
+      releases.shift()!();
+      await first;
+      await vi.waitFor(() =>
+        expect(captureScreenshot).toHaveBeenCalledTimes(2),
+      );
+      releases.shift()!();
+      await second;
+    } finally {
+      releases.forEach((release) => release());
+    }
+  });
+
+  it.each(["geometry", "cancel"] as const)(
+    "keeps a %s reply when the same mounted runtime adopts a save while it is in flight",
+    async (operation) => {
+      const nextVersion = "2".repeat(24);
+      const result = {
+        ...details("heading", nextVersion),
+        box: {
+          x: 0, y: 0, width: 100, height: 40,
+          rotation: 0, scaleX: 1, scaleY: 1,
+        },
+        children: [],
+      };
+      const runtime = {
+        sourceVersion: FRAME.sourceVersion,
+        supports: () => true,
+        previewGeometry: async () => {
+          runtime.sourceVersion = nextVersion;
+          return result;
+        },
+        clearPreviewStyles: async () => {
+          runtime.sourceVersion = nextVersion;
+          return result;
+        },
+      };
+      mocks.designFrameRuntime.mockReturnValue(runtime);
+      const request = () =>
+        operation === "geometry"
+          ? previewDesignNodeGeometry({
+              workspaceId: "workspace-a",
+              frame: FRAME,
+              nodeId: "heading",
+              styles: { width: "100px" },
+            })
+          : clearDesignNodeStylePreviewTransient({
+              workspaceId: "workspace-a",
+              frame: FRAME.file,
+              sourceVersion: FRAME.sourceVersion,
+              nodeId: "heading",
+            });
+      await expect(request()).resolves.toMatchObject({
+        sourceVersion: nextVersion,
+      });
+      // A replacement document cannot borrow that reply, even at the same key.
+      mocks.designFrameRuntime
+        .mockReturnValueOnce(runtime)
+        .mockReturnValue({ ...runtime });
+      await expect(request()).rejects.toThrow("changed");
+    },
+  );
+
+  it("drops a queued capture when its retained canvas becomes inactive", async () => {
+    const runtime = {
+      sourceVersion: FRAME.sourceVersion,
+      active: true,
+      isActive() {
+        return this.active;
+      },
+      captureScreenshot: vi.fn(async () => null),
+    };
+    mocks.designFrameRuntime.mockReturnValue(runtime);
+    const resume = designBackgroundWork.pause();
+    const capture = captureDesignRuntimeScreenshot(
+      "workspace-a",
+      "/design/a",
+      FRAME.file,
+      FRAME.sourceVersion,
+      null,
+      1,
+    );
+    runtime.active = false;
+    resume();
+    await expect(capture).resolves.toBeNull();
+    expect(runtime.captureScreenshot).not.toHaveBeenCalled();
+    expect(mocks.designSetScreenshot).not.toHaveBeenCalled();
   });
 
   it("makes confirmed frame pixels available before durable screenshot persistence settles", async () => {
