@@ -11,6 +11,13 @@ function Popover({
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
   const publishOverlay = useNativeSurfaceOverlayIntent();
+  // A controlled owner can close after navigation without Radix calling
+  // onOpenChange. Release that intent too, or the next overlay cannot announce
+  // its opening to an Electron browser surface. Pointer opens still announce
+  // synchronously in onOpenChange, before their portal is mounted.
+  React.useLayoutEffect(() => {
+    if (props.open !== undefined) publishOverlay(props.open);
+  }, [props.open, publishOverlay]);
   return (
     <PopoverPrimitive.Root
       {...props}

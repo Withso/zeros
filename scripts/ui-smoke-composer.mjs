@@ -80,6 +80,7 @@ import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
 import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
 import { runPermissionHintsSmoke } from "./ui-smoke-permission-hints.mjs";
 import { runContextGaugeSmoke } from "./ui-smoke-context-gauge.mjs";
+import { runConversationSummarySmoke } from "./ui-smoke-conversation-summary.mjs";
 import {
   expectDiffSeparatorCards,
   runEditDiffSeparatorsSmoke,
@@ -150,6 +151,9 @@ try {
   const permissionPage = await browser.newPage();
   await runPermissionHintsSmoke({ page: permissionPage, harnessBase });
   await permissionPage.close();
+  const summaryPage = await browser.newPage();
+  await runConversationSummarySmoke({ page: summaryPage, check, harnessBase });
+  await summaryPage.close();
   const overlayPage = await browser.newPage();
   await runOverlayPositioningSmoke({ page: overlayPage, check, harnessBase });
   await overlayPage.close();

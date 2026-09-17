@@ -1,0 +1,39 @@
+.conversation-summary-popover {
+  transform-origin: var(--radix-popover-content-transform-origin);
+}
+
+/* Settle ready content by just four pixels; never delay its layout or input. */
+@keyframes conversation-summary-enter {
+  from {
+    opacity: 0.82;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .conversation-summary-island {
+    animation: conversation-summary-enter var(--default-transition-duration)
+      var(--ease-out);
+  }
+}
+
+.conversation-summary-expansion {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--default-transition-duration)
+    var(--default-transition-timing-function);
+}
+
+.conversation-summary-expansion[data-expanded="true"] {
+  grid-template-rows: 1fr;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .conversation-summary-expansion {
+    transition: none;
+  }
+}
