@@ -31,18 +31,21 @@ export async function openOwnedTranscript(
   candidate: string,
 ): Promise<{ handle: FileHandle; stat: Stats }> {
   const canonical = await ownedTranscriptPath(root, candidate);
-  const before = await lstat(canonical);
-  if (!before.isFile() || before.nlink !== 1) throw new Error("Transcript is not a private regular file");
-  // NONBLOCK also protects against a file replaced by a FIFO between lstat
-  // and open. NOFOLLOW closes the equivalent leaf-symlink race.
+  // Open first and judge the descriptor, never the name. Stat'ing the path
+  // before opening it decides against a file the open may not receive, so the
+  // decision is the race. NONBLOCK protects against a file replaced by a FIFO,
+  // NOFOLLOW closes the equivalent leaf-symlink race, and every property below
+  // is asserted against the handle actually held.
   const handle = await open(canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
+    if (!stat.isFile() || stat.nlink !== 1) throw new Error("Transcript is not a private regular file");
+    // Re-resolving the name and matching it back to the open inode is what
+    // rejects a swap landing mid-open: the path a caller asked for must still
+    // be the file being read.
     const afterPath = await ownedTranscriptPath(root, candidate);
     const after = await lstat(afterPath);
-    if (!stat.isFile() || stat.nlink !== 1 || canonical !== afterPath ||
-        before.dev !== stat.dev || before.ino !== stat.ino ||
-        after.dev !== stat.dev || after.ino !== stat.ino) {
+    if (canonical !== afterPath || after.dev !== stat.dev || after.ino !== stat.ino) {
       throw new Error("Transcript changed during open");
     }
     return { handle, stat };
