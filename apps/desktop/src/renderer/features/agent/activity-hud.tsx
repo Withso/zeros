@@ -23,11 +23,12 @@ import type { AgentMessage } from "./use-agent-session";
  *  elapsed is not lost — each in-flight tool row renders its own DurationChip,
  *  where a tool-scoped clock is the right answer.)
  *
- *  Two candidate anchors, and the earliest wins:
+ *  The earliest confirmed candidate wins:
  *   - the turn's own start (the user message's timestamp) — authoritative when
  *     the caller has it; callers pass 0 for "no user message in this turn
  *     yet", which is a sentinel, not a timestamp, and would date the clock to
- *     the epoch.
+ *     the epoch. A resumed background run can also supply its retained SDK
+ *     start; it must not replace an earlier engine/user start.
  *   - the first provider event — only a PROXY, because events are stamped when
  *     the renderer RECEIVES them. On a slow first token (Cursor's cold session
  *     routinely takes 10s+) it lands ten seconds after the send, so taking it
@@ -35,17 +36,15 @@ import type { AgentMessage } from "./use-agent-session";
  *     arrived, and settle at ~1s for a 13s turn. */
 export function pickStartedAt(
   events: AgentMessage[],
-  fallbackStartedAt?: number,
+  ...startCandidates: Array<number | null | undefined>
 ): number {
-  const turnStartedAt =
-    typeof fallbackStartedAt === "number" && fallbackStartedAt > 0
-      ? fallbackStartedAt
-      : null;
-  const firstEventAt = events.length > 0 ? events[0].createdAt : null;
-  if (turnStartedAt !== null && firstEventAt !== null) {
-    return Math.min(turnStartedAt, firstEventAt);
+  let startedAt = events.length > 0 ? events[0].createdAt : null;
+  for (const candidate of startCandidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate) && candidate > 0) {
+      startedAt = startedAt === null ? candidate : Math.min(startedAt, candidate);
+    }
   }
-  return turnStartedAt ?? firstEventAt ?? Date.now();
+  return startedAt ?? Date.now();
 }
 
 interface ActivityHUDProps {

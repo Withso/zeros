@@ -34,7 +34,7 @@ export function FileTag({
       className={cn(
         // Unified pill recipe: 20px tall, 4px radius —
         // shared with the turn-footer file pills and the composer pills.
-        "inline-flex h-5 min-w-0 max-w-[440px] items-center gap-1.5 rounded-sm border border-border3 bg-bg1 px-1.5 text-xs text-fg2 transition-colors hover:bg-bg2-hover",
+        "inline-flex h-5 min-w-0 max-w-[440px] items-center gap-1.5 rounded-sm border border-border3 bg-bg1 px-1.5 text-xs font-medium text-fg3 transition-colors hover:bg-bg2-hover",
         className,
       )}
     >

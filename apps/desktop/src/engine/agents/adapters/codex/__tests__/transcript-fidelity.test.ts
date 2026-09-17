@@ -19,6 +19,36 @@ function transcript() {
 }
 
 describe("Codex transcript fidelity", () => {
+  it("recovers missing item completions from a full terminal turn snapshot", () => {
+    const t = transcript();
+    t.item({ type: "agentMessage", id: "reply", text: "Draft" }, false);
+    t.item({ type: "commandExecution", id: "cmd", command: "check", status: "inProgress" }, false);
+    const turn = { id: "turn", status: "completed", itemsView: "full", items: [
+      { type: "agentMessage", id: "reply", text: "Final answer", phase: "final_answer" },
+      { type: "commandExecution", id: "cmd", command: "check", status: "completed", exitCode: 1, aggregatedOutput: "Permission denied" },
+    ] };
+    t.translator.handle("turn/completed", { turn });
+    t.translator.handle("turn/completed", { turn });
+    expect(t.messages()).toEqual([
+      expect.objectContaining({ text: "Final answer", phase: "final_answer" }),
+      expect.objectContaining({ status: "failed", rawOutput: expect.objectContaining({ output: "Permission denied" }) }),
+    ]);
+  });
+
+  it("does not invent item completion from a summary or unfinished snapshot item", () => {
+    const t = transcript();
+    t.translator.handle("turn/completed", { turn: { id: "turn", status: "completed", itemsView: "summary", items: [{ type: "agentMessage", id: "reply", text: "Summary is not the answer" }] } });
+    expect(t.messages()).toEqual([]);
+    t.translator.handle("turn/completed", { turn: { id: "turn", status: "completed", itemsView: "full", items: [{ type: "commandExecution", id: "cmd", command: "check", status: "inProgress" }] } });
+    expect(t.messages()[0]).toMatchObject({ status: "in_progress" });
+  });
+
+  it("does not infer a command outcome when a malformed full snapshot omits status", () => {
+    const t = transcript();
+    t.translator.handle("turn/completed", { turn: { id: "turn", status: "completed", itemsView: "full", items: [{ type: "commandExecution", id: "cmd", command: "check" }] } });
+    expect(t.messages()[0]).toMatchObject({ status: "in_progress" });
+  });
+
   it.each(["completed", "failed", "declined"])(
     "retains streamed file-edit output after %s completion and replay",
     (status) => {

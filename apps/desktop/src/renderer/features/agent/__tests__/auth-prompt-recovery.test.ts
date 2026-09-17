@@ -9,6 +9,14 @@ import {
 import type { AgentMessage, AgentTextMessage } from "../use-agent-session";
 
 describe("authentication recovery", () => {
+  it.each(["rate-limited", "protocol-error", "session-expired", "transport-closed"])("does not override %s with legacy sign-in wording", (kind) => {
+    const events = [{ kind: "text", role: "agent", text: "Unauthorized request for the selected model." }] as AgentMessage[];
+    expect(authenticationTurn(events, kind)).toBe(false);
+    expect(authenticationTurnState({ userPrompt: { id: "u", kind: "text", role: "user", text: "hi", createdAt: 1 }, events, failureKind: kind, isTail: true, inFlight: false })).toBeNull();
+    const reloaded = JSON.parse(JSON.stringify([...events, { id: "failure", kind: "error_notice", message: "Provider rejected the request.", severity: "error", turnFailure: { turnId: "u", kind } }]));
+    expect(authenticationTurn(reloaded)).toBe(false);
+  });
+
   const blocked: AgentTextMessage = {
     id: "blocked",
     kind: "text",
@@ -55,6 +63,14 @@ describe("authentication recovery", () => {
       blocked,
       again,
     ]);
+  });
+
+  it("does not replay or gate a turn whose typed failure superseded an auth notice", () => {
+    const nativeFailure = { id: "native", kind: "error_notice", severity: "error", message: "Request throttled.", turnFailure: { turnId: blocked.id, kind: "rate-limited" } } as AgentMessage;
+    const legacy = { id: "legacy", kind: "text", role: "agent", text: "Unauthorized request." } as AgentMessage;
+    const next = { ...blocked, id: "next", authRecovery: undefined, text: "Continue" };
+    expect(authenticationTurnState({ userPrompt: blocked, events: [legacy, nativeFailure], failureKind: "rate-limited", isTail: true, inFlight: false })).toBeNull();
+    expect(pendingAuthenticationPrompts([blocked, legacy, nativeFailure, next], next.id)).toEqual([]);
   });
   it("retains the exact expanded prompt and attachments only for the matching chat, agent, and turn", () => {
     const recovery = new AuthPromptRecovery();

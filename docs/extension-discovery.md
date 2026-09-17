@@ -42,6 +42,126 @@ Primary research references:
   differ between SDK local and hosted cloud agents. The public SDK exposes
   authentication and agent operations, not an account extension listing.
 
+## Explicit MCP transport
+
+The shared registry supports `stdio`, `http` (Streamable HTTP), and `sse`
+(the separate SSE event-stream and POST endpoints). Choose the transport in
+Customize → MCP → Add/Edit. Remote transports share the existing URL, headers,
+and authentication controls. Imports preserve an explicit native `type: "sse"`;
+an untyped URL retains the existing HTTP default. Neither a `/sse` URL suffix
+nor an HTTP response using SSE framing determines the configured transport.
+Unknown explicit transport types are not converted to HTTP.
+
+The settings schema, renderer draft, import scanner, composed registry, and
+provider mappings must preserve the discriminant. Duplicate names retain layer
+precedence; duplicate remote targets use **transport plus URL**. Disabled
+entries still mask a lower-precedence entry with the same name. Credential
+sentinels never reach provider configuration, and environment-backed headers
+are materialized only in the admitted SDK options.
+
+- Cursor SDK 1.0.31 and Claude SDK 0.3.266 receive the declared remote `type`.
+  Cursor prewarm, create, resume, missing-session recovery, and mode recreation
+  use the same admitted registry. Claude query recreation also retains it.
+- OAuth and stored-header servers use the existing user/managed gateway. Its
+  backend transport preserves HTTP or SSE through passive connection, browser
+  authorization, paste-code authorization, and reload. The agent-facing gateway
+  stays Streamable HTTP, so those SSE tools remain available to all providers.
+- Codex has no direct legacy SSE transport. Direct SSE entries are omitted
+  from Codex startup without reinterpreting them or failing other MCP servers;
+  the settings hint explains this limit and the adapter emits a diagnostic.
+  Use a Streamable HTTP endpoint or an authenticated gateway server for Codex.
+
+SSE startup has a 15-second bound, including waiting for the endpoint event.
+Malformed endpoints and failed connections are isolated per backend. Only a
+native authentication error offers the existing sign-in actions; ordinary
+connection errors retain the existing error status and detail. Saving the
+server settings reloads the gateway without changing its agent-facing URL.
+The guarded fetch covers event-stream GETs, message POSTs, and OAuth requests;
+redirects strip both Authorization and configured custom headers so a brokered
+API key cannot be forwarded to another endpoint.
+
+Regression coverage includes settings/import round trips, registry precedence,
+provider create/resume/recovery, real SSE tool calls, both OAuth authorization
+flows, missing credentials, unavailable and malformed endpoints, startup
+timeout, reconnect, and the existing settings form in a real browser. The
+installed SDK types remain authoritative on upgrade; see the
+[Cursor SDK MCP contract](https://cursor.com/docs/sdk/typescript#mcpserverconfig)
+and [Codex MCP transports](https://developers.openai.com/codex/mcp/).
+
+## MCP authorization and local process folders
+
+Configured resource headers survive gateway OAuth sign-in, renewal, reconnect
+and resume on both HTTP and SSE. They are applied only to the MCP endpoint and
+same-origin SSE JSON-RPC POSTs, never inherited by OAuth discovery, registration
+or token fetches. The selected OAuth token owns Authorization; a stale configured
+Authorization header cannot override it. Vaulted static headers override matching
+configured names case-insensitively. Redirects still strip resource credentials.
+
+The shared gateway advertises tool-list changes to initialized agent clients.
+It refreshes on backend notifications and publishes one complete catalog with
+matching routes/statuses. Unchanged reconnects are quiet; schema changes and
+tool removal are changes even when the connection URL stays the same. Reads
+are coalesced per backend and scoped to its connection generation. Temporary
+refresh failures retain the confirmed catalog; revoked access withdraws tools.
+Removing the last backend publishes an empty catalog through the existing
+listener, which stays alive until engine shutdown for already-connected chats.
+New chats omit that empty gateway; adding a backend reuses its stable endpoint.
+
+Discovery follows every tools/list cursor, including empty intermediate pages,
+before applying disabled-tool filters. Each traversal is bounded to 100 pages,
+10,000 returned entries, 8 MiB of tool definitions, 8 KiB cursors and 15 seconds
+overall. Repeated cursors, conflicting duplicate definitions and incomplete
+pages fail the traversal; identical overlap is deduplicated. A failed refresh
+never replaces confirmed tools with just page one. The SDK's output validators
+and task metadata are committed for all pages together. Invalid replacement
+schemas preserve prior validators; valid schema changes can reuse their native
+schema IDs. Stop/reload aborts pending
+reads and late results cannot restore retired tools. These updates use the
+existing MCP settings status and inventory surfaces, without transcript notices.
+
+Remote OAuth servers use the shared user/managed gateway for Claude, Codex and
+Cursor. `oauth_client_id` selects a registered client; `oauth_scopes` requests
+explicit permissions. The optional client secret is entered in Customize → MCP
+and sent only to the engine vault, persisted through the existing encrypted
+credential store. It never enters settings, provider arguments, or the reopened
+form. Desktop persistence uses the private host pipe and Electron safeStorage;
+a standalone engine without that host retains credentials in memory only.
+Clear it explicitly with **Remove saved secret on save**. Native/JSON
+imports retain client IDs and scopes; an imported client secret is omitted with
+a warning and must be entered in the OAuth form. Inherited overrides retain
+public client/scopes configuration. Repo-scoped OAuth remains
+unsupported because the gateway has no repository-specific authorization owner.
+
+Changing client ID, secret or scopes invalidates the prior authorization.
+Equivalent scope order does not. Legacy default registrations remain readable.
+Renewal persists rotated refresh tokens; revoked grants clear tokens and expose
+**Sign in**. Cancel, gateway reload and shutdown retire pending browser/paste-code
+flows and reject late token writes. The authorization timeout also bounds
+paste-code flights. Passive reconnect never opens a browser. Connection failures
+offer **Reconnect**; authentication failures offer **Sign in**. Status reads are
+shared by exact engine connection, retain their confirmed snapshot and poll only
+on the active, visible settings surface. Concurrent reconnects publish only the
+latest configuration; a retired connection cannot clear newer clients. A rejected
+static API key stays a configuration error and never offers OAuth recovery.
+
+STDIO entries accept optional `cwd`, shown as **Working directory**. Absolute
+paths and `~/` refer to the machine running the engine; relative paths resolve
+against the chat workspace. Save validates resolvable paths; session admission
+validates and canonicalizes all configured folders. An invalid folder must not
+silently switch to the default registry or working directory. Blank preserves
+existing provider defaults. Deduplication includes the configured directory.
+Cursor local and Codex receive their native cwd field, including startup/resume
+and mode recreation. Claude's installed MCP type lacks that field, so a fixed
+POSIX `cd`/`exec` launcher passes literal arguments and inherits the existing
+process boundary. It does not evaluate configuration as shell source. HTTP/SSE
+have no process folder. Cursor's hosted cloud SDK rejects per-server cwd;
+Zeros' engine-owned local SDK execution is the supported path.
+
+Regression coverage includes actual subprocess cwd/argv, paths containing shell
+syntax, invalid folders/symlinks, configuration imports and save round trips,
+provider recreation, PKCE consent, client-secret basic/post exchanges, refresh,
+revocation, restored vaults, cancellation/late callbacks, and browser form checks.
+
 ## Native session execution
 
 Ordinary chats connect the Zeros registry and supported account extensions.

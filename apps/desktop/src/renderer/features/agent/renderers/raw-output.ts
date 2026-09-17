@@ -19,6 +19,37 @@
 
 export const RAW_OUTPUT_MAX = 20_000;
 
+function encodedData(owner: object, data: string): boolean {
+  const record = owner as Record<string, unknown>;
+  return ["image", "audio", "base64"].includes(String(record.type)) ||
+    /^(?:image|audio)\//.test(String(record.mimeType ?? record.media_type ?? "")) ||
+    (data.length > 256 && /^[A-Za-z0-9+/]+={0,2}$/.test(data));
+}
+
+export function toolCompletionUnreported(rawOutput: unknown): boolean {
+  return (
+    !!rawOutput &&
+    typeof rawOutput === "object" &&
+    (rawOutput as Record<string, unknown>)._zerosToolCompletion === "unreported"
+  );
+}
+
+/** Execution metadata can be inside Cursor's SDK wrapper. Keep the stored
+ * result intact; only unwrap known command fields for the detail presenter. */
+export function commandResultOutput(rawOutput: unknown): unknown {
+  if (!rawOutput || typeof rawOutput !== "object" || Array.isArray(rawOutput))
+    return rawOutput;
+  const outer = rawOutput as Record<string, unknown>;
+  if ("exitCode" in outer) return outer;
+  const oneof =
+    outer.result && typeof outer.result === "object"
+      ? (outer.result as Record<string, unknown>)
+      : {};
+  const value = outer.value ?? outer.success ?? oneof.value;
+  if (value && typeof value === "object" && "exitCode" in value) return value;
+  return rawOutput;
+}
+
 /** Coerce a tool's raw output into a displayable string, or null when there
  *  is nothing human-readable. Input is displayed separately by the caller. */
 export function asDisplayString(value: unknown): string | null {
@@ -82,7 +113,8 @@ function readableValue(
             key.startsWith("_zeros") ||
             key === "zerosQuestion" ||
             (typeof entry === "string" &&
-              /^(?:data|blob|base64|encrypted_content)$/i.test(key))
+              (/^(?:blob|base64|imageData|encrypted_content)$/i.test(key) ||
+                (key === "data" && encodedData(value, entry))))
           )
             return [];
           const readable = readableValue(entry, depth + 1, seen, budget);

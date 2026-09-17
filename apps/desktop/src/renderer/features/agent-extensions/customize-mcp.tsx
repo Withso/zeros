@@ -26,6 +26,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
 import {
   AlertTriangle,
@@ -52,9 +53,12 @@ import {
 } from "../../shared/ui/primitives/dialog";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useBridge } from "../../platform/bridge/use-bridge";
+import { runtimeExecutionKey } from "../../platform/bridge/ws-client";
 import { shellOpenUrl } from "../../platform/app";
 import {
   bridgeMcpGatewayAuthorize,
+  bridgeMcpGatewayCancelAuth,
+  bridgeMcpGatewayReconnect,
   bridgeMcpGatewayBeginAuth,
   bridgeMcpGatewayCompleteAuth,
   bridgeMcpGatewayStatus,
@@ -77,6 +81,8 @@ import {
 } from "./mcp-server-model";
 import { McpImportDialog } from "./mcp-import-dialog";
 import type { ResolvedCustomizeScope } from "./customize-page";
+import { useCachedRead } from "../../state/use-cached-read";
+import { mcpGatewayStatusCache, mcpGatewayStatusKey } from "../../state/read-caches";
 import { shouldUseHeadlessMcpAuth } from "./mcp-auth-flow";
 
 // The filled-card recipe the Models settings page uses — rows separated by
@@ -100,12 +106,14 @@ function layerLabel(s: string): string {
 /** Build a raw server entry from a composed (resolved) one, for "Override
  *  here" (copy an inherited managed server into the user layer to edit). */
 function rawFromComposed(c: ComposedMcpServerWire): RawServer {
-  if (c.transport === "http") {
+  if (c.transport !== "stdio") {
     return {
       name: c.name,
-      transport: "http",
+      transport: c.transport,
       url: c.url ?? "",
       ...(c.auth ? { auth: c.auth } : {}),
+      ...(c.oauth_client_id ? { oauth_client_id: c.oauth_client_id } : {}),
+      ...(c.oauth_scopes ? { oauth_scopes: c.oauth_scopes } : {}),
     };
   }
   return {
@@ -113,6 +121,7 @@ function rawFromComposed(c: ComposedMcpServerWire): RawServer {
     transport: "stdio",
     command: c.command ?? "",
     ...(c.args && c.args.length ? { args: c.args } : {}),
+    ...(c.cwd ? { cwd: c.cwd } : {}),
   };
 }
 
@@ -192,7 +201,7 @@ function HeadlessAuthModal({
           </div>
         </div>
         <DialogFooter>
-          <Button variant="ghost" size="sm" onClick={onCancel} disabled={busy}>
+          <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel
           </Button>
           <Button
@@ -230,7 +239,10 @@ function ServerRow({
     status?: GatewayBackendStatusWire;
     error?: string | null;
     signingIn: boolean;
+    signInBlocked: boolean;
     onSignIn: () => void;
+    onCancel: () => void;
+    onReconnect: () => void;
     onToolToggle?: (tool: string, disabled: boolean) => void;
     onBeginHeadless?: () => void;
   };
@@ -264,7 +276,7 @@ function ServerRow({
       ? `${gateway?.status?.toolCount ?? 0}/${allTools.length} tools`
       : st === "error"
         ? "error"
-        : isOauth
+        : st === "needs-auth"
           ? "OAuth · sign in"
           : "connecting…";
   return (
@@ -332,13 +344,13 @@ function ServerRow({
                 <span className={chipCls}>{chipText}</span>
               </Tooltip>
             ))}
-          {!repoScope && isOauth && gateway && !gwDown && st !== "connected" && (
+          {!repoScope && isOauth && gateway && !gwDown && st === "needs-auth" && (
             <Tooltip label="Sign in">
               <Button
                 variant="secondary"
                 size="sm"
                 onClick={gateway.onSignIn}
-                disabled={gateway.signingIn || busy}
+                disabled={gateway.signInBlocked || busy}
               >
                 {gateway.signingIn ? (
                   <ZerosSpinner size={16} />
@@ -353,19 +365,21 @@ function ServerRow({
             isOauth &&
             gateway?.onBeginHeadless &&
             !gwDown &&
-            st !== "connected" && (
+            st === "needs-auth" && (
               <Tooltip label="Authorize on another device">
                 <Button
                   variant="ghost"
                   size="sm"
                   className="text-fg2 hover:text-fg1 px-1.5 text-xs"
                   onClick={gateway.onBeginHeadless}
-                  disabled={gateway.signingIn || busy}
+                  disabled={gateway.signInBlocked || busy}
                 >
                   No browser?
                 </Button>
               </Tooltip>
             )}
+          {!repoScope && gateway?.signingIn && <Button variant="ghost" size="sm" onClick={gateway.onCancel}>Cancel</Button>}
+          {!repoScope && gateway && st === "error" && <Button variant="ghost" size="sm" disabled={busy || gateway.signingIn} onClick={gateway.onReconnect}>Reconnect</Button>}
           <Switch
             checked={enabled}
             onCheckedChange={onToggle}
@@ -435,7 +449,7 @@ function InheritedServerRow({
   onOverride: () => void;
 }) {
   const endpoint =
-    composed.transport === "http"
+    composed.transport !== "stdio"
       ? composed.url || "(no url)"
       : `${composed.command ?? ""} ${(composed.args ?? []).join(" ")}`.trim() ||
         "(no command)";
@@ -534,13 +548,21 @@ export function CustomizeMcpSection({
   // browser directly; cloud engines return a URL that this trusted renderer
   // opens on the user's device.
   const bridge = useBridge();
-  const [gwStatus, setGwStatus] = useState<
-    Map<string, GatewayBackendStatusWire>
-  >(new Map());
-  const [gwHealth, setGwHealth] = useState<{
-    running: boolean;
-    error: string | null;
-  }>({ running: false, error: null });
+  const execution = useSyncExternalStore(
+    useCallback((changed) => bridge?.onExecutionIdentityChange(changed) ?? (() => {}), [bridge]),
+    useCallback(() => bridge ? runtimeExecutionKey(bridge.executionIdentity) : "", [bridge]),
+  );
+  const statusKey = bridge && isUser ? mcpGatewayStatusKey(bridge, execution) : null;
+  const gatewayRead = useCachedRead(mcpGatewayStatusCache, statusKey, async (key) => {
+    const matches = () => bridge && key === mcpGatewayStatusKey(bridge, runtimeExecutionKey(bridge.executionIdentity));
+    if (!bridge || !matches()) throw new Error("MCP connection changed.");
+    const snapshot = await bridgeMcpGatewayStatus(bridge);
+    if (!matches()) throw new Error("MCP connection changed.");
+    return snapshot;
+  }, { enabled: surfaceActive && isUser, maxAgeMs: 3000 });
+  const gwStatus = useMemo(() => new Map((gatewayRead.data?.servers ?? []).map((s) => [s.name, s])), [gatewayRead.data]);
+  const gwHealth = gatewayRead.data ?? { running: false, error: null };
+  const refreshGateway = gatewayRead.refresh;
   const [composed, setComposed] = useState<ComposedMcpServerWire[]>([]);
   useEffect(() => {
     if (!bridge || !isUser || !surfaceActive) return;
@@ -553,45 +575,72 @@ export function CustomizeMcpSection({
     return () => {
       live = false;
     };
-  }, [bridge, isUser, surfaceActive, servers]);
+  }, [bridge, execution, isUser, surfaceActive, servers]);
   const [signingIn, setSigningIn] = useState<string | null>(null);
-  const refreshGateway = useCallback(async () => {
-    if (!bridge || !isUser) return;
-    try {
-      const s = await bridgeMcpGatewayStatus(bridge);
-      setGwStatus(new Map(s.servers.map((x) => [x.name, x])));
-      setGwHealth({ running: s.running, error: s.error });
-    } catch {
-      /* gateway down / remote — leave status empty (rows show "sign in") */
-    }
-  }, [bridge, isUser]);
+  const authAttempt = useRef(0);
+  // The gateway owns one OAuth flight across all servers. Claim it before
+  // rendering disabled controls and retain it while a paste-code dialog waits.
+  const authPending = useRef(false);
+  useEffect(() => {
+    const generation = authAttempt;
+    authPending.current = false;
+    setSigningIn(null);
+    setHeadlessAuth(null);
+    setHeadlessBusy(false);
+    return () => { generation.current++; };
+  }, [bridge, execution, isUser]);
   useEffect(() => {
     if (!isUser || !surfaceActive) return;
-    void refreshGateway();
-    // The gateway (re)starts asynchronously after a settings change — re-poll
-    // once so a freshly-added server flips to connected, or surfaces "Gateway
-    // unavailable" if the start failed (e.g. the port is taken).
-    const t = setTimeout(() => void refreshGateway(), 1500);
-    return () => clearTimeout(t);
-  }, [refreshGateway, isUser, surfaceActive, servers]);
+    // Keep slow startup and token renewal visible; pause while the app is hidden.
+    const poll = () => { if (document.visibilityState !== "hidden") refreshGateway(); };
+    const timer = setInterval(poll, 3000);
+    document.addEventListener("visibilitychange", poll);
+    return () => { clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
+  }, [refreshGateway, isUser, surfaceActive]);
+  const previousServers = useRef({ key: statusKey, servers });
+  useEffect(() => {
+    if (statusKey && previousServers.current.key === statusKey && previousServers.current.servers !== servers) {
+      mcpGatewayStatusCache.invalidate(statusKey);
+    }
+    previousServers.current = { key: statusKey, servers };
+  }, [statusKey, servers]);
+  const cancelSignIn = async (name: string) => {
+    if (!bridge) return;
+    const attempt = ++authAttempt.current;
+    await bridgeMcpGatewayCancelAuth(bridge, name);
+    if (attempt !== authAttempt.current) return;
+    authPending.current = false;
+    setSigningIn(null);
+    setHeadlessAuth(null);
+    setHeadlessBusy(false);
+    refreshGateway();
+  };
 
   const handleSignIn = async (name: string) => {
-    if (!bridge) return;
+    if (!bridge || authPending.current) return;
+    authPending.current = true;
+    const attempt = ++authAttempt.current;
+    let awaitingCode = false;
     setSigningIn(name);
     try {
       const st = await bridgeMcpGatewayAuthorize(bridge, name);
-      setGwStatus((prev) => new Map(prev).set(name, st));
+      if (attempt !== authAttempt.current) return;
+      if (statusKey) mcpGatewayStatusCache.invalidate(statusKey);
       if (st.state === "connected")
         toast.success(`Signed in to ${name} — ${st.toolCount} tools`);
       else toast.error(`${name}: ${st.detail ?? st.state}`);
     } catch (e) {
+      if (attempt !== authAttempt.current) return;
       if (shouldUseHeadlessMcpAuth(e)) {
         try {
           const url = await bridgeMcpGatewayBeginAuth(bridge, name);
+          if (attempt !== authAttempt.current) return;
           setHeadlessAuth({ server: name, url });
+          awaitingCode = true;
           await shellOpenUrl(url);
           return;
         } catch (headlessError) {
+          if (attempt !== authAttempt.current) return;
           toast.error(
             `Couldn't start sign-in for ${name}: ${headlessError instanceof Error ? headlessError.message : String(headlessError)}`,
           );
@@ -602,8 +651,11 @@ export function CustomizeMcpSection({
         `Couldn't sign in to ${name}: ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
-      setSigningIn(null);
-      void refreshGateway();
+      if (attempt === authAttempt.current) {
+        if (!awaitingCode) authPending.current = false;
+        setSigningIn(null);
+        refreshGateway();
+      }
     }
   };
 
@@ -614,37 +666,53 @@ export function CustomizeMcpSection({
   } | null>(null);
   const [headlessBusy, setHeadlessBusy] = useState(false);
   const handleBeginHeadless = async (name: string) => {
-    if (!bridge) return;
+    if (!bridge || authPending.current) return;
+    authPending.current = true;
+    const attempt = ++authAttempt.current;
+    let awaitingCode = false;
     setSigningIn(name);
     try {
       const url = await bridgeMcpGatewayBeginAuth(bridge, name);
+      if (attempt !== authAttempt.current) return;
       setHeadlessAuth({ server: name, url });
+      awaitingCode = true;
     } catch (e) {
+      if (attempt !== authAttempt.current) return;
       toast.error(
         `Couldn't start sign-in for ${name}: ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
-      setSigningIn(null);
+      if (attempt === authAttempt.current) {
+        if (!awaitingCode) authPending.current = false;
+        setSigningIn(null);
+      }
     }
   };
   const handleCompleteHeadless = async (code: string) => {
-    if (!bridge || !headlessAuth) return;
+    if (!bridge || !headlessAuth || headlessBusy) return;
     const server = headlessAuth.server;
+    const attempt = ++authAttempt.current;
     setHeadlessBusy(true);
     try {
       const st = await bridgeMcpGatewayCompleteAuth(bridge, server, code);
-      setGwStatus((prev) => new Map(prev).set(server, st));
+      if (attempt !== authAttempt.current) return;
+      if (statusKey) mcpGatewayStatusCache.invalidate(statusKey);
       if (st.state === "connected")
         toast.success(`Signed in to ${server} — ${st.toolCount} tools`);
       else toast.error(`${server}: ${st.detail ?? st.state}`);
       setHeadlessAuth(null);
     } catch (e) {
+      if (attempt !== authAttempt.current) return;
+      setHeadlessAuth(null);
       toast.error(
         `Couldn't finish sign-in: ${e instanceof Error ? e.message : String(e)}`,
       );
     } finally {
-      setHeadlessBusy(false);
-      void refreshGateway();
+      if (attempt === authAttempt.current) {
+        authPending.current = false;
+        setHeadlessBusy(false);
+        refreshGateway();
+      }
     }
   };
 
@@ -784,9 +852,12 @@ export function CustomizeMcpSection({
                       isUser &&
                       (server.auth === "oauth" || server.auth === "header")
                         ? {
-                            status: gwStatus.get(asString(server.name)),
+                            status: gwStatus.get(asString(server.name))?.url === server.url ? gwStatus.get(asString(server.name)) : undefined,
                             error: gwHealth.error,
                             signingIn: signingIn === asString(server.name),
+                            signInBlocked: signingIn !== null || headlessAuth !== null,
+                            onCancel: () => { void cancelSignIn(asString(server.name)).catch(() => toast.error("Couldn't cancel sign-in.")); },
+                            onReconnect: () => { if (bridge) void bridgeMcpGatewayReconnect(bridge).then(refreshGateway).catch(() => toast.error("Couldn't reconnect MCP servers.")); },
                             onSignIn: () =>
                               void handleSignIn(asString(server.name)),
                             onToolToggle: (tool, disabled) =>
@@ -852,7 +923,7 @@ export function CustomizeMcpSection({
       <HeadlessAuthModal
         state={headlessAuth}
         busy={headlessBusy}
-        onCancel={() => setHeadlessAuth(null)}
+        onCancel={() => { if (headlessAuth) void cancelSignIn(headlessAuth.server).catch(() => toast.error("Couldn't cancel sign-in.")); }}
         onComplete={(code) => void handleCompleteHeadless(code)}
       />
     </div>

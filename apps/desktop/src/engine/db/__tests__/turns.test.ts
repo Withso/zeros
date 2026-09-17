@@ -9,6 +9,7 @@ import { openZerosDb, closeZerosDb, setZerosDbPathForTesting } from "../index";
 import {
   startTurn,
   finishTurn,
+  updateTurnUsage,
   getTurn,
   listTurnsForWorkspace,
   listTurnsForChat,
@@ -25,6 +26,38 @@ function tmpDbFile(): string {
 }
 
 describe("turns table", () => {
+  it("combines retry executions without replaying either execution's cumulative usage", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    startTurn({ chatId: "chat", turnId: "a", agentId: "claude", workspaceId: null, folder: null, summary: null, startedAt: 1, preSnapshot: null });
+    const usage = { accountingVersion: 1 as const, revision: 1, totalCostUsd: 0.1, inputTokens: 100 };
+    expect(updateTurnUsage("chat", "a", "claude", usage, "first-execution")).toBe(true);
+    expect(updateTurnUsage("chat", "a", "claude", { ...usage, totalCostUsd: 0.05, inputTokens: 50 }, "retry-execution")).toBe(true);
+    expect(getTurn("chat", "a")?.usage).toMatchObject({ totalCostUsd: 0.15, inputTokens: 150, revision: 2 });
+    expect(updateTurnUsage("chat", "a", "claude", usage, "first-execution")).toBe(false);
+    expect(updateTurnUsage("chat", "a", "claude", { ...usage, revision: 2, totalCostUsd: 0.07, inputTokens: 70 }, "retry-execution")).toBe(true);
+    expect(getTurn("chat", "a")?.usage).toMatchObject({ totalCostUsd: 0.17, inputTokens: 170, revision: 3 });
+  });
+
+  it("keeps exact-turn usage revisions through finish, late billing and failures", () => {
+    setZerosDbPathForTesting(tmpDbFile());
+    startTurn({ chatId: "chat", turnId: "a", agentId: "claude", workspaceId: null, folder: null, summary: null, startedAt: 1, preSnapshot: null });
+    const usage = { accountingVersion: 1 as const, revision: 2, totalCostUsd: 0.15 };
+    expect(updateTurnUsage("chat", "a", "claude", usage)).toBe(true);
+    expect(updateTurnUsage("chat", "a", "cursor", { ...usage, revision: 3 })).toBe(false);
+    expect(updateTurnUsage("elsewhere", "a", "claude", usage)).toBe(false);
+    expect(updateTurnUsage("chat", "a", "claude", { ...usage, revision: 1 })).toBe(false);
+    expect(updateTurnUsage("chat", "a", "claude", { ...usage, revision: 3, totalCostUsd: -1 })).toBe(false);
+    finishTurn("chat", "a", { endedAt: 2, status: "failed", stopReason: null, postSnapshot: null, files: [], usage: null });
+    expect(getTurn("chat", "a")?.usage).toEqual(usage);
+    finishTurn("chat", "a", { endedAt: 2, status: "completed", stopReason: "end_turn", postSnapshot: null, files: [], usage: { ...usage, revision: 1, totalCostUsd: 0.1 } });
+    expect(getTurn("chat", "a")?.usage).toEqual(usage);
+    expect(updateTurnUsage("chat", "a", "claude", { ...usage, revision: 3, totalCostUsd: 0.2 })).toBe(true);
+    expect(getTurn("chat", "a")?.usage?.totalCostUsd).toBe(0.2);
+    deleteTurnsForChat("chat");
+    expect(updateTurnUsage("chat", "a", "claude", { ...usage, revision: 4 })).toBe(false);
+    expect(getTurn("chat", "a")).toBeNull();
+  });
+
   it("pages with stable identities when a prior page is deleted or a tied turn is updated", () => {
     setZerosDbPathForTesting(tmpDbFile());
     for (const turnId of ["a", "b", "c", "d"]) {

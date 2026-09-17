@@ -4,11 +4,15 @@ import {
   useActiveWorkbenchTabId,
   useWorkbenchTabs,
   useWorkspaceDispatch,
+  useWorkspaceStore,
 } from "@/renderer/state/store";
 import type { Action } from "@/renderer/state/workspace-store";
+import { workbenchScopeForFolder } from "@/renderer/state/workspace-store";
+import { isLoopbackUrl } from "./tabs/localhost-url";
 import {
   canonicalBrowsableHttpUrl,
   createBrowserTab,
+  defaultScopeFor,
   type WorkbenchTab,
 } from "./tab-model";
 
@@ -24,7 +28,7 @@ export function planBrowserOpen(
   tabs: WorkbenchTab[],
   activeId: string | null,
   options?: BrowserOpenOptions,
-): Action | null {
+): Extract<Action, { type: "ADD_WORKBENCH_TAB" | "ACTIVATE_WORKBENCH_TAB" }> | null {
   if (options?.url !== undefined) {
     const url = canonicalBrowsableHttpUrl(options.url);
     if (!url) return null;
@@ -67,4 +71,18 @@ export function useOpenBrowserInWorkbench(
     },
     [activeId, dispatch, onReveal, tabs],
   );
+}
+
+/** A retained chat must never open its preview in a different workspace. */
+export function useOpenChatPreviewInWorkbench(): (cwd: string | undefined, url: string) => boolean {
+  return useCallback((cwd, url) => {
+    if (!cwd || !isLoopbackUrl(url)) return false;
+    const scope = workbenchScopeForFolder(cwd);
+    const state = useWorkspaceStore.getState();
+    const current = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+    const action = planBrowserOpen(current.tabs, current.activeId, { url });
+    if (!action) return false;
+    state.dispatch({ ...action, scope });
+    return true;
+  }, []);
 }

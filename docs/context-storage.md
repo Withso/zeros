@@ -1,5 +1,19 @@
 # Workspace context storage
 
+Composer attachments reach every agent as confirmed file references. Staging
+starts when the file is attached; Send awaits persistence before passing the
+engine-returned path with an instruction to read the file or open the image.
+Text bodies and image bytes are not embedded in composer prompts, regardless
+of the harness's native image-input capability. Reading a referenced format
+depends on the tools available to that agent.
+
+The shared encoder also handles older drafts and edited/retried messages. It
+can restore legacy text/image bytes to persist the file, but sends only the
+resulting path and retains the original attachment id. Both text and image
+bubble metadata keep that relative path. Failed saves retain the unsent draft;
+typing during a save cannot be cleared by the earlier submission. Attachment
+format and upload-size policy is separate from this delivery contract.
+
 See [Composer attachments](composer-attachments.md) for the 500 MB file policy
 and chunked transfer / path delivery contract.
 
@@ -66,6 +80,20 @@ in the other root. Exact successful reads win when conflicting copies exist.
 The pre-graph `.context/attachments/...` layout remains exact-only until its
 existing transcript-window migration copies the image into a scope. Resending
 an edited message preserves its original attachment id for both graph layouts.
+
+Send-time metadata resolution also honors the saved graph path first, including
+its recorded filename. If that path moved, exactly one matching record must
+remain across scopes and roots; ambiguous copies require reattachment. Resolution
+validates the record path and refuses symlinks without reading file bodies.
+Queued sends and Send now refresh their file references and bubble metadata
+before dispatch. Failed resolution preserves the editable row and pauses the
+queue; Stop during resolution prevents dispatch.
+
+Open sent-message edits mirror their whole document and attachment identities
+into a chat/message-owned live draft slot. Debounced persistence, reload and
+native quit flush this slot without requiring React unmount or publishing each
+keystroke through workspace state. Replacing or reordering attachments counts
+as an edit even when the text and attachment count stay the same.
 
 The `context.graph.*` bridge operations, `agent_attachment_write` IPC,
 attachment ids, transcript fields and workbench persistence keys retain their

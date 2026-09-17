@@ -16,6 +16,7 @@ import { runSessionId } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { createDesignWebDocumentState } from "@zeros/design-web";
 import { WorkspaceService, LOCAL_MAIN_WORKSPACE_ID } from "../service";
+import * as mcpRegistry from "../../agents/mcp-registry";
 import {
   setStateRootForTesting,
   closeState,
@@ -4483,6 +4484,7 @@ describe("WorkspaceService", () => {
       "workspace.runLog",
       "mcp.resolveComposed",
       "mcp.gateway.status",
+      "mcp.validateWorkingDirectory",
     ]) {
       expect(svc.remoteReadable(op)).toBe(true);
       expect(svc.isRemoteAllowed(op)).toBe(true);
@@ -4511,6 +4513,9 @@ describe("WorkspaceService", () => {
       "mcp.gateway.completeAuth",
       "mcp.gateway.disconnect",
       "mcp.gateway.setHeaderSecret",
+      "mcp.gateway.setOAuthSecret",
+      "mcp.gateway.cancelAuth",
+      "mcp.gateway.reconnect",
     ]) {
       expect(svc.isRemoteAllowed(op)).toBe(true);
     }
@@ -4647,13 +4652,19 @@ describe("WorkspaceService", () => {
       disconnect: async (server: string) => {
         calls.push(`disconnect:${server}`);
       },
+      cancelAuthorization: async (server?: string) => {
+        calls.push(`cancel:${server ?? "all"}`);
+      },
+      reconnect: async () => { calls.push("reconnect"); },
     };
     const headerSecrets: Array<{
       url: string;
       headerName: string;
       value: string;
     }> = [];
+    const oauthSecret = vi.fn();
     svc.setGatewayAccessor(() => gateway as never);
+    svc.setGatewayOAuthSecretSetter(oauthSecret);
     svc.setGatewayHeaderSecretSetter((url, headerName, value) => {
       headerSecrets.push({ url, headerName, value });
     });
@@ -4687,6 +4698,16 @@ describe("WorkspaceService", () => {
         { remote: true },
       ),
     ).resolves.toEqual({ ok: true });
+    await expect(svc.handle("mcp.gateway.setOAuthSecret", {
+      url: connected.url, clientId: "registered", value: "fixture-client-secret",
+    }, { remote: true })).resolves.toEqual({ ok: true });
+    expect(oauthSecret).toHaveBeenCalledWith(connected.url, "registered", "fixture-client-secret");
+    await expect(svc.handle("mcp.gateway.setOAuthSecret", {
+      url: "https://name:secret@example.test", clientId: "registered", value: "invalid",
+    }, { remote: true })).rejects.toThrow(/invalid/i);
+    expect(oauthSecret).toHaveBeenCalledTimes(1);
+    await svc.handle("mcp.gateway.cancelAuth", { server: "docs" }, { remote: true });
+    await svc.handle("mcp.gateway.reconnect", {}, { remote: true });
     await expect(
       svc.handle(
         "mcp.gateway.disconnect",
@@ -4698,6 +4719,9 @@ describe("WorkspaceService", () => {
     expect(calls).toEqual([
       "begin:docs",
       "complete:docs:auth-code",
+      "cancel:all",
+      "cancel:docs",
+      "reconnect",
       "disconnect:docs",
     ]);
     expect(headerSecrets).toEqual([
@@ -4707,6 +4731,25 @@ describe("WorkspaceService", () => {
         value: "Bearer secret",
       },
     ]);
+  });
+
+  it("validates MCP directories on the engine and defers user-wide relative folders", async () => {
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: dir })).resolves.toEqual({ ok: true });
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: "tools" })).resolves.toEqual({ deferred: true });
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: path.join(dir, "hello.txt") })).rejects.toThrow(/folder/i);
+    await expect(svc.handle("mcp.validateWorkingDirectory", { directory: "tools", workspace: "/unregistered-repo" }, { remote: true })).rejects.toThrow(/unknown workspace/i);
+  });
+
+  it("keeps public OAuth configuration in inherited server overrides", async () => {
+    const resolve = vi.spyOn(mcpRegistry, "resolveMcpServers").mockReturnValue({
+      servers: [], sources: [], warnings: [],
+      gatewayBackends: [{ name: "docs", url: "https://example.test/mcp", auth: "oauth", source: "managed", clientId: "registered", scopes: ["read"] }],
+    });
+    try {
+      await expect(svc.handle("mcp.resolveComposed", {}, { remote: true })).resolves.toMatchObject({
+        servers: [{ name: "docs", oauth_client_id: "registered", oauth_scopes: ["read"] }],
+      });
+    } finally { resolve.mockRestore(); }
   });
 
   // ── Path redaction for remote clients (FIX 3) ──────────────────────────────

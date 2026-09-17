@@ -63,42 +63,50 @@ async function resolveAttachment(
   attachmentId: string,
   filename: string,
   mimeType: string,
+  diskPath: unknown,
 ): Promise<AttachmentWriteResult> {
-  // Exact attachment identity, without the Context canvas's bounded listing or
-  // a file-body read. Sharing and legacy root migration may move this record.
+  let safeFilename = safeAttachmentFilename(filename);
+  const candidates = new Set<string>();
+  if (diskPath !== undefined) {
+    const graph = typeof diskPath === "string" &&
+      /^(\.context(?:-graph)?)\/(local|shared)\/attachments\/([a-zA-Z0-9_-]{1,128})\/([a-zA-Z0-9._-]+)$/.exec(diskPath);
+    if (graph) {
+      if (graph[3] !== attachmentId || graph[4] === "." || graph[4] === "..")
+        throw new Error("invalid attachment path identity");
+      safeFilename = graph[4];
+      candidates.add(diskPath as string);
+    } else if (
+      typeof diskPath !== "string" ||
+      !/^\.context\/attachments\/[a-zA-Z0-9_-]{1,128}\/[a-zA-Z0-9._-]+$/.test(diskPath)
+    ) {
+      throw new Error("invalid attachment path");
+    }
+    // Old chat-scoped paths still use the encoder's explicit migration read.
+  }
+  // Try the confirmed path first. If it moved, accept only one surviving
+  // identity; conflicting scopes must never silently substitute other bytes.
   for (const directory of [CONTEXT_DIR, LEGACY_CONTEXT_DIR]) {
     for (const scope of ["local", "shared"]) {
-      const folder = path.join(
-        root,
-        directory,
-        scope,
-        "attachments",
-        attachmentId,
-      );
-      await assertContextDirectory(folder, root);
-      const target = path.join(folder, safeAttachmentFilename(filename));
-      const stat = await fs
-        .lstat(target)
-        .catch((error: NodeJS.ErrnoException) => {
-          if (error.code === "ENOENT") return null;
-          throw error;
-        });
-      if (!stat?.isFile()) continue;
-      const validation = validateAttachmentFile({
-        name: filename,
-        mimeType,
-        size: stat.size,
-      });
-      if (!validation.ok) throw new Error(validation.reason);
-      return {
-        absolutePath: target,
-        relativePath: path.relative(root, target),
-        mimeType,
-        bytes: stat.size,
-        skipped: true,
-      };
+      candidates.add(`${directory}/${scope}/attachments/${attachmentId}/${safeFilename}`);
     }
   }
+  let resolved: AttachmentWriteResult | undefined;
+  for (const relativePath of candidates) {
+    const target = path.join(root, relativePath);
+    await assertContextDirectory(path.dirname(target), root);
+    const stat = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!stat) continue;
+    if (!stat.isFile()) throw new Error("invalid attachment file path");
+    const validation = validateAttachmentFile({ name: safeFilename, mimeType, size: stat.size });
+    if (!validation.ok) throw new Error(validation.reason);
+    if (resolved) throw new Error("The saved attachment is ambiguous — attach it again");
+    resolved = { absolutePath: target, relativePath, mimeType, bytes: stat.size, skipped: true };
+    if (relativePath === diskPath) return resolved;
+  }
+  if (resolved) return resolved;
   throw new Error("The saved attachment is not available — attach it again");
 }
 
@@ -119,7 +127,7 @@ export async function transferContextAttachment(
     throw new Error("attachment: missing base64");
   const root = await fs.realpath(workspaceRoot);
   if (args.resolve === true)
-    return resolveAttachment(root, attachmentId, filename, mimeType);
+    return resolveAttachment(root, attachmentId, filename, mimeType, args.diskPath);
 
   if (args.nativeSourceId !== undefined) {
     if (!options.allowNativeSource) throw new Error("Native attachments require a local workspace");

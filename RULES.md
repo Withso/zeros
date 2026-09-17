@@ -115,6 +115,32 @@ contract: structural work must not alter it without explicit design approval.
 - Run `pnpm check:ui` for every UI/style change and `pnpm build:ui` whenever the
   cascade, entrypoint, or renderer build could be affected.
 
+### Agent tool transcripts
+
+- Follow [the tool presentation contract](docs/agent-tool-presentation.md) when
+  changing Claude, Codex, Cursor, transcript rendering, or provider replay.
+- Reconcile native event identities and preserve durable tool rows through
+  streaming, completion, replay, and history loading. Matching text, names, or
+  arguments is not evidence that two calls are duplicates.
+- Show known tool rows only when their command/target/name is ready; retain
+  provisional native records and always expose terminal errors. Ordinary icons
+  stay fg2; live narration is fg1 until the next visible activity.
+  Prefer meaningful native command descriptions; unresolved tools stay fully
+  readable. Failed Agent groups retain their name/icon in red, and all failed
+  tool details and collapsed previews use the error palette.
+- Expanded tools use one 320px scroll surface. Keep commands, source, results,
+  and failure explanations readable; hide routine transport/status metadata.
+  Edit tools share the Changes diff presentation. Thinking opens as plain text.
+- Agent groups start collapsed and expand into an unboxed nested feed. Native
+  child identity/lifetime owns the loader; launch acknowledgements are not
+  completion. Preserve remaining-task waiting and the original elapsed clock
+  through Claude background replies. Keep every confirmed report visible in
+  chronological order. Stream child checkpoints only with safe native ownership.
+  Hover/focus disclosure replaces the Agent status icon in the same slot.
+  Smooth only live assistant prose with a bounded presentation buffer; flush on
+  corrections, Stop, hidden surfaces and reduced motion. Provider upgrades must
+  keep this contract covered by native-event regressions and browser smoke tests.
+
 ## 4. Renderer state and interaction performance
 
 - Publish route and destination identity in one state transition. Never render

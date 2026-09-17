@@ -22,6 +22,7 @@
 import { marked, type Token, type TokensList } from "marked";
 import DOMPurify from "dompurify";
 import { fileRefPath } from "./markdown-file-path";
+import { isLoopbackUrl } from "@/renderer/shell/workbench/tabs/localhost-url";
 
 // Re-exported so callers can keep importing it from the markdown barrel; the
 // detection itself lives in markdown-file-path.ts (pure → unit-testable).
@@ -46,6 +47,7 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
     const a = node as HTMLAnchorElement;
     a.setAttribute("target", "_blank");
     a.setAttribute("rel", "noopener noreferrer");
+    if (isLoopbackUrl(a.getAttribute("href") ?? "")) a.setAttribute("data-local-preview", "");
   }
 });
 
@@ -191,12 +193,11 @@ export function renderMarkdownSegments(text: string): MarkdownSegment[] {
  *  link never renders as a bare `--blue-primary` blue `<a>`. Two passes:
  *
  *   1. `[name](path)` links whose href is a workspace file → chip (the original
- *      `<a>` is dropped). External / non-file links are left untouched (still
- *      `--blue-primary`). Runs before DOMPurify's hook adds target=_blank.
+ *      `<a>` is dropped). External / non-file links retain their anchors. Runs before DOMPurify's hook adds target=_blank.
  *   2. Inline `<code>` spans that ARE a file path → chip. Only inline code is
  *      matched: block code is `<pre><code class="language-…">` (has a class, so
  *      the no-attribute match skips it) or `<pre><code>` (skipped by the
- *      lookbehind).
+ *      protected preformatted section).
  *
  *  `data-file-path` drives the renderer's click handler; DOMPurify keeps the
  *  class / data-* / role / tabindex by default. */
@@ -206,16 +207,17 @@ function linkifyFilePaths(html: string): string {
     out = out.replace(
       /<a href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/g,
       (full, href: string, inner: string) => {
-        const path = fileRefPath(href);
+        const path = fileRefPath(decodeLinkText(href), true);
         return path == null ? full : fileChip(path, inner);
       },
     );
   }
   if (out.includes("<code>")) {
     out = out.replace(
-      /(?<!<pre>)<code>([^<]+)<\/code>/g,
+      /<a\b[^>]*>[\s\S]*?<\/a>|<pre\b[^>]*>[\s\S]*?<\/pre>|<code>([^<]+)<\/code>/g,
       (full, inner: string) => {
-        const path = fileRefPath(inner);
+        if (inner === undefined) return full;
+        const path = fileRefPath(decodeLinkText(inner));
         return path == null ? full : fileChip(path, inner);
       },
     );
@@ -223,6 +225,14 @@ function linkifyFilePaths(html: string): string {
   return out;
 }
 
+function decodeLinkText(value: string): string {
+  if (!value.includes("&")) return value;
+  const element = document.createElement("textarea");
+  element.innerHTML = value;
+  return element.value;
+}
+
 function fileChip(path: string, inner: string): string {
-  return `<code class="zeros-md-filepath" data-file-path="${path}" role="link" tabindex="0">${inner}</code>`;
+  const escaped = path.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+  return `<code class="zeros-md-filepath" data-file-path="${escaped}" title="${escaped}" role="link" tabindex="0">${inner.replace(/^<code>([\s\S]*)<\/code>$/, "$1")}</code>`;
 }

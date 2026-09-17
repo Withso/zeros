@@ -38,6 +38,90 @@ Zeros-owned input, output, authorization, timeout, cancellation, redaction, and
 error semantics. Its adapter may then translate that operation to each
 provider's native protocol.
 
+## Turn failure and explicit recovery
+
+Every started provider turn must settle once. Normal stream EOF without a
+terminal result is a transport failure, and cancellation wins over missing or
+late completion. Successful settlement requires an explicit provider completion.
+Claude result error arrays, Cursor structured run errors, and Codex terminal
+errors retain their actionable reason through the adapter boundary.
+
+All three adapters normalize native error codes, HTTP status, and provider
+messages before adding recovery advice (`adapters/shared/provider-error.ts`).
+Claude combines `errors[]` with the parent SDK assistant error code; Cursor
+prefers `RunResult.error.message/code` and consults legacy stores only when
+terminal details are absent; Codex retains `codexErrorInfo` and
+`additionalDetails` from both error and completion notifications. Generic 403
+responses and mentions of API keys do not establish an authentication failure.
+Only an authentication failure invalidates the provider's authenticated state.
+
+Rate limits remain terminal for the send. Model access errors use the existing
+model advice; Cursor may retry once with a model confirmed by the account's
+catalog before any output. Expired conversations and transport interruptions
+retain their existing session recovery. Unknown errors preserve the provider
+explanation without guessing a sign-in remedy. Typed failures also
+outrank legacy authentication notices after reload and during prompt replay.
+
+The engine persists a terminal `error_notice` with optional `turnFailure`
+identity before publishing the failed turn. The renderer displays its reason
+outside collapsed activity. Automatic provider retry notices and user stops do
+not become terminal recovery cards. Pre-admission failures retain the user row,
+expanded request, attachment references, and `recoveryFailure` for reload.
+Chat errors, warnings and authentication notices share the `--brown-bg` surface
+with readable plain text and safe web links. Automatic reconnect activity keeps
+its live indicator. Authentication notices retain their Sign in action.
+
+Explicit Retry resends a request with no observed work, or continues an
+interrupted request with its original context. Retry in new chat copies chat
+settings, attaches the source session's concise transcript, and sends to a new
+provider conversation. Both actions check current turn identity, cancellation
+generation, and chat ownership after preparation; missing attachments prevent
+an incomplete resend. Both destinations are available for terminal failures,
+including usage limits, without implying that a new chat bypasses provider
+restrictions. Historical cards have no send actions. Design recovery
+keeps the existing execution actor and document scope.
+
+All added recovery fields are optional. Older transcript rows and protocol
+peers remain readable; this additive change keeps the existing protocol range.
+
+Tool outcomes are independent of turn outcomes. Cursor's successful SDK wrapper
+does not override a nonzero shell exit code, termination signal, or MCP
+`isError`. Child transcripts correlate `tool_result` records by native tool ID;
+polls and final reads update existing rows, scoped to their task and transcript
+source. Duplicate records and partial snapshots cannot erase a confirmed
+failure. The conversation-step fallback preserves the same statuses and output.
+Calls without completion evidence remain `pending`; at final flush the private
+`rawOutput._zerosToolCompletion: "unreported"` marker lets existing detail panels
+say "Completion not reported" and stops task-row animation. This marker uses
+the existing opaque output field and does not change the protocol schema.
+Provider output, including failure text and command exit status, remains
+inspectable after reload. A failed child tool does not by itself fail the parent
+turn. Claude uses native `is_error` results and Codex uses item outcomes for the
+same distinction.
+
+Final answers and replayed tools reconcile within their provider execution.
+Claude retains native message/block identity and parent-scoped tool ids;
+completion snapshots can replace a streamed draft without appending it twice.
+Early child records attach to the recovered parent without changing row ids.
+Cursor uses native run/agent and tool identity, with ordered, one-use mirror
+matching for text callbacks and completed steps that expose no native message
+id. An observed callback never disables a category of later stream events.
+Ambiguous parallel tool steps wait for native identity before settling a row.
+Successful final results recover missing answers even after commentary, and a
+full Codex terminal snapshot can recover missing item completions. Summary or
+unfinished snapshots do not prove a tool succeeded. These paths reuse existing
+text replacement, parent attachment and tool-update events; late native tool
+ids remain on the same durable message through persistence and reload.
+`ToolCallUpdate.nativeToolCallId` is optional and additive; older clients may
+ignore this late identity while continuing to address the same local row.
+Claude result UUIDs are retained to prevent a same-query replay from settling
+a later send. Replayed output and delayed stream bookkeeping do not revive
+idle activity or reset the clock for background work.
+Confirmed final results use the existing `final_answer` phase so delayed tool
+records cannot hide the answer. A native Claude continuation demotes that
+execution's earlier final text to commentary; a new user turn keeps the prior
+turn's final classification intact.
+
 ## Capability advertisement
 
 `InitializeResponse.agentCapabilities.domains` is descriptive data, not an RPC

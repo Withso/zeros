@@ -167,4 +167,14 @@ export async function runComposerAttachmentsSmoke({ page, check }) {
     cutAfterFailure.empty &&
       cutAfterFailure.copied.includes("Inspect the attached file"),
   );
+  await page.locator(".composer-pm").pressSequentially("Unsaved edit survives reload");
+  await page.locator('input[type="file"]').setInputFiles({
+    name: "replacement.txt", mimeType: "text/plain", buffer: Buffer.from("edited attachment"),
+  });
+  await expect(page.getByRole("button", { name: "Remove replacement.txt", exact: true })).toBeVisible();
+  // Reload the mounted edit directly; React unmount is not a persistence boundary.
+  await page.reload();
+  await expect(page.locator(".composer-pm")).toContainText("Unsaved edit survives reload");
+  await expect(page.getByRole("button", { name: "Remove replacement.txt", exact: true })).toBeVisible();
+  check("reload preserves the live sent-message edit and replacement attachment", true);
 }

@@ -54,6 +54,8 @@ These instructions apply to the entire repository. Read and follow
 
 For renderer state, navigation, loading, tabs, panels, or list work, also read
 `docs/ui-interaction-performance.md` when it is present.
+For provider event handling or tool transcript UI, also read
+`docs/agent-tool-presentation.md`.
 
 ## Verification
 

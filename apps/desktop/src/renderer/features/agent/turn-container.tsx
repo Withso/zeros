@@ -62,6 +62,8 @@ import {
 } from "../../state/store";
 
 import { editSeedSource } from "./edit-seed";
+import { isPristineEditDraft } from "./edit-draft-content";
+import { registerLiveEditDraft } from "./edit-live-drafts";
 import type { Turn } from "./turn-grouping";
 
 export {
@@ -232,7 +234,7 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
-  ) => Promise<void>;
+  ) => void | boolean | Promise<void | boolean>;
   /** Pills (model / effort / permissions) rendered in the edit-mode
    *  toolbar so editing a past message has the same affordances as
    *  the main composer. The component appends its own Cancel/Send
@@ -313,6 +315,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
             (otherwise every TurnPromptHeader on the page would attach
             its own pair). */}
         <TurnPromptEditor
+          key={editStashKey}
+          chatId={chatId}
+          draftKey={editStashKey}
           originalText={originalText ?? ""}
           originalAttachments={originalAttachments}
           originalSegments={originalSegments}
@@ -501,6 +506,8 @@ function UserMessageActions({
 // ──────────────────────────────────────────────────────────
 
 function TurnPromptEditor({
+  chatId,
+  draftKey,
   originalText,
   originalAttachments,
   originalSegments,
@@ -513,6 +520,8 @@ function TurnPromptEditor({
   agentContext,
   surfaceActive,
 }: {
+  chatId?: string;
+  draftKey: string | null;
   originalText: string;
   originalAttachments?: AgentTextMessageAttachment[];
   originalSegments?: MessageContentSegment[];
@@ -523,7 +532,7 @@ function TurnPromptEditor({
     editedText: string,
     attachments: ComposerAttachment[],
     segments: ComposerSegment[],
-  ) => Promise<void>;
+  ) => void | boolean | Promise<void | boolean>;
   onCancel: () => void;
   editToolbarPills?: React.ReactNode;
   agentContext?: EditAgentContext;
@@ -536,7 +545,9 @@ function TurnPromptEditor({
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   // Seed the editor: a prior in-progress edit (stash json), then its plain-text
@@ -545,6 +556,12 @@ function TurnPromptEditor({
   // in place. No separate "originals" row; everything is
   // inline + editable. The choice itself lives in edit-seed.ts, which explains
   // why the middle rung is load-bearing.
+  const originalContentRef = useRef<ComposerInitialContent | null>(null);
+  originalContentRef.current ??= messageToEditorContent({
+    text: originalText,
+    segments: originalSegments,
+    attachments: originalAttachments,
+  });
   const initialContentRef = useRef<ComposerInitialContent>(
     (() => {
       switch (editSeedSource(stash)) {
@@ -554,17 +571,10 @@ function TurnPromptEditor({
           // Chips are gone with the bytes; the words survive.
           return { json: textToDoc(stash!.text), attachments: [] };
         default:
-          return messageToEditorContent({
-            text: originalText,
-            segments: originalSegments,
-            attachments: originalAttachments,
-          });
+          return originalContentRef.current!;
       }
     })(),
   );
-  const originalAttachmentCount = useRef(
-    initialContentRef.current.attachments.length,
-  ).current;
   const submitRef = useRef<() => void>(() => {});
   const persistRef = useRef<() => void>(() => {});
 
@@ -579,7 +589,9 @@ function TurnPromptEditor({
     availableCommands: agentContext?.availableCommands ?? [],
     placeholder: "Edit your message…",
     onSubmit: () => submitRef.current(),
-    onEscape: () => { if (!submittingRef.current) onCancel(); },
+    onEscape: () => {
+      if (!submittingRef.current) onCancel();
+    },
     onChange: () => persistRef.current(),
     initialContent: initialContentRef.current,
   });
@@ -630,40 +642,40 @@ function TurnPromptEditor({
     attachments: stash?.newAttachments ?? initialContentRef.current.attachments,
     json: stash?.json ?? initialContentRef.current.json ?? null,
   });
+  const submittedRef = useRef(false);
+  const liveDraftOwnerRef = useRef<ReturnType<typeof registerLiveEditDraft> | null>(null);
+  const readDraft = useCallback((): EditDraftStash | null => {
+    const isPristine = isPristineEditDraft(liveRef.current, originalContentRef.current!);
+    if (submittedRef.current || isPristine) return null;
+    const { text, attachments, json } = liveRef.current;
+    return { text, newAttachments: attachments, keptOriginals: [], json };
+  }, []);
   const persistDraft = useCallback(() => {
     const s = serialize();
+    if (!s) return;
     liveRef.current = {
-      text: s?.displayText ?? "",
-      attachments: s?.attachments ?? [],
-      json: s?.json ?? null,
+      text: s.displayText,
+      attachments: s.attachments,
+      json: s.json,
     };
-  }, [serialize]);
+    liveDraftOwnerRef.current?.update(readDraft());
+  }, [serialize, readDraft]);
   persistRef.current = persistDraft;
 
-  const submittedRef = useRef(false);
   useEffect(() => {
+    const owner = chatId && draftKey
+      ? registerLiveEditDraft(draftKey, chatId, readDraft())
+      : null;
+    liveDraftOwnerRef.current = owner;
     return () => {
-      if (submittedRef.current) {
-        onClearDraft();
-        return;
-      }
-      const { text, attachments, json } = liveRef.current;
-      const isPristine =
-        text.trim() === originalText.trim() &&
-        attachments.length === originalAttachmentCount;
-      if (isPristine) {
-        onClearDraft();
-        return;
-      }
-      onPersistDraft({
-        text,
-        newAttachments: attachments,
-        keptOriginals: [],
-        json,
-      });
+      if (owner && !owner.isCurrent()) return;
+      const draft = readDraft();
+      if (draft) onPersistDraft(draft);
+      else onClearDraft();
+      owner?.dispose();
+      if (liveDraftOwnerRef.current === owner) liveDraftOwnerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [chatId, draftKey, onClearDraft, onPersistDraft, readDraft]);
 
   const submitEdit = useCallback(async () => {
     if (submittingRef.current) return;
@@ -679,11 +691,12 @@ function TurnPromptEditor({
     setSubmitting(true);
     editor?.setEditable(false);
     try {
-      await onEdit(trimmed, attachments, s?.segments ?? []);
+      const accepted = await onEdit(trimmed, attachments, s?.segments ?? []);
+      if (accepted === false) return;
       submittedRef.current = true;
+      liveDraftOwnerRef.current?.update(null);
       onClearDraft();
-      // Truncating the old turn may already have unmounted this editor.
-      // A late completion must not close another turn's active edit.
+      // Truncation may already have removed this turn. Do not close a newer edit.
       if (mountedRef.current) onCancel();
     } catch (error) {
       toast.error("Edited message wasn't sent", {

@@ -15,12 +15,14 @@
 //   • Primitive tokens referenced outside tokens.css
 //   • Inline style with static visual properties
 //   • `Inter` or other web font names
+//   • Class names in files no Tailwind @source scans (see below)
 //
 // Zero dependencies. Run: `node scripts/check-ui-consistency.mjs`
 // Exit code is 0 (clean) or 1 (violations).
 // ============================================================
+import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { extname, join, relative, sep } from "node:path";
+import { dirname, extname, join, relative, sep } from "node:path";
 
 const ROOT = process.cwd();
 const SRC = join(ROOT, "apps", "desktop", "src");
@@ -638,6 +640,228 @@ function checkTokenCommentDrift() {
 // checkTokenCommentDrift(). Widening the scan roots to include the other two
 // needs a pass over which rules should legitimately apply there first.
 
+// ============================================================
+// Tailwind @source coverage
+// ------------------------------------------------------------
+// styles/zeros-tokens.css opens with `@import "tailwindcss" source(none)`
+// and then names its sources explicitly. That turned off v4's automatic
+// detection, which walks up to the nearest .git and scans the ENTIRE repo
+// for anything shaped like a class name — it was shipping 155 rules the
+// renderer never asked for (Playwright locators, npm script names, the
+// marketing app's breakpoints, `!contents` from a TypeScript negation, and
+// the very classes §14 bans, present only because the docs name them).
+//
+// The cost of that fix is this rule's reason to exist: an allowlist can go
+// stale silently. A new class-bearing file outside the listed roots is not
+// an error anywhere — Tailwind just never emits its utilities, and the UI
+// renders unstyled. So: every file carrying class markup must be scanned by
+// SOMETHING, or be explicitly exempt with a reason.
+//
+// The check is bidirectional, which is what keeps it cheap to maintain:
+//   → uncovered class markup fails (the hole this rule exists to close);
+//   → an exemption that no longer suppresses anything fails (dead entries
+//     can't accumulate);
+//   → a @source pointing into an exempt zone fails (prototypes and docs
+//     can't be re-admitted by widening a root);
+//   → dropping `source(none)` fails (it would silently restore repo-wide
+//     scanning and make this whole table decorative).
+// Nothing here needs touching until one of those actually changes.
+const TAILWIND_ENTRY = "styles/zeros-tokens.css";
+
+// Files whose class names are NOT meant for the desktop bundle. Each entry
+// must suppress at least one real class-bearing file or it is reported as
+// stale, so this table stays the size of the problem.
+const SOURCE_EXEMPT = [
+  {
+    why: "test files and fixtures — asserted against, never shipped markup",
+    match: (rel) =>
+      /(^|\/)__tests__\//.test(rel) || /\.(test|spec)\.[cm]?[jt]sx?$/.test(rel),
+  },
+  {
+    why: "standalone design prototypes — deliberately free-form, self-styled, and explicitly NOT held to the design system",
+    match: (rel) => rel.startsWith("styles/Artifacts/"),
+  },
+  {
+    why: "build and smoke harnesses — Playwright selectors and fixture markup that never reach a bundle",
+    match: (rel) => rel.startsWith("scripts/"),
+  },
+  {
+    why: "separate app with its own Tailwind entry (apps/marketing/src/index.css)",
+    match: (rel) => rel.startsWith("apps/marketing/"),
+  },
+  {
+    why: "standalone static pages served by apps/web, styled by hand-written CSS in apps/web/public",
+    match: (rel) => rel.startsWith("apps/web/"),
+  },
+  {
+    why: "standalone package preview page, opened directly and styled by its own inline <style>",
+    match: (rel) => rel === "packages/zeros-logo-particles/preview.html",
+  },
+];
+
+// What counts as class markup: a JSX `className=` attribute, a `className:`
+// prop in an object, an HTML `class=`, or one of the class-string helpers this
+// app builds variants with. The `(?<![.\w])` guards matter — without them
+// `wrapper.className = parent.className` in electron/iframe-picker-script.ts
+// reads as markup, which is the same mistake that made Tailwind compile
+// `!contents` out of a TypeScript negation.
+const CLASS_MARKUP_RE =
+  /(?<![.\w])className\s*=\s*["'{`]|(?<![.\w])className\s*:\s*["'`]|\sclass\s*=\s*["']|\b(?:cva|clsx|twMerge)\s*\(/;
+const MARKUP_EXT = new Set([
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+  ".html",
+]);
+
+// Every non-ignored file, tracked or not — the same set Tailwind's own
+// detection would consider (it reads the filesystem and honours .gitignore),
+// and far cheaper than walking the tree ourselves. `--others` matters: a
+// brand-new component is exactly when this rule has something to say, and
+// waiting for `git add` to say it would make the check useless locally.
+function scannableFiles() {
+  return execFileSync(
+    "git",
+    ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+    {
+      cwd: ROOT,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  )
+    .split("\0")
+    .filter(Boolean);
+}
+
+// This rule's whole job is to notice silence, so it must never BE silent: if
+// the file list can't be built, say so and fail rather than report clean.
+function scannableFilesOrReport() {
+  try {
+    return scannableFiles();
+  } catch (err) {
+    push(
+      "scripts/check-ui-consistency.mjs",
+      1,
+      `Could not list files to check @source coverage (${err.message.split("\n")[0]}) — this rule needs \`git ls-files\` and was NOT applied. Run from inside the repo.`,
+    );
+    return null;
+  }
+}
+
+function checkTailwindSourceCoverage() {
+  const entryAbs = join(ROOT, TAILWIND_ENTRY);
+  if (!existsSync(entryAbs)) return;
+  const entry = readFileSync(entryAbs, "utf8");
+  const entryLine = (re) => {
+    const idx = entry.split(/\r?\n/).findIndex((l) => re.test(l));
+    return idx === -1 ? 1 : idx + 1;
+  };
+
+  const importRe = /@import\s+["']tailwindcss["'][^;]*;/;
+  const importStmt = entry.match(importRe);
+  if (!importStmt) return;
+  if (!/\bsource\(none\)/.test(importStmt[0])) {
+    push(
+      TAILWIND_ENTRY,
+      entryLine(importRe),
+      "Tailwind import dropped `source(none)` — automatic detection is back, so the whole repo (design prototypes, docs, scripts, the marketing app) feeds the renderer bundle again. Restore it, or delete the @source list and this rule together.",
+    );
+    return;
+  }
+
+  // `@source "…"` roots, resolved from the stylesheet's own directory.
+  // `@source inline(…)` / `@source not …` name no filesystem path — skip them.
+  const roots = [];
+  for (const m of entry.matchAll(
+    /@source\s+(?!inline|not\b)["']([^"']+)["']/g,
+  )) {
+    const rel = toRel(join(ROOT, dirname(TAILWIND_ENTRY), m[1]));
+    roots.push({ raw: m[1], rel });
+    if (!existsSync(join(ROOT, rel))) {
+      push(
+        TAILWIND_ENTRY,
+        entryLine(
+          new RegExp(
+            `@source\\s+["']${m[1].replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`,
+          ),
+        ),
+        `Stale @source "${m[1]}" — the path no longer exists. Remove it, or repoint it at where the markup moved.`,
+      );
+    }
+  }
+  const covered = (rel) =>
+    roots.some((r) => rel === r.rel || rel.startsWith(`${r.rel}/`));
+
+  // A root that reaches into an exempt zone re-opens the hole from the other
+  // side: widen `@source "../styles"` and every prototype ships again. Match
+  // the root as a DIRECTORY too — the zones are written as `foo/` prefixes,
+  // which the bare root path `foo` would slip past.
+  const swallowed = new Set();
+  for (const r of roots) {
+    const i = SOURCE_EXEMPT.findIndex(
+      (e) => e.match(r.rel) || e.match(`${r.rel}/`),
+    );
+    if (i === -1) continue;
+    swallowed.add(i);
+    push(
+      TAILWIND_ENTRY,
+      entryLine(
+        new RegExp(
+          `@source\\s+["']${r.raw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']`,
+        ),
+      ),
+      `@source "${r.raw}" points into an exempt zone (${SOURCE_EXEMPT[i].why}) — those class names would ship to the app. Narrow the root, or drop the exemption deliberately.`,
+    );
+  }
+
+  // Only files OUTSIDE the roots can be uncovered, so covered paths are
+  // dismissed on the path alone and never read.
+  const credited = new Set();
+  const files = scannableFilesOrReport();
+  if (!files) return;
+  for (const rel of files) {
+    if (covered(rel)) continue;
+    if (!MARKUP_EXT.has(extname(rel).toLowerCase())) continue;
+    let src;
+    try {
+      src = readFileSync(join(ROOT, rel), "utf8");
+    } catch {
+      continue;
+    }
+    if (!CLASS_MARKUP_RE.test(src)) continue;
+
+    const zone = SOURCE_EXEMPT.findIndex((e) => e.match(rel));
+    if (zone !== -1) {
+      credited.add(zone);
+      continue;
+    }
+    // Suggest the directory, except for a lone file at the repo root
+    // (`@source "../."` would re-admit the entire tree).
+    const suggest = rel.includes("/")
+      ? rel.slice(0, rel.lastIndexOf("/"))
+      : rel;
+    push(
+      rel,
+      1,
+      `Class names here are compiled by nothing: no @source in ${TAILWIND_ENTRY} covers this file, so Tailwind never emits its utilities and the markup renders unstyled. Add \`@source "../${suggest}";\` there — or, if this is not app markup, an entry in SOURCE_EXEMPT (scripts/check-ui-consistency.mjs) saying why.`,
+    );
+  }
+
+  SOURCE_EXEMPT.forEach((e, i) => {
+    // `swallowed` zones are already reported above, with the cause; not
+    // crediting them is a SYMPTOM of that, so don't say it twice.
+    if (credited.has(i) || swallowed.has(i)) return;
+    push(
+      "scripts/check-ui-consistency.mjs",
+      1,
+      `Stale SOURCE_EXEMPT entry "${e.why}" — it no longer suppresses any class-bearing file; remove it.`,
+    );
+  });
+}
+
 // --- Stale allowlist entries: a deleted file must not keep an exemption ---
 function checkAllowlistFresh() {
   for (const rel of ALLOWLIST) {
@@ -657,6 +881,7 @@ const files = [SRC, GLOBAL_STYLES].flatMap((root) =>
 );
 for (const f of files) scanFile(f);
 checkTokenCommentDrift();
+checkTailwindSourceCoverage();
 checkAllowlistFresh();
 
 if (violations.length === 0) {

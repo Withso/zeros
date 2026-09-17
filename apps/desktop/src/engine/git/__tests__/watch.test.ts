@@ -12,9 +12,16 @@ import {
 const roots: string[] = [];
 const watchers: GitWatcher[] = [];
 
+// Budget, not a latency assertion. Every wait here rides a chokidar poll cycle,
+// and CI runs this suite four forks wide, so a starved event loop can stretch a
+// ~50ms detection well past a tight bound and fail a test that is about which
+// paths are observed, not how fast. Absence is still asserted with fixed sleeps
+// below, so a longer budget cannot mask a missing exclusion; it only costs wall
+// clock when something is genuinely broken, and stays under the 20s testTimeout
+// so the failure still reads as "timed out waiting for change".
 async function waitFor(
   predicate: () => boolean,
-  timeoutMs: number = 2_000,
+  timeoutMs: number = 10_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!predicate()) {

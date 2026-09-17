@@ -1,9 +1,4 @@
-// Coverage for the Bash row's label/target rule (2026-06-18).
-//
-// The rule: the agent's human description is the bright primary
-// label (fg1); the raw command is the muted secondary text (fg2). Without
-// a description the label falls back to "Bash". The command preview is
-// collapsed to a single line so it truncates cleanly in the row.
+// Tool names are stable; command previews supply the operation.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -24,7 +19,7 @@ const exec = (rawInput: Record<string, unknown>): AgentMessage =>
   }) as unknown as AgentMessage;
 
 describe("metaForEvent — Bash (execute) rows", () => {
-  it("uses the agent's description as the bright label when present", () => {
+  it("shows the native command description when one is supplied", () => {
     const meta = metaForEvent(
       exec({ command: "rg -n foo", description: "Find foo callsites" }),
     );
@@ -45,7 +40,7 @@ describe("metaForEvent — Bash (execute) rows", () => {
 });
 
 describe("metaForEvent — Thinking duration", () => {
-  it("shows the provider-reported duration in the common row metadata", () => {
+  it("retains thinking duration in history without showing it in the row", () => {
     const meta = metaForEvent({
       id: "thought-1",
       kind: "text",
@@ -54,7 +49,7 @@ describe("metaForEvent — Thinking duration", () => {
       durationMs: 2_400,
       createdAt: 1,
     } as AgentMessage);
-    expect(meta.trailing).toBe("2s");
+    expect(meta.trailing).toBeUndefined();
   });
 
   it("drops the chip when the duration would only ever read 0s", () => {
@@ -124,7 +119,7 @@ describe("metaForEvent — read / search / list rows (Codex commandActions parit
     expect(meta.label).toBe("Read image");
     expect(meta.target).toBe("footer-diff-hover.png");
     expect(meta.targetFile).toBe(true);
-    expect(meta.expandable).toBe(false);
+    expect(meta.expandable).toBe(true);
   });
 
   it("search kind renders a Grep card targeting the query", () => {

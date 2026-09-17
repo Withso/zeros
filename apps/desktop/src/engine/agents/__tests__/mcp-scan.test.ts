@@ -34,6 +34,31 @@ const bySource = (out: ReturnType<typeof scanNativeMcpConfigs>, source: string) 
   out.find((s) => s.source === source)!;
 
 describe("scanNativeMcpConfigs", () => {
+  it("imports native cwd and public OAuth metadata without exposing client secrets", () => {
+    write(".cursor/mcp.json", JSON.stringify({ mcpServers: {
+      remote: { url: "https://example.test/mcp", auth: { CLIENT_ID: "registered", CLIENT_SECRET: "fixture-private-client", scopes: ["read"] } },
+      local: { command: "node", cwd: "tools/mcp" },
+    } }));
+    const result = bySource(scanNativeMcpConfigs(home), "cursor");
+    expect(result.servers).toEqual([
+      { name: "remote", transport: "http", url: "https://example.test/mcp", oauth: { clientId: "registered", scopes: ["read"], requiresClientSecret: true } },
+      { name: "local", transport: "stdio", command: "node", cwd: "tools/mcp" },
+    ]);
+    expect(result.warning).toMatch(/client secret/i);
+    expect(JSON.stringify(result)).not.toContain("fixture-private-client");
+  });
+  it("preserves explicit SSE, defaults untyped URLs to HTTP, and skips unsupported transports", () => {
+    write(".cursor/mcp.json", JSON.stringify({ mcpServers: {
+      events: { type: "sse", url: "https://example.test/events", headers: { "X-Version": "1" } },
+      untyped: { url: "https://example.test/sse" },
+      invalid: { type: "websocket", url: "https://example.test/ws" },
+    } }));
+    expect(bySource(scanNativeMcpConfigs(home), "cursor").servers).toEqual([
+      { name: "events", transport: "sse", url: "https://example.test/events", headers: { "X-Version": "1" } },
+      { name: "untyped", transport: "http", url: "https://example.test/sse" },
+    ]);
+  });
+
   it("offers Codex project declarations for import", () => {
     const repo = path.join(home, "repo");
     write("repo/.codex/config.toml", '[mcp_servers.project_notes]\ncommand = "notes-server"\n');

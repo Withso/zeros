@@ -1,9 +1,7 @@
-/** Before the user expresses a preference, reveal the task as soon as Cursor's
- * first live child event arrives. An explicit expand/collapse stays sticky
- * across every later poll frame. */
+/** Child arrival must not override the user's disclosure choice. */
 export function cursorTaskOpenState(
   userToggled: boolean | null,
-  childCount: number,
+  _childCount: number,
 ): boolean {
-  return userToggled ?? childCount > 0;
+  return userToggled ?? false;
 }

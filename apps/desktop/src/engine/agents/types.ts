@@ -38,7 +38,7 @@ import type {
   TurnUsage,
 } from "@zeros/protocol/agent-events";
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
-import type { AccountDetails } from "@zeros/protocol/messages";
+import type { AccountDetails, SteerOutcome } from "@zeros/protocol/messages";
 import type {
   ExecutionBoundaryPortsSnapshot,
   ExecutionBoundaryStatus,
@@ -54,6 +54,10 @@ import type { BoundaryPreviewGatewayFactory } from "./containment/zsr-preview-ga
 export type AgentFailureKind =
   | "timeout"
   | "auth-required"
+  /** Native account verification or cloud credential setup requires user
+   * action, not a Claude sign-in, model fallback, or automatic prompt replay. */
+  | "verification-required"
+  | "cloud-credentials-unavailable"
   | "subprocess-exited"
   | "protocol-error"
   | "transport-closed"
@@ -184,8 +188,8 @@ export interface AgentGatewayEvents {
 // ── MCP server registration (matches current AgentSessionManager API) ─
 
 /** One MCP server Zeros registers with every agent. A discriminated union over
- *  the two transports the MCP spec defines: `stdio` (a local subprocess) and
- *  `http` (Streamable HTTP / a remote URL). Secrets never live here — `env`
+ *  `stdio` (a local subprocess), `http` (Streamable HTTP), and `sse`
+ *  (HTTP with a separate server-sent event stream). Secrets never live here — `env`
  *  values + header values are non-secret or reference env-var names; real
  *  credentials stay in the keychain. */
 export type McpServerRegistration =
@@ -193,23 +197,29 @@ export type McpServerRegistration =
       name: string;
       transport: "stdio";
       command: string;
+      /** Server process folder; relative paths resolve against the chat workspace. */
+      cwd?: string;
       args?: string[];
       env?: Record<string, string>;
       /** Provider startup allowance for heavyweight local MCP runtimes. */
       startupTimeoutSec?: number;
     }
-  | {
-      name: string;
-      transport: "http";
-      url: string;
-      headers?: Record<string, string>;
-      /** HTTP header name -> session environment variable name. This keeps
-       * short-lived capabilities out of provider argv/config literals while
-       * still allowing providers that support env-backed MCP headers to use
-       * their native mechanism. Adapters without that mechanism materialize
-       * the value only in their in-memory SDK options. */
-      headersFromEnv?: Record<string, string>;
-    };
+  | McpRemoteServerRegistration<"http">
+  | McpRemoteServerRegistration<"sse">;
+
+/** Keep distinct discriminants so transport-specific grants can use Extract. */
+export interface McpRemoteServerRegistration<T extends "http" | "sse"> {
+  name: string;
+  transport: T;
+  url: string;
+  headers?: Record<string, string>;
+  /** HTTP header name -> session environment variable name. This keeps
+   * short-lived capabilities out of provider argv/config literals while
+   * still allowing providers that support env-backed MCP headers to use
+   * their native mechanism. Adapters without that mechanism materialize
+   * the value only in their in-memory SDK options. */
+  headersFromEnv?: Record<string, string>;
+}
 
 // ── Gateway construction shape (drop-in with AgentSessionManager) ──
 
@@ -238,6 +248,9 @@ export interface AgentAdapterContext {
   authenticationContext?: () => string;
   /** MCP servers to register with the agent (passed via agent-specific config). */
   mcpServers: McpServerRegistration[];
+  /** Exact-endpoint revision of an engine-owned MCP catalog, if any. Read
+   * lazily; an empty published catalog still matters to existing sessions. */
+  mcpCatalogRevision?: (server: McpServerRegistration) => string | undefined;
   /** Per-session state directory root. Adapter-owned subdirs inside. */
   sessionDirRoot: string;
   /** Emit events up to the gateway. */
@@ -331,7 +344,7 @@ export interface AgentBackgroundWorkCapabilityPort {
 }
 
 export interface AgentTurnControlCapabilityPort {
-  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<void>;
+  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<SteerOutcome | void>;
   setMode?(opts: { sessionId: string; modeId: string }): Promise<void>;
   compactContext?(opts: { sessionId: string }): Promise<void>;
 }
@@ -609,13 +622,12 @@ export interface AgentAdapter {
     taskId: string;
   }): Promise<void>;
 
-  /** Inject a user message into the RUNNING turn without cancelling it
-   *  (mid-turn "steering"). Resolves once the message is delivered to the
-   *  agent runtime; the in-flight prompt() keeps streaming and settles the
-   *  whole (steered) turn. MUST throw when no turn is in flight. Optional —
-   *  only adapters advertising `agentCapabilities.steering` implement it
-   *  (claude-sdk pushes into the SDK input queue; codex calls `turn/steer`). */
-  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<void>;
+  /** Offer input to a running turn without cancelling it. A native receipt
+   * establishes delivered/queued/interrupted; local enqueue alone is not an
+   * acknowledgement. Idle or rejected-before-submission input returns queued.
+   * Only adapters advertising agentCapabilities.steering implement this.
+   * Legacy adapters returning void retain their delivered-ack behavior. */
+  steer?(opts: { sessionId: string; prompt: ContentBlock[] }): Promise<SteerOutcome | void>;
 
   /** Switch session mode (e.g. plan/default/accept-edits). */
   setMode?(opts: { sessionId: string; modeId: string }): Promise<void>;

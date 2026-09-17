@@ -71,6 +71,26 @@ describe("relativizePath", () => {
 });
 
 describe("describePermission", () => {
+  it("uses only the existing Yes/No rows for an explicit approval, even with stale broad options", () => {
+    const request = {
+      ...req("execute", "Bash", { command: "rm -rf dist" }),
+      requiresExplicitApproval: true,
+      useOptionNames: true,
+      options: [
+        { optionId: "once", name: "Approve", kind: "allow_once" },
+        { optionId: "chat", name: "Allow for this chat", kind: "allow_always" },
+        { optionId: "project", name: "Allow for this project", kind: "allow_always_project" },
+        { optionId: "no", name: "Decline", kind: "reject_once" },
+      ],
+    } as RequestPermissionRequest;
+    const html = renderToStaticMarkup(createElement(PermissionCard, { request, onRespond: () => {} }));
+    expect(html.match(/<button /g)).toHaveLength(2);
+    expect(html).toContain(">Yes</span>");
+    expect(html).toContain(">No</span>");
+    expect(html).not.toContain("Allow for this");
+    const yes = html.match(/<button\b[^>]*>.*?>Yes<.*?<\/button>/)?.[0];
+    expect(yes).not.toContain("↵");
+  });
   it("shows a Read's file (relative) + file icon — the Task 3 fix", () => {
     // Claude Read: kind arrives as "other", file_path is ABSOLUTE.
     const d = describePermission(

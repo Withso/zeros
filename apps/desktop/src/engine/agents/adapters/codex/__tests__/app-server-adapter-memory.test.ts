@@ -1,4 +1,31 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AgentAdapterContext } from "../../../types";
+
+describe("Codex fallback selection", () => {
+  it.each([false, true])("uses the fallback on the next send unless manually changed: %s", async (manual) => {
+    const updates: unknown[] = [];
+    const instance = new CodexAppServerAdapter({ projectRoot: "/tmp/proj", mcpServers: [], sessionDirRoot: "/tmp/sessions",
+      emit: { onSessionUpdate: (_a, n) => updates.push(n.update), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() } });
+    const { session: info } = await instance.newSession({ cwd: "/tmp/proj", env: { OPENAI_MODEL: "gpt-6-astra" } });
+    const session = (instance as unknown as { sessions: Map<string, import("../app-server-adapter").CodexSession> }).sessions.get(info.sessionId)!;
+    let calls = 0;
+    vi.mocked(session.runtime.runTurn).mockImplementation(async () => {
+      if (calls++ === 0) {
+        if (manual) await instance.setModel({ sessionId: info.sessionId, model: "gpt-5.6-luna" });
+        const fallback = { threadId: session.threadId, turnId: "native-turn", fromModel: "gpt-6-astra", toModel: "gpt-5.6-sol", reason: "highRiskCyberActivity" };
+        native.state.notificationHandlers.get("model/rerouted")?.(fallback);
+        native.state.notificationHandlers.get("model/rerouted")?.(fallback);
+      }
+      return { status: "completed", turnId: "native-turn", raw: {} } as never;
+    });
+    await instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "First" }] });
+    await instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "Next" }] });
+    const model = manual ? "gpt-5.6-luna" : "gpt-5.6-sol";
+    expect(vi.mocked(session.runtime.runTurn).mock.calls.at(-1)?.[0]).toMatchObject({ model, collaborationMode: { settings: { model } } });
+    expect(updates.filter((u) => (u as { sessionUpdate: string }).sessionUpdate === "current_model_update")).toHaveLength(manual ? 0 : 1);
+    await instance.dispose();
+  });
+});
 
 const native = vi.hoisted(() => {
   const state = {
@@ -19,6 +46,7 @@ const native = vi.hoisted(() => {
     },
     goalGetGate: null as Promise<void> | null,
     rateLimitReadGate: null as Promise<void> | null,
+    rateLimitMetadata: {} as Record<string, unknown>,
     rateLimitSnapshot: {
       limitId: null,
       limitName: null,
@@ -124,8 +152,9 @@ const native = vi.hoisted(() => {
     }
     if (method === "account/rateLimits/read") {
       const snapshot = state.rateLimitSnapshot;
+      const metadata = state.rateLimitMetadata;
       if (state.rateLimitReadGate) await state.rateLimitReadGate;
-      return { rateLimits: snapshot };
+      return { rateLimits: snapshot, ...metadata };
     }
     return {};
   });
@@ -191,6 +220,7 @@ vi.mock("../../session-paths", () => ({
 }));
 
 import { CodexAppServerAdapter } from "../app-server-adapter";
+import { bootCodexAppServerRuntime } from "../app-server";
 
 describe("Codex native memory capability", () => {
   beforeEach(() => {
@@ -202,6 +232,7 @@ describe("Codex native memory capability", () => {
     native.state.goal = null;
     native.state.goalGetGate = null;
     native.state.rateLimitReadGate = null;
+    native.state.rateLimitMetadata = {};
     native.state.rateLimitSnapshot = {
       limitId: null,
       limitName: null,
@@ -402,6 +433,242 @@ describe("Codex native memory capability", () => {
     await instance.dispose();
   });
 
+  it("keeps included-usage permission and the model alias from the full usage read", async () => {
+    native.state.rateLimitMetadata = {
+      ordinaryUsageAllowed: false,
+      accountId: "account-a",
+    };
+    native.state.rateLimitSnapshot = {
+      ...native.state.rateLimitSnapshot,
+      normalModelSlug: "gpt-5.6-sol",
+    };
+    const instance = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit: {
+        onSessionUpdate: vi.fn(),
+        onPermissionRequest: vi.fn(),
+        onQuestionRequest: vi.fn(),
+        onAgentStderr: vi.fn(),
+        onAgentExit: vi.fn(),
+      },
+    });
+    const quota = await instance.readProviderQuota({ cwd: "/tmp/proj" });
+    expect(quota).toMatchObject({
+      ordinaryUsageAllowed: false,
+      normalModelSlug: "gpt-5.6-sol",
+    });
+    expect(quota).not.toHaveProperty("accountId");
+    expect(
+      native.requestTyped.mock.calls
+        .filter(([method]) => method === "account/rateLimits/read")
+        .at(-1)?.[1] ?? {},
+    ).not.toMatchObject({ supportsLunaReserve: true });
+    await instance.dispose();
+  });
+
+  it("does not publish a delayed seed over a newer rolling update", async () => {
+    let release!: () => void;
+    native.state.rateLimitReadGate = new Promise<void>((r) => {
+      release = r;
+    });
+    native.state.rateLimitSnapshot = {
+      ...native.state.rateLimitSnapshot,
+      primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: null },
+    };
+    const onProviderQuotaUpdated = vi.fn();
+    const instance = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit: {
+        onSessionUpdate: vi.fn(),
+        onPermissionRequest: vi.fn(),
+        onQuestionRequest: vi.fn(),
+        onAgentStderr: vi.fn(),
+        onAgentExit: vi.fn(),
+        onProviderQuotaUpdated,
+      },
+    });
+    await instance.newSession({ cwd: "/tmp/proj" });
+    native.state.notificationHandlers.get("account/rateLimits/updated")?.({
+      rateLimits: {
+        primary: { usedPercent: 20, windowDurationMins: 300, resetsAt: null },
+      },
+    });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onProviderQuotaUpdated).toHaveBeenLastCalledWith(
+      "codex",
+      expect.objectContaining({
+        primary: expect.objectContaining({ usedPercent: 20 }),
+      }),
+    );
+    await instance.dispose();
+  });
+
+  it("invalidates an in-flight quota read on a signed-in account change", async () => {
+    let release!: () => void;
+    native.state.rateLimitReadGate = new Promise<void>((r) => {
+      release = r;
+    });
+    native.state.rateLimitMetadata = {
+      ordinaryUsageAllowed: false,
+      accountId: "account-a",
+    };
+    const onProviderQuotaUpdated = vi.fn();
+    const instance = new CodexAppServerAdapter({
+      projectRoot: "/tmp/proj",
+      mcpServers: [],
+      sessionDirRoot: "/tmp/sessions",
+      emit: {
+        onSessionUpdate: vi.fn(),
+        onPermissionRequest: vi.fn(),
+        onQuestionRequest: vi.fn(),
+        onAgentStderr: vi.fn(),
+        onAgentExit: vi.fn(),
+        onProviderQuotaUpdated,
+      },
+    });
+    await instance.newSession({ cwd: "/tmp/proj" });
+    native.state.notificationHandlers.get("account/updated")?.({
+      authMode: "chatgpt",
+      planType: "pro",
+    });
+    native.state.rateLimitMetadata = {
+      ordinaryUsageAllowed: true,
+      accountId: "account-b",
+    };
+    native.state.notificationHandlers.get("account/updated")?.({
+      authMode: "chatgpt",
+      planType: "pro",
+    });
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(onProviderQuotaUpdated.mock.calls).not.toContainEqual([
+      "codex",
+      expect.objectContaining({ ordinaryUsageAllowed: false }),
+    ]);
+    expect(onProviderQuotaUpdated).toHaveBeenLastCalledWith(
+      "codex",
+      expect.objectContaining({ ordinaryUsageAllowed: true }),
+    );
+    await instance.dispose();
+  });
+
+  it.each(["newer-read", "dispose"])(
+    "rejects an obsolete one-shot usage response after %s",
+    async (boundary) => {
+      const instance = adapter();
+      let release!: () => void;
+      native.state.rateLimitReadGate = new Promise<void>((r) => {
+        release = r;
+      });
+      native.state.rateLimitMetadata = {
+        ordinaryUsageAllowed: false,
+        accountId: "account-a",
+      };
+      const old = instance
+        .readProviderQuota({ cwd: "/tmp/proj" })
+        .catch((error) => error);
+      await vi.waitFor(() =>
+        expect(
+          native.requestTyped.mock.calls.some(
+            ([method]) => method === "account/rateLimits/read",
+          ),
+        ).toBe(true),
+      );
+      if (boundary === "newer-read") {
+        native.state.rateLimitReadGate = null;
+        native.state.rateLimitMetadata = {
+          ordinaryUsageAllowed: true,
+          accountId: "account-b",
+        };
+        expect(
+          await instance.readProviderQuota({ cwd: "/tmp/proj" }),
+        ).toMatchObject({ ordinaryUsageAllowed: true });
+      } else await instance.dispose();
+      release();
+      expect(await old).toBeInstanceOf(Error);
+      await instance.dispose();
+    },
+  );
+
+  it.each(["newer-read", "dispose"])(
+    "rejects a quota result superseded during runtime cleanup: %s",
+    async (cause) => {
+      const instance = adapter();
+      let releaseRead!: () => void;
+      native.state.rateLimitReadGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      let releaseDispose!: () => void;
+      const disposeGate = new Promise<void>((resolve) => {
+        releaseDispose = resolve;
+      });
+      let enteredDispose!: () => void;
+      const disposalStarted = new Promise<void>((resolve) => {
+        enteredDispose = resolve;
+      });
+      const pending = instance.readProviderQuota({ cwd: "/tmp/proj" });
+      const runtime = await vi
+        .mocked(bootCodexAppServerRuntime)
+        .mock.results.at(-1)!.value;
+      vi.mocked(runtime.dispose).mockImplementationOnce(async () => {
+        enteredDispose();
+        await disposeGate;
+      });
+      const observed = pending.then(
+        () => "stale response published",
+        (error: Error) => error.message,
+      );
+      releaseRead();
+      await disposalStarted;
+      native.state.rateLimitReadGate = null;
+      if (cause === "dispose") await instance.dispose();
+      else await instance.readProviderQuota({ cwd: "/tmp/proj" });
+      releaseDispose();
+      expect(await observed).toMatch(/usage changed while refreshing/i);
+      await instance.dispose();
+    },
+  );
+
+  it("ignores an older runtime's rolling quota after another runtime confirms a different account", async () => {
+    const instance = adapter();
+    const publish = vi.fn();
+    (
+      instance as unknown as { ctx: AgentAdapterContext }
+    ).ctx.emit.onProviderQuotaUpdated = publish;
+    native.state.rateLimitMetadata = {
+      ordinaryUsageAllowed: false,
+      accountId: "account-a",
+    };
+    await instance.newSession({ cwd: "/tmp/proj" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const oldRolling = native.state.notificationHandlers.get(
+      "account/rateLimits/updated",
+    )!;
+    native.state.rateLimitMetadata = {
+      ordinaryUsageAllowed: true,
+      accountId: "account-b",
+    };
+    await instance.newSession({ cwd: "/tmp/proj" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const count = publish.mock.calls.length;
+    oldRolling({
+      rateLimits: {
+        primary: { usedPercent: 99, windowDurationMins: 300, resetsAt: null },
+      },
+    });
+    expect(publish).toHaveBeenCalledTimes(count);
+    expect(publish).toHaveBeenLastCalledWith(
+      "codex",
+      expect.objectContaining({ ordinaryUsageAllowed: true }),
+    );
+    await instance.dispose();
+  });
+
   it("clears account-scoped quota immediately when Codex signs out", async () => {
     const onProviderQuotaUpdated = vi.fn();
     const instance = new CodexAppServerAdapter({
@@ -502,6 +769,13 @@ describe("Codex native memory capability", () => {
       authMode: null,
       planType: null,
     });
+    // Login now revalidates the new account. Keep the delayed old response
+    // captured above, but make newly issued reads return Account B's snapshot.
+    native.state.rateLimitSnapshot = {
+      limitId: "account-b", limitName: "Account B", primary: null,
+      secondary: null, credits: null, individualLimit: null,
+      spendControlReached: null, planType: "team", rateLimitReachedType: null,
+    };
     native.state.notificationHandlers.get("account/updated")?.({
       authMode: "chatgpt",
       planType: "team",

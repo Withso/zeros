@@ -19,6 +19,23 @@ const tool = (over: Partial<AgentToolMessage>): AgentToolMessage =>
   }) as AgentToolMessage;
 
 describe("matchSubagent", () => {
+  it("recognizes saved Codex activity rows through their native payload", () => {
+    expect(
+      matchSubagent(
+        tool({
+          title: "subAgentActivity",
+          toolKind: "other",
+          rawInput: {
+            type: "subAgentActivity",
+            id: "native",
+            agentThreadId: "child",
+            agentPath: "/root/source_audit",
+            kind: "started",
+          },
+        }),
+      ),
+    ).toMatchObject({ description: "Source audit" });
+  });
   it("matches Claude's snake_case subagent_type", () => {
     const info = matchSubagent(tool({ title: "Task", rawInput: { subagent_type: "explore", description: "Look around" } }));
     expect(info).toMatchObject({ subagentType: "explore", description: "Look around" });
@@ -42,9 +59,8 @@ describe("matchSubagent", () => {
     expect(matchSubagent(tool({ title: "Read", toolKind: "read", rawInput: { path: "a.ts" } }))).toBeNull();
   });
 
-  it("returns null for kind 'task' (Cursor's raw task card, not the SubagentCard)", () => {
-    // Even though it carries subagent_type/subagentType, a kind-"task" tool is
-    // Cursor's RAW task card — it must NOT route to the Claude-style SubagentCard.
+  it("keeps Cursor's stored task kind on its compatibility route", () => {
+    // Kind dispatch retains the serialized route; its renderer shares Agent UI.
     expect(
       matchSubagent(tool({ title: "Subagent Explore", toolKind: "task", rawInput: { subagent_type: "explore", description: "Explore" } })),
     ).toBeNull();

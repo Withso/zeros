@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "codexProtocolVersion": "0.153.4",
+  "codexProtocolVersion": "0.154.0",
   "clientRequests": {
     "handled": [
       "initialize",
@@ -37,6 +37,10 @@
       "mcpServer/oauth/login"
     ],
     "generated-only": [
+      "userVerification/status",
+      "userVerification/enroll",
+      "userVerification/verify",
+      "userVerification/delete",
       "thread/archive",
       "thread/delete",
       "thread/unsubscribe",

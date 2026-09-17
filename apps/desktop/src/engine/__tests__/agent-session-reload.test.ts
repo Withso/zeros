@@ -1586,6 +1586,25 @@ describe("Zeros-owned conversation fork and provider detachment", () => {
 // spawned here, but ownership of a LIVE turn — its stream, its replayed
 // permission cards, and the chat its transcript is written to — still moves.
 describe("re-adoption keeps the remote trust boundary", () => {
+  it("adopts the latest background snapshot after the foreground prompt has settled", async () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_880 });
+    const state = internals(engine);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-bg", "claude");
+    state.sessionChat.set("session-bg", "chat-bg");
+    state.sessionLoadResponses.set("session-bg", {});
+    const snapshot = {
+      sessionUpdate: "background_tasks_update" as const,
+      tasks: [{ taskId: "task-1", name: "Tests", startedAt: 100, updatedAt: 200 }],
+      waiting: true, activity: { state: "idle" as const, startedAt: 50 },
+    };
+    state.agents.events.onSessionUpdate("claude", { sessionId: "session-bg", update: snapshot });
+    await state.handleMessage({ type: "AGENT_LOAD_SESSION", id: "load-bg", source: "browser", timestamp: 1, agentId: "claude", sessionId: "session-bg", chatId: "chat-bg" }, client);
+    expect(messages).toContainEqual(expect.objectContaining({ type: "AGENT_SESSION_LOADED", promptActive: false, response: expect.objectContaining({ backgroundTasks: snapshot }) }));
+    state.agents.events.onSessionUpdate("claude", { sessionId: "session-bg", update: { ...snapshot, tasks: [], waiting: false, activity: null } });
+    expect(state.sessionLoadResponses.get("session-bg")?.backgroundTasks).toMatchObject({ tasks: [], waiting: false, activity: null });
+  });
   it("refuses a raw provider binding that is not attached to an accessible chat", async () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_888 });
     const state = internals(engine);

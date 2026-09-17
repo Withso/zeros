@@ -209,8 +209,6 @@ describe("remote agent config env allowlist", () => {
       CURSOR_MODEL: "composer-2.5",
       ZEROS_THINKING_EFFORT: "max",
       ZEROS_FAST_MODE: "1",
-      CLAUDE_FALLBACK_MODEL: "claude-sonnet-4-6",
-      CLAUDE_MAX_BUDGET_USD: "10",
       ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES: "120",
       ZEROS_ADDITIONAL_DIRS: '["/managed/repo"]',
     });

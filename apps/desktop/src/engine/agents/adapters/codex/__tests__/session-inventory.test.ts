@@ -102,6 +102,53 @@ function fixture() {
 }
 
 describe("Codex grouped session inventory", () => {
+  it("keeps app entries but never claims callable tools during discovery failure, then recovers", async () => {
+    const f = fixture();
+    f.responses["mcpServerStatus/list"] = {
+      data: [
+        {
+          name: "codex_apps",
+          runtimeStatus: "connected",
+          toolsError: "Tool discovery failed.",
+        },
+      ],
+      nextCursor: null,
+    };
+    const failed = await f.read();
+    expect(failed.entries[0]).toMatchObject({
+      status: "error",
+      detail: expect.stringContaining("Tool discovery failed."),
+    });
+    expect(
+      failed.groups!.find((group) => group.kind === "apps")!.entries,
+    ).toContainEqual(
+      expect.objectContaining({
+        id: "notes",
+        name: "Notes",
+        status: "unavailable",
+      }),
+    );
+    f.responses["mcpServerStatus/list"] = {
+      data: [
+        {
+          name: "codex_apps",
+          runtimeStatus: "connected",
+          toolsError: null,
+          tools: {},
+        },
+      ],
+      nextCursor: null,
+    };
+    const recovered = await f.read();
+    expect(recovered.entries[0]).toMatchObject({ status: "connected" });
+    expect(recovered.entries[0].detail).toBeUndefined();
+    expect(
+      recovered.groups!.find((group) => group.kind === "apps")!.entries,
+    ).toContainEqual(
+      expect.objectContaining({ id: "notes", status: "available" }),
+    );
+  });
+
   it("separates installed plugins, thread-callable apps and admitted MCP connections", async () => {
     const f = fixture();
     const result = await f.read();

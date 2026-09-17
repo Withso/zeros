@@ -345,10 +345,22 @@ export function invalidateAllEngineReadCaches(): void {
   providerMemorySettingsCache.invalidateAll();
   filesToCopyPreviewCache.invalidateAll();
   workingDirectoriesCache.invalidateAll();
+  mcpGatewayStatusCache.invalidateAll();
   designDirectoryTargetCache.invalidateAll();
   designDirectoryListingCache.invalidateAll();
 
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
   // device lands while this renderer is deaf to DB_CHANGED.
   turnRowCache.invalidateAll();
+}
+
+/** MCP status belongs to an exact engine connection. Retain confirmed data on
+ * revalidation; WeakMap identities cannot mix local and remote credentials. */
+export const mcpGatewayStatusCache = new KeyedAsyncCache<import("../platform/bridge/workspace-bridge").McpGatewayStatusWire>(16);
+const mcpBridgeKeys = new WeakMap<object, string>();
+let mcpBridgeSequence = 0;
+export function mcpGatewayStatusKey(bridge: object, execution = "local:sidecar"): string {
+  let key = mcpBridgeKeys.get(bridge);
+  if (!key) { key = `mcp:${++mcpBridgeSequence}`; mcpBridgeKeys.set(bridge, key); }
+  return `${key}:${execution}`;
 }

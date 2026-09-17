@@ -11,8 +11,12 @@ import { Button } from "../shared/ui/primitives/button";
 import { TooltipProvider } from "../shared/ui/primitives/tooltip";
 import { setActiveBridge } from "../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../platform/bridge/ws-client";
+import { useWorkspaceStore } from "../state/workspace-store";
 
 const cwd = "/attachment-harness";
+useWorkspaceStore.setState({
+  chats: [{ id: "attachment-harness-chat", folder: cwd, agentId: "claude", agentName: "Claude", model: null, effort: "high", permissionMode: "auto", title: "Attachment edit", createdAt: 1, updatedAt: 1 }],
+});
 const body =
   "# Saved transcript\n\nThe staged transcript body must remain visible.";
 const preview = {

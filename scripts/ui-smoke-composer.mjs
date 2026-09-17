@@ -78,6 +78,8 @@ import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
 import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
 import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
+import { runPermissionHintsSmoke } from "./ui-smoke-permission-hints.mjs";
+import { runContextGaugeSmoke } from "./ui-smoke-context-gauge.mjs";
 import { runConversationSummarySmoke } from "./ui-smoke-conversation-summary.mjs";
 import {
   expectDiffSeparatorCards,
@@ -143,6 +145,12 @@ try {
   await waitForHttp(pageUrl);
 
   browser = await chromium.launch();
+  const contextPage = await browser.newPage();
+  await runContextGaugeSmoke({ page: contextPage, harnessBase });
+  await contextPage.close();
+  const permissionPage = await browser.newPage();
+  await runPermissionHintsSmoke({ page: permissionPage, harnessBase });
+  await permissionPage.close();
   const summaryPage = await browser.newPage();
   await runConversationSummarySmoke({ page: summaryPage, check, harnessBase });
   await summaryPage.close();

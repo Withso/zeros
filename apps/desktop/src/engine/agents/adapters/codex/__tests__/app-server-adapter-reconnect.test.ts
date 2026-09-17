@@ -113,7 +113,13 @@ vi.mock("../app-server", () => ({
           method: string,
           handler: (params: unknown) => void,
         ) => {
-          rt.notificationHandlers.set(method, handler);
+          // Runtime subscriptions fan out: tracking and translation both
+          // listen to turn/completed and neither replaces the other.
+          const previous = rt.notificationHandlers.get(method);
+          rt.notificationHandlers.set(method, (params) => {
+            previous?.(params);
+            handler(params);
+          });
           return () => rt.notificationHandlers.delete(method);
         },
         request,
@@ -606,6 +612,132 @@ describe("codex mid-turn reconnect + per-session crash signalling", () => {
     // we don't mask a real turn failure as a silent retry.
     expect((err as AgentFailureError).failure.kind).toBe("protocol-error");
   });
+
+  it("preserves a completion-only provider error for the recovery card", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    rt.runTurnImpl = async (_params, options) => {
+      options.onTurnStarted?.("turn-1");
+      rt.notificationHandlers.get("turn/completed")?.({
+        threadId: "thread-1",
+        turn: {
+          id: "turn-1",
+          status: "failed",
+          error: {
+            message:
+              "Selected model is at capacity. Please try a different model.",
+          },
+        },
+      });
+      return { turnId: "turn-1", status: "failed", raw: {} };
+    };
+    await expect(
+      adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") }),
+    ).rejects.toThrow("Selected model is at capacity.");
+    await adapter.dispose();
+  });
+
+  it.each([
+    ["unauthorized", "The account credential expired.", "auth-required"],
+    ["rateLimitExceeded", "Request rejected. Check your API key settings.", "rate-limited"],
+    [{ httpConnectionFailed: { httpStatusCode: 403 } }, "The model `private-model` is not available.", "protocol-error"],
+    [{ responseStreamDisconnected: { httpStatusCode: null } }, "Request interrupted.", "transport-closed"],
+    ["cyberPolicy", "Sign-in required documentation was blocked.", "protocol-error"],
+  ])("settles native completion errors without replacing their explanation: %j", async (info, message, kind) => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    rt.runTurnImpl = async (_params, options) => {
+      options.onTurnStarted?.("turn-1");
+      rt.notificationHandlers.get("turn/completed")?.({
+        threadId: "thread-1", turn: { id: "turn-1", status: "failed", error: { codexErrorInfo: info, message, additionalDetails: "Additional provider explanation." } },
+      });
+      return { turnId: "turn-1", status: "failed", raw: {} };
+    };
+    try {
+      const error = await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") }).catch((failure: unknown) => failure);
+      expect(error).toMatchObject({ failure: { kind } });
+      expect((error as Error).message).toContain(message);
+      expect((error as Error).message).toContain("Additional provider explanation.");
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each([undefined, "inProgress"])(
+    "rejects a runtime result without completion evidence: %s",
+    async (status) => {
+      const { adapter } = makeAdapter();
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+      rt.runTurnImpl = async () => ({ turnId: "turn-1", status, raw: {} });
+      await expect(
+        adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") }),
+      ).rejects.toMatchObject({ failure: { kind: "transport-closed" } });
+      await adapter.dispose();
+    },
+  );
+
+  it("preserves an error returned directly in the turn acknowledgement", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    rt.runTurnImpl = async () => ({
+      turnId: "turn-1",
+      status: "failed",
+      raw: {
+        turn: {
+          status: "failed",
+          error: { message: "Selected model is at capacity." },
+        },
+      },
+    });
+    await expect(
+      adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") }),
+    ).rejects.toThrow("Selected model is at capacity.");
+    await adapter.dispose();
+  });
+
+  it("preserves cancellation when turn/start rejects during Stop", async () => {
+    const { adapter } = makeAdapter();
+    const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+    let rejectTurn!: (error: Error) => void;
+    rt.runTurnImpl = async (_params, options) => {
+      options.onTurnStarted?.("turn-1");
+      return new Promise((_resolve, reject) => { rejectTurn = reject; });
+    };
+    const result = adapter.prompt({ sessionId: session.sessionId, prompt: TEXT("hi") });
+    await vi.waitFor(() => expect(rejectTurn).toBeTypeOf("function"));
+    await adapter.cancel({ sessionId: session.sessionId });
+    rejectTurn(new Error("The transport closed during cancellation"));
+    await expect(result).resolves.toMatchObject({ stopReason: "cancelled", response: { stopReason: "cancelled", effectiveModel: "gpt-5" } });
+    await adapter.dispose();
+  });
+
+  it.each(["session", "adapter"])(
+    "keeps a late failed result cancelled after %s disposal",
+    async (scope) => {
+      const { adapter } = makeAdapter();
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj" });
+      let finishTurn!: (result: unknown) => void;
+      rt.runTurnImpl = async (_params, options) => {
+        options.onTurnStarted?.("turn-1");
+        return new Promise((resolve) => { finishTurn = resolve; });
+      };
+      const settled = vi.fn();
+      const result = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: TEXT("hi"),
+      });
+      void result.then(settled, settled);
+      await vi.waitFor(() => expect(finishTurn).toBeTypeOf("function"));
+      if (scope === "session") await adapter.disposeSession(session.sessionId);
+      else await adapter.dispose();
+      finishTurn({ turnId: "turn-1", status: "failed", raw: {} });
+      await expect(result).resolves.toMatchObject({
+        stopReason: "cancelled",
+        response: { stopReason: "cancelled" },
+      });
+      finishTurn({ turnId: "turn-1", status: "completed", raw: {} });
+      await Promise.resolve();
+      expect(settled).toHaveBeenCalledTimes(1);
+    },
+  );
 });
 
 describe("codex compactContext", () => {

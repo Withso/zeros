@@ -119,7 +119,7 @@ describe("queuedPromptPresentation", () => {
         "provider-unavailable",
         "active-turn",
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       shouldPreserveAdmissionPromptOnFailure(
         "design-protection-failed",
@@ -911,12 +911,12 @@ describe("stopping a send that has not gone out yet", () => {
     ).toBe("create");
   });
 
-  it("keeps the visible admission prompt as the stopped turn and drops only follow-ups", () => {
+  it("keeps the stopped admission turn and preserves queued follow-ups", () => {
     expect(cancelledQueuedMessageAction("active-turn")).toBe(
       "preserve-as-turn",
     );
-    expect(cancelledQueuedMessageAction("queued-card")).toBe("drop");
-    expect(cancelledQueuedMessageAction(undefined)).toBe("drop");
+    expect(cancelledQueuedMessageAction("queued-card")).toBe("preserve-in-queue");
+    expect(cancelledQueuedMessageAction(undefined)).toBe("preserve-in-queue");
   });
 
   it("marks the chat cancelled for a send captured before the stop", () => {

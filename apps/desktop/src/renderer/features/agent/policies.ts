@@ -19,6 +19,8 @@
 // convenience; persistence stays isolated to this module and the store mutators.
 // ──────────────────────────────────────────────────────────
 
+import type { PermissionOption, RequestPermissionRequest } from "../../platform/bridge/agent-events";
+
 const STORAGE_KEY = "zeros.chat-policies.v1";
 
 export type PolicyDecision = "allow" | "reject";
@@ -85,6 +87,25 @@ export function findMatchingPolicy(
     if (r.toolKind && r.toolKind !== toolKind) continue;
     if (r.toolTitle && r.toolTitle !== toolTitle) continue;
     return r;
+  }
+  return null;
+}
+
+/** Decide against the current request before consuming a saved rule. A native
+ * explicit approval must reach the user even if this tool was allowed before. */
+export function permissionPolicyOption(
+  rules: PolicyRule[],
+  request: RequestPermissionRequest,
+): PermissionOption | null {
+  if (request.requiresExplicitApproval || request.allowLocalPolicies === false) return null;
+  const match = findMatchingPolicy(rules, request.toolCall.kind ?? undefined, request.toolCall.title);
+  if (!match) return null;
+  const kinds = match.decision === "allow"
+    ? ["allow_always", "allow_once"]
+    : ["reject_always", "reject_once"];
+  for (const kind of kinds) {
+    const option = request.options.find((candidate) => candidate.kind === kind);
+    if (option) return option;
   }
   return null;
 }

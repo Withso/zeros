@@ -30,6 +30,36 @@ const args = () => ({
 });
 
 describe("attachment chunk transfer", () => {
+  it("uses the saved filename when the display name differs from a legacy record", async () => {
+    const diskPath = ".context/shared/attachments/att-1/legacy.jsonl";
+    await fs.mkdir(path.dirname(path.join(root, diskPath)), { recursive: true });
+    await fs.writeFile(path.join(root, diskPath), "expected");
+    expect((await transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath })).relativePath).toBe(diskPath);
+  });
+  it.each([".context/shared", ".context-graph/local", ".context-graph/shared"])(
+    "honors a saved %s path when another scope contains the same id",
+    async (scope) => {
+      const local = await transferContextAttachment(root, { ...args(), uploadId: undefined, base64: Buffer.from("other").toString("base64") });
+      const diskPath = `${scope}/attachments/att-1/events.jsonl`;
+      await fs.mkdir(path.dirname(path.join(root, diskPath)), { recursive: true });
+      await fs.writeFile(path.join(root, diskPath), "expected");
+      const resolved = await transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath });
+      expect(resolved.relativePath).toBe(diskPath);
+      expect(resolved.bytes).toBe(8);
+      await expect(transferContextAttachment(root, { ...args(), base64: "", resolve: true })).rejects.toThrow(/ambiguous/i);
+      await fs.rm(local.absolutePath);
+      expect((await transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath: local.relativePath })).relativePath).toBe(diskPath);
+    },
+  );
+
+  it.each(["../private.txt", ".context/shared/attachments/other/events.jsonl", ".context/local/attachments/att-1/../events.jsonl"])(
+    "rejects an invalid saved path %s rather than resolving another record",
+    async (diskPath) => {
+      await transferContextAttachment(root, { ...args(), uploadId: undefined, base64: "YQ==" });
+      await expect(transferContextAttachment(root, { ...args(), base64: "", resolve: true, diskPath })).rejects.toThrow(/path/i);
+    },
+  );
+
   it("keeps pending chunks outside a repo-valued TMPDIR and cleans them on abort", async () => {
     const privateData = await fs.mkdtemp(path.join(os.tmpdir(), "zeros-transfer-private-"));
     vi.stubEnv("ZEROS_DATA_DIR", privateData);

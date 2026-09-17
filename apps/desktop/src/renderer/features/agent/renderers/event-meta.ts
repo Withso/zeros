@@ -1,3 +1,4 @@
+import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 // ──────────────────────────────────────────────────────────
 // event-meta — pure label/meta extractors per event kind
 // ──────────────────────────────────────────────────────────
@@ -14,14 +15,16 @@
 import {
   nativeToolSurface,
   nativeToolTitle,
+  nativeAgentWait,
   toolRecord,
 } from "./native-tool-presentation";
 import {
   Bot,
+  Hourglass,
   Brain,
   FileEdit,
   FileText,
-  FolderTree,
+  FileSearch,
   Globe,
   Plug,
   RefreshCw,
@@ -37,7 +40,9 @@ import {
 import type { ComponentType } from "react";
 
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
-import { formatElapsed } from "@/renderer/shared/ui/loading";
+import { displayCommand } from "./tool-command";
+import { readLabel, readLineCount } from "./read-output";
+import { toolCompletionUnreported } from "./raw-output";
 import {
   browserToolActivity,
   type BrowserToolActivity,
@@ -121,7 +126,6 @@ export function metaForEvent(message: AgentMessage): EventMeta {
   }
   if (message.kind === "text" && (message as any).role === "thought") {
     const text = (message as any).text as string;
-    const durationMs = (message as { durationMs?: unknown }).durationMs;
     const chars = text?.length ?? 0;
     return {
       Icon: Brain,
@@ -137,18 +141,7 @@ export function metaForEvent(message: AgentMessage): EventMeta {
       // Char count intentionally omitted from the right edge. The thought text
       // is still inspectable via expand.
       //
-      // The duration only earns the right edge when it says something. Only
-      // Cursor reports one at all (`thinking_duration_ms`), and it is almost
-      // always sub-second, so every Thinking row wore a meaningless "0s" —
-      // formatElapsed floors anything under a second to exactly that. Match
-      // DurationChip's settled-card behaviour and drop the chip instead of
-      // printing a zero; a genuinely long thought still shows its time.
-      trailing:
-        typeof durationMs === "number" &&
-        Number.isFinite(durationMs) &&
-        durationMs >= 1000
-          ? formatElapsed(durationMs)
-          : undefined,
+      trailing: undefined,
       expandable: chars > 0,
     };
   }
@@ -203,6 +196,14 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       : {}
   ) as Record<string, unknown>;
 
+  const wait = nativeAgentWait(tool);
+  if (wait) return { Icon: Hourglass, label: wait.label, expandable: !!wait.result };
+
+  if (isImageGenerationTool(tool)) {
+    const path = generatedImagePath(tool);
+    return { Icon: Sparkles, label: "Generate", target: path ? basename(path) : undefined, targetFile: !!path, targetKind: "file", expandable: true };
+  }
+
   if (kind === "read") {
     const path = pickString(
       input.file_path,
@@ -211,22 +212,21 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       input.target_file,
     );
     const image = isImagePath(path);
-    const lineCount = image ? null : readLineCount(tool);
+    const lineCount =
+      image || tool.status === "failed" ? null : readLineCount(tool);
     // Count in the LABEL ("Read 403 lines" / "Read image"), filename as the
     // tag. Consistent across all adapters.
     return {
       Icon: FileText,
       label: image
         ? "Read image"
-        : lineCount != null
-          ? `Read ${lineCount} lines`
-          : "Read",
+        : readLabel(lineCount),
       target: path ? basename(path) : tool.title,
       targetFile: !!path,
       targetKind: "file",
       trailing: undefined,
       // The shared row also exposes the input path when image bytes are absent.
-      expandable: image ? false : hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -247,36 +247,37 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       targetFile: !!path,
       targetKind: "file",
       trailing: diff ?? undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
   if (kind === "execute") {
-    const cmd =
-      pickString(input.command, input.cmd, input.script) ?? tool.title;
-    // When the agent provides a human description (Claude's
-    // Bash tool does), THAT is the bright primary label; the raw command is the
-    // muted secondary text. Without one, fall back to "Bash". Both truncate in
-    // the row (event-row.tsx caps the label + truncates the command).
-    const description = pickString(input.description);
+    const cmd = displayCommand(input) ?? tool.title;
     return {
       Icon: Terminal,
-      label: description ?? "Bash",
+      label: pickString(input.description)?.replace(/\s+/g, " ").trim() || "Bash",
       target: truncate(cmd.replace(/\s+/g, " ").trim(), 300),
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
   if (kind === "search") {
-    const pattern = pickString(input.pattern, input.query, input.regex);
-    const matches = searchMatchCount(tool);
+    const glob = typeof input.globPattern === "string" || /^Glob(?:\s|$)/i.test(tool.title) || /^Searching for /.test(tool.title);
+    const pattern = pickString(input.globPattern, input.pattern, input.query, input.regex);
+    const matches = glob ? null : searchMatchCount(tool);
     return {
       Icon: SearchIcon,
-      label: "Grep",
+      label: glob
+        ? "Glob"
+        : /^Search(?:\s|$)/.test(tool.title) &&
+            typeof input.query === "string" &&
+            !input.pattern
+          ? "Search"
+          : "Grep",
       target: pattern ? truncate(pattern, 60) : tool.title,
       trailing: matches != null ? `${matches} matches` : undefined,
-      expandable: hasContent(tool),
+      expandable: !glob || tool.status === "failed" || toolCompletionUnreported(tool.rawOutput),
     };
   }
 
@@ -290,13 +291,13 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       input.file_path,
     );
     return {
-      Icon: FolderTree,
+      Icon: FileSearch,
       label: "List",
       target: path ? basename(path) : tool.title,
       targetFile: !!path,
       targetKind: "folder",
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -311,7 +312,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       label: action.type === "open_page" ? "Open page" : action.type === "find_in_page" ? "Find in page" : "Web search",
       target: action.type === "find_in_page" ? [pattern, url].filter(Boolean).join(" · ") : url ?? (query ? `"${truncate(query, 60)}"` : tool.title),
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -322,7 +323,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       label: "Fetch",
       target: url ? truncate(url, 80) : tool.title,
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -371,7 +372,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
         label: nativeTitle ?? "Use computer",
         target: undefined,
         trailing: undefined,
-        expandable: hasContent(tool),
+        expandable: true,
       };
     }
     if (isNativeCodexBrowserToolCall(tool)) {
@@ -399,7 +400,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       label: appName ?? "MCP",
       target: actionName ?? tool.title,
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -418,7 +419,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
           : `/${name}`
         : tool.title,
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -448,7 +449,7 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
           ? `"${truncate(query, 60)}"`
           : tool.title,
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
@@ -458,16 +459,16 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
       label: "Switch mode",
       target: tool.title,
       trailing: undefined,
-      expandable: hasContent(tool),
+      expandable: true,
     };
   }
 
   return {
     Icon: Wrench,
     label: tool.title || "Tool",
-    target: kind ?? undefined,
+    target: undefined,
     trailing: undefined,
-    expandable: hasContent(tool),
+    expandable: true,
   };
 }
 
@@ -603,27 +604,6 @@ function objectRecord(value: unknown): Record<string, unknown> {
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
   return s.slice(0, n - 1) + "…";
-}
-
-function hasContent(tool: AgentToolMessage): boolean {
-  return Boolean(tool.content && tool.content.length > 0);
-}
-
-function readLineCount(tool: AgentToolMessage): number | null {
-  if (!tool.content) return null;
-  // Count the lines of the read's text body. Strip a single trailing newline so
-  // a file ending in "\n" doesn't over-count by one. (For Claude's cat-n output
-  // each line is still one row, so the count is the line count read.)
-  for (const block of tool.content) {
-    if (block.type === "content" && (block as any).content?.type === "text") {
-      const text = (block as any).content.text as string;
-      if (typeof text === "string") {
-        const trimmed = text.endsWith("\n") ? text.slice(0, -1) : text;
-        return trimmed.length === 0 ? 0 : trimmed.split(/\r?\n/).length;
-      }
-    }
-  }
-  return null;
 }
 
 function editDiffNumbers(tool: AgentToolMessage): string | null {

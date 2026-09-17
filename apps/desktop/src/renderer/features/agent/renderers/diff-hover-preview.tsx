@@ -40,9 +40,10 @@ interface DiffHoverPreviewProps {
   error?: Error | null;
   /** Footer previews need the path header; Edit rows already show it below. */
   showPath?: boolean;
-  /** Hover surfaces share a strict 350px outer cap; expanded transcript diffs
-   * keep the existing larger reading viewport. */
+  /** Hover surfaces have a collision-aware 350px cap. */
   compact?: boolean;
+  /** An expanded tool card owns scrolling for the entire operation. */
+  embedded?: boolean;
 }
 
 /** Shared by footer-pill and Edit/Write hover portals. 450px is the requested
@@ -61,6 +62,8 @@ const useBrowserLayoutEffect =
 interface DiffHoverCardProps {
   trigger: ReactElement;
   children: ReactNode;
+  /** Expanded or inactive tools already own a reading surface. */
+  enabled?: boolean;
 }
 
 interface DiffHoverPlacement {
@@ -81,13 +84,18 @@ interface DiffHoverPlacement {
 export const DiffHoverCard = memo(function DiffHoverCard({
   trigger,
   children,
+  enabled = true,
 }: DiffHoverCardProps) {
   const triggerRef = useRef<HTMLAnchorElement | null>(null);
   const boundaryRef = useRef<Element | null>(null);
   const [contentElement, setContentElement] = useState<HTMLDivElement | null>(
     null,
   );
-  const [open, setOpen] = useState(false);
+  const [requestedOpen, setOpen] = useState(false);
+  const open = enabled && requestedOpen;
+  useEffect(() => {
+    if (!enabled) setOpen(false);
+  }, [enabled]);
   const [placement, setPlacement] = useState<DiffHoverPlacement>({
     side: "top",
     availableHeight: DIFF_HOVER_MAX_HEIGHT_PX,
@@ -158,6 +166,7 @@ export const DiffHoverCard = memo(function DiffHoverCard({
   }, [contentElement]);
 
   const handleOpenChange = useCallback((nextOpen: boolean) => {
+    if (!enabled) return;
     if (nextOpen) {
       boundaryRef.current =
         triggerRef.current?.closest(DIFF_HOVER_BOUNDARY_SELECTOR) ?? null;
@@ -167,7 +176,7 @@ export const DiffHoverCard = memo(function DiffHoverCard({
       });
     }
     setOpen(nextOpen);
-  }, []);
+  }, [enabled]);
 
   useBrowserLayoutEffect(() => {
     if (!open || !contentElement) return;
@@ -199,6 +208,7 @@ export const DiffHoverCard = memo(function DiffHoverCard({
   return (
     <HoverCard
       open={open}
+      enabled={enabled}
       onOpenChange={handleOpenChange}
       openDelay={350}
       closeDelay={120}
@@ -235,6 +245,7 @@ export const DiffHoverPreview = memo(function DiffHoverPreview({
   error = null,
   showPath = false,
   compact = false,
+  embedded = false,
 }: DiffHoverPreviewProps) {
   // Existing open previews follow code-theme changes without remounting.
   const codeTheme = useCodeTheme();
@@ -256,9 +267,11 @@ export const DiffHoverPreview = memo(function DiffHoverPreview({
       aria-label={`Diff preview for ${path}`}
       data-agent-diff-preview
       className={
-        compact
+        embedded
+          ? "min-w-0 max-w-full"
+          : compact
           ? "flex max-h-[min(350px,var(--diff-hover-available-height,350px))] min-h-0 w-full max-w-full min-w-0 flex-col overflow-hidden"
-          : "flex max-h-[480px] min-h-0 max-w-full min-w-0 flex-col overflow-hidden"
+          : "flex max-h-[320px] min-h-0 max-w-full min-w-0 flex-col overflow-hidden"
       }
     >
       {showPath && (
@@ -268,7 +281,7 @@ export const DiffHoverPreview = memo(function DiffHoverPreview({
       )}
       {/* @pierre owns visual-line measurement in overflow:"wrap" mode. This
           wrapper owns only the single remaining scroll axis. */}
-      <div className="bg-sidebar-bg min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto">
+      <div className={embedded ? "bg-sidebar-bg min-w-0" : "bg-sidebar-bg min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto"}>
         {hasPatch ? (
           <PatchDiff patch={patch} options={options} disableWorkerPool />
         ) : (

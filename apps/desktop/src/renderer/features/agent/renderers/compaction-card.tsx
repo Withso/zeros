@@ -126,7 +126,7 @@ export const CompactionRecordCard: Renderer<AgentToolMessage> = memo(
       <EventRow
         message={message}
         ctx={ctx}
-        meta={meta}
+        meta={{ ...meta, expandable: true }}
         detail={detail ?? renderDetail(message, ctx)}
         trailingNode={running || failed ? null : <DoneChip />}
         // Never tint red: a failed compaction costs nothing — the row label

@@ -69,6 +69,7 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 
 /** Process start, so every later measurement can be stated relative to boot. */
 const hostStartedAt = Date.now();
@@ -1051,6 +1052,19 @@ try {
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
 const agents = new Map();
+// A resumed conversation has the same agentId but a different executor lease.
+// Scope proxy calls to that handle so late close/usage cannot target its successor.
+const agentHandles = new Map();
+function registerAgent(agent) {
+  const handleId = randomUUID();
+  agentHandles.set(handleId, agent);
+  agents.set(agent.agentId, agent);
+  return { agentId: agent.agentId, handleId };
+}
+function agentFor(args) {
+  const agent = args.handleId === undefined ? agents.get(args.agentId) : agentHandles.get(args.handleId);
+  return agent && agent.agentId === args.agentId ? agent : undefined;
+}
 // Run ids whose native callback events are still allowed onto the protocol.
 // Removing an id is the cancellation/terminal fence: late provider callbacks
 // become no-ops instead of mutating a stopped or already-reaped Zeros turn.
@@ -1422,14 +1436,12 @@ async function handle(m) {
     }
     case "agent.create": {
       const agent = await Agent.create(withLocalStore(args));
-      agents.set(agent.agentId, agent);
-      ok(id, { agentId: agent.agentId });
+      ok(id, registerAgent(agent));
       return;
     }
     case "agent.resume": {
       const agent = await Agent.resume(args.agentId, withLocalStore(args.opts));
-      agents.set(agent.agentId, agent);
-      ok(id, { agentId: agent.agentId });
+      ok(id, registerAgent(agent));
       return;
     }
     case "agent.list": {
@@ -1444,7 +1456,7 @@ async function handle(m) {
       return;
     }
     case "agent.send": {
-      const agent = agents.get(args.agentId);
+      const agent = agentFor(args);
       if (!agent) throw new Error(`Agent ${args.agentId} not found`);
       // Copy the caller's options rather than passing the wire object through:
       // anything callback-shaped (e.g. `onDelta`) can only be attached HERE,
@@ -1508,9 +1520,10 @@ async function handle(m) {
       return;
     }
     case "agent.close": {
-      const agent = agents.get(args.agentId);
+      const agent = agentFor(args);
       if (agent) {
-        agents.delete(args.agentId);
+        if (agents.get(args.agentId) === agent) agents.delete(args.agentId);
+        for (const [handleId, owned] of agentHandles) if (owned === agent) agentHandles.delete(handleId);
         try {
           if (typeof agent.close === "function") agent.close();
         } catch {
@@ -1521,7 +1534,7 @@ async function handle(m) {
       return;
     }
     case "agent.getUsage": {
-      const agent = agents.get(args.agentId);
+      const agent = agentFor(args);
       if (!agent) throw new Error(`Agent ${args.agentId} not found`);
       if (typeof agent.getUsage !== "function") {
         throw new Error("Cursor SDK agent.getUsage is unavailable");
@@ -1555,6 +1568,20 @@ async function handle(m) {
       // usage metadata here; narrowing to {status,result} silently discarded
       // it at the process boundary.
       ok(id, res ?? null);
+      return;
+    }
+    case "run.steer": {
+      if (typeof args.text !== "string") throw new Error("Steering requires text");
+      const entry = runs.get(args.runId);
+      if (!entry || typeof entry.run.steer !== "function") {
+        ok(id, "revert_to_followup");
+        return;
+      }
+      const outcome = await entry.run.steer(args.text);
+      if (outcome !== "complete_delivered" && outcome !== "revert_to_followup") {
+        throw new Error("Invalid steering acknowledgement");
+      }
+      ok(id, outcome);
       return;
     }
     case "run.cancel": {
@@ -1681,7 +1708,7 @@ async function shutdown() {
       /* best effort */
     }
   }
-  for (const agent of agents.values()) {
+  for (const agent of new Set(agentHandles.values())) {
     try {
       if (typeof agent.close === "function")
         pending.push(Promise.resolve(agent.close()));
@@ -1694,6 +1721,7 @@ async function shutdown() {
   runs.clear();
   observedRuns.clear();
   agents.clear();
+  agentHandles.clear();
   stores.clear();
   localStores.clear();
   try {

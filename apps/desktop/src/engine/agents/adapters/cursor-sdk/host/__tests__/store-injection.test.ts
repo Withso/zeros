@@ -147,6 +147,35 @@ afterEach(() => {
   host = null;
 });
 
+describe("cursor host — native handle lifetime", () => {
+  it("rejects a previous host generation's handle after the same conversation resumes", async () => {
+    const opts = { cwd: "/w/alpha", handleFixture: true };
+    const first = startHost(); await first.ready();
+    const retired = await first.req<{ agentId: string; handleId: string }>("agent.create", opts);
+    first.dispose();
+    const second = startHost(); await second.ready();
+    const current = await second.req<{ agentId: string; handleId: string }>("agent.create", opts);
+    await expect(second.req("agent.getUsage", retired)).rejects.toThrow(/not found/);
+    await second.req("agent.close", retired);
+    await expect(second.req("agent.getUsage", current)).resolves.toEqual({ closed: false });
+  });
+  it("closing a previous executor cannot close a resumed handle with the same conversation id", async () => {
+    const h = startHost(); await h.ready();
+    const opts = { cwd: "/w/alpha", handleFixture: true };
+    const old = await h.req<{ agentId: string; handleId: string }>("agent.create", opts);
+    const fresh = await h.req<{ agentId: string; handleId: string }>("agent.resume", { agentId: old.agentId, opts });
+    expect(fresh.agentId).toBe(old.agentId);
+    expect(fresh.handleId).not.toBe(old.handleId);
+    await h.req("agent.close", old);
+    await expect(h.req("agent.getUsage", fresh)).resolves.toEqual({ closed: false });
+    await expect(h.req("agent.getUsage", old)).rejects.toThrow(/not found/);
+    await expect(h.req("agent.getUsage", { ...fresh, agentId: "wrong-owner" })).rejects.toThrow(/not found/);
+    await expect(h.req("agent.getUsage", { agentId: fresh.agentId })).resolves.toEqual({ closed: false });
+    await h.req("agent.close", fresh);
+    await expect(h.req("agent.getUsage", fresh)).rejects.toThrow(/not found/);
+  });
+});
+
 describe("cursor host — workspace scan cache TTL", () => {
   // The host prewarms the workspace executor during session start so the first
   // turn doesn't pay for the scan. The SDK's 20s default expires that warm scan

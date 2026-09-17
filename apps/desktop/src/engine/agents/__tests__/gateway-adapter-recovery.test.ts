@@ -6,11 +6,12 @@
 // "claude: Agent error — adapter not live" toast. See the comment in
 // gateway.ts adapterForSession + isRecoverable() in zeros/bridge/failure.ts.
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import { AgentFailureError, type AgentAdapter } from "../types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
+import { normalizeProviderError, providerErrorFailure } from "../adapters/shared/provider-error";
 
 function makeGateway() {
   return new AgentGateway({
@@ -27,6 +28,31 @@ function makeGateway() {
 }
 
 describe("AgentGateway session/adapter recovery classification", () => {
+  it.each([
+    ["verification_required", false],
+    ["cloud_credential_error", false],
+    ["authentication_failed", true],
+  ] as const)("only changes Claude sign-in health for a login failure: %s", async (code, authFailed) => {
+    const gw = makeGateway() as unknown as {
+      executionToAgent: Map<string, string>;
+      adapters: Map<string, AgentAdapter>;
+      markAuthFailed(agentId: string): void;
+      markAuthOk(agentId: string): void;
+      prompt(a: string, s: string, p: unknown[]): Promise<unknown>;
+    };
+    const failed = vi.spyOn(gw, "markAuthFailed").mockImplementation(() => {});
+    const ok = vi.spyOn(gw, "markAuthOk").mockImplementation(() => {});
+    const error = providerErrorFailure("claude", normalizeProviderError("claude", {
+      code, status: 401, message: "Credentials expired.",
+    }), "prompt");
+    gw.adapters.set("claude", {
+      agentId: "claude", prompt: async () => { throw error; }, respondToPermission: () => {},
+    } as unknown as AgentAdapter);
+    gw.executionToAgent.set("s-error", "claude");
+    await expect(gw.prompt("claude", "s-error", [])).rejects.toBe(error);
+    expect(failed).toHaveBeenCalledTimes(authFailed ? 1 : 0);
+    expect(ok).not.toHaveBeenCalled();
+  });
   it("throws a recoverable session-expired failure when no route AND no adapter exist (fresh gateway after engine restart)", async () => {
     const gw = makeGateway();
     let caught: unknown;

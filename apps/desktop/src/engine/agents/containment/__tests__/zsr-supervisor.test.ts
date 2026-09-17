@@ -14,9 +14,14 @@ import {
   SandboxManager,
   SandboxRuntimeConfigSchema,
 } from "@anthropic-ai/sandbox-runtime";
+import {
+  cleanupBwrapMountPoints,
+  type LinuxSandboxParams,
+  wrapCommandWithSandboxLinux,
+} from "@anthropic-ai/sandbox-runtime/dist/sandbox/linux-sandbox-utils.js";
 import { wrapCommandWithSandboxMacOS } from "@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js";
 import { rgPath } from "@vscode/ripgrep";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const SUPERVISOR = path.join(
   process.cwd(),
@@ -189,6 +194,153 @@ describe("ZSR host-parity supervisor", () => {
     expect(command.lastIndexOf(groupedDeny)).toBeGreaterThan(carveOut);
   });
 });
+
+describe.skipIf(process.platform !== "linux")(
+  "ZSR Linux runtime compatibility",
+  () => {
+    let root: string;
+    let capture: string;
+
+    beforeEach(async () => {
+      root = await realpath(
+        await mkdtemp(path.join(os.tmpdir(), "zeros-srt-compat-")),
+      );
+      capture = path.join(root, "capture-bwrap");
+      // Capture the real generated argv without needing mount/user namespaces.
+      // Kernel enforcement is exercised separately by check:zsr:runtime.
+      await writeFile(
+        capture,
+        "#!/usr/bin/env node\nconsole.log(JSON.stringify(process.argv.slice(2)));\n",
+        { mode: 0o700 },
+      );
+    });
+
+    afterEach(async () => {
+      vi.restoreAllMocks();
+      cleanupBwrapMountPoints();
+      await rm(root, { recursive: true, force: true });
+    });
+
+    async function argumentsFor(overrides: Partial<LinuxSandboxParams> = {}) {
+      const command = await wrapCommandWithSandboxLinux({
+        command: "true",
+        needsNetworkRestriction: false,
+        allowAllUnixSockets: true,
+        disableMandatoryWriteProtection: true,
+        writeConfig: { allowOnly: [root], denyWithinAllow: [] },
+        bwrapPath: capture,
+        ...overrides,
+      });
+      const result = spawnSync("/bin/sh", ["-c", command], {
+        encoding: "utf8",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      return JSON.parse(result.stdout) as string[];
+    }
+
+    it.each([false, true])(
+      "drops root capabilities in upstream isolation (weaker nesting: %s)",
+      async (enableWeakerNestedSandbox) => {
+        vi.spyOn(process, "geteuid").mockReturnValue(0);
+        const args = await argumentsFor({ enableWeakerNestedSandbox });
+        expect(args).toContain("--unshare-user");
+        expect(args).toContain("--unshare-pid");
+        expect(
+          args.slice(
+            args.indexOf("--cap-drop"),
+            args.indexOf("--cap-drop") + 2,
+          ),
+        ).toEqual(["--cap-drop", "ALL"]);
+        expect(args).not.toContain("--cap-add");
+      },
+    );
+
+    it("drops ordinary host-parity capabilities without isolating host processes", async () => {
+      const args = await argumentsFor({ hostParity: true });
+      expect(args).not.toContain("--unshare-user");
+      expect(args).not.toContain("--unshare-pid");
+      expect(args).toContain("--dev-bind");
+      expect(
+        args.slice(args.indexOf("--cap-drop"), args.indexOf("--cap-drop") + 2),
+      ).toEqual(["--cap-drop", "ALL"]);
+      expect(args).not.toContain("--cap-add");
+    });
+
+    it("retains only worker identity-transition capabilities until setpriv drops them", async () => {
+      vi.spyOn(process, "geteuid").mockReturnValue(0);
+      const args = await argumentsFor({
+        hostParity: true,
+        linuxPrivilegedWorker: {
+          uid: 1000,
+          gid: 1000,
+          setprivPath: await realpath("/usr/bin/setpriv"),
+        },
+      });
+      expect(args).not.toContain("--unshare-user");
+      expect(args).not.toContain("--unshare-pid");
+      expect(
+        args.filter((_, index) => args[index - 1] === "--cap-add"),
+      ).toEqual(["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"]);
+      const workload = args.at(-1)!;
+      for (const required of [
+        "--bounding-set=-all",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+        "--no-new-privs",
+        "--reuid=1000",
+        "--regid=1000",
+        "--clear-groups",
+        "+noroot_locked",
+        "+no_setuid_fixup_locked",
+      ]) {
+        expect(workload).toContain(required);
+      }
+    });
+
+    it("preserves nested write denies and read masks after reopening a writable island", async () => {
+      const island = path.join(root, "scratch");
+      const denied = path.join(island, "protected");
+      const secret = path.join(island, "secret.txt");
+      await mkdir(denied, { recursive: true });
+      await writeFile(secret, "private");
+      const args = await argumentsFor({
+        hostParity: true,
+        readConfig: { denyOnly: [secret], allowWithinDeny: [] },
+        writeConfig: {
+          allowOnly: [root, island],
+          denyWithinAllow: [root, denied],
+          allowWithinDeny: [island],
+        },
+      });
+      const lastBind = args.reduce(
+        (last, arg, index) =>
+          arg === "--bind" && args[index + 2] === island ? index : last,
+        -1,
+      );
+      expect(lastBind).toBeGreaterThan(-1);
+      expect(args.slice(lastBind + 3).join("\n")).toContain(
+        ["--ro-bind", denied, denied].join("\n"),
+      );
+      expect(args.slice(lastBind + 3).join("\n")).toContain(
+        ["--ro-bind", "/dev/null", secret].join("\n"),
+      );
+    });
+
+    it("omits redundant child binds when the containing denied directory stays read-only", async () => {
+      const denied = path.join(root, "protected");
+      const file = path.join(denied, "config.json");
+      await mkdir(denied);
+      await writeFile(file, "{}");
+      const args = await argumentsFor({
+        writeConfig: { allowOnly: [root], denyWithinAllow: [denied, file] },
+      });
+      expect(args.join("\n")).toContain(
+        ["--ro-bind", denied, denied].join("\n"),
+      );
+      expect(args).not.toContain(file);
+    });
+  },
+);
 
 describe("ZSR supervisor launch contract", () => {
   let root: string;

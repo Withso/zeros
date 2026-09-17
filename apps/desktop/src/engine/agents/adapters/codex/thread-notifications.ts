@@ -2,6 +2,8 @@ import type { CodexAppServerTranslator } from "./app-server-translator";
 
 export class CodexThreadNotifications {
   private readonly children = new Map<string, CodexAppServerTranslator>();
+  private readonly parents = new Map<string, CodexAppServerTranslator>();
+  private readonly completedChildren = new Map<string, string>();
   private readonly turns = new Map<string, string>();
   private readonly retiredTurns = new Map<string, Set<string>>();
   constructor(
@@ -16,17 +18,38 @@ export class CodexThreadNotifications {
     );
   }
 
+  /** A local prompt owns a new translator/model-selection epoch before input
+   * preparation can await I/O. Retire the old native turn at that boundary,
+   * including delayed control events before the new turn/started arrives. */
+  startRootTurn(): void {
+    const previous = this.turns.get(this.threadId);
+    if (previous) this.retireTurn(this.threadId, previous);
+    this.root.startTurn();
+  }
+
   handle(method: string, params: unknown): void {
     const p = params as {
       threadId?: string;
       turnId?: string;
-      turn?: { id?: string };
+      turn?: {
+        id?: string;
+        status?: string;
+        itemsView?: string;
+        items?: Array<{
+          id?: string;
+          type?: string;
+          tool?: string;
+          receiverThreadIds?: string[];
+          agentThreadId?: string;
+        }>;
+      };
       thread?: { id?: string };
       item?: {
         id?: string;
         type?: string;
         tool?: string;
         receiverThreadIds?: string[];
+        agentThreadId?: string;
       };
     } | null;
     const threadId =
@@ -35,15 +58,10 @@ export class CodexThreadNotifications {
       this.threadId;
     const translator = this.forThread(threadId);
     const turnId = p?.turnId ?? p?.turn?.id;
+    if (turnId && this.retiredTurns.get(threadId)?.has(turnId)) return;
     if (method === "turn/started" && turnId) {
       const previous = this.turns.get(threadId);
-      const retired = this.retiredTurns.get(threadId) ?? new Set<string>();
-      if (retired.has(turnId)) return;
-      if (previous && previous !== turnId) {
-        retired.add(previous);
-        if (retired.size > 128) retired.delete(retired.values().next().value!);
-        this.retiredTurns.set(threadId, retired);
-      }
+      if (previous && previous !== turnId) this.retireTurn(threadId, previous);
       // User prompts already reset the root before turn/start. Native parent
       // continuations have no adapter prompt call, so retire their prior
       // terminal state here just as we do for child turns.
@@ -53,10 +71,11 @@ export class CodexThreadNotifications {
       )
         translator.startTurn();
       this.turns.set(threadId, turnId);
+      this.completedChildren.delete(threadId);
     }
-    // Item ids can be reused in the next turn. Once that turn starts, stale
-    // frames cannot mutate its records or control state. Late bookkeeping
-    // before the next turn still flows through the original translator state.
+    // Item ids can be reused in the next turn. After a local prompt begins or
+    // a native continuation starts, stale frames cannot mutate its records or
+    // control state. Earlier late bookkeeping stays with its original turn.
     if (
       turnId &&
       this.turns.has(threadId) &&
@@ -64,24 +83,76 @@ export class CodexThreadNotifications {
     )
       return;
     translator.handle(method, params);
-    const item = p?.item;
     if (
-      item?.type === "collabAgentToolCall" &&
-      item.tool === "spawnAgent" &&
-      item.id
+      threadId !== this.threadId &&
+      method === "turn/completed" &&
+      p?.turn?.status &&
+      ["completed", "interrupted", "failed"].includes(p.turn.status)
     ) {
-      const parent = translator.toolCallIdFor(item.id);
-      if (parent && Array.isArray(item.receiverThreadIds)) {
-        for (const receiver of item.receiverThreadIds) {
-          if (
-            typeof receiver === "string" &&
-            receiver !== threadId &&
-            receiver !== this.threadId
-          )
-            this.forThread(receiver).setParentToolId(parent);
+      this.completedChildren.set(threadId, p.turn.status);
+      this.parents.get(threadId)?.completeAgentThread(threadId, p.turn.status);
+    }
+    const items = p?.item
+      ? [p.item]
+      : method === "turn/completed" &&
+          p?.turn?.itemsView === "full" &&
+          Array.isArray(p.turn.items)
+        ? p.turn.items
+        : [];
+    for (const item of items) {
+      if (
+        item.type === "subAgentActivity" &&
+        item.id &&
+        item.agentThreadId &&
+        item.agentThreadId !== threadId &&
+        item.agentThreadId !== this.threadId
+      ) {
+        const parent = translator.toolCallIdFor(item.id);
+        if (parent) this.attachChild(item.agentThreadId, parent, translator);
+      }
+      if (
+        item?.type === "collabAgentToolCall" &&
+        item.tool === "spawnAgent" &&
+        item.id
+      ) {
+        const parent = translator.toolCallIdFor(item.id);
+        if (parent && Array.isArray(item.receiverThreadIds)) {
+          for (const receiver of item.receiverThreadIds) {
+            if (
+              typeof receiver === "string" &&
+              receiver !== threadId &&
+              receiver !== this.threadId
+            )
+              this.attachChild(receiver, parent, translator);
+          }
         }
       }
     }
+  }
+
+  private retireTurn(threadId: string, turnId: string): void {
+    const retired = this.retiredTurns.get(threadId) ?? new Set<string>();
+    retired.add(turnId);
+    if (retired.size > 128) retired.delete(retired.values().next().value!);
+    this.retiredTurns.set(threadId, retired);
+  }
+
+  private attachChild(
+    threadId: string,
+    parentToolId: string,
+    owner: CodexAppServerTranslator,
+  ): void {
+    const child = this.forThread(threadId);
+    const firstOwner = !this.parents.has(threadId);
+    this.parents.set(threadId, owner);
+    child.setParentToolId(parentToolId);
+    const completed = this.completedChildren.get(threadId);
+    if (firstOwner && completed) owner.completeAgentThread(threadId, completed);
+  }
+
+  endAgentActivity(): void {
+    this.root.endAgentActivity();
+    for (const child of this.children.values()) child.endAgentActivity();
   }
 
   forThread(threadId: string): CodexAppServerTranslator {
@@ -97,6 +168,8 @@ export class CodexThreadNotifications {
         this.children.delete(oldest);
         this.turns.delete(oldest);
         this.retiredTurns.delete(oldest);
+        this.parents.delete(oldest);
+        this.completedChildren.delete(oldest);
       }
     }
     return child;

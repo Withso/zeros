@@ -9,6 +9,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { transcriptParentId } from "./transcript-parent";
 import React, {
   useCallback,
   useEffect,
@@ -17,7 +18,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { useOpenChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
+import { useOpenChatPreviewInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
+import { useOpenChatFileInWorkbench, warmChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
   materializeScrollGeometryWithin,
@@ -48,6 +50,7 @@ import {
   type ChatThread,
 } from "../../state/store";
 import { newChatId } from "../../state/chat-id";
+import { retryAgentTurn, warmRetryTranscript } from "./retry-agent-turn";
 import { expandMentionsInText } from "./mentions";
 import {
   useComposerEditor,
@@ -58,12 +61,7 @@ import {
   type ComposerSegment,
 } from "./composer-editor";
 import { QueuedMessagesCard } from "./queued-messages-card";
-import {
-  BackgroundTasksCard,
-  BackgroundTasksWaitingLine,
-  shouldKeepTurnLiveForBackgroundTasks,
-  shouldShowBackgroundTasksCard,
-} from "./background-tasks-card";
+import { agentActivity } from "./agent-activity";
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
@@ -86,6 +84,7 @@ import {
   reportSkippedAttachments,
 } from "./encode-attachments";
 import type { ComposerAttachment } from "./composer-attachments";
+import { isSubmittedComposerDocument } from "./composer-submission";
 // Wave 4 (2026-05-16): the composer card is now built on the canonical
 // AI Elements PromptInput recipe (form-shaped InputGroup with a
 // block-end addon toolbar). Only COMPOSER_FILE_ACCEPT survives here
@@ -96,7 +95,6 @@ import {
   COMPOSER_FILE_ACCEPT,
   PROMPT_SURFACE_RADIUS,
 } from "./composer-shell";
-import { isSubmittedComposerDocument } from "./composer-submission";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import {
   Conversation,
@@ -141,6 +139,7 @@ import {
   type AgentFailure,
 } from "../../platform/bridge/failure";
 import type {
+  AgentMessage,
   AgentSessionControls,
   AgentSessionState,
   AgentTextMessage,
@@ -239,6 +238,7 @@ import {
   turnKey,
 } from "./turn-container";
 import { TurnEventList } from "./turn-event-list";
+import { pickStartedAt } from "./activity-hud";
 import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
@@ -288,6 +288,10 @@ function labelForFailure(
         return "Timed out";
       case "auth-required":
         return "Sign in required";
+      case "verification-required":
+        return "Verification required";
+      case "cloud-credentials-unavailable":
+        return "Cloud credentials unavailable";
       case "transport-closed":
         return "Disconnected";
       case "rate-limited":
@@ -468,13 +472,7 @@ export function AgentChat({
           shadowed.add(m.id);
           continue;
         }
-        const parentId =
-          m.kind === "tool"
-            ? (m as import("./use-agent-session").AgentToolMessage).parentToolId
-            : m.kind === "text"
-              ? (m as import("./use-agent-session").AgentTextMessage)
-                  .parentToolId
-              : undefined;
+        const parentId = transcriptParentId(m);
         if (!parentId || !presentToolIds.has(parentId)) continue;
         const bucket = subagentChildren.get(parentId) ?? [];
         bucket.push(m);
@@ -495,19 +493,10 @@ export function AgentChat({
         queuedMessages,
       };
     }, [session.messages]);
-  const foregroundStreaming = session.status === "streaming";
-  const backgroundTaskOptions = {
-    agentId: session.agentId,
-    effort: chatThread?.effort ?? null,
-    foregroundStreaming,
-    taskCount: session.backgroundTasks.length,
-  };
-  const showBackgroundTasksCard = shouldShowBackgroundTasksCard(
-    backgroundTaskOptions,
-  );
-  const backgroundContinuationActive = shouldKeepTurnLiveForBackgroundTasks(
-    backgroundTaskOptions,
-  );
+  const pendingLocalTurnId = usePendingLocalTurnId(chatId);
+  const activity = agentActivity(session, pendingLocalTurnId);
+  const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
+  const waitingForBackgroundTasks = activity === "waiting";
   // Switching into a chat is interactive intent even before Send. Keep a
   // queued cosmetic title provider out of the user's typing/startup window;
   // the Send edge below refreshes the same quiet window once more.
@@ -550,10 +539,10 @@ export function AgentChat({
     session.messages,
     session.status,
   ]);
-  // A quiet Claude background continuation is still part of the active turn:
-  // keep its working stripe/shimmer and withhold the final answer/footer until
-  // the provider's authoritative active-task set becomes empty.
-  const isStreaming = foregroundStreaming || backgroundContinuationActive;
+  const isStreaming =
+    agentFamily(session.agentId) === "claude"
+      ? activity === "running"
+      : session.status === "streaming";
   // QuestionCard's submit hook routes through session.sendPrompt (see the
   // RendererContext contract).
   const respondToQuestion = useCallback(
@@ -653,16 +642,8 @@ export function AgentChat({
           /* cancel best-effort; carry on with truncate */
         }
       }
-      // Materialize every staged attachment into ContentBlocks (text → file
-      // XML; image → ImageContent or disk-write+path-reference by vision
-      // support) + bubble metadata. A reconstructed chip carries only its
-      // durable context-graph reference (legacy image rows may still carry a
-      // data URL), so the encoder resolves BOTH image bytes and text bodies
-      // back out of the graph for this send alone — neither is ever copied
-      // into the message or the composer document.
-      //
-      // Same encoder as the live send path (2026-07-30) — these were two
-      // copies and only this one was right.
+      // Every harness receives confirmed file references, including resends of
+      // older text/image attachments. Resolve them before changing history.
       const {
         blocks: newBlocks,
         bubbleAttachments: newBubbleMeta,
@@ -684,6 +665,7 @@ export function AgentChat({
       // chip simply vanished from the resubmitted bubble and the agent
       // received nothing, with no explanation anywhere.
       reportSkippedAttachments(skippedOnEdit, toast.warning);
+      if (skippedOnEdit.length > 0) return false;
       const mergedBubble = newBubbleMeta;
       const messageSegments = toMessageSegments(
         segments ?? [],
@@ -743,6 +725,9 @@ export function AgentChat({
   useEffect(() => {
     openChatFileRef.current = openChatFile;
   }, [openChatFile]);
+  const warmFileThroughRef = useCallback((path: string) => warmChatFileInWorkbench(chatCwdRef.current, path), []);
+  const openChatPreview = useOpenChatPreviewInWorkbench();
+  const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url), [openChatPreview]);
   const openFileThroughRef = useCallback((path: string) => {
     openChatFileRef.current(chatCwdRef.current, path);
   }, []);
@@ -797,7 +782,9 @@ export function AgentChat({
       attachmentCwd: chatThread?.folder ?? session.cwd ?? null,
       attachmentImagesActive: surfaceActive,
       openFile: openFileThroughRef,
+      warmFile: warmFileThroughRef,
       openPrUrl: openPrUrlThroughRef,
+      openPreviewUrl: openPreviewUrlThroughRef,
     }),
     [
       isStreaming,
@@ -821,7 +808,9 @@ export function AgentChat({
       session.cwd,
       surfaceActive,
       openFileThroughRef,
+      warmFileThroughRef,
       openPrUrlThroughRef,
+      openPreviewUrlThroughRef,
     ],
   );
   // Scroll + active-prompt elements tracked via state so the
@@ -839,6 +828,21 @@ export function AgentChat({
   // first render. The original declaration here was removed.)
   const agentsList = useAgentsSnapshot();
   const agentSessions = useAgentSessions();
+  const retryTurn = useCallback(
+    (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => {
+      if (!chatId || !surfaceActive) return Promise.resolve();
+      return retryAgentTurn({ chatId, prompt, events, newChat }, {
+        sessions: agentSessions,
+        getChat: (id) => useWorkspaceStore.getState().chats.find((chat) => chat.id === id),
+        publishChat: (chat) => dispatch({ type: "ADD_CHAT", chat }),
+      }).catch((error) => {
+        // The source card is hidden after navigation to the fresh chat.
+        if (newChat) toast.error(error instanceof Error ? error.message : "Could not retry in a new chat.");
+        throw error;
+      });
+    },
+    [agentSessions, chatId, dispatch, surfaceActive],
+  );
   const capabilitiesBridge = useBridge();
   const preparationOwner = JSON.stringify([
     chatId,
@@ -1192,7 +1196,6 @@ export function AgentChat({
   // liveness is derived from this rather than from session status, so a chat
   // being REOPENED — a tab switch, a workspace switch, an app reload, all of
   // which warm a session — never repaints a finished turn as working.
-  const pendingLocalTurnId = usePendingLocalTurnId(chatId);
   const conversationStarted =
     hasSessionMessages ||
     !transcriptKnown ||
@@ -1332,6 +1335,10 @@ export function AgentChat({
             if (effortChanged) maybeShowCostBumpToast("effort");
           }}
           onChange={(v) => {
+            if (chatId) {
+              const store = useSessionsStore.getState();
+              store.patchSession(chatId, { modelSelectionRevision: (store.sessions[chatId]?.modelSelectionRevision ?? 0) + 1 });
+            }
             const configuration = resolveModelConfiguration(
               chatThread.agentId,
               v,
@@ -1687,6 +1694,7 @@ export function AgentChat({
   /** Re-entrancy latch for saveQueuedEdit (a second Enter while attachment
    *  encoding awaits would double-apply the edit). */
   const queueSaveInFlightRef = useRef(false);
+  const queueEditGenerationRef = useRef(0);
   const queueKeysRef = useRef({
     arrowUp: (): boolean => false,
     arrowDown: (): boolean => false,
@@ -3031,14 +3039,14 @@ export function AgentChat({
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
   const composerStreaming = composerShowsStopControl({
-    status: session.status,
+    status: backgroundContinuationActive ? "streaming" : session.status,
     hasPendingLocalTurn: pendingLocalTurnId !== null,
     planReview: Boolean(planReview),
   });
 
   // Mid-turn steering (queued-card "Send now" while running): advertised by
-  // the adapter at session creation. Claude/Codex support it; Cursor doesn't
-  // — its arrow disables with a tooltip while a turn is in flight.
+  // the adapter at session creation. Claude, Codex and Cursor support it; an unavailable
+  // harness disables its arrow with a tooltip while a turn is in flight.
   const steeringSupported =
     session.initialize?.agentCapabilities?.steering === true;
   const steeringAgentName =
@@ -3271,35 +3279,20 @@ export function AgentChat({
     !blockingQuestionActive &&
     !composerEmpty;
 
-  // Image attachments are universal —
-  // every image is persisted to
-  // <cwd>/.context/<scope>/attachments/…; vision-capable agents also get
-  // the transient inline ImageContent block, while everyone else gets a text
-  // block referencing the path (their models still Read the file). Transcript
-  // payloads retain only that path, never the full-resolution base64.
-  // Shared by handleSend and the queued-message edit save, so an edited
-  // queued send re-encodes its attachments exactly like a fresh one.
-  //
-  // 2026-07-30: the loop moved to encode-attachments.ts, shared with
-  // editAndResubmit. It used to be a second, divergent copy with no
-  // `kind === "text"` branch and no validation.ok guard — see that module's
-  // header for what that cost.
+  // Attach-time staging has normally completed already. Await the final
+  // persistence check for every kind before publishing a reference to an agent.
   const encodeComposerAttachments = async (
     localAttachments: ComposerAttachment[],
   ) => {
-    const waitingForFile = localAttachments.some(
-      (a) => a.delivery === "reference",
-    );
-    if (waitingForFile) setSendPreparing(true);
+    if (localAttachments.length > 0) setSendPreparing(true);
     return encodeAttachments(localAttachments, {
       supportsImage:
-        session.initialize?.agentCapabilities?.promptCapabilities?.image !==
-        false,
+        session.initialize?.agentCapabilities?.promptCapabilities?.image !== false,
       cwd: chatThread?.folder || null,
       chatId: chatId ?? null,
       agentId: session.agentId ?? chatThread?.agentId ?? null,
     }).finally(() => {
-      if (waitingForFile) setSendPreparing(false);
+      if (localAttachments.length > 0) setSendPreparing(false);
     });
   };
 
@@ -3683,6 +3676,7 @@ export function AgentChat({
     // write that failed — all of which used to end in the agent quietly
     // getting nothing.
     reportSkippedAttachments(skippedAttachments, toast.warning);
+    if (skippedAttachments.length > 0) return;
     const extraBlocks: ContentBlock[] = [
       ...localImageBlocks,
       ...((extras?.extraAttachments as ContentBlock[] | undefined) ?? []),
@@ -3702,8 +3696,7 @@ export function AgentChat({
             localBubbleAttachmentById,
           )
         : extras?.bubbleSegments;
-    const submittedDraftUnchanged =
-      override === undefined && snapshot &&
+    const submittedDraftUnchanged = override === undefined && snapshot &&
       isSubmittedComposerDocument(snapshot.json, serializeComposerState()?.json);
     if (submittedDraftUnchanged) clearComposer();
     // Drop any stashed draft for this chat —
@@ -3777,6 +3770,8 @@ export function AgentChat({
    *  the provider-side queue hold, and hands focus back to the composer. */
   const exitQueuedEdit = () => {
     if (editingQueuedRef.current == null) return;
+    queueEditGenerationRef.current++;
+    editingQueuedRef.current = null;
     setEditingQueuedId(null);
     setQueueSelectedId(null);
     setComposerContent(
@@ -3795,7 +3790,7 @@ export function AgentChat({
    *  queue so a settling turn can't flush the edit target mid-edit. */
   const startQueuedEdit = (id: string) => {
     const target = queuedMessages.find((m) => m.id === id);
-    if (!target || target.queuedEditable === false) return;
+    if (!target || target.queuedEditable === false || target.queuedDelivery) return;
     if (editingQueuedRef.current === id) return;
     if (editingQueuedRef.current == null) {
       // First entry into edit mode — stash the in-progress draft. Switching
@@ -3806,6 +3801,8 @@ export function AgentChat({
         s && !s.isEmpty ? { json: s.json, attachments: s.attachments } : null;
       session.holdQueue?.();
     }
+    queueEditGenerationRef.current++;
+    editingQueuedRef.current = id;
     setEditingQueuedId(id);
     setQueueSelectedId(id);
     setQueueCollapsed(false);
@@ -3825,6 +3822,7 @@ export function AgentChat({
   const saveQueuedEdit = async (): Promise<boolean> => {
     const id = editingQueuedRef.current;
     if (!id || queueSaveInFlightRef.current) return false;
+    const generation = queueEditGenerationRef.current;
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
@@ -3838,11 +3836,25 @@ export function AgentChat({
       );
       const { blocks, bubbleAttachments, bubbleAttachmentById, skipped } =
         await encodeComposerAttachments(localAttachments);
+      // Upload completion belongs to this edit instance and document only.
+      // Keep newer typing (or a different/reopened edit) intact, including
+      // when this save was initiated by Send now.
+      if (
+        editingQueuedRef.current !== id ||
+        queueEditGenerationRef.current !== generation
+      ) return false;
+      if (!s || !isSubmittedComposerDocument(s.json, serializeComposerState()?.json)) {
+        toast.error("Queued message changed while saving", {
+          description: "Your changes are still in the editor. Save again to include them.",
+        });
+        return false;
+      }
       // Same reason as the live send: the queued row keeps rendering every
       // segment, so an excluded attachment is indistinguishable from one that
       // made it. The queued message has not been dispatched yet, which makes
       // this the LAST moment the user can act on it.
       reportSkippedAttachments(skipped, toast.warning);
+      if (skipped.length > 0) return false;
       const segments = toMessageSegments(
         s?.segments ?? [],
         localAttachments,
@@ -3885,7 +3897,7 @@ export function AgentChat({
     }
   };
 
-  /** "Send now": steer the running turn (Claude/Codex), or flush immediately
+  /** "Send now": steer the running turn (Claude/Codex/Cursor), or flush immediately
    *  when idle. Sending the row that's being edited saves the edit first, so
    *  what's dispatched is what the user sees in the composer. */
   const sendNowQueued = async (id: string) => {
@@ -3894,7 +3906,7 @@ export function AgentChat({
     if (ok === false) {
       toast.error("Couldn't send now", {
         description:
-          "The message stays queued and will send when the current turn finishes.",
+          "The message stays queued. Choose Send now to retry delivery.",
       });
     }
     if (queueSelectedRef.current === id) setQueueSelectedId(null);
@@ -4007,7 +4019,11 @@ export function AgentChat({
   // Bounded-deck eviction and application shutdown retain the old unmount
   // guarantee as a final idempotent safety net.
   useEffect(() => {
-    return () => releaseQueueRef.current?.();
+    const editGeneration = queueEditGenerationRef;
+    return () => {
+      editGeneration.current++;
+      releaseQueueRef.current?.();
+    };
   }, []);
 
   // The editor's Enter keymap calls this through a ref (handleSend is defined
@@ -4349,10 +4365,6 @@ export function AgentChat({
           >
             {/* Older history auto-pages in via the nearTop effect above, with
               no visible affordance: scrolling back should show everything. */}
-            {/* Reconnecting state is surfaced by the "Reconnecting…" card
-              directly above the composer (see the composer banner stack) —
-              keep the message area empty so the user can still see the
-              transcript area. */}
             {showTranscriptLoading && (
               <div className="text-muted-foreground flex items-center gap-2 py-2 text-xs">
                 <ZerosSpinner
@@ -4539,13 +4551,17 @@ export function AgentChat({
                         isActive={isActiveProviderSegment}
                         isStreaming={turnInFlight && !authStopped}
                         showActivity={isVisualTail}
+                        backgroundTasks={isVisualTail && waitingForBackgroundTasks ? session.backgroundTasks : undefined}
+                        surfaceActive={surfaceActive}
                         activityEvents={turn.providerEvents}
-                        activityStartedAt={
-                          isVisualTail
-                            ? (session.activeTurnStartedAt ??
-                              turn.recordedStartedAt)
-                            : turn.recordedStartedAt
-                        }
+                        activityStartedAt={pickStartedAt(
+                          turn.providerEvents,
+                          turn.recordedStartedAt,
+                          isVisualTail ? session.activeTurnStartedAt : null,
+                          isVisualTail && backgroundContinuationActive && !turnIsPendingLocal
+                            ? session.backgroundActivity?.startedAt ?? session.backgroundTasksWaitingSince
+                            : null,
+                        )}
                         workflow={activeWorkflow}
                         onStopWorkflow={session.stopBackgroundTask}
                         ctx={messageCtx}
@@ -4555,8 +4571,26 @@ export function AgentChat({
                           chatId &&
                           ownsProviderFooter ? (
                             <TurnFooter
+                              surfaceActive={surfaceActive}
                               chatId={chatId}
                               turnId={turn.recordedTurnId ?? turn.userPrompt.id}
+                              failure={isVisualTail ? session.failure : null}
+                              recoveryFailure={turn.userPrompt.recoveryFailure}
+                              onRetryNewChatIntent={
+                                surfaceActive && chatThread
+                                  ? () => warmRetryTranscript(chatThread, turn.userPrompt!, turn.providerEvents)
+                                  : undefined
+                              }
+                              onRetry={
+                                surfaceActive && isVisualTail
+                                  ? () => retryTurn(turn.userPrompt!, turn.providerEvents, false)
+                                  : undefined
+                              }
+                              onRetryNewChat={
+                                surfaceActive && isVisualTail && session.agentRole !== "design"
+                                  ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
+                                  : undefined
+                              }
                               events={
                                 authStopped
                                   ? visibleEvents
@@ -4705,7 +4739,7 @@ export function AgentChat({
           a MAX: on a 2000px conversation pane the
           composer sits in the 1152px centred measure; when conversation pane is
           narrower it shrinks to the window. */}
-        {/* gap-0.5 (2px): above-composer cards (Reconnecting, permission, plan
+        {/* gap-0.5 (2px): above-composer cards (permission, plan
           review, embedded terminal) sit nearly flush to the composer.
           The message list is a separate container, so its spacing is unaffected. */}
         {/* px-7 (28px, 2026-07-16): kept in lock-step with the transcript
@@ -4746,33 +4780,11 @@ export function AgentChat({
             through different task tools with partial/absent status), so it
             could sit stuck at all-pending. Rather than show an inconsistent
             card we don't surface it at all. */}
-          {/* Reconnecting card — this chat's agent session dropped (a child
-            crash, or an engine respawn) so it's marked `reconnecting`. Per
-            session: it shows ONLY on the affected chat, not every chat on the
-            agent. A plain text card above the composer (no spinner, by
-            request); the chat silently re-creates its session on the next
-            send. Matches the embedded-terminal banner styling. */}
-          {session.status === "reconnecting" && (
-            <div className="border-border1 bg-bg1 flex items-center gap-2 rounded-lg border px-3.5 py-2.5">
-              {/* Type-3 indication (UI consolidation 2026-07-10): reconnect
-                states carry a LOADING affordance — the Orbit shimmer, same
-                as the api_retry "Reconnecting agent" row — so the user
-                reads "still trying", not a settled error. */}
-              <ZerosSpinner
-                size={16}
-                label="Reconnecting"
-                className="shrink-0"
-              />
-              <span className="text-fg2 min-w-0 flex-1 truncate text-sm">
-                Reconnecting…
-              </span>
-            </div>
-          )}
           {/* Queued messages (2026-07-06 redesign): sends typed mid-turn dock
             here as a card tucked under the NEXT composer-slot surface (the composer, or the permission/question card that replaces it) — NOT greyed
             transcript bubbles. Rows offer Edit (loads into the composer
             below), Delete, and Send now (steers the running turn on
-            Claude/Codex). ↑ from the composer walks the list. */}
+            Claude/Codex/Cursor). ↑ from the composer walks the list. */}
           <QueuedMessagesCard
             messages={queuedMessages}
             selectedId={queueSelectedId}
@@ -4787,6 +4799,7 @@ export function AgentChat({
             onSendNow={(id) => void sendNowQueued(id)}
             steeringSupported={steeringSupported}
             streaming={composerStreaming}
+            paused={session.queuePaused}
             agentName={steeringAgentName}
           />
           {/* Permission card (2026-07-02): the ONE permission gate. While a
@@ -4813,8 +4826,7 @@ export function AgentChat({
             />
           )}
           {/* Plan review (Claude's ExitPlanMode): a standalone card above the
-            still-live composer (same island recipe as the Reconnecting card),
-            NOT a bar fused into the composer. Approve allows the gate + exits
+            still-live composer. Approve allows the gate + exits
             Plan mode; typing a follow-up below refines the plan (see
             handleSend's plan-review branch). */}
           {planReview && !browserPermissionCardActive && (
@@ -4824,26 +4836,6 @@ export function AgentChat({
               onReject={denyPlanReview}
             />
           )}
-          {/* Provider-native work must always retain a visible Stop surface.
-            Quiet Claude Ultracode continuation is a separate concern: it can
-            keep the turn live, but never owns task-card visibility. */}
-          {showBackgroundTasksCard ? (
-            <BackgroundTasksCard
-              tasks={session.backgroundTasks}
-              onStop={session.stopBackgroundTask}
-            />
-          ) : null}
-          {session.waitingForBackgroundTasks ? (
-            <BackgroundTasksWaitingLine
-              tasks={session.backgroundTasks}
-              startedAt={
-                session.backgroundTasksWaitingSince ??
-                session.backgroundTasks[0]?.startedAt ??
-                Date.now()
-              }
-              active={surfaceActive}
-            />
-          ) : null}
           {/* Wave 4 (2026-05-16): canonical AI Elements PromptInput
             recipe replaces ComposerShell + ComposerTextarea +
             ComposerToolbar. PromptInput is a `<form>` element; the

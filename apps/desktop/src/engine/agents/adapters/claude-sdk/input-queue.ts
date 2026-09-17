@@ -34,6 +34,12 @@ export class InputQueue<T> implements AsyncIterable<T> {
     }
   }
 
+  /** Remove only messages not handed to the SDK yet. Stop must do this
+   * before interrupting, otherwise the wrapper can send them after its receipt. */
+  discardPending(): T[] {
+    return this.buffer.splice(0);
+  }
+
   /** Terminate the iterable. The SDK's `query()` finishes its async
    *  generator (the `claude` process exits) once this lands. Idempotent. */
   end(): void {

@@ -12,10 +12,11 @@
 // Transcripts made a multi-hundred-KB text attachment a routine thing rather
 // than an accident, so the failure had to stop being silent-and-total.
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { loadPersistedDrafts, schedulePersistDrafts, persistDraftsNow } from "../persist-composer-drafts";
 import { setLiveChatDraft } from "../../features/agent/composer-live-drafts";
+import { registerLiveEditDraft, pruneLiveEditDrafts } from "../../features/agent/edit-live-drafts";
 import { editSeedSource } from "../../features/agent/edit-seed";
 import type { WorkspaceState } from "../store";
 
@@ -100,6 +101,7 @@ async function flush() {
 }
 
 describe("persist-composer-drafts", () => {
+  afterEach(() => pruneLiveEditDrafts(new Set()));
   beforeEach(() => {
     vi.useFakeTimers();
     vi.unstubAllGlobals();
@@ -115,6 +117,37 @@ describe("persist-composer-drafts", () => {
     setLiveChatDraft("chat-1", { text: "typed while active", attachments: [], json: null });
     await flush();
     expect(loadPersistedDrafts().chats["chat-1"].text).toBe("typed while active");
+  });
+
+  it("flushes an open sent-message edit and its attachment without React unmount", () => {
+    installStorage();
+    const state = stateWith("chat draft", "");
+    const draft = { text: "live edited text", newAttachments: state.chatComposerDrafts["chat-1"].attachments, keptOriginals: [], json: state.chatComposerDrafts["chat-1"].json };
+    registerLiveEditDraft("chat-1:message-1", "chat-1", draft);
+    persistDraftsNow(state);
+    expect(loadPersistedDrafts().edits["chat-1:message-1"]).toEqual(draft);
+    expect(loadPersistedDrafts().chats["chat-1"].text).toBe("chat draft");
+  });
+
+  it("does not restore an older stash after the live edit returned to its original", () => {
+    installStorage();
+    const state = stateWith("chat draft", "");
+    state.editComposerDrafts["chat-1:message-1"] = { text: "old edit", newAttachments: [], keptOriginals: [] };
+    registerLiveEditDraft("chat-1:message-1", "chat-1", null);
+    persistDraftsNow(state);
+    expect(loadPersistedDrafts().edits).toEqual({});
+  });
+
+  it("isolates message owners and ignores a deleted chat's mounted edit", () => {
+    installStorage();
+    const state = { ...stateWith("chat draft", ""), chats: [{ id: "chat-1" }] } as WorkspaceState;
+    const draft = { text: "edit", newAttachments: [], keptOriginals: [] };
+    registerLiveEditDraft("chat-1:message-1", "chat-1", draft);
+    registerLiveEditDraft("chat-1:message-2", "chat-1", { ...draft, text: "other message" });
+    registerLiveEditDraft("chat-2:message-1", "chat-2", draft);
+    persistDraftsNow(state);
+    expect(Object.keys(loadPersistedDrafts().edits)).toEqual(["chat-1:message-1", "chat-1:message-2"]);
+    expect(loadPersistedDrafts().edits["chat-1:message-2"].text).toBe("other message");
   });
 
   it("keeps live drafts isolated and persists an actively cleared composer", () => {

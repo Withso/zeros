@@ -99,13 +99,19 @@ function serverFromJson(
   cfg: Record<string, unknown>,
   warnings: string[],
 ): RawServer | null {
+  const transport = cfg.type ?? cfg.transport;
+  if (transport !== undefined && transport !== "stdio" && transport !== "http" && transport !== "sse") {
+    warnings.push(`${name || "(unnamed)"}: unsupported transport — skipped`);
+    return null;
+  }
   const command = asString(cfg.command);
   const url = asString(cfg.url) || asString(cfg.serverUrl);
-  if (!command && !url) {
+  if ((!command && !url) || (transport === "stdio" && !command) ||
+      ((transport === "http" || transport === "sse") && !url)) {
     warnings.push(`${name || "(unnamed)"}: no "command" or "url" — skipped`);
     return null;
   }
-  if (command) {
+  if (command && transport !== "http" && transport !== "sse") {
     const args = Array.isArray(cfg.args)
       ? cfg.args.filter((a): a is string => typeof a === "string")
       : [];
@@ -114,15 +120,23 @@ function serverFromJson(
       name,
       transport: "stdio",
       command,
+      ...(asString(cfg.cwd) ? { cwd: asString(cfg.cwd) } : {}),
       ...(args.length ? { args } : {}),
       ...(env ? { env } : {}),
     };
   }
   const headers = stringMap(cfg.headers);
+  const auth = isPlainObject(cfg.auth) ? cfg.auth : undefined;
+  if (auth?.CLIENT_SECRET) warnings.push(`${name}: OAuth client secret was not imported. Add it in the server's OAuth settings.`);
   return {
     name,
-    transport: "http",
+    transport: transport === "sse" ? "sse" : "http",
     url,
+    ...(auth || cfg.auth === "oauth" ? {
+      auth: "oauth",
+      ...(asString(auth?.CLIENT_ID) || asString(cfg.oauth_client_id) ? { oauth_client_id: asString(auth?.CLIENT_ID) || asString(cfg.oauth_client_id) } : {}),
+      ...(Array.isArray(auth?.scopes ?? cfg.oauth_scopes) ? { oauth_scopes: ((auth?.scopes ?? cfg.oauth_scopes) as unknown[]).filter((v): v is string => typeof v === "string") } : {}),
+    } : {}),
     ...(headers ? { headers } : {}),
   };
 }

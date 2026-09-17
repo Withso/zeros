@@ -332,6 +332,7 @@ Separate identity for the `@pierre/diffs` renderer (Changes/Review tabs, file-ta
 12. **Default text/icon color is `fg2`, not `fg1`.** Reach for `fg1` only when something is selected, highlighted, or the focal output.
 13. **`--diff-*` are immutable** — pixel-identical to GitHub Dark on purpose. Don't theme-aware them.
 14. **No bare Tailwind color classes** (`bg-white`, `text-black`, `bg-gray-500`, etc.). Only the Zeros primitive utility classes.
+15. **Tailwind scans an allowlist, not the repo** (enforced by `check:ui`). `styles/zeros-tokens.css` opens with `@import "tailwindcss" source(none)` and then names its sources. Automatic detection scans everything under the git root, which fed the renderer bundle from design artifacts, docs (a class named in prose compiles), npm script names, Playwright selectors, the marketing app, and `!contents` in TypeScript — rule 14's own examples shipped because this file lists them. Add a `@source` only for production markup; `checkTailwindSourceCoverage` in `scripts/check-ui-consistency.mjs` fails the build on class markup no `@source` reaches, so the trade for a tighter bundle is a named exemption rather than silently unstyled UI.
 
 ---
 
@@ -357,7 +358,7 @@ Previously the theme used `color-mix()` in a handful of places. As of 2026-05-26
 Strict **12/14 scale** in chrome:
 
 ```
-text-sm font-medium (14 px, weight 500): page/section/card titles, focal labels
+text-sm font-medium (14 px, weight 450): page/section/card titles, focal labels
 text-sm             (14 px, weight 400): body text, descriptions, hints
 text-xs             (12 px):             captions, timestamps, badges, numeric metadata (kbd chips are text-2xxs, 11px — §4)
 text-xs tabular-nums:                    counts, timers, numeric metadata
@@ -367,6 +368,10 @@ Markdown body (`.zeros-agent-md`) uses its own scale — see
 `styles/global/runtime-content.css`.
 
 **Fonts**: `Geist Variable` (sans) and `Geist Mono Variable` (mono). These are Vercel-published typography assets, imported as npm packages; they are not the design system reference (which is **Zeros Foundation**).
+
+**Weights** are lighter than Tailwind's defaults — `styles/zeros-tokens.css` re-points each step one notch down, which Geist Variable (a real 100-900 axis) renders exactly: `font-normal` **400**, `font-medium` **450**, `font-semibold` **500**, `font-bold` **600**. Keep using the utility names; don't reach for an arbitrary weight value to get the old rendering back.
+
+The values live on `--weight-medium` / `--weight-semibold` / `--weight-bold` in `:root`, and `@theme inline` points Tailwind's `--font-weight-*` keys at them. The indirection is load-bearing: `@theme inline` substitutes a key's text into the utility instead of emitting a custom property, so a literal there would leave `var(--font-weight-medium)` undefined for hand-written CSS. Runtime-generated markup that no JSX can reach — `.zeros-agent-md` in `styles/global/runtime-content.css` — therefore writes `font-weight: var(--weight-medium)`, never a bare number, and stays in step with the chrome around it.
 
 ---
 

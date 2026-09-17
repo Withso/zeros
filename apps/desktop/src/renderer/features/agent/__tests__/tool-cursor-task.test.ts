@@ -3,9 +3,9 @@ import { describe, expect, it } from "vitest";
 import { cursorTaskOpenState } from "../renderers/cursor-task-state";
 
 describe("Cursor Task live child visibility", () => {
-  it("opens when the first streamed child arrives", () => {
+  it("stays collapsed when the first streamed child arrives", () => {
     expect(cursorTaskOpenState(null, 0)).toBe(false);
-    expect(cursorTaskOpenState(null, 1)).toBe(true);
+    expect(cursorTaskOpenState(null, 1)).toBe(false);
   });
 
   it("keeps an explicit user collapse sticky while more children stream", () => {
