@@ -197,6 +197,7 @@ interface PaneCtx {
    *  expand control) to the TOP-RIGHT leaf. */
   stripLeading: ReactNode;
   stripTrailing: ReactNode;
+  bodyAside: ReactNode;
   chatsByPane: Map<string, ChatThread[]>;
   focusedPaneId: string;
   globalActiveChatId: string | null;
@@ -220,6 +221,7 @@ export function ConversationPaneLayout({
   onMinimumSizeChange,
   stripLeading = null,
   stripTrailing = null,
+  bodyAside = null,
 }: {
   onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
   /** Pinned to the leading edge of the first pane's chat strip — Code's
@@ -228,6 +230,8 @@ export function ConversationPaneLayout({
   stripLeading?: ReactNode;
   /** Pinned to the trailing edge of the top-right pane's chat strip. */
   stripTrailing?: ReactNode;
+  /** Optional island beside the top-right pane's body, below its tab strip. */
+  bodyAside?: ReactNode;
 } = {}) {
   const paneSurfaceRef = useRef<HTMLDivElement | null>(null);
   const activeChatId = useActiveChatId();
@@ -691,6 +695,7 @@ export function ConversationPaneLayout({
       layout,
       stripLeading,
       stripTrailing,
+      bodyAside,
       chatsByPane,
       focusedPaneId,
       globalActiveChatId: activeChatId,
@@ -710,6 +715,7 @@ export function ConversationPaneLayout({
       layout,
       stripLeading,
       stripTrailing,
+      bodyAside,
       chatsByPane,
       focusedPaneId,
       activeChatId,
@@ -1265,15 +1271,18 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         leading={stripLeading}
         trailing={stripTrailing}
       />
-      <div className="relative min-h-0 min-w-0 flex-1">
-        {/* Mount point for the store-owned content host. Persistent chat and
-            terminal decks portal into this stable node; a replacement pane
-            only reparents it, preserving the completed DOM. */}
-        <div
-          ref={hostMountRefCallback}
-          className={PANE_TERMINAL_HOST_CLS}
-          data-pane-terminal-host-mount=""
-        />
+      <div className="flex min-h-0 min-w-0 flex-1">
+        <div className="relative min-h-0 min-w-0 flex-1">
+          {/* Mount point for the store-owned content host. Persistent chat and
+              terminal decks portal into this stable node; a replacement pane
+              only reparents it, preserving the completed DOM. */}
+          <div
+            ref={hostMountRefCallback}
+            className={PANE_TERMINAL_HOST_CLS}
+            data-pane-terminal-host-mount=""
+          />
+        </div>
+        {paneId === topRightLeafId(ctx.layout.root) ? ctx.bodyAside : null}
       </div>
       {/* Inactive-window veil: every pane EXCEPT the one holding the global
           active chat gets a bg0/30 wash over its whole surface (strip + body)

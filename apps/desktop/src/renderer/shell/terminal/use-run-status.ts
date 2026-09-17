@@ -19,7 +19,7 @@ import {
   type WorkspaceRunActionStatus,
 } from "../../platform/git";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
-import { useBridge } from "../../platform/bridge/use-bridge";
+import { useGitRefreshKey } from "../use-git-refresh-key";
 
 export type RunStatusMap = Record<string, WorkspaceRunActionStatus>;
 
@@ -37,6 +37,30 @@ export interface RunStatusesSnapshot {
 const EMPTY_RUN_STATUSES: RunStatusMap = {};
 const runStatusCache = new Map<string, RunStatusMap>();
 const MAX_RUN_STATUS_SNAPSHOTS = 64;
+const runInfoRequests = new Map<string, ReturnType<typeof workspaceRunInfo>>();
+
+/** Summary and Terminal share a transport read for each refresh generation.
+ * Returning after a hidden run transition must not join an older read that
+ * is still in flight. The shared refresh bus tracks those transitions even
+ * while these surfaces are closed. */
+export function runInfoForRefresh(
+  args: Parameters<typeof workspaceRunInfo>[0],
+  generation: number,
+): ReturnType<typeof workspaceRunInfo> {
+  const key = JSON.stringify([
+    args.workspaceId,
+    args.repoRoot,
+    args.sessionIds,
+    generation,
+  ]);
+  const pending = runInfoRequests.get(key);
+  if (pending) return pending;
+  const promise = workspaceRunInfo(args).finally(() => {
+    if (runInfoRequests.get(key) === promise) runInfoRequests.delete(key);
+  });
+  runInfoRequests.set(key, promise);
+  return promise;
+}
 
 function cacheRunStatuses(key: string, statuses: RunStatusMap): void {
   runStatusCache.delete(key);
@@ -66,7 +90,7 @@ export function useRunStatuses(
     [actions],
   );
   const cacheKey = JSON.stringify([workspaceId, folderKey, actionIdsKey]);
-  const bridge = useBridge();
+  const refreshKey = useGitRefreshKey(folderKey, workspaceId, active);
   // Associates each completion with its workspace/actions generation so a
   // context switch can paint the last confirmed badges immediately.
   const [snapshot, setSnapshot] = useState<{
@@ -80,20 +104,18 @@ export function useRunStatuses(
     const actionIds = actionIdsKey ? actionIdsKey.split("\n") : [];
     if (!active || !workspaceId || !folderKey || actionIds.length === 0) return;
     let cancelled = false;
-    // Monotonic pull token: DB_CHANGED can fire back-to-back (running → then
-    // finished) and responses may resolve out of order — only the LATEST
-    // issued pull may commit, or a tab could stick on a stale "running".
-    let pullGen = 0;
     const sessionIds = actionIds.map((id) => runSessionId(folderKey, id));
     const pull = async () => {
-      const gen = ++pullGen;
       try {
-        const res = await workspaceRunInfo({
-          workspaceId,
-          repoRoot,
-          sessionIds,
-        });
-        if (!cancelled && gen === pullGen) {
+        const res = await runInfoForRefresh(
+          {
+            workspaceId,
+            repoRoot,
+            sessionIds,
+          },
+          refreshKey,
+        );
+        if (!cancelled) {
           cacheRunStatuses(cacheKey, res.actions);
           setSnapshot({ key: cacheKey, statuses: res.actions });
         }
@@ -102,22 +124,8 @@ export function useRunStatuses(
       }
     };
     void pull();
-    const off = bridge?.on("DB_CHANGED", (msg) => {
-      const change = msg as { kinds?: unknown; workspaceIds?: unknown };
-      const kinds = change.kinds;
-      if (!Array.isArray(kinds) || !kinds.includes("workspaces")) return;
-      const workspaceIds = Array.isArray(change.workspaceIds)
-        ? change.workspaceIds.filter(
-            (id): id is string => typeof id === "string",
-          )
-        : [];
-      if (workspaceIds.length > 0 && !workspaceIds.includes(workspaceId))
-        return;
-      void pull();
-    });
     return () => {
       cancelled = true;
-      off?.();
     };
   }, [
     workspaceId,
@@ -125,7 +133,7 @@ export function useRunStatuses(
     folderKey,
     actionIdsKey,
     cacheKey,
-    bridge,
+    refreshKey,
     active,
   ]);
   if (!workspaceId || !folderKey) {

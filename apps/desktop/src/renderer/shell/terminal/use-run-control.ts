@@ -62,6 +62,7 @@ export interface RunControl {
    *  add-script empty state AND the stale-session cleanup so neither fires
    *  off a not-yet-loaded snapshot. */
   actionsReady: boolean;
+  actionsError: string | null;
   /** The ⌘R action (null when `actions` is empty). */
   defaultAction: RunAction | null;
   /** The deterministic session id for one action's run terminal. */
@@ -80,7 +81,7 @@ export function useRunControl(
   const { workspace: activeWs } = useActiveWorkspace();
   // Resolve from the checkout so private workspace overrides compose with
   // live repository defaults, matching the engine command selection.
-  const { resolved } = useResolvedSettings(
+  const { resolved, error: actionsError } = useResolvedSettings(
     activeWs?.path || activeWs?.repoRoot || folderKey || undefined,
   );
   // Gated on a real chat folder — a chatless surface has no runnable workspace.
@@ -194,5 +195,13 @@ export function useRunControl(
     [folderKey, workspaceId],
   );
 
-  return { actions, actionsReady, defaultAction, runIdFor, startRun, stopRun };
+  return {
+    actions,
+    actionsReady,
+    actionsError,
+    defaultAction,
+    runIdFor,
+    startRun,
+    stopRun,
+  };
 }
