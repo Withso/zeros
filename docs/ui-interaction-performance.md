@@ -247,6 +247,7 @@ keyboard focus, retained file-tree owners and canvas anchors in Chromium.
 - File content/diff cache: `apps/desktop/src/renderer/shell/workspace-file-data-cache.ts`.
 - Workspace intent warming: `apps/desktop/src/renderer/shell/prefetch-workspace-surface.ts`.
 - Chat retention: `apps/desktop/src/renderer/shell/conversation/chat-deck.tsx` with store-owned pane hosts.
+- Conversation Summary: `apps/desktop/src/renderer/shell/conversation/conversation-summary.tsx` owns the chat strip's Summary popover and the island beside its top-right pane when Workbench is collapsed. Narrow panes and layouts with side-by-side chat columns keep the popover, bounded inside its owning pane with a 16px right inset; the island reserves body space without remounting chat. Both presentations share Context, run-preview and All Changes data, dismiss on owner changes, and stop active reads when hidden. Starting an Environment action leaves Summary visible; its preview opens the exact URL in the workspace's Browser.
 - Changes file retention/prefetch: `apps/desktop/src/renderer/shell/workbench/tabs/changes-surface.tsx`.
 - Browser retention: the bounded, cross-workspace iframe deck in `apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx`; retained browser updates carry their original workspace scope.
 - Terminal retention: the bounded folder/session deck in `apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx`, with stable portal hosts across main-tab and bottom-panel placement (see `docs/terminal-workbench.md`).

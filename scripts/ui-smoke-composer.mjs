@@ -78,6 +78,7 @@ import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
 import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
 import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
+import { runConversationSummarySmoke } from "./ui-smoke-conversation-summary.mjs";
 import {
   expectDiffSeparatorCards,
   runEditDiffSeparatorsSmoke,
@@ -142,6 +143,9 @@ try {
   await waitForHttp(pageUrl);
 
   browser = await chromium.launch();
+  const summaryPage = await browser.newPage();
+  await runConversationSummarySmoke({ page: summaryPage, check, harnessBase });
+  await summaryPage.close();
   const overlayPage = await browser.newPage();
   await runOverlayPositioningSmoke({ page: overlayPage, check, harnessBase });
   await overlayPage.close();

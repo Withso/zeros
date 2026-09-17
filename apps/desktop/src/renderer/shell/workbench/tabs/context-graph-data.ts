@@ -16,6 +16,7 @@ import { useCallback, useSyncExternalStore } from "react";
 
 import {
   listContextGraph,
+  subscribeContextGraphChanged,
   type ContextGraphListWire,
 } from "@/renderer/platform/context-graph";
 import {
@@ -26,6 +27,13 @@ import {
 type ContextGraphData = ContextGraphListWire;
 
 const graphCache = new KeyedAsyncCache<ContextGraphData>(32);
+const refreshGenerations = new Map<string, number>();
+
+// Cache invalidation outlives visible consumers. An attachment can land while
+// both Context and Summary are closed; mark only its key stale, with no I/O.
+subscribeContextGraphChanged((cwd) =>
+  graphCache.invalidate(contextGraphKey(cwd)),
+);
 
 function normalizeCwd(cwd: string): string {
   if (cwd === "/" || /^[A-Za-z]:[\\/]$/.test(cwd)) return cwd;
@@ -71,10 +79,30 @@ export function loadContextGraph(
 ): Promise<ContextGraphData> {
   const key = contextGraphKey(cwd);
   if (options.force) graphCache.invalidate(key);
-  return graphCache.load(key, () => fetchContextGraph(key), options);
+  return graphCache.load(key, () => fetchContextGraph(key), {
+    // A failed revalidation must not make an older, recent value look fresh.
+    maxAgeMs: graphCache.getSnapshot(key).error ? -1 : 30_000,
+    ...options,
+  });
+}
+
+/** Multiple visible summaries/canvases share one refresh generation. Reopening
+ * a surface is not a mutation, even when the refresh bus is already nonzero. */
+export function loadContextGraphForRefresh(cwd: string, generation: number) {
+  const key = contextGraphKey(cwd);
+  const previous = refreshGenerations.get(key);
+  refreshGenerations.delete(key);
+  refreshGenerations.set(key, generation);
+  while (refreshGenerations.size > 32) {
+    refreshGenerations.delete(refreshGenerations.keys().next().value!);
+  }
+  return loadContextGraph(cwd, {
+    force: generation > 0 && previous !== generation,
+  });
 }
 
 /** Test-only reset. The cache stays a module singleton in production. */
 export function resetContextGraphCacheForTests(): void {
   graphCache.clear();
+  refreshGenerations.clear();
 }
