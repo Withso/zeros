@@ -1,3 +1,4 @@
+import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
 // ──────────────────────────────────────────────────────────
 // event-meta — pure label/meta extractors per event kind
 // ──────────────────────────────────────────────────────────
@@ -197,6 +198,11 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
 
   const wait = nativeAgentWait(tool);
   if (wait) return { Icon: Hourglass, label: wait.label, expandable: !!wait.result };
+
+  if (isImageGenerationTool(tool)) {
+    const path = generatedImagePath(tool);
+    return { Icon: Sparkles, label: "Generate", target: path ? basename(path) : undefined, targetFile: !!path, targetKind: "file", expandable: true };
+  }
 
   if (kind === "read") {
     const path = pickString(

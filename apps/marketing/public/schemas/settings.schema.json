@@ -337,6 +337,12 @@
                     "minLength": 1,
                     "description": "Executable to spawn for the stdio server."
                   },
+                  "cwd": {
+                    "description": "Folder for this local MCP process. Relative paths resolve against the chat workspace; ~/ uses the engine user's home. Omit to preserve the provider default.",
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
                   "args": {
                     "description": "Arguments passed to the command.",
                     "type": "array",
@@ -408,6 +414,86 @@
                   "oauth_client_id": {
                     "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
                     "type": "string"
+                  },
+                  "oauth_scopes": {
+                    "description": "OAuth permission scopes to request. Credentials are stored separately in the encrypted vault.",
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[\\x21\\x23-\\x5b\\x5d-\\x7e]+$"
+                    }
+                  },
+                  "disabled_tools": {
+                    "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "enabled": {
+                    "description": "Set false to keep the entry but skip loading it.",
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "name",
+                  "transport",
+                  "url"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Unique server name (the tool namespace)."
+                  },
+                  "transport": {
+                    "type": "string",
+                    "const": "sse"
+                  },
+                  "url": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "SSE endpoint URL."
+                  },
+                  "headers": {
+                    "description": "HTTP headers sent on every request (e.g. Authorization; non-secret / refs). Applies to auth=\"none\" (injected directly) and auth=\"header\" (sent alongside the brokered secret); IGNORED for auth=\"oauth\" (the gateway manages the connection).",
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {
+                      "type": "string"
+                    }
+                  },
+                  "auth": {
+                    "description": "Routes this server through the Zeros MCP gateway: \"oauth\" brokers OAuth 2.1 once and holds the token; \"header\" holds a static auth header (its VALUE lives in the engine vault, never here) and adds it when proxying. Default \"none\" = injected directly with the headers above.",
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "oauth",
+                      "header"
+                    ]
+                  },
+                  "header_name": {
+                    "description": "For auth=\"header\": the header NAME the gateway sets (e.g. Authorization). The value is stored in the engine secret vault, not this file.",
+                    "type": "string"
+                  },
+                  "oauth_client_id": {
+                    "description": "For auth=\"oauth\": a pre-registered OAuth client_id for servers that don't support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).",
+                    "type": "string"
+                  },
+                  "oauth_scopes": {
+                    "description": "OAuth permission scopes to request. Credentials are stored separately in the encrypted vault.",
+                    "maxItems": 64,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[\\x21\\x23-\\x5b\\x5d-\\x7e]+$"
+                    }
                   },
                   "disabled_tools": {
                     "description": "For a gateway-fronted server (auth oauth/header): tool NAMES to hide from agents — e.g. to stay under Cursor's ~40-tool cap. Empty/absent = all tools exposed.",

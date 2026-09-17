@@ -1,4 +1,7 @@
 import { ClaudeQueryUsage } from "./usage-accounting";
+import { isClaudeBackgroundAcknowledgement, type ClaudeResultOwnership } from "./result-ownership";
+import { claudeActionCategory } from "../shared/provider-error";
+import { boundedStructuredOutput, canonicalResourceLinks, canonicalToolContent, mergeToolContent, type CanonicalToolContent } from "../shared/tool-content";
 // ──────────────────────────────────────────────────────────
 // Claude stream-json → SessionNotification translator
 // ──────────────────────────────────────────────────────────
@@ -40,6 +43,7 @@ import type {
 import { claudeContextWindow } from "@zeros/protocol/model-context";
 
 import { ClaudeTranscriptState } from "./transcript-state";
+import { ClaudeEventFeedback, isClaudeParentProgress } from "./event-feedback";
 import type {
   ContentBlock,
   SessionNotification,
@@ -209,12 +213,14 @@ interface ClaudeSystemEvent {
   status?: string;
   state?: "idle" | "running" | "requires_action";
   output_file?: string;
+  resource_links?: unknown[];
 }
 
-interface ClaudeResultEvent {
+interface ClaudeResultEvent extends ClaudeResultOwnership {
   type: "result";
   uuid?: string;
   errors?: string[];
+  startup_failure_reason?: string;
   subtype?: "success" | "error_max_turns" | "error_during_execution" | string;
   session_id?: string;
   total_cost_usd?: number;
@@ -352,6 +358,7 @@ interface ClaudeStreamEvent {
       type?: string;
       text?: string;
       thinking?: string;
+      partial_json?: string;
       stop_reason?: string | null;
     };
   };
@@ -481,7 +488,43 @@ export class ClaudeStreamTranslator {
   private readonly transcript = new ClaudeTranscriptState((update) => {
     this.emit({ sessionId: this.sessionId, update });
   });
-  private readonly scopedTools = new Map<string, { id: string; announced: boolean; inputComplete?: boolean; resultFrameId?: string; status: "pending" | "in_progress" | "completed" | "failed" }>();
+  private readonly scopedTools = new Map<string, { id: string; announced: boolean; inputComplete?: boolean; resultFrameId?: string; resultRetracted?: boolean; status: "pending" | "in_progress" | "completed" | "failed" }>();
+  private readonly lifecycleFrames = new Set<string>();
+  private readonly feedback = new ClaudeEventFeedback({
+    emit: (messageId, text, nativeParent, groupId) => {
+      const parentToolId = groupId ?? (nativeParent ? this.toolCallIds.get(nativeParent) : undefined);
+      if (nativeParent && !parentToolId) {
+        this.transcript.trackParent(nativeParent, messageId);
+      }
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          messageId,
+          textMode: "replace",
+          phase: "commentary",
+          content: { type: "text", text },
+          ...(parentToolId ? { parentToolId } : {}),
+        },
+      });
+    },
+    owner: (nativeId, nativeParent) => {
+      const candidates = nativeParent !== undefined
+        ? [[JSON.stringify([nativeParent, nativeId]), this.scopedTools.get(JSON.stringify([nativeParent, nativeId]))] as const]
+        : [...this.scopedTools].filter(([key]) => JSON.parse(key)[1] === nativeId);
+      const eligible = candidates.filter(([key, value]) => value && !this.retractedTools.has(key));
+      if (eligible.length !== 1) return undefined;
+      const [key, value] = eligible[0];
+      const parent = JSON.parse(key)[0] as string;
+      const agent = [...this.agentTasks.values()].find((task) => task.toolCallId === value!.id);
+      const status = agent?.status ?? value!.status;
+      return {
+        toolCallId: value!.id,
+        ...(parent ? { nativeParent: parent } : {}),
+        terminal: status === "completed" || status === "failed",
+      };
+    },
+  });
   private readonly nativeFrames = new Map<string, { parent: string; startedAt: number; resultKeys: Set<string> }>();
   private readonly retractedFrames = new Set<string>();
   private readonly retractedTools = new Set<string>();
@@ -537,7 +580,7 @@ export class ClaudeStreamTranslator {
    *  The CLI emits one `system/api_retry` per attempt (up to ~10 with
    *  exponential backoff); one row per burst tells the user the stall is a
    *  network blip being retried without writing ten rows into the
-   *  transcript. Cleared by any non-system event (the call got through). */
+   *  transcript. Cleared by accepted root model progress or a result. */
   private retryBurstNoticed = false;
 
   // ── Compaction lifecycle ──
@@ -645,6 +688,7 @@ export class ClaudeStreamTranslator {
     this.ambientTaskIds.clear();
     this.workflowNarration.clear();
     this.activityStopped = false;
+    this.feedback.beginTurn();
   }
 
   /** Replace the session's one-shot wakeups from StopHookInput.session_crons.
@@ -738,6 +782,7 @@ export class ClaudeStreamTranslator {
   /** The local prompt boundary is authoritative evidence that the parent is
    * running even if this CLI build omits a matching session-state edge. */
   beginTurn(startedAt = Date.now()): void {
+    this.feedback.beginTurn();
     this.currentTurnUsage = undefined;
     this.fallbackGeneration++;
     this.modelTurnStartedAt = startedAt;
@@ -760,6 +805,8 @@ export class ClaudeStreamTranslator {
   /** Stop/EOF releases process-owned activity, independently of the already
    * settled prompt. Buffered frames cannot resurrect it before the next send. */
   endActivity(): void {
+    this.feedback.stop();
+    this.finishUnconfirmedCompaction();
     for (const [taskId, agent] of this.agentTasks) {
       if (agent.status === "in_progress")
         this.settleAgentTask(
@@ -798,6 +845,26 @@ export class ClaudeStreamTranslator {
       this.onUnknown?.(event);
       return false;
     }
+    // Side-channel feedback is not model output or proof of successful work.
+    // It must not reset the API retry burst or wake the parent for child traffic.
+    if (this.feedback.feed(event)) return false;
+    const parentProgress = isClaudeParentProgress(event);
+    if (
+      event.type === "system" &&
+      ["status", "compact_boundary", "thinking_tokens", "session_state_changed"].includes(String(event.subtype))
+    ) {
+      if (this.activityStopped || event.parent_tool_use_id) return false;
+      if (event.subtype === "thinking_tokens" && !parentProgress) return false;
+      if (
+        event.subtype === "session_state_changed" &&
+        !["idle", "running", "requires_action"].includes(String(event.state))
+      ) return false;
+      if (typeof event.uuid === "string" && event.uuid.length <= 512) {
+        if (this.lifecycleFrames.has(event.uuid)) return false;
+        addBoundedSet(this.lifecycleFrames, event.uuid, 4_000);
+      }
+      if (parentProgress) this.resumeActivity();
+    }
     // Markers can be added to a replayed frame; apply them BEFORE replay
     // suppression. Only identities previously observed by this query qualify.
     if (event.type === "assistant") this.retractMessages(event.supersedes);
@@ -823,10 +890,15 @@ export class ClaudeStreamTranslator {
       this.transcript.isStreamReplay(event.event, typeof event.parent_tool_use_id === "string" ? event.parent_tool_use_id : "");
     const streamActivity = event.type === "stream_event" && isObj(event.event) &&
       ["message_start", "content_block_start", "content_block_delta"].includes(String(event.event.type));
-    // Any non-system event means the API call got through (or the turn
-    // settled) — the current retry burst, if any, is over. The next
-    // api_retry starts a NEW burst and gets its own notice row.
-    if (event.type !== "system") this.retryBurstNoticed = false;
+    // Only actual root model activity/result ends a parent retry burst.
+    // Heartbeats, usage metadata and a sibling's output prove nothing about it.
+    if (
+      !event.parent_tool_use_id && !replayedStream &&
+      (event.type === "assistant" || event.type === "result" || streamActivity ||
+        (parentProgress && event.subtype === "thinking_tokens"))
+    ) {
+      this.retryBurstNoticed = false;
+    }
     // Internal loop wake-ups can begin without passing through adapter.prompt.
     // Child output and user/tool-result echoes do not prove the parent resumed.
     if (
@@ -880,7 +952,7 @@ export class ClaudeStreamTranslator {
         const tool = this.scopedTools.get(key);
         if (tool?.resultFrameId !== uuid) continue;
         toolCallIds.push(tool.id);
-        this.scopedTools.set(key, { ...tool, status: "pending", resultFrameId: undefined });
+        this.scopedTools.set(key, { ...tool, status: "pending", resultFrameId: undefined, resultRetracted: true });
       }
     }
     if (messageIds.length) this.emit({ sessionId: this.sessionId, update: { sessionUpdate: "message_retraction", messageIds } });
@@ -912,6 +984,17 @@ export class ClaudeStreamTranslator {
       this.parkBackgroundReply(event.event.delta?.stop_reason);
     if (!this.streamPartials || !event.event) return;
     const parent = event.parent_tool_use_id ?? "";
+    const block = event.event.content_block;
+    const delta = event.event.delta;
+    // A provider may recover inside the query. Headers or a child's activity
+    // do not supersede its setup error, but fresh parent model content does.
+    if (this.pendingUserActionFailure && !parent && !this.transcript.isStreamReplay(event.event, parent) && (
+      (event.event.type === "content_block_delta" && Boolean(delta?.text || delta?.thinking || delta?.partial_json)) ||
+      (event.event.type === "content_block_start" && Boolean(block?.text || block?.thinking || (block?.type === "tool_use" && block.name)))
+    )) {
+      this.assistantFailure = null;
+      this.assistantFailureFrame = undefined;
+    }
     if (!this.transcript.isStreamReplay(event.event, parent) && event.event.type === "content_block_start" && event.event.content_block?.type === "tool_use") {
       this.onAssistantTool(event.event.content_block, parent || undefined, this.toolCallIds.get(parent), true);
     }
@@ -958,6 +1041,14 @@ export class ClaudeStreamTranslator {
   get terminalFailure(): { message: string; code?: string } | null {
     return this.terminalErrorMsg
       ? { message: this.terminalErrorMsg, code: this.terminalErrorCode }
+      : null;
+  }
+
+  /** An explicit setup failure remains actionable if the transport ends before
+   * result. Success, replacement and retraction already clear this candidate. */
+  get pendingUserActionFailure(): { message: string; code: string } | null {
+    return this.assistantFailure && claudeActionCategory(this.assistantFailure.code)
+      ? this.assistantFailure
       : null;
   }
 
@@ -1833,6 +1924,17 @@ export class ClaudeStreamTranslator {
 
   private onTaskNotification(event: ClaudeSystemEvent): void {
     if (!event.task_id) return;
+    // The SDK joins these links to the originating MCP call by tool_use_id.
+    // Never guess a parent or revive a retracted call. Background completion
+    // enriches that existing row, including after foreground settlement.
+    if (event.tool_use_id && event.resource_links?.length && !event.skip_transcript) {
+      const matches = [...this.scopedTools].filter(([key]) => JSON.parse(key)[1] === event.tool_use_id && !this.retractedTools.has(key));
+      if (matches.length === 1 && !matches[0][1].resultRetracted) {
+        const [, tool] = matches[0];
+        const resourceLinks = canonicalResourceLinks(event.resource_links).flatMap(block => block.content.type === "resource_link" ? [block.content] : []);
+        if (resourceLinks.length) this.emit({ sessionId: this.sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: tool.id, resourceLinks } });
+      }
+    }
     if (this.taskIsAmbient(event)) {
       this.endAmbientTask(event);
       return;
@@ -2040,6 +2142,24 @@ export class ClaudeStreamTranslator {
         rawOutput,
       },
     });
+  }
+
+  private finishUnconfirmedCompaction(): void {
+    if (this.pendingCompactionToolCallId && !this.pendingCompactionSettled) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: this.pendingCompactionToolCallId,
+          title: "Compaction incomplete",
+          status: "failed",
+          rawOutput: { error: "Claude ended before confirming context compaction." },
+        },
+      });
+    }
+    this.pendingCompactionToolCallId = null;
+    this.pendingCompactionSettled = false;
+    this.manualCompactionExpected = false;
   }
 
   /** `system/status` — open/settle the compaction row (see onSystem). */
@@ -2331,6 +2451,7 @@ export class ClaudeStreamTranslator {
           announced: previous?.announced ?? false,
           inputComplete: previous?.inputComplete,
           resultFrameId: event.uuid,
+          resultRetracted: false,
           status,
         },
         4_000,
@@ -2338,23 +2459,15 @@ export class ClaudeStreamTranslator {
       if (event.uuid) this.nativeFrames.get(event.uuid)?.resultKeys.add(key);
       if (!event.parent_tool_use_id || !this.toolCallIds.has(tool.tool_use_id))
         this.toolCallIds.set(tool.tool_use_id, toolCallId);
-      const content =
-        !tool.is_error &&
-        agentResult?.status === "completed" &&
-        Array.isArray(agentResult.content)
-          ? agentResult.content.flatMap((block) =>
-              isObj(block) &&
-              block.type === "text" &&
-              typeof block.text === "string"
-                ? [
-                    {
-                      type: "content" as const,
-                      content: { type: "text" as const, text: block.text },
-                    },
-                  ]
-                : [],
-            )
-          : toolResultContent(tool);
+      const envelope = resultCount === 1 && isObj(event.tool_use_result) ? event.tool_use_result : null;
+      const content = mergeToolContent(
+        !tool.is_error && agentResult?.status === "completed" && Array.isArray(agentResult.content)
+          ? canonicalToolContent(agentResult.content) : toolResultContent(tool),
+        canonicalResourceLinks(envelope?.resourceLinks),
+      );
+      const structuredContent = envelope && "structuredContent" in envelope
+        ? { structuredContent: boundedStructuredOutput(envelope.structuredContent) } : null;
+
       if (
         event.parent_tool_use_id &&
         !this.toolCallIds.has(event.parent_tool_use_id)
@@ -2380,7 +2493,7 @@ export class ClaudeStreamTranslator {
                     : {}),
                   ...(agent?.error ? { message: agent.error } : {}),
                 }
-              : (structuredTaskOutput ?? tool.content),
+              : (structuredTaskOutput ?? (structuredContent ? { content: boundedStructuredOutput(tool.content), ...structuredContent } : (Array.isArray(tool.content) ? boundedStructuredOutput(tool.content) : tool.content))),
           content: agent?.error
             ? [
                 {
@@ -2421,6 +2534,19 @@ export class ClaudeStreamTranslator {
     const parentToolId = claudeParentId
       ? this.toolCallIds.get(claudeParentId)
       : undefined;
+
+    // These SDK-generated failures are displayed by the terminal error card.
+    // They are not model output or evidence that the user's request executed.
+    // Keep the recorded native frame for replacement and the result's details;
+    // child explanations still belong in their own Agent group.
+    if (
+      !claudeParentId &&
+      blocks.every((block) => block.type === "text") &&
+      event.error && claudeActionCategory(event.error)
+    ) {
+      this.transcript.rememberSuppressed(event.message?.id, "", event.uuid);
+      return;
+    }
 
     // Did a fallback model answer this message? Checked before the
     // blocks render so the "Model switched" record lands where the swap
@@ -2467,7 +2593,7 @@ export class ClaudeStreamTranslator {
     const previous = this.scopedTools.get(key);
     if (previous?.announced && (partial || previous.inputComplete !== false)) return;
     const toolCallId = previous?.id ?? randomUUID();
-    setBoundedMap(this.scopedTools, key, { id: toolCallId, announced: true, inputComplete: !partial, resultFrameId: previous?.resultFrameId, status: previous?.status ?? "in_progress" }, 4_000);
+    setBoundedMap(this.scopedTools, key, { ...previous, id: toolCallId, announced: true, inputComplete: !partial, resultFrameId: previous?.resultFrameId, status: previous?.status ?? "in_progress" }, 4_000);
     if (!claudeParentId || !this.toolCallIds.has(block.id)) this.toolCallIds.set(block.id, toolCallId);
     if (claudeParentId && !parentToolId) this.transcript.trackParent(claudeParentId, toolCallId);
     const retainedInput = retainToolInput(block.name, block.input);
@@ -2502,11 +2628,21 @@ export class ClaudeStreamTranslator {
       },
     });
     this.transcript.attachParent(block.id, toolCallId);
+    this.feedback.flushTools();
   }
 
   // ── Result (final) ──────────────────────────────────────
   private onResult(event: ClaudeResultEvent): void {
-    if (event.subtype === "success" && event.is_error !== true && !event.errors?.length) this.transcript.final(event.result, event.uuid);
+    if (isClaudeBackgroundAcknowledgement(event)) {
+      this.currentTurnUsage = this.queryUsage.record(event);
+      return;
+    }
+    this.feedback.result();
+    const hasNativeErrors = Array.isArray(event.errors) && event.errors.some((error) => typeof error === "string" && error.trim());
+    const terminalReason = typeof event.terminal_reason === "string" ? event.terminal_reason : null;
+    const mappedTerminalReason = mapClaudeTerminalReason(terminalReason);
+    if (event.subtype === "success" && event.is_error !== true && !hasNativeErrors &&
+      (mappedTerminalReason === null || mappedTerminalReason === "end_turn")) this.transcript.final(event.result, event.uuid);
     this.hasSeenResult = true;
     if (!this.activityStopped) {
       this.sessionActivityState = "idle";
@@ -2532,22 +2668,7 @@ export class ClaudeStreamTranslator {
     // run — a later compaction opens its own row. If it settled we just
     // drop the reference; if it's still in_progress, close it out so the
     // spinner can't shimmer forever.
-    if (this.pendingCompactionToolCallId && !this.pendingCompactionSettled) {
-      this.emit({
-        sessionId: this.sessionId,
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: this.pendingCompactionToolCallId,
-          title: "Context compacted",
-          status: "completed",
-        },
-      });
-    }
-    this.pendingCompactionToolCallId = null;
-    this.pendingCompactionSettled = false;
-    // A manual-compact expectation that never materialised must not
-    // mislabel a later AUTO compaction as user-initiated.
-    this.manualCompactionExpected = false;
+    this.finishUnconfirmedCompaction();
     // Reset the terminal-error capture at the START of every result so it
     // reflects ONLY this turn. The SDK adapter reuses ONE translator for the
     // whole session (persistent query()), and the adapter reads
@@ -2570,9 +2691,6 @@ export class ClaudeStreamTranslator {
     // (they'd render as an error toast) or a clean "end_turn" (a truncated
     // answer masquerading as finished). Checked BEFORE is_error because the
     // budget/blocking results arrive as SDKResultError with is_error set.
-    const terminalReason =
-      typeof event.terminal_reason === "string" ? event.terminal_reason : null;
-    const mappedTerminalReason = mapClaudeTerminalReason(terminalReason);
     const captureTerminalError = () => {
       const raw =
         Array.isArray(event.errors) &&
@@ -2585,8 +2703,17 @@ export class ClaudeStreamTranslator {
             : assistantFailure?.message || (typeof event.subtype === "string"
               ? event.subtype
               : "");
-      this.terminalErrorMsg = raw || "claude turn ended with an error";
-      this.terminalErrorCode = assistantFailure?.code;
+      // The synthetic assistant error may contain the provider's actionable
+      // explanation/link while result.errors only describes the failed run.
+      // Keep both native details without duplicating identical explanations.
+      const assistantDetail = assistantFailure?.message.trim();
+      this.terminalErrorMsg = assistantDetail && !raw.includes(assistantDetail)
+        ? `${raw}\n${assistantDetail}`.trim()
+        : raw || "claude turn ended with an error";
+      this.terminalErrorCode = typeof event.startup_failure_reason === "string" &&
+        event.startup_failure_reason.trim().length > 0 && event.startup_failure_reason.length <= 128
+        ? event.startup_failure_reason.trim()
+        : assistantFailure?.code;
     };
     if (
       event.subtype === "error_max_budget_usd" ||
@@ -2623,20 +2750,24 @@ export class ClaudeStreamTranslator {
     ) {
       this.lastStopReason = mappedTerminalReason;
       if (mappedTerminalReason === "refusal") captureTerminalError();
-    } else if (event.is_error) {
+    } else if (event.is_error === true || (typeof event.subtype === "string" && event.subtype.startsWith("error_")) || hasNativeErrors) {
       this.lastStopReason = "refusal";
       // Standard SDK failures use errors[]. Older results used result, and
       // synthetic assistant errors can supply the missing code/explanation.
+      // Failure subtypes/details remain authoritative when the optional flag or
+      // completion reason contradicts them, including future error subtypes.
       captureTerminalError();
     } else if (event.stop_reason === "max_tokens") {
       // The output-token cap cut the answer mid-thought. Was dead
       // code before: the result settled as a clean end_turn and the truncated
       // answer rendered as complete.
       this.lastStopReason = "max_tokens";
-    } else if (mappedTerminalReason === "end_turn") {
+    } else if (event.subtype === "success" || mappedTerminalReason === "end_turn" || event.stop_reason === "end_turn") {
       this.lastStopReason = "end_turn";
     } else {
-      this.lastStopReason = "end_turn";
+      this.lastStopReason = "refusal";
+      this.terminalErrorMsg = "Claude ended without confirming that the turn completed.";
+      this.terminalErrorCode = "INCOMPLETE_RESULT";
     }
 
     this.currentTurnUsage = this.queryUsage.record(event);
@@ -2850,66 +2981,10 @@ function readStructuredPatch(result: unknown): unknown[] | null {
   return valid ? sp : null;
 }
 
-function toolResultContent(
-  result: ClaudeToolResultBlock,
-): Array<{ type: "content"; content: ContentBlock }> {
-  if (typeof result.content === "string") {
-    const text = stripToolUseError(result.content);
-    return text ? [{ type: "content", content: { type: "text", text } }] : [];
-  }
-  if (!Array.isArray(result.content)) return [];
-
-  return result.content.flatMap<{
-    type: "content";
-    content: ContentBlock;
-  }>((block) => {
-    if (block.type === "text" && typeof block.text === "string") {
-      const text = stripToolUseError(block.text);
-      return text
-        ? [
-            {
-              type: "content" as const,
-              content: { type: "text" as const, text },
-            },
-          ]
-        : [];
-    }
-    const source = block.source;
-    if (
-      block.type === "image" &&
-      source?.type === "base64" &&
-      typeof source.data === "string" &&
-      source.data.length > 0 &&
-      typeof source.media_type === "string" &&
-      source.media_type.startsWith("image/")
-    ) {
-      return [
-        {
-          type: "content" as const,
-          content: {
-            type: "image" as const,
-            data: source.data,
-            mimeType: source.media_type,
-          },
-        },
-      ];
-    }
-    // Lenient tail, matching the pre-image behavior: an MCP server that emits
-    // text under a wrapper type (or no type at all) still renders instead of
-    // vanishing from the tool output.
-    if (typeof block.text === "string") {
-      const text = stripToolUseError(block.text);
-      return text
-        ? [
-            {
-              type: "content" as const,
-              content: { type: "text" as const, text },
-            },
-          ]
-        : [];
-    }
-    return [];
-  });
+function toolResultContent(result: ClaudeToolResultBlock): CanonicalToolContent {
+  return canonicalToolContent(result.content).map((block) => block.content.type === "text"
+    ? { type: "content", content: { ...block.content, text: stripToolUseError(block.content.text) } }
+    : block);
 }
 
 function readScheduledWakeupResultTimestamp(

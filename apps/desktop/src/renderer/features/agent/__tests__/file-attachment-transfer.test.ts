@@ -185,14 +185,25 @@ describe("reference attachment staging", () => {
   });
 
   it("resolves a restored draft from its stable id without fetching file bytes", async () => {
-    await ensureFileAttachment("/repo", attachment({ sourceFile: undefined }));
+    const diskPath = ".context/shared/attachments/att-1/events.jsonl";
+    await ensureFileAttachment("/repo", attachment({ sourceFile: undefined, diskPath }));
     expect(write).toHaveBeenCalledWith(
       expect.objectContaining({
         resolve: true,
         base64: "",
         attachmentId: "att-1",
+        diskPath,
       }),
     );
+  });
+
+  it("does not share resolution between conflicting saved paths with the same record id", async () => {
+    write.mockImplementation(async args => ({ ...final, relativePath: args.diskPath, absolutePath: `/repo/${args.diskPath}` }));
+    const local = attachment({ sourceFile: undefined, diskPath: ".context/local/attachments/att-1/events.jsonl" });
+    const shared = attachment({ sourceFile: undefined, diskPath: ".context/shared/attachments/att-1/events.jsonl" });
+    const paths = [local.diskPath, shared.diskPath];
+    const resolved = await Promise.all([ensureFileAttachment("/repo", local), ensureFileAttachment("/repo", shared)]);
+    expect(resolved.map(result => result.relativePath)).toEqual(paths);
   });
 
   it("isolates workspace uploads and aborts failures so a retry can start fresh", async () => {

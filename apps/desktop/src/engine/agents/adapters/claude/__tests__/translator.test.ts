@@ -2658,6 +2658,47 @@ describe("ClaudeStreamTranslator string message.content (2026-07-12)", () => {
 });
 
 describe("ClaudeStreamTranslator distinct stop reasons", () => {
+  it.each([
+    ["error_during_execution", false],
+    ["error_during_execution", undefined],
+    ["error_max_structured_output_retries", false],
+    ["error_max_structured_output_retries", undefined],
+    ["error_future_failure", false],
+  ])("preserves %s failure despite is_error=%s and a contradictory completion reason", (subtype, is_error) => {
+    const { t } = collect();
+    t.feed({ type: "result", subtype, is_error, terminal_reason: "completed", errors: ["Authoritative failure", "Provider explanation"], result: "generic fallback" });
+    expect(t.stopReason).toBe("refusal");
+    expect(t.terminalError).toBe("Authoritative failure\nProvider explanation");
+    t.feed({ type: "result", subtype: "success", is_error: false });
+    expect(t.stopReason).toBe("end_turn");
+    expect(t.terminalError).toBeNull();
+  });
+
+  it("does not render a success result with native errors as a final answer", () => {
+    const { t, updates } = collect();
+    t.feed({ type: "result", subtype: "success", is_error: false, errors: ["Rate limit exceeded"], result: "This failed" });
+    expect(t.stopReason).toBe("refusal");
+    expect(t.terminalError).toBe("Rate limit exceeded");
+    expect(updates.some((note) => note.update.sessionUpdate === "agent_message_chunk")).toBe(false);
+  });
+
+  it.each([undefined, "unrecognized_result", 42, {}])("requires positive completion evidence for subtype %s", (subtype) => {
+    const { t } = collect();
+    t.feed({ type: "result", subtype, is_error: false });
+    expect(t.stopReason).toBe("refusal");
+    expect(t.terminalError).toMatch(/without.*confirm/i);
+  });
+
+  it.each([
+    ["error_max_turns", "max_turn_requests"],
+    ["error_max_budget_usd", "budget_exhausted"],
+  ])("keeps the named %s ending with a conflicting error flag", (subtype, reason) => {
+    const { t } = collect();
+    t.feed({ type: "result", subtype, is_error: false });
+    expect(t.stopReason).toBe(reason);
+    expect(t.terminalError).toBeNull();
+  });
+
   it("exhaustively maps every terminal reason in Claude Agent SDK 0.3.238", () => {
     const cases = {
       blocking_limit: "blocking_limit",
@@ -2961,5 +3002,29 @@ describe("ClaudeStreamTranslator per-model usage", () => {
       usage: { input_tokens: 10, output_tokens: 5 },
     });
     expect(t.turnUsage?.perModel).toBeUndefined();
+  });
+});
+
+describe("Claude background result acknowledgements", () => {
+  it("preserves active narration and cumulative usage across empty batch receipts", () => {
+    const { t, updates } = collect();
+    t.beginTurn();
+    t.feed({ type: "assistant", uuid: "a", message: { role: "assistant", content: [{ type: "text", text: "Reviewing reports" }] } });
+    const before = updates.length;
+    const acknowledgement = { type: "result", subtype: "success", uuid: "ack", result_index: 0, num_turns: 0, result: "", origin: { kind: "task-notification" }, total_cost_usd: 0.1, modelUsage: {} };
+    t.feed(acknowledgement);
+    expect(updates.slice(before).filter((n) => n.update.sessionUpdate === "background_tasks_update")).toEqual([]);
+    expect(t.turnUsage?.totalCostUsd).toBe(0.1);
+    expect(t.feed(acknowledgement)).toBe(false);
+    t.feed({ ...acknowledgement, uuid: "final", result_index: 1, num_turns: 1, result: "Both reports", total_cost_usd: 0.15 });
+    expect(t.turnUsage?.totalCostUsd).toBeCloseTo(0.05);
+  });
+
+  it.each(["gateway_signin_required", "managed_settings_invalid", "cwd_unavailable", "future_startup_reason"])("retains native startup reason %s without an assistant frame", (reason) => {
+    const { t } = collect();
+    t.feed({ type: "result", subtype: "error_during_execution", is_error: true, errors: ["Native startup explanation"], startup_failure_reason: reason });
+    expect(t.terminalFailure).toEqual({ message: "Native startup explanation", code: reason });
+    t.feed({ type: "result", subtype: "success", result: "Recovered" });
+    expect(t.terminalFailure).toBeNull();
   });
 });

@@ -81,6 +81,20 @@ The pre-graph `.context/attachments/...` layout remains exact-only until its
 existing transcript-window migration copies the image into a scope. Resending
 an edited message preserves its original attachment id for both graph layouts.
 
+Send-time metadata resolution also honors the saved graph path first, including
+its recorded filename. If that path moved, exactly one matching record must
+remain across scopes and roots; ambiguous copies require reattachment. Resolution
+validates the record path and refuses symlinks without reading file bodies.
+Queued sends and Send now refresh their file references and bubble metadata
+before dispatch. Failed resolution preserves the editable row and pauses the
+queue; Stop during resolution prevents dispatch.
+
+Open sent-message edits mirror their whole document and attachment identities
+into a chat/message-owned live draft slot. Debounced persistence, reload and
+native quit flush this slot without requiring React unmount or publishing each
+keystroke through workspace state. Replacing or reordering attachments counts
+as an edit even when the text and attachment count stay the same.
+
 The `context.graph.*` bridge operations, `agent_attachment_write` IPC,
 attachment ids, transcript fields and workbench persistence keys retain their
 names. Historical prompt text and external shell commands are not rewritten;

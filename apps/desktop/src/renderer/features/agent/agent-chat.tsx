@@ -18,7 +18,8 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { useOpenChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
+import { useOpenChatPreviewInWorkbench } from "@/renderer/shell/workbench/use-open-browser";
+import { useOpenChatFileInWorkbench, warmChatFileInWorkbench } from "@/renderer/shell/workbench/use-open-file";
 import { chatFileOpenCwd } from "@/renderer/shell/workbench/direct-file-open";
 import {
   materializeScrollGeometryWithin,
@@ -287,6 +288,10 @@ function labelForFailure(
         return "Timed out";
       case "auth-required":
         return "Sign in required";
+      case "verification-required":
+        return "Verification required";
+      case "cloud-credentials-unavailable":
+        return "Cloud credentials unavailable";
       case "transport-closed":
         return "Disconnected";
       case "rate-limited":
@@ -720,6 +725,9 @@ export function AgentChat({
   useEffect(() => {
     openChatFileRef.current = openChatFile;
   }, [openChatFile]);
+  const warmFileThroughRef = useCallback((path: string) => warmChatFileInWorkbench(chatCwdRef.current, path), []);
+  const openChatPreview = useOpenChatPreviewInWorkbench();
+  const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url), [openChatPreview]);
   const openFileThroughRef = useCallback((path: string) => {
     openChatFileRef.current(chatCwdRef.current, path);
   }, []);
@@ -774,7 +782,9 @@ export function AgentChat({
       attachmentCwd: chatThread?.folder ?? session.cwd ?? null,
       attachmentImagesActive: surfaceActive,
       openFile: openFileThroughRef,
+      warmFile: warmFileThroughRef,
       openPrUrl: openPrUrlThroughRef,
+      openPreviewUrl: openPreviewUrlThroughRef,
     }),
     [
       isStreaming,
@@ -798,7 +808,9 @@ export function AgentChat({
       session.cwd,
       surfaceActive,
       openFileThroughRef,
+      warmFileThroughRef,
       openPrUrlThroughRef,
+      openPreviewUrlThroughRef,
     ],
   );
   // Scroll + active-prompt elements tracked via state so the
@@ -1682,6 +1694,7 @@ export function AgentChat({
   /** Re-entrancy latch for saveQueuedEdit (a second Enter while attachment
    *  encoding awaits would double-apply the edit). */
   const queueSaveInFlightRef = useRef(false);
+  const queueEditGenerationRef = useRef(0);
   const queueKeysRef = useRef({
     arrowUp: (): boolean => false,
     arrowDown: (): boolean => false,
@@ -3757,6 +3770,8 @@ export function AgentChat({
    *  the provider-side queue hold, and hands focus back to the composer. */
   const exitQueuedEdit = () => {
     if (editingQueuedRef.current == null) return;
+    queueEditGenerationRef.current++;
+    editingQueuedRef.current = null;
     setEditingQueuedId(null);
     setQueueSelectedId(null);
     setComposerContent(
@@ -3786,6 +3801,8 @@ export function AgentChat({
         s && !s.isEmpty ? { json: s.json, attachments: s.attachments } : null;
       session.holdQueue?.();
     }
+    queueEditGenerationRef.current++;
+    editingQueuedRef.current = id;
     setEditingQueuedId(id);
     setQueueSelectedId(id);
     setQueueCollapsed(false);
@@ -3805,6 +3822,7 @@ export function AgentChat({
   const saveQueuedEdit = async (): Promise<boolean> => {
     const id = editingQueuedRef.current;
     if (!id || queueSaveInFlightRef.current) return false;
+    const generation = queueEditGenerationRef.current;
     const s = serializeComposerState();
     const displayText = (s?.displayText ?? "").trim();
     const localAttachments = s?.attachments ?? [];
@@ -3818,6 +3836,19 @@ export function AgentChat({
       );
       const { blocks, bubbleAttachments, bubbleAttachmentById, skipped } =
         await encodeComposerAttachments(localAttachments);
+      // Upload completion belongs to this edit instance and document only.
+      // Keep newer typing (or a different/reopened edit) intact, including
+      // when this save was initiated by Send now.
+      if (
+        editingQueuedRef.current !== id ||
+        queueEditGenerationRef.current !== generation
+      ) return false;
+      if (!s || !isSubmittedComposerDocument(s.json, serializeComposerState()?.json)) {
+        toast.error("Queued message changed while saving", {
+          description: "Your changes are still in the editor. Save again to include them.",
+        });
+        return false;
+      }
       // Same reason as the live send: the queued row keeps rendering every
       // segment, so an excluded attachment is indistinguishable from one that
       // made it. The queued message has not been dispatched yet, which makes
@@ -3988,7 +4019,11 @@ export function AgentChat({
   // Bounded-deck eviction and application shutdown retain the old unmount
   // guarantee as a final idempotent safety net.
   useEffect(() => {
-    return () => releaseQueueRef.current?.();
+    const editGeneration = queueEditGenerationRef;
+    return () => {
+      editGeneration.current++;
+      releaseQueueRef.current?.();
+    };
   }, []);
 
   // The editor's Enter keymap calls this through a ref (handleSend is defined

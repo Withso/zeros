@@ -73,6 +73,58 @@ stops on settlement, replacement or disposal. Failed/hung billing lookups are
 bounded to 500ms and do not fail agent work. No paid live billing was exercised
 by the mock-backed regression suites.
 
+## Context-window snapshots
+
+Context fill is independent of turn billing. Claude refreshes it after each
+accepted root result, including turnless compaction and background continuations.
+Use the query object as the process generation and a monotonically increasing
+refresh revision. After awaiting the SDK, publish only if that query is still
+current, the session is alive and no newer refresh has started. Ordinary
+`system/init` metadata must not reset this ownership. Replacement, idle detach,
+Stop that retires the query and EOF all invalidate its pending responses.
+
+Routine reads use `getContextUsage({ detail: "summary" })`, supported by the
+pinned Claude SDK. This uses last-response usage and local estimates instead of
+the full mode's per-category token-count calls; it is not a claim of exact token
+counts or a measured latency improvement. Keep the last confirmed snapshot while
+refreshing or on failure. Reject missing, non-finite or negative totals and an
+invalid window size. A valid zero/lower reading after compaction is allowed.
+Totals and categories come from the same response; an empty/missing breakdown
+clears the old categories rather than keeping stale detail beside new totals.
+
+Preserve the native category `kind` (`used`, `free`, `buffer`, `deferred`)
+through the shared notification and renderer state. SDK 0.3.268+ supplies it;
+only older responses fall back to `isDeferred` and the legacy category names.
+Native kind wins over both. Ignore malformed or unsupported category types
+without discarding a valid total. Category-kind changes are meaningful even
+when the name and token count stay equal; repeated equal snapshots stay
+reference-stable. The optional protocol field keeps older peers readable.
+
+The context popover is one continuous list: Free space first, used categories,
+then any compaction buffer. Display native free space once, including zero;
+when it is absent, subtract both used tokens and the buffer from the window.
+Keep buffer separate from free space and used content. Deferred schemas are
+outside the window: preserve their classification internally, but omit their
+rows and any explanatory section from this popover. Never sum category
+estimates to replace the authoritative used total. Providers without a
+breakdown keep Used/Free, and the existing ring and Compact now action remain.
+
+The shared renderer accepts context updates only for the slot's current
+execution, even when the notification supplies a durable chat ID. Preserve
+legacy session-ID routing, unrelated chat references and equal snapshot
+references. Partial updates retain omitted fields; an explicit empty category
+array clears the breakdown. This guard also protects Codex's pushed context
+readings. Codex's native router rejects retired-turn usage and keeps child
+usage out of the parent gauge. Cursor has no supported context-window reading;
+its run-token and billing data must not be used to invent one.
+
+Regression coverage lives in the Claude SDK adapter's context refresh tests,
+Codex notification ownership tests, `sessions-store-context-usage.test.ts`,
+`context-gauge.test.ts` and the browser `ui-smoke-context-gauge.mjs` checks.
+Keep query replacement/resume, overlapping refreshes, failed refreshes,
+compaction, Stop/dispose/EOF, invalid readings and retired execution routing
+covered when updating provider integrations.
+
 ## Analytics
 
 Prompt completion/generation events receive corrected turn snapshots. Canonical

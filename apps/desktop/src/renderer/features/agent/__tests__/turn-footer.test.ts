@@ -115,6 +115,12 @@ describe("turnFooterFiles", () => {
 });
 
 describe("turnFooterFailureLabel", () => {
+  it.each([
+    ["verification-required", "VERIFICATION REQUIRED"],
+    ["cloud-credentials-unavailable", "CLOUD CREDENTIALS UNAVAILABLE"],
+  ] as const)("labels %s without requesting a Claude sign-in", (kind, label) => {
+    expect(turnFooterFailureLabel({ kind, stage: "prompt", message: "Native explanation" })).toBe(label);
+  });
   it("uses the single compact Design-protection failure label", () => {
     expect(
       turnFooterFailureLabel({

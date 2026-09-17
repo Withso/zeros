@@ -2404,14 +2404,16 @@ export type DiscoveredMcpServerWire =
       name: string;
       transport: "stdio";
       command: string;
+      cwd?: string;
       args?: string[];
       env?: Record<string, string>;
     }
   | {
       name: string;
-      transport: "http";
+      transport: "http" | "sse";
       url: string;
       headers?: Record<string, string>;
+      oauth?: { clientId?: string; scopes?: string[]; requiresClientSecret?: boolean };
     };
 
 export interface DiscoveredMcpSourceWire {
@@ -2440,14 +2442,17 @@ export async function bridgeMcpScanNative(
  *  for the Customize → MCP source badges + inherited group. */
 export interface ComposedMcpServerWire {
   name: string;
-  transport: "stdio" | "http";
+  transport: "stdio" | "http" | "sse";
   url?: string;
   command?: string;
+  cwd?: string;
   args?: string[];
   /** The settings layer this server was resolved from. */
   source: string;
   /** Gateway-managed (oauth/header) vs directly injected (undefined). */
   auth?: "oauth" | "header";
+  oauth_client_id?: string;
+  oauth_scopes?: string[];
 }
 
 /** The merged MCP registry (user + managed — repo layers no longer carry MCP)
@@ -2506,7 +2511,7 @@ export async function bridgeMcpGatewayAuthorize(
 ): Promise<GatewayBackendStatusWire> {
   const r = (await workspaceOp(bridge, "mcp.gateway.authorize", {
     server,
-  })) as {
+  }, 330_000)) as {
     status: GatewayBackendStatusWire;
   };
   return r.status;
@@ -2518,6 +2523,19 @@ export async function bridgeMcpGatewayDisconnect(
   server: string,
 ): Promise<void> {
   await workspaceOp(bridge, "mcp.gateway.disconnect", { server });
+}
+
+export async function bridgeMcpGatewayCancelAuth(bridge: RuntimeClient, server: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.cancelAuth", { server });
+}
+export async function bridgeMcpGatewayReconnect(bridge: RuntimeClient): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.reconnect", {}, 120_000);
+}
+export async function bridgeMcpGatewaySetOAuthSecret(bridge: RuntimeClient, url: string, clientId: string, value: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.gateway.setOAuthSecret", { url, clientId, value });
+}
+export async function bridgeMcpValidateWorkingDirectory(bridge: RuntimeClient, directory: string, workspace?: string): Promise<void> {
+  await workspaceOp(bridge, "mcp.validateWorkingDirectory", { directory, ...(workspace ? { workspace } : {}) });
 }
 
 /** Store a static auth-header secret for an auth:"header" gateway backend. The
@@ -2545,7 +2563,7 @@ export async function bridgeMcpGatewayBeginAuth(
 ): Promise<string> {
   const r = (await workspaceOp(bridge, "mcp.gateway.beginAuth", {
     server,
-  })) as {
+  }, 60_000)) as {
     authorizationUrl?: string;
   };
   if (!r.authorizationUrl) throw new Error("no authorization URL returned");
@@ -2562,7 +2580,7 @@ export async function bridgeMcpGatewayCompleteAuth(
   const r = (await workspaceOp(bridge, "mcp.gateway.completeAuth", {
     server,
     code,
-  })) as {
+  }, 120_000)) as {
     status: GatewayBackendStatusWire;
   };
   return r.status;

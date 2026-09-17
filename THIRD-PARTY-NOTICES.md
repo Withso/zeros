@@ -37,6 +37,20 @@ inventoried accordingly.
 
 ## Generated and vendored code
 
+### Zeros Sandbox Runtime dependency
+
+- **Source:** [Anthropic Sandbox Runtime](https://github.com/anthropics/sandbox-runtime),
+  exact-pinned with its upstream commit, archive integrity and local patch digest
+  in [`scripts/zsr-qualification/pin.json`](scripts/zsr-qualification/pin.json).
+- **License:** Apache-2.0; the upstream license is included in the generated bundle.
+- **Modifications:** Zeros' versioned patch in `patches/` adds explicit host-parity
+  policy, nested writable exceptions and privileged worker identity transitions.
+  The 0.0.76 rebase retains upstream capability dropping in both Linux isolation
+  modes and its read-only bind deduplication. Local Code execution remains native.
+- **Qualification:** Rebase the patch for each upgrade, regenerate the license
+  inventory and run `check:runtime-pins`, `check:zsr` and
+  `check:zsr-preview-browser` on supported hosts before release.
+
 ### Codex app-server protocol bindings
 
 - **Path:** `apps/desktop/src/engine/agents/adapters/codex/generated/`

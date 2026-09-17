@@ -72,13 +72,15 @@ const CODEX_PLUGIN_CACHE_REL = "plugins/cache";
 /** Skip a pathological config file rather than block the scan on a huge parse. */
 const MAX_CONFIG_BYTES = 8 * 1024 * 1024; // 8 MB
 
+export type DiscoveredMcpServer = McpServerRegistration & { oauth?: { clientId?: string; scopes?: string[]; requiresClientSecret?: boolean } };
+
 export interface DiscoveredMcpSource {
   source: string;
   label: string;
   /** Absolute path of the config file scanned (for display). */
   path: string;
   exists: boolean;
-  servers: McpServerRegistration[];
+  servers: DiscoveredMcpServer[];
   /** Non-fatal note (unreadable / unparseable / too large). */
   warning?: string;
 }
@@ -106,27 +108,32 @@ function asStringMap(v: unknown): Record<string, string> | undefined {
  *  (headers from `headers` (Cursor/Claude/Factory) or `http_headers` (Codex)); a
  *  `command` makes it stdio. Anything else (e.g. a name we can't classify) is
  *  dropped. */
-function mapNativeServer(name: string, cfg: unknown): McpServerRegistration | null {
+function mapNativeServer(name: string, cfg: unknown): DiscoveredMcpServer | null {
   if (typeof cfg !== "object" || cfg === null || Array.isArray(cfg) || !name) return null;
   const c = cfg as Record<string, unknown>;
+  const transport = c.type ?? c.transport;
+  if (transport !== undefined && transport !== "stdio" && transport !== "http" && transport !== "sse") return null;
   const url = asString(c.url);
-  if (url) {
+  if (url && transport !== "stdio") {
     const headers = asStringMap(c.headers) ?? asStringMap(c.http_headers);
-    return { name, transport: "http", url, ...(headers ? { headers } : {}) };
+    const auth = c.auth && typeof c.auth === "object" ? c.auth as Record<string, unknown> : undefined;
+    const oauth = auth ? { ...(asString(auth.CLIENT_ID) ? { clientId: asString(auth.CLIENT_ID) } : {}), ...(asStringArray(auth.scopes) ? { scopes: asStringArray(auth.scopes) } : {}), ...(asString(auth.CLIENT_SECRET) ? { requiresClientSecret: true } : {}) } : undefined;
+    return { name, transport: transport === "sse" ? "sse" : "http", url, ...(headers ? { headers } : {}), ...(oauth ? { oauth } : {}) };
   }
   const command = asString(c.command);
-  if (command) {
+  if (command && (transport === undefined || transport === "stdio")) {
     const args = asStringArray(c.args);
     const env = asStringMap(c.env);
-    return { name, transport: "stdio", command, ...(args ? { args } : {}), ...(env ? { env } : {}) };
+    const cwd = asString(c.cwd);
+    return { name, transport: "stdio", command, ...(cwd ? { cwd } : {}), ...(args ? { args } : {}), ...(env ? { env } : {}) };
   }
   return null;
 }
 
 /** Read a `{ "<name>": <config> }` map (mcpServers / mcp_servers) into registrations. */
-function serversFromMap(map: unknown): McpServerRegistration[] {
+function serversFromMap(map: unknown): DiscoveredMcpServer[] {
   if (typeof map !== "object" || map === null || Array.isArray(map)) return [];
-  const out: McpServerRegistration[] = [];
+  const out: DiscoveredMcpServer[] = [];
   for (const [name, cfg] of Object.entries(map as Record<string, unknown>)) {
     const reg = mapNativeServer(name, cfg);
     if (reg) out.push(reg);
@@ -165,6 +172,7 @@ function scanSource(baseDir: string, def: SourceDef): DiscoveredMcpSource {
     const doc = (def.format === "json" ? JSON.parse(text) : parseToml(text)) as Record<string, unknown>;
     // JSON tools nest under `mcpServers`; Codex TOML under `mcp_servers`.
     out.servers = serversFromMap(def.format === "json" ? doc.mcpServers : doc.mcp_servers);
+    if (out.servers.some((s) => s.oauth?.requiresClientSecret)) out.warning = "An OAuth client secret was not imported. Add it in the server's OAuth settings.";
     // Claude Code (~/.claude.json) ALSO nests LOCAL-scoped servers under
     // projects["<abs path>"].mcpServers — surface those too (top-level wins on a
     // name clash) so a user's project-local Claude MCP servers are importable.

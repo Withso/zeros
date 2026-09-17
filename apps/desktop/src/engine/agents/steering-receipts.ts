@@ -10,6 +10,10 @@ export class SteeringReceiptCapacityError extends Error {
 export class SteeringReceipts<T> {
   private readonly executions = new Map<string, Map<string, Promise<T>>>();
 
+  has(executionId: string, messageId: string): boolean {
+    return this.executions.get(executionId)?.has(messageId) ?? false;
+  }
+
   run(
     executionId: string,
     messageId: string,

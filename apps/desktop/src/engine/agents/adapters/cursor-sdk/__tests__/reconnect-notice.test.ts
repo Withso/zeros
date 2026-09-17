@@ -84,6 +84,28 @@ beforeEach(() => {
 const TEXT: ContentBlock[] = [{ type: "text", text: "hi" } as ContentBlock];
 
 describe("CursorSdkAdapter — network stream death leaves a reconnect notice", () => {
+  it("retains explicit SSE after a failed connection and same-chat recovery", async () => {
+    const emitted: SessionNotification[] = [];
+    const adapter = new CursorSdkAdapter(makeCtx(emitted));
+    const options = { cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test" }, mcpServers: [{
+      name: "reports", transport: "sse" as const, url: "https://reports.example/events", headers: { "X-Version": "1" },
+    }] };
+    const expected = { reports: { type: "sse", url: options.mcpServers[0]!.url, headers: { "X-Version": "1" } } };
+    sendSpy.mockReset().mockResolvedValueOnce(makeFailingRun(new Error("read ECONNRESET while streaming")));
+    try {
+      const { session } = await adapter.newSession(options);
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toMatchObject({ failure: { kind: "transport-closed" } });
+      await adapter.disposeSession(session.sessionId);
+      await adapter.loadSession({ ...options, sessionId: session.sessionId });
+      expect(resumeSpy.mock.calls.at(-1)![1].mcpServers).toEqual(expected);
+      sendSpy.mockResolvedValueOnce({ id: "recovered", stream: async function* () { yield { type: "status", status: "FINISHED" }; }, wait: async () => ({ status: "finished", result: "Recovered" }), cancel: async () => {} });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).resolves.toMatchObject({ stopReason: "end_turn" });
+      expect(emitted.filter((event) => event.update.sessionUpdate === "error_notice")).toHaveLength(1);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   it("network error → transport-closed + 'connection lost' error_notice", async () => {
     sendSpy
       .mockReset()

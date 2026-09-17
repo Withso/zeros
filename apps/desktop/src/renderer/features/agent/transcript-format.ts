@@ -339,8 +339,12 @@ function toolOutputText(tool: AgentToolMessage): string {
     }
   }
   const fromContent = stripInternalNoise(parts.join("\n"));
-  if (fromContent) return fromContent;
-  return stripInternalNoise(payloadText(withoutQuestionStamp(tool.rawOutput)));
+  const output = [fromContent || stripInternalNoise(payloadText(withoutQuestionStamp(tool.rawOutput)))];
+  for (const link of tool.resourceLinks ?? []) {
+    const text = textFromBlock(link);
+    if (!parts.includes(text) && !output.includes(text)) output.push(text);
+  }
+  return output.filter(Boolean).join("\n");
 }
 
 // ── Render context ─────────────────────────────────────────

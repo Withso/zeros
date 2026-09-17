@@ -25,6 +25,8 @@ const names = new Set([
   "cancel",
   "steerQueued",
   "drainNextQueued",
+  "flushQueuedPrompt",
+  "refreshQueuedAttachments",
   "holdQueue",
   "releaseQueue",
   "editQueued",
@@ -43,7 +45,7 @@ function collect(node: ts.Node): void {
 }
 collect(ast);
 const code = ts.transpileModule(
-  callbacks.join("\n") + `\nglobalThis.actions = {${[...names].join(",")}};`,
+  callbacks.join("\n") + `\nglobalThis.actions = {${[...names].filter(name => !["flushQueuedPrompt", "refreshQueuedAttachments"].includes(name)).join(",")}};`,
   {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,
@@ -77,6 +79,7 @@ function setup(agentId = "claude", status = "streaming") {
         sessionId: "execution",
         executionId: "execution",
         status,
+        cwd: "/repo",
         messages,
       },
     },
@@ -133,6 +136,8 @@ function setup(agentId = "claude", status = "streaming") {
     toast: { error: vi.fn() },
     queueMicrotask,
     activeProviderTurnId: () => "A",
+    hasPromptAttachmentReferences: (payload: { bubbleAttachments?: unknown[] }) => !!payload.bubbleAttachments?.length,
+    refreshPromptAttachments: vi.fn(async (payload: object) => payload),
     promoteToEnd: (
       list: Array<{ id: string }>,
       id: string,
@@ -161,6 +166,148 @@ function setup(agentId = "claude", status = "streaming") {
 describe.each(["claude", "codex", "cursor"])(
   "%s queue and Stop workflow",
   (agentId) => {
+    it("preserves an uncertain original attempt when its receipt retry is rejected", async () => {
+      const h = setup(agentId);
+      const first = h.actions.steerQueued("chat", "C");
+      h.requests[0]!.reject(new Error("reply lost"));
+      await first;
+      await h.finish();
+      h.store.sessions.chat.sessionId = "replacement";
+      h.store.sessions.chat.executionId = "replacement";
+      const retry = h.actions.steerQueued("chat", "C");
+      h.requests[1]!.resolve({ type: "AGENT_ERROR", code: "SESSION_ACCESS_DENIED" });
+      await retry;
+      expect(h.queue.isPaused("chat")).toBe(true);
+      expect(h.store.sessions.chat.messages.find((m: { id: string }) => m.id === "C"))
+        .toMatchObject({ queued: true, queuedDelivery: "unconfirmed" });
+      h.actions.editQueued("chat", "C", { text: "changed" });
+      expect(h.queue.get("chat")!.find(e => e.bubbleId === "C")!.args[1]).toBe("C");
+      const again = h.actions.steerQueued("chat", "C");
+      expect(h.sent).toEqual([]);
+      expect(h.requests[2]!.message).toMatchObject({
+        attemptId: h.requests[0]!.message.attemptId,
+        sessionId: "execution",
+      });
+      h.requests[2]!.resolve({ type: "AGENT_STEERED", outcome: "delivered", turnId: "A" });
+      await again;
+      expect(h.queue.get("chat")!.map(e => e.bubbleId)).not.toContain("C");
+    });
+
+    it("keeps a first-attempt admission rejection editable", async () => {
+      const h = setup(agentId);
+      const first = h.actions.steerQueued("chat", "C");
+      h.requests[0]!.resolve({ type: "AGENT_ERROR", code: "SESSION_ACCESS_DENIED" });
+      await first;
+      expect(h.queue.isPaused("chat")).toBe(true);
+      expect(h.queue.get("chat")!.find(e => e.bubbleId === "C")!.steerRequest).toBeUndefined();
+      h.actions.editQueued("chat", "C", { text: "changed" });
+      expect(h.queue.get("chat")!.find(e => e.bubbleId === "C")!.args[1]).toBe("changed");
+    });
+
+    it("never resends an interrupted receipt from a retired execution", async () => {
+      const h = setup(agentId);
+      const first = h.actions.steerQueued("chat", "C");
+      h.requests[0]!.reject(new Error("reply lost"));
+      await first;
+      await h.finish();
+      h.store.sessions.chat.sessionId = "replacement";
+      h.store.sessions.chat.executionId = "replacement";
+      const retry = h.actions.steerQueued("chat", "C");
+      h.requests[1]!.resolve({ type: "AGENT_STEERED", outcome: "interrupted" });
+      await retry;
+      await h.finish();
+      expect(h.sent).toEqual([]);
+      expect(h.queue.isPaused("chat")).toBe(true);
+      expect(h.queue.get("chat")!.map(e => e.bubbleId)).toEqual(["B", "D"]);
+      expect(h.store.sessions.chat.messages.find((m: { id: string }) => m.id === "C"))
+        .toMatchObject({ queued: false, steeredTurnId: "A" });
+    });
+
+    it("retries an unconfirmed delivery receipt without resolving its files again", async () => {
+      const h = setup(agentId);
+      const entry = h.queue.get("chat")![0]!;
+      entry.args[4] = [{ delivery: "reference" }];
+      h.context.refreshPromptAttachments.mockResolvedValue({ bubbleAttachments: entry.args[4] });
+      const first = h.actions.steerQueued("chat", "B");
+      await vi.waitFor(() => expect(h.requests).toHaveLength(1));
+      h.requests[0]!.reject(new Error("reply lost"));
+      await first;
+      h.context.refreshPromptAttachments.mockRejectedValue(new Error("file since deleted"));
+      const retry = h.actions.steerQueued("chat", "B");
+      expect(h.requests[1]!.message.attemptId).toBe(h.requests[0]!.message.attemptId);
+      h.requests[1]!.resolve({ type: "AGENT_STEERED", outcome: "delivered" });
+      await retry;
+      expect(h.context.refreshPromptAttachments).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores preparation completion after the queue owner is replaced", async () => {
+      const h = setup(agentId, "ready");
+      h.queue.get("chat")![0]!.args[4] = [{ delivery: "reference" }];
+      let finish!: (payload: object) => void;
+      h.context.refreshPromptAttachments.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+      h.actions.drainNextQueued("chat");
+      h.queue.delete("chat");
+      h.queue.set("chat", [{ bubbleId: "replacement", args: ["chat", "newer instruction"] }]);
+      finish({});
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(h.sent).toEqual([]);
+      expect(h.queue.get("chat")![0]!.args[1]).toBe("newer instruction");
+      expect(h.queue.isPaused("chat")).toBe(false);
+    });
+
+    it.each(["drain", "send now", "steer"])("refreshes moved attachment paths before %s", async (action) => {
+      const h = setup(agentId, action === "steer" ? "streaming" : "ready");
+      const oldPath = ".context/local/attachments/att/file.pdf";
+      const newPath = ".context/shared/attachments/att/file.pdf";
+      const original = { name: "file.pdf", kind: "file", mimeType: "application/pdf", attachmentId: "att", diskPath: oldPath, delivery: "reference" };
+      const entry = h.queue.get("chat")![0]!;
+      entry.args = ["chat", "B", "B", [{ type: "text", text: oldPath }], [original], [{ type: "attachment", ...original }]];
+      h.context.refreshPromptAttachments.mockResolvedValue({ attachments: [{ type: "text", text: newPath }], bubbleAttachments: [{ ...original, diskPath: newPath }], segments: [{ type: "attachment", ...original, diskPath: newPath }] });
+      const pending = action === "drain" ? h.actions.drainNextQueued("chat") : h.actions.steerQueued("chat", "B");
+      await vi.waitFor(() => expect(action === "steer" ? h.requests : h.sent).toHaveLength(1));
+      if (action === "steer") {
+        expect(h.requests[0]!.message.prompt).toEqual([{ type: "text", text: "B" }, { type: "text", text: newPath }]);
+        expect(h.requests[0]!.message.bubble).toMatchObject({ attachments: [{ diskPath: newPath }], segments: [{ diskPath: newPath }] });
+        h.requests[0]!.resolve({ type: "AGENT_STEERED", outcome: "delivered" });
+      } else {
+        expect(h.sent[0]![3]).toEqual([{ type: "text", text: newPath }]);
+        expect(h.sent[0]![4]).toMatchObject([{ diskPath: newPath }]);
+      }
+      await pending;
+    });
+
+    it.each(["drain", "steer"])("keeps an unavailable attachment queued on %s without sending stale paths", async (action) => {
+      const h = setup(agentId, action === "steer" ? "streaming" : "ready");
+      h.queue.get("chat")![0]!.args[4] = [{ delivery: "reference" }];
+      h.context.refreshPromptAttachments.mockRejectedValue(new Error("The saved attachment is not available"));
+      if (action === "drain") h.actions.drainNextQueued("chat");
+      else await h.actions.steerQueued("chat", "B");
+      await vi.waitFor(() => expect(h.queue.isPaused("chat")).toBe(true));
+      expect(h.sent).toEqual([]);
+      expect(h.requests).toEqual([]);
+      expect(h.queue.get("chat")!.map(e => e.bubbleId)).toEqual(["B", "C", "D"]);
+      expect(h.queue.get("chat")![0]!.steerRequest).toBeUndefined();
+      expect(h.queue.isSending("chat")).toBe(false);
+    });
+
+    it.each(["drain", "steer"])("honors Stop while %s resolves attachments", async (action) => {
+      const h = setup(agentId, action === "steer" ? "streaming" : "ready");
+      h.queue.get("chat")![0]!.args[4] = [{ delivery: "reference" }];
+      let finish!: (payload: object) => void;
+      h.context.refreshPromptAttachments.mockImplementation(() => new Promise(resolve => { finish = resolve; }));
+      const pending = action === "drain" ? h.actions.drainNextQueued("chat") : h.actions.steerQueued("chat", "B");
+      await h.actions.cancel("chat");
+      expect(finish).toBeTypeOf("function");
+      finish({});
+      await pending;
+      await Promise.resolve();
+      expect(h.sent).toEqual([]);
+      expect(h.requests).toEqual([]);
+      expect(h.queue.get("chat")![0]!.steerRequest).toBeUndefined();
+      expect(h.queue.isPaused("chat")).toBe(true);
+    });
+
     it("preserves editable B/C/D, then sends selected C → edited B → D automatically", async () => {
       const h = setup(agentId);
       await h.actions.cancel("chat");

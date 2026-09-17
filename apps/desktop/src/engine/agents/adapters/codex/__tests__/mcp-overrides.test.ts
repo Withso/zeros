@@ -8,6 +8,13 @@ import {
 import type { McpServerRegistration } from "../../../types";
 
 describe("buildMcpServerOverrides — Codex -c MCP config", () => {
+  it("does not reinterpret unsupported direct SSE or break the remaining servers", () => {
+    expect(buildMcpServerOverrides([
+      { name: "events", transport: "sse", url: "https://example.test/sse" },
+      { name: "ordinary", transport: "http", url: "https://example.test/mcp" },
+    ])).toEqual(["-c", 'mcp_servers.ordinary.url="https://example.test/mcp"']);
+  });
+
   it("emits url + http_headers for an http server (no `type` field)", () => {
     const args = buildMcpServerOverrides([
       {

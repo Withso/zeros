@@ -1,4 +1,5 @@
 import { TurnUsageFixture } from "./turn-usage-fixture";
+import { ArtifactLinksFixture } from "./artifact-links-fixture";
 // Development-only fixtures exercising the production transcript components.
 import "../../../../../styles/zeros-tokens.css";
 import "../../../../../styles/semantic-tokens.css";
@@ -23,6 +24,7 @@ import { SubagentPresentationFixture } from "./subagent-presentation-fixture";
 import { StreamingTextFixture } from "./streaming-text-fixture";
 import { ToolPresentationFixture } from "./tool-presentation-fixture";
 import { ModelFallbackFixture } from "./model-fallback-fixture";
+import { AgentNoticeFixture } from "./agent-notice-fixture";
 
 const initial: SessionUpdate[] = [
   {
@@ -272,8 +274,10 @@ function Harness() {
           <output id="retry-count">{retries}</output>
           <output id="fresh-retry-count">{freshRetries}</output>
         </div>
+        <AgentNoticeFixture ctx={ctx} />
         <ClaudeBackgroundFixture ctx={ctx} />
         <ToolPresentationFixture ctx={ctx} />
+        <ArtifactLinksFixture ctx={ctx} />
         <SubagentPresentationFixture ctx={ctx} />
         <StreamingTextFixture ctx={ctx} />
         <ModelFallbackFixture ctx={ctx} />

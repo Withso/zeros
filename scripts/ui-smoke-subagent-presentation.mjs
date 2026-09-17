@@ -151,6 +151,13 @@ export async function runSubagentPresentationSmoke({ page, check }) {
       ),
     ).toBeVisible();
   }
+  for (const text of ["Some subagent details could not be loaded.", "Subagent details were truncated."]) {
+    const notice = group("Cursor").getByText(text, { exact: true });
+    await expect(notice).toBeVisible();
+    check("Subagent capture notices render as nested prose without a tool or card",
+      await notice.evaluate((element) => !!element.closest("[data-agent-children]") &&
+        !element.closest("button, [data-tool-detail], [role=alert]")));
+  }
   const errors = fixture.locator("#error-and-list-probe");
   await expect(errors.locator(".lucide-file-search")).toHaveCount(1);
   const failed = errors.getByRole("button", { name: /^Read private.ts/ });

@@ -37,6 +37,7 @@ import {
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import type { AgentUsage } from "./use-agent-session";
+import { contextGaugeData } from "./context-usage";
 
 const RADIUS = 6;
 const CIRCUMFERENCE = 2 * Math.PI * RADIUS; // ≈ 37.70
@@ -113,54 +114,13 @@ export interface ContextGaugeProps {
   compactDisabled?: boolean;
 }
 
-/** True when the gauge has real numbers to show. */
-function hasData(
-  usage: ContextGaugeProps["usage"],
-): usage is {
-  size: number;
-  used: number;
-  categories?: AgentUsage["categories"];
-} {
-  return (
-    !!usage &&
-    typeof usage.size === "number" &&
-    usage.size > 0 &&
-    typeof usage.used === "number" &&
-    usage.used >= 0
-  );
-}
-
 export const ContextGauge = memo(function ContextGauge({
   usage,
   unavailableReason,
   onCompactNow,
   compactDisabled,
 }: ContextGaugeProps) {
-  const data = hasData(usage) ? usage : null;
-
-  const rows = useMemo(() => {
-    if (!data) return [];
-    const free = Math.max(0, data.size - data.used);
-    const pct = (n: number) => `${((n / data.size) * 100).toFixed(1)}%`;
-    const categories = (data.categories ?? [])
-      .filter((c) => c.tokens > 0)
-      // "Free space" is OUR computed lead row — drop any same-named
-      // category an agent reports (Claude's getContextUsage includes one)
-      // so it can never render twice.
-      .filter((c) => !/^free space$/i.test(c.name.trim()))
-      .slice()
-      .sort((a, b) => b.tokens - a.tokens)
-      .map((c) => ({ name: c.name, pct: pct(c.tokens), lead: false }));
-    return [
-      { name: "Free space", pct: pct(free), lead: true },
-      // Agents without a per-category breakdown (Codex reports only window
-      // fill; its protocol has no category accounting) still get an honest
-      // second row: everything in the window that isn't free.
-      ...(categories.length > 0
-        ? categories
-        : [{ name: "Used", pct: pct(data.used), lead: false }]),
-    ];
-  }, [data]);
+  const data = useMemo(() => contextGaugeData(usage), [usage]);
 
   // No usage yet: an agent that will never report it (Cursor) shows its own
   // reason; one that just hasn't produced data yet (no message sent, or a
@@ -169,7 +129,7 @@ export const ContextGauge = memo(function ContextGauge({
   const noDataMessage =
     unavailableReason ?? "Send a message to see context usage.";
 
-  const fraction = data ? data.used / data.size : 0;
+  const fraction = data?.fraction ?? 0;
   const tooltip = data
     ? `Context · ${Math.round(Math.min(1, fraction) * 100)}% used`
     : noDataMessage;
@@ -208,19 +168,19 @@ export const ContextGauge = memo(function ContextGauge({
               />
             </div>
             <div className="mt-2 flex flex-col">
-              {rows.map((r) => (
+              {data.rows.map((r, index) => (
                 <div
-                  key={r.name}
+                  key={`${r.kind}:${r.name}:${index}`}
                   className="flex items-center justify-between px-0.5 py-1 text-[12.5px]"
                 >
                   <span className="text-fg2">{r.name}</span>
                   <span
                     className={cn(
                       "font-mono text-xs tabular-nums",
-                      r.lead ? "text-fg1" : "text-fg2",
+                      r.kind === "free" ? "text-fg1" : "text-fg2",
                     )}
                   >
-                    {r.pct}
+                    {`${((r.tokens / data.size) * 100).toFixed(1)}%`}
                   </span>
                 </div>
               ))}

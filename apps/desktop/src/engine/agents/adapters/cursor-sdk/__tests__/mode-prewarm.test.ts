@@ -142,6 +142,24 @@ async function startSession(): Promise<{
 }
 
 describe("Cursor executor prewarm across a mode change", () => {
+  it("preserves SSE through creation, prewarm, mode recreation, and resume", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const mcpServers = [{ name: "reports", transport: "sse", url: "https://reports.example/events", headers: { "X-Version": "1" } }] as const;
+    const expected = { reports: { type: "sse", url: mcpServers[0].url, headers: { "X-Version": "1" } } };
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj/wt", env: { CURSOR_API_KEY: "key_test" }, mcpServers: [...mcpServers] });
+      expect(createSpy.mock.calls[0][0].mcpServers).toEqual(expected);
+      expect(prewarmSpy.mock.calls[0][0].mcpServers).toEqual(expected);
+      await adapter.setMode({ sessionId: session.executionId, modeId: "agent" });
+      await adapter.prompt({ sessionId: session.executionId, prompt: TEXT });
+      expect(resumeSpy.mock.calls.at(-1)![1].mcpServers).toEqual(expected);
+      await adapter.loadSession({ sessionId: "saved-sse", cwd: "/tmp/proj/wt", env: { CURSOR_API_KEY: "key_test" }, mcpServers: [...mcpServers] });
+      expect(resumeSpy.mock.calls.at(-1)![1].mcpServers).toEqual(expected);
+    } finally {
+      await adapter.dispose();
+    }
+  });
+
   it("reports team content separately from suppressed local MCP sources", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     const provenance =
@@ -226,15 +244,17 @@ describe("Cursor executor prewarm across a mode change", () => {
     await adapter.dispose();
   });
 
-  it.each([false, true])(
-    "preserves team content and imported MCP when reopening (missing agent: %s)",
-    async (missingAgent) => {
+  it.each([
+    ["http", false], ["http", true], ["sse", false], ["sse", true],
+  ] as const)(
+    "preserves team content and imported %s MCP when reopening (missing agent: %s)",
+    async (transport, missingAgent) => {
       if (missingAgent)
         resumeSpy.mockRejectedValueOnce(new Error("Agent agent-old not found"));
       const adapter = new CursorSdkAdapter(makeCtx());
       const imported = {
         name: "imported-server",
-        transport: "http" as const,
+        transport,
         url: "https://example.com/mcp",
       };
       await adapter.loadSession({
@@ -246,7 +266,7 @@ describe("Cursor executor prewarm across a mode change", () => {
       const warmed = prewarmSpy.mock.calls[0][0];
       expect(warmed.local.settingSources).toEqual(["team"]);
       expect(warmed.mcpServers).toEqual({
-        "imported-server": { url: imported.url },
+        "imported-server": { type: transport, url: imported.url },
       });
       expect(resumeSpy.mock.calls[0][1]).toMatchObject({
         local: warmed.local,
@@ -260,6 +280,19 @@ describe("Cursor executor prewarm across a mode change", () => {
       await adapter.dispose();
     },
   );
+
+  it("preserves a local server directory through prewarm, resume, and mode recreation", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const loaded = await adapter.loadSession({ sessionId: "agent-old", cwd: "/tmp/proj/wt",
+      env: { CURSOR_API_KEY: "key_test" }, mcpServers: [{ name: "files", transport: "stdio", command: "node", args: ["server.js"], cwd: "tools" }] });
+    const expected = { files: { command: "node", args: ["server.js"], cwd: "/tmp/proj/wt/tools" } };
+    expect(prewarmSpy.mock.calls[0][0].mcpServers).toEqual(expected);
+    expect(resumeSpy.mock.calls[0][1].mcpServers).toEqual(expected);
+    await adapter.setMode({ sessionId: loaded.executionId!, modeId: "agent" });
+    await adapter.prompt({ sessionId: loaded.executionId!, prompt: TEXT });
+    expect(resumeSpy.mock.calls.at(-1)![1].mcpServers).toEqual(expected);
+    await adapter.dispose();
+  });
 
   it("keeps the host account opt-out across mode rebuilds", async () => {
     vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0");

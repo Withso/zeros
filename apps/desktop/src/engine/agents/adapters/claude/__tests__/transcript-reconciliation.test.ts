@@ -67,6 +67,37 @@ const result = (id = "call", parent?: string) => ({
 });
 
 describe("Claude native transcript reconciliation", () => {
+  it("does not assign envelope artifacts to a batch or an ambiguous child", () => {
+    const c = capture();
+    c.t.feed(assistant("left", [{ type: "tool_use", id: "same", name: "mcp__reports__create", input: {} }], "parent-one"));
+    c.t.feed(assistant("right", [{ type: "tool_use", id: "same", name: "mcp__reports__create", input: {} }], "parent-two"));
+    c.t.feed({ type: "system", subtype: "task_notification", task_id: "task", tool_use_id: "same", status: "completed", resource_links: [{ uri: "file:///ws/report.html", name: "Report" }] });
+    expect(c.tools().some(tool => tool.content?.length || tool.resourceLinks?.length)).toBe(false);
+    c.t.feed({ type: "user", message: { content: [
+      { type: "tool_result", tool_use_id: "one", content: "One" },
+      { type: "tool_result", tool_use_id: "two", content: "Two" },
+    ] }, tool_use_result: { resourceLinks: [{ uri: "file:///ws/report.html", name: "Report" }] } });
+    expect(c.tools().some(tool => tool.content?.some(block => block.type === "content" && block.content.type === "resource_link"))).toBe(false);
+  });
+  it("retains rich result links and late notification links on the original persisted tool", () => {
+    const c = capture();
+    c.t.feed(assistant("response", [{ type: "tool_use", id: "report", name: "mcp__reports__create", input: {} }]));
+    const link = { type: "resource_link", uri: ".context/local/artifacts/report.html", name: "Report" };
+    c.t.feed({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "report", content: "Report ready" }] }, tool_use_result: { resourceLinks: [{ ...link, type: undefined }], structuredContent: { count: 3 } } });
+    expect(c.tools()[0].content).toContainEqual({ type: "content", content: link });
+    expect(c.tools()[0].rawOutput).toMatchObject({ structuredContent: { count: 3 } });
+    const late = { ...link, uri: ".context/local/artifacts/details.csv", name: "Details" };
+    const notification = { type: "system", subtype: "task_notification", task_id: "background", tool_use_id: "report", status: "completed", resource_links: [{ ...late, type: undefined }] };
+    c.t.feed(notification);
+    c.t.feed(notification);
+    const saved = JSON.parse(JSON.stringify(c.tools()));
+    expect(saved[0].resourceLinks).toEqual([late]);
+    expect(saved).toHaveLength(1);
+    expect(saved[0].content).toEqual([
+      { type: "content", content: { type: "text", text: "Report ready" } },
+      { type: "content", content: link },
+    ]);
+  });
   it("assigns a late native end_turn to its own reply instead of a newer live message", () => {
     const c = capture();
     c.t.feed(start("first"));

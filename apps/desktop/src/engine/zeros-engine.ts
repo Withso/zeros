@@ -1209,6 +1209,10 @@ export class ZerosEngine {
     this.workspace.setGatewayHeaderSecretSetter((url, name, value) =>
       this.setMcpHeaderSecret(url, name, value),
     );
+    this.workspace.setGatewayOAuthSecretSetter((url, clientId, value) => {
+      this.ensureMcpVault().setOAuthSecret(canonicalResourceUri(url), clientId, value);
+      this.reloadGateway();
+    });
     this.workspace.setDesignTerritoryTransitioner((targets, mutation) =>
       this.withDesignTerritoryTransition(targets, mutation, {
         // WorkspaceService may discover the transition only after an async
@@ -2256,7 +2260,7 @@ export class ZerosEngine {
       await gw.start(gatewayBackends);
       this.mcpGateway = gw;
       this.gatewayError = null;
-      this.agents.setGatewayServer(gw.url);
+      this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
       console.log(
         `[Zeros] MCP gateway on ${gw.url} fronting ${gatewayBackends.length} backend(s): ` +
           gw
@@ -2272,8 +2276,9 @@ export class ZerosEngine {
 
   /** Re-resolve the gateway's backend set on a settings change (fire-and-forget;
    *  the agent-facing endpoint stays stable so live sessions aren't dropped).
-   *  Starts the gateway if a backend was just added, stops it if the last one
-   *  was removed. */
+   *  Starts the gateway if a backend was just added. Removing the last backend
+   *  publishes an empty catalog to existing clients; engine shutdown owns the
+   *  listener's lifetime. New sessions omit an empty gateway. */
   private reloadGateway(): void {
     // Serialize onto the chain: re-read this.mcpGateway AFTER each await so two
     // queued reloads can never both construct a gateway on the fixed port.
@@ -2282,8 +2287,7 @@ export class ZerosEngine {
         const { gatewayBackends } = resolveMcpServers();
         if (gatewayBackends.length === 0) {
           if (this.mcpGateway) {
-            await this.mcpGateway.stop();
-            this.mcpGateway = null;
+            await this.mcpGateway.reload([]);
             this.agents.setGatewayServer(null);
           }
           this.gatewayError = null;
@@ -2293,6 +2297,8 @@ export class ZerosEngine {
           await this.startGateway();
         } else {
           await this.mcpGateway.reload(gatewayBackends);
+          const gw = this.mcpGateway;
+          this.agents.setGatewayServer(gw.url, () => gw.catalogRevision);
           this.gatewayError = null;
         }
       } catch (err) {
@@ -2307,8 +2313,8 @@ export class ZerosEngine {
    *  host's durable store (safeStorage) — pushed over stdin as `host.mcpVault`
    *  before this ran (buffered in `mcpVaultSeed`). Its onChange persists every
    *  mint/refresh/clear back to the host via the control fd, so tokens survive an
-   *  engine restart. One vault for the whole process: a gateway stop/start
-   *  (last oauth server removed, then re-added) keeps the live tokens. */
+   *  engine restart. One vault for the whole process: removing and re-adding
+   *  gateway backends keeps their live tokens. */
   private ensureMcpVault(): OAuthVault {
     if (!this.mcpVault) {
       this.mcpVault = new OAuthVault(() => this.scheduleVaultPersist());
@@ -5683,59 +5689,76 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          this.assertAgentSessionProcessStartAllowed(
-            msg.sessionId,
-            this.workspaceIdForAgentSession(msg.sessionId),
-          );
-          const acceptingTurn = this.activeTurnSnapshots.get(msg.sessionId);
-          const receipt = await this.steeringReceipts
-            .run(
+          const attemptId = msg.attemptId ?? msg.userMessageId ?? msg.id;
+          // Replay is a read. Admit only new deliveries, before recording an
+          // attempt, so a transient admission rejection can be retried later.
+          if (
+            this.sessionAgent.has(msg.sessionId) &&
+            !this.steeringReceipts.has(msg.sessionId, attemptId)
+          ) {
+            this.assertAgentSessionProcessStartAllowed(
               msg.sessionId,
-              msg.attemptId ?? msg.userMessageId ?? msg.id,
-              async () => {
-                // Capture the accepting turn before awaiting provider delivery.
-                // Stop or a subsequent prompt may replace the active snapshot.
-                const turnId = acceptingTurn?.turnId;
-                if (
-                  !turnId ||
-                  this.activeTurnSnapshots.get(msg.sessionId) !==
-                    acceptingTurn ||
-                  this.cancelRequested.has(msg.sessionId)
-                ) {
-                  return { outcome: "queued" as const };
-                }
-                let outcome: SteerOutcome;
-                try {
-                  outcome =
-                    (await this.agents.steer(
-                      msg.agentId,
-                      msg.sessionId,
-                      msg.prompt,
-                      () =>
-                        this.activeTurnSnapshots.get(msg.sessionId) ===
-                          acceptingTurn &&
-                        !this.cancelRequested.has(msg.sessionId),
-                    )) ?? "delivered";
-                } catch {
-                  outcome = "interrupted";
-                }
-                if (outcome !== "queued") {
-                  this.persistSteeredUserPrompt(
-                    msg.sessionId,
-                    msg.prompt,
-                    msg.bubble,
-                    msg.userMessageId,
-                    turnId,
-                  );
-                }
-                return { outcome, turnId };
-              },
-            )
-            .catch((error: unknown) => {
-              if (error instanceof SteeringReceiptCapacityError)
-                return { outcome: "queued" as const };
-              throw error;
-            });
+              this.workspaceIdForAgentSession(msg.sessionId),
+            );
+          }
+          const acceptingTurn = this.activeTurnSnapshots.get(msg.sessionId);
+          // Receipts are bounded to live executions. Once a route is retired
+          // (or the engine restarts), a missing receipt cannot prove that an
+          // earlier attempt was never delivered. Do not make it resendable or
+          // allocate a new ledger for arbitrary historical execution ids.
+          const receipt = !this.sessionAgent.has(msg.sessionId)
+            ? { outcome: "interrupted" as const }
+            : await this.steeringReceipts
+                .run(
+                  msg.sessionId,
+                  attemptId,
+                  async () => {
+                    // Disposal can race the microtask that dispatches this attempt.
+                    if (!this.sessionAgent.has(msg.sessionId))
+                      return { outcome: "interrupted" as const };
+                    // Capture the accepting turn before awaiting provider delivery.
+                    // Stop or a subsequent prompt may replace the active snapshot.
+                    const turnId = acceptingTurn?.turnId;
+                    if (
+                      !turnId ||
+                      this.activeTurnSnapshots.get(msg.sessionId) !==
+                        acceptingTurn ||
+                      this.cancelRequested.has(msg.sessionId)
+                    ) {
+                      return { outcome: "queued" as const };
+                    }
+                    let outcome: SteerOutcome;
+                    try {
+                      outcome =
+                        (await this.agents.steer(
+                          msg.agentId,
+                          msg.sessionId,
+                          msg.prompt,
+                          () =>
+                            this.activeTurnSnapshots.get(msg.sessionId) ===
+                              acceptingTurn &&
+                            !this.cancelRequested.has(msg.sessionId),
+                        )) ?? "delivered";
+                    } catch {
+                      outcome = "interrupted";
+                    }
+                    if (outcome !== "queued") {
+                      this.persistSteeredUserPrompt(
+                        msg.sessionId,
+                        msg.prompt,
+                        msg.bubble,
+                        msg.userMessageId,
+                        turnId,
+                      );
+                    }
+                    return { outcome, turnId };
+                  },
+                )
+                .catch((error: unknown) => {
+                  if (error instanceof SteeringReceiptCapacityError)
+                    return { outcome: "queued" as const };
+                  throw error;
+                });
           // Legacy renderers interpret every AGENT_STEERED as delivered.
           // Only receipt-aware requests opt in to non-delivered outcomes.
           if (!msg.attemptId && receipt.outcome !== "delivered") {

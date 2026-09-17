@@ -118,7 +118,10 @@ export async function ensureFileAttachment(
   const owner = attachmentOwner(cwd);
   attachment.owner ??= owner;
   const key = keyFor(cwd, id);
-  let flight = flights.get(key);
+  // Conflicting legacy records may share an id but have different confirmed
+  // paths. They must not adopt each other's in-flight resolution.
+  const flightKey = JSON.stringify([key, attachment.diskPath ?? null, attachment.name, attachment.mimeType]);
+  let flight = flights.get(flightKey);
   if (!flight) {
     const validation = validateAttachmentFile({
       name: attachment.name,
@@ -133,6 +136,7 @@ export async function ensureFileAttachment(
       attachmentId: id,
       filename: attachment.name,
       mimeType: attachment.mimeType,
+      diskPath: attachment.diskPath,
     };
     publish(key, { phase: "saving", percent: 0 });
     const releaseOwner = registerAttachmentSourceOwner(() => attachment);
@@ -245,7 +249,7 @@ export async function ensureFileAttachment(
       void releaseAttachmentSource(attachment.sourceRecoveryId).catch(() => {});
       return result;
     }).finally(releaseOwner);
-    flights.set(key, flight);
+    flights.set(flightKey, flight);
     void flight
       .then(
         (result) => {
@@ -264,7 +268,7 @@ export async function ensureFileAttachment(
         },
       )
       .finally(() => {
-        if (flights.get(key) === flight) flights.delete(key);
+        if (flights.get(flightKey) === flight) flights.delete(flightKey);
       });
   }
   const result = await flight;

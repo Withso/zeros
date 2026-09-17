@@ -209,6 +209,9 @@ export interface ToolCall {
 
 export interface ToolCallUpdate {
   toolCallId: ToolCallId;
+  /** Late artifacts enrich an existing result without replacing its content.
+   * Additive: older peers ignore these links and retain their captured output. */
+  resourceLinks?: ResourceLinkContent[];
   /** A native id can arrive after a completed callback created the local row. */
   nativeToolCallId?: string | null;
   title?: string | null;
@@ -463,6 +466,11 @@ export interface AgentQuotaWindow {
  * use PromptResponse/usage_update and is deliberately not duplicated here. */
 export interface AgentProviderQuota {
   providerId: string;
+  /** Provider-confirmed permission for ordinary included usage. Null is
+   * unknown, never evidence of recovery. Older peers may omit this field. */
+  ordinaryUsageAllowed?: boolean | null;
+  /** Normal model behind a quota alias; informational, not model selection. */
+  normalModelSlug?: string | null;
   primary?: AgentQuotaWindow;
   secondary?: AgentQuotaWindow;
   credits?: {
@@ -731,6 +739,9 @@ export interface ErrorNoticeUpdate {
   /** Engine-confirmed terminal failure. Optional for older transcripts and
    * provider retry notices; turn identity prevents late errors crossing turns. */
   turnFailure?: { turnId: string; kind: string };
+  /** Classified provider failure, including autonomous work with no prompt
+   * receipt. Does not establish turn ownership or automatic recoverability. */
+  failureKind?: string;
   /** True for transient/retryable notices where the active turn is expected
    *  to continue. These should never be treated as terminal failures. */
   recoverable?: boolean;
@@ -762,6 +773,15 @@ export interface ToolResultRetractionUpdate {
   toolCallIds: string[];
 }
 
+export interface ContextUsageCategory {
+  name: string;
+  tokens: number;
+  /** Native semantics, independent of the display name. Optional for older
+   * peers/snapshots. Deferred schemas are outside the context window; buffer
+   * is compaction reserve, not used content or available free space. */
+  kind?: "used" | "free" | "buffer" | "deferred";
+}
+
 export interface UsageUpdateNotification {
   sessionUpdate: "usage_update";
   size?: number;
@@ -772,7 +792,7 @@ export interface UsageUpdateNotification {
    *  getContextUsage() (Messages, MCP tools, System prompt, …); agents
    *  whose protocol has no breakdown (Codex) omit it and the popover
    *  shows Used/Free only. Ordered as received; tokens are absolute. */
-  categories?: Array<{ name: string; tokens: number }>;
+  categories?: ContextUsageCategory[];
 }
 
 /** Absolute accounting snapshot for an exact user turn, including late native
@@ -858,6 +878,10 @@ export interface RequestPermissionRequest {
    * provider policy/amendment decisions set false so a broader local rule can
    * neither replace nor replay a provider-owned decision. */
   allowLocalPolicies?: boolean;
+  /** This action requires a deliberate once-only decision. The existing card
+   * shows Yes/No, starts on No and has no global approval shortcut. Saved
+   * policies and broader approval options must not bypass this request. */
+  requiresExplicitApproval?: boolean;
   /** Vendor correlation id (SDK control request_id / Codex RequestId).
    *  Used by the renderer to dedupe a replayed request on reconnect — the
    *  SDK re-arms in-flight requests on initialize and the adapter mints a

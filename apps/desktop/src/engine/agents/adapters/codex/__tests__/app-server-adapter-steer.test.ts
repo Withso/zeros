@@ -131,13 +131,15 @@ const tick = async (count = 8): Promise<void> => {
   for (let index = 0; index < count; index += 1) await Promise.resolve();
 };
 
-function makeAdapter(): CodexAppServerAdapter {
+function makeAdapter(
+  onSessionUpdate: AgentAdapterContext["emit"]["onSessionUpdate"] = vi.fn(),
+): CodexAppServerAdapter {
   const ctx: AgentAdapterContext = {
     projectRoot: "/tmp/proj",
     mcpServers: [],
     sessionDirRoot: "/tmp/sessions",
     emit: {
-      onSessionUpdate: vi.fn(),
+      onSessionUpdate,
       onPermissionRequest: vi.fn(),
       onQuestionRequest: vi.fn(),
       onAgentStderr: vi.fn(),
@@ -148,6 +150,61 @@ function makeAdapter(): CodexAppServerAdapter {
 }
 
 describe("CodexAppServerAdapter.steer", () => {
+  it("does not adopt an old turn's reroute while preparing a newer manually selected model", async () => {
+    const onSessionUpdate = vi.fn();
+    const adapter = makeAdapter(onSessionUpdate);
+    const { session: info } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { OPENAI_MODEL: "gpt-6-astra" },
+    });
+    const internal = adapter as unknown as {
+      sessions: Map<string, {
+        runtime: { runTurn: (...args: unknown[]) => Promise<unknown> };
+        env: { OPENAI_MODEL: string };
+      }>;
+      buildUserInput: (...args: unknown[]) => Promise<unknown[]>;
+    };
+    const session = internal.sessions.get(info.sessionId)!;
+    const fire = (method: string, params: unknown) =>
+      rt.handlers.get(method)?.forEach(fn => fn(params));
+    const first = adapter.prompt({ sessionId: info.sessionId, prompt: text("First") });
+    await tick();
+    fire("turn/started", { threadId: "thread-steer", turn: { id: "old", status: "inProgress", items: [] } });
+    fire("turn/completed", { threadId: "thread-steer", turn: { id: "old", status: "completed", items: [] } });
+    rt.resolveTurn?.({ turnId: "old", status: "completed", raw: {} });
+    await first;
+    await adapter.setModel({ sessionId: info.sessionId, model: "gpt-5.6-luna" });
+    await adapter.setModel({ sessionId: info.sessionId, model: "gpt-6-astra" });
+    onSessionUpdate.mockClear();
+
+    let release!: (input: unknown[]) => void;
+    vi.spyOn(internal, "buildUserInput").mockImplementationOnce(
+      () => new Promise(resolve => { release = resolve; }),
+    );
+    const run = vi.spyOn(session.runtime, "runTurn");
+    const next = adapter.prompt({ sessionId: info.sessionId, prompt: text("Next") });
+    const reroute = { threadId: "thread-steer", turnId: "old", fromModel: "gpt-6-astra", toModel: "gpt-5.6-sol", reason: "highRiskCyberActivity" };
+    fire("model/rerouted", reroute);
+    release([{ type: "text", text: "Next", text_elements: [] }]);
+    await tick();
+    expect(run).toHaveBeenCalledWith(expect.objectContaining({
+      model: "gpt-6-astra",
+      collaborationMode: expect.objectContaining({ settings: expect.objectContaining({ model: "gpt-6-astra" }) }),
+    }), expect.anything());
+    expect(onSessionUpdate.mock.calls.some(([, event]) => event.update.sessionUpdate === "current_model_update")).toBe(false);
+
+    // A reroute owned by the new native turn still updates the selection.
+    fire("turn/started", { threadId: "thread-steer", turn: { id: "new", status: "inProgress", items: [] } });
+    fire("model/rerouted", { ...reroute, turnId: "new" });
+    expect(session.env.OPENAI_MODEL).toBe("gpt-5.6-sol");
+    expect(onSessionUpdate).toHaveBeenCalledWith("codex", expect.objectContaining({
+      update: expect.objectContaining({ sessionUpdate: "current_model_update", model: "gpt-5.6-sol" }),
+    }));
+    rt.resolveTurn?.({ turnId: "new", status: "completed", raw: {} });
+    await next;
+    await adapter.dispose();
+  });
+
   it("does not deliver prepared input after Stop", async () => {
     const adapter = makeAdapter();
     const { session } = await adapter.newSession({ cwd: "/tmp/proj" });

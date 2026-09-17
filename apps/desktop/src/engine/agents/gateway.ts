@@ -1,3 +1,4 @@
+import { McpWorkingDirectoryError, validateMcpWorkingDirectory } from "./mcp-working-directory";
 import {
   sessionToolsSnapshotSchema,
   sessionToolsInventorySnapshotSchema,
@@ -3846,8 +3847,12 @@ export class AgentGateway {
    *  one extra http server pointing at the gateway, which fronts the auth:"oauth"
    *  backends (they're held out of direct injection by resolveMcpServers). */
   private gatewayServerUrl: string | null = null;
-  setGatewayServer(url: string | null): void {
+  private gatewayCatalog: { url: string; revision: () => string } | null = null;
+  setGatewayServer(url: string | null, revision?: () => string): void {
     this.gatewayServerUrl = url;
+    // Keep the source when new sessions omit an empty gateway: older sessions
+    // still need to withdraw its former tools on their next send.
+    if (url && revision) this.gatewayCatalog = { url, revision };
   }
 
   private scopedLocalServicePorts(
@@ -3855,7 +3860,7 @@ export class AgentGateway {
   ): number[] {
     return this.localPortsForUrls(
       servers.flatMap((server) =>
-        server.transport === "http" && server.name !== "zeros-gateway"
+        server.transport !== "stdio" && server.name !== "zeros-gateway"
           ? [server.url]
           : [],
       ),
@@ -3910,8 +3915,8 @@ export class AgentGateway {
    *  the boot view) keeps a settings edit live for the NEXT session without a
    *  registry reload race. Async because the repo-local trust check shells
    *  `git check-ignore` (off the event loop — the old sync resolve blocked the
-   *  whole engine per spawn). Falls back to the global boot-loaded view on any
-   *  error so a spawn is never blocked. */
+   *  whole engine per spawn). Registry read failures fall back to the global
+   *  view; invalid configured working directories remain actionable errors. */
   private async resolveSessionMcp(
     agentId: string,
     cwd: string,
@@ -3948,14 +3953,20 @@ export class AgentGateway {
         );
         return false;
       });
-      return [...injected, ...safeServers];
+      return await this.validateSessionMcp([...injected, ...safeServers], cwd);
     } catch (err) {
+      if (err instanceof McpWorkingDirectoryError) throw err;
       console.warn(
         `[agents] ${agentId} MCP resolve failed for ${cwd}; using the global registry:`,
         err instanceof Error ? err.message : String(err),
       );
-      return this.mcpServersView;
+      return await this.validateSessionMcp(this.mcpServersView, cwd);
     }
+  }
+
+  private async validateSessionMcp(servers: readonly McpServerRegistration[], cwd: string): Promise<McpServerRegistration[]> {
+    return Promise.all(servers.map(async (server) => server.transport === "stdio" && server.cwd
+      ? { ...server, cwd: await validateMcpWorkingDirectory(server.cwd, cwd) } : server));
   }
 
   /** Resolve only browser capabilities the selected provider exposes natively.
@@ -6675,6 +6686,12 @@ export class AgentGateway {
       // in refreshMcpView; native agent configuration remains owned by each
       // adapter's discovery path.
       mcpServers: this.mcpServersView,
+      mcpCatalogRevision: (server) =>
+        server.name === "zeros-gateway" &&
+        server.transport === "http" &&
+        server.url === this.gatewayCatalog?.url
+          ? this.gatewayCatalog.revision()
+          : undefined,
       sessionDirRoot: sessionsRoot(),
       emit: this.events,
     };

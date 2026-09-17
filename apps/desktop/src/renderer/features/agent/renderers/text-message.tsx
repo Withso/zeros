@@ -73,7 +73,7 @@ function filePathFromMarkdownTarget(target: EventTarget | null): string | null {
     return p && p.length > 0 ? p : null;
   }
   const anchor = target.closest("a");
-  if (anchor) return fileRefPath(anchor.getAttribute("href") ?? "");
+  if (anchor) return fileRefPath(anchor.getAttribute("href") ?? "", true);
   return null;
 }
 
@@ -92,7 +92,7 @@ function handleMarkdownActivate(e: SyntheticEvent, ctx: RendererContext): void {
   // focuses the Review tab instead of leaving the app.
   const anchor = e.target instanceof HTMLElement ? e.target.closest("a") : null;
   const href = anchor?.getAttribute("href") ?? "";
-  if (href && ctx.openPrUrl?.(href)) {
+  if (href && (ctx.openPreviewUrl?.(href) || ctx.openPrUrl?.(href))) {
     e.preventDefault();
   }
 }
@@ -203,6 +203,14 @@ export const TextMessage: Renderer<AgentTextMessage> = memo(
                   <div
                     ref={proseRef}
                     className="zeros-agent-md"
+                    onPointerOver={(event) => {
+                      const path = filePathFromMarkdownTarget(event.target);
+                      if (path && ctx.attachmentImagesActive !== false) ctx.warmFile?.(path);
+                    }}
+                    onFocus={(event) => {
+                      const path = filePathFromMarkdownTarget(event.target);
+                      if (path && ctx.attachmentImagesActive !== false) ctx.warmFile?.(path);
+                    }}
                     onClick={(e) => handleMarkdownActivate(e, ctx)}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter" && e.key !== " ") return;

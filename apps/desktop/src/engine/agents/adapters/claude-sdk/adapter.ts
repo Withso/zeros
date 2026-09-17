@@ -74,10 +74,12 @@ import {
   type UserDialogRequest,
   type UserDialogResult,
 } from "@anthropic-ai/claude-agent-sdk";
+import { isClaudeParentProgress } from "../claude/event-feedback";
 
 import type {
   AdvertisedModel,
   AvailableCommand,
+  ContextUsageCategory,
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
@@ -106,11 +108,14 @@ import {
   type StopReason,
   type TurnUsage,
 } from "../../types";
+import { claudeMcpStdio } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { FirstTokenLatency } from "../shared/first-token-latency";
+import { hasClaudeModelContent } from "./first-content";
+import { isClaudeBackgroundAcknowledgement, isUnownedClaudeResult } from "../claude/result-ownership";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import {
@@ -586,8 +591,17 @@ export function claudeNativeBrowserExtraArgs(
 
 const CLAUDE_CHROME_TOOL_PREFIX = "mcp__claude-in-chrome__";
 
-function isClaudeChromeTool(toolName: string): boolean {
-  return toolName.startsWith(CLAUDE_CHROME_TOOL_PREFIX);
+function isClaudeChromeTool(
+  toolName: string,
+  nativeChromeEnabled: boolean,
+  server?: { name: string; source: string },
+): boolean {
+  if (!nativeChromeEnabled || !toolName.startsWith(CLAUDE_CHROME_TOOL_PREFIX)) return false;
+  // Native Chrome is CLI-owned dynamic configuration, not an SDK-host server.
+  // Only the enabled query without a registered namesake can own it. Older
+  // wrappers omit provenance; retain that narrow query-owned fallback.
+  return server === undefined ||
+    (server?.name === "claude-in-chrome" && server.source === "dynamic");
 }
 
 function claudeChromeSessionPermission(input: {
@@ -680,6 +694,9 @@ interface SdkSession {
   /** The live persistent query (null until the first prompt, or after an idle
    *  release / dispose / fatal error — recreated lazily with `resume`). */
   query: Query | null;
+  /** Monotonic refresh revision; the query object supplies the process
+   * generation. Neither resets at ordinary per-turn system/init boundaries. */
+  contextUsageRevision: number;
   /** Push channel feeding the query's prompt iterable. */
   input: InputQueue<SDKUserMessage>;
   /** Long-lived consumer loop draining the query's output. */
@@ -696,9 +713,11 @@ interface SdkSession {
    *  and a full prompt-cache WRITE before the model says anything, and none of
    *  that was distinguishable from generation in the log. */
   firstToken: FirstTokenLatency;
-  /** No turn has produced output on this query yet — the once-per-query costs
-   *  land on it, so "cold" is the qualifier that makes the number readable. */
+  /** Existing stream-seen guard used by idle detachment. This deliberately
+   * includes empty stream frames; diagnostics must not change that guard. */
   sawFirstTurnOutput: boolean;
+  /** Diagnostic cold/warm qualifier, independent of idle lifecycle state. */
+  sawFirstContent: boolean;
   /** The in-flight turn's deferred, settled when the consumer sees `result`
    *  (or the query errors). Null when idle. */
   turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }> | null;
@@ -739,7 +758,7 @@ interface SdkSession {
   /** Permission resolvers from canUseTool, keyed by permissionId. */
   readonly pendingPermissions: Map<
     string,
-    (r: RequestPermissionResponse) => void
+    ((r: RequestPermissionResponse) => void) & { requiresExplicitApproval?: boolean }
   >;
   /** Blocking user-input questions (AskUserQuestion), keyed by questionId. A
    *  question may be raised by canUseTool (B, the demonstrable path) and/or
@@ -841,6 +860,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, SdkSession>();
+  private readonly permissionModeRevisions = new WeakMap<SdkSession, number>();
   private readonly queryPlugins = new WeakMap<Query, SessionToolGroup>();
 
   private async readSessionTools(
@@ -1366,6 +1386,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // session id once the init event arrives.
       legacySessionId: zerosSessionId,
       query: null,
+      contextUsageRevision: 0,
       input: new InputQueue<SDKUserMessage>(),
       consumer: null,
       containedProcesses: new Set(),
@@ -1406,6 +1427,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       pendingModelReapply: null,
       pendingModelControlStop: null,
       sawFirstTurnOutput: false,
+      sawFirstContent: false,
       turn: null,
       usageLedger: new TurnUsageLedger((turnId, usage) => this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: zerosSessionId, update: { sessionUpdate: "turn_usage_update", turnId, usage },
@@ -1794,6 +1816,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // — an idle teardown mid-conversation is exactly the case where that
     // qualifier stops a normal number from reading as a regression.
     state.sawFirstTurnOutput = false;
+    state.sawFirstContent = false;
     state.input = new InputQueue<SDKUserMessage>();
     state.abort = new AbortController();
     state.skillNames = new Set();
@@ -1875,60 +1898,67 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     }
   }
 
-  /** Emit a `usage_update` carrying the SDK's authoritative context-window
-   *  fill + per-category breakdown (query.getContextUsage()). This is the
-   *  gauge's truth for Claude: the translator's result-time usage_update is
-   *  cumulative TURN BILLING (its own comment warns it once rendered >100%
-   *  "full"), so this second update — emitted after the turn settles, hence
-   *  landing last — overwrites `size`/`used` with actual window numbers and
-   *  attaches `categories` for the popover. Cost is deliberately omitted so
-   *  the store keeps the billing update's costUsd. Best-effort: feature-
-   *  detected (older CLIs lack the control request) and never throws. */
+  /** Refresh context fill independently of turn billing. Summary mode uses
+   * the SDK's last-response usage/local estimates without per-category token
+   * counting calls. Only the current query generation's latest refresh may
+   * publish; failures leave the last confirmed renderer snapshot untouched.
+   * Older CLIs may lack this optional control, so refreshes are best-effort. */
   private async emitContextUsage(state: SdkSession): Promise<void> {
-    const q = state.query as unknown as {
-      getContextUsage?: () => Promise<{
+    const query = state.query;
+    const q = query as unknown as {
+      getContextUsage?: (options?: { detail: "summary" }) => Promise<{
         totalTokens?: number;
         maxTokens?: number;
         categories?: Array<{
           name?: string;
           tokens?: number;
           isDeferred?: boolean;
+          kind?: string;
         }>;
       }>;
     } | null;
-    if (!q || typeof q.getContextUsage !== "function") return;
+    if (state.disposed || !q || typeof q.getContextUsage !== "function") return;
+    const revision = ++state.contextUsageRevision;
     try {
-      const usage = await q.getContextUsage();
-      if (state.disposed) return;
+      const usage = await q.getContextUsage({ detail: "summary" });
+      if (
+        state.disposed || state.query !== query ||
+        state.contextUsageRevision !== revision
+      ) return;
       const size = usage?.maxTokens;
       const used = usage?.totalTokens;
-      if (typeof size !== "number" || typeof used !== "number") return;
-      const categories = (usage.categories ?? [])
+      if (
+        typeof size !== "number" || !Number.isFinite(size) || size <= 0 ||
+        typeof used !== "number" || !Number.isFinite(used) || used < 0
+      ) return;
+      const categories: ContextUsageCategory[] = (Array.isArray(usage.categories) ? usage.categories : [])
         .filter(
-          (c): c is { name: string; tokens: number; isDeferred?: boolean } =>
-            typeof c?.name === "string" && typeof c?.tokens === "number",
+          (c): c is { name: string; tokens: number; isDeferred?: boolean; kind?: string } =>
+            typeof c?.name === "string" && !!c.name.trim() && typeof c?.tokens === "number" &&
+            Number.isFinite(c.tokens) && c.tokens >= 0,
         )
-        // The SDK's list includes its own "Free space" pseudo-category
-        // (wire-verified: maxTokens − totalTokens). The gauge popover
-        // computes and leads with free space itself, so passing this
-        // through renders the row twice.
-        .filter((c) => !/^free space$/i.test(c.name.trim()))
-        .map((c) => ({
-          // The reference design lists deferred pools as their own rows —
-          // suffix unless the SDK already did.
-          name:
-            c.isDeferred && !/deferred/i.test(c.name)
-              ? `${c.name} (deferred)`
-              : c.name,
-          tokens: c.tokens,
-        }));
+        .flatMap((c): ContextUsageCategory[] => {
+          const name = c.name.trim();
+          // SDK 0.3.268+ classifies directly. Names/isDeferred are only a
+          // compatibility fallback for older runtimes, never an override.
+          const kind = c.kind ?? (
+            c.isDeferred || /\(deferred\)$/i.test(name) ? "deferred" :
+            /^free space$/i.test(name) ? "free" :
+            /^(auto)?compact buffer$/i.test(name) ? "buffer" : "used"
+          );
+          // Do not guess that a future category type consumes context.
+          if (kind !== "used" && kind !== "free" && kind !== "buffer" && kind !== "deferred") return [];
+          return [{ name, tokens: c.tokens, kind }];
+        });
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: state.zerosSessionId,
         update: {
           sessionUpdate: "usage_update",
           size,
           used,
-          ...(categories.length > 0 ? { categories } : {}),
+          // An empty/missing breakdown must not keep categories from an older
+          // snapshot beside these new totals. Zero used is valid after clear.
+          categories,
         } as never,
       });
     } catch {
@@ -2032,7 +2062,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     if (
       m.type === "assistant" ||
       m.type === "stream_event" ||
-      m.type === "result"
+      m.type === "result" ||
+      (m.type === "system" &&
+        (message as { subtype?: unknown }).subtype === "thinking_tokens" &&
+        isClaudeParentProgress(message as Record<string, unknown>))
     ) {
       const ids = Array.isArray(m.user_message_uuids)
         ? m.user_message_uuids
@@ -2054,12 +2087,18 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     let continuationFailure = false;
     let streamError: string | null = null;
     let rejectedPrompt = false;
-    const reportContinuation = (code: string, message: string, recovered = false) => {
+    // The SDK can yield a structured startup error and then throw it again
+    // when the process exits. The rejected send already owns that diagnostic.
+    let reportedStartupFailure = false;
+    const reportContinuation = (
+      code: string, message: string, recovered = false, failureKind?: string,
+    ) => {
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: state.zerosSessionId,
         update: {
           sessionUpdate: "error_notice", noticeId: `claude-background-${randomUUID()}`,
           severity: recovered ? "warning" : "error", recoverable: recovered, code, message,
+          ...(failureKind ? { failureKind } : {}),
         },
       });
     };
@@ -2084,6 +2123,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           user_message_uuid?: unknown;
           user_message_uuids?: unknown;
           queued_turn_count?: number;
+          startup_failure_reason?: unknown;
           parent_tool_use_id?: string | null;
           state?: "idle" | "running" | "requires_action";
         };
@@ -2152,12 +2192,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (Array.isArray(cmds)) void this.refreshSkillsThenEmit(state, cmds);
         }
 
-        if (m.type === "system" && m.subtype === "session_state_changed" && m.state && !state.cancelRequested) {
-          state.providerRunActive = m.state !== "idle";
-          if (state.providerRunActive) this.markSessionBusy(state);
-          else this.refreshIdleTeardown(state);
-        }
-
         // Translate → emit. The SDK shapes match the raw stream-json the
         // translator already understands (system/assistant/user/result).
         const hadProcessWork = state.translator.hasProcessWork;
@@ -2176,6 +2210,22 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // following deltas retain the correct native message owner.
         if (!accepted) continue;
 
+        if (m.type === "system" && m.subtype === "session_state_changed" && m.state && !state.cancelRequested) {
+          state.providerRunActive = m.state !== "idle";
+          if (state.providerRunActive) this.markSessionBusy(state);
+          else this.refreshIdleTeardown(state);
+        }
+        if (m.type === "system" && m.subtype === "status" && !m.parent_tool_use_id && !state.cancelRequested) {
+          // Native plan entry/exit is authoritative. The creation-time auto
+          // fallback must not override a deliberate mid-turn mode change.
+          void this.reconcileAdvertisedPermissionMode(
+            state,
+            q,
+            (msg as unknown as { permissionMode?: string }).permissionMode,
+            false,
+          );
+        }
+
         // A provider wake-up/autonomous continuation has no local prompt()
         // deferred. Treat visible provider traffic as active until its result
         // so an already-armed idle timer cannot close the process mid-run.
@@ -2185,29 +2235,31 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           !state.cancelRequested &&
           !m.parent_tool_use_id &&
           (m.type === "assistant" ||
-            m.type === "stream_event")
+            m.type === "stream_event" ||
+            isClaudeParentProgress(msg as unknown as Record<string, unknown>))
         ) {
+          reportedStartupFailure = false;
           state.providerRunActive = true;
           this.markSessionBusy(state);
         }
 
-        // First model output of the turn. `system/init` and the SDK's own
-        // control frames land within milliseconds of the prompt even when the
-        // model takes twelve seconds to say anything, so the measurement has
-        // to key on content — assistant text/thinking, a tool call, or the
-        // partial-message stream that precedes both.
+        // Preserve the existing stream-seen idle guard. Measure latency only
+        // when the parent produces actual content, not a message_start/empty
+        // block, usage/signature metadata, or a background child's output.
         if (
           state.firstToken.awaitingFirstOutput &&
           (m.type === "assistant" || m.type === "stream_event")
         ) {
-          const line = state.firstToken.firstOutput({
-            cold: !state.sawFirstTurnOutput,
-            model: state.model,
-          });
           state.sawFirstTurnOutput = true;
-          // Same channel as the Cursor host's equivalent line, so the engine
-          // log a user pastes shows all three providers side by side.
-          if (line) console.info(line);
+          if (hasClaudeModelContent(msg)) {
+            const line = state.firstToken.firstOutput({
+              cold: !state.sawFirstContent,
+              model: state.model,
+            });
+            state.sawFirstContent = true;
+            // Keep the existing channel, format, and slow-turn threshold.
+            if (line) console.info(line);
+          }
         }
 
         if (m.type === "result") {
@@ -2217,7 +2269,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           // no prompt() awaiting to do it. Fire-and-forget: a control-
           // channel call (zero model tokens) that must never delay or fail
           // the turn.
-          void this.emitContextUsage(state);
+          const result = msg as Extract<SDKMessage, { type: "result" }>;
+          const backgroundAcknowledgement = isClaudeBackgroundAcknowledgement(result);
+          const unownedResult = isUnownedClaudeResult(result);
+          if (!backgroundAcknowledgement && typeof m.startup_failure_reason !== "string") reportedStartupFailure = false;
+          if (!backgroundAcknowledgement) void this.emitContextUsage(state);
           const correlatedMessageUuids = new Set<string>();
           if (
             typeof m.user_message_uuid === "string" &&
@@ -2234,7 +2290,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           }
           const hasCorrelation = correlatedMessageUuids.size > 0;
           const turn = state.turn;
-          state.providerRunActive = false;
+          if (!backgroundAcknowledgement) state.providerRunActive = false;
 
           // A correlated result can settle any /compact input it explicitly
           // names. With no correlation fields, retain the pre-0.3.265 fallback:
@@ -2246,7 +2302,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                 matchedTurnless += 1;
               }
             }
-          } else if (!turn && state.turnlessRunsPending > 0) {
+          } else if (!turn && !backgroundAcknowledgement && !unownedResult && state.turnlessRunsPending > 0) {
             const oldestUuid = state.turnlessMessageUuids.values().next().value;
             if (typeof oldestUuid === "string") {
               state.turnlessMessageUuids.delete(oldestUuid);
@@ -2260,15 +2316,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             );
           }
 
-          // 0.3.265+ can emit a result for a synthetic/autonomous turn while
-          // our user message is still queued. Only defer local settlement
-          // when the producer supplied positive correlation that names some
-          // other message; uncorrelated legacy/fatal results keep the historic
-          // next-result behavior. The frame itself was already translated and
-          // its usage refresh above still runs, so no provider output is gated.
+          // UUIDs establish ownership even when a user message was folded into
+          // an autonomous turn. Without them, explicit autonomous origin or a
+          // batch acknowledgement cannot finish a waiting user send. Legacy
+          // uncorrelated results and session-scoped startup errors still settle.
           const resultBelongsToTurn =
-            turn !== null &&
-            (!hasCorrelation ||
+            turn !== null && !backgroundAcknowledgement &&
+            ((!hasCorrelation && !unownedResult) ||
               [...correlatedMessageUuids].some((uuid) =>
                 state.turnMessageUuids.has(uuid),
               ));
@@ -2284,6 +2338,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           if (resultBelongsToTurn) state.usageOwnerTurnId = usageTurnId;
           const accountedUsage = owners.size > 1 ? undefined
             : state.usageLedger.add(usageTurnId, state.translator.turnUsage, "estimated");
+          if (backgroundAcknowledgement) {
+            this.refreshIdleTeardown(state);
+            continue;
+          }
           if ((!turn || resultBelongsToTurn) && !m.parent_tool_use_id &&
               !(typeof m.queued_turn_count === "number" && m.queued_turn_count > 0) &&
               !state.cancelOperation) {
@@ -2293,7 +2351,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             if (!turn && !state.cancelRequested && !state.disposed) {
               const error = state.translator.terminalFailure;
               if (error) {
-                reportContinuation("claude-background-failed", providerErrorFailure("claude", normalizeProviderError("claude", error), "prompt").message);
+                const failure = providerErrorFailure(
+                  "claude", normalizeProviderError("claude", error), "prompt",
+                ).failure;
+                reportContinuation("claude-background-failed", failure.message, false, failure.kind);
                 continuationFailure = true;
               } else if (continuationFailure && state.translator.stopReason === "end_turn") {
                 reportContinuation("claude-background-recovered", "Claude continued successfully.", true);
@@ -2312,6 +2373,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             continue;
           }
           if (terminalError) {
+            reportedStartupFailure = typeof m.startup_failure_reason === "string" && m.startup_failure_reason.trim().length > 0;
             const native = normalizeProviderError("claude", state.translator.terminalFailure);
             if (native.category === "session-expired") {
               state.query = null;
@@ -2347,7 +2409,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // belongs to the NEW query. Bail without settling it (the `finally` is
       // likewise guarded, so it won't null the new query either).
       if (state.query !== q) return;
-      streamError = normalizeProviderError("claude", err).message;
+      const nativeError = normalizeProviderError("claude", state.translator.pendingUserActionFailure ?? err);
+      streamError = nativeError.message;
+      const failure = err instanceof AgentFailureError ? err : providerErrorFailure(
+        "claude", nativeError, "prompt",
+      );
       // The query errored or was aborted. A deliberate teardown/cancel is
       // not a failure; anything else settles the in-flight turn so prompt()
       // doesn't hang forever.
@@ -2359,10 +2425,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         if (state.cancelRequested || state.disposed) {
           turn.resolve({ stopReason: "cancelled" as StopReason });
         } else {
-          turn.reject(err instanceof AgentFailureError ? err : providerErrorFailure(
-            "claude", normalizeProviderError("claude", err), "prompt",
-          ));
+          turn.reject(failure);
         }
+      } else if (
+        !reportedStartupFailure && !state.cancelRequested && !state.disposed &&
+        (failure.failure.kind === "verification-required" || failure.failure.kind === "cloud-credentials-unavailable")
+      ) {
+        reportContinuation("claude-background-failed", failure.message, false, failure.failure.kind);
+        continuationFailure = true;
       }
     } finally {
       // The query is spent (iterator returned/threw); a future prompt
@@ -2371,6 +2441,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // stale teardown can't null the fresh query prompt() just created.
       if (state.query === q) {
         const lostBackgroundWork = state.translator.hasActiveWork || state.providerRunActive;
+        const pendingError = state.translator.pendingUserActionFailure;
+        const actionFailure = pendingError ? providerErrorFailure(
+          "claude", normalizeProviderError("claude", pendingError), "prompt",
+        ) : null;
         // A clean iterator return is still a disconnect when the current send
         // never received its result. Detach before settling so a continuation
         // cannot enqueue its next prompt into this spent query.
@@ -2388,16 +2462,20 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.translator.endActivity();
         this.clearCommandDiscovery(state);
         state.consumer = null;
-        if (!unfinished && !rejectedPrompt && !state.cancelRequested && !state.disposed && !continuationFailure && (lostBackgroundWork || streamError)) {
-          reportContinuation("claude-background-transport-closed",
-            streamError ? `Claude disconnected during background work: ${streamError}` : "Claude disconnected before its background work finished.");
+        if (!unfinished && !rejectedPrompt && !reportedStartupFailure && !state.cancelRequested && !state.disposed && !continuationFailure && (actionFailure || lostBackgroundWork || streamError)) {
+          if (actionFailure) {
+            reportContinuation("claude-background-failed", actionFailure.message, false, actionFailure.failure.kind);
+          } else {
+            reportContinuation("claude-background-transport-closed",
+              streamError ? `Claude disconnected during background work: ${streamError}` : "Claude disconnected before its background work finished.");
+          }
         }
         if (unfinished) {
           if (state.cancelRequested || state.disposed) {
             unfinished.resolve({ stopReason: "cancelled" });
           } else {
             unfinished.reject(
-              new AgentFailureError({
+              actionFailure ?? new AgentFailureError({
                 kind: "transport-closed",
                 message:
                   "Claude disconnected before confirming that the turn finished.",
@@ -2780,6 +2858,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     let appliedId =
       requestedMode && mode !== requestedMode ? mode : opts.modeId;
     if (mode) {
+      this.permissionModeRevisions.set(state,
+        (this.permissionModeRevisions.get(state) ?? 0) + 1);
       state.permissionMode = mode;
       // Apply live to an alive query (the SDK supports mid-session mode
       // changes — a per-turn-spawn adapter can't do this). This does NOT
@@ -2831,9 +2911,10 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // every pending request for this session; the blocked turn then
       // proceeds instead of hanging until the response timeout.
       if (mode === "bypass" && state.pendingPermissions.size > 0) {
-        const resolvers = [...state.pendingPermissions.values()];
-        state.pendingPermissions.clear();
-        for (const resolve of resolvers) {
+        for (const [permissionId, resolve] of state.pendingPermissions) {
+          // Native once-only gates still need their own deliberate decision.
+          if (resolve.requiresExplicitApproval) continue;
+          state.pendingPermissions.delete(permissionId);
           resolve({
             outcome: { outcome: "selected", optionId: "allow_once" },
           } as RequestPermissionResponse);
@@ -2866,11 +2947,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     state: SdkSession,
     q: Query,
     advertised: string | undefined,
+    allowAutoFallback = true,
   ): Promise<void> {
     if (!advertised || state.disposed || state.query !== q) return;
-    if (advertised === toSdkPermissionMode(state.permissionMode)) return;
     let applied = defaultModeTokenToClaudeMode(advertised);
-    if (state.permissionMode === "auto") {
+    if (!applied) return;
+    const revision = (this.permissionModeRevisions.get(state) ?? 0) + 1;
+    this.permissionModeRevisions.set(state, revision);
+    if (advertised === toSdkPermissionMode(state.permissionMode)) return;
+    if (allowAutoFallback && state.permissionMode === "auto") {
       try {
         await q.setPermissionMode("acceptEdits");
         applied = "accept-edits";
@@ -2878,8 +2963,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         /* keep the CLI's own downgrade */
       }
     }
+    if (
+      state.disposed || state.query !== q ||
+      this.permissionModeRevisions.get(state) !== revision
+    ) return;
     if (!applied || applied === state.permissionMode) return;
     state.permissionMode = applied;
+    if ((applied === "bypass") !== state.queryAllowsBypass) state.pendingRestart = true;
     this.ctx.emit.onSessionUpdate(this.agentId, {
       sessionId: state.zerosSessionId,
       update: {
@@ -3013,7 +3103,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  We raise the same permission UI the hook path used, await the user's
    *  decision (keyed by permissionId so N concurrent/subagent requests
    *  resolve independently — no deadlock), and map it to allow/deny. */
-  private canUseTool(state: SdkSession) {
+  private canUseTool(state: SdkSession, nativeChromeEnabled: boolean) {
     return (
       toolName: string,
       input: Record<string, unknown>,
@@ -3028,6 +3118,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         description?: string;
         requestId?: string;
         agentID?: string;
+        mcpServer?: { name: string; source: string };
+        defaultToNo?: boolean;
+        suppressAlwaysAllowRule?: boolean;
         matchedAskRule?: {
           source: string;
           toolName: string;
@@ -3048,7 +3141,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       if (/^AskUserQuestion$/i.test(toolName)) {
         return this.handleAskUserQuestionTool(state, input, options);
       }
-      if (isClaudeChromeTool(toolName)) {
+      if (isClaudeChromeTool(toolName, nativeChromeEnabled, options.mcpServer)) {
         return this.requestClaudeChromePermission(
           state,
           toolName,
@@ -3056,6 +3149,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           options,
         );
       }
+      const requiresExplicitApproval =
+        options.defaultToNo === true || options.suppressAlwaysAllowRule === true;
       const permissionId = randomUUID();
       const toolCallId = options.toolUseID ?? `${Date.now()}`;
       // "Allow for this project" persists an ALLOW RULE to localSettings
@@ -3070,14 +3165,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       //    "Allow all edits in this project" (honest about the breadth).
       // We NEVER synthesize a tool-wide rule for Bash/exec tools — that would be
       // RCE-by-default — so a Bash call with no scoped suggestion gets no project
-      // option (chat-scope only). "Allow for this chat" is always offered (a
-      // Zeros chat-scoped policy recorded renderer-side; no SDK write).
+      // option (chat-scope only). Native approval hints restrict BOTH broader
+      // scopes: this request must remain an explicit once-only Yes/No choice.
       const scopedRules = (options.suggestions ?? [])
         .filter((s) => s.type === "addRules" && s.behavior === "allow")
         .map((s) => ({ ...s, destination: "localSettings" as const }));
-      let projectRules: PermissionUpdate[] = scopedRules;
+      let projectRules: PermissionUpdate[] = requiresExplicitApproval ? [] : scopedRules;
       let projectName = "Allow for this project";
-      if (scopedRules.length === 0 && EDIT_TOOLS.has(toolName)) {
+      if (!requiresExplicitApproval && scopedRules.length === 0 && EDIT_TOOLS.has(toolName)) {
         projectRules = [
           {
             type: "addRules",
@@ -3091,6 +3186,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       const offerProject = projectRules.length > 0;
       const request: RequestPermissionRequest = {
         sessionId: state.zerosSessionId,
+        ...(requiresExplicitApproval
+          ? { requiresExplicitApproval: true, allowLocalPolicies: false }
+          : {}),
         ...(typeof options.title === "string" && options.title.trim()
           ? { title: options.title.trim() }
           : {}),
@@ -3107,11 +3205,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         },
         options: [
           { optionId: "allow_once", name: "Allow once", kind: "allow_once" },
-          {
-            optionId: "allow_always",
-            name: "Allow for this chat",
-            kind: "allow_always",
-          },
+          ...(!requiresExplicitApproval
+            ? [{ optionId: "allow_always", name: "Allow for this chat", kind: "allow_always" }]
+            : []),
           ...(offerProject
             ? [
                 {
@@ -3165,10 +3261,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           ).outcome;
           const optionId =
             outcome?.outcome === "selected" ? (outcome.optionId ?? "") : "";
+          // Validate at the adapter too: a stale renderer choice must not
+          // restore a broader grant that this particular ask never offered.
+          if (!request.options.some((option) => option.optionId === optionId)) {
+            deny();
+            return;
+          }
           if (optionId === "allow_project") {
-            // projectRules is non-empty exactly when the option was offered; on
-            // a spurious/forged allow_project (empty) `allow` degrades to a
-            // plain once-allow — it never persists a broad rule.
             allow(projectRules);
           } else if (optionId === "allow_once" || optionId === "allow_always") {
             allow();
@@ -3195,9 +3294,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         };
         options.signal.addEventListener("abort", onAbort, { once: true });
 
-        state.pendingPermissions.set(permissionId, (response) => {
-          settle(response);
-        });
+        state.pendingPermissions.set(permissionId, Object.assign(settle, { requiresExplicitApproval }));
         if (options.signal.aborted) {
           onAbort();
           return;
@@ -3223,6 +3320,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       description?: string;
       requestId?: string;
       suggestions?: PermissionUpdate[];
+      defaultToNo?: boolean;
+      suppressAlwaysAllowRule?: boolean;
       matchedAskRule?: {
         source: string;
         toolName: string;
@@ -3231,7 +3330,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     },
   ): Promise<PermissionResult> {
     const permissionId = randomUUID();
-    const domain = claudeChromeSessionPermission(options);
+    const requiresExplicitApproval =
+      options.defaultToNo === true || options.suppressAlwaysAllowRule === true;
+    const domain = requiresExplicitApproval ? null : claudeChromeSessionPermission(options);
     const request: RequestPermissionRequest = {
       sessionId: state.zerosSessionId,
       title:
@@ -3242,8 +3343,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         typeof options.requestId === "string" && options.requestId
           ? options.requestId
           : (options.toolUseID ?? permissionId),
-      useOptionNames: true,
+      useOptionNames: !requiresExplicitApproval,
       allowLocalPolicies: false,
+      ...(requiresExplicitApproval ? { requiresExplicitApproval: true } : {}),
       toolCall: {
         toolCallId: options.toolUseID ?? `${Date.now()}`,
         title:
@@ -3315,7 +3417,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         deny();
       };
       options.signal.addEventListener("abort", onAbort, { once: true });
-      state.pendingPermissions.set(permissionId, settle);
+      state.pendingPermissions.set(permissionId, Object.assign(settle, { requiresExplicitApproval }));
       if (options.signal.aborted) {
         onAbort();
         return;
@@ -4153,14 +4255,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
             sessionMcp.map((s) => [
               s.name,
               s.transport === "stdio"
-                ? {
-                    type: "stdio",
-                    command: s.command,
-                    ...(s.args ? { args: s.args } : {}),
-                    ...(s.env ? { env: s.env } : {}),
-                  }
+                ? claudeMcpStdio(s, state.cwd)
                 : {
-                    type: "http",
+                    type: s.transport,
                     url: s.url,
                     ...(s.headers ? { headers: s.headers } : {}),
                   },
@@ -4197,16 +4294,25 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       );
     }
 
+    // Native preset + host append stay fresh when a conversation is resumed
+    // with changed workspace/custom instructions. 0.3.267+ defaults to a
+    // recorded prompt, so query recreation alone would retain the old append.
+    // Older SDKs ignore this optional flag and already render fresh prompts.
+    const systemPrompt: Extract<Options["systemPrompt"], { type: "preset" }> & { snapshot: false } = {
+      type: "preset", preset: "claude_code", snapshot: false,
+      ...(systemAppend ? { append: systemAppend } : {}),
+    };
     const options: ClaudeOptionsWithOAuthRefresh = {
       cwd: state.cwd,
       // The SDK REPLACES the subprocess env entirely when `env` is set, so
       // we MUST spread process.env (PATH/HOME/keychain access depend on it).
       env: state.executionBoundary
-        ? stripEngineAuthorityEnv({ ...(env ?? {}), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1" })
+        ? stripEngineAuthorityEnv({ ...(env ?? {}), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1", CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1" })
         : preserveAmbientConfigRoots({
             ...(process.env as Record<string, string>),
             ...env,
             CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: "1",
+            CLAUDE_CODE_STARTUP_FAILURE_RESULTS: "1",
           }),
       permissionMode: toSdkPermissionMode(state.permissionMode),
       ...(state.executionBoundary
@@ -4256,7 +4362,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // pendingRestart), so gated modes get canUseTool back before the next turn.
       ...(state.permissionMode === "bypass"
         ? { allowDangerouslySkipPermissions: true }
-        : { canUseTool: this.canUseTool(state) }),
+        : { canUseTool: this.canUseTool(state, state.browserUse && !sessionMcp.some((server) => server.name === "claude-in-chrome")) }),
       // (A) Blocking-dialog channel. Wired defensively: if this CLI routes
       // AskUserQuestion through onUserDialog we handle it here; otherwise the
       // canUseTool special-case (B) covers it. Deliberately exclude Claude in
@@ -4361,11 +4467,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // own cwd: on its first write it would guess an absolute path like
       // `/changes.md`, hit macOS's read-only root volume (EROFS), then recover
       // by running `pwd`. Only the user's optional append text is conditional.
-      systemPrompt: {
-        type: "preset",
-        preset: "claude_code",
-        ...(systemAppend ? { append: systemAppend } : {}),
-      },
+      systemPrompt,
       // ALWAYS pass an explicit executable. The SDK's own fallback — resolving
       // its platform package relative to sdk.mjs — is IMPOSSIBLE in the packaged
       // app (bun-compiled single-file engine: sdk.mjs lives in $bunfs and there

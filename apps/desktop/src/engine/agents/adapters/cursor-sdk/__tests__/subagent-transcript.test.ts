@@ -3,23 +3,22 @@
 // (Glob/Read/Grep/Shell), no tool_result blocks, final assistant text = report.
 
 import { describe, it, expect, afterAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseSubagentTranscript,
   cursorProjectSlug,
-  findSubagentTranscriptPath,
   agentTranscriptsRoot,
-  loadSubagentTranscript,
-  loadSubagentTranscriptByPath,
   agentIdFromTranscriptPath,
 } from "../subagent-transcript";
+
+import { findSubagentTranscriptPath, loadSubagentTranscript, loadSubagentTranscriptByPath } from "../subagent-transcript-reader";
 
 const line = (o: unknown) => JSON.stringify(o);
 
 describe("cursorProjectSlug", () => {
-  it("mirrors the SDK sanitizer (non-alnum → '-', collapse, trim)", () => {
+  it("mirrors the SDK sanitizer (non-alnum → '-', collapse, trim)", async () => {
     expect(cursorProjectSlug("/Users/dev/zeros/workspaces/acme-widgets/ws_a4844b-almond")).toBe(
       "Users-dev-zeros-workspaces-acme-widgets-ws-a4844b-almond",
     );
@@ -41,31 +40,31 @@ describe("native child transcript lookup", () => {
     return path;
   }
 
-  it("requires the parent identity even when only one matching child file exists", () => {
+  it("requires the parent identity even when only one matching child file exists", async () => {
     child("other-chat", "foreign-child");
-    expect(findSubagentTranscriptPath(cwd, "foreign-child", { home })).toBeNull();
-    expect(loadSubagentTranscript(cwd, "foreign-child", { home })).toBeNull();
+    expect(await findSubagentTranscriptPath(cwd, "foreign-child", { home })).toBeNull();
+    expect(await loadSubagentTranscript(cwd, "foreign-child", { home })).toBeNull();
   });
 
-  it("does not search a sibling chat when the current parent has no transcript", () => {
+  it("does not search a sibling chat when the current parent has no transcript", async () => {
     child("other-chat", "other-child");
-    expect(findSubagentTranscriptPath(cwd, "other-child", { home, parentAgentId: "current-chat" })).toBeNull();
+    expect(await findSubagentTranscriptPath(cwd, "other-child", { home, parentAgentId: "current-chat" })).toBeNull();
   });
 
-  it("does not fall through an existing native directory into a colliding legacy prefix", () => {
+  it("does not fall through an existing native directory into a colliding legacy prefix", async () => {
     child("current", "current-child");
     child("agent-current", "wrong-child");
-    expect(findSubagentTranscriptPath(cwd, "wrong-child", { home, parentAgentId: "current" })).toBeNull();
+    expect(await findSubagentTranscriptPath(cwd, "wrong-child", { home, parentAgentId: "current" })).toBeNull();
   });
 
-  it("supports the legacy directory when the exact parent directory does not exist", () => {
+  it("supports the legacy directory when the exact parent directory does not exist", async () => {
     const path = child("agent-legacy", "legacy-child");
-    expect(findSubagentTranscriptPath(cwd, "legacy-child", { home, parentAgentId: "legacy" })).toBe(path);
+    expect(await findSubagentTranscriptPath(cwd, "legacy-child", { home, parentAgentId: "legacy" })).toBe(path);
   });
 
-  it("does not treat a truncated child ID as an exact identity", () => {
+  it("does not treat a truncated child ID as an exact identity", async () => {
     child("long-parent", "a".repeat(200));
-    expect(findSubagentTranscriptPath(cwd, `${"a".repeat(200)}-other`, { home, parentAgentId: "long-parent" })).toBeNull();
+    expect(await findSubagentTranscriptPath(cwd, `${"a".repeat(200)}-other`, { home, parentAgentId: "long-parent" })).toBeNull();
   });
 });
 
@@ -84,7 +83,7 @@ describe("parseSubagentTranscript", () => {
     line({ role: "assistant", message: { content: [{ type: "text", text: "# Research Report\n\nFinal findings." }] } }),
   ].join("\n");
 
-  it("extracts tool calls as steps and the last assistant text as finalText", () => {
+  it("extracts tool calls as steps and the last assistant text as finalText", async () => {
     const { steps, finalText } = parseSubagentTranscript(jsonl);
     expect(finalText).toBe("# Research Report\n\nFinal findings.");
     // narration text + 4 tool calls (the final report is held back from steps)
@@ -103,7 +102,7 @@ describe("parseSubagentTranscript", () => {
     expect(steps.some((s) => s.type === "text" && (s as { text: string }).text.includes("Research Report"))).toBe(false);
   });
 
-  it("normalizes tool inputs to the fields event-meta reads", () => {
+  it("normalizes tool inputs to the fields event-meta reads", async () => {
     const { steps } = parseSubagentTranscript(jsonl);
     const tools = steps.filter((s) => s.type === "tool") as Array<{ toolKind: string; rawInput: any }>;
     expect(tools[0].rawInput.pattern).toBe("**/*"); // Glob glob_pattern → pattern
@@ -111,7 +110,7 @@ describe("parseSubagentTranscript", () => {
     expect(tools[3].rawInput.command).toBe("ls -la"); // Shell → execute
   });
 
-  it("ignores user/tool_result lines and tolerates malformed JSON", () => {
+  it("ignores user/tool_result lines and tolerates malformed JSON", async () => {
     const messy = [
       line({ role: "user", message: { content: [{ type: "tool_result", tool_use_id: "x", content: "out" }] } }),
       "{ not json",
@@ -122,11 +121,11 @@ describe("parseSubagentTranscript", () => {
     expect((steps[0] as { toolKind: string }).toolKind).toBe("read");
   });
 
-  it("returns empty for an empty transcript", () => {
+  it("returns empty for an empty transcript", async () => {
     expect(parseSubagentTranscript("")).toEqual({ steps: [], finalText: "" });
   });
 
-  it("strips Cursor's [REDACTED] reasoning tokens and drops bare-redacted blocks", () => {
+  it("strips Cursor's [REDACTED] reasoning tokens and drops bare-redacted blocks", async () => {
     const redacted = [
       line({ role: "assistant", message: { content: [
         { type: "text", text: "Exploring the codebase. [REDACTED]" }, // real text + token → keep stripped
@@ -149,8 +148,25 @@ describe("loadSubagentTranscriptByPath", () => {
   const dir = mkdtempSync(join(tmpdir(), "cursor-tpath-"));
   afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
-  it("reads + parses a transcript at an exact path", () => {
-    const path = join(dir, "sub.jsonl");
+  it("does not read an exact path without an authoritative owner", async () => {
+    const file = join(dir, "unowned.jsonl");
+    writeFileSync(file, line({ role: "assistant", message: { content: [{ type: "text", text: "foreign" }] } }));
+    expect(await loadSubagentTranscriptByPath(file)).toBeNull();
+  });
+
+  it("does not follow child transcript symlinks", async () => {
+    const root = agentTranscriptsRoot("/work/symlink", { home: dir });
+    mkdirSync(join(root, "parent", "subagents"), { recursive: true });
+    const foreign = join(dir, "foreign.jsonl");
+    writeFileSync(foreign, line({ role: "assistant", message: { content: [{ type: "text", text: "foreign" }] } }));
+    symlinkSync(foreign, join(root, "parent", "subagents", "child.jsonl"));
+    expect(await loadSubagentTranscript("/work/symlink", "child", { home: dir, parentAgentId: "parent" })).toBeNull();
+  });
+
+  it("reads + parses a transcript at an exact path", async () => {
+    const folder = join(agentTranscriptsRoot("/work/exact", { home: dir }), "parent", "subagents");
+    mkdirSync(folder, { recursive: true });
+    const path = join(folder, "sub.jsonl");
     writeFileSync(
       path,
       [
@@ -161,18 +177,18 @@ describe("loadSubagentTranscriptByPath", () => {
         ] } }),
       ].join("\n"),
     );
-    const parsed = loadSubagentTranscriptByPath(path);
+    const parsed = await loadSubagentTranscriptByPath(path, { cwd: "/work/exact", home: dir, parentAgentId: "parent" });
     expect(parsed?.finalText).toBe("# Done");
     expect(parsed?.steps.filter((s) => s.type === "tool")).toHaveLength(1);
   });
 
-  it("returns null for a missing path", () => {
-    expect(loadSubagentTranscriptByPath(join(dir, "nope.jsonl"))).toBeNull();
+  it("returns null for a missing path", async () => {
+    expect(await loadSubagentTranscriptByPath(join(dir, "nope.jsonl"))).toBeNull();
   });
 });
 
 describe("agentIdFromTranscriptPath", () => {
-  it("extracts the agentId stem from a transcript path", () => {
+  it("extracts the agentId stem from a transcript path", async () => {
     expect(
       agentIdFromTranscriptPath("/Users/x/.cursor/projects/p/agent-transcripts/agent-A/subagents/sub-123.jsonl"),
     ).toBe("sub-123");
@@ -198,7 +214,7 @@ describe("transcript roots follow the HOME the session actually ran with", () =>
 
   afterAll(() => rmSync(projectedHome, { recursive: true, force: true }));
 
-  it("finds a subagent transcript under the projected HOME", () => {
+  it("finds a subagent transcript under the projected HOME", async () => {
     mkdirSync(join(root, "agent-parent", "subagents"), { recursive: true });
     const file = join(root, "agent-parent", "subagents", "sub-1.jsonl");
     writeFileSync(
@@ -220,13 +236,13 @@ describe("transcript roots follow the HOME the session actually ran with", () =>
     );
 
     expect(agentTranscriptsRoot(cwd, { home: projectedHome })).toBe(root);
-    expect(findSubagentTranscriptPath(cwd, "sub-1", { home: projectedHome, parentAgentId: "agent-parent" })).toBe(
+    expect(await findSubagentTranscriptPath(cwd, "sub-1", { home: projectedHome, parentAgentId: "agent-parent" })).toBe(
       file,
     );
     expect(
-      loadSubagentTranscript(cwd, "sub-1", { home: projectedHome, parentAgentId: "agent-parent" })?.finalText,
+      (await loadSubagentTranscript(cwd, "sub-1", { home: projectedHome, parentAgentId: "agent-parent" }))?.finalText,
     ).toBe("done");
     // …and the engine's own home is NOT where a contained session's state is.
-    expect(findSubagentTranscriptPath(cwd, "sub-1")).toBeNull();
+    expect(await findSubagentTranscriptPath(cwd, "sub-1")).toBeNull();
   });
 });

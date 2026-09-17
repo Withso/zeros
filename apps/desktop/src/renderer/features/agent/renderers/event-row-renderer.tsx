@@ -1,3 +1,6 @@
+import { ToolResourceLink } from "./tool-resource-link";
+import { generatedImagePath, structuredToolOutput } from "./tool-artifacts";
+import { fileRefPath } from "../markdown-file-path";
 import { cursorSearchOutput } from "./search-output";
 // ──────────────────────────────────────────────────────────
 // EventRowRenderer — adapter from registry's Renderer<M> to EventRow
@@ -44,6 +47,7 @@ import {
   toolCompletionUnreported,
 } from "./raw-output";
 import { nativeAgentWait, toolRecord } from "./native-tool-presentation";
+import { AgentNotice } from "../agent-notice";
 import { getLang } from "./syntax";
 import type { Renderer, RendererContext } from "./types";
 
@@ -117,6 +121,9 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
           <span>Reconnecting agent</span>
         </div>
       );
+    }
+    if (message.kind === "error_notice" && message.code !== "api_retry") {
+      return <AgentNotice message={message.message} />;
     }
     if (message.kind === "tool") {
       const reads = commandReadActions(message);
@@ -433,9 +440,35 @@ function ToolDetail({ tool, ctx }: { tool: AgentToolMessage; ctx: RendererContex
   );
 }
 
-function renderToolOutput(
+function renderToolOutput(tool: AgentToolMessage, ctx: RendererContext): React.ReactNode {
+  const resources = new Map<string, { label: string; description?: string }>();
+  const path = generatedImagePath(tool);
+  for (const block of tool.content ?? []) {
+    if (block.type !== "content") continue;
+    const content = block.content;
+    if (content.type === "resource_link") resources.set(content.uri, { label: content.title ?? content.name, description: content.description });
+    else if (content.type === "resource") resources.set(content.resource.uri, { label: content.resource.uri });
+  }
+  for (const link of tool.resourceLinks ?? []) resources.set(link.uri, { label: link.title ?? link.name, description: link.description });
+  if (path && ![...resources.keys()].some(uri => fileRefPath(uri, true) === path)) resources.set(path, { label: path.split("/").pop() ?? path });
+  const structured = tool.content?.length && !["read", "execute", "search", "list"].includes(tool.toolKind ?? "") ? asDisplayString(structuredToolOutput(tool.rawOutput)) : null;
+  const body = renderToolBody(tool, ctx, !!structured);
+  if (!resources.size && !structured) return body;
+  return <div className="min-w-0">
+    {resources.size > 0 && <div className="zeros-agent-md space-y-1 px-3 py-2">{[...resources].map(([uri, resource]) => (
+      <div key={uri}><ToolResourceLink uri={uri} label={resource.label} ctx={ctx} />
+        {resource.description && <p>{resource.description}</p>}
+      </div>
+    ))}</div>}
+    {body}
+    {structured && <HighlightedCode code={structured} lang="json" className={OUTPUT_CLASS} />}
+  </div>;
+}
+
+function renderToolBody(
   tool: AgentToolMessage,
   ctx: RendererContext,
+  hasStructuredOutput: boolean,
 ): React.ReactNode {
   if (tool.toolKind === "search") {
     const text = cursorSearchOutput(tool.rawOutput);
@@ -463,6 +496,7 @@ function renderToolOutput(
     }
   }
 
+
   if (tool.content && tool.content.length > 0) {
     const texts: string[] = [];
     const images: string[] = [];
@@ -475,7 +509,7 @@ function renderToolOutput(
           texts.push(c.text);
         } else if (
           c?.type === "image" &&
-          typeof c.data === "string" &&
+          typeof c.data === "string" && c.data.length > 0 &&
           typeof c.mimeType === "string"
         ) {
           // A tool returning an image (screenshot, MCP image result).
@@ -484,26 +518,13 @@ function renderToolOutput(
           images.push(c.uri);
         } else if (
           c?.type === "audio" &&
-          typeof c.data === "string" &&
+          typeof c.data === "string" && c.data.length > 0 &&
           typeof c.mimeType === "string" &&
           c.mimeType.startsWith("audio/")
         ) {
           audio.push(`data:${c.mimeType};base64,${c.data}`);
-        } else if (c?.type === "resource_link" && typeof c.uri === "string") {
-          texts.push(
-            [
-              c.title ?? c.name,
-              c.description,
-              `@${c.uri.replace(/^file:\/\//, "")}`,
-            ]
-              .filter((value) => typeof value === "string" && value)
-              .join("\n"),
-          );
         } else if (c?.type === "resource" && c.resource) {
-          // Embedded resource — show its inline text or a path marker.
           if (typeof c.resource.text === "string") texts.push(c.resource.text);
-          else if (typeof c.resource.uri === "string")
-            texts.push(`@${String(c.resource.uri).replace(/^file:\/\//, "")}`);
         }
       } else if (b.type === "text" && typeof b.text === "string") {
         // Defensive: a FLAT (un-wrapped) text block from a non-conformant
@@ -553,11 +574,15 @@ function renderToolOutput(
       );
     }
   }
+  if (hasStructuredOutput) return null;
   // Fall back to captured OUTPUT before raw input — fixes adapters that
   // populate `rawOutput` (or emit only a terminal block) instead of
   // canonical content blocks. The renderer never read rawOutput before,
   // so shell/terminal output silently vanished for some agents.
-  const outStr = asDisplayString(capturedOutput(tool));
+  const captured = capturedOutput(tool);
+  const hasArtifacts = generatedImagePath(tool) || tool.content?.some(block => block.type === "content" && (block.content.type === "resource_link" || block.content.type === "resource"));
+  const outStr = asDisplayString(hasArtifacts && tool.status !== "failed" && captured && typeof captured === "object" && !Array.isArray(captured)
+    ? structuredToolOutput(captured) : captured);
   if (outStr) {
     return (
       <HighlightedCode

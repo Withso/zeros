@@ -1,3 +1,4 @@
+import { boundedStructuredOutput, canonicalToolContent } from "../shared/tool-content";
 import { CodexTurnUsage } from "./usage-accounting";
 // ──────────────────────────────────────────────────────────
 // Codex app-server → SessionNotification translator.
@@ -141,6 +142,17 @@ export class CodexAppServerTranslator {
    *  synthesized from the server request. */
   toolCallIdFor(itemId: string): string | undefined {
     return this.toolCallIds.get(itemId);
+  }
+
+  /** A host capability notice belongs to the requesting native thread. It is
+   * commentary, not an agent tool or a successful identity check. */
+  emitUnsupportedVerification(requestId: string): void {
+    this.emitMessageDelta(
+      `unsupported-verification:${requestId}`,
+      false,
+      "Codex requested identity verification, which this version of Zeros cannot complete.",
+      "commentary",
+    );
   }
 
   /** Codex may ask a blocking question through the JSON-RPC request channel
@@ -2276,7 +2288,7 @@ function toolOutput(item: ThreadItemUnion, streamedOutput?: string): unknown {
     };
   }
   if (item.type === "mcpToolCall") {
-    return item.result ?? item.error ?? null;
+    return boundedStructuredOutput(item.result ?? item.error ?? null);
   }
   if (item.type === "dynamicToolCall") {
     return item.contentItems ?? null;
@@ -2319,85 +2331,7 @@ function mcpToolContent(
 ): ToolCallContent[] | null {
   const result = recordValue(item.result);
   const content = result.content ?? recordValue(result.raw).content;
-  if (!Array.isArray(content)) return null;
-  const blocks: ToolCallContent[] = [];
-  for (const candidate of content.slice(0, 128)) {
-    const value = recordValue(candidate);
-    if (value.type === "text" && typeof value.text === "string") {
-      blocks.push({
-        type: "content",
-        content: { type: "text", text: value.text },
-      });
-    } else if (
-      (value.type === "image" || value.type === "audio") &&
-      typeof value.data === "string" &&
-      typeof value.mimeType === "string" &&
-      value.mimeType.startsWith(`${value.type}/`) &&
-      value.data.length <= 16 * 1024 * 1024 &&
-      /^[A-Za-z0-9+/]+={0,2}$/.test(value.data)
-    ) {
-      blocks.push({
-        type: "content",
-        content: {
-          type: value.type,
-          mimeType: value.mimeType,
-          data: value.data,
-        },
-      });
-    } else if (
-      value.type === "resource_link" &&
-      typeof value.uri === "string"
-    ) {
-      blocks.push({
-        type: "content",
-        content: {
-          type: "resource_link",
-          uri: value.uri,
-          name: typeof value.name === "string" ? value.name : value.uri,
-          ...(typeof value.description === "string"
-            ? { description: value.description }
-            : {}),
-          ...(typeof value.title === "string" ? { title: value.title } : {}),
-          ...(typeof value.mimeType === "string"
-            ? { mimeType: value.mimeType }
-            : {}),
-          ...(typeof value.size === "number" ? { size: value.size } : {}),
-        },
-      });
-    } else if (value.type === "resource") {
-      const resource = recordValue(value.resource);
-      if (typeof resource.uri !== "string") continue;
-      if (typeof resource.text === "string") {
-        blocks.push({
-          type: "content",
-          content: {
-            type: "resource",
-            resource: {
-              uri: resource.uri,
-              text: resource.text,
-              ...(typeof resource.mimeType === "string"
-                ? { mimeType: resource.mimeType }
-                : {}),
-            },
-          },
-        });
-      } else {
-        // Binary resources remain inspectable by identity without copying their
-        // bytes into another durable presentation field.
-        blocks.push({
-          type: "content",
-          content: {
-            type: "resource_link",
-            uri: resource.uri,
-            name: resource.uri,
-            ...(typeof resource.mimeType === "string"
-              ? { mimeType: resource.mimeType }
-              : {}),
-          },
-        });
-      }
-    }
-  }
+  const blocks = canonicalToolContent(content);
   return blocks.length ? blocks : null;
 }
 

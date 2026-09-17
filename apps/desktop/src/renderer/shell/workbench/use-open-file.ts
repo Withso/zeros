@@ -32,7 +32,7 @@ import {
 import { buildDirectFileOpenAction } from "./direct-file-open";
 import { useWorkbenchDirtyEditorIds } from "./tabs/code-editor/editor-state";
 import { pickFileMatch } from "../resolve-file-ref";
-import { loadWorkspaceFileRead } from "../workspace-file-data-cache";
+import { loadWorkspaceFileRead, prefetchWorkspaceFileRead } from "../workspace-file-data-cache";
 import {
   loadWorkspaceFiles,
   peekWorkspaceFiles,
@@ -52,6 +52,15 @@ function relativeToCwd(abs: string, cwd: string): string | null {
   if (!abs.startsWith(base)) return null;
   const rel = abs.slice(base.length);
   return rel.length > 0 ? rel : null;
+}
+
+/** Warm the same bounded, exact-key snapshot used by the Files viewer. This
+ * runs on reference hover/focus only; hidden chats never prefetch artifacts. */
+export function warmChatFileInWorkbench(cwd: string | undefined, rawPath: string): void {
+  if (!cwd) return;
+  const path = rawPath.startsWith("/") ? relativeToCwd(rawPath, cwd) : rawPath;
+  if (!path || path.split("/").includes("..")) return;
+  prefetchWorkspaceFileRead(cwd, path);
 }
 
 /** Open a workbench file, optionally in Diff mode. `opts.diff` opens the viewer's
@@ -268,7 +277,7 @@ async function verifyThenOpen(
   // response being published afterward.
   const res = await loadWorkspaceFileRead(
     { cwd, path, contentRevision: 0 },
-    { force: true },
+    { maxAgeMs: 15_000 },
   );
   if (res && res.kind !== "error") openTab(path);
 }

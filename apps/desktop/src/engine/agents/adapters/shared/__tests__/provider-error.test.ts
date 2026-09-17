@@ -1,7 +1,67 @@
 import { describe, expect, it } from "vitest";
-import { normalizeProviderError } from "../provider-error";
+import { normalizeProviderError, providerErrorFailure } from "../provider-error";
 
 describe("normalizeProviderError", () => {
+  it.each([
+    ["verification_required", "verification-required"],
+    ["cloud_credential_error", "cloud-credentials-unavailable"],
+  ] as const)("keeps Claude's %s separate from login, model and transport recovery", (code, category) => {
+    const message = "The model is unavailable. Invalid credentials. See https://example.com/provider-help";
+    for (const value of [
+      { code, message },
+      { error: code, message },
+      { code, message, status: 401, name: "AuthenticationError" },
+      { code, message, cause: { code: "invalid_token", message: "Expired credential." } },
+      { code, message, cause: { code: "ECONNRESET" } },
+      new Error(message, { cause: { code } }),
+    ]) {
+      const normalized = normalizeProviderError("claude", value);
+      expect(normalized).toMatchObject({ category, code });
+      const { failure } = providerErrorFailure("claude", normalized, "prompt");
+      expect(failure.kind).toBe(category);
+      expect(failure.message).toContain(message);
+      expect(failure.advice).not.toMatch(/Settings|sign in|model menu/i);
+    }
+  });
+
+  it("uses the API verification detail before its generic permission wrapper", () => {
+    const body = { error: { type: "permission_error", message: "Verify at https://example.com/verify", details: { error_code: "verification_required", privateDetail: "do-not-display" } } };
+    for (const value of [
+      { status: 403, ...body },
+      new Error(`API Error: 403 ${JSON.stringify(body)}`),
+    ]) {
+      const normalized = normalizeProviderError("claude", value);
+      expect(normalized).toMatchObject({ category: "verification-required", code: "verification_required", status: 403 });
+      expect(normalized.message).toContain("https://example.com/verify");
+    }
+    expect(normalizeProviderError("claude", body).message).not.toContain("do-not-display");
+  });
+
+  it.each([
+    ["verification_required", "verification-required", /verification/i],
+    ["cloud_credential_error", "cloud-credentials-unavailable", /cloud provider.*credentials/i],
+  ] as const)("gives a missing explanation for %s useful fallback copy", (code, kind, copy) => {
+    for (const value of [code, { code }, { code, message: code }, { error: code }, { code, message: "error_during_execution" }]) {
+      const { failure } = providerErrorFailure("claude", normalizeProviderError("claude", value), "prompt");
+      expect(failure.kind).toBe(kind);
+      expect(failure.message).toMatch(copy);
+      expect(failure.message).toMatch(/retry/i);
+      expect(failure.message).not.toContain(code);
+    }
+  });
+
+  it("does not infer new Claude categories from advice or change other providers", () => {
+    for (const provider of ["codex", "cursor"] as const) {
+      expect(normalizeProviderError(provider, { code: "verification_required", message: "Request failed." }).category).toBe("protocol-error");
+      expect(normalizeProviderError(provider, { code: "cloud_credential_error", status: 401, message: "Invalid credentials." }).category).toBe("auth-required");
+    }
+    for (const value of [
+      { message: "A tool mentioned verification_required in its documentation." },
+      { message: "Request failed.", advice: "cloud_credential_error" },
+      { message: "Request failed.", details: { unrelated: "verification_required" } },
+    ]) expect(normalizeProviderError("claude", value).category).toBe("protocol-error");
+  });
+
   it.each(["claude", "cursor", "codex"] as const)(
     "keeps %s error categories independent",
     (provider) => {
@@ -155,5 +215,48 @@ describe("normalizeProviderError", () => {
       expect(error.message).not.toContain("[object Object]");
       expect(error.message.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("Claude startup reason recovery", () => {
+  it.each([
+    ["gateway_signin_required", "auth-required", /sign in/i],
+    ["gateway_access_denied", "protocol-error", /administrator/i],
+    ["org_pin_api_key_conflict", "protocol-error", /credential/i],
+    ["org_verify_failed", "protocol-error", /organization/i],
+    ["org_pin_mismatch", "protocol-error", /organization/i],
+    ["managed_settings_invalid", "protocol-error", /administrator/i],
+    ["remote_settings_required_unavailable", "protocol-error", /settings/i],
+    ["proxy_invalid", "protocol-error", /proxy/i],
+    ["temp_dir_unusable", "protocol-error", /temporary/i],
+    ["cwd_unavailable", "protocol-error", /directory/i],
+    ["shell_tool_missing", "protocol-error", /shell/i],
+    ["session_held_by_background", "protocol-error", /background/i],
+    ["worktree_resume_refused", "protocol-error", /worktree/i],
+    ["worktree_unverified", "protocol-error", /worktree/i],
+    ["cli_version_too_old", "protocol-error", /update/i],
+    ["bypass_root", "protocol-error", /root/i],
+  ] as const)("uses %s before incidental sign-in or transport advice", (code, category, advice) => {
+    for (const value of [{ code }, { startup_failure_reason: code }]) {
+      const error = normalizeProviderError("claude", { ...value, message: "Native explanation: please sign in or check the network error.", cause: { code: "invalid_token" } });
+      expect(error).toMatchObject({ code, category });
+      const { failure } = providerErrorFailure("claude", error, "prompt");
+      expect(failure.advice).toMatch(advice);
+      expect(failure.message).toBe("Native explanation: please sign in or check the network error.");
+    }
+  });
+
+  it("does not classify other providers or prose as Claude startup reasons", () => {
+    for (const provider of ["cursor", "codex"] as const) {
+      expect(normalizeProviderError(provider, { code: "proxy_invalid", message: "Invalid credentials." }).category).toBe("auth-required");
+    }
+    expect(normalizeProviderError("claude", { message: "Documentation says gateway_signin_required" }).category).toBe("protocol-error");
+    expect(normalizeProviderError("claude", { startup_failure_reason: "future_kind", message: "An unfamiliar startup failure" })).toMatchObject({ code: "future_kind", category: "protocol-error" });
+  });
+
+  it("supplies useful copy for a startup error containing only a generic subtype", () => {
+    const { failure } = providerErrorFailure("claude", normalizeProviderError("claude", { code: "cwd_unavailable", message: "error_during_execution" }), "prompt");
+    expect(failure.message).toMatch(/directory/i);
+    expect(failure.message).not.toBe("error_during_execution");
   });
 });

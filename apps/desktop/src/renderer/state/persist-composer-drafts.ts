@@ -54,6 +54,7 @@
 
 import type { ComposerDraft, EditDraftStash, WorkspaceState } from "./store";
 import { liveChatDraftEntries } from "../features/agent/composer-live-drafts";
+import { liveEditDraftEntries } from "../features/agent/edit-live-drafts";
 
 const STORAGE_KEY = "zeros:composer-drafts:v1";
 const DEBOUNCE_MS = 500;
@@ -301,15 +302,21 @@ export function persistDraftsNow(state: WorkspaceState): void {
 
 function snapshotOf(state: WorkspaceState): PersistedDrafts {
   const chats = { ...state.chatComposerDrafts };
+  const edits = { ...state.editComposerDrafts };
   const owners = state.chats && new Set(state.chats.map((chat) => chat.id));
   for (const [id, draft] of liveChatDraftEntries()) {
     if (owners && !owners.has(id)) continue;
     if (draft.text.trim() || draft.attachments.length > 0) chats[id] = draft;
     else delete chats[id];
   }
+  for (const [key, { chatId, draft }] of liveEditDraftEntries()) {
+    if (owners && !owners.has(chatId)) continue;
+    if (draft) edits[key] = draft;
+    else delete edits[key];
+  }
   return {
     chats,
-    edits: state.editComposerDrafts,
+    edits,
     autoSend: state.pendingAutoSend,
   };
 }

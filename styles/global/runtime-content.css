@@ -120,7 +120,15 @@
      code block + inline code + table → 12 px
 
    The 20 / 16 tiers exist ONLY inside `.zeros-agent-md`; never use
-   `text-lg`/`text-xl`/`text-base` on app chrome. */
+   `text-lg`/`text-xl`/`text-base` on app chrome.
+
+   SIZES are this scale's own; WEIGHTS are not. Because no JSX binds here,
+   these rules can't say `font-medium` and must write `font-weight`
+   directly — so they write `var(--weight-medium)` / `var(--weight-semibold)`
+   (styles/zeros-tokens.css), which is exactly what those utilities compile
+   to. Never a bare number: a literal `500` silently detaches this file from
+   the scale, so rendered markdown drifts heavier than the chrome beside it
+   the next time the weights move. */
 [data-Zeros-root] .zeros-agent-md {
   white-space: normal;
   font-size: 14px;
@@ -148,7 +156,7 @@
 [data-Zeros-root] .zeros-agent-md h4,
 [data-Zeros-root] .zeros-agent-md h5,
 [data-Zeros-root] .zeros-agent-md h6 {
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   color: var(--fg1);
 }
 [data-Zeros-root] .zeros-agent-md h1,
@@ -223,20 +231,30 @@
   text-decoration-color: var(--fg2);
   opacity: 0.6;
 }
-/* Links — blue-fg text, no underline at rest; hover reveals a custom 1px
+/* External links — brown-primary text, no underline at rest; hover reveals a custom 1px
    underline with a gap below the text (matches the file-path chips). Every
    link ends with a small ↗ redirect glyph (lucide arrow-up-right as an
-   alpha mask, painted with blue-fg via background-color so it re-themes
+   alpha mask, painted with the link color via background-color so it re-themes
    with the token). The glyph is an atomic inline (inline-block), so the
    hover underline never runs under it. */
 [data-Zeros-root] .zeros-agent-md a {
-  color: var(--blue-fg);
+  display: inline-block;
+  max-width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  color: var(--brown-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  word-break: normal;
+  overflow-wrap: normal;
   text-decoration: none;
 }
 [data-Zeros-root] .zeros-agent-md a:hover {
   text-decoration: underline;
   text-decoration-thickness: 1px;
-  text-decoration-color: var(--blue-fg);
+  text-decoration-color: currentColor;
   text-underline-offset: 3px;
 }
 [data-Zeros-root] .zeros-agent-md a::after {
@@ -245,14 +263,14 @@
   width: 0.7em;
   height: 0.7em;
   margin-left: 3px;
-  background-color: var(--blue-fg);
+  background-color: currentColor;
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 7h10v10'/%3E%3Cpath d='M7 17 17 7'/%3E%3C/svg%3E")
     no-repeat center / contain;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M7 7h10v10'/%3E%3Cpath d='M7 17 17 7'/%3E%3C/svg%3E")
     no-repeat center / contain;
 }
 [data-Zeros-root] .zeros-agent-md strong {
-  font-weight: 600;
+  font-weight: var(--weight-semibold);
   color: var(--fg1);
 }
 [data-Zeros-root] .zeros-agent-md em {
@@ -286,25 +304,61 @@
   color: var(--fg1);
   word-break: break-word;
 }
-/* Inline file paths the agent mentions (`src/foo.ts`) linkify into clickable
-   chips that open the file in the workbench (markdown.ts > linkifyFilePaths +
-   text-message.tsx). Borderless chip on the lifted --bg1-highlight fill (no
-   border, unlike inline code); the path reads as a warm accent — brown-primary
-   text (distinct from blue markdown links), and hover reveals the custom 1px
-   underline (offset below the text — same treatment as markdown links). Text
-   stays brown-primary on hover. */
-[data-Zeros-root] .zeros-agent-md code.zeros-md-filepath {
-  background: var(--bg1-highlight);
+/* Internal file references share the same 14px sans face as prose, without a
+   background. Keep paths whole; long labels ellipsize and expose the full path
+   in their title. Plain inline code above retains its monospace presentation. */
+[data-Zeros-root] .zeros-agent-md .zeros-md-filepath {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  padding: 1px 3px; /* check:ui ignore-line — compact reference geometry requested by design */
+  border-radius: 4px;
+  background: transparent;
   border: none;
   color: var(--brown-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
   cursor: pointer;
-  word-break: break-all;
+  word-break: normal;
+  overflow-wrap: normal;
 }
-[data-Zeros-root] .zeros-agent-md code.zeros-md-filepath:hover {
+[data-Zeros-root] .zeros-agent-md .zeros-md-filepath:hover {
   text-decoration: underline;
   text-decoration-thickness: 1px;
   text-decoration-color: var(--brown-primary);
   text-underline-offset: 3px;
+}
+[data-Zeros-root] .zeros-agent-md a[data-local-preview] {
+  color: var(--blue-fg);
+}
+[data-Zeros-root] .zeros-agent-md a[data-local-preview]::after {
+  display: none;
+}
+[data-Zeros-root] .zeros-agent-md .zeros-md-filepath:focus-visible {
+  outline: 1px solid var(--brown-primary);
+  outline-offset: 2px;
+}
+/* References retain their own link affordance in live and settled narration. */
+[data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md :is(a, .zeros-md-filepath),
+[data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md :is(a, .zeros-md-filepath) * {
+  color: var(--brown-primary);
+}
+[data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md a[data-local-preview],
+[data-Zeros-root] .zeros-working-feed [data-role] .zeros-agent-md a[data-local-preview] * {
+  color: var(--blue-fg);
+}
+[data-Zeros-root] .zeros-agent-md a code {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: none;
+  padding: 0;
+}
+[data-Zeros-root] .zeros-agent-md a * {
+  color: inherit;
 }
 [data-Zeros-root] .zeros-agent-md pre {
   margin: 14px 0;
@@ -399,7 +453,7 @@
    "ignore the header" behaviour. */
 [data-Zeros-root] .zeros-agent-md th {
   background: var(--bg2);
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   color: var(--fg1);
 }
 [data-Zeros-root] .zeros-agent-md tbody tr:last-child td {
@@ -425,15 +479,15 @@
   scroll-margin-top: 96px;
 }
 
-/* Definition lists — rare but valid markdown. The term row is
-   `font-weight: 500` so it visually leads the definition row. */
+/* Definition lists — rare but valid markdown. The term row carries
+   --weight-medium so it visually leads the definition row. */
 [data-Zeros-root] .zeros-agent-md dl {
   margin: 0 0 14px;
   font-size: 14px;
 }
 [data-Zeros-root] .zeros-agent-md dt {
   margin-top: 8px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   color: var(--fg1);
 }
 [data-Zeros-root] .zeros-agent-md dd {
@@ -457,7 +511,7 @@
 }
 [data-Zeros-root] .zeros-agent-md details > summary {
   cursor: pointer;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   color: var(--fg1);
   list-style: none;
 }
@@ -523,7 +577,7 @@
   border: 1px solid var(--border1);
   border-radius: 4px;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   color: var(--fg2);
 }
 

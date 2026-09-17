@@ -16,6 +16,18 @@ function redirect(to: string, status = 302): Response {
 }
 
 describe("safeAuthFetch (gateway SSRF guard)", () => {
+  it("strips a brokered custom header across an SSE redirect", async () => {
+    const seen: (string | null)[] = [];
+    const fetchImpl: FetchFn = async (_url, init) => {
+      seen.push(new Headers(init?.headers).get("X-Api-Key"));
+      return seen.length === 1 ? redirect("https://canonical.example/sse") : ok();
+    };
+    await safeAuthFetch("https://mcp.example/sse", { headers: { "X-Api-Key": "fixture" } }, {
+      fetchImpl, lookupImpl: makeLookup(), sensitiveHeaders: ["X-Api-Key"],
+    });
+    expect(seen).toEqual(["fixture", null]);
+  });
+
   it("allows a public HTTPS GET and returns the response", async () => {
     const fetchImpl: FetchFn = async () => ok('{"ok":true}');
     const res = await safeAuthFetch("https://mcp.example.com/.well-known", undefined, {

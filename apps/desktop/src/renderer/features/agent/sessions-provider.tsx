@@ -17,6 +17,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { SendQueue } from "./send-queue";
+import { hasPromptAttachmentReferences, refreshPromptAttachments } from "./refresh-prompt-attachments";
 import { reconcileHistoryMessages } from "./history-message-identity";
 import React, {
   startTransition,
@@ -88,7 +89,7 @@ import {
   classifyRpcError,
   type AgentFailure,
 } from "../../platform/bridge/failure";
-import { findMatchingPolicy } from "./policies";
+import { permissionPolicyOption } from "./policies";
 import {
   agentModeForPermission,
   agentFamily,
@@ -660,49 +661,26 @@ export function AgentSessionsProvider({
           // resolved. Never render a card or send a duplicate response.
           continue;
         }
-        const match =
-          chatId && p.request.allowLocalPolicies !== false
-            ? findMatchingPolicy(policies, tool.kind ?? undefined, tool.title)
-            : null;
-        if (match) {
-          // Map decision → wire option. Prefer allow_always /
-          // reject_always (sticky on the engine side too); fall back
-          // to the once-variants if the agent didn't expose the
-          // always option for this request.
-          const wantedKinds =
-            match.decision === "allow"
-              ? ["allow_always", "allow_once"]
-              : ["reject_always", "reject_once"];
-          let optionId: string | null = null;
-          let optionKind: string | null = null;
-          for (const k of wantedKinds) {
-            const opt = p.request.options.find((o) => o.kind === k);
-            if (opt) {
-              optionId = opt.optionId;
-              optionKind = opt.kind;
-              break;
-            }
-          }
-          if (optionId) {
-            bridge.send({
-              type: "AGENT_PERMISSION_RESPONSE",
-              permissionId: p.permissionId,
-              response: {
-                outcome: { outcome: "selected", optionId },
-              },
-            });
-            trackAgentPermissionDecided({
-              chatId: chatId ?? "",
-              agentId: p.agentId,
-              decision: `policy_${optionKind ?? "unknown"}`,
-              toolKind: tool.kind,
-            });
-            if (chatId) promptActivityRef.current.get(chatId)?.();
-            // Skip the regular set-pendingPermission path so the UI
-            // never blinks the prompt. The auto-allow is deliberately
-            // silent — no attribution chip (removed 2026-07-06).
-            continue;
-          }
+        const policyOption = chatId ? permissionPolicyOption(policies, p.request) : null;
+        if (policyOption) {
+          bridge.send({
+            type: "AGENT_PERMISSION_RESPONSE",
+            permissionId: p.permissionId,
+            response: {
+              outcome: { outcome: "selected", optionId: policyOption.optionId },
+            },
+          });
+          trackAgentPermissionDecided({
+            chatId: chatId ?? "",
+            agentId: p.agentId,
+            decision: `policy_${policyOption.kind}`,
+            toolKind: tool.kind,
+          });
+          if (chatId) promptActivityRef.current.get(chatId)?.();
+          // Skip the regular set-pendingPermission path so the UI
+          // never blinks the prompt. The auto-allow is deliberately
+          // silent — no attribution chip (removed 2026-07-06).
+          continue;
         }
         store.applyBridgePermissionRequest(
           p.agentId,
@@ -1434,6 +1412,114 @@ export function AgentSessionsProvider({
     [evictUnretainedTranscripts],
   );
 
+  const refreshQueuedAttachments = useCallback(
+    async (
+      chatId: string,
+      entry: {
+        bubbleId: string;
+        args: Parameters<SessionsActions["sendPrompt"]>;
+      },
+    ): Promise<boolean> => {
+      const slot = getStore().sessions[chatId];
+      const args = entry.args;
+      const refreshed = await refreshPromptAttachments(
+        {
+          attachments: args[3],
+          bubbleAttachments: args[4],
+          segments: args[5],
+        },
+        {
+          cwd: slot?.cwd ?? null,
+          chatId,
+          agentId: slot?.agentId,
+          supportsImage: true,
+        },
+      );
+      if (
+        !sendQueueRef.current.get(chatId)?.includes(entry) ||
+        entry.args !== args ||
+        getStore().sessions[chatId]?.cwd !== slot?.cwd
+      )
+        return false;
+      entry.args = [...args];
+      entry.args[3] = refreshed.attachments;
+      entry.args[4] = refreshed.bubbleAttachments;
+      entry.args[5] = refreshed.segments;
+      const current = getStore().sessions[chatId];
+      if (current)
+        getStore().patchSession(chatId, {
+          messages: current.messages.map((message) =>
+            message.kind === "text" && message.id === entry.bubbleId
+              ? {
+                  ...message,
+                  attachments: refreshed.bubbleAttachments,
+                  segments: refreshed.segments,
+                }
+              : message,
+          ),
+        });
+      return true;
+    },
+    [getStore],
+  );
+
+  /** Keep ownership of the row until its files resolve. Errors leave an
+   * editable queued message, and Stop invalidates the pending dispatch. */
+  const flushQueuedPrompt = useCallback(
+    async (
+      chatId: string,
+      entry: {
+        bubbleId: string;
+        args: Parameters<SessionsActions["sendPrompt"]>;
+      },
+    ): Promise<boolean> => {
+      if (!sendQueueRef.current.claim(chatId, entry.bubbleId)) return false;
+      const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
+      const ownsEntry = () =>
+        sendQueueRef.current.get(chatId)?.includes(entry) === true;
+      markQueuedDelivery(chatId, entry.bubbleId, "sending");
+      try {
+        if (hasPromptAttachmentReferences({ bubbleAttachments: entry.args[4] })) {
+          if (!(await refreshQueuedAttachments(chatId, entry))) return false;
+        }
+        const status = getStore().sessions[chatId]?.status;
+        if (
+          !ownsEntry() ||
+          cancelledSince(cancelGenerationsRef.current, chatId, generation) ||
+          sendQueueRef.current.isPaused(chatId) ||
+          queueHeldRef.current.has(chatId) ||
+          sendingChatsRef.current.has(chatId) ||
+          !status ||
+          status === "warming" ||
+          status === "streaming"
+        )
+          return false;
+        const remaining = sendQueueRef.current
+          .get(chatId)!
+          .filter((item) => item !== entry);
+        if (remaining.length) sendQueueRef.current.set(chatId, remaining);
+        else sendQueueRef.current.delete(chatId);
+        sendQueueRef.current.release(chatId, entry.bubbleId);
+        flushBubbleRef.current.set(chatId, entry.bubbleId);
+        void sendPromptRef.current?.(...entry.args);
+        return true;
+      } catch (error) {
+        if (ownsEntry()) {
+          pauseQueue(chatId);
+          toast.error("Queued message wasn't sent", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return false;
+      } finally {
+        // Release even if Stop removed an admission placeholder during resolution.
+        sendQueueRef.current.release(chatId, entry.bubbleId);
+        if (ownsEntry()) markQueuedDelivery(chatId, entry.bubbleId, undefined);
+      }
+    },
+    [getStore, markQueuedDelivery, pauseQueue, refreshQueuedAttachments],
+  );
+
   /** Flush the HEAD of a chat's send queue if (and only if) it may fire now:
    *  not held, nothing in flight, session ready. The single drain entry point
    *  — the turn-completion finally, releaseQueue, and a send parked behind an
@@ -1450,12 +1536,9 @@ export function AgentSessionsProvider({
         void steerQueuedRef.current?.(chatId, q[0].bubbleId);
         return;
       }
-      const next = q.shift()!;
-      if (q.length === 0) sendQueueRef.current.delete(chatId);
-      flushBubbleRef.current.set(chatId, next.bubbleId);
-      void sendPromptRef.current?.(...next.args);
+      void flushQueuedPrompt(chatId, q[0]!);
     },
-    [getStore],
+    [getStore, flushQueuedPrompt],
   );
   /** Resolve a chat's send queue once whatever it was parked behind has
    *  finished: drain the head if the chat came back healthy, otherwise DROP the
@@ -4246,6 +4329,7 @@ export function AgentSessionsProvider({
 
   const removeQueued = useCallback<SessionsActions["removeQueued"]>(
     (chatId, messageId) => {
+      if (sendQueueRef.current.isSending(chatId, messageId)) return;
       // Drop the pending queued send (by its placeholder bubble id) before
       // it flushes, and remove the greyed bubble from the transcript.
       const q = sendQueueRef.current.get(chatId);
@@ -4268,6 +4352,7 @@ export function AgentSessionsProvider({
 
   const editQueued = useCallback<SessionsActions["editQueued"]>(
     (chatId, messageId, payload) => {
+      if (sendQueueRef.current.isSending(chatId, messageId)) return;
       const text = payload.text.trim();
       const hasAttachments =
         (payload.attachments?.length ?? 0) > 0 ||
@@ -4380,12 +4465,7 @@ export function AgentSessionsProvider({
           sendQueueRef.current.canDrain(chatId) &&
           slot.status !== "warming"
         ) {
-          sendQueueRef.current.set(
-            chatId,
-            (sendQueueRef.current.get(chatId) ?? []).filter((e) => e !== entry),
-          );
-          flushBubbleRef.current.set(chatId, messageId);
-          void sendPromptRef.current?.(...entry.args);
+          return flushQueuedPrompt(chatId, entry);
         } else drainNextQueued(chatId);
         return true;
       }
@@ -4395,15 +4475,45 @@ export function AgentSessionsProvider({
       const generation = cancelGeneration(cancelGenerationsRef.current, chatId);
       // A request whose reply was lost is retried with this SAME identity. The
       // engine's receipt ledger returns its outcome without injecting again.
+      const retryingReceipt = entry.steerRequest != null;
       const route = entry.steerRequest ?? {
         agentId: slot.agentId,
         sessionId: slot.executionId ?? slot.sessionId!,
         attemptId: crypto.randomUUID(),
         turnId: activeProviderTurnId(slot.messages, messageId),
       };
-      entry.steerRequest = route;
       sendQueueRef.current.claim(chatId, messageId);
       markQueuedDelivery(chatId, messageId, "sending");
+      const ownsEntry = () =>
+        sendQueueRef.current.get(chatId)?.includes(entry) === true;
+      // A lost receipt must retry its original attempt even if its file has
+      // since moved. New attempts refresh before acquiring a delivery identity.
+      if (!entry.steerRequest && hasPromptAttachmentReferences({ bubbleAttachments: entry.args[4] })) {
+        try {
+          if (!(await refreshQueuedAttachments(chatId, entry)) ||
+              cancelledSince(cancelGenerationsRef.current, chatId, generation)) return false;
+        } catch (error) {
+          if (ownsEntry()) {
+            pauseQueue(chatId);
+            toast.error("Queued message wasn't sent", {
+              description: error instanceof Error ? error.message : String(error),
+            });
+          }
+          return false;
+        } finally {
+          sendQueueRef.current.release(chatId, messageId);
+          if (ownsEntry()) markQueuedDelivery(chatId, messageId, undefined);
+        }
+        const current = getStore().sessions[chatId];
+        if (!ownsEntry() || current?.status !== "streaming" ||
+            (current.executionId ?? current.sessionId) !== route.sessionId) {
+          drainNextQueued(chatId);
+          return false;
+        }
+        sendQueueRef.current.claim(chatId, messageId);
+        markQueuedDelivery(chatId, messageId, "sending");
+      }
+      entry.steerRequest = route;
       const [
         ,
         text,
@@ -4433,8 +4543,6 @@ export function AgentSessionsProvider({
               ...(autoAction != null ? { autoAction } : {}),
             }
           : undefined;
-      const ownsEntry = () =>
-        sendQueueRef.current.get(chatId)?.includes(entry) === true;
       let steeredTurnId: string | undefined;
       try {
         const resp = await bridge.request<
@@ -4455,13 +4563,15 @@ export function AgentSessionsProvider({
           { timeoutMs: 15_000 },
         );
         if (!ownsEntry()) return false;
-        delete entry.steerRequest;
         if (resp.type === "AGENT_ERROR") {
-          // Rejected before provider dispatch (for example, session admission
-          // or access validation). Keep the original instruction editable.
+          // A first-attempt admission rejection is safe to edit. Rejecting a
+          // receipt retry says nothing about the original delivery, so retain
+          // its identity and uncertainty across access/admission failures.
+          if (!retryingReceipt) delete entry.steerRequest;
           pauseQueue(chatId);
           return false;
         }
+        delete entry.steerRequest;
         const outcome = resp.outcome ?? "delivered";
         if (outcome === "queued") {
           // Native steering was declined: honor Send now at the next turn
@@ -4539,6 +4649,8 @@ export function AgentSessionsProvider({
       pauseQueue,
       resumeQueue,
       markQueuedDelivery,
+      refreshQueuedAttachments,
+      flushQueuedPrompt,
     ],
   );
 

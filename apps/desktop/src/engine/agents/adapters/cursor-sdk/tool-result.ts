@@ -1,3 +1,4 @@
+import { canonicalToolContent, mergeToolContent } from "../shared/tool-content";
 import type { ContentBlock } from "../../types";
 
 type RecordValue = Record<string, unknown>;
@@ -82,32 +83,35 @@ export function cursorToolResultContent(
   const oneof = record(outer.result);
   const value = cursorToolResultValue(result);
   const texts: string[] = [];
+  const rich: CursorToolContent = [];
   const add = (v: unknown) => {
     if (typeof v === "string" && v.length && !texts.includes(v)) texts.push(v);
   };
   const addContent = (content: unknown) => {
-    if (typeof content === "string") add(content);
-    else if (Array.isArray(content)) {
-      for (const block of content) {
-        const b = record(block);
-        if (b.type === "text") add(b.text);
-        else if (typeof b.text === "object") add(record(b.text).text);
-      }
+    // SDK McpToolResultContentItem has separate optional text/image wrappers.
+    // Transcript fallback uses ordinary MCP blocks, so accept both contracts.
+    const blocks = Array.isArray(content) ? content.slice(0, 128).flatMap(candidate => {
+      const image = record(record(candidate).image);
+      return typeof image.data === "string" ? [candidate, { type: "image", ...image }] : [candidate];
+    }) : content;
+    for (const block of canonicalToolContent(blocks)) {
+      if (block.content.type === "text") add(block.content.text);
+      else rich.push(block);
     }
   };
   const error =
     outer.error ?? (oneof.case === "error" ? oneof.value : undefined);
   add(error);
   add(record(error).message);
-  for (const payload of [outer, value]) {
+  for (const payload of [outer, value, record(value.raw)]) {
     add(payload.stdout);
     add(payload.stderr);
     addContent(payload.content);
+    addContent(payload.resourceLinks);
   }
   if (typeof result === "string" || Array.isArray(result)) addContent(result);
-  return texts.length
-    ? [{ type: "content", content: { type: "text", text: texts.join("\n") } }]
-    : undefined;
+  const content = mergeToolContent(canonicalToolContent(texts.join("\n")), rich);
+  return content.length ? content : undefined;
 }
 
 /** Private presentation metadata inside the existing rawOutput field. A

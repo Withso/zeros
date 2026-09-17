@@ -22,12 +22,10 @@
 //
 // ──────────────────────────────────────────────────────────
 
-import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Readable } from "node:stream";
-import * as readline from "node:readline";
+import { openOwnedTranscript, ownedTranscriptPath } from "../shared/transcript-file";
 
 import { providerBindingForResume } from "@zeros/protocol/identities";
 
@@ -37,46 +35,43 @@ function codexHome(): string {
   return process.env.CODEX_HOME ?? path.join(os.homedir(), ".codex");
 }
 
-/**
- * Find every rollout JSONL under $CODEX_HOME/sessions. Walks
- * YYYY/MM/DD subdirs in reverse chronological order so newer
- * sessions appear first.
- */
-async function findRolloutFiles(limit: number): Promise<string[]> {
-  const root = path.join(codexHome(), "sessions");
-  const out: string[] = [];
-  let years: string[];
+const MAX_HEADER_BYTES = 64 * 1024;
+const MAX_DIRECTORY_ENTRIES = 4096;
+const MAX_SCAN_ENTRIES = 32_768;
+
+/** Bounded, asynchronous directory iteration. Dirent types exclude symlinked
+ * dates and special files before any open; file opens validate again. */
+async function entries(
+  home: string, directory: string, pattern: RegExp, directories: boolean,
+  budget: { remaining: number },
+): Promise<string[]> {
+  const names: string[] = [];
+  if (budget.remaining <= 0) return names;
   try {
-    years = (await fsp.readdir(root)).filter(nonDot).sort().reverse();
-  } catch {
-    return out;
-  }
-  for (const y of years) {
-    const yDir = path.join(root, y);
-    let months: string[];
-    try {
-      months = (await fsp.readdir(yDir)).filter(nonDot).sort().reverse();
-    } catch {
-      continue;
+    const canonical = await ownedTranscriptPath(home, directory);
+    const dir = await fsp.opendir(canonical);
+    let count = 0;
+    for await (const entry of dir) {
+      budget.remaining--;
+      count++;
+      if ((directories ? entry.isDirectory() : entry.isFile()) && pattern.test(entry.name)) names.push(entry.name);
+      if (count >= MAX_DIRECTORY_ENTRIES || budget.remaining <= 0) break;
     }
-    for (const m of months) {
+  } catch { /* A missing/replaced date directory does not invalidate others. */ }
+  return names.sort().reverse();
+}
+
+async function findRolloutFiles(home: string, limit: number): Promise<string[]> {
+  const root = path.join(home, "sessions");
+  const out: string[] = [];
+  const budget = { remaining: MAX_SCAN_ENTRIES };
+  for (const y of await entries(home, root, /^\d{4}$/, true, budget)) {
+    const yDir = path.join(root, y);
+    for (const m of await entries(home, yDir, /^(?:0[1-9]|1[0-2])$/, true, budget)) {
       const mDir = path.join(yDir, m);
-      let days: string[];
-      try {
-        days = (await fsp.readdir(mDir)).filter(nonDot).sort().reverse();
-      } catch {
-        continue;
-      }
-      for (const d of days) {
+      for (const d of await entries(home, mDir, /^(?:0[1-9]|[12]\d|3[01])$/, true, budget)) {
         const dDir = path.join(mDir, d);
-        let files: string[];
-        try {
-          files = (await fsp.readdir(dDir)).filter((f) => f.endsWith(".jsonl"));
-        } catch {
-          continue;
-        }
-        files.sort().reverse();
-        for (const f of files) {
+        for (const f of await entries(home, dDir, /\.jsonl$/, false, budget)) {
           out.push(path.join(dDir, f));
           if (out.length >= limit) return out;
         }
@@ -86,34 +81,33 @@ async function findRolloutFiles(limit: number): Promise<string[]> {
   return out;
 }
 
-/** Read the first non-empty line of a file and parse it as JSON. */
-async function readFirstLine(file: string): Promise<unknown | null> {
-  let stream: Readable;
+/** Only the metadata prefix is needed, even for a very large rollout. Blank
+ * prefixes and missing newlines count against the same strict byte limit. */
+async function readFirstLine(home: string, file: string): Promise<unknown | null> {
+  let opened: Awaited<ReturnType<typeof openOwnedTranscript>> | undefined;
   try {
-    stream = fs.createReadStream(file, { encoding: "utf-8" });
-  } catch {
-    return null;
-  }
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      try {
-        return JSON.parse(trimmed);
-      } catch {
-        return null;
+    opened = await openOwnedTranscript(home, file);
+    let prefix = Buffer.alloc(0);
+    let position = 0;
+    while (position < MAX_HEADER_BYTES) {
+      const buffer = Buffer.alloc(Math.min(4096, MAX_HEADER_BYTES - position));
+      const { bytesRead } = await opened.handle.read(buffer, 0, buffer.length, position);
+      position += bytesRead;
+      prefix = Buffer.concat([prefix, buffer.subarray(0, bytesRead)]);
+      let newline: number;
+      while ((newline = prefix.indexOf(10)) >= 0) {
+        const line = prefix.subarray(0, newline).toString("utf8").trim();
+        prefix = prefix.subarray(newline + 1);
+        if (line) return JSON.parse(line);
+      }
+      if (!bytesRead || position >= opened.stat.size) {
+        const line = prefix.toString("utf8").trim();
+        return line ? JSON.parse(line) : null;
       }
     }
-  } finally {
-    rl.close();
-    stream.destroy();
-  }
+  } catch { /* Invalid/unreadable metadata is a per-file miss. */ }
+  finally { await opened?.handle.close().catch(() => {}); }
   return null;
-}
-
-function nonDot(n: string): boolean {
-  return !n.startsWith(".");
 }
 
 interface RawSessionEntry {
@@ -130,13 +124,15 @@ interface RawSessionEntry {
 export async function listCodexSessions(
   opts: { cwd?: string; limit?: number } = {},
 ): Promise<ListSessionsResponse> {
-  const limit = opts.limit ?? 50;
-  const files = await findRolloutFiles(limit * 2); // oversample; some files may lack a session_meta / thread.metadata head
+  const limit = Number.isFinite(opts.limit) ? Math.max(0, Math.min(200, Math.trunc(opts.limit!))) : 50;
+  if (!limit) return { sessions: [] };
+  const home = path.resolve(codexHome());
+  const files = await findRolloutFiles(home, limit * 2); // oversample; some files may lack a session_meta / thread.metadata head
 
   const sessions: RawSessionEntry[] = [];
   for (const file of files) {
     if (sessions.length >= limit) break;
-    const head = await readFirstLine(file);
+    const head = await readFirstLine(home, file);
     if (!head || typeof head !== "object") continue;
     const rec = head as Record<string, unknown>;
     const type = rec.type;

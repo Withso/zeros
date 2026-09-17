@@ -221,6 +221,8 @@ const mcpStdioServerSchema = z.object({
     .string()
     .min(1)
     .describe("Executable to spawn for the stdio server."),
+  cwd: z.string().trim().min(1).max(4096).refine((v) => !v.includes("\0"), "Invalid working directory").optional()
+    .describe("Folder for this local MCP process. Relative paths resolve against the chat workspace; ~/ uses the engine user's home. Omit to preserve the provider default."),
   args: z
     .array(z.string())
     .optional()
@@ -264,6 +266,8 @@ const mcpHttpServerSchema = z.object({
     .describe(
       'For auth="oauth": a pre-registered OAuth client_id for servers that don\'t support Dynamic Client Registration (Auth0/Okta/Cognito/enterprise). Non-secret. Omit to auto-register (DCR).',
     ),
+  oauth_scopes: z.array(z.string().regex(/^[\x21\x23-\x5b\x5d-\x7e]+$/)).max(64).optional()
+    .describe("OAuth permission scopes to request. Credentials are stored separately in the encrypted vault."),
   disabled_tools: z
     .array(z.string())
     .optional()
@@ -278,6 +282,10 @@ const mcpHttpServerSchema = z.object({
 export const mcpServerSchema = z.discriminatedUnion("transport", [
   mcpStdioServerSchema,
   mcpHttpServerSchema,
+  mcpHttpServerSchema.extend({
+    transport: z.literal("sse"),
+    url: z.string().min(1).describe("SSE endpoint URL."),
+  }),
 ]);
 const mcpSchema = z
   .object({

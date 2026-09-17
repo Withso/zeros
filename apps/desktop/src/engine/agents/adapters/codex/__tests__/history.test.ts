@@ -83,4 +83,34 @@ describe("listCodexSessions", () => {
     const r = await listCodexSessions({});
     expect(r.sessions.some((s) => s.sessionId === "legacy-1")).toBe(true);
   });
+
+  it("skips symlinked rollouts and oversized metadata without losing valid sessions", async () => {
+    const dir = path.join(home, "sessions", "2026", "04", "03");
+    writeRollout(home, "2026/04/03/rollout-valid.jsonl", { type: "session_meta", payload: { id: "valid" } });
+    const foreign = path.join(home, "foreign.jsonl");
+    fs.writeFileSync(foreign, JSON.stringify({ type: "session_meta", payload: { id: "foreign" } }));
+    fs.symlinkSync(foreign, path.join(dir, "rollout-symlink.jsonl"));
+    writeRollout(home, "2026/04/03/rollout-large.jsonl", {
+      type: "session_meta", payload: { id: "large", title: "x".repeat(1024 * 1024) },
+    });
+    expect((await listCodexSessions()).sessions.map((session) => session.sessionId)).toEqual(["valid"]);
+  });
+
+  it("does not traverse a symlinked date directory", async () => {
+    writeRollout(home, "2025/04/03/rollout-valid.jsonl", { type: "session_meta", payload: { id: "valid" } });
+    fs.symlinkSync(path.join(home, "sessions", "2025"), path.join(home, "sessions", "2026"));
+    expect((await listCodexSessions()).sessions.map((session) => session.sessionId)).toEqual(["valid"]);
+  });
+
+  it("bounds blank prefixes and malformed metadata while preserving a valid header without a newline", async () => {
+    const dir = path.join(home, "sessions", "2026", "04", "03");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "rollout-valid.jsonl"), JSON.stringify({ type: "session_meta", payload: { id: "valid" } }));
+    fs.writeFileSync(path.join(dir, "rollout-blank.jsonl"), "\n".repeat(70 * 1024) + JSON.stringify({ type: "session_meta", payload: { id: "blank" } }));
+    fs.writeFileSync(path.join(dir, "rollout-malformed.jsonl"), "{broken\n");
+    fs.mkdirSync(path.join(dir, "rollout-directory.jsonl"));
+    expect((await listCodexSessions()).sessions.map((session) => session.sessionId)).toEqual(["valid"]);
+    expect((await listCodexSessions({ limit: -1 })).sessions).toEqual([]);
+    expect((await listCodexSessions({ limit: NaN })).sessions).toHaveLength(1);
+  });
 });

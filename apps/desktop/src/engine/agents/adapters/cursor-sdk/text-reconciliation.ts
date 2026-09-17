@@ -24,8 +24,10 @@ export class CursorTextReconciliation {
   private readonly finalIds = new Set<string>();
   private lastText: Unit | undefined;
   private finalResult: string | undefined;
+  private endedText: Unit | undefined;
   private lastThought: Unit | undefined;
   private lastStreamThought: Unit | undefined;
+  private lastStreamUnit: Unit | undefined;
   private boundarySequence = 0;
   private readonly pendingSteps: Unit[] = [];
   private readonly mirrors: Unit[] = [];
@@ -34,9 +36,43 @@ export class CursorTextReconciliation {
     private readonly emit: (update: SessionNotification["update"]) => void,
   ) {}
 
+  get hasFinalAnswer(): boolean {
+    return this.finalIds.size > 0;
+  }
+
   boundary(): void {
     this.pendingSteps.length = 0;
+    this.endedText = undefined;
     this.boundarySequence++;
+  }
+
+  /** A native turn may finish while the SDK keeps this run open for children.
+   * Keep that report final and give the continuation its own display identity. */
+  endTurn(): void {
+    const last = this.units.at(-1);
+    if (!last || last.boundary !== this.boundarySequence) return;
+    const report = last.role === "text" ? last : undefined;
+    if (report) this.publish(report, undefined, undefined, true);
+    this.boundary();
+    this.endedText = report;
+  }
+
+  streamToolBoundary(): void {
+    this.lastStreamUnit = undefined;
+  }
+
+  /** A usage frame closes the stream's own last unit. Callback delivery may
+   * already be ahead in a later turn, whose text/identity must stay open. */
+  endStreamTurn(): boolean {
+    const last = this.lastStreamUnit;
+    this.lastStreamUnit = undefined;
+    if (!last) return false;
+    const report = last.role === "text" ? last : undefined;
+    if (report) this.publish(report, undefined, undefined, true);
+    if (last.boundary !== this.boundarySequence) return false;
+    this.boundary();
+    this.endedText = report;
+    return true;
   }
 
   delta(id: string, role: Role, text: string): void {
@@ -83,6 +119,7 @@ export class CursorTextReconciliation {
     );
     const mirror = this.mirrors[index];
     if (mirror) {
+      this.lastStreamUnit = mirror;
       if (role === "thought") this.lastStreamThought = mirror;
       const remaining = mirror.mirrorText.slice(mirror.mirrored);
       if (mirror.stepSeen && text === mirror.text) {
@@ -116,6 +153,7 @@ export class CursorTextReconciliation {
     unit.text += text;
     unit.mirrorText += text;
     unit.mirrored = unit.mirrorText.length;
+    this.lastStreamUnit = unit;
     if (role === "thought") this.lastStreamThought = unit;
     this.publish(unit, durationMs, text);
   }
@@ -132,7 +170,7 @@ export class CursorTextReconciliation {
     const last =
       this.lastText?.boundary === this.boundarySequence
         ? this.lastText
-        : undefined;
+        : this.endedText;
     const previous = last ? (this.emitted.get(last.id) ?? "") : "";
     if (last && previous === text) {
       this.publish(last, undefined, undefined, true);
@@ -151,6 +189,7 @@ export class CursorTextReconciliation {
   }
 
   private create(id: string, role: Role, source: Unit["source"]): Unit {
+    this.endedText = undefined;
     const unit: Unit = {
       id,
       role,

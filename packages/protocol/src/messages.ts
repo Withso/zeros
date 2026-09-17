@@ -1079,6 +1079,8 @@ export interface BridgeAgentFailure {
   kind:
     | "timeout"
     | "auth-required"
+    | "verification-required"
+    | "cloud-credentials-unavailable"
     | "subprocess-exited"
     | "protocol-error"
     | "transport-closed"

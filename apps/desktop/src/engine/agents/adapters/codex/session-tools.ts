@@ -2,6 +2,7 @@ import type { ListMcpServerStatusResponse } from "./generated/v2/ListMcpServerSt
 import type { McpServerOauthLoginResponse } from "./generated/v2/McpServerOauthLoginResponse";
 import type { SessionToolsSnapshot } from "@zeros/protocol/agent-extensions";
 import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
+import { redactLogSecrets } from "@zeros/protocol/scrub";
 import type { CodexAppServerHandle } from "./app-server";
 
 /** Read the admitted thread, never the account's global configuration. App
@@ -33,15 +34,30 @@ export async function readCodexSessionTools(
     for (const server of result.data) {
       // Disabled local declarations are not part of this session's Tools list.
       if (server.runtimeStatus === "disabled") continue;
+      // A connected transport can still have no usable tool catalog. Null is
+      // a successful discovery (including an empty or cached catalog).
+      const toolsError =
+        typeof server.toolsError === "string"
+          ? redactLogSecrets(
+              server.toolsError.replace(
+                /\b(https?:\/\/)[^/\s]+@/gi,
+                "$1[redacted]@",
+              ),
+            )
+              .trim()
+              .slice(0, 1000) || "Tool discovery failed."
+          : "";
       const status =
-        server.runtimeStatus === "connected"
-          ? "connected"
-          : server.runtimeStatus === "authenticationRequired"
-            ? "needs-auth"
-            : server.runtimeStatus === "starting" ||
-                server.runtimeStatus === "notStarted"
-              ? "connecting"
-              : "error";
+        server.runtimeStatus === "authenticationRequired"
+          ? "needs-auth"
+          : toolsError
+            ? "error"
+            : server.runtimeStatus === "connected"
+              ? "connected"
+              : server.runtimeStatus === "starting" ||
+                  server.runtimeStatus === "notStarted"
+                ? "connecting"
+                : "error";
       entries.set(server.name, {
         id: server.name,
         name: server.name,
@@ -49,9 +65,11 @@ export async function readCodexSessionTools(
         ...(status === "needs-auth" && server.authStatus === "notLoggedIn"
           ? { canAuthenticate: true }
           : {}),
-        ...(server.runtimeStatus == null
-          ? { detail: "Codex has not confirmed this connection." }
-          : {}),
+        ...(toolsError
+          ? { detail: toolsError }
+          : server.runtimeStatus == null
+            ? { detail: "Codex has not confirmed this connection." }
+            : {}),
       });
     }
     if (!result.nextCursor)

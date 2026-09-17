@@ -18,6 +18,7 @@ import type {
   SessionNotification,
   ToolCall,
   ToolCallUpdate,
+  ResourceLinkContent,
 } from "./agent-events";
 
 export type AgentMessageRole = "user" | "agent" | "thought" | "system";
@@ -196,6 +197,7 @@ export interface AgentToolMessage {
   toolKind: string | undefined;
   status: "pending" | "in_progress" | "completed" | "failed";
   content?: ToolCall["content"];
+  resourceLinks?: ResourceLinkContent[];
   locations?: ToolCall["locations"];
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -347,6 +349,7 @@ export interface AgentErrorNoticeMessage {
   severity: "warning" | "error";
   message: string;
   turnFailure?: { turnId: string; kind: string };
+  failureKind?: string;
   /** True while the provider is retrying automatically within the live turn. */
   recoverable: boolean;
   /** Adapter-side error code for click-through to docs. */
@@ -469,6 +472,17 @@ function mergeRawOutput(prev: unknown, next: unknown): unknown {
   // Non-object vendor output (a bare string/array) — keep it under `output`
   // so neither the vendor result nor the stamp is lost.
   return { output: next, zerosQuestion: stamp };
+}
+
+/** Links are independent late metadata, keyed by resource identity and bounded
+ * separately from the tool body retained in the canonical row. */
+function mergeResourceLinks(previous: ResourceLinkContent[] | undefined, incoming: ResourceLinkContent[] | undefined): ResourceLinkContent[] | undefined {
+  if (!incoming?.length) return previous;
+  const links = new Map((previous ?? []).map(link => [link.uri, link]));
+  for (const link of incoming.slice(0, 50)) {
+    if (link?.type === "resource_link" && typeof link.uri === "string" && typeof link.name === "string") links.set(link.uri, link);
+  }
+  return [...links.values()].slice(0, 128);
 }
 
 function isSettledToolStatus(status: AgentToolMessage["status"]): boolean {
@@ -604,6 +618,7 @@ export function applyUpdate(
           title: upd2.title ?? m.title,
           toolKind: upd2.kind ?? m.toolKind,
           content: upd2.content ?? m.content,
+          resourceLinks: m.resultRetracted ? undefined : mergeResourceLinks(m.resourceLinks, upd2.resourceLinks),
           locations: upd2.locations ?? m.locations,
           rawInput: upd2.rawInput ?? m.rawInput,
           rawOutput: mergeRawOutput(m.rawOutput, upd2.rawOutput),
@@ -673,7 +688,7 @@ export function applyUpdate(
       const next = messages.map((m): AgentMessage => {
         if (m.kind !== "tool" || !ids.has(m.toolCallId) || m.resultRetracted) return m;
         changed = true;
-        return { ...m, content: undefined, rawOutput: undefined, status: "pending", settledAt: undefined,
+        return { ...m, content: undefined, resourceLinks: undefined, rawOutput: undefined, status: "pending", settledAt: undefined,
           resultRetracted: true, resultRevision: (m.resultRevision ?? 0) + 1, updatedAt: Date.now() };
       });
       return changed ? next : messages;
@@ -716,6 +731,7 @@ export function applyUpdate(
         severity: n.severity === "error" ? "error" : "warning",
         message: n.message,
         ...(n.turnFailure ? { turnFailure: n.turnFailure } : {}),
+        ...(n.failureKind ? { failureKind: n.failureKind } : {}),
         recoverable: n.recoverable === true,
         code: n.code,
         ...(n.parentToolId ? { parentToolId: n.parentToolId } : {}),

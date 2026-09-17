@@ -1,6 +1,7 @@
 import type {
   AgentMessage,
   AgentTextMessage,
+  MessageContentSegment,
 } from "@zeros/protocol/agent-messages";
 import type { ChatThread } from "../../state/store";
 import type { SessionsActions } from "./sessions-context";
@@ -162,6 +163,22 @@ export async function retryAgentTurn(
         `Could not retry with the original attachments: ${encoded.skipped.map((entry) => entry.name).join(", ")}. Restore them and try again.`,
       );
     }
+    // Reconstruction and encoding preserve attachment order. Replace every
+    // inline chip with its newly resolved metadata, then append new context
+    // such as the fork transcript. Segments take precedence over the flat
+    // attachment list on the next edit/retry, so both must describe this send.
+    let attachmentIndex = 0;
+    const segments = prompt.segments?.length
+      ? prompt.segments.map((segment): MessageContentSegment =>
+          segment.type === "attachment"
+            ? { type: "attachment", ...encoded.bubbleAttachments[attachmentIndex++]! }
+            : segment,
+        )
+      : undefined;
+    if (segments) {
+      for (const attachment of encoded.bubbleAttachments.slice(attachmentIndex))
+        segments.push({ type: "attachment", ...attachment });
+    }
     if (!ownsDestination() || !ownsSource()) return;
     const currentDestination = deps.getChat(destination.id)!;
     await deps.sessions.ensureSession(destination.id, source.agentId, {
@@ -195,7 +212,7 @@ export async function retryAgentTurn(
       continuing ? "Continue" : prompt.text,
       encoded.blocks.length ? encoded.blocks : undefined,
       encoded.bubbleAttachments.length ? encoded.bubbleAttachments : undefined,
-      continuing ? undefined : prompt.segments,
+      continuing ? undefined : segments,
       prompt.autoAction,
     );
   } finally {

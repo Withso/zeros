@@ -6,7 +6,7 @@ import { parseSubagentTranscript } from "../subagent-transcript";
 describe("Cursor child checkpoint delivery", () => {
   it.each(["", "[REDACTED]"])(
     "retires live text when a later checkpoint replaces it with %j",
-    (replacement) => {
+    async (replacement) => {
       let content = "A provisional child answer";
       let messages: AgentMessage[] = [];
       const translator = new CursorSdkTranslator({
@@ -32,16 +32,16 @@ describe("Cursor child checkpoint delivery", () => {
         status: "running",
         args: { agentId: "child", description: "Audit" },
       });
-      translator.pollSubagents();
+      await translator.pollSubagents();
       const id = messages[1].id;
       content = replacement;
-      translator.pollSubagents();
+      await translator.pollSubagents();
       expect(messages.filter((message) => message.kind === "text")).toEqual([
         expect.objectContaining({ id, text: "" }),
       ]);
     },
   );
-  it("reconciles corrected text in a checkpoint using its native message and block identity", () => {
+  it("reconciles corrected text in a checkpoint using its native message and block identity", async () => {
     let content = "Initial draft";
     let messages: AgentMessage[] = [];
     const translator = new CursorSdkTranslator({
@@ -74,16 +74,16 @@ describe("Cursor child checkpoint delivery", () => {
       status: "running",
       args: { agentId: "child" },
     });
-    translator.pollSubagents();
+    await translator.pollSubagents();
     const id = messages[1].id;
     content = "Corrected answer";
-    translator.pollSubagents();
-    translator.flushSubagents();
+    await translator.pollSubagents();
+    await translator.flushSubagents();
     expect(messages.filter((message) => message.kind === "text")).toEqual([
       expect.objectContaining({ id, text: content }),
     ]);
   });
-  it("streams narration and tools in order before completion and reconciles repeated checkpoints", () => {
+  it("streams narration and tools in order before completion and reconciles repeated checkpoints", async () => {
     const records: unknown[] = [];
     let messages: AgentMessage[] = [];
     const translator = new CursorSdkTranslator({
@@ -115,7 +115,7 @@ describe("Cursor child checkpoint delivery", () => {
         content: [{ type: "text", text: "Inspecting source." }],
       },
     });
-    translator.pollSubagents();
+    await translator.pollSubagents();
     expect(messages).toContainEqual(
       expect.objectContaining({
         kind: "text",
@@ -137,9 +137,9 @@ describe("Cursor child checkpoint delivery", () => {
         ],
       },
     });
-    translator.pollSubagents();
+    await translator.pollSubagents();
     const ids = messages.map((m) => m.id);
-    translator.pollSubagents();
+    await translator.pollSubagents();
     expect(messages.map((m) => m.id)).toEqual(ids);
     expect(messages.slice(1).map((m) => m.kind)).toEqual(["text", "tool"]);
     records.push({
@@ -162,7 +162,7 @@ describe("Cursor child checkpoint delivery", () => {
         content: [{ type: "text", text: "Audit finished." }],
       },
     });
-    translator.pollSubagents();
+    await translator.pollSubagents();
     translator.feed({
       type: "tool_call",
       call_id: "task",
@@ -170,7 +170,7 @@ describe("Cursor child checkpoint delivery", () => {
       status: "completed",
       result: { status: "success", value: { agentId: "child" } },
     });
-    translator.flushSubagents();
+    await translator.flushSubagents();
     expect(
       messages.filter((m) => m.kind === "text").map((m) => m.text),
     ).toEqual(["Inspecting source.", "Audit finished."]);

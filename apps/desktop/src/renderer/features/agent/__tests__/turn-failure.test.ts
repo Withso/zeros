@@ -17,17 +17,44 @@ const notice: AgentMessage = {
 
 describe("persistent turn failure card", () => {
   it.each([
-    ["protocol-error", "Unexpected provider error. Check your API key settings.", false],
-    ["protocol-error", "Claude model unavailable: Selection rejected.", false],
-    ["rate-limited", "Provider refused this request.", false],
+    ["protocol-error", "Unexpected provider error. Check your API key settings.", true],
+    ["protocol-error", "Claude model unavailable: Selection rejected.", true],
+    ["rate-limited", "Provider refused this request.", true],
+    ["rate-limited", "You've hit your usage limit. Visit https://example.com/usage to purchase more credits or try again later.", true],
     ["auth-required", "Credential rejected.", false],
+    ["verification-required", "Complete verification at https://example.com/verify", false],
+    ["cloud-credentials-unavailable", "Could not load Bedrock credentials. Refresh your AWS credentials and retry.", false],
     ["session-expired", "Stored session was removed.", true],
     ["protocol-error", "Context window exceeded.", true],
-  ])("offers new-chat recovery only for session-related failures: %s / %s", (kind, message, expected) => {
+  ])("offers new-chat retry except for account and credential failures: %s / %s", (kind, message, expected) => {
     const event = { ...notice, message, turnFailure: { turnId: "u1", kind } } as AgentMessage;
     const failure = turnFailureForCard({ events: JSON.parse(JSON.stringify([event])), turnId: "u1" });
     expect(failure?.message).toBe(message);
     expect(failure?.newChatAllowed).toBe(expected);
+    const html = renderToStaticMarkup(
+      createElement(TurnFailureCard, {
+        failure: failure!,
+        onRetry: vi.fn(),
+        onRetryNewChat: vi.fn(),
+      }),
+    );
+    expect(html.includes("Retry in new chat")).toBe(expected);
+  });
+
+  it.each(["verification-required", "cloud-credentials-unavailable"])("retains %s recovery for autonomous results across persistence", (kind) => {
+    const event = {
+      ...notice, code: "claude-background-failed", turnFailure: undefined,
+      failureKind: kind, message: "Resolve this at https://example.com/provider-help",
+    };
+    const failure = turnFailureForCard({ events: JSON.parse(JSON.stringify([event])), turnId: "u1", status: "completed" });
+    expect(failure).toMatchObject({ kind, newChatAllowed: false, message: event.message });
+    const html = renderToStaticMarkup(createElement(TurnFailureCard, {
+      failure: failure!, onRetry: vi.fn(), onRetryNewChat: vi.fn(),
+    }));
+    expect(html).toContain('href="https://example.com/provider-help"');
+    expect(html).toContain("Retry");
+    expect(html).not.toContain("Retry in new chat");
+    expect(html).not.toContain("Sign in");
   });
 
   it("shows an autonomous failure after a successful foreground result and requires recovery evidence to clear it", () => {
@@ -39,7 +66,7 @@ describe("persistent turn failure card", () => {
   it("shows the actionable reason outside collapsed activity", () => {
     const failure = turnFailureForCard({ events: [notice], turnId: "u1" });
     expect(failure?.message).toBe(notice.message);
-    expect(failure?.newChatAllowed).toBe(false);
+    expect(failure?.newChatAllowed).toBe(true);
     const html = renderToStaticMarkup(
       createElement(TurnFailureCard, { failure: failure!, onRetry: vi.fn() }),
     );

@@ -5,6 +5,58 @@ adapters own native semantics; the renderer owns consistent presentation. A
 provider upgrade must preserve both. Stored native inputs, results, identities
 and statuses remain available even when routine metadata is hidden in the UI.
 
+## Artifacts and links
+
+- Image generation uses `Generate` plus the native saved-file pill. Inspecting
+  that image remains `Read image`; other operations keep their existing names.
+  An inline image or remote result does not prove that a local file exists.
+  Derive saved image links only from result paths or explicit resource links;
+  an input `filePath`/`file_path` is only a requested destination, even after
+  the operation reaches a terminal status.
+- Keep supported tool content (text, images, audio, resource links and embedded
+  resource text), plus bounded structured results. A text summary must not hide
+  a sibling report link or MCP `structuredContent`. Preserve errors and native
+  search/list results in child transcripts too. Do not dump encoded binary or
+  provider-private `_meta` fields into expanded cards or persisted raw output.
+  Retain the bounded native Browser/Computer presentation metadata already
+  consumed by Zeros.
+- Claude `tool_use_result.resourceLinks` belongs to one unambiguous result.
+  `task_notification.resource_links` joins only by native tool identity, never
+  prompt/name/recency. The additive `ToolCallUpdate.resourceLinks` field enriches
+  the saved row without replacing its body or retaining media in the adapter.
+  Deduplicate links by URI; retracted results reject stale artifact updates.
+  The optional field preserves old records and peers without a protocol bump:
+  older clients ignore late links, retaining the original tool output.
+- Put artifact references inside the existing 320px detail surface. Agent
+  groups remain nested feeds. Use the same file-reference treatment in ordinary
+  and child output, commentary, and expanded results: no background, 3px horizontal padding, brown
+  text, Geist sans at 14px, hover underline. Long labels truncate within the
+  available width with the complete path in the title; never break path words.
+  Plain inline code and source previews retain their monospace styling.
+- External HTTP(S)/mail links use brown text, no background and a trailing
+  arrow-up-right. Keep the existing local-preview appearance and route loopback
+  URLs to the chat workspace's Browser tab. File references use the Files tab,
+  exact-key reads and workspace containment; warm on hover/focus only while
+  active. Unknown provider resource schemes stay readable without invoking an
+  arbitrary OS handler. Generated HTML is source content in Files, not trusted
+  app code. Do not bypass existing image size or binary-preview limits.
+- Code-agent startup instructions place temporary deliverables in
+  `.context/local/artifacts/<task>/` and investigations/logs in
+  `.context/local/scratch/<task>/`. Read relevant existing context, pass exact
+  paths to delegates, preserve other agents' work, and link actual saved files.
+  Required project source/build outputs keep their normal locations. Design
+  agents retain their read-only filesystem contract. See
+  [context-storage.md](context-storage.md) for local/shared ownership.
+
+Contract references: the installed Claude SDK's `SDKMcpResourceLink` and task
+notification declarations, [MCP tool results](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#tool-result),
+and the [Cursor SDK](https://cursor.com/docs/sdk/typescript). Native adapters
+unwrap their own envelopes before applying the bounded shared content rules.
+Cover generated paths, encoded spaces, malicious/unknown URLs, batched and
+ambiguous results, late/replayed/retracted links, persistence, child output,
+mixed structured content and keyboard activation. Browser coverage lives in
+`scripts/ui-smoke-artifact-links.mjs` alongside the existing transcript smoke.
+
 ## Identity and streaming
 
 1. Scope reconciliation to the provider execution, native conversation, parent
@@ -54,6 +106,35 @@ For Cursor upgrades, compare the installed SDK types with its
 types and native-event regression fixtures define the integration's supported
 delivery shapes.
 
+## Cursor managed MCP catalog lifetime
+
+- Publish a catalog revision only after committing the complete gateway tool
+  list. Additions, removals, schema changes, authentication withdrawals and an
+  empty catalog count; unchanged reconnects and failed discovery do not. Include
+  gateway generation so replacement at the same URL cannot reuse a stale cache.
+- Cursor SDK 1.0.31 caches workspace executors across chats and prewarms. Its
+  `agent.reload()` operates on the shared executor and does nothing before the
+  handle has sent a prompt. For managed gateway registrations, include the
+  exact-endpoint revision in the in-memory `X-Zeros-Mcp-Catalog` header. The SDK
+  includes MCP configuration in its executor cache key. Do not persist this
+  header or forward it to backend servers; preserve authentication and all
+  unmanaged MCP registrations.
+- Reconcile changed configuration with `Agent.resume` on the same conversation
+  before the next send, including queued sends. Coalesce with mode changes.
+  Never refresh an active run or its background continuations. A newer catalog
+  published during preparation requires another reconciliation before sending.
+  Bound repeated churn and surface failure through existing recovery UI without
+  submitting a prompt against a known stale catalog.
+- Stop/disposal cancels prompt preparation immediately. A subsequent send joins
+  any pending configuration refresh; late completion cannot revive a disposed
+  session or submit the stopped prompt. Native host operations are bound to an
+  individual handle, so closing a previous executor never closes its successor
+  with the same provider conversation ID. Keep usage reconciliation intact.
+- Cover publication, first-send/prewarm races, same-cwd sibling isolation,
+  history resume, mode changes, concurrent publication, refresh failures,
+  cancellation and handle disposal. A live canary must verify actual tool calls
+  through the adapter and host, not just that the gateway advertises new tools.
+
 ## Response replacement and model fallback
 
 - Claude `supersedes` and `model_refusal_fallback.retracted_message_uuids`
@@ -91,7 +172,10 @@ delivery shapes.
   defaults; reconcile effort/Fast against the selected model's capabilities.
 - A newer manual choice wins over an older request's fallback, including
   A → B → A. Use local selection revisions rather than comparing renderer and
-  remote-engine wall clocks. Repeated notices cannot change selection again. If a late Claude
+  remote-engine wall clocks. Codex retires the preceding root native turn when
+  a local prompt begins, before input preparation awaits I/O, so its delayed
+  reroutes cannot enter the new selection epoch. Child activity keeps its own
+  lifetime. Repeated notices cannot change selection again. If a late Claude
   sticky fallback overwrites a prior live control, reassert the current choice
   before more input leaves the app. Stop/disposal must interrupt this wait,
   and control failure must not send a prompt using the wrong model.
@@ -212,8 +296,21 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   Partial root output and complete
   child assistant blocks follow their respective native identities. Forwarded
   summaries are displayable provider output, not access to hidden reasoning.
-- Cursor's local SDK writes child transcript checkpoints during execution.
-  Poll under the exact native parent conversation and provider HOME, then
+- Cursor 1.0.31's `onDelta` exposes `tool-call-delta.taskUpdate` for live child
+  text, thinking and tools. Route it by the outer native `callId` into that
+  Agent group; each child has its own tool/text identities. Do not wait for a
+  task's final result to show these events. A late named start enriches the
+  same provisional group. Native terminal results finalize the child's report;
+  completion-only text can also come from normalized or protobuf result steps.
+  Choose one child feed: once usable native deltas are in use, do not append a file or
+  conversation-step copy. Empty/malformed callbacks cannot claim this feed.
+  A completed native child with no final answer can recover only its report
+  from the bounded, owned final file; do not replay its other text or tools.
+  If a checkpoint feed was established first, retain
+  it rather than guessing matches against ID-less callback text. Discard an
+  in-flight checkpoint if native delivery claimed the child before publication.
+- Cursor's local SDK also writes child transcript checkpoints during execution.
+  When native child deltas are absent, poll under the exact native parent conversation and provider HOME, then
   reconcile narration, thoughts and tools by source/message/block/tool identity.
   A complete native task argument or result must provide the child ID, or its
   result must provide an exact transcript path. Partial/truncated argument IDs,
@@ -227,10 +324,52 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   fallback. Replays must not create additional groups or child rows.
   Native results settle tool status; missing results stay unresolved. Exact-path
   results supersede ID-based lookup, even when the path is not readable yet.
+  Exact paths are untrusted pointers: require the configured provider HOME,
+  project, native parent and (when supplied) child identity. Reject symlinked
+  descendants, hard links and non-regular files; verify the opened file's
+  identity. Never search sibling chats. The configured HOME itself may use a
+  canonical filesystem alias.
+  Capture is asynchronous and bounded: 8 MiB per child file, 256 KiB per JSONL
+  record, 512 KiB per live poll, 64 files and 32 MiB of captured input per run
+  (128 MiB total I/O including replacement reads). Keep only the incomplete
+  record buffered; parse append deltas, preserve native row identities, and
+  yield between parsing batches. Replaced checkpoints rebuild the bounded
+  parser; the final read also verifies in-place rewrites. Incomplete tails are
+  normal while live. Preserve confirmed rows through temporary missing or
+  malformed writes. Coalesce polls and revoke publication on Stop, disposal,
+  native identity changes, and finalization; final capture has a two-second
+  overall deadline so filesystem trouble cannot strand the provider turn.
+  If final capture is incomplete, emit one ordinary **commentary/inbetween
+  message inside the affected Agent group**: “Some subagent details could not
+  be loaded.” or “Subagent details were truncated.” Do not create a tool,
+  failure card, or failed Agent status for capture problems. Preserve the native
+  final report; complete native conversation steps can replace a missing file
+  without a warning. User cancellation does not produce a capture warning.
+  Codex live children use native notifications. Its separate history browser
+  bounds metadata to 64 KiB, directory iteration and requested session count,
+  and applies the same owned-file checks. Claude's SDK-delivered child stream
+  does not pass through either filesystem reader.
   Use conversationSteps only as a final fallback when no file checkpoint was
   captured, so a disappearing/late file cannot duplicate the child feed. Final
   flush closes child delivery, including late callbacks after Stop/EOF. This
-  provides checkpoint progress; it does not promise per-token child callbacks.
+  provides fallback checkpoint progress; native child deltas provide live
+  progress when the runtime supplies them.
+- Cursor background continuations belong to the original SDK run and Zeros
+  user turn. Drain `run.stream()` and await `run.wait()` through all of them;
+  neither `turn-ended` nor a successful background task launch settles the
+  send. Mark the ending native report as final, keep it in source order, and
+  start a new message identity for the continuation, even without a tool
+  between replies. Consume delayed callback/stream mirrors only once. A
+  stream-only per-turn usage event closes the stream's own last text unit,
+  not a newer callback unit. Missing mirrors or identical token totals cannot
+  suppress a later report boundary.
+  `isBackground: true` keeps the Agent group active; a later launch replay
+  cannot overwrite known completion/failure. Without a native child terminal,
+  finalization releases its loader as unresolved rather than inventing success.
+  Stop/disposal closes child publication and steering; late events cannot
+  revive a stopped run. Use the cumulative `RunResult.usage` once for the owning
+  user turn, never once per intermediate report. No separate Cursor background
+  card or Claude-style Background Task tool is introduced.
 - Codex collaboration `wait` is agent coordination, not Claude Background Task.
   Present a compact waiting row. Show actual child messages/statuses when
   supplied, with failed/unresolved waits inspectable; omit internal thread IDs
@@ -267,6 +406,20 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
 
 ## Colors and readable errors
 
+- Claude's native `verification_required` and `cloud_credential_error` remain
+  distinct from a Claude sign-in failure, model unavailability and transport
+  failure. Preserve the provider's explanation, credential/provider name and
+  safe verification link in the existing brown error card with **Retry →**.
+  When only an error tag exists, provide clear verification/credential guidance.
+  Do not invent a verification URL, switch models, replay automatically, offer
+  **Retry in new chat**, or invalidate Claude's sign-in health for these errors.
+  Keep classification through persistence and autonomous/background results;
+  classification alone does not establish a result's turn ownership.
+- These two parent synthetic SDK error messages belong in the failure card,
+  not the assistant answer. They are not evidence of model work: Retry resends
+  the original prompt and attachments before work, or continues with that same
+  request after actual output/tools. Child-only and replaced/recovered errors
+  must not poison a later parent result. Normal provider tool choices are unchanged.
 - Ordinary tool icons always use `--fg2`, including the newest running call.
   List uses the file-search icon. Current streamed narration uses `--fg1` at
   every nesting level; once the next visible activity arrives, it uses `--fg2`.
@@ -317,7 +470,71 @@ suites, `features/agent/__tests__/fallback-transcript.test.ts`,
   historical tool result with a read of today's file. Missing or failed edits
   must not look applied; proposed diffs remain explicitly unconfirmed.
 
+## Explicit permission decisions
+
+- Codex identity-verification elicitation is not an ordinary permission or
+  question. Until native signing/enrollment is supported, cancel it and show
+  `Codex requested identity verification, which this version of Zeros cannot complete.`
+  as an inbetween message inside the requesting thread/Agent group. No tool
+  row or Yes/No card can establish verification. Redact challenges and private
+  display context from traces, and suppress late feedback after Stop/disposal.
+
+- Claude's `defaultToNo` or `suppressAlwaysAllowRule` hint makes that request
+  an explicit once-only decision. Reuse the existing composer-position
+  PermissionCard with exactly **Yes** and **No**, the existing target details,
+  and no new modal, tool row or explanatory badge.
+- Initially focus No in the active pane without stealing focus from another
+  editor or overlay. Plain Enter declines; approval requires clicking Yes or
+  deliberately focusing it and activating it. Remove broad approval shortcuts
+  and suppress held/in-flight activation keys when a queued request replaces
+  the preceding card. Inactive and hidden panes never own these keys.
+- Neither saved chat policies nor a mode change may silently answer an
+  explicit request. The adapter offers only once/deny and rejects any stale
+  broader option. Apply the same rule to Claude in Chrome and explicit plan
+  approvals; ordinary provider options and plan review remain unchanged.
+- Preserve the hint through the installed SDK wrapper, bridge transport and
+  permission queue. The pinned SDK forwards both hints natively; the former
+  0.3.266 backport is removed. Keep the real-wrapper regression and browser
+  smoke passing against each replacement.
+
 ## Verification when providers change
+
+Claude background completion receipts are not user-turn completion. An empty
+zero-call success needs autonomous origin or indexed queued-work evidence to
+be treated as an acknowledgement; `/usage`, `/clear`, and legacy results must
+still settle. Preserve the parent clock, pending compaction and steering while
+accounting for cumulative usage once. A result's explicit user UUIDs outrank
+its autonomous origin when a queued send was folded into that turn.
+
+Claude startup reasons select recovery before incidental advice in provider
+prose. Enable structured startup results, retain the last-resort EOF path, and
+do not mark organization policy, proxy, cwd or shell failures as bad sign-in.
+Use the existing failure card and preserve the native explanation.
+If the SDK throws the same startup failure after yielding its result, retain
+one error card; do not label that process exit as failed background work.
+
+Permission identity uses the query's immutable integration configuration and
+native MCP provenance, not a tool prefix alone. Native Chrome is CLI-owned
+`dynamic` configuration; a configured namesake, an SDK-host server, or an
+unknown source cannot acquire its browser permission flow. Older wrappers
+without provenance retain that flow only for an enabled browser query without
+an explicitly registered namesake.
+
+Keep Claude's native prompt preset and tool selection. Zeros opts out of prompt
+snapshots (`snapshot: false`) so changed host/workspace instructions take effect
+when resuming the same conversation. This intentionally favors instruction
+freshness over a frozen prompt-cache prefix. It does not force Task/Todo or
+Edit/Write tools onto models that do not advertise them.
+
+For Claude, keep the [installed SDK event inventory](claude-event-coverage.md)
+and its exhaustive regression map current. Meaningful hook, permission, plugin,
+limit and runtime feedback uses bounded, replay-safe inbetween messages. Keep
+child notices under authoritative native ownership, omit private login output
+and routine diagnostic logs, and never turn advisory feedback into a tool or
+successful result. Thinking estimates indicate activity and steering consumption,
+not visible reasoning or billable usage. Apply replay guards before lifecycle
+and permission-mode updates. Compaction requires positive completion evidence;
+Stop, EOF and a turn result alone cannot mark it successful.
 
 Keep native adapter regressions for separate blocks sharing a message ID,
 partial-plus-complete delivery, completion-only delivery, repeated completion,
@@ -377,11 +594,19 @@ Current entry points:
   retrieves the engine receipt, including after the original turn ended; it must
   not issue a second native instruction. The bounded receipt ledger retains all
   accepted IDs for the execution lifetime. At capacity new requests remain
-  ordinary queued follow-ups. Capture the accepting turn before awaiting and
+  ordinary queued follow-ups. A retired or unknown execution returns
+  `interrupted`, never `queued`: disposal or engine restart cannot prove that
+  the original attempt was undelivered. Admission applies only to new delivery;
+  an access/admission error on a receipt retry retains the renderer's original
+  attempt identity and uncertainty. Capture the accepting turn before awaiting and
   ignore callbacks from a replaced queue or execution. Recheck the accepting
   turn after gateway admission as well as after provider input preparation.
   `attemptId` opts into structured outcomes; older clients receive AGENT_ERROR
   for non-delivery because they interpret any AGENT_STEERED as success.
+- Explicit failed-turn recovery rebuilds inline attachment segments from the
+  encoder's current durable metadata and includes appended source transcripts.
+  Keep text/mention order intact and the inline and flat attachment lists in
+  sync, so a subsequent edit or retry cannot restore stale paths or omit context.
 - Claude's input UUID is the steering identity. `command_lifecycle.command_uuid`
   (not the lifecycle frame UUID), native started/completed states, and root
   `user_message_uuid(s)` establish consumption. Child events do not acknowledge

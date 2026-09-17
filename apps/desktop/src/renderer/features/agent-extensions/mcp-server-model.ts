@@ -9,7 +9,7 @@
 // without a DOM. See customize-mcp.tsx / mcp-server-form.tsx for the views.
 // ──────────────────────────────────────────────────────────
 
-export type Transport = "stdio" | "http";
+export type Transport = "stdio" | "http" | "sse";
 
 /** The sentinel an env VALUE carries when its real value lives in the OS
  *  Keychain, not the settings file. The engine strips it from the registry and
@@ -40,11 +40,12 @@ export interface Draft {
   description: string;
   transport: Transport;
   command: string;
+  cwd: string;
   argsText: string; // one arg per line (handles spaces; no shell-splitting)
   url: string;
   env: KV[];
   headers: KV[];
-  /** http only: "oauth"/"header" route through the Zeros gateway (which brokers
+  /** Remote transports only: "oauth"/"header" route through the Zeros gateway (which brokers
    *  OAuth, or holds a static auth header). */
   auth: "none" | "oauth" | "header";
   /** auth:"header" — the header NAME the gateway sets (e.g. Authorization). */
@@ -56,6 +57,9 @@ export interface Draft {
   /** auth:"oauth" — optional pre-registered client_id for no-DCR servers
    *  (non-secret; written to settings as oauth_client_id). */
   oauthClientId: string;
+  oauthScopes: string;
+  oauthClientSecret: string;
+  clearOAuthClientSecret: boolean;
 }
 
 export function asString(v: unknown): string {
@@ -73,12 +77,12 @@ export function readRawServers(doc: Record<string, unknown> | undefined): RawSer
 }
 
 export function transportOf(s: RawServer): Transport {
-  return s.transport === "http" ? "http" : "stdio";
+  return s.transport === "http" || s.transport === "sse" ? s.transport : "stdio";
 }
 
 /** A one-line, monospace summary of where a server points. */
 export function endpointSummary(s: RawServer): string {
-  if (transportOf(s) === "http") return asString(s.url) || "(no url)";
+  if (transportOf(s) !== "stdio") return asString(s.url) || "(no url)";
   const cmd = asString(s.command) || "(no command)";
   const args = Array.isArray(s.args) ? s.args.filter((a) => typeof a === "string").join(" ") : "";
   return args ? `${cmd} ${args}` : cmd;
@@ -120,6 +124,7 @@ export function draftFromServer(s: RawServer | null): Draft {
     description: s ? asString(s.description) : "",
     transport,
     command: s ? asString(s.command) : "",
+    cwd: asString(s?.cwd),
     argsText: (args as string[]).join("\n"),
     url: s ? asString(s.url) : "",
     // A sentinel'd env value is a Keychain secret: mark the row secret and clear
@@ -130,12 +135,15 @@ export function draftFromServer(s: RawServer | null): Draft {
     ),
     headers: mapToKV(s?.headers),
     auth:
-      transport === "http" && (s?.auth === "oauth" || s?.auth === "header")
+      transport !== "stdio" && (s?.auth === "oauth" || s?.auth === "header")
         ? (s.auth as "oauth" | "header")
         : "none",
     headerName: asString(s?.header_name) || "Authorization",
     headerSecret: "", // never read a stored secret into the form
     oauthClientId: asString(s?.oauth_client_id),
+    oauthScopes: Array.isArray(s?.oauth_scopes) ? s.oauth_scopes.filter((v): v is string => typeof v === "string").join(" ") : "",
+    oauthClientSecret: "",
+    clearOAuthClientSecret: false,
   };
 }
 
@@ -168,6 +176,7 @@ const DRAFT_OWNED_KEYS = new Set([
   "description",
   "transport",
   "command",
+  "cwd",
   "args",
   "env",
   "url",
@@ -175,6 +184,8 @@ const DRAFT_OWNED_KEYS = new Set([
   "auth",
   "header_name",
   "oauth_client_id",
+  "oauth_scopes",
+  "oauth_client_secret",
   "enabled",
   "disabled_tools",
 ]);
@@ -210,6 +221,7 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
       ...description,
       transport: "stdio",
       command: d.command.trim(),
+      ...(d.cwd.trim() ? { cwd: d.cwd.trim() } : {}),
       ...(args.length ? { args } : {}),
       ...(Object.keys(env).length ? { env } : {}),
       ...disabledTools,
@@ -224,7 +236,7 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
       ...carried,
       name: d.name.trim(),
       ...description,
-      transport: "http",
+      transport: d.transport,
       url: d.url.trim(),
       auth: "header",
       header_name: d.headerName.trim() || "Authorization",
@@ -237,13 +249,14 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
     ...carried,
     name: d.name.trim(),
     ...description,
-    transport: "http",
+    transport: d.transport,
     url: d.url.trim(),
     ...(Object.keys(headers).length ? { headers } : {}),
     ...(d.auth === "oauth"
       ? {
           auth: "oauth",
           ...(d.oauthClientId.trim() ? { oauth_client_id: d.oauthClientId.trim() } : {}),
+          ...(d.oauthScopes.trim() ? { oauth_scopes: [...new Set(d.oauthScopes.trim().split(/\s+/))] } : {}),
         }
       : {}),
     ...disabledTools,
@@ -258,7 +271,7 @@ export function serverFromDraft(d: Draft, prior: RawServer | null): RawServer {
 export function newHeaderSecretFromDraft(
   d: Draft,
 ): { url: string; headerName: string; value: string } | null {
-  if (d.transport !== "http" || d.auth !== "header" || !d.headerSecret) return null;
+  if (d.transport === "stdio" || d.auth !== "header" || !d.headerSecret) return null;
   return {
     url: d.url.trim(),
     headerName: d.headerName.trim() || "Authorization",
@@ -272,9 +285,15 @@ export function draftError(d: Draft, takenNames: Set<string>): string | null {
   if (!name) return "Name is required.";
   if (takenNames.has(name)) return `Another server is already named “${name}”.`;
   if (d.transport === "stdio" && !d.command.trim()) return "Command is required for a stdio server.";
-  if (d.transport === "http") {
+  if (d.transport === "stdio" && (d.cwd.includes("\0") || d.cwd.length > 4096)) return "Working directory is invalid.";
+  if (d.auth === "oauth" && d.transport !== "stdio") {
+    if (d.oauthClientSecret && !d.oauthClientId.trim()) return "Client ID is required with a client secret.";
+    const scopes = d.oauthScopes.trim().split(/\s+/).filter(Boolean);
+    if (scopes.length > 64 || scopes.some((s) => !/^[\x21\x23-\x5b\x5d-\x7e]+$/.test(s))) return "Enter valid OAuth scopes separated by spaces.";
+  }
+  if (d.transport !== "stdio") {
     const url = d.url.trim();
-    if (!url) return "URL is required for an HTTP server.";
+    if (!url) return `URL is required for an ${d.transport === "sse" ? "SSE" : "HTTP"} server.`;
     if (!/^https?:\/\//i.test(url)) return "URL must start with http:// or https://.";
   }
   return null;

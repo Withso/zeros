@@ -16,7 +16,7 @@
 // relative ones (e.g. a `[name](/Users/…/x.ts)` link); the workspace boundary
 // for those is enforced at OPEN time, not here.
 export const FILE_PATH_RE =
-  /^\/?[\w.-]+(?:\/[\w.-]+)*\.(?:tsx?|jsx?|mjs|cjs|json5?|jsonc?|md|mdx|markdown|css|s[ac]ss|less|html?|xml|svg|vue|svelte|astro|py|rb|rs|go|java|kts?|swift|c|cc|cpp|cxx|hh?|hpp|mm?|cs|php|sh|bash|zsh|fish|ps1|sql|graphql|gql|ya?ml|toml|ini|cfg|conf|env|lock|txt|log|proto|prisma|tsv|csv)(?::\d+(?::\d+)?)?$/i;
+  /^\/?[\p{L}\p{N}_.()-]+(?:[ /][\p{L}\p{N}_.()-]+)*\.(?:tsx?|jsx?|mjs|cjs|json5?|jsonc?|md|mdx|markdown|css|s[ac]ss|less|html?|xml|svg|vue|svelte|astro|py|rb|rs|go|java|kts?|swift|c|cc|cpp|cxx|hh?|hpp|mm?|cs|php|sh|bash|zsh|fish|ps1|sql|graphql|gql|ya?ml|toml|ini|cfg|conf|env|lock|txt|log|proto|prisma|tsv|csv|png|jpe?g|gif|webp|bmp|ico|avif|heic|heif|pdf|zip|mp[34]|wav|webm|ogg)(?::\d+(?::\d+)?)?$/iu;
 
 /** If `raw` looks like a file reference — optionally with a `:line[:col]`
  *  suffix, a leading `./`, or a `file://` scheme — return the bare path;
@@ -28,12 +28,20 @@ export const FILE_PATH_RE =
  *  at OPEN time (relativised against the chat's cwd + read-gated), not here — so
  *  an out-of-workspace absolute path simply opens nothing instead of rendering
  *  as an external link that navigates the app away. */
-export function fileRefPath(raw: string): string | null {
+export function fileRefPath(raw: string, explicit = false): string | null {
   let s = raw.trim();
-  if (!s || s.length > 240) return null;
-  s = s.replace(/^file:\/\//i, ""); // a file://… URL → its bare path
-  if (!FILE_PATH_RE.test(s)) return null;
+  if (!s || s.length > 4096) return null;
+  if (/^file:/i.test(s)) {
+    if (!/^file:\/\/\//i.test(s)) return null;
+    s = s.slice(7);
+  }
+  try { s = decodeURIComponent(s); } catch { return null; }
+  // eslint-disable-next-line no-control-regex -- reject unsafe control bytes in native file references
+  if (/[\x00-\x1f\x7f<>"\\?#]/.test(s) || s.startsWith("//")) return null;
   s = s.replace(/:\d+(?::\d+)?$/, "").replace(/^\.\//, "");
-  if (s.split("/").some((seg) => seg === "..")) return null;
+  if (s.includes(":") || s.split("/").some(seg => seg === "..")) return null;
+  // Explicit links/resources may name extensionless deliverables. Inline code
+  // stays conservative so identifiers and package names retain their styling.
+  if (!FILE_PATH_RE.test(s) && !(explicit && /^[\p{L}\p{N}_ .()/@+%&,;=!-]+$/u.test(s))) return null;
   return s;
 }

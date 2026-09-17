@@ -1,3 +1,4 @@
+import { validateMcpWorkingDirectory } from "../agents/mcp-working-directory";
 import {
   changesHistorySchema,
   turnHistoryCursorSchema,
@@ -577,6 +578,9 @@ const WRITE_OPS = new Set<string>([
   "mcp.gateway.completeAuth",
   "mcp.gateway.disconnect",
   "mcp.gateway.setHeaderSecret",
+  "mcp.gateway.setOAuthSecret",
+  "mcp.gateway.cancelAuth",
+  "mcp.gateway.reconnect",
   // Files-tab manual edit — write one file's content. Open to paired devices on
   // the SAME terms as settings.write (a paired device already holds PTY =
   // arbitrary file edits, so gating this would be theater). The handler still
@@ -1134,6 +1138,7 @@ const REMOTE_READABLE = new Set<string>([
   // bearer credentials. It is required for cloud MCP parity.
   "mcp.resolveComposed",
   "mcp.gateway.status",
+  "mcp.validateWorkingDirectory",
   "tools.session.list",
   "tools.session.inventory",
 ]);
@@ -1810,6 +1815,10 @@ export class WorkspaceService {
     fn: (url: string, headerName: string, value: string) => void,
   ): void {
     this.gatewayHeaderSecretSetter = fn;
+  }
+  private gatewayOAuthSecretSetter: ((url: string, clientId: string, value: string) => void) | null = null;
+  setGatewayOAuthSecretSetter(fn: (url: string, clientId: string, value: string) => void): void {
+    this.gatewayOAuthSecretSetter = fn;
   }
   /** Starts (or restarts) a contained background setup PTY. Wired by the
    *  engine (which owns the PtyService + SetupManager); managed workspaces are
@@ -5118,17 +5127,19 @@ export class WorkspaceService {
         const direct = r.servers.map((s, i) => ({
           name: s.name,
           transport: s.transport,
-          ...(s.transport === "http"
+          ...(s.transport !== "stdio"
             ? { url: s.url }
-            : { command: s.command, ...(s.args ? { args: s.args } : {}) }),
+            : { command: s.command, ...(s.args ? { args: s.args } : {}), ...(s.cwd ? { cwd: s.cwd } : {}) }),
           source: r.sources[i]!,
         }));
         const gateway = r.gatewayBackends.map((b) => ({
           name: b.name,
-          transport: "http" as const,
+          transport: b.transport ?? "http" as const,
           url: b.url,
           source: b.source,
           auth: b.auth,
+          ...(b.clientId ? { oauth_client_id: b.clientId } : {}),
+          ...(b.scopes ? { oauth_scopes: b.scopes } : {}),
         }));
         return { servers: [...direct, ...gateway], warnings: r.warnings };
       }
@@ -5193,6 +5204,35 @@ export class WorkspaceService {
           error: this.gatewayErrorAccessor?.() ?? null,
           servers: gw?.getStatuses() ?? [],
         };
+      }
+      case "mcp.validateWorkingDirectory": {
+        const directory = reqStr(params, "directory");
+        const workspace = optStr(params, "workspace");
+        if (workspace && remote && !isKnownRepoRoot(workspace)) throw new Error("Unknown workspace for MCP working directory.");
+        // User-wide relative directories belong to the eventual chat workspace.
+        // Validate them at admission; absolute and repo-scoped paths can be checked now.
+        if (!workspace && !nodePath.isAbsolute(directory) && !directory.startsWith("~/") && directory !== "~") return { deferred: true };
+        await validateMcpWorkingDirectory(directory, workspace ?? os.homedir());
+        return { ok: true };
+      }
+      case "mcp.gateway.cancelAuth": {
+        await this.gatewayForScope()?.cancelAuthorization(reqStr(params, "server"));
+        return { ok: true };
+      }
+      case "mcp.gateway.reconnect": {
+        await this.gatewayForScope()?.reconnect();
+        return { ok: true };
+      }
+      case "mcp.gateway.setOAuthSecret": {
+        const url = reqStr(params, "url");
+        const clientId = reqStr(params, "clientId");
+        const value = optStr(params, "value") ?? "";
+        const parsed = new URL(url);
+        if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || clientId.length > 4096 || value.length > 16384) throw new Error("Invalid MCP OAuth client configuration.");
+        if (!this.gatewayOAuthSecretSetter) throw new Error("OAuth credential storage is unavailable.");
+        await this.gatewayForScope()?.cancelAuthorization();
+        this.gatewayOAuthSecretSetter(url, clientId, value);
+        return { ok: true };
       }
       case "mcp.gateway.authorize": {
         if (remote) {

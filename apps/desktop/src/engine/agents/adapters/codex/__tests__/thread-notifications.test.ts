@@ -2,8 +2,51 @@ import { describe, expect, it } from "vitest";
 import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 import { CodexAppServerTranslator } from "../app-server-translator";
 import { CodexThreadNotifications } from "../thread-notifications";
+import type { SessionNotification } from "@zeros/protocol/agent-events";
 
 describe("Codex notification ownership", () => {
+  it("retires the preceding parent turn at the local prompt boundary without silencing children", () => {
+    const t = setup();
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "old" } });
+    t.router.handle("turn/completed", { threadId: "parent", turn: { id: "old", status: "completed" } });
+    t.router.startRootTurn();
+    const reroute = { threadId: "parent", turnId: "old", fromModel: "gpt-6", toModel: "gpt-5.6", reason: "highRiskCyberActivity" };
+    t.router.handle("model/rerouted", reroute);
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "old" } });
+    t.router.handle("item/completed", { threadId: "parent", turnId: "old", item: { type: "agentMessage", id: "stale", text: "Stale output" } });
+    expect(t.messages()).toEqual([]);
+
+    t.router.handle("item/completed", { threadId: "child", turnId: "background", item: { type: "agentMessage", id: "child-result", text: "Child finished" } });
+    expect(t.messages()).toHaveLength(1);
+    t.router.handle("turn/started", { threadId: "parent", turn: { id: "new" } });
+    t.router.handle("model/rerouted", { ...reroute, turnId: "new" });
+    expect(t.messages().at(-1)).toMatchObject({ modelFallback: { fromModel: "gpt-6", toModel: "gpt-5.6", scope: "session" } });
+  });
+
+  it("keeps parent context readings isolated from retired turns and child usage", () => {
+    const readings: number[] = [];
+    const root = new CodexAppServerTranslator({
+      sessionId: "session",
+      emit: (event: SessionNotification) => {
+        if (event.update.sessionUpdate === "usage_update") readings.push(event.update.used!);
+      },
+    });
+    const router = new CodexThreadNotifications("parent", root);
+    const usage = (threadId: string, turnId: string, used: number) => router.handle("thread/tokenUsage/updated", {
+      threadId, turnId,
+      tokenUsage: { last: { totalTokens: used, inputTokens: used, outputTokens: 0 }, modelContextWindow: 100 },
+    });
+    router.handle("turn/started", { threadId: "parent", turn: { id: "old" } });
+    usage("parent", "old", 90);
+    router.handle("turn/started", { threadId: "parent", turn: { id: "current" } });
+    usage("parent", "current", 20);
+    usage("parent", "old", 95);
+    router.handle("turn/started", { threadId: "child", turn: { id: "child-turn" } });
+    usage("child", "child-turn", 80);
+    // A legitimate current-turn compaction is allowed to lower the reading.
+    usage("parent", "current", 10);
+    expect(readings).toEqual([90, 20, 10]);
+  });
   it("keeps child fallback prose local and dedupes native reroute replay", () => {
     const t = setup();
     t.router.handle("item/started", { threadId: "parent", item: { type: "subAgentActivity", id: "spawn", kind: "started", agentThreadId: "child", agentPath: "/root/audit" } });

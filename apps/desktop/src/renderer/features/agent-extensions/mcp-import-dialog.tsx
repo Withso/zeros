@@ -96,6 +96,7 @@ async function importToSettings(srv: DiscoveredMcpServerWire): Promise<ImportRes
         name: srv.name,
         transport: "stdio",
         command: srv.command,
+        ...(srv.cwd ? { cwd: srv.cwd } : {}),
         ...(srv.args && srv.args.length ? { args: srv.args } : {}),
         ...(Object.keys(env).length ? { env } : {}),
       },
@@ -116,10 +117,19 @@ async function importToSettings(srv: DiscoveredMcpServerWire): Promise<ImportRes
       plain[k] = v;
     }
   }
+  if (srv.oauth) {
+    return {
+      entry: { name: srv.name, transport: srv.transport, url: srv.url, auth: "oauth",
+        ...(srv.oauth.clientId ? { oauth_client_id: srv.oauth.clientId } : {}),
+        ...(srv.oauth.scopes?.length ? { oauth_scopes: srv.oauth.scopes } : {}),
+      },
+      ...(headerSecret || droppedSecretHeaders.length ? { droppedSecretHeaders: [...(headerSecret ? [headerSecret.headerName] : []), ...droppedSecretHeaders] } : {}),
+    };
+  }
   const entry: RawServer = headerSecret
     ? {
         name: srv.name,
-        transport: "http",
+        transport: srv.transport,
         url: srv.url,
         auth: "header",
         header_name: headerSecret.headerName,
@@ -127,7 +137,7 @@ async function importToSettings(srv: DiscoveredMcpServerWire): Promise<ImportRes
       }
     : {
         name: srv.name,
-        transport: "http",
+        transport: srv.transport,
         url: srv.url,
         ...(Object.keys(plain).length ? { headers: plain } : {}),
       };
@@ -138,7 +148,7 @@ async function importToSettings(srv: DiscoveredMcpServerWire): Promise<ImportRes
   };
 }
 
-function TransportPill({ transport }: { transport: "stdio" | "http" }) {
+function TransportPill({ transport }: { transport: "stdio" | "http" | "sse" }) {
   return (
     <span className="select-none rounded-sm border border-border1 px-1.5 py-px text-xs font-medium text-fg2">
       {transport}

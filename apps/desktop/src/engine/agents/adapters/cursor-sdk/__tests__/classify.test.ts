@@ -119,6 +119,30 @@ describe("classifyCursorSdkError", () => {
     }
   });
 
+  it.each([
+    ["[unknown] Server error during API key exchange: Service unavailable", "transport-closed"],
+    ["Failed to connect to API key exchange endpoint: Unknown error", "transport-closed"],
+    ["Provider explanation: Server error during API key exchange: no details", "protocol-error"],
+    ["API key exchange succeeded but returned no access token", "protocol-error"],
+    [{ code: "unauthenticated", message: "Server error during API key exchange: rejected" }, "auth-required"],
+    [{ status: 401, message: "Server error during API key exchange: rejected" }, "auth-required"],
+    [{ status: 429, message: "Server error during API key exchange: rejected" }, "rate-limited"],
+    [{ status: 403, message: "Server error during API key exchange: rejected" }, "protocol-error"],
+    [{ code: "permission_denied", message: "Server error during API key exchange: rejected" }, "protocol-error"],
+    [{ code: "configuration_error", message: "Server error during API key exchange: rejected" }, "protocol-error"],
+  ])("limits the erased-refresh-code fallback to SDK connection errors: %j", (error, kind) => {
+    expect(classifyCursorSdkError(error, "prompt").failure.kind).toBe(kind);
+  });
+
+  it("preserves TLS guidance for a failed credential exchange", () => {
+    const failure = classifyCursorSdkError(
+      "[unknown] Failed to connect to API key exchange endpoint: self-signed certificate in certificate chain",
+      "prompt",
+    ).failure;
+    expect(failure.kind).toBe("protocol-error");
+    expect(failure.message).toContain("NODE_EXTRA_CA_CERTS");
+  });
+
   it("classifies TLS / certificate failures with actionable guidance (HTTPS interception)", () => {
     // This altname error used to fire SPURIOUSLY because the bun runtime
     // mis-parsed Cursor's valid cert under node:http2 — that path now runs in

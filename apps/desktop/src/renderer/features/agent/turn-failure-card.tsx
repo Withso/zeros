@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
 import { ArrowRight } from "lucide-react";
 import { Button } from "@/renderer/shared/ui/primitives/button";
+import { AgentNotice, AgentNoticeText } from "./agent-notice";
 import type { TurnFailure } from "./turn-failure";
 
 export function TurnFailureCard({
@@ -35,35 +36,9 @@ export function TurnFailureCard({
       setBusy(false);
     }
   };
-  // Plain text is escaped by React. Only explicit web URLs become links;
-  // provider HTML, Markdown commands and other URL schemes remain text.
-  const parts = failure.message.split(
-    /(https?:\/\/[^\s<>"\]]+[^\s<>"\].,;)])/g,
-  );
   return (
-    <div
-      role="status"
-      data-turn-failure-card
-      className="bg-brown-bg text-fg1 my-2 rounded-md p-3 text-sm"
-    >
-      <div className="break-words whitespace-pre-wrap">
-        {parts.map((part, index) =>
-          /^https?:\/\//.test(part) ? (
-            <a
-              key={index}
-              href={part}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-fg1 underline underline-offset-2"
-            >
-              {part}
-            </a>
-          ) : (
-            part
-          ),
-        )}
-      </div>
-      {(onRetry || onRetryNewChat) && (
+    <AgentNotice message={failure.message} data-turn-failure-card>
+      {(onRetry || (onRetryNewChat && failure.newChatAllowed)) && (
         <div className="mt-2 flex flex-wrap items-center gap-3">
           {onRetry && (
             <Button
@@ -96,9 +71,9 @@ export function TurnFailureCard({
       )}
       {retryError && (
         <div role="alert" className="mt-2">
-          {retryError}
+          <AgentNoticeText message={retryError} />
         </div>
       )}
-    </div>
+    </AgentNotice>
   );
 }

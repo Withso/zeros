@@ -18,6 +18,15 @@ export class CodexThreadNotifications {
     );
   }
 
+  /** A local prompt owns a new translator/model-selection epoch before input
+   * preparation can await I/O. Retire the old native turn at that boundary,
+   * including delayed control events before the new turn/started arrives. */
+  startRootTurn(): void {
+    const previous = this.turns.get(this.threadId);
+    if (previous) this.retireTurn(this.threadId, previous);
+    this.root.startTurn();
+  }
+
   handle(method: string, params: unknown): void {
     const p = params as {
       threadId?: string;
@@ -49,15 +58,10 @@ export class CodexThreadNotifications {
       this.threadId;
     const translator = this.forThread(threadId);
     const turnId = p?.turnId ?? p?.turn?.id;
+    if (turnId && this.retiredTurns.get(threadId)?.has(turnId)) return;
     if (method === "turn/started" && turnId) {
       const previous = this.turns.get(threadId);
-      const retired = this.retiredTurns.get(threadId) ?? new Set<string>();
-      if (retired.has(turnId)) return;
-      if (previous && previous !== turnId) {
-        retired.add(previous);
-        if (retired.size > 128) retired.delete(retired.values().next().value!);
-        this.retiredTurns.set(threadId, retired);
-      }
+      if (previous && previous !== turnId) this.retireTurn(threadId, previous);
       // User prompts already reset the root before turn/start. Native parent
       // continuations have no adapter prompt call, so retire their prior
       // terminal state here just as we do for child turns.
@@ -69,9 +73,9 @@ export class CodexThreadNotifications {
       this.turns.set(threadId, turnId);
       this.completedChildren.delete(threadId);
     }
-    // Item ids can be reused in the next turn. Once that turn starts, stale
-    // frames cannot mutate its records or control state. Late bookkeeping
-    // before the next turn still flows through the original translator state.
+    // Item ids can be reused in the next turn. After a local prompt begins or
+    // a native continuation starts, stale frames cannot mutate its records or
+    // control state. Earlier late bookkeeping stays with its original turn.
     if (
       turnId &&
       this.turns.has(threadId) &&
@@ -124,6 +128,13 @@ export class CodexThreadNotifications {
         }
       }
     }
+  }
+
+  private retireTurn(threadId: string, turnId: string): void {
+    const retired = this.retiredTurns.get(threadId) ?? new Set<string>();
+    retired.add(turnId);
+    if (retired.size > 128) retired.delete(retired.values().next().value!);
+    this.retiredTurns.set(threadId, retired);
   }
 
   private attachChild(

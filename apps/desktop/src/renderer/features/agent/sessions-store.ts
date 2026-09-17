@@ -817,7 +817,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       size?: number;
       used?: number;
       cost?: { totalCostUsd?: number } | null;
-      categories?: Array<{ name: string; tokens: number }>;
+      categories?: AgentUsage["categories"];
       currentModeId?: string;
       availableCommands?: AvailableCommand[];
       availableSubagents?: AvailableSubagent[];
@@ -987,13 +987,14 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       return;
     }
 
-    // usage_update → context window accounting. Keep cumulative counters
-    // from prompt-response usage; overwrite size/used. The adapter adds
-    // costUsd capture from upd.cost.totalCostUsd.
+    // Context snapshots belong to an execution, even when the engine routes
+    // them by durable chatId. A retired execution cannot update its replacement
+    // or an unbound slot. Retain confirmed fields for partial refreshes.
     if (upd.sessionUpdate === "usage_update") {
       set((state) => {
         const slot = state.sessions[chatId];
-        if (!slot) return state;
+        if (!slot || (slot.executionId ?? slot.sessionId) !==
+          (notification.executionId ?? notification.sessionId)) return state;
         const nextUsage: AgentUsage = {
           ...slot.usage,
           size: typeof upd.size === "number" ? upd.size : slot.usage.size,
@@ -1002,10 +1003,23 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
             typeof upd.cost?.totalCostUsd === "number"
               ? upd.cost.totalCostUsd
               : slot.usage.costUsd,
-          // Breakdown only when the update carries one (Claude) — a
-          // categoryless codex update must not wipe a prior breakdown.
+          // Omitted = partial update; [] explicitly clears an old breakdown.
           categories: upd.categories ?? slot.usage.categories,
         };
+        const previousCategories = slot.usage.categories;
+        if (
+          nextUsage.categories && previousCategories &&
+          nextUsage.categories.length === previousCategories.length &&
+          nextUsage.categories.every((category, index) =>
+            category.name === previousCategories[index].name &&
+            category.tokens === previousCategories[index].tokens &&
+            category.kind === previousCategories[index].kind)
+        ) nextUsage.categories = previousCategories;
+        if (
+          nextUsage.size === slot.usage.size && nextUsage.used === slot.usage.used &&
+          nextUsage.costUsd === slot.usage.costUsd &&
+          nextUsage.categories === slot.usage.categories
+        ) return state;
         return {
           sessions: {
             ...state.sessions,

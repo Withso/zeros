@@ -76,6 +76,19 @@ export class ClaudeTranscriptState {
     return frameId ? message?.frames.has(frameId) === true : message?.snapshotCompleted === true;
   }
 
+  /** Remember a native synthetic error without making it model output or
+   * changing the active response. Replays/retractions still use its identity. */
+  rememberSuppressed(nativeId: string | undefined, parent = "", frameId?: string): void {
+    const message = this.message(nativeId, parent);
+    message.completed = true;
+    message.snapshotCompleted = true;
+    if (frameId) {
+      message.frames.add(frameId);
+      this.frames.set(frameId, { parent, message, indices: [] });
+      if (this.frames.size > MAX_RETAINED_MESSAGES) this.frames.delete(this.frames.keys().next().value!);
+    }
+  }
+
   isStreamReplay(event: StreamEvent, parent = ""): boolean {
     if (event.type === "message_start")
       return !!event.message?.id && this.messages.get(this.key(parent, event.message.id))?.completed === true;

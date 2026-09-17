@@ -156,4 +156,86 @@ describe("Codex provider quota", () => {
     expect(merged.credits).toEqual(baseline.credits);
     expect(merged.planType).toBe("pro");
   });
+
+  it.each([false, true, null])(
+    "preserves authoritative included-usage permission %s and the quota model alias",
+    (ordinaryUsageAllowed) => {
+      const quota = normalizeCodexQuota({
+        ...baseline,
+        ordinaryUsageAllowed,
+        normalModelSlug: "gpt-5.6-sol",
+        accountId: "private-account",
+      });
+      expect(quota).toMatchObject({
+        ordinaryUsageAllowed,
+        normalModelSlug: "gpt-5.6-sol",
+      });
+      expect(JSON.stringify(quota)).not.toContain("private-account");
+    },
+  );
+
+  it("does not infer permission recovery from a percentage reset or lose the alias in a sparse update", () => {
+    const merged = mergeCodexRateLimitSnapshot(
+      {
+        ...baseline,
+        ordinaryUsageAllowed: false,
+        normalModelSlug: "gpt-5.6-sol",
+      },
+      {
+        ...baseline,
+        primary: { ...baseline.primary, usedPercent: 0, resetsAt: 1 },
+      },
+    );
+    expect(normalizeCodexQuota(merged)).toMatchObject({
+      ordinaryUsageAllowed: false,
+      normalModelSlug: "gpt-5.6-sol",
+    });
+  });
+
+  it("never inherits another account's or quota bucket's counters", () => {
+    const previous = {
+      ...baseline,
+      accountId: "a",
+      ordinaryUsageAllowed: false,
+      normalModelSlug: "model-a",
+    };
+    const incoming = {
+      ...baseline,
+      accountId: "b",
+      secondary: null,
+      credits: null,
+      planType: null,
+    };
+    expect(mergeCodexRateLimitSnapshot(previous, incoming)).toEqual(incoming);
+    const otherBucket = mergeCodexRateLimitSnapshot(previous, {
+      ...baseline,
+      limitId: "other",
+      secondary: null,
+      credits: null,
+      normalModelSlug: null,
+    });
+    expect(otherBucket).toMatchObject({
+      secondary: null,
+      credits: null,
+      normalModelSlug: null,
+      ordinaryUsageAllowed: false,
+    });
+  });
+
+  it("keeps explicit unknown permission distinct from a confirmed recovery", () => {
+    const previous = { ...baseline, ordinaryUsageAllowed: false };
+    expect(
+      mergeCodexRateLimitSnapshot(previous, {
+        ...baseline,
+        ordinaryUsageAllowed: null,
+      }).ordinaryUsageAllowed,
+    ).toBeNull();
+    expect(
+      mergeCodexRateLimitSnapshot(previous, {
+        ...baseline,
+        ordinaryUsageAllowed: true,
+      }).ordinaryUsageAllowed,
+    ).toBe(true);
+  });
+
 });

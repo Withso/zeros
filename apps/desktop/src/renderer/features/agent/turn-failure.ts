@@ -59,21 +59,17 @@ export function turnFailureForCard(input: {
       ? "transport-closed"
       : undefined) ??
     (notice?.kind === "error_notice" ? notice.turnFailure?.kind : undefined) ??
+    notice?.failureKind ??
     fallback?.kind ??
     "protocol-error";
-  // A fresh conversation can repair lost/corrupt session state. Provider-wide
-  // limits, model availability and policy rejections need the same remedy in
-  // either chat, so avoid suggesting that a new chat would fix them.
-  const sessionRecovery = [
-      "session-expired",
-      "transport-closed",
-      "timeout",
-      "subprocess-exited",
-    ].includes(kind) || (kind === "protocol-error" && /context\s+(?:window|length).{0,40}(?:exceeded|limit)|(?:session|conversation|thread).{0,40}(?:corrupt|invalid|expired|not found)/i.test(message));
-  const newChatAllowed = sessionRecovery &&
-    !/capacity|rate.?limit|quota|billing|flagged|cybersecurity|policy|model.{0,60}(?:unavailable|not found|not supported|rejected)/i.test(
-      message,
-    );
+  // A new chat is an explicit retry destination, including for provider limits;
+  // preserve the provider's reason without promising that this resolves it.
+  // A new conversation cannot fix account verification or cloud credentials.
+  // Authentication has its own Sign in action. The caller also gates ownership
+  // and Design scope before supplying any retry callbacks.
+  const newChatAllowed = ![
+    "auth-required", "verification-required", "cloud-credentials-unavailable",
+  ].includes(kind);
   return {
     message: redactLogSecrets(message).slice(0, 8000),
     kind,

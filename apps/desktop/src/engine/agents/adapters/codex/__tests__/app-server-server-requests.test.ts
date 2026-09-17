@@ -479,6 +479,46 @@ describe("codex app-server initiated requests", () => {
     await runtime.dispose();
   });
 
+  it("settles an unsupported verification RPC once even after late answers and disposal", async () => {
+    const fake = createFakeProcess();
+    harness.proc = fake.proc;
+    let questionId = "";
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: "/tmp/project",
+      clientInfo: { name: "Zeros-test", version: "0.0.0" },
+      onUserInputRequest: (request) => {
+        questionId = request.questionId;
+        runtime.respondToUserInput(questionId, {
+          action: "cancel",
+          content: null,
+          _meta: null,
+        });
+      },
+    });
+    fake.send({
+      jsonrpc: "2.0",
+      id: "verify-rpc",
+      method: "mcpServer/elicitation/request",
+      params: {
+        threadId: "thread",
+        turnId: "turn",
+        serverName: "fixture",
+        mode: "openai/userVerification",
+        title: "Verify identity",
+        description: "fixture",
+        challenge: "Zml4dHVyZQ",
+      },
+    });
+    expect(
+      (await fake.waitFor((frame) => frame.id === "verify-rpc")).result,
+    ).toEqual({ action: "cancel", content: null, _meta: null });
+    runtime.respondToUserInput(questionId, { action: "accept", content: {} });
+    await runtime.dispose();
+    expect(
+      fake.outbound.filter((frame) => frame.id === "verify-rpc"),
+    ).toHaveLength(1);
+  });
+
   it("bounds concurrent MCP elicitations instead of flooding the question UI", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;
@@ -873,6 +913,26 @@ describe("codex app-server initiated requests", () => {
 });
 
 describe("Codex RPC trace redaction", () => {
+  it("never logs verification challenges or private display context", () => {
+    const request = redactCodexRpcLine(
+      JSON.stringify({
+        id: 9,
+        method: "mcpServer/elicitation/request",
+        params: {
+          threadId: "thread",
+          mode: "openai/userVerification",
+          title: "private-title",
+          description: "private-description",
+          challenge: "private-challenge",
+        },
+      }),
+    );
+    expect(request).not.toMatch(
+      /private-title|private-description|private-challenge/,
+    );
+    expect(request).toContain("openai/userVerification");
+  });
+
   it("redacts prompt input and answers returned to server requests", () => {
     const turnStart = redactCodexRpcLine(
       JSON.stringify({

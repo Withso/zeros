@@ -198,6 +198,8 @@ export interface AttachmentTransferOptions {
   offset?: number;
   totalBytes?: number;
   resolve?: boolean;
+  /** Saved workspace-relative graph path; authoritative while it still exists. */
+  diskPath?: string;
   abort?: boolean;
 }
 

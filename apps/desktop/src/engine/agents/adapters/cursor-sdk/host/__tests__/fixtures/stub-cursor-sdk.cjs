@@ -52,8 +52,14 @@ function configureCursorSdk(options) {
   configuredScanTtlMs = String(value);
 }
 
+function lifecycleAgent(agentId) {
+  let closed = false;
+  return { agentId, close() { closed = true; }, getUsage: async () => ({ closed }) };
+}
+
 const Agent = {
   create: async (opts) => {
+    if (opts.handleFixture) return lifecycleAgent("same-conversation");
     if (process.env.ZEROS_CURSOR_STUB_REPORT_SCAN_TTL === "1") {
       return { agentId: `scanTtl:${configuredScanTtlMs}` };
     }
@@ -98,7 +104,7 @@ const Agent = {
       agentId: `create:${describe(opts && opts.local && opts.local.store)}`,
     };
   },
-  resume: async (_agentId, opts) => ({
+  resume: async (_agentId, opts) => opts.handleFixture ? lifecycleAgent(_agentId) : ({
     agentId: `resume:${describe(opts && opts.local && opts.local.store)}`,
   }),
   list: async (opts) => ({

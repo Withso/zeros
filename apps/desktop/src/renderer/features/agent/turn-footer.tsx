@@ -119,6 +119,10 @@ export function turnFooterFailureLabel(
       return "AGENT STOPPED - DESIGN PROTECTION FAILED";
     case "auth-required":
       return "SIGN IN REQUIRED";
+    case "verification-required":
+      return "VERIFICATION REQUIRED";
+    case "cloud-credentials-unavailable":
+      return "CLOUD CREDENTIALS UNAVAILABLE";
     case "subprocess-exited":
       return "AGENT EXITED";
     case "session-expired":

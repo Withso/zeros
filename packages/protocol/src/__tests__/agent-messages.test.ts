@@ -7,6 +7,15 @@ import {
 } from "../agent-messages";
 import type { SessionNotification } from "../agent-events";
 
+it("appends late resource links without replacing captured output and clears them on retraction", () => {
+  const initial = applyUpdate([], { sessionId: "s", update: { sessionUpdate: "tool_call", toolCallId: "report", title: "Report", kind: "mcp", status: "completed", content: [{ type: "content", content: { type: "text", text: "Report ready" } }], rawOutput: { structuredContent: { count: 2 } } } });
+  const update: SessionNotification = { sessionId: "s", update: { sessionUpdate: "tool_call_update", toolCallId: "report", resourceLinks: [{ type: "resource_link", uri: ".context/local/artifacts/report.csv", name: "Report" }] } };
+  const next = applyUpdate(applyUpdate(initial, update), update);
+  expect(next[0]).toMatchObject({ content: (initial[0] as AgentToolMessage).content, rawOutput: { structuredContent: { count: 2 } }, resourceLinks: [{ type: "resource_link", uri: ".context/local/artifacts/report.csv", name: "Report" }] });
+  const retracted = applyUpdate(next, { sessionId: "s", update: { sessionUpdate: "tool_result_retraction", toolCallIds: ["report"] } });
+  expect((applyUpdate(retracted, update)[0] as AgentToolMessage).resourceLinks).toBeUndefined();
+});
+
 // The live renderer and persist-on-emit engine share applyUpdate to fold
 // streaming chunks into AgentMessages.
 // These guard the streaming contract so the two can never drift.
@@ -448,6 +457,19 @@ describe("applyUpdate — question tool-call identity + stamp durability", () =>
 // attempts, transport warnings) fold into ONE compact row per event — never
 // appended into the agent's prose. Replays dedupe on noticeId.
 describe("applyUpdate — error_notice rows", () => {
+  it("retains autonomous failure classification across persistence and replay", () => {
+    const notification = {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "error_notice", noticeId: "background-verification",
+        severity: "error", recoverable: false, code: "claude-background-failed",
+        message: "Verify at https://example.com/verify", failureKind: "verification-required",
+      },
+    } as SessionNotification;
+    const saved = JSON.parse(JSON.stringify(applyUpdate([], notification)));
+    expect(saved[0]).toMatchObject({ failureKind: "verification-required", message: "Verify at https://example.com/verify" });
+    expect(applyUpdate(saved, notification)).toBe(saved);
+  });
   it("retains the exact failed turn across persistence and replay", () => {
     const notification = {
       sessionId: "s",

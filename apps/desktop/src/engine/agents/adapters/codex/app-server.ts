@@ -1,3 +1,4 @@
+import { mcpWorkingDirectory } from "../../mcp-working-directory";
 // ──────────────────────────────────────────────────────────
 // Codex app-server runtime — long-lived JSON-RPC over stdio.
 // ──────────────────────────────────────────────────────────
@@ -589,7 +590,7 @@ export async function bootCodexAppServerRuntime(
     ? [process.execPath, [binarySource.path]]
     : [binarySource.path, []];
 
-  const mcpArgs = buildMcpServerOverrides(opts.mcpServers ?? []);
+  const mcpArgs = buildMcpServerOverrides((opts.mcpServers ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s));
 
   // Feature overrides (per-process `-c`, no ~/.codex/config.toml mutation):
   //   • default_mode_request_user_input — codex only puts the
@@ -1409,6 +1410,10 @@ export function redactCodexRpcLine(line: string): string {
         input?: unknown;
         url?: unknown;
         requestedSchema?: unknown;
+        mode?: unknown;
+        title?: unknown;
+        description?: unknown;
+        challenge?: unknown;
       };
       result?: { answers?: unknown; content?: unknown };
       method?: string;
@@ -1427,6 +1432,12 @@ export function redactCodexRpcLine(line: string): string {
       changed = true;
     }
     if (obj.method === "mcpServer/elicitation/request" && obj.params) {
+      if (obj.params.mode === "openai/userVerification") {
+        for (const key of ["title", "description", "challenge"] as const) {
+          if (key in obj.params) obj.params[key] = "[redacted verification input]";
+        }
+        changed = true;
+      }
       if ("url" in obj.params) {
         obj.params.url = redactMcpTraceUrl(obj.params.url);
         changed = true;
@@ -1492,7 +1503,11 @@ export function buildMcpServerOverrides(
     // avoid syntax injection. Skip silently rather than throw — a
     // misconfigured MCP entry shouldn't kill the boot.
     if (!/^[A-Za-z0-9_-]+$/.test(s.name)) continue;
+    // Codex cannot express legacy SSE. The adapter reports the omission; never
+    // coerce it to Streamable HTTP or treat it as a subprocess.
+    if (s.transport === "sse") continue;
     const base = `mcp_servers.${s.name}`;
+    if (s.transport === "stdio" && s.cwd) args.push("-c", `${base}.cwd="${escapeTomlString(s.cwd)}"`);
     // Codex infers the transport from the keys — `command` ⇒ stdio,
     // `url` ⇒ Streamable HTTP (no `type` field). Each `-c` value is parsed as
     // TOML, so arrays/tables are emitted as TOML literals.

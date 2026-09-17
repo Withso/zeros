@@ -603,12 +603,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     string,
     Promise<{ authorizationUrl: string }>
   >();
-  /** Last confirmed account snapshot shared across live runtimes and one-shot
-   * settings reads. Rolling notifications merge into this value. */
+  /** Last confirmed account snapshot across live runtimes and one-shot reads.
+   * Rolling updates merge with their own runtime's confirmed snapshot. */
   private latestRateLimitSnapshot: CodexRateLimitSnapshotLike | null = null;
-  /** Invalidates in-flight account reads when an authoritative logout clears
-   * account-scoped quota state. */
+  /** Invalidates in-flight reads across account boundaries and disposal. */
   private quotaSnapshotEpoch = 0;
+  /** Latest requested read or rolling update owns publication within an account. */
+  private quotaSnapshotRevision = 0;
   /** Zeros session ids being torn down intentionally — so the resulting
    *  app-server child exit doesn't broadcast an agent-wide death. One
    *  `codex app-server` child runs per session, but onAgentExit is
@@ -690,8 +691,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "account/rateLimits/read",
       GetAccountRateLimitsResponse
     >("account/rateLimits/read", undefined);
-    return response.rateLimits as RateLimitSnapshot &
-      CodexRateLimitSnapshotLike;
+    if (!response?.rateLimits)
+      throw new Error("Codex did not return a usage snapshot.");
+    return {
+      ...response.rateLimits,
+      accountId: response.accountId ?? null,
+      ordinaryUsageAllowed: response.ordinaryUsageAllowed ?? null,
+    };
   }
 
   async readProviderQuota(opts: {
@@ -700,9 +706,22 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     executionBoundary?: PreparedBoundary;
   }): Promise<AgentProviderQuota | null> {
-    return this.withMemoryRuntime(opts, async (runtime) =>
-      normalizeCodexQuota(await this.readProviderRateLimitSnapshot(runtime)),
+    const epoch = this.quotaSnapshotEpoch;
+    const revision = ++this.quotaSnapshotRevision;
+    const snapshot = await this.withMemoryRuntime(opts, (runtime) =>
+      this.readProviderRateLimitSnapshot(runtime),
     );
+    // Runtime cleanup is asynchronous too: validate after the entire operation
+    // so a newer refresh/account boundary cannot be overtaken during disposal.
+    if (
+      epoch !== this.quotaSnapshotEpoch ||
+      revision !== this.quotaSnapshotRevision
+    )
+      throw new Error(
+        "Codex usage changed while refreshing. Refresh to retry.",
+      );
+    this.adoptQuotaSnapshot(snapshot);
+    return normalizeCodexQuota(snapshot);
   }
 
   private async readMemorySettingsFromRuntime(
@@ -1260,7 +1279,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     if (!session.runtimeAlive) throw codexDisconnectedFailure();
 
     session.modelSelection.beginTurn();
-    session.translator.startTurn();
+    session.notifications.startRootTurn();
     session.activeTurnId = null;
     session.sawCollabTurns = false;
     session.cancelRequested = false;
@@ -2168,6 +2187,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 
   async dispose(): Promise<void> {
+    this.quotaSnapshotEpoch += 1;
+    this.quotaSnapshotRevision += 1;
+    this.latestRateLimitSnapshot = null;
     const all = Array.from(this.sessions.values());
     for (const s of all) {
       s.cancelRequested = true;
@@ -2256,6 +2278,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let effectiveBrowserUse = opts.browserUse;
     let nativeBrowserSkill: CodexNativeBrowserSkill | null = null;
     let mcpServers = opts.mcpServers ?? this.ctx.mcpServers;
+    if (mcpServers.some((server) => server.transport === "sse")) {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        "[codex-app-server] Direct SSE MCP connections are unavailable in Codex. Use Streamable HTTP, or an authenticated server through the Zeros gateway. Other MCP servers remain available.",
+      );
+      mcpServers = mcpServers.filter((server) => server.transport !== "sse");
+    }
     if (opts.browserUse?.kind === "codex-app-server") {
       const containmentReason = codexNativeBrowserUnavailableReason({
         contained: hasKernelExecutionBoundary(opts.executionBoundary),
@@ -2855,6 +2884,75 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
+  private invalidateQuotaSnapshot(): void {
+    this.quotaSnapshotEpoch += 1;
+    this.quotaSnapshotRevision += 1;
+    this.latestRateLimitSnapshot = null;
+    for (const active of this.sessions.values()) {
+      active.latestRateLimits = null;
+      active.quotaUpdatesSuppressed = true;
+    }
+    this.ctx.emit.onProviderQuotaUpdated?.(this.agentId, null);
+  }
+
+  private adoptQuotaSnapshot(
+    snapshot: CodexRateLimitSnapshotLike,
+    session?: CodexSession,
+  ): void {
+    const previousAccount = this.latestRateLimitSnapshot?.accountId;
+    if (
+      previousAccount &&
+      snapshot.accountId &&
+      previousAccount !== snapshot.accountId
+    )
+      this.invalidateQuotaSnapshot();
+    this.latestRateLimitSnapshot = snapshot;
+    // Account-wide permission learned by a full read also owns subsequent
+    // sparse updates from other runtimes confirmed to belong to that account.
+    for (const active of this.sessions.values()) {
+      if (
+        snapshot.accountId &&
+        active.latestRateLimits?.accountId === snapshot.accountId
+      ) {
+        active.latestRateLimits = {
+          ...active.latestRateLimits,
+          ordinaryUsageAllowed: snapshot.ordinaryUsageAllowed,
+        };
+      }
+    }
+    if (session) {
+      session.latestRateLimits = snapshot;
+      session.quotaUpdatesSuppressed = false;
+    }
+  }
+
+  private refreshSessionQuota(
+    session: CodexSession,
+    runtime: CodexAppServerHandle,
+  ): void {
+    const epoch = this.quotaSnapshotEpoch;
+    const revision = ++this.quotaSnapshotRevision;
+    // Diagnostics never delay admission. A failed or superseded refresh keeps
+    // the last confirmed exact-account snapshot rather than publishing empty.
+    void this.readProviderRateLimitSnapshot(runtime)
+      .then((snapshot) => {
+        if (
+          !session.runtimeAlive ||
+          session.quotaUpdatesSuppressed ||
+          this.sessions.get(session.zerosSessionId) !== session ||
+          epoch !== this.quotaSnapshotEpoch ||
+          revision !== this.quotaSnapshotRevision
+        )
+          return;
+        this.adoptQuotaSnapshot(snapshot, session);
+        this.ctx.emit.onProviderQuotaUpdated?.(
+          this.agentId,
+          normalizeCodexQuota(snapshot),
+        );
+      })
+      .catch(() => undefined);
+  }
+
   /** Subscribe to the codex app-server's structured auth + rate-limit
    *  notifications. The translator deliberately swallows these so they
    *  don't appear as chat bubbles; the adapter is the right home for
@@ -2865,6 +2963,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
     runtime: CodexAppServerHandle,
   ): void {
     runtime.onNotification("account/updated", (params) => {
+      if (
+        !session.runtimeAlive ||
+        this.sessions.get(session.zerosSessionId) !== session
+      ) return;
       const p = (params ?? {}) as {
         authMode?: string | null;
         planType?: string | null;
@@ -2872,31 +2974,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const prevAuthMode = session.authMode;
       session.authMode = p.authMode ?? null;
       session.planType = p.planType ?? null;
+      // This event has no account ID. Equal auth mode/plan can still mean a
+      // different account, so retire all previous ownership and in-flight reads.
+      this.invalidateQuotaSnapshot();
       session.quotaUpdatesSuppressed = !session.authMode;
       this.ctx.emit.onAgentStderr(
         this.agentId,
         `[codex-app-server:${session.zerosSessionId.slice(0, 8)}] account.updated authMode=${session.authMode} plan=${session.planType}`,
       );
-      // Auth was good, now it's null/expired — the session is alive but
-      // the next turn will fail. Surfacing via stderr lets the gateway's
-      // listAgents probe / settings panel re-poll. A future polish is
-      // to emit a typed bridge event so the UI's auth banner flips
-      // without waiting for the next listAgents tick.
-      if (!session.authMode) {
-        // Quotas belong to the signed-in account. Keeping the previous plan's
-        // snapshot visible after logout is both misleading and a cross-account
-        // data leak if another account is connected next. Invalidate even when
-        // no snapshot was published yet: the signed-out event can race the
-        // initial read, and a replacement login can unsuppress notifications
-        // before that old request resolves.
-        this.quotaSnapshotEpoch += 1;
-        this.latestRateLimitSnapshot = null;
-        for (const active of this.sessions.values()) {
-          active.latestRateLimits = null;
-          active.quotaUpdatesSuppressed = true;
-        }
-        this.ctx.emit.onProviderQuotaUpdated?.(this.agentId, null);
-      }
+      if (session.authMode) this.refreshSessionQuota(session, runtime);
       if (prevAuthMode && !session.authMode) {
         this.ctx.emit.onAgentStderr(
           this.agentId,
@@ -2906,12 +2992,16 @@ export class CodexAppServerAdapter implements AgentAdapter {
     });
 
     runtime.onNotification("account/rateLimits/updated", (params) => {
-      if (session.quotaUpdatesSuppressed) return;
+      if (
+        !session.runtimeAlive || session.quotaUpdatesSuppressed ||
+        this.sessions.get(session.zerosSessionId) !== session
+      ) return;
       const incoming = (params as { rateLimits?: RateLimitSnapshot } | null)
         ?.rateLimits;
       if (!incoming) return;
+      this.quotaSnapshotRevision += 1;
       const merged = mergeCodexRateLimitSnapshot(
-        this.latestRateLimitSnapshot,
+        session.latestRateLimits,
         incoming as RateLimitSnapshot & CodexRateLimitSnapshotLike,
       );
       this.latestRateLimitSnapshot = merged;
@@ -2929,27 +3019,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       );
     });
 
-    // Seed the rolling-notification merge with an authoritative snapshot.
-    // Best-effort: quota is a settings diagnostic and must never delay or fail
-    // conversation admission.
-    const quotaReadEpoch = this.quotaSnapshotEpoch;
-    void this.readProviderRateLimitSnapshot(runtime)
-      .then((snapshot) => {
-        if (
-          session.quotaUpdatesSuppressed ||
-          this.sessions.get(session.zerosSessionId) !== session ||
-          quotaReadEpoch !== this.quotaSnapshotEpoch
-        ) {
-          return;
-        }
-        this.latestRateLimitSnapshot = snapshot;
-        session.latestRateLimits = snapshot;
-        this.ctx.emit.onProviderQuotaUpdated?.(
-          this.agentId,
-          normalizeCodexQuota(snapshot),
-        );
-      })
-      .catch(() => undefined);
+    this.refreshSessionQuota(session, runtime);
   }
 
   private emitBackgroundTasks(session: CodexSession): void {
@@ -3467,6 +3537,37 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexUserInputRequest,
   ): void {
+    if (
+      request.method === "mcpServer/elicitation/request" &&
+      request.params.mode === "openai/userVerification"
+    ) {
+      // Native verification requires a signed challenge, not a form answer or
+      // approval. Do not park an unanswerable card or persist its private input.
+      try {
+        if (
+          session?.runtimeAlive &&
+          !session.cancelRequested &&
+          this.sessions.get(session.zerosSessionId) === session
+        ) {
+          session.notifications
+            .forThread(
+              typeof request.params.threadId === "string"
+                ? request.params.threadId
+                : session.threadId,
+            )
+            .emitUnsupportedVerification(request.questionId);
+        }
+      } finally {
+        // The runtime atomically retires its resolver and timer. Stop, timeout,
+        // disposal, and late UI replies cannot subsequently accept this ask.
+        session?.runtime.respondToUserInput(request.questionId, {
+          action: "cancel",
+          content: null,
+          _meta: null,
+        });
+      }
+      return;
+    }
     if (this.autoAcceptRedirectBrowserOrigin(session, request)) return;
     const canonical = mapCodexQuestionToCanonical(
       session.zerosSessionId,

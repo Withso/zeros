@@ -215,6 +215,8 @@ describe("Claude SDK refusal replacement", () => {
         content: undefined,
       }),
     ]);
+    c.t.feed({ type: "system", subtype: "task_notification", task_id: "late", tool_use_id: "read", status: "completed", resource_links: [{ uri: ".context/local/artifacts/withdrawn.html", name: "Withdrawn" }] });
+    expect(c.tools()[0].content).toBeUndefined();
     c.t.feed(result("good", false));
     c.t.feed(result("bad"));
     expect(c.tools()).toEqual([

@@ -74,6 +74,41 @@ these files changed; the protocol version is intentionally unchanged.
 
 ## Evidence and verification
 
+### Cursor credential lifetime
+
+The selected Cursor API key and the SDK's short-lived access token have separate
+lifetimes. Browser sign-in returns a revocable API key (90-day default TTL in the
+installed `auth/login.d.ts` contract). Main owns its encrypted storage and expiry;
+the engine never substitutes an ambient credential for an expired selected key.
+Renewing an access token does not renew that account key. An expired or revoked
+account key uses the existing sign-in / update-key recovery in Settings.
+
+The pinned `@cursor/sdk` 1.0.31 owns access-token refresh, including during active
+local runs. This incorporates the refresh correction documented in the
+[1.0.30 changelog](https://cursor.com/docs/sdk/changelog). Do not add a competing
+Zeros refresh timer or restart a healthy execution just to renew its token.
+Credential replacement still retires the old execution before its next send;
+late success or failure from that execution cannot change the replacement
+credential's authentication verdict.
+
+Qualification of 1.0.31 found that a failed local token exchange can reach
+`run.wait()` without its error code, while the native run store retains only the
+SDK's error string. The adapter recognizes the SDK-owned server/connection
+exchange prefixes as transport failures only when native code/status and TLS
+evidence do not already determine recovery. Provider details are preserved.
+Authentication, rate limits, permission errors and certificate failures retain
+their existing behavior; these cases use the current recovery UI.
+
+Native authenticated runs verified refresh between turns, refresh within an
+active turn, recovery after an injected exchange outage, and resume in a fresh
+process. Expiry was accelerated with a process-local clock; 503 and revoked-key
+401 responses were injected at the exchange boundary. This qualifies those
+paths, not a real-time soak or real account revocation. Retained regressions
+cover erased-code failures, native-code precedence, account expiry, replacement
+credentials, and late authentication verdicts.
+
+### Provider evidence
+
 - Anthropic documents `CLAUDE_CONFIG_DIR` as a separate configuration root,
   including multiple-account use: [environment variables](https://code.claude.com/docs/en/env-vars).
 - OpenAI documents `CODEX_HOME`, credential storage and refresh behavior:

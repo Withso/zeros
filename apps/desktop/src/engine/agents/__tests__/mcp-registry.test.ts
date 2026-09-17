@@ -341,6 +341,40 @@ describe("resolveMcpServers (user + managed, plus opt-in repo-local)", () => {
     writeFileSync(path.join(userDir, "settings.toml"), toml);
   const writeManaged = (toml: string) =>
     writeFileSync(path.join(userDir, "settings.managed.toml"), toml);
+
+  it("composes SSE gateway and direct servers with transport-aware precedence", () => {
+    writeUser(`[[mcp.servers]]
+name = "reports"
+transport = "sse"
+url = "https://reports.example/events"
+auth = "oauth"
+oauth_client_id = "public-client"
+oauth_scopes = ["read", "write"]
+disabled_tools = ["delete"]
+[[mcp.servers]]
+name = "direct"
+transport = "sse"
+url = "https://direct.example/events"
+[[mcp.servers]]
+name = "http"
+transport = "http"
+url = "https://direct.example/events"
+`);
+    const result = resolveMcpServers();
+    expect(result.gatewayBackends).toEqual([{
+      name: "reports", transport: "sse", url: "https://reports.example/events",
+      auth: "oauth", clientId: "public-client", scopes: ["read", "write"], disabledTools: ["delete"], source: "user",
+    }]);
+    expect(result.servers.map((server) => server.transport)).toEqual(["sse", "http"]);
+    writeManaged(`[[mcp.servers]]
+name = "reports"
+transport = "sse"
+url = "https://reports.example/events"
+enabled = false
+`);
+    expect(resolveMcpServers().gatewayBackends).toEqual([]);
+    expect(resolveMcpServers().servers).toEqual(result.servers);
+  });
   const writeRepoFile = (root: string, file: string, toml: string) => {
     mkdirSync(path.join(root, ".zeros"), { recursive: true });
     writeFileSync(path.join(root, ".zeros", file), toml);

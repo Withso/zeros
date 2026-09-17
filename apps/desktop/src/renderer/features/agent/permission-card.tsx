@@ -36,9 +36,11 @@
 // a FOURTH button — "Allow for this chat" (Zeros chat-scoped) vs "Allow for
 // this project" (writes `.claude/settings.local.json`). Absent that kind the
 // layout is unchanged, so Codex/Cursor are untouched.
+// Explicit native gates use the same card with only Yes/No, initially focused
+// on No. They have no global approval shortcut or saved-policy action.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useEffect, useRef } from "react";
+import { memo, useEffect, useRef, type Ref } from "react";
 import { FilePen, FileText, Terminal, Wrench } from "lucide-react";
 
 import type {
@@ -197,7 +199,10 @@ export const PermissionCard = memo(function PermissionCard({
     cwd,
   );
 
-  const opts = request.options;
+  const requiresExplicitApproval = request.requiresExplicitApproval === true;
+  const opts = requiresExplicitApproval
+    ? request.options.filter((option) => option.kind === "allow_once" || option.kind === "reject_once")
+    : request.options;
   const allowOnce = opts.find((o) => o.kind === "allow_once");
   const allowAlways = opts.find((o) => o.kind === "allow_always");
   // Claude-only: a project-scoped always-allow (persists to settings). Its
@@ -205,7 +210,7 @@ export const PermissionCard = memo(function PermissionCard({
   // project" pair; without it we keep the legacy "don't ask again" wording so
   // Codex/Cursor are unchanged.
   const allowProject = opts.find((o) => o.kind === "allow_always_project");
-  const useOptionNames = request.useOptionNames === true;
+  const useOptionNames = !requiresExplicitApproval && request.useOptionNames === true;
   const reject = providerRejectOption(opts, useOptionNames);
   const allowAlwaysLabel = allowProject
     ? "Allow for this chat"
@@ -221,7 +226,7 @@ export const PermissionCard = memo(function PermissionCard({
     // Sticky "don't ask again": write a chat policy BEFORE responding so the
     // next matching request auto-resolves and never blinks this card.
     if (
-      request.allowLocalPolicies !== false &&
+      !requiresExplicitApproval && request.allowLocalPolicies !== false &&
       onRecordPolicy &&
       chatId &&
       opt.kind === "allow_always"
@@ -250,11 +255,23 @@ export const PermissionCard = memo(function PermissionCard({
   //   • a short arming delay absorbs the keystroke already in flight when
   //     the card mounts / a new request swaps in.
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const rejectRef = useRef<HTMLButtonElement | null>(null);
   const armedAtRef = useRef(0);
   useEffect(() => {
     armedAtRef.current = performance.now() + KEYBOARD_ARM_MS;
   }, [request]);
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!requiresExplicitApproval || !root || !isInFocusedPane(root)) return;
+    const active = document.activeElement;
+    // A new gate may replace a focused Yes button from the preceding gate.
+    // Reset to No, but never steal focus from another pane, editor or overlay.
+    if (!active || active === document.body || active === document.documentElement || root.contains(active)) {
+      rejectRef.current?.focus({ preventScroll: true });
+    }
+  }, [requiresExplicitApproval, request.sessionId, request.nativeRequestId, request.toolCall.toolCallId]);
   const actionsRef = useRef({
+    requiresExplicitApproval,
     allowOnce,
     allowAlways,
     allowProject,
@@ -262,6 +279,7 @@ export const PermissionCard = memo(function PermissionCard({
     respondWith,
   });
   actionsRef.current = {
+    requiresExplicitApproval,
     allowOnce,
     allowAlways,
     allowProject,
@@ -270,26 +288,44 @@ export const PermissionCard = memo(function PermissionCard({
   };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.repeat || performance.now() < armedAtRef.current) return;
-      // Split panes: only the focused pane's card owns these window-level
-      // keys — two visible cards must not both resolve on one Enter.
-      if (!isInFocusedPane(rootRef.current)) return;
       const t = e.target as HTMLElement | null;
       const insideCard = !!t && !!rootRef.current?.contains(t);
+      // Split panes: only the focused pane's card owns these window-level
+      // keys — two visible cards must not both resolve on one Enter.
+      if (!isInFocusedPane(rootRef.current)) {
+        // Retained panes may briefly keep a focused button. Stop its native
+        // activation as well as our global shortcut until it owns focus again.
+        if (insideCard && (e.key === "Enter" || e.key === " ")) e.preventDefault();
+        return;
+      }
       const aimedElsewhere =
         !!t &&
         t !== document.body &&
         t !== document.documentElement &&
         !insideCard;
       if (aimedElsewhere) return;
+      const a = actionsRef.current;
+      if (
+        a.requiresExplicitApproval && (e.key === "Enter" || e.key === " ") &&
+        (e.repeat || performance.now() < armedAtRef.current || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey)
+      ) {
+        // Returning alone still lets a focused button's native key activation
+        // approve. Suppress that default too, including stale broad shortcuts.
+        e.preventDefault();
+        return;
+      }
+      if (e.repeat || performance.now() < armedAtRef.current) return;
       // If one of the card's own buttons is focused (keyboard Tab), let ITS
       // native Enter/Space activation fire. Applying the global mapping here
       // would resolve "Allow once" regardless of which button is focused — so a
       // user who Tabbed to "No" and pressed Enter would APPROVE instead of deny.
       if (insideCard && t?.closest("button")) return;
-      const a = actionsRef.current;
       if (e.key === "Enter") {
         e.preventDefault();
+        if (a.requiresExplicitApproval) {
+          a.respondWith(a.reject);
+          return;
+        }
         // ⇧⌘/Ctrl+↵ → project (falls back to chat if not offered) ·
         // ⌘/Ctrl+↵ → chat · plain ↵ → once.
         if ((e.metaKey || e.ctrlKey) && e.shiftKey) {
@@ -304,8 +340,8 @@ export const PermissionCard = memo(function PermissionCard({
         a.respondWith(a.reject);
       }
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, []);
 
   return (
@@ -357,7 +393,7 @@ export const PermissionCard = memo(function PermissionCard({
         ) : allowOnce ? (
           <PermRow
             label="Yes"
-            hint="↵"
+            hint={requiresExplicitApproval ? "" : "↵"}
             onClick={() => respondWith(allowOnce)}
           />
         ) : null}
@@ -378,7 +414,13 @@ export const PermissionCard = memo(function PermissionCard({
           />
         )}
         {!useOptionNames && reject && (
-          <PermRow label="No" hint="⌫" onClick={() => respondWith(reject)} />
+          <PermRow
+            label="No"
+            hint={requiresExplicitApproval ? "↵" : "⌫"}
+            buttonRef={rejectRef}
+            explicitFocus={requiresExplicitApproval}
+            onClick={() => respondWith(reject)}
+          />
         )}
       </div>
     </div>
@@ -443,18 +485,23 @@ function PermRow({
   label,
   hint,
   onClick,
+  buttonRef,
+  explicitFocus,
 }: {
   label: string;
   hint: string;
   onClick: () => void;
+  buttonRef?: Ref<HTMLButtonElement>;
+  explicitFocus?: boolean;
 }) {
   return (
     <button
       type="button"
+      ref={buttonRef}
       onClick={onClick}
       // Secondary-button recipe (RULES.md): bg1 fill + border3, hover → bg2 +
       // border4. Full-width row (label left, shortcut hint right).
-      className="border-border3 bg-bg1 hover:border-border4 hover:bg-bg2 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition-colors duration-150 ease-out"
+      className={`border-border3 bg-bg1 hover:border-border4 hover:bg-bg2 flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2 text-left transition-colors duration-150 ease-out${explicitFocus ? " focus:border-fg2 focus:outline-none" : ""}`}
     >
       <span className="text-fg1 min-w-0 truncate text-sm">{label}</span>
       {hint ? (

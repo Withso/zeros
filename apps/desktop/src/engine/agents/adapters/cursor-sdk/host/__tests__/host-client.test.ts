@@ -121,6 +121,23 @@ describe("toHostError", () => {
 });
 
 describe("CursorHostClient proxy", () => {
+  it("binds operations to the native handle even when resume reuses agentId", async () => {
+    const { client, fake } = makeClient();
+    const creating = client.module().Agent.create({});
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "same", handleId: "old" } });
+    const old = await creating;
+    const resuming = client.module().Agent.resume("same", {});
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { agentId: "same", handleId: "new" } });
+    const fresh = await resuming;
+    old.close?.();
+    expect(fake.lastReq().args).toEqual({ agentId: "same", handleId: "old" });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: null });
+    const sending = fresh.send("next");
+    expect(fake.lastReq().args).toMatchObject({ agentId: "same", handleId: "new" });
+    fake.emit({ k: "res", id: fake.lastReq().id, ok: true, result: { sdkRunId: "run-new" } });
+    await sending;
+    client.dispose();
+  });
   it("registers one exit callback per host generation", () => {
     const transport = {
       send: vi.fn(),

@@ -1,4 +1,5 @@
 import { SESSION_EXPIRED_KEYWORDS } from "./session-expiry";
+import { claudeStartupRecovery } from "../claude/startup-failure";
 import {
   extractUnavailableModelId,
   isModelUnavailableError,
@@ -9,6 +10,8 @@ import { AgentFailureError, type AgentFailureStage } from "../../types";
 type Provider = "claude" | "cursor" | "codex";
 export type ProviderErrorCategory =
   | "auth-required"
+  | "verification-required"
+  | "cloud-credentials-unavailable"
   | "rate-limited"
   | "model-unavailable"
   | "session-expired"
@@ -35,6 +38,17 @@ const MODEL_ACCESS =
 
 const codeKey = (code: string) => code.toLowerCase().replace(/[^a-z0-9]/g, "");
 const codes = (values: string[]) => new Set(values.map(codeKey));
+/** Explicit native Claude tags requiring account/provider action. */
+export function claudeActionCategory(code: string) {
+  switch (codeKey(code)) {
+    case "verificationrequired":
+      return "verification-required";
+    case "cloudcredentialerror":
+      return "cloud-credentials-unavailable";
+    default:
+      return undefined;
+  }
+}
 const AUTH_CODES = codes([
   "authentication_failed",
   "authentication_error",
@@ -137,6 +151,15 @@ export function normalizeProviderError(
     if (typeof input === "string") {
       const text = string(input);
       if (!text) return;
+      // Some terminal errors contain only the SDK's scalar error tag. Never
+      // infer these categories from an incidental mention in provider prose.
+      if (
+        provider === "claude" &&
+        (text === "verification_required" || text === "cloud_credential_error")
+      ) {
+        nativeCodes.push(text);
+        return;
+      }
       messages.push(text);
       // Result.errors may contain several independent API errors/diagnostics.
       // Their joined display text is not necessarily one valid JSON document.
@@ -169,6 +192,14 @@ export function normalizeProviderError(
     visit(obj.error, depth + 1);
     visit(obj.data, depth + 1);
     visit(obj.cause, depth + 1);
+    // Anthropic's 403 verification response wraps the actionable code in a
+    // generic permission_error. Read only the documented classification key.
+    if (provider === "claude") {
+      const startupReason = string(obj.startup_failure_reason);
+      if (startupReason) nativeCodes.push(startupReason);
+      const detailCode = string(record(obj.details)?.error_code);
+      if (detailCode) nativeCodes.push(detailCode);
+    }
     for (const raw of [obj.code, obj.errorCode, obj.type]) {
       const code = string(raw);
       if (code) nativeCodes.push(code);
@@ -214,6 +245,18 @@ export function normalizeProviderError(
     ...(status ? { status } : {}),
     category,
   });
+  // The SDK's explicit action names the credential/account layer to fix, even
+  // when its underlying cause is invalid_token, HTTP 401, or a connection error.
+  if (provider === "claude") {
+    for (const code of nativeCodes) {
+      const recovery = claudeStartupRecovery(code);
+      if (recovery) return finish(recovery.category, code);
+    }
+    for (const code of nativeCodes) {
+      const category = claudeActionCategory(code);
+      if (category) return finish(category, code);
+    }
+  }
   for (const code of nativeCodes) {
     const key = codeKey(code);
     if (AUTH_CODES.has(key)) return finish("auth-required", code);
@@ -291,16 +334,33 @@ export function providerErrorFailure(
         ? "Codex"
         : "Cursor";
   const { category, message } = error;
+  const startupRecovery = provider === "claude" ? claudeStartupRecovery(error.code) : undefined;
+  const actionAdvice =
+    startupRecovery?.advice ?? (category === "verification-required"
+      ? "Complete the account or organization verification requested by Anthropic, then retry."
+      : category === "cloud-credentials-unavailable"
+        ? "Check or refresh the credentials for your configured cloud provider, then retry."
+        : undefined);
   const advice =
-    category === "model-unavailable"
+    actionAdvice ??
+    (category === "model-unavailable"
       ? modelUnavailableAdvice(label, extractUnavailableModelId(message))
       : category === "rate-limited"
         ? `${label} is rate-limiting requests. Wait for the provider reset, then try again.`
         : category === "auth-required"
           ? `Sign in or update your credentials in Settings → Providers → ${label}, then try again.`
-          : undefined;
-  const explanation =
-    category === "model-unavailable"
+          : undefined);
+  // A scalar error code (or generic SDK subtype) is not an explanation. Use
+  // useful copy only in that case; native prose, provider names and links win.
+  const missingActionExplanation = actionAdvice && (
+    !message.trim() ||
+    message === error.code ||
+    message === "error_during_execution" ||
+    message === `Claude reported an error (${error.code}).`
+  );
+  const explanation = missingActionExplanation
+    ? `${startupRecovery ? "Claude could not start." : category === "verification-required" ? "Claude requires verification." : "Claude could not load the configured cloud provider's credentials."} ${actionAdvice}`
+    : category === "model-unavailable"
       ? `${label} model unavailable: ${message}`
       : category === "rate-limited"
         ? `${label} rate limit: ${message}`

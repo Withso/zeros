@@ -21,6 +21,7 @@ import type {
   AgentGoal,
   BackgroundTask,
   ContentBlock,
+  ContextUsageCategory,
   InitializeResponse,
   NewSessionResponse,
   QuestionRequest,
@@ -78,15 +79,9 @@ export type SessionStatus =
  *  (context window view); `inputTokens`/`outputTokens` come from the
  *  PromptResponse.usage at turn end. */
 export interface AgentUsage {
-  /** Model's prompt context window in tokens. Informational only —
-   *  This is not used in the headline ratio because
-   *  `used` (tokens billed across the turn's tool-use loop) is *not*
-   *  the same metric as "current window fill"; comparing the two
-   *  produced 100%+ alarms on perfectly normal turns. */
+  /** Provider-reported context window, independent of turn billing. */
   size: number;
-  /** Tokens billed for the most recent turn (cumulative across the
-   *  agent's internal tool-use loop). The headline pill renders
-   *  this verbatim, no ratio. */
+  /** Current context occupancy. May exceed size; only the ring is clamped. */
   used: number;
   /** Lifetime input tokens sent to the agent this session. */
   inputTokens: number;
@@ -104,7 +99,7 @@ export interface AgentUsage {
   costUsd?: number;
   /** Per-category context breakdown for the gauge popover.
    *  Claude only (getContextUsage); absent for Codex → Used/Free rows. */
-  categories?: Array<{ name: string; tokens: number }>;
+  categories?: ContextUsageCategory[];
 }
 
 export interface AgentSessionState {

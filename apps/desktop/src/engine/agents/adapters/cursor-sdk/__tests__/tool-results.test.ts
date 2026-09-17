@@ -3,6 +3,7 @@ import { applyUpdate, type AgentMessage } from "@zeros/protocol/agent-messages";
 import { CursorSdkTranslator } from "../translator";
 import { parseSubagentTranscript } from "../subagent-transcript";
 import type { CursorSdkTranslatorOptions } from "../translator";
+import { cursorToolResultContent } from "../tool-result";
 
 function capture(options: Partial<CursorSdkTranslatorOptions> = {}) {
   let messages: AgentMessage[] = [];
@@ -43,6 +44,18 @@ const textContent = (text: string) => [
 ];
 
 describe("Cursor native tool outcomes", () => {
+  it("unwraps the installed SDK's MCP image record beside text", () => {
+    expect(cursorToolResultContent({ status: "success", value: { content: [{ text: { text: "Screenshot" } }, { image: { data: "aGVsbG8=", mimeType: "image/png" } }], isError: false } })).toContainEqual({ type: "content", content: { type: "image", data: "aGVsbG8=", mimeType: "image/png" } });
+  });
+  it("preserves rich child MCP results when loading a transcript", () => {
+    const link = { type: "resource_link", name: "report.csv", uri: ".context/local/artifacts/report.csv" };
+    const steps = toolSteps(jsonl(call("mcp", "mcp__reports__create", {}), result("mcp", [
+      { type: "text", text: "Report ready" }, link,
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+    ])));
+    expect(steps[0].content).toContainEqual({ type: "content", content: link });
+    expect(steps[0].content).toContainEqual({ type: "content", content: { type: "image", data: "aGVsbG8=", mimeType: "image/png" } });
+  });
   it.each(["stream", "delta", "step"] as const)(
     "uses shell exit status and MCP isError with the %s source",
     (source) => {
@@ -238,7 +251,7 @@ describe("Cursor native tool outcomes", () => {
     ]);
   });
 
-  it("leaves interrupted main tools unresolved on final flush", () => {
+  it("leaves interrupted main tools unresolved on final flush", async () => {
     const env = capture();
     env.t.feed({
       type: "tool_call",
@@ -246,13 +259,13 @@ describe("Cursor native tool outcomes", () => {
       name: "read",
       status: "running",
     });
-    env.t.flushSubagents();
+    await env.t.flushSubagents();
     expect(env.tools()[0]).toMatchObject({
       status: "pending",
       rawOutput: { _zerosToolCompletion: "unreported" },
     });
     const confirmed = env.messages();
-    env.t.flushSubagents();
+    await env.t.flushSubagents();
     expect(env.messages()).toBe(confirmed);
   });
 
@@ -423,7 +436,7 @@ describe("Cursor child result correlation", () => {
 });
 
 describe("Cursor child refresh and fallback results", () => {
-  it("keeps fallback narration before an unresolved call out of the final report", () => {
+  it("keeps fallback narration before an unresolved call out of the final report", async () => {
     const env = capture();
     env.t.feed({
       type: "tool_call",
@@ -446,7 +459,7 @@ describe("Cursor child refresh and fallback results", () => {
         },
       },
     });
-    env.t.flushSubagents();
+    await env.t.flushSubagents();
     expect(env.tools()[0].content).toBeUndefined();
     expect(env.messages()).toContainEqual(
       expect.objectContaining({
@@ -491,14 +504,14 @@ describe("Cursor child refresh and fallback results", () => {
 
   it.each(["poll", "flush"] as const)(
     "updates an existing child when the error arrives at %s",
-    (phase) => {
+    async (phase) => {
       const env = live();
-      env.t.pollSubagents();
+      await env.t.pollSubagents();
       const original = env.tools()[1];
       expect(original.status).toBe("pending");
       env.set(jsonl(call("read"), result("read", "Permission denied", true)));
-      if (phase === "poll") env.t.pollSubagents();
-      else env.t.flushSubagents();
+      if (phase === "poll") await env.t.pollSubagents();
+      else await env.t.flushSubagents();
       expect(env.tools()).toHaveLength(2);
       expect(env.tools()[1]).toMatchObject({
         toolCallId: original.toolCallId,
@@ -507,19 +520,19 @@ describe("Cursor child refresh and fallback results", () => {
         content: textContent("Permission denied"),
       });
       const confirmed = env.messages();
-      env.t.pollSubagents();
+      await env.t.pollSubagents();
       expect(env.messages()).toBe(confirmed);
     },
   );
 
-  it("retains a confirmed result if a later read is a partial prefix", () => {
+  it("retains a confirmed result if a later read is a partial prefix", async () => {
     const env = live();
     env.set(jsonl(call("read"), result("read", "Permission denied", true)));
-    env.t.pollSubagents();
+    await env.t.pollSubagents();
     const confirmed = env.tools()[1];
     env.set(jsonl(call("read")));
-    env.t.pollSubagents();
-    env.t.flushSubagents();
+    await env.t.pollSubagents();
+    await env.t.flushSubagents();
     expect(env.tools()[1]).toBe(confirmed);
     expect(env.tools()[1]).toMatchObject({
       status: "failed",
@@ -527,21 +540,21 @@ describe("Cursor child refresh and fallback results", () => {
     });
   });
 
-  it("marks uncaptured completion at final flush without leaving a running child", () => {
+  it("marks uncaptured completion at final flush without leaving a running child", async () => {
     const env = live();
-    env.t.pollSubagents();
-    env.t.flushSubagents();
+    await env.t.pollSubagents();
+    await env.t.flushSubagents();
     expect(env.tools()[1]).toMatchObject({
       status: "pending",
       rawOutput: { _zerosToolCompletion: "unreported" },
     });
     const confirmed = env.messages();
-    env.t.flushSubagents();
-    env.t.pollSubagents();
+    await env.t.flushSubagents();
+    await env.t.pollSubagents();
     expect(env.messages()).toBe(confirmed);
   });
 
-  it("isolates identical native tool IDs between concurrent children", () => {
+  it("isolates identical native tool IDs between concurrent children", async () => {
     const env = capture({
       loadSubagentTranscript: (id) =>
         parseSubagentTranscript(
@@ -556,7 +569,7 @@ describe("Cursor child refresh and fallback results", () => {
         status: "running",
         args: { agentId: id },
       });
-    env.t.pollSubagents();
+    await env.t.pollSubagents();
     const [bad, good] = env.tools().filter((t) => t.parentToolId);
     expect(bad).toMatchObject({
       status: "failed",
@@ -572,7 +585,7 @@ describe("Cursor child refresh and fallback results", () => {
 
   it.each(["read", "edit", "write", "delete", "mcp", "futureTool"])(
     "retains fallback %s error output and leaves its missing result pending",
-    (name) => {
+    async (name) => {
       const env = capture();
       env.t.feed({
         type: "tool_call",
@@ -602,7 +615,7 @@ describe("Cursor child refresh and fallback results", () => {
           },
         },
       });
-      env.t.flushSubagents();
+      await env.t.flushSubagents();
       const [failed, pending] = env.tools().filter((t) => t.parentToolId);
       expect(failed).toMatchObject({
         status: "failed",

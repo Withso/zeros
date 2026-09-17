@@ -59,7 +59,7 @@ Rate limits remain terminal for the send. Model access errors use the existing
 model advice; Cursor may retry once with a model confirmed by the account's
 catalog before any output. Expired conversations and transport interruptions
 retain their existing session recovery. Unknown errors preserve the provider
-explanation without guessing a sign-in or new-chat remedy. Typed failures also
+explanation without guessing a sign-in remedy. Typed failures also
 outrank legacy authentication notices after reload and during prompt replay.
 
 The engine persists a terminal `error_notice` with optional `turnFailure`
@@ -67,13 +67,18 @@ identity before publishing the failed turn. The renderer displays its reason
 outside collapsed activity. Automatic provider retry notices and user stops do
 not become terminal recovery cards. Pre-admission failures retain the user row,
 expanded request, attachment references, and `recoveryFailure` for reload.
+Chat errors, warnings and authentication notices share the `--brown-bg` surface
+with readable plain text and safe web links. Automatic reconnect activity keeps
+its live indicator. Authentication notices retain their Sign in action.
 
 Explicit Retry resends a request with no observed work, or continues an
 interrupted request with its original context. Retry in new chat copies chat
 settings, attaches the source session's concise transcript, and sends to a new
 provider conversation. Both actions check current turn identity, cancellation
 generation, and chat ownership after preparation; missing attachments prevent
-an incomplete resend. Historical cards have no send actions. Design recovery
+an incomplete resend. Both destinations are available for terminal failures,
+including usage limits, without implying that a new chat bypasses provider
+restrictions. Historical cards have no send actions. Design recovery
 keeps the existing execution actor and document scope.
 
 All added recovery fields are optional. Older transcript rows and protocol

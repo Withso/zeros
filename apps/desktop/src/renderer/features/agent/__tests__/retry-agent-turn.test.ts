@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentTextMessage } from "@zeros/protocol/agent-messages";
 import type { ChatThread } from "../../../state/store";
 import type { SessionsActions } from "../sessions-context";
+import type { ComposerAttachment } from "../composer-attachments";
 import { retryAgentTurn } from "../retry-agent-turn";
 
 const { encode, transcript } = vi.hoisted(() => ({
@@ -88,6 +89,60 @@ beforeEach(() => {
 });
 
 describe("explicit failed-turn recovery", () => {
+  it("refreshes inline attachment metadata without changing text or mention order", async () => {
+    const oldPath = ".context/local/attachments/attachment/report.pdf";
+    const newPath = ".context/shared/attachments/attachment/report.pdf";
+    const attachment = {
+      kind: "file" as const,
+      name: "report.pdf",
+      mimeType: "application/pdf",
+      delivery: "reference" as const,
+      attachmentId: "attachment",
+      diskPath: oldPath,
+    };
+    const before = { type: "text" as const, text: "Read " };
+    const after = { type: "mention" as const, label: "a.ts", path: "a.ts", kind: "file" as const };
+    const withAttachment: AgentTextMessage = {
+      ...prompt,
+      attachments: [attachment],
+      segments: [before, { type: "attachment", ...attachment }, after],
+    };
+    const h = harness();
+    h.sessions.getSession.mockImplementation(() => ({ agentId: "codex", agentRole: "code", cwd: "/repo", messages: [withAttachment], status: "ready" }));
+    const refreshed = { ...attachment, diskPath: newPath, size: 42 };
+    encode.mockResolvedValue({ blocks: [{ type: "text", text: "current file reference" }], bubbleAttachments: [refreshed], skipped: [] });
+    await retryAgentTurn({ chatId: "source", prompt: withAttachment, events: [], newChat: false }, h.dependencies);
+    expect(h.sessions.sendPrompt).toHaveBeenCalledOnce();
+    const args = h.sessions.sendPrompt.mock.calls[0] as unknown[];
+    expect(args[4]).toEqual([refreshed]);
+    expect(args[5]).toEqual([before, { type: "attachment", ...refreshed }, after]);
+  });
+
+  it("retains the source transcript through repeated recovery of a segmented prompt", async () => {
+    const segmentedPrompt: AgentTextMessage = { ...prompt, segments: [{ type: "text", text: prompt.text }] };
+    const h = harness();
+    const messages = new Map<string, AgentTextMessage[]>([["source", [segmentedPrompt]]]);
+    h.sessions.getSession.mockImplementation((id: string) => ({ agentId: "codex", agentRole: "code", cwd: "/repo", messages: messages.get(id) ?? [], status: "ready" }));
+    encode.mockImplementation(async (attachments: ComposerAttachment[]) => ({
+      blocks: attachments.map(a => ({ type: "text", text: a.text || a.name })),
+      bubbleAttachments: attachments.map(a => ({ kind: a.kind, name: a.name, mimeType: a.mimeType, delivery: "reference", attachmentId: a.contextAttachmentId ?? a.id, diskPath: a.diskPath ?? `.context/local/attachments/${a.id}/transcript.txt` })),
+      skipped: [],
+    }));
+    await retryAgentTurn({ chatId: "source", prompt: segmentedPrompt, events: [], newChat: true }, h.dependencies);
+    const first = h.sessions.sendPrompt.mock.calls[0] as unknown as Parameters<SessionsActions["sendPrompt"]>;
+    const chatId = first[0];
+    const retriedPrompt: AgentTextMessage = { ...segmentedPrompt, id: "retry-1", attachments: first[4], segments: first[5] };
+    messages.set(chatId, [retriedPrompt]);
+    expect(retriedPrompt.attachments).toHaveLength(1);
+    await retryAgentTurn({ chatId, prompt: retriedPrompt, events: [], newChat: false }, h.dependencies);
+    expect(encode).toHaveBeenCalledTimes(2);
+    expect(encode.mock.calls[1][0]).toHaveLength(1);
+    expect(encode.mock.calls[1][0][0]).toMatchObject({ contextAttachmentId: retriedPrompt.attachments![0].attachmentId });
+    const second = h.sessions.sendPrompt.mock.calls[1] as unknown[];
+    expect(second[4]).toEqual(first[4]);
+    expect(second[5]).toEqual([{ type: "text", text: prompt.text }, { type: "attachment", ...retriedPrompt.attachments![0] }]);
+  });
+
   it("resends the undelivered expanded request with its attachments", async () => {
     const h = harness();
     await retryAgentTurn(

@@ -164,7 +164,7 @@ describe("CursorSdkAdapter — cancel during agent.send() still stops the run", 
       sessionId: session.sessionId,
       prompt: TEXT,
     });
-    await Promise.resolve(); // send() is now in flight; activeRun still null
+    await vi.waitFor(() => expect(sendSpy).toHaveBeenCalledOnce()); // activeRun still null
 
     await adapter.cancel({ sessionId: session.sessionId });
     expect(runCancel).not.toHaveBeenCalled(); // nothing to abort yet

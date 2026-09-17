@@ -1,3 +1,4 @@
+import { boundedStructuredOutput } from "../shared/tool-content";
 // ──────────────────────────────────────────────────────────
 // @cursor/sdk SDKMessage → SessionNotification translator
 // ──────────────────────────────────────────────────────────
@@ -27,6 +28,7 @@ import type {
   StopReason,
 } from "../../types";
 import { agentIdFromTranscriptPath } from "./subagent-transcript";
+import type { ChildTranscriptIdentity, TranscriptCapture } from "./subagent-transcript-reader";
 import type {
   NormalizedSubagentStep,
   ParsedSubagentTranscript,
@@ -40,16 +42,34 @@ import {
 import type { CursorToolStatus } from "./tool-result";
 
 type SubagentToolStep = Extract<NormalizedSubagentStep, { type: "tool" }>;
+interface SubagentFlushOptions {
+  readFinal?: boolean;
+  canReadFinal?: () => boolean;
+  ownsUpdates?: () => boolean;
+}
+
+/** A stuck filesystem request must never strand a completed provider turn. */
+async function transcriptDeadline<T>(work: Promise<T>, deadline: number, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([work, new Promise<T>((resolve) => {
+      timer = setTimeout(() => resolve(fallback), Math.max(0, deadline - Date.now()));
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
 interface SubagentState {
   toolCallId: string;
   agentId?: string;
   transcriptPath?: string;
   result?: unknown;
   hasTranscript?: boolean;
+  /** The public taskUpdate lane owns live children when available. Do not
+   * append an independently identified file snapshot to that same feed. */
+  native?: CursorSdkTranslator;
   /** Source + native ID (ordinal only for old records without IDs). Retained
    * until flush so later results update the original row instead of duplicating it. */
   tools: Map<string, { toolCallId: string; step: SubagentToolStep }>;
-  text?: Map<string, { messageId: string; text: string }>;
+  text?: Map<string, { messageId: string; text: string; final?: boolean }>;
 }
 
 type ToolKind =
@@ -103,11 +123,10 @@ export interface CursorSdkTranslatorOptions {
   sessionId: string;
   emit: Emit;
   onUnknown?: (event: unknown) => void;
-  /** Reads a finished Cursor subagent's on-disk transcript by its agentId
-   *  (injected by the adapter, which owns the cwd + fs). Cursor doesn't stream
-   *  subagent internals and leaves `conversationSteps` empty in local mode, so
-   *  this transcript is the real source of the child's tool calls. Returns
-   *  null when the file is absent/unreadable (→ conversationSteps fallback). */
+  readSubagentTranscript?: (child: ChildTranscriptIdentity, final: boolean) => Promise<TranscriptCapture>;
+  /** Legacy checkpoint injection for callers without the asynchronous reader.
+   * Used only when native child deltas are absent; native identity and owned
+   * file validation remain the loader's responsibility. */
   loadSubagentTranscript?: (
     subagentAgentId: string,
   ) => ParsedSubagentTranscript | null;
@@ -148,6 +167,10 @@ export class CursorSdkTranslator {
   /** Per-task state is discarded after the final transcript read. */
   private readonly subagents = new Map<string, SubagentState>();
   private subagentsFlushed = false;
+  private subagentsClosing = false;
+  private subagentPoll?: Promise<void>;
+  private subagentFlush?: Promise<void>;
+  private readonly readSubagentTranscript?: CursorSdkTranslatorOptions["readSubagentTranscript"];
   private readonly loadSubagentTranscript?: (
     subagentAgentId: string,
   ) => ParsedSubagentTranscript | null;
@@ -175,6 +198,7 @@ export class CursorSdkTranslator {
     this.sessionId = opts.sessionId;
     this.emit = opts.emit;
     this.onUnknown = opts.onUnknown;
+    this.readSubagentTranscript = opts.readSubagentTranscript;
     this.loadSubagentTranscript = opts.loadSubagentTranscript;
     this.loadSubagentTranscriptByPath = opts.loadSubagentTranscriptByPath;
     this.onLog = opts.onLog;
@@ -241,6 +265,7 @@ export class CursorSdkTranslator {
         this.onAssistant(msg);
         break;
       case "tool_call":
+        this.text.streamToolBoundary();
         this.bindToolStep(msg);
         this.onToolCall(msg);
         break;
@@ -250,10 +275,19 @@ export class CursorSdkTranslator {
       case "status":
         this.onStatus(msg);
         break;
+      case "usage": {
+        // SDK usage is emitted once at each native turn end. Its callback may
+        // already have finalized that report while the stream was buffered.
+        // Scope the boundary to stream-owned text, not counts or equal token
+        // totals: lost/delayed mirrors must not close a newer callback turn.
+        if (isObj(raw.usage) && this.text.endStreamTurn()) {
+          this.activeText = undefined;
+        }
+        break;
+      }
       case "task":
-        // Subagent/task progress — no canonical surface yet; ignore so it
-        // doesn't render as a raw "unknown" card. (Subagent bodies arrive
-        // via tool_call(taskToolCall) results.)
+        // This is a summary, not a child-identity/terminal contract. Live
+        // details arrive through taskUpdate or owned transcript checkpoints.
         break;
       case "request":
         // Interactive approval request through the permission round trip.
@@ -289,6 +323,9 @@ export class CursorSdkTranslator {
         this.text.thinkingDuration(duration, "delta");
         return;
       }
+      case "tool-call-delta":
+        this.onSubagentDelta(raw);
+        return;
       case "tool-call-started":
       case "partial-tool-call":
       case "tool-call-completed": {
@@ -326,11 +363,64 @@ export class CursorSdkTranslator {
         }
         return;
       }
-      // turn-ended is consumed by the adapter for usage; step/summary/shell
+      case "turn-ended":
+        this.text.endTurn();
+        this.activeText = undefined;
+        return;
+      // step/summary/shell
       // lifecycle remains informational until Zeros has a common consumer.
       default:
         return;
     }
+  }
+
+  private onSubagentDelta(raw: Record<string, unknown>): void {
+    if (this.subagentsClosing || this.subagentsFlushed ||
+        typeof raw.callId !== "string" || !raw.callId.trim() || !isObj(raw.taskUpdate)) return;
+    const update = raw.taskUpdate;
+    // The installed SDK exposes one level of child deltas with these public
+    // variants. Only usable content can claim the native feed; malformed or
+    // empty updates must not suppress checkpoint fallback.
+    switch (update.type) {
+      case "text-delta":
+      case "thinking-delta":
+        if (typeof update.text !== "string" || !update.text) return;
+        break;
+      case "tool-call-started":
+      case "partial-tool-call":
+      case "tool-call-completed":
+        if (typeof update.callId !== "string" || !update.callId.trim() ||
+            !isObj(update.toolCall) || typeof update.toolCall.type !== "string" || !update.toolCall.type.trim()) return;
+        break;
+      case "thinking-completed":
+        if (!this.subagents.get(raw.callId)?.native) return;
+        break;
+      default:
+        return;
+    }
+    const record = this.toolRecords.get(raw.callId);
+    if (record && (mapToolKind(record.name) !== "task" || record.status === "completed" || record.status === "failed")) return;
+    this.openToolCard(raw.callId, "task", undefined);
+    let entry = this.subagents.get(raw.callId);
+    if (!entry) {
+      entry = { toolCallId: this.ensureToolCallId(raw.callId), tools: new Map() };
+      this.subagents.set(raw.callId, entry);
+    }
+    // Older/mixed transports may start with checkpoints. Keep that established
+    // feed: callback text has no native message ID with which to replace it.
+    if (entry.hasTranscript) return;
+    entry.native ??= new CursorSdkTranslator({
+      sessionId: this.sessionId,
+      emit: (event) => {
+        const value = event.update;
+        this.emit({ ...event, update:
+          value.sessionUpdate === "tool_call" || value.sessionUpdate === "agent_message_chunk" || value.sessionUpdate === "agent_thought_chunk"
+            ? { ...value, parentToolId: value.parentToolId ?? entry.toolCallId }
+            : value,
+        });
+      },
+    });
+    entry.native.feedDelta(update);
   }
 
   /** A completed step reconciles its partial callback/stream record. Tool
@@ -457,6 +547,7 @@ export class CursorSdkTranslator {
         this.hasSeenAssistantText = true;
         this.text.stream(this.messageIdFor("text"), "text", block.text);
       } else if (block?.type === "tool_use" && typeof block.id === "string") {
+        this.text.streamToolBoundary();
         this.bindToolStep({ type: "tool_call", call_id: block.id, name: block.name, args: block.input, status: "running" });
         this.openToolCard(block.id, block.name, block.input);
       }
@@ -493,6 +584,12 @@ export class CursorSdkTranslator {
     if (msg.status === "running") {
       if (previous?.status === "completed" || previous?.status === "failed") return;
       this.openToolCard(callId, name, args);
+      if (previous && args != null && !partialArgs) {
+        this.emit({ sessionId: this.sessionId, update: {
+          sessionUpdate: "tool_call_update", toolCallId: this.ensureToolCallId(callId),
+          title: describeTool(name, args), rawInput,
+        } });
+      }
       // A native child ID permits live checkpoints. Prompt/recency hints do
       // not prove ownership, including within the same parent conversation.
       if (mapToolKind(name) === "task" && !this.subagentsFlushed) {
@@ -513,21 +610,24 @@ export class CursorSdkTranslator {
     }
 
     // completed | error
-    const status = msg.status === "error"
+    const resultStatus = msg.status === "error"
       ? "failed"
       : cursorToolStatus(name, result, msg.status === "completed");
+    // A successful launch/foreground-to-background handoff is not child
+    // completion. Keep its existing Agent group active across parent replies.
+    const status = resultStatus !== "failed" && mapToolKind(name) === "task" &&
+      readTaskResultValue(result)?.isBackground === true ? "in_progress" : resultStatus;
     if ((previous?.status === "failed" && status !== "failed") ||
-        (previous?.status === "completed" && status === "pending")) return;
+        (previous?.status === "completed" && (status === "pending" || status === "in_progress"))) return;
     const snapshot = createHash("sha256").update(stableMirrorJson({ name, status, rawInput, ...presentation })).digest("hex");
     if (previous?.snapshot === snapshot) return;
     this.toolRecords.set(callId, { name, status, rawOutput: presentation.rawOutput, snapshot });
     this.opened.add(callId);
 
-    // A Cursor `task` (subagent) finished. Its tool calls are streamed live by
-    // pollSubagents() from checkpoints, including narration. Reconcile the
-    // final report at flushSubagents() after the run ends, when the file is
-    // fully flushed — reading at completion can race Cursor's write. Here we
-    // just record the result + agentId on the live entry.
+    // A task result can be a completed child or a background launch receipt.
+    // Native deltas carry live output; older transports use owned checkpoints.
+    // Record the result now and defer final file capture until the run ends,
+    // since reading at tool completion can race Cursor's transcript write.
     const isSubagent = mapToolKind(name) === "task";
 
     const existing = this.toolCallIds.get(callId);
@@ -598,6 +698,12 @@ export class CursorSdkTranslator {
       // without these identities has not emitted any provisional rows.
       if (agentId) entry.agentId = agentId;
       if (transcriptPath) entry.transcriptPath = transcriptPath;
+      if (entry.native && this.toolRecords.get(callId)?.status === "completed") {
+        const report = completedTaskReport(result);
+        if (report) entry.native.recoverFinalAnswer(report);
+        entry.native.text.endTurn();
+        entry.native.activeText = undefined;
+      }
     } else {
       this.subagents.set(callId, {
         toolCallId,
@@ -611,31 +717,77 @@ export class CursorSdkTranslator {
 
   /** Reconcile native child checkpoints while the parent run is live. Prose,
    * thoughts and tools keep source order and identity across repeated polls. */
-  pollSubagents(): void {
-    if (this.subagentsFlushed) return;
-    for (const entry of this.subagents.values()) {
-      const parsed = this.resolveSubagentFor(entry, false);
-      if (!parsed) continue;
-      this.syncSubagentTranscript(entry, parsed);
-    }
+  pollSubagents(ownsUpdates: () => boolean = () => true): Promise<void> {
+    if (this.subagentsClosing || this.subagentsFlushed) return Promise.resolve();
+    if (this.subagentPoll) return this.subagentPoll;
+    const poll = async () => {
+      for (const entry of this.subagents.values()) {
+        if (this.subagentsClosing || !ownsUpdates()) break;
+        if (entry.native) continue;
+        const identity = JSON.stringify([entry.agentId, entry.transcriptPath]);
+        const parsed = await this.resolveSubagentFor(entry, false);
+        if (!parsed || entry.native || this.subagentsClosing || !ownsUpdates() ||
+            identity !== JSON.stringify([entry.agentId, entry.transcriptPath])) continue;
+        this.syncSubagentTranscript(entry, parsed);
+      }
+    };
+    this.subagentPoll = poll().finally(() => { this.subagentPoll = undefined; });
+    return this.subagentPoll;
   }
 
   /** Finalize every subagent once the run has ended: reconcile the final
    * checkpoint and report without duplicating live text/tools. Clears the map. */
-  flushSubagents(): void {
-    if (this.subagentsFlushed) return;
+  flushSubagents(opts: SubagentFlushOptions = {}): Promise<void> {
+    if (this.subagentFlush) return this.subagentFlush;
+    this.subagentsClosing = true;
+    this.subagentFlush = this.finishSubagents(opts);
+    return this.subagentFlush;
+  }
+
+  private async finishSubagents(opts: SubagentFlushOptions): Promise<void> {
+    const deadline = Date.now() + 2000;
+    const canRead = () => opts.readFinal !== false && (opts.canReadFinal?.() ?? true);
+    if (this.subagentPoll && canRead()) await transcriptDeadline(this.subagentPoll, deadline, undefined).catch(() => {});
+    const ownsUpdates = opts.ownsUpdates ?? (() => true);
+    if (!ownsUpdates()) { this.subagents.clear(); this.subagentsFlushed = true; return; }
     for (const { message } of this.deferredToolSteps.splice(0)) {
       const callId = `step-${randomUUID()}`;
       this.anonymousToolIds.add(callId);
       this.onToolCall({ ...message, call_id: callId });
     }
-    for (const entry of this.subagents.values()) {
-      const sub = this.resolveSubagentFor(entry);
+    for (const [callId, entry] of this.subagents) {
+      if (entry.native) {
+        // Mixed delivery can provide live tools but leave the answer only in
+        // the final file. Recover just that report under the same owned child,
+        // never a second copy of the file's text/tool timeline.
+        if (canRead() && this.toolRecords.get(callId)?.status === "completed" &&
+            !entry.native.text.hasFinalAnswer) {
+          const identity = JSON.stringify([entry.agentId, entry.transcriptPath]);
+          const unavailable = { steps: [], finalText: "", captureIssue: "unavailable" as const };
+          const sub = Date.now() >= deadline ? unavailable
+            : await transcriptDeadline(this.resolveSubagentFor(entry), deadline, unavailable);
+          if (ownsUpdates() && canRead() && identity === JSON.stringify([entry.agentId, entry.transcriptPath])) {
+            if (sub?.finalText && !sub.captureIssue) entry.native.recoverFinalAnswer(sub.finalText);
+            if (sub?.captureIssue) this.emitSubagentCaptureIssue(entry.toolCallId, sub.captureIssue);
+          }
+        }
+        if (ownsUpdates()) await entry.native.flushSubagents({ readFinal: false, ownsUpdates });
+        continue;
+      }
+      const identity = JSON.stringify([entry.agentId, entry.transcriptPath]);
+      const unavailable = { steps: [], finalText: "", captureIssue: "unavailable" as const };
+      let sub = !canRead() ? null : Date.now() >= deadline ? unavailable
+        : await transcriptDeadline(this.resolveSubagentFor(entry), deadline, unavailable);
+      if (!canRead()) sub = null;
+      if (!ownsUpdates() || identity !== JSON.stringify([entry.agentId, entry.transcriptPath])) continue;
       if (sub) {
         // Reconcile every result, including calls whose start was already
         // streamed. Source identity prevents cross-transcript ID collisions.
-        const toolOrdinal = this.syncSubagentTranscript(entry, sub);
-        const finalText = sub.finalText || extractResultText(entry.result);
+        const nativeReport = readTaskResultValue(entry.result)?.finalMessage;
+        const toolOrdinal = this.syncSubagentTranscript(entry, sub,
+          !sub.captureIssue || nativeReport === sub.finalText);
+        const finalText = (sub.captureIssue && typeof nativeReport === "string" && nativeReport.trim() ? nativeReport : "") ||
+          sub.finalText || extractResultText(entry.result);
         if (finalText) this.emitSubagentReport(entry.toolCallId, finalText);
         this.onLog?.(
           `[cursor-sdk] subagent ${entry.agentId ?? "?"}: ${toolOrdinal} tools, ${finalText.length}c report`,
@@ -646,6 +798,9 @@ export class CursorSdkTranslator {
         this.onLog?.(
           `[cursor-sdk] subagent ${entry.agentId ?? "?"}: no transcript/steps (check cwd-path / timing)`,
         );
+      }
+      if (sub?.captureIssue) {
+        this.emitSubagentCaptureIssue(entry.toolCallId, sub.captureIssue);
       }
       // No result in the final snapshot is not evidence of success. Include
       // the same marker for a missing/unreadable final file after live polls.
@@ -675,10 +830,19 @@ export class CursorSdkTranslator {
     }
   }
 
+  private emitSubagentCaptureIssue(toolCallId: string, issue: "unavailable" | "truncated"): void {
+    this.emit({ sessionId: this.sessionId, update: {
+      sessionUpdate: "agent_message_chunk", messageId: randomUUID(),
+      parentToolId: toolCallId, phase: "commentary",
+      content: { type: "text", text: issue === "truncated"
+        ? "Subagent details were truncated." : "Some subagent details could not be loaded." },
+    } });
+  }
+
   private syncSubagentTool(
     entry: SubagentState,
     sourceAgentId: string | undefined,
-    ordinal: number,
+    ordinal: number | string,
     step: SubagentToolStep,
   ): void {
     const key = JSON.stringify([
@@ -715,22 +879,25 @@ export class CursorSdkTranslator {
   private syncSubagentTranscript(
     entry: SubagentState,
     sub: ParsedSubagentTranscript & { sourceAgentId?: string },
+    final = false,
   ): number {
     if (sub.sourceAgentId !== undefined) entry.hasTranscript = true;
     const timeline = sub.timeline ?? sub.steps.map((step, index) => ({ identity: `step:${index}`, step }));
     let toolOrdinal = 0;
     for (const { identity, step } of timeline) {
       if (step.type === "tool") {
-        this.syncSubagentTool(entry, sub.sourceAgentId, toolOrdinal++, step);
+        this.syncSubagentTool(entry, sub.sourceAgentId, sub.timeline ? identity : toolOrdinal, step);
+        toolOrdinal++;
         continue;
       }
       const key = JSON.stringify([sub.sourceAgentId ?? "conversation", identity, step.type]);
       const text = entry.text ??= new Map();
       const previous = text.get(key);
+      const finalReport = final && step.type === "text" && identity === sub.finalIdentity;
       if (!previous && !step.text) continue;
-      if (previous?.text === step.text) continue;
+      if (previous?.text === step.text && (!finalReport || previous.final)) continue;
       const messageId = previous?.messageId ?? randomUUID();
-      text.set(key, { messageId, text: step.text });
+      text.set(key, { messageId, text: step.text, final: finalReport || previous?.final });
       this.emit({
         sessionId: this.sessionId,
         update: {
@@ -738,6 +905,7 @@ export class CursorSdkTranslator {
           messageId,
           parentToolId: entry.toolCallId,
           content: { type: "text", text: step.text },
+          ...(finalReport ? { phase: "final_answer" as const } : {}),
           ...(previous ? { textMode: "replace" as const } : {}),
         },
       });
@@ -750,12 +918,29 @@ export class CursorSdkTranslator {
    *  conversationSteps empty in local mode): first by the exact `transcriptPath`
    *  the result handed us, or by agentId when no path was supplied. Uncaptured
    *  final transcripts can fall back to the result's conversationSteps. */
-  private resolveSubagentFor(entry: {
+  private async resolveSubagentFor(entry: {
     agentId?: string;
     transcriptPath?: string;
     result?: unknown;
     hasTranscript?: boolean;
-  }, allowResultFallback = true): (ParsedSubagentTranscript & { sourceAgentId?: string }) | null {
+  }, allowResultFallback = true): Promise<(TranscriptCapture & { sourceAgentId?: string }) | null> {
+    if (this.readSubagentTranscript) {
+      // Snapshot identity before awaiting I/O. The caller verifies it again
+      // before publishing; native completion can correct identity mid-poll.
+      const child = { agentId: entry.agentId, transcriptPath: entry.transcriptPath };
+      let t: TranscriptCapture;
+      try { t = await this.readSubagentTranscript(child, allowResultFallback); }
+      catch { t = { steps: [], finalText: "", captureIssue: "unavailable" }; }
+      if (t.timeline?.length || t.steps.length || t.finalText) return {
+        ...t, sourceAgentId: child.transcriptPath ? agentIdFromTranscriptPath(child.transcriptPath)
+          : child.agentId ? encodeURIComponent(child.agentId).replace(/%/g, "_") : undefined,
+      };
+      const fallback = allowResultFallback && !entry.hasTranscript ? extractSubagentResult(entry.result) : null;
+      // A native conversation payload can fully replace a missing disk
+      // capture; do not warn when it already supplied the details.
+      if (fallback?.steps.length) return fallback;
+      return { ...t, finalText: fallback?.finalText ?? "" };
+    }
     if (this.loadSubagentTranscriptByPath && entry.transcriptPath) {
       const t = this.loadSubagentTranscriptByPath(entry.transcriptPath);
       if (t && (t.steps.length > 0 || t.finalText || t.timeline?.length))
@@ -970,7 +1155,7 @@ function safeToolInput(
           ? { description: args.description }
           : {}),
         ...(pathBasename(args.filePath)
-          ? { fileName: pathBasename(args.filePath) }
+          ? { fileName: pathBasename(args.filePath), filePath: args.filePath }
           : {}),
       },
       truncated,
@@ -997,7 +1182,7 @@ function safeToolResult(
         {
           status: "success",
           value: {
-            ...(fileName ? { fileName } : {}),
+            ...(fileName ? { fileName, filePath: value.filePath } : {}),
             ...(imageData === undefined && typeof value.imageData === "string"
               ? { imageOmitted: "invalid_or_too_large" }
               : {}),
@@ -1054,7 +1239,7 @@ function safeToolResult(
     return { rawOutput: withTruncation(result, truncated) };
   }
   return {
-    rawOutput: withTruncation(result, truncated),
+    rawOutput: withTruncation(boundedStructuredOutput(result), truncated),
     content: cursorToolResultContent(result),
   };
 }
@@ -1113,6 +1298,24 @@ function readTaskResultValue(result: unknown): Record<string, unknown> | null {
   if (isObj(result.result) && isObj(result.result.value))
     return result.result.value;
   return null;
+}
+
+/** Local SDK task results can retain protobuf JSON conversation steps even
+ * when the live callback lane is normalized. Recover only their actual answer,
+ * never a background-launch suffix or a second copy of their tool history. */
+function completedTaskReport(result: unknown): string | undefined {
+  const value = readTaskResultValue(result);
+  if (!value || value.isBackground === true) return undefined;
+  if (typeof value.finalMessage === "string" && value.finalMessage.trim()) return value.finalMessage;
+  const steps = value.conversationSteps;
+  if (!Array.isArray(steps)) return undefined;
+  for (let i = steps.length - 1, end = Math.max(0, steps.length - 16_384); i >= end; i--) {
+    const step = steps[i];
+    if (!isObj(step)) continue;
+    const message = step.type === "assistantMessage" ? step.message : step.assistantMessage;
+    if (isObj(message) && typeof message.text === "string" && message.text.trim()) return message.text;
+  }
+  return undefined;
 }
 
 /** Completed callbacks have no call_id. Only a shared native child identity

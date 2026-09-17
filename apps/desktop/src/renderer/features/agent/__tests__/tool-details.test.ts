@@ -9,6 +9,7 @@ import { CompactionRecordCard } from "../renderers/compaction-card";
 import { QuestionRecordCard } from "../renderers/question-card";
 import { CursorTaskCard } from "../renderers/tool-cursor-task";
 import { SubagentCard } from "../renderers/tool-subagent";
+import { generatedImagePath } from "../renderers/tool-artifacts";
 
 vi.mock("../renderers/highlighted-code", () => ({
   HighlightedCode: ({ code }: { code: string }) => code,
@@ -35,6 +36,80 @@ const render = (value: AgentToolMessage) =>
   );
 
 describe("expanded tool details", () => {
+  it("keeps artifacts beside specialized Read output", () => {
+    const html = render(tool({ toolKind: "read", rawInput: { path: "report.txt" }, content: [
+      { type: "content", content: { type: "text", text: "Report text" } },
+      { type: "content", content: { type: "resource_link", uri: ".context/local/artifacts/chart.png", name: "Chart" } },
+    ] }));
+    expect(html).toContain("Report text");
+    expect(html).toContain('data-file-path=".context/local/artifacts/chart.png"');
+  });
+  it("keeps a clickable artifact and structured MCP fields alongside text", () => {
+    const html = render(tool({ toolKind: "other", rawOutput: { structuredContent: { matches: ["src/a.ts"], data: "Report details" } }, content: [
+      { type: "content", content: { type: "text", text: "Report ready" } },
+      { type: "content", content: { type: "resource_link", name: "report.html", uri: ".context/local/artifacts/report.html" } },
+    ] }));
+    expect(html).toContain('data-file-path=".context/local/artifacts/report.html"');
+    expect(html).toContain("Report ready");
+    expect(html).toContain("src/a.ts");
+    expect(html).toContain("Report details");
+  });
+
+  it("uses Generate with a file target for image creation, preserving Read for inspection", () => {
+    expect(metaForEvent(tool({ toolKind: "other", title: "Generating image", rawOutput: { savedPath: ".context/local/artifacts/scene.png" } }))).toMatchObject({ label: "Generate", target: "scene.png", targetFile: true });
+    expect(metaForEvent(tool({ toolKind: "read", rawInput: { path: ".context/local/artifacts/scene.png" } }))).toMatchObject({ label: "Read image", target: "scene.png" });
+  });
+  it.each(["pending", "in_progress", "failed", "completed"] as const)(
+    "does not present a requested image destination as a saved artifact when %s",
+    (status) => {
+      const requestedPath = ".context/local/artifacts/requested.png";
+      for (const key of ["filePath", "file_path"]) {
+        const value = tool({
+          toolKind: "other",
+          title: "Generate image",
+          status,
+          rawInput: { [key]: requestedPath },
+          ...(status === "failed" ? { rawOutput: { error: "Image generation failed" } } : {}),
+        });
+        expect(generatedImagePath(value)).toBeUndefined();
+        expect(metaForEvent(value)).toMatchObject({ label: "Generate", target: undefined, targetFile: false });
+        expect(render(value)).not.toContain(`data-file-path="${requestedPath}"`);
+      }
+    },
+  );
+
+  it.each([
+    { savedPath: ".context/local/artifacts/actual.png" },
+    { filePath: ".context/local/artifacts/actual.png" },
+    { value: { filePath: ".context/local/artifacts/actual.png" } },
+  ])("uses the confirmed output path for a generated image", (rawOutput) => {
+    const value = tool({ toolKind: "other", title: "Generate image", rawInput: { filePath: ".context/local/artifacts/requested.png" }, rawOutput });
+    expect(generatedImagePath(value)).toBe(".context/local/artifacts/actual.png");
+    expect(render(value)).toContain('data-file-path=".context/local/artifacts/actual.png"');
+    expect(render(value)).not.toContain('data-file-path=".context/local/artifacts/requested.png"');
+  });
+
+  it("keeps a generated remote image external instead of inventing a file target", () => {
+    const remote = tool({ toolKind: "other", title: "Generating image", content: [
+      { type: "content", content: { type: "resource_link", uri: "https://example.com/scene.png", name: "Scene" } },
+    ] });
+    expect(metaForEvent(remote)).toMatchObject({ label: "Generate", target: undefined, targetFile: false });
+    expect(render(remote)).toContain('href="https://example.com/scene.png"');
+  });
+  it("renders a generated file URI once with its native resource name", () => {
+    const html = render(tool({ toolKind: "other", title: "Generating image", content: [
+      { type: "content", content: { type: "resource_link", uri: "file:///workspace/scene.png", name: "Generated scene" } },
+    ] }));
+    expect(html.match(/data-file-path="\/workspace\/scene\.png"/g)).toHaveLength(1);
+    expect(html).toContain("Generated scene");
+  });
+  it("does not let a resource-only result hide its captured error", () => {
+    const html = render(tool({ status: "failed", rawOutput: "Permission denied while saving report", content: [
+      { type: "content", content: { type: "resource_link", uri: ".context/local/artifacts/log.txt", name: "Error log" } },
+    ] }));
+    expect(html).toContain("Permission denied while saving report");
+    expect(html).toContain('data-file-path=".context/local/artifacts/log.txt"');
+  });
   it("renders an unfamiliar structured result once", () => {
     const html = render(tool({ rawOutput: { message: "A unique result" } }));
     expect(html.match(/A unique result/g)).toHaveLength(1);

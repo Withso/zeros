@@ -1,8 +1,10 @@
 import { runTurnUsageSmoke } from "./ui-smoke-turn-usage.mjs";
+import { runArtifactLinksSmoke } from "./ui-smoke-artifact-links.mjs";
 import { runSubagentPresentationSmoke } from "./ui-smoke-subagent-presentation.mjs";
 import { runModelFallbackSmoke } from "./ui-smoke-model-fallback.mjs";
 import { runStreamingTextSmoke } from "./ui-smoke-streaming-text.mjs";
 import { runToolPresentationSmoke } from "./ui-smoke-tool-presentation.mjs";
+import { runAgentNoticesSmoke } from "./ui-smoke-agent-notices.mjs";
 import { expect } from "@playwright/test";
 
 export async function runCodexTranscriptSmoke({ page, check }) {
@@ -148,6 +150,8 @@ export async function runCodexTranscriptSmoke({ page, check }) {
     true,
   );
 
+  await runAgentNoticesSmoke({ page, check });
+
   const background = page.locator("#claude-background-fixture");
   const backgroundTranscript = background.locator("#background-transcript");
   const waitingLoader = (locator) => locator.getByRole("status", { name: "Waiting for background tasks", exact: true });
@@ -214,6 +218,7 @@ export async function runCodexTranscriptSmoke({ page, check }) {
   await expect(chatTab.getByRole("status")).toHaveCount(0);
   check("Claude waiting/resume retains its clock, child updates stay quiet, and both tabs clear on completion or Stop", true);
   await runToolPresentationSmoke({ page, check });
+  await runArtifactLinksSmoke({ page, check });
   await runSubagentPresentationSmoke({ page, check });
   await runStreamingTextSmoke({ page, check });
   await runModelFallbackSmoke({ page, check });

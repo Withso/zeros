@@ -116,6 +116,17 @@ export function SubagentPresentationFixture({ ctx }: { ctx: RendererContext }) {
             status: "completed",
           },
         });
+        if (provider === "Cursor") {
+          for (const [index, text] of ["Some subagent details could not be loaded.", "Subagent details were truncated."].entries()) {
+            next = applyUpdate(next, {
+              sessionId: "fixture",
+              update: {
+                sessionUpdate: "agent_message_chunk", messageId: `capture-notice-${index}`,
+                parentToolId: provider, phase: "commentary", content: { type: "text", text },
+              },
+            });
+          }
+        }
         return [
           ...next,
           {

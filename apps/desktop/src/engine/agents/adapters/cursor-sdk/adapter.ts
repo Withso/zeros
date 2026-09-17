@@ -22,6 +22,7 @@ import { isDevRuntime } from "../../../runtime";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
+import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
@@ -45,10 +46,7 @@ import type {
 } from "../../types";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { CursorSdkTranslator } from "./translator";
-import {
-  loadSubagentTranscript,
-  loadSubagentTranscriptByPath,
-} from "./subagent-transcript";
+import { CursorSubagentTranscriptReader } from "./subagent-transcript-reader";
 import {
   createCursorHostRuntime,
   getCursorHostModule,
@@ -291,7 +289,7 @@ export function applyCursorReasoning(
 // the Auto-review feature; without it, autoReview:true degrades to full access
 // (never MORE permissive than "Full access", so it's a safe default). autoReview
 // is a CREATE-TIME option (absent from LocalSendOptions), so switching in/out of
-// Auto mid-chat rebuilds the agent — see ensureAutoReview().
+// Auto mid-chat rebuilds the agent — see ensureSessionConfiguration().
 const CURSOR_SDK_MODES: SessionMode[] = [
   { id: "plan", name: "Ask", description: "Designs a plan; makes no edits." },
   {
@@ -807,12 +805,8 @@ export function cursorModelSelection(
   return { id, ...(params.length > 0 ? { params } : {}) };
 }
 
-/** What we hand @cursor/sdk's `mcpServers` — structurally a Cursor
- *  McpServerConfig (the SDK infers stdio from `command`, http from `url`; the
- *  `type` field is optional). */
-type CursorMcpConfig =
-  | { command: string; args?: string[]; env?: Record<string, string> }
-  | { url: string; headers?: Record<string, string> };
+/** Preserve the SDK's explicit remote transport, including SSE. */
+type CursorMcpConfig = import("@cursor/sdk").McpServerConfig;
 /** Compatibility view of local run records. Current SDKs return the error
  * on RunResult directly; older hosts may require this exact-run fallback. */
 export interface CursorLocalRunDoc {
@@ -996,7 +990,7 @@ interface Session {
    *  genuine mid-stream failure (which must surface as an AgentFailure, not
    *  a silent empty turn). Reset at the start of each prompt. */
   cancelRequested: boolean;
-  /** Session env + MCP registry, kept so ensureAutoReview() can rebuild the
+  /** Session env + MCP registry, kept so ensureSessionConfiguration() can rebuild the
    *  agent (Agent.resume) with the SAME sandbox/MCP wiring when the user
    *  toggles into/out of Auto mode — autoReview is create-time only. */
   env?: Record<string, string>;
@@ -1012,6 +1006,10 @@ interface Session {
    *  are two SEPARATE executors — and rebuilding one costs the full workspace
    *  resolution. At most two entries, so this cannot grow with toggling. */
   prewarmedAutoReview: Set<boolean>;
+  appliedMcpCatalog: string;
+  configurationRefresh?: Promise<void>;
+  preparingPrompt?: AbortController;
+  disposing?: boolean;
 }
 
 interface CursorModelState {
@@ -1339,7 +1337,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       );
     };
     try {
-      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env, opts.cwd);
       void Promise.resolve(
         sdk.platform.prewarm({
           apiKey,
@@ -1365,7 +1363,7 @@ export class CursorSdkAdapter implements AgentAdapter {
    *
    *  `autoReview` is a create-time @cursor/sdk option AND part of its workspace
    *  executor cache key, so "Auto" and "not Auto" are two separate executors.
-   *  ensureAutoReview() reconciles the agent lazily at prompt time — correct,
+   *  ensureSessionConfiguration() reconciles the agent lazily at prompt time — correct,
    *  and deliberately so (see its doc) — but the `Agent.resume` it issues has
    *  to resolve a workspace that was never built: the full rules / skills /
    *  ignore / MCP walk, measured at 8-12s on this repo, landing squarely on the
@@ -1392,7 +1390,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         cwd: session.cwd,
         settingSources: session.settingSources,
         ...(session.env ? { env: session.env } : {}),
-        ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
+        mcpServers: this.mcpCatalog(session.mcpServers).servers,
       },
       want,
     );
@@ -1628,10 +1626,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
     const runtime = await this.createSessionRuntime(opts);
+    const catalog = this.mcpCatalog(opts.mcpServers);
     // Fire-and-forget, and BEFORE the awaits below on purpose: the whole point
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
-    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, settingSources });
+    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources });
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -1649,7 +1648,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const sdk = runtime.sdk;
     let agent: SdkAgent;
     try {
-      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      const sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // Discovery above is detached, so a retired pick can reach the SDK here;
       // withModelRecovery turns its "Cannot use this model" into one retry on
       // a model the account lists instead of a failed chat.
@@ -1708,6 +1707,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
+      appliedMcpCatalog: catalog.key,
     };
     this.sessions.set(executionId, session);
 
@@ -1747,10 +1747,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
     const runtime = await this.createSessionRuntime(opts);
+    const catalog = this.mcpCatalog(opts.mcpServers);
     // Same overlap as newSession: a reopened chat pays the identical cold
     // workspace/backend cost on its first turn, so warm it while the catalog
     // and `Agent.resume` are still in flight.
-    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, settingSources });
+    this.prewarmWorkspace(runtime.sdk, apiKey, { ...opts, mcpServers: catalog.servers, settingSources });
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
@@ -1778,7 +1779,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
-      sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // A reopened chat carries the model it was created on; if Cursor has
       // retired it since, `Agent.resume` throws "Cannot use this model" on
       // every reopen. withModelRecovery retries once on a listed model.
@@ -1896,6 +1897,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
+      appliedMcpCatalog: catalog.key,
     });
     return {
       executionId,
@@ -1978,11 +1980,25 @@ export class CursorSdkAdapter implements AgentAdapter {
     const message = buildUserMessage(opts.prompt);
     session.cancelRequested = false;
 
-    // Reconcile the Auto-review classifier before sending. autoReview is a
-    // CREATE-TIME @cursor/sdk option, so a mid-chat switch into/out of "Auto"
-    // only takes effect after the agent is rebuilt — do it lazily here so
-    // toggling modes without sending costs nothing and A→B→A settles to one.
-    await this.ensureAutoReview(session);
+    // Configuration refresh is preparation, not a submitted prompt. Stop must
+    // settle immediately even if native resume is slow. A later queued send
+    // joins that same refresh instead of racing a second native handle into it.
+    const preparation = new AbortController();
+    session.preparingPrompt = preparation;
+    let stopPreparing!: () => void;
+    const stopped = new Promise<void>((resolve) => { stopPreparing = resolve; });
+    preparation.signal.addEventListener("abort", stopPreparing, { once: true });
+    try {
+      await Promise.race([this.ensureSessionConfiguration(session), stopped]);
+    } catch (err) {
+      if (!preparation.signal.aborted && !session.disposing) throw this.classify(err, "prompt");
+    } finally {
+      preparation.signal.removeEventListener("abort", stopPreparing);
+      if (session.preparingPrompt === preparation) session.preparingPrompt = undefined;
+    }
+    if (preparation.signal.aborted || session.disposing || this.sessions.get(opts.sessionId) !== session) {
+      return { stopReason: "cancelled", response: { stopReason: "cancelled" } };
+    }
     session.billing ??= new CursorUsageReconciler(
       () => readCursorAgentUsage(session.agent),
       (turnId, usage) => {
@@ -2016,25 +2032,21 @@ export class CursorSdkAdapter implements AgentAdapter {
       // Fresh translator per attempt so a retried run doesn't inherit the
       // failed run's partial state. A model-gated run errors before emitting
       // assistant text, so the retry won't duplicate visible content.
+      const transcripts = new CursorSubagentTranscriptReader({
+        cwd: session.cwd, parentAgentId: session.agent.agentId,
+        ...(session.providerHome ? { home: session.providerHome } : {}),
+      });
       const translator = new CursorSdkTranslator({
         sessionId: opts.sessionId,
         emit: (n) => this.ctx.emit.onSessionUpdate(AGENT_ID, n),
         onUnknown: () => {
           /* tolerate unknown message types */
         },
-        // Cursor runs subagents as a black box (no live stream, empty
-        // conversationSteps in local mode) — their real tool calls live in the
-        // on-disk transcript. Inject readers so the translator can lift them
-        // into the SubagentCard once native child identity is known. Scoped to
-        // this native parent conversation and provider HOME. Called by the
-        // live poll timer and at flush; log only the final read.
-        loadSubagentTranscript: (subagentAgentId) =>
-          loadSubagentTranscript(session.cwd, subagentAgentId, {
-            parentAgentId: session.agent.agentId,
-            ...(session.providerHome ? { home: session.providerHome } : {}),
-          }),
-        loadSubagentTranscriptByPath: (path) =>
-          loadSubagentTranscriptByPath(path),
+        // Native taskUpdate callbacks supply live child activity. Older or
+        // incomplete transports can instead use owned transcript checkpoints.
+        // The translator selects one child feed, avoiding duplicate native /
+        // file histories. Readers stay scoped to the native parent and HOME.
+        readSubagentTranscript: (child, final) => transcripts.read(child, final),
         onLog: (m) =>
           this.ctx.emit.onAgentStderr(AGENT_ID, `${m} (cwd=${session.cwd})`),
       });
@@ -2074,7 +2086,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         // it can't collide with this one.
         run = await session.agent.send(message, {
           // Auto & Full access both run as sdk "agent"; they differ only by the
-          // (create-time) autoReview already baked in via ensureAutoReview().
+          // (create-time) autoReview already baked in via ensureSessionConfiguration().
           mode: sdkModeFor(session.modeId),
           model: this.modelSelection(modelId, session.modelState, session.env),
           local: { force: true },
@@ -2103,6 +2115,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         });
       } catch (err) {
         acceptingUpdates = false;
+        transcripts.dispose();
         if (session.cancelRequested) {
           return {
             stopReason: "cancelled",
@@ -2128,19 +2141,16 @@ export class CursorSdkAdapter implements AgentAdapter {
         }
       }
 
-      // Poll active subagents' transcripts on a timer so their tool calls stream
-      // during the run once native ownership is known (Cursor doesn't push
-      // child internals through the stream; they are written to disk). The
+      // Poll children without native taskUpdate delivery once their transcript
+      // ownership is known. Children already receiving callbacks skip disk. The
       // translator correlates calls/results across polls and reconciles final
       // results and marks uncaptured completion. ~1.2s balances liveness vs file churn.
       const SUBAGENT_POLL_MS = 1200;
       const pollTimer = setInterval(() => {
         if (!ownsUpdates()) return;
-        try {
-          translator.pollSubagents();
-        } catch {
+        void translator.pollSubagents(ownsUpdates).catch(() => {
           /* best-effort live update — flush is the authority */
-        }
+        });
       }, SUBAGENT_POLL_MS);
 
       // Drain the stream, then settle on the run's final status. We DON'T
@@ -2181,14 +2191,19 @@ export class CursorSdkAdapter implements AgentAdapter {
       } finally {
         acceptingUpdates = false;
         clearInterval(pollTimer);
+        // Stop/disposal revokes live reads. Final reads are bounded and awaited
+        // before another turn can publish into this transcript.
+        try {
+          await translator.flushSubagents({
+            readFinal: !session.cancelRequested,
+            canReadFinal: () => !session.cancelRequested,
+            ownsUpdates: () => this.sessions.get(opts.sessionId) === session && session.activeRun === run,
+          });
+        } finally { transcripts.dispose(); }
         if (session.activeRun === run) {
           session.activeRun = null;
           this.finishPendingSteers(session);
         }
-        // The stream has drained — every subagent transcript Cursor wrote is now
-        // flushed, so emit each subagent's remaining tool calls + narration +
-        // report (the tail beyond what the live poll already streamed).
-        translator.flushSubagents();
       }
 
       // Capture usage on every terminal path, including failures and Stop.
@@ -2389,7 +2404,10 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   async cancel(opts: { sessionId: string }): Promise<void> {
     const session = this.sessions.get(opts.sessionId);
-    if (session) session.cancelRequested = true;
+    if (session) {
+      session.cancelRequested = true;
+      session.preparingPrompt?.abort();
+    }
     // Native cancel can finish after its run has settled and the user has
     // started another. Only reconcile requests owned at the Stop boundary.
     const pending = [...(session?.pendingSteers ?? [])];
@@ -2407,7 +2425,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (!session) return;
     // Cheap: just record the pick. Ask↔Full access is a per-send `mode` change;
     // toggling Auto flips the DESIRED autoReview, reconciled lazily by
-    // ensureAutoReview() on the next prompt (autoReview is create-time only).
+    // ensureSessionConfiguration() on the next prompt (autoReview is create-time only).
     if (
       opts.modeId === "agent" ||
       opts.modeId === "plan" ||
@@ -2455,45 +2473,60 @@ export class CursorSdkAdapter implements AgentAdapter {
     );
   }
 
-  /** Rebuild the agent (Agent.resume) when the mode's desired autoReview no
-   *  longer matches what's baked into the live agent — the only way to change
-   *  the create-time classifier gate for an in-flight chat. Resumes the SAME
-   *  session id (conversation preserved), re-applying cwd/sandbox/MCP. On
-   *  failure it keeps the existing agent and leaves appliedAutoReview stale so
-   *  the next prompt retries — never fails the turn over a gate toggle. */
-  private async ensureAutoReview(session: Session): Promise<void> {
-    const want = autoReviewFor(session.modeId);
-    if (want === session.appliedAutoReview) return;
-    try {
-      const sdk = session.sdk;
-      const sessionMcp = this.mcpServers(session.mcpServers, session.env);
-      session.billing?.dispose();
-      session.billing = undefined;
-      session.agent = await sdk.Agent.resume(session.agent.agentId, {
-        apiKey: session.apiKey,
-        model: this.modelSelection(
-          session.modelId,
-          session.modelState,
-          session.env,
-        ),
-        cwd: session.cwd,
-        local: this.buildLocalOpts(
-          session.cwd,
-          session.env,
-          want,
-          session.settingSources,
-        ),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      });
-      session.appliedAutoReview = want;
-    } catch (err) {
-      this.ctx.emit.onAgentStderr(
-        AGENT_ID,
-        `[cursor-sdk] Auto-review rebuild (autoReview=${want}) failed; ` +
-          `keeping current agent: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-      );
+  /** Reconcile only between runs. A versioned gateway header is part of the
+   * SDK's executor cache key: it isolates the refreshed catalog from running
+   * siblings and stale prewarm leases. agent.reload() cannot do this safely:
+   * in 1.0.31 it affects a shared executor and is a no-op before first send. */
+  private async ensureSessionConfiguration(session: Session): Promise<void> {
+    if (session.configurationRefresh) await session.configurationRefresh;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (session.disposing || this.sessions.get(session.zerosSessionId) !== session) return;
+      const want = autoReviewFor(session.modeId);
+      const catalog = this.mcpCatalog(session.mcpServers);
+      const catalogChanged = catalog.key !== session.appliedMcpCatalog;
+      if (!catalogChanged && want === session.appliedAutoReview) return;
+      if (session.activeRun) throw new Error("Cursor MCP configuration cannot refresh during an active run.");
+      const previous = session.agent;
+      const refresh = async () => {
+        const sessionMcp = this.mcpServers(catalog.servers, session.env, session.cwd);
+        const agent = await session.sdk.Agent.resume(previous.agentId, {
+          apiKey: session.apiKey,
+          model: this.modelSelection(session.modelId, session.modelState, session.env),
+          cwd: session.cwd,
+          local: this.buildLocalOpts(session.cwd, session.env, want, session.settingSources),
+          ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+        });
+        if (session.disposing || this.sessions.get(session.zerosSessionId) !== session) {
+          agent.close?.();
+          return;
+        }
+        // The host proxy owns an individual native handle, not just agentId;
+        // releasing the old executor cannot close the replacement conversation.
+        session.agent = agent;
+        session.appliedAutoReview = want;
+        session.appliedMcpCatalog = catalog.key;
+        if (previous !== agent) previous.close?.();
+      };
+      const pending = refresh();
+      session.configurationRefresh = pending;
+      try {
+        await pending;
+      } catch (err) {
+        // Keep the prior mode-only recovery behavior. A stale tool catalog must
+        // instead fail before submitting the prompt and retry via existing UI.
+        if (catalogChanged || this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog) throw err;
+        this.ctx.emit.onAgentStderr(AGENT_ID,
+          `[cursor-sdk] Auto-review rebuild (autoReview=${want}) failed; keeping current agent: ${err instanceof Error ? err.message : String(err)}`);
+        return;
+      } finally {
+        if (session.configurationRefresh === pending) session.configurationRefresh = undefined;
+      }
+      // Re-read after the await: a second publication cannot be acknowledged by
+      // a handle created with the first revision. Bound pathological churn.
+    }
+    if (this.mcpCatalog(session.mcpServers).key !== session.appliedMcpCatalog ||
+        autoReviewFor(session.modeId) !== session.appliedAutoReview) {
+      throw new Error("Cursor MCP configuration kept changing. Please retry the message.");
     }
   }
 
@@ -2506,7 +2539,9 @@ export class CursorSdkAdapter implements AgentAdapter {
     // session is superseded mid-turn (one-live-session-per-chat teardown in the
     // engine) — mirrors the claude/codex deliberate-teardown semantics.
     session.billing?.dispose();
+    session.disposing = true;
     session.cancelRequested = true;
+    session.preparingPrompt?.abort();
     try {
       await session.activeRun?.cancel();
     } catch {
@@ -2704,12 +2739,27 @@ export class CursorSdkAdapter implements AgentAdapter {
     return local;
   }
 
+  /** Only an engine-owned, exact-endpoint revision may partition the SDK
+   * cache. This header contains no credentials and is neither persisted nor
+   * forwarded to backend MCP servers. Preserve the user's registry verbatim. */
+  private mcpCatalog(override?: McpServerRegistration[]): { key: string; servers: McpServerRegistration[] } {
+    const revisions: Array<[string, string, string]> = [];
+    const servers = (override ?? this.ctx.mcpServers).map((server) => {
+      const revision = this.ctx.mcpCatalogRevision?.(server);
+      if (server.transport === "stdio" || revision === undefined) return server;
+      revisions.push([server.name, server.url, revision]);
+      return { ...server, headers: { ...server.headers, "X-Zeros-Mcp-Catalog": revision } };
+    });
+    return { key: JSON.stringify(revisions), servers };
+  }
+
   /** Render the MCP registry into @cursor/sdk's shape. `override` is the
    *  gateway-resolved per-session registry (user + repo + workspace layers,
    *  RCE-gated); undefined → the global ctx.mcpServers. */
   private mcpServers(
     override?: McpServerRegistration[],
     env: Readonly<Record<string, string | undefined>> = {},
+    cwd = this.ctx.projectRoot,
   ): Record<string, CursorMcpConfig> | null {
     const list = materializeMcpServerRegistrations(
       override ?? this.ctx.mcpServers,
@@ -2722,10 +2772,11 @@ export class CursorSdkAdapter implements AgentAdapter {
         s.transport === "stdio"
           ? {
               command: s.command,
+              ...(s.cwd ? { cwd: mcpWorkingDirectory(s.cwd, cwd) } : {}),
               ...(s.args ? { args: s.args } : {}),
               ...(s.env ? { env: s.env } : {}),
             }
-          : { url: s.url, ...(s.headers ? { headers: s.headers } : {}) },
+          : { type: s.transport, url: s.url, ...(s.headers ? { headers: s.headers } : {}) },
       ]),
     );
   }
@@ -2807,6 +2858,22 @@ export function classifyCursorSdkError(
       stage,
       agentId: AGENT_ID,
     });
+  }
+  // Local SDK 1.0.31 can erase the error class/code while persisting a failed
+  // refresh, leaving only these SDK-owned prefixes (observed on a 503 exchange).
+  // Retain connection recovery for that narrow case. Explicit native status /
+  // codes and TLS failures above still own their existing recovery semantics.
+  if (
+    native.category === "protocol-error" &&
+    native.status === undefined &&
+    (!native.code || native.code.toLowerCase() === "unknown") &&
+    /^(?:\[unknown\]\s*)?(?:Server error during API key exchange:|Failed to connect to API key exchange endpoint:)/i.test(message)
+  ) {
+    return providerErrorFailure(
+      "cursor",
+      { ...native, category: "transport-closed" },
+      stage,
+    );
   }
   return providerErrorFailure("cursor", native, stage);
 }
