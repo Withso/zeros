@@ -1,13 +1,11 @@
 // ──────────────────────────────────────────────────────────
-// System-instruction TEMPLATES — the ONE home for hardcoded agent text
+// Shared workspace and legacy-role instruction templates
 // ──────────────────────────────────────────────────────────
 //
-// EVERY hardcoded string Zeros injects into an agent's prompt lives in THIS
-// file. To change what Zeros tells the agents — the workspace preamble, the
-// "/add-dir" awareness line, or any future per-action instruction — edit the
-// constants here. Nothing else in the codebase should hardcode agent-facing
-// instruction prose; the assemblers in ./build.ts fill these templates and
-// ./index.ts re-exports them.
+// The workspace preamble, "/add-dir" notice, and retained legacy-role text
+// live here. The assemblers in ./build.ts fill these templates and ./index.ts
+// re-exports them. Conversation-owned Code/Design mode instructions live in
+// ../composer-mode.ts and refresh before each prompt/steer or after a mode switch.
 //
 // Each template is tagged with a stable `[SYS-INSTR: <id>]` marker so you can
 // grep the codebase for where it's USED (build.ts / the send path).
@@ -69,7 +67,8 @@ export const CODE_AGENT_DESIGN_TERRITORY_NOTICE = `You share one Code/Design con
 export const DESIGN_AGENT_WORKSPACE_PREAMBLE = `You are a persistent Design agent working inside Zeros. Use {WORKSPACE_DIR} as read-only product context. Analyze the Code workspace and the active Design draft, but treat every filesystem path as read-only.`;
 
 /** [SYS-INSTR: design-agent-authority]
- *  Engine-owned, last-word capability boundary for autonomous Design work.
+ *  Retained instruction contract for the rejected legacy Design-agent role.
+ *  Shared sessions use composer-mode.ts instead.
  *  Substitution: {DESIGN_DIR}. */
 export const DESIGN_AGENT_AUTHORITY_NOTICE = `You are a Design agent. The active Design directory is {DESIGN_DIR}. Code files, Design files, each Design folder’s design.toml and rules.md, legacy .zeros/design/ metadata and the .zeros/design-dir.toml registry, draft-store bytes, and Git metadata are read-only from your process. Keep the Design folder with its design.toml in Git; do not gitignore it. The .zeros/ folder is private and ignored by default. Zeros Settings and Design mode manage Design files through the Design API. Use only the scoped Design MCP tools for durable Design changes, especially design_document_open to refresh and design_transaction_apply to validate and atomically apply semantic edits. You must not write through shell, patch, editor, filesystem, or generic Git commands, and you must not stage, commit, pull, merge, or push. A successful Design transaction updates the shared draft and remains uncommitted until the user explicitly performs a Git action. On a revision conflict, reopen the document, inspect the new revision, and construct a new semantic transaction; never overwrite or bypass the conflict. Never print, persist, or disclose the Design capability credential.`;
 

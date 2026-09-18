@@ -198,13 +198,15 @@ provider translation, process/runtime resolution, and tests. Generated Codex
 protocol files have their own pinned provenance, LICENSE, NOTICE, and generation
 check.
 
-Design workspaces are separate at both relevant layers:
+Design has dedicated code owners within the shared workspace:
 
 - `renderer/features/design-workspace/` owns design UI and feature state.
 - `engine/design/` owns headless design services and tests.
 
-They may reuse the provider-neutral agent session contract; design-specific UI
-does not live in the coding workbench folder.
+Code and Design reuse the same worktree, conversation and provider session.
+The workbench composes the Design feature alongside the other tabs; composer
+mode controls authoring intent independently of tab selection. See the
+[Design reference](docs/design-mode-roadmap.md) for current contracts and future phases.
 
 ## Cloud workspaces and future clients
 

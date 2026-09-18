@@ -768,9 +768,8 @@ describe("actor-scoped Design identity lifecycle", () => {
         type: "AGENT_ERROR",
         requestId: "disabled-design-agent-start",
         code: "AGENT_PROTOCOL_ERROR",
-        message: expect.stringContaining(
-          "Separate Design-agent sessions are retired",
-        ),
+        message:
+          "Separate Design-agent sessions are retired. Use Design mode in the shared agent session.",
       }),
     );
   });

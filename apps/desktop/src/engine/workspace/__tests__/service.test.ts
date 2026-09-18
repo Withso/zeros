@@ -1301,6 +1301,9 @@ describe("WorkspaceService", () => {
         });
       }
     },
+    // Twelve durable undo/redo operations, each reopening both frame sessions,
+    // exceed the default 20s on the macOS runners under parallel Git load.
+    60_000,
   );
 
   it("undoes metadata-only frame renames without recording unchanged names", async () => {

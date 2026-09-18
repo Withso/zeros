@@ -31,17 +31,17 @@ export interface FirstTurnInstructionInput {
   additionalDirectories?: readonly string[];
   /** Repo/user `[prompts] general` from .zeros/settings.toml. Empty → skipped. */
   customInstructions?: string | null;
-  /** Absolute active Design directory. When present, inject the permanent
-   * code-actor territory rule independently of the UI's current view mode. */
+  /** Absolute active Design directory. When present, inject the shared
+   * authoring policy independently of the UI's current view mode. */
   designDirectory?: string | null;
-  /** Every recognized Design root for a native Code actor. The active root
-   * above remains the singular Design-agent document identity. */
+  /** Every recognized Design root in this workspace. The active root above
+   * identifies the selected directory for Design authoring. */
   designDirectories?: readonly string[];
   /** Defaults to code for serialized/backward compatibility. */
   agentRole?: "code" | "design";
 }
 
-/** Legacy role formatter, not the planned composer Design-mode notice. */
+/** Retained legacy-role formatter; shared mode instructions live in composer-mode.ts. */
 export function buildDesignAgentNotice(
   designDirectory?: string | null,
 ): string {

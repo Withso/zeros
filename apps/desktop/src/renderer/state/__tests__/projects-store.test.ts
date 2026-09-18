@@ -9,7 +9,7 @@
 // The node test env has no DOM, so we install a tiny in-memory localStorage
 // before importing the store (getSetting/setSetting are localStorage-backed).
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   loadProjects,
@@ -44,12 +44,38 @@ beforeEach(() => {
     new MemStorage() as unknown as Storage;
 });
 afterEach(() => {
+  vi.restoreAllMocks();
   delete (globalThis as { localStorage?: Storage }).localStorage;
 });
 
 // projects-store only touches localStorage at call time (inside the tests,
 // after beforeEach installs the polyfill) — the top-level import is safe.
 const BACKUP_KEY = "zeros-projects-v1-backup"; // PREFIX + BACKUP_KEY
+
+it("keeps project identities distinct when the clock and weak random source repeat", () => {
+  vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+  vi.spyOn(Math, "random").mockReturnValue(0.5);
+  const first = upsertProject({ repoRoot: "/repo/first" });
+  const second = upsertProject({ repoRoot: "/repo/second" });
+  expect(first.id).not.toBe(second.id);
+  expect(upsertProject({ repoRoot: first.repoRoot }).id).toBe(first.id);
+  removeProject(first.id);
+  expect(loadProjects().map((project) => project.id)).toEqual([second.id]);
+});
+
+it("preserves saved project identities when loading and upserting", () => {
+  const saved = {
+    id: "proj_legacy-ab12",
+    name: "Saved",
+    repoRoot: "/repo/saved",
+    repoSlug: "saved",
+    originUrl: null,
+    addedAt: 1,
+  };
+  localStorage.setItem("zeros-projects-v1", JSON.stringify([saved]));
+  expect(loadProjects()).toEqual([saved]);
+  expect(upsertProject({ repoRoot: saved.repoRoot }).id).toBe(saved.id);
+});
 
 describe("removeProject — backup recovery", () => {
   it("removing one of several repos leaves the rest (no resurrection)", () => {

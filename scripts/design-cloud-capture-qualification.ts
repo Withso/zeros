@@ -1,7 +1,7 @@
 // Run on the immutable Linux capture image as its coordinator user. This
 // probes source tools and rendering; it does not qualify a hosted bridge.
 import { createServer } from "node:http";
-import { readdir, stat, readFile, writeFile } from "node:fs/promises";
+import { readdir, stat, readFile } from "node:fs/promises";
 import { startCloudDesignCapture } from "../apps/desktop/src/engine/design/capture-cloud";
 import { createDesignCaptureRenderer } from "../apps/desktop/src/engine/design/capture-client";
 import {
@@ -15,6 +15,10 @@ import { DesignCodeTools } from "../apps/desktop/src/engine/design/code-tools";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  expectedCloudCaptureRenderer,
+  writeCloudCaptureReport,
+} from "./design-cloud-capture-report";
 const assert = (ok: unknown, label: string) => {
   if (!ok) throw new Error(label);
   console.log("PASS", label);
@@ -83,6 +87,8 @@ async function main() {
       "Dedicated sandboxed cloud worker returns a bounded PNG",
     );
     const reply = await first.json();
+    const renderer = expectedCloudCaptureRenderer();
+    assert(reply.renderer === renderer, "Cloud capture uses the pinned renderer");
     const png = Buffer.from(reply.data, "base64");
     assert(
       png.readUInt32BE(16) === 320 && png.readUInt32BE(20) === 240,
@@ -185,25 +191,19 @@ async function main() {
       (await workers()).length === 0,
       "Result generation leaves no browser process",
     );
-    await writeFile(
-      "/tmp/zeros-design-cloud-qualification.json",
-      JSON.stringify(
-        {
-          platform: process.platform,
-          arch: process.arch,
-          renderer: reply.renderer,
-          checkedAt: new Date().toISOString(),
-          elapsedMs: performance.now() - started,
-          activeWorkers: await workers(),
-          networkReads,
-          hostedCloud: false,
-          limitation:
-            "Production capture worker on a Linux VM fixture; deployed Daytona admission/bridge qualification is separate.",
-        },
-        null,
-        2,
-      ),
-    );
+    const reportFile = await writeCloudCaptureReport({
+      platform: process.platform,
+      arch: process.arch,
+      renderer,
+      checkedAt: new Date().toISOString(),
+      elapsedMs: performance.now() - started,
+      activeWorkers: await workers(),
+      networkReads,
+      hostedCloud: false,
+      limitation:
+        "Production capture worker on a Linux VM fixture; deployed Daytona admission/bridge qualification is separate.",
+    });
+    console.log("Qualification report:", reportFile);
   } finally {
     tools?.dispose();
     await service.stop();

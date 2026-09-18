@@ -44,9 +44,9 @@ and statuses remain available even when routine metadata is hidden in the UI.
   `.context/local/artifacts/<task>/` and investigations/logs in
   `.context/local/scratch/<task>/`. Read relevant existing context, pass exact
   paths to delegates, preserve other agents' work, and link actual saved files.
-  Required project source/build outputs keep their normal locations. Shared
-  Design mode uses ordinary provider file tools for authored Design files;
-  the mode-gated Design API remains optional. See
+  Required project source/build outputs keep their normal locations. Design
+  source placement and native/API authoring follow the
+  [Design contract](design-mode-roadmap.md#native-authoring-and-optional-tools). See
   [context-storage.md](context-storage.md) for local/shared ownership.
 
 Contract references: the installed Claude SDK's `SDKMcpResourceLink` and task
@@ -658,9 +658,8 @@ fields keep older transcript records and supported peers readable.
 
 ## Minimal Design-mode tools
 
-The engine-owned `design-draft` MCP endpoint uses ordinary expandable rows with
-the existing pen icon and short labels (List, Inspect, Inspect Styles, Edit,
-Validate, Capture, Undo). Native qualified tool identity selects that treatment;
-unqualified names or foreign servers do not. Keep native IDs and normal detail
-rendering. No new semantic cards, proposal review or switching banners. The
-composer + menu and removable Design tag are the only mode controls in v1.
+Design helpers follow the ordinary native-identity, expandable-row and detail
+contracts above. Keep Design-specific labels, catalog limits, authoring modes
+and UI scope in the [canonical Design tool contract](design-mode-roadmap.md#native-authoring-and-optional-tools).
+Native file edits retain their provider's ordinary presentation; an unqualified
+Design-looking tool name or foreign MCP server never selects trusted Design UI.

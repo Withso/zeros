@@ -124,7 +124,7 @@ describe("Zeros-scoped design-directory containment guarantees", () => {
 
   it("documents native mode policy separately from filesystem permissions", () => {
     const designWorkspace = readFileSync(
-      path.join(repositoryRoot, "docs", "design-workspace.md"),
+      path.join(repositoryRoot, "docs", "design-mode-roadmap.md"),
       "utf8",
     );
     expect(designWorkspace).toContain("Shared Code/Design agent");

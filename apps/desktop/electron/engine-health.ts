@@ -3,6 +3,27 @@ export interface OwnedEngineManifest {
   instance: string;
 }
 
+/** A manifest selects a port from the range assigned to this child. Return the
+ * configured candidate so file contents never become HTTP request options. */
+export function selectEnginePort(
+  manifestPort: number,
+  firstPort: number,
+  portSpan: number,
+): number | null {
+  if (
+    !Number.isInteger(firstPort) ||
+    firstPort < 1 ||
+    !Number.isInteger(portSpan) ||
+    portSpan < 1 ||
+    firstPort + portSpan > 65_536
+  )
+    return null;
+  for (let port = firstPort; port < firstPort + portSpan; port++) {
+    if (port === manifestPort) return port;
+  }
+  return null;
+}
+
 /** The engine deliberately retires stale kernel process domains before it
  * publishes any renderer authority. Recovery may outlive an ordinary health
  * probe when several abandoned generations are drained in sequence. Preserve

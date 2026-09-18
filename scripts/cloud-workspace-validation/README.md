@@ -258,3 +258,6 @@ render admission, blocked network/scripts, exact dimensions, global capacity,
 cancellation/cleanup, and source-bound result generation. Its report explicitly
 identifies a local worker fixture; it does not replace the provider validation
 sequence above or prove authenticated bridge reconnect/replication.
+The worker must match the installed Playwright/Chromium pins. Each report is
+written to a new private temporary directory; the command prints its path for
+collection and leaves earlier reports intact.

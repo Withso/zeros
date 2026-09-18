@@ -185,6 +185,10 @@ content inherits these rules.
   swaps on there being no active gesture, and never key a live overlay by array
   index.
 
+The [Design renderer contract](design-mode-roadmap.md#renderer-and-editor-contract)
+owns the feature-specific gestures, source transactions and runtime limits;
+the interaction rules here apply across renderer features.
+
 ### 5.2 Typed input is a draft; commit is the event
 
 An input in an inspector is not a slider. Applying a value per keystroke reflows

@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -82,6 +83,24 @@ setInterval(() => {}, 1000);
 }
 
 describe("development main-process restart", () => {
+  it("keeps the running app when a rebuild output is a symbolic link", async () => {
+    const app = await fixture(false);
+    const preload = path.join(path.dirname(app.output), "preload.cjs");
+    const linkedOutput = path.join(path.dirname(app.output), "linked.cjs");
+    await writeFile(linkedOutput, "replacement outside the build outputs");
+    await rm(preload);
+    await symlink(linkedOutput, preload);
+    await writeFile(app.output, "next main");
+    await delay(900);
+    expect(await app.events()).toHaveLength(1);
+
+    await rm(preload);
+    await writeFile(preload, "next preload");
+    await expect
+      .poll(async () => (await app.events()).length, { timeout: 5000 })
+      .toBeGreaterThanOrEqual(3);
+  });
+
   it("keeps the running app while clean rebuild outputs are missing", async () => {
     const app = await fixture(false);
     const preload = path.join(path.dirname(app.output), "preload.cjs");

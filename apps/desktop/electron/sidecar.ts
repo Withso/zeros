@@ -68,6 +68,7 @@ import {
   ENGINE_STARTUP_TIMEOUT_MS,
   engineStartupWaitDecision,
   parseOwnedEngineManifest,
+  selectEnginePort,
 } from "./engine-health";
 import { createSharedBackpressureGate } from "./stream-backpressure";
 import { createBoundedLineForwarder } from "./bounded-line-forwarder";
@@ -1801,7 +1802,8 @@ async function doSpawnEngine(
     // a manifest written by the child we just spawned.
     if (manifest && state.localToken) {
       const rangeEnd = requestedPort + portSpan - 1;
-      if (manifest.port < requestedPort || manifest.port > rangeEnd) {
+      const port = selectEnginePort(manifest.port, requestedPort, portSpan);
+      if (port === null) {
         console.error(
           `[Zeros] engine child ${child.pid ?? "unknown"} published out-of-range port ` +
             `${manifest.port}; expected ${requestedPort}-${rangeEnd}`,
@@ -1810,7 +1812,7 @@ async function doSpawnEngine(
         throw new EngineHealthUnreachableError(manifest.port);
       }
       const reachable = await confirmSpawnReachable(
-        manifest.port,
+        port,
         state.spawnGeneration,
         manifest.instance,
       );
@@ -1822,11 +1824,11 @@ async function doSpawnEngine(
       // proved this exact child can answer. ensureEngineRunning/currentPort
       // can never expose a manifest-only listener to the renderer.
       state.instance = manifest.instance;
-      state.port = manifest.port;
+      state.port = port;
       console.log(
         `[Zeros] engine ready and externally verified on port ${manifest.port}`,
       );
-      return manifest.port;
+      return port;
     }
     await new Promise<void>((r) => setTimeout(r, 100));
   }

@@ -93,11 +93,13 @@ platform does not match, Browser use fails closed for that thread; the normal
 Codex agent remains available and no Zeros browser tools are substituted.
 
 Local Code threads run natively, so on macOS the official Browser helper can
-install its mandatory Seatbelt profile normally. The planned composer Design
+install its mandatory Seatbelt profile normally. Composer Design
 mode shares that provider session and does not change its execution boundary.
-Browser capability policy remains independent of the Design API mode gate.
-Qualified cloud deployments retain their own capability matrix. Runtime discovery failures leave the ordinary Codex Code session
-usable; Zeros never substitutes a custom browser surface.
+Browser capability policy remains independent of the
+[Design authoring contract](design-mode-roadmap.md#actor-and-execution-contract).
+Qualified cloud deployments retain their own capability matrix. Runtime
+discovery failures leave the ordinary Codex Code session usable; Zeros never
+substitutes a custom browser surface.
 
 After `thread/start` or `thread/resume` returns the native thread id, the engine
 registers `{ nativeSessionId, browserSessionId }` with the authenticated

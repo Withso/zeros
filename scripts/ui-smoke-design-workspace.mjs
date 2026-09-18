@@ -1922,6 +1922,53 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         !!draggedPaddingBox &&
         Math.abs(draggedPaddingBox.x - inlinePaddingBox.x) > 8,
     );
+    // A metadata refresh can finish while the gesture is previewing. Let the
+    // aggregate child read observe that preview before canceling, so the next
+    // gesture cannot accidentally use those cached boxes as its baseline.
+    await page.evaluate(async () => {
+      const { designFrameRuntime } = await import(
+        "/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts"
+      );
+      const { useDesignRuntimeStore } = await import(
+        "/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts"
+      );
+      const workspaceId = "ws_design_harness";
+      const runtime = designFrameRuntime(workspaceId, "home.html");
+      const readGeometry = runtime.previewGeometry.bind(runtime);
+      let finishRead;
+      let timeout;
+      const read = new Promise((resolve, reject) => {
+        finishRead = resolve;
+        timeout = setTimeout(
+          () => reject(new Error("Child geometry did not refresh")),
+          10_000,
+        );
+      });
+      runtime.previewGeometry = async (...args) => {
+        const geometry = await readGeometry(...args);
+        if (args[0] === "home-main" && !args[1] && args[2]?.children)
+          finishRead();
+        return geometry;
+      };
+      try {
+        const store = useDesignRuntimeStore.getState();
+        const snapshot = store.byWorkspace[workspaceId].frames["home.html"].snapshot;
+        store.publishSnapshot(
+          workspaceId,
+          store.byWorkspace[workspaceId].folder,
+          "home.html",
+          { ...snapshot, revision: snapshot.revision + 1 },
+          snapshot.sourceVersion,
+        );
+        await read;
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        );
+      } finally {
+        clearTimeout(timeout);
+        runtime.previewGeometry = readGeometry;
+      }
+    });
     await page.keyboard.press("Escape");
     await page.mouse.up();
     check(
@@ -1985,7 +2032,9 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         return (
           (await distributedGapHandle.textContent()) === distributedGapValue &&
           !!restoredBox &&
+          Math.abs(restoredBox.x - distributedGapBox.x) < 1 &&
           Math.abs(restoredBox.y - distributedGapBox.y) < 1 &&
+          Math.abs(restoredBox.width - distributedGapBox.width) < 1 &&
           Math.abs(restoredBox.height - distributedGapBox.height) < 1
         );
       }, "design-inline-distributed-gap-cancel"),

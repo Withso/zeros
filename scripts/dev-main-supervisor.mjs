@@ -55,10 +55,20 @@ function readyBuild() {
     const hash = createHash("sha256");
     for (const name of TRIGGER_FILES) {
       const file = path.join(DIST_DIR, name);
-      if (!fs.statSync(file).isFile()) return null;
-      const contents = fs.readFileSync(file);
-      if (contents.length === 0) return null;
-      hash.update(name).update(contents);
+      // Validate and read the same open file, even if a rebuild replaces its
+      // pathname. Reject links and avoid blocking on a non-regular output.
+      const descriptor = fs.openSync(
+        file,
+        fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK,
+      );
+      try {
+        if (!fs.fstatSync(descriptor).isFile()) return null;
+        const contents = fs.readFileSync(descriptor);
+        if (contents.length === 0) return null;
+        hash.update(name).update(contents);
+      } finally {
+        fs.closeSync(descriptor);
+      }
     }
     return hash.digest("hex");
   } catch {

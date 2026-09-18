@@ -1,7 +1,7 @@
 import { commitDesignDirectoryMove } from "./ops";
 import { designMetadataIndexPaths } from "../design/metadata-git";
 // ──────────────────────────────────────────────────────────
-// Design mode — one workspace, two concurrent views
+// Legacy workspace view lifecycle — one workspace, two concurrent views
 // ──────────────────────────────────────────────────────────
 //
 // A workspace is never "a design workspace" by species: every worktree is
@@ -12,11 +12,12 @@ import { designMetadataIndexPaths } from "../design/metadata-git";
 // files, commits, or retires Code processes. Design files remain ordinary
 // uncommitted work until the user performs an explicit Git action.
 //
-// Authored Design changes use the API and native-session scoped tools. Generic
-// file/Git handlers retain their current Design path guards. The human Design
+// Local agents author Design through native file tools in Design mode; visual
+// edits and optional scoped tools use the API. Managed file/Git handlers retain
+// their operation-specific Design path guards. The human Design
 // surface cannot write outside its directory (assertSafeDesignWriteTarget);
 // native agent tools and external editors retain normal host authority.
-// The planned composer mode gate is separate from this legacy view lifecycle;
+// Conversation-owned composer mode is separate from this legacy view lifecycle;
 // it does not introduce Code-write isolation or another provider process.
 //
 // Pre-concurrency builds DID lock the whole tracked tree while a workspace

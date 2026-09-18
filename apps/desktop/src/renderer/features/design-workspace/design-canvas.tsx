@@ -2841,6 +2841,8 @@ export function DesignCanvas({
         "padding-bottom": designPixelValue(details.styles.paddingBottom),
         "padding-left": designPixelValue(details.styles.paddingLeft),
       };
+      let originalGeometry: DesignPaintedNode = details;
+      let originalChildren = childGeometryDetails;
       const fixedGapDistributionStyles = control.property.includes("gap")
         ? designInlineGapDistributionStyles({
             display: details.styles.display,
@@ -3067,7 +3069,7 @@ export function DesignCanvas({
         gestureCancelRef.current = null;
       };
       const restore = () => {
-        paintOverlayGeometry(details);
+        paintOverlayGeometry(originalGeometry);
         paintPaddingStyles(
           Object.fromEntries(
             Object.entries(paddingOriginalValues).map(([property, value]) => [
@@ -3075,8 +3077,9 @@ export function DesignCanvas({
               `${value}px`,
             ]),
           ),
+          originalGeometry.rect,
         );
-        paintGapGeometry(details, childGeometryDetails);
+        paintGapGeometry(originalGeometry, originalChildren);
         paintPropertyLabel(control.property, control.value);
         void clearDesignNodeStylePreviewTransient(previewInput).catch(() => {});
       };
@@ -3133,6 +3136,27 @@ export function DesignCanvas({
       };
 
       gestureCancelRef.current?.();
+      // Inspector reads may have observed the preceding gesture's preview.
+      // After canceling it, capture this gesture's baseline on the same runtime
+      // port before any preview writes; its reply precedes their measurements.
+      // Cancellation then paints synchronously from the actual starting boxes.
+      void previewDesignNodeGeometry({
+        workspaceId,
+        frame,
+        nodeId: details.oid,
+        children: true,
+      })
+        .then((geometry) => {
+          originalGeometry = geometry;
+          originalChildren = geometry.children;
+          Object.assign(paddingOriginalValues, {
+            "padding-top": designPixelValue(geometry.styles.paddingTop),
+            "padding-right": designPixelValue(geometry.styles.paddingRight),
+            "padding-bottom": designPixelValue(geometry.styles.paddingBottom),
+            "padding-left": designPixelValue(geometry.styles.paddingLeft),
+          });
+        })
+        .catch(() => {});
       gestureCancelRef.current = cancel;
       paintPropertyLabel(control.property, latestValue);
       paintGestureState([]);

@@ -262,9 +262,10 @@ function endStatus(response: http.ServerResponse, statusCode: number): void {
   response.end();
 }
 
-/** One loopback MCP endpoint per persistent Design-agent run. The trusted
- * engine hosts it outside ZSR; only semantic operations cross this boundary,
- * and every HTTP request must present the run's scoped capability. */
+/** One engine-hosted loopback MCP endpoint per admitted execution. Shared
+ * conversations retain it across mode changes; the handler checks mode and
+ * authority. Every HTTP request must present the scoped capability. The class
+ * name also serves the retained capability API compatibility path. */
 export class DesignAgentMcpServer {
   private port = 0;
   private httpServer: http.Server | null = null;

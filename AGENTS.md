@@ -18,11 +18,12 @@ These instructions apply to the entire repository. Read and follow
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
 - A Zeros `design.toml` registers a Design directory. Code mode may inspect it;
-  user-authorized Design mode may author HTML, CSS, assets and `canvas.json`
+  user-authorized local Design mode may author HTML, CSS, assets and `canvas.json`
   using normal provider Read/Write/Edit/patch/shell tools. Read the directory's
   `rules.md`, preserve stable frame IDs, and re-read changed files before editing.
   No Design API apply/import/publish is required after native edits. The Design
-  API remains available for inspection and optional semantic edits.
+  API remains available for inspection and optional semantic edits. Cloud
+  workers retain their execution policy and use API authoring instead.
 - Use Zeros Settings/lifecycle operations for `design.toml`, generated `rules.md`,
   registration and legacy migration. Do not bypass mode instructions or provider
   permissions with Git-as-editor, ACL changes or filesystem aliases. Mode is an
@@ -58,6 +59,8 @@ These instructions apply to the entire repository. Read and follow
 - Internal-only runtime surfaces must use `useInternalFeatureActive(...)`, not a
   raw flag, and may attach hotkeys only while that gate is active.
 
+For Design work, read `docs/design-mode-roadmap.md`, the single Design
+architecture, implementation and future-phase reference.
 For renderer state, navigation, loading, tabs, panels, or list work, also read
 `docs/ui-interaction-performance.md` when it is present.
 For provider event handling or tool transcript UI, also read

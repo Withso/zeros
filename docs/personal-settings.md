@@ -117,19 +117,17 @@ into TOML or copied from native configuration by inventory reads.
 
 ## Tracked Design metadata
 
-Each Design folder carries a tracked `design.toml` with its stable ID, frame
-geometry, titles, kinds and Foundation metadata. Commit it together with the
-source and short `rules.md` ownership instructions. Code agents may read the
-folder but cannot mutate it through generic Code operations. `.zeros/` holds
-private state and is ignored by default.
+Private `[design] directory_id` selects a registered folder within the current
+checkout; legacy `directory` paths remain readable. The folder's tracked
+`design.toml` v2 owns registration, while `canvas.json` owns its scene. These
+files are separate from private `.zeros/` settings. Removing private settings
+loses the selection, not the portable Design document.
 
-Personal selection uses `[design] directory_id`; legacy `directory` paths remain
-readable. Each checkout resolves the ID from its own folder manifests. Deleting
-`.zeros/` loses the private selection, but Design folders are still discoverable.
-Settings can also adopt an existing folder and recover metadata saved in Git.
-Older central registry/JSON layouts remain readable and migrate through the
-Design API without changing IDs or document values. See
-[Design workspace](design-workspace.md) for migration and Git behavior.
+Settings owns directory selection, adoption, rename and registration removal.
+The [Design directory contract](design-mode-roadmap.md#source-metadata-and-personal-state)
+and [migration/Git rules](design-mode-roadmap.md#migration-and-git) define their
+source-preservation and compatibility requirements. Composer mode is
+conversation state, separate from either settings selection or workbench tabs.
 
 ## Customize
 

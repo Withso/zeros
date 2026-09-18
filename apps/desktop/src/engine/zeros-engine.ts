@@ -4681,7 +4681,7 @@ export class ZerosEngine {
               kind: "protocol-error",
               stage: "newSession",
               message:
-                "Separate Design-agent sessions are retired. Use the shared agent session; composer Design mode is planned.",
+                "Separate Design-agent sessions are retired. Use Design mode in the shared agent session.",
             });
           }
           const bindToken = this.beginConversationBind(msg.chatId);
