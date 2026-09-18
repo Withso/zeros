@@ -14,12 +14,14 @@ import { runDesignAuthoredFrameSmoke } from "./ui-smoke-design-authored-frame.mj
 import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs";
 import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
 import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
+import { runDesignSpacingSmoke } from "./ui-smoke-design-spacing.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await runDesignWorkbenchSmoke({ page, check });
   await runDesignGitMenuSmoke({ page, check });
   await runDesignSelectionSmoke({ page, waitFor, check });
   await runDesignAutoLayoutSmoke({ page, check });
+  await runDesignSpacingSmoke({ page, check });
   await runDesignLayoutGesturesSmoke({ page, check });
   await runDesignInspectorRacesSmoke({ page, check });
   await runDesignLayoutSmoke({ page, waitFor, check });

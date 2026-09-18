@@ -2907,7 +2907,7 @@ export function DesignCanvas({
             handle.querySelector<HTMLElement>(
               `[data-design-inline-spacing-value="${CSS.escape(property)}"]`,
             ),
-            `${Math.round(value * 10) / 10}`,
+            `${Math.round(value)}`,
           );
         }
       };
