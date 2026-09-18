@@ -19,6 +19,7 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { designToolLabel } from "./design-tool-presentation";
 import {
   Bot,
   Brain,
@@ -28,6 +29,7 @@ import {
   Globe,
   Plug,
   Search as SearchIcon,
+  PenTool,
   Terminal,
 } from "lucide-react";
 import type { ComponentType } from "react";
@@ -105,6 +107,10 @@ export function summaryIcons(
   let hasThinking = false;
   for (const e of events) {
     if (e.kind === "tool") {
+      if (designToolLabel(e)) {
+        if (!seenKinds.has("design")) { seenKinds.add("design"); out.push(PenTool); }
+        continue;
+      }
       if (browserToolActivity(e)) {
         if (!seenKinds.has("browser")) {
           seenKinds.add("browser");

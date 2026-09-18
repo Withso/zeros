@@ -32,8 +32,8 @@ function frameFromDocumentId(documentId: string): string {
 /** Engine-owned semantic repository backed by the workspace checkout. Drafts
  * are ordinary uncommitted Design files, written through the transaction
  * journal/CAS implementation in document.ts.
- * Agent adapters receive a DesignApi backed by this store; they never receive
- * this path or direct filesystem authority. */
+ * Optional agent helpers and visual edits use this store. In Design mode,
+ * native provider tools also author the same checkout files directly. */
 export class DesignDraftStore implements DesignDocumentRepository {
   constructor(
     private readonly workspacePath: string,

@@ -1,6 +1,6 @@
-import { escapeText } from "./source";
+import { escapeText, insertDesignHeadMarkup } from "./source";
 import { FRAME_SEED, TEXT_FRAME_SEED } from "./document-seeds";
-import { designNodeRecords } from "./node-identities";
+import { designNodeRecords, healDesignOids } from "./node-identities";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -9,7 +9,7 @@ import {
 import { prepareFrameRenderSource } from "./render-preparation";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
-// Design document — portable HTML/CSS frames + app-owned canvas state
+// Design document — authored HTML/CSS frames and canvas metadata
 // ──────────────────────────────────────────────────────────
 //
 // A design workspace is still a Git worktree, but its authored surface is one
@@ -18,8 +18,9 @@ import { elementRecords } from "./source";
 //   Zeros Design/*.html      one top-level file per frame
 //   Zeros Design/*.css       shared authored styles
 //   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  stable identity, frame and Foundation metadata
-//   Zeros Design/rules.md     short Design API ownership instructions
+//   Zeros Design/design.toml  engine-managed directory registration
+//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
+//   Zeros Design/rules.md     short native-authoring instructions
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
@@ -73,6 +74,8 @@ import {
   initializeDesignDocumentUnlocked,
 } from "./document-transactions";
 import { type DesignStorageChange } from "./metadata";
+import { legacyFrameId } from "./canvas-file";
+import { isDeepStrictEqual } from "node:util";
 
 function slugFrameTitle(title: string): string {
   const slug = title
@@ -134,7 +137,7 @@ export async function createDesignFrame(
         )
       : FRAME_SEED(title, oid, geometry.w, geometry.h);
     canvas.frames[file] = geometry;
-    canvas.frame_info[file] = { title, kind: textSeed ? "text" : "frame" };
+    canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: textSeed ? "text" : "frame" };
     await writeCanvas(workspacePath, canvas, [
       {
         file: `${designDirectoryNameFor(workspacePath)}/${file}`,
@@ -160,118 +163,7 @@ export async function createDesignFrame(
 
 
 
-function oidForElement(
-  source: string,
-  element: DefaultTreeAdapterTypes.Element,
-): string {
-  const offset = element.sourceCodeLocation?.startOffset ?? 0;
-  return `o-${createHash("sha256")
-    .update(`${element.tagName}:${offset}:${source.slice(offset, offset + 80)}`)
-    .digest("hex")
-    .slice(0, 9)}`;
-}
-
-export function healDesignOids(source: string): {
-  html: string;
-  changed: boolean;
-  fixed: Array<{ kind: "missing" | "duplicate"; line: number; oid: string }>;
-} {
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const records = designNodeRecords(document);
-  const used = new Set<string>();
-  const edits: Array<{ start: number; end: number; text: string }> = [];
-  const fixed: Array<{
-    kind: "missing" | "duplicate";
-    line: number;
-    oid: string;
-  }> = [];
-  for (const record of records) {
-    const location = record.element.sourceCodeLocation;
-    const startTag = location?.startTag;
-    if (!startTag) continue;
-    const usableOid =
-      record.oid !== null && record.oid.trim().length > 0 ? record.oid : null;
-    const duplicate = usableOid !== null && used.has(usableOid);
-    if (usableOid !== null && !duplicate) {
-      used.add(usableOid);
-      continue;
-    }
-    const oidBase = oidForElement(source, record.element);
-    let oid = oidBase;
-    for (let suffix = 2; used.has(oid); suffix++) {
-      oid = `${oidBase}-${suffix}`;
-    }
-    used.add(oid);
-    const attrLocation = location?.attrs?.["data-oid"];
-    if (attrLocation) {
-      const original = source.slice(
-        attrLocation.startOffset,
-        attrLocation.endOffset,
-      );
-      const equalsAt = original.indexOf("=");
-      if (equalsAt < 0) {
-        edits.push({
-          start: attrLocation.startOffset,
-          end: attrLocation.endOffset,
-          text: `${original}="${oid}"`,
-        });
-        fixed.push({
-          kind: duplicate ? "duplicate" : "missing",
-          line: attrLocation.startLine,
-          oid,
-        });
-        continue;
-      }
-      let valueStart = equalsAt + 1;
-      while (/\s/.test(original[valueStart] ?? "")) valueStart += 1;
-      const quote = original[valueStart];
-      let valueEnd = valueStart;
-      if (quote === '"' || quote === "'") {
-        valueStart += 1;
-        valueEnd = original.indexOf(quote, valueStart);
-      } else {
-        while (
-          valueEnd < original.length &&
-          !/[\s"'`=<>]/.test(original[valueEnd] ?? "")
-        ) {
-          valueEnd += 1;
-        }
-      }
-      if (valueEnd < valueStart) continue;
-      const replacement = `${original.slice(0, valueStart)}${oid}${original.slice(valueEnd)}`;
-      edits.push({
-        start: attrLocation.startOffset,
-        end: attrLocation.endOffset,
-        text: replacement,
-      });
-      fixed.push({
-        kind: duplicate ? "duplicate" : "missing",
-        line: attrLocation.startLine,
-        oid,
-      });
-    } else {
-      const insertAt = source.lastIndexOf(">", startTag.endOffset - 1);
-      if (insertAt < startTag.startOffset) continue;
-      const slashAt = source.lastIndexOf("/", insertAt);
-      const offset =
-        slashAt >= startTag.startOffset &&
-        source.slice(slashAt, insertAt).trim() === "/"
-          ? slashAt
-          : insertAt;
-      edits.push({
-        start: offset,
-        end: offset,
-        text: ` data-oid="${oid}"`,
-      });
-      fixed.push({ kind: "missing", line: startTag.startLine, oid });
-    }
-  }
-  let html = source;
-  for (const edit of edits.sort((a, b) => b.start - a.start)) {
-    html = `${html.slice(0, edit.start)}${edit.text}${html.slice(edit.end)}`;
-  }
-  return { html, changed: edits.length > 0, fixed };
-}
+export { healDesignOids } from "./node-identities";
 
 export async function designFrameTarget(
   workspacePath: string,
@@ -318,6 +210,8 @@ export async function listDesignFramesUnlocked(
     try {
       ({ source } = await readAndHealFrame(workspacePath, file, writeBack));
     } catch (error) {
+      if (!existsSync(path.join(designDirectory(workspacePath), file)))
+        throw new Error(`Design frame source is missing: ${file}. Update canvas.json or restore the file.`);
       if (error instanceof DesignRenderBudgetError) continue;
       throw error;
     }
@@ -372,7 +266,7 @@ export async function listDesignFrames(
   workspacePath: string,
   options: DesignReadOptions = {},
 ): Promise<DesignFrameSummary[]> {
-  const writeBack = options.writeBack !== false;
+  const writeBack = options.writeBack === true;
   return writeBack
     ? withDocumentWrite(workspacePath, () =>
         listDesignFramesUnlocked(workspacePath, true),
@@ -549,7 +443,7 @@ export async function duplicateDesignFrame(
       originalMeta,
     );
     canvas.frames[file] = geometry;
-    canvas.frame_info[file] = { title, kind: originalMeta.kind };
+    canvas.frame_info[file] = { id: `frame_${randomUUID().replace(/-/g, "")}`, title, kind: originalMeta.kind };
     await writeCanvas(workspacePath, canvas, [
       {
         file: `${designDirectoryNameFor(workspacePath)}/${file}`,
@@ -599,7 +493,7 @@ async function designFrameRestorePointUnlocked(
       file,
       source,
       geometry: { ...geometry },
-      metadata: { title: meta.title, kind: meta.kind },
+      metadata: { ...canvas.frame_info[file], title: meta.title, kind: meta.kind },
     },
   };
 }
@@ -611,7 +505,10 @@ export function sameDesignFrameRestorePoint(
   return (
     left.file === right.file &&
     left.source === right.source &&
-    JSON.stringify(left.metadata) === JSON.stringify(right.metadata) &&
+    isDeepStrictEqual(
+      { ...left.metadata, id: (left.metadata as FrameMeta | undefined)?.id ?? legacyFrameId(left.file) },
+      { ...right.metadata, id: (right.metadata as FrameMeta | undefined)?.id ?? legacyFrameId(right.file) },
+    ) &&
     left.geometry.x === right.geometry.x &&
     left.geometry.y === right.geometry.y &&
     left.geometry.w === right.geometry.w &&
@@ -830,14 +727,15 @@ export async function transferDesignNode(
       throw new Error("The source frame changed before the layer move.");
     if (input.destinationFrame === from.file)
       throw new Error("Use a node move for layers in the same frame.");
-    const sourceDocument = parse(from.source, { sourceCodeLocationInfo: true });
+    const fromSource = healDesignOids(from.source).html;
+    const sourceDocument = parse(fromSource, { sourceCodeLocationInfo: true });
     const record = designNodeRecords(sourceDocument).find(
       (record) => record.oid === input.nodeId,
     );
     const span = record?.element.sourceCodeLocation;
     if (!record || !span)
       throw new Error("The layer has no movable source span.");
-    let fragment = from.source.slice(span.startOffset, span.endOffset);
+    let fragment = fromSource.slice(span.startOffset, span.endOffset);
     const root = record.element.attrs.some(
       (attribute) => attribute.name === "data-zeros-frame-root",
     );
@@ -858,7 +756,7 @@ export async function transferDesignNode(
       ? null
       : {
           ...from,
-          source: mutateDesignNodeDeleteSource(from.source, input.nodeId),
+          source: mutateDesignNodeDeleteSource(fromSource, input.nodeId),
         };
     let destination: DesignFrameRestorePoint | null = null;
     let after: DesignFrameRestorePoint;
@@ -876,8 +774,9 @@ export async function transferDesignNode(
       );
       if (destinationIdentity.sourceVersion !== input.destinationSourceVersion)
         throw new Error("The destination frame changed before the layer move.");
+      const destinationSource = healDesignOids(destination.source).html;
       const destinationIds = new Set(
-        designNodeRecords(parse(destination.source)).map(
+        designNodeRecords(parse(destinationSource)).map(
           (record) => record.oid,
         ),
       );
@@ -896,7 +795,7 @@ export async function transferDesignNode(
         null,
       );
       let source = mutateDesignNodeHtmlSource(
-        destination.source,
+        destinationSource,
         input.parentId ?? "::zeros-document-body",
         fragment,
         "append",
@@ -928,17 +827,14 @@ export async function transferDesignNode(
               location.endOffset <= span.endOffset)
           )
             return [];
-          const content = from.source.slice(
+          const content = fromSource.slice(
             location.startOffset,
             location.endOffset,
           );
           return source.includes(content) ? [] : [content];
         });
       if (dependencies.length)
-        source = source.replace(
-          /<head(?:\s[^>]*)?>/i,
-          (head) => head + dependencies.join("\n"),
-        );
+        source = insertDesignHeadMarkup(source, dependencies.join("\n"));
       after = { ...destination, source };
     } else {
       const base = "frame";
@@ -958,11 +854,11 @@ export async function transferDesignNode(
       after = {
         file,
         source:
-          from.source.slice(0, bodySpan.startTag.endOffset) +
+          fromSource.slice(0, bodySpan.startTag.endOffset) +
           fragment +
-          from.source.slice(bodySpan.endTag.startOffset),
+          fromSource.slice(bodySpan.endTag.startOffset),
         geometry: normalizeGeometry(input.geometry, input.geometry),
-        metadata: { title: "Frame", kind: "frame" },
+        metadata: { id: `frame_${randomUUID().replace(/-/g, "")}`, title: "Frame", kind: "frame" },
       };
     }
     const styles = input.destinationFrame
@@ -1073,9 +969,10 @@ export async function prepareFrameRenderSourceForFile(
   sanitized: string;
   sourceVersion: string;
 }> {
-  const document = parse(source, { sourceCodeLocationInfo: true });
-  const meta = readFrameMeta(document, file, await readCanvas(workspacePath));
-  const geometry = (await readCanvas(workspacePath)).frames[file];
+  const document = parse(healDesignOids(source).html, { sourceCodeLocationInfo: true });
+  const canvas = await readCanvas(workspacePath);
+  const meta = readFrameMeta(document, file, canvas);
+  const geometry = canvas.frames[file];
   const width = geometry?.w ?? meta.width;
   const height = geometry?.h ?? meta.height;
   const render = await prepareFrameRenderSource(workspacePath, source, {

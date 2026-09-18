@@ -6,7 +6,7 @@ import {
   finishAdmittedDesignWrite,
 } from "./write-authority";
 // ──────────────────────────────────────────────────────────
-// Design document — portable HTML/CSS frames + app-owned canvas state
+// Design document — authored HTML/CSS frames and canvas metadata
 // ──────────────────────────────────────────────────────────
 //
 // A design workspace is still a Git worktree, but its authored surface is one
@@ -15,8 +15,9 @@ import {
 //   Zeros Design/*.html      one top-level file per frame
 //   Zeros Design/*.css       shared authored styles
 //   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  stable identity, frame and Foundation metadata
-//   Zeros Design/rules.md     short Design API ownership instructions
+//   Zeros Design/design.toml  engine-managed directory registration
+//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
+//   Zeros Design/rules.md     short native-authoring instructions
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
@@ -52,6 +53,7 @@ import {
 } from "./document-write-lock";
 import {
   ensureDesignMetadataLayout,
+  readDirectoryDesignManifest,
   recoverWorkspaceDesignMetadata,
 } from "./metadata";
 
@@ -220,7 +222,7 @@ export async function initializeDesignDocumentUnlocked(
   // Reading validates existing metadata as well as seeding a new document.
   const canvas = await readCanvas(workspacePath);
   if (
-    !designDirectoryEntry(workspacePath, designDirectoryNameFor(workspacePath))
+    !readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.canvas
   )
     await writeCanvas(workspacePath, canvas);
   else

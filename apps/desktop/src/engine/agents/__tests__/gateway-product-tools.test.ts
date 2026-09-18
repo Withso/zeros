@@ -47,6 +47,8 @@ describe("native Code product tool admission", () => {
           ],
           revoke: vi.fn(),
           dispose: vi.fn(async () => {}),
+          preparePrompt: vi.fn(() => "<system_instruction>Current composer mode: Design.</system_instruction>"),
+          cancel: vi.fn(),
         };
         admitted.push(tools);
         return tools;
@@ -70,6 +72,8 @@ describe("native Code product tool admission", () => {
         return { modes: { currentModeId: "default", availableModes: [] } };
       },
       disposeSession: vi.fn(async () => {}),
+      prompt: vi.fn(async () => ({ response: { stopReason: "end_turn" } })),
+      cancel: vi.fn(async () => {}),
       dispose: vi.fn(async () => {}),
     } as unknown as AgentAdapter;
     (
@@ -118,5 +122,19 @@ describe("native Code product tool admission", () => {
     ).rejects.toThrow("Provider failed");
     expect(admitted[0]!.revoke).toHaveBeenCalled();
     expect(admitted[0]!.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("refreshes product instructions on every native prompt and fences tools on Stop", async () => {
+    const created = await gateway.newSession("fixture", { cwd: root, conversationId: "durable-chat" });
+    const adapter = (gateway as unknown as { adapters: Map<string, AgentAdapter> }).adapters.get("fixture")!;
+    await gateway.prompt("fixture", created.executionId, [{ type: "text", text: "Create a page" }]);
+    expect(adapter.prompt).toHaveBeenLastCalledWith(expect.objectContaining({
+      prompt: expect.arrayContaining([{ type: "text", text: "<system_instruction>Current composer mode: Design.</system_instruction>" }]),
+    }));
+    await gateway.prompt("fixture", created.executionId, [{ type: "text", text: "Continue" }]);
+    expect(admitted[0]!.preparePrompt).toHaveBeenCalledTimes(2);
+    await gateway.cancel("fixture", created.executionId);
+    expect(admitted[0]!.cancel).toHaveBeenCalledOnce();
+    expect(admitted[0]!.dispose).not.toHaveBeenCalled();
   });
 });

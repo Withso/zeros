@@ -113,4 +113,20 @@ describe("session tool ownership", () => {
       registry.admit({ executionId: "three", cwd: "/a" }, [], {}),
     ).rejects.toThrow("cancelled");
   });
+
+  it("cancels tools admitted after Stop and only resumes them at a new prompt", async () => {
+    const tools = { ...resource(), cancel: vi.fn(), beginPrompt: vi.fn() };
+    let ready!: (value: AgentSessionTools) => void;
+    const registry = new AgentSessionToolRegistry(() => new Promise((resolve) => { ready = resolve; }));
+    const pending = registry.admit({ executionId: "late", cwd: "/workspace" }, [], {});
+    await Promise.resolve();
+    registry.cancel("late");
+    ready(tools);
+    await pending;
+    expect(tools.cancel).toHaveBeenCalledOnce();
+    expect(tools.revoke).not.toHaveBeenCalled();
+    registry.beginPrompt("late");
+    expect(tools.beginPrompt).toHaveBeenCalledOnce();
+    await registry.dispose();
+  });
 });

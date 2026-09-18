@@ -506,6 +506,24 @@ describe("design workspace cache", () => {
     expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(2);
   });
 
+  it("retains the confirmed canvas during a partial native save and recovers on the next file event", async () => {
+    const workspaceId = "ws_native_save";
+    const confirmed = snapshot();
+    const repaired = snapshot([{ file: "welcome.html" }]);
+    platformMocks.readSnapshot.mockResolvedValueOnce(confirmed)
+      .mockRejectedValueOnce(new Error("Design canvas metadata contains invalid JSON."))
+      .mockResolvedValueOnce(repaired);
+    await fetchDesignWorkspaceSnapshot(workspaceId);
+    const previous = designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data;
+    applyDesignWorkspaceRefreshVersion(workspaceId, 1);
+    await expect(refreshDesignWorkspaceSnapshot(workspaceId)).rejects.toThrow(/invalid JSON/);
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data).toBe(previous);
+    expect(designWorkspaceSnapshotCache.peekSnapshot("another-workspace").data).toBeUndefined();
+    applyDesignWorkspaceRefreshVersion(workspaceId, 2);
+    await refreshDesignWorkspaceSnapshot(workspaceId);
+    expect(designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames[0].file).toBe("welcome.html");
+  });
+
   it("re-reads a stale generation and replays the rejected mutation once", async () => {
     const workspaceId = "ws_stale_generation_retry";
     const stale = snapshot();

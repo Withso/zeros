@@ -1,3 +1,4 @@
+import { conversationModePort } from "./design/conversation-mode";
 import { startCloudDesignCapture } from "./design/capture-cloud";
 import { setDesignCaptureConfig } from "./design/capture-client";
 import type { DesignCaptureService } from "./design/capture-service";
@@ -1474,7 +1475,7 @@ export class ZerosEngine {
           this.sessionLoadResponses.delete(sessionId);
           this.detachedProviderBindings.delete(sessionId);
           this.exitedAgentExecutions.delete(sessionId);
-          this.activePromptContexts.delete(sessionId);
+          this.releasePromptContext(sessionId);
           this.clearPendingAgentInteractions(sessionId);
           if (
             conversationId &&
@@ -1771,6 +1772,8 @@ export class ZerosEngine {
       projectRoot: this.root,
       executionBoundary: this.executionBoundary,
       sessionToolFactory: new DesignCodeToolAdmissions({
+        mode: (input) => conversationModePort(input, () =>
+          this.broadcast(createMessage({ type: "DB_CHANGED", source: "engine", kinds: ["chats"] }))),
         cloudWorker: this.cloudWorker !== null,
         resolveWorkspace: (id) => this.workspace.designAgentWorkspace(id),
         workspaceIdForCwd: (cwd) => this.workspace.workspaceIdForCwd(cwd),
@@ -3097,8 +3100,8 @@ export class ZerosEngine {
       this.globalDesignTerritoryTransitionCount += 1;
       try {
         await previous;
-        await this.agents.revokeSessionTools();
-        return await mutation();
+        const resumeTools = this.agents.suspendSessionTools();
+        try { return await mutation(); } finally { resumeTools(); }
       } finally {
         release();
         this.globalDesignTerritoryTransitionCount -= 1;
@@ -3220,10 +3223,8 @@ export class ZerosEngine {
           validated.push(target);
         }
         await previous;
-        for (const target of ordered) {
-          await this.agents.revokeSessionTools(target.workspaceId);
-        }
-        return await mutation();
+        const resumeTools = ordered.map((target) => this.agents.suspendSessionTools(target.workspaceId));
+        try { return await mutation(); } finally { resumeTools.forEach((resume) => resume()); }
       } finally {
         release();
         for (const target of validated) {
@@ -4085,7 +4086,7 @@ export class ZerosEngine {
     this.exitedAgentExecutions.delete(executionId);
     this.clearPendingAgentInteractions(executionId);
     if (!opts.preservePrompt) {
-      this.activePromptContexts.delete(executionId);
+      this.releasePromptContext(executionId);
       this.promptSessions.delete(executionId);
     }
     if (
@@ -4911,7 +4912,7 @@ export class ZerosEngine {
               // finally may never run. Retire the record with the rest of the
               // session's bookkeeping (the identity checks in that finally keep
               // a late settle from touching anything that outlived it).
-              this.activePromptContexts.delete(priorSessionId);
+              this.releasePromptContext(priorSessionId);
               this.clearPendingAgentInteractions(priorSessionId);
               void this.agents
                 .endSession(priorAgentId, priorSessionId)
@@ -5089,7 +5090,7 @@ export class ZerosEngine {
                 `${msg.sessionId}: no activity for ` +
                 `${Math.round((Date.now() - inFlight.lastActivityAt) / 1000)}s`,
             );
-            this.activePromptContexts.delete(msg.sessionId);
+            this.releasePromptContext(msg.sessionId);
             this.promptSessions.delete(msg.sessionId);
           }
           try {
@@ -5145,6 +5146,9 @@ export class ZerosEngine {
             lastActivityAt: promptReceivedAt,
           };
           this.activePromptContexts.set(msg.sessionId, activePrompt);
+          // Snapshotting and prompt preparation are already accepted work.
+          // Protect them before the first await, not only provider dispatch.
+          this.enterPrompt(activePrompt);
           // Keep a start barrier registered from before the first await until
           // promptSessions is visible. Archive/delete either waits for this
           // preparation or sees the live prompt and cancels it; there is no
@@ -5170,10 +5174,6 @@ export class ZerosEngine {
               activePrompt.startedAt,
             );
             preamble.mark("persist");
-            // Mark the engine busy for the duration of the turn so the dev
-            // HMR watcher defers respawning (a save mid-turn must not kill
-            // the in-flight response). Cleared in finally — including on the
-            // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
             turnCtx = await this.beginTurn(
               msg.sessionId,
@@ -5191,7 +5191,6 @@ export class ZerosEngine {
               msg.sessionId,
               lifecycleWorkspaceId,
             );
-            this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
             if (turnCtx) {
               this.activeTurnSnapshots.set(msg.sessionId, turnCtx);
@@ -5205,6 +5204,7 @@ export class ZerosEngine {
               this.emitTurnState(activePrompt, "running");
             }
           } catch (err) {
+            this.exitPrompt(activePrompt);
             // A lifecycle that acquired the workspace while the pre-snapshot
             // was being built must leave no forever-"running" turn row. Do not
             // take a post snapshot here: cleanup owns the checkout now.
@@ -5220,7 +5220,7 @@ export class ZerosEngine {
             }
             this.emitTurnState(activePrompt, "failed");
             if (this.activePromptContexts.get(msg.sessionId) === activePrompt) {
-              this.activePromptContexts.delete(msg.sessionId);
+              this.releasePromptContext(msg.sessionId);
             }
             if (this.designTransitionInterruptedProcessStart(err)) {
               const message =
@@ -5420,7 +5420,7 @@ export class ZerosEngine {
             // unanswered gates of THAT live turn is the failure this guards.
             const promptOwner = this.activePromptContexts.get(msg.sessionId);
             if (promptOwner === activePrompt) {
-              this.activePromptContexts.delete(msg.sessionId);
+              this.releasePromptContext(msg.sessionId);
             }
             if (!promptOwner || promptOwner === activePrompt) {
               this.promptSessions.delete(msg.sessionId);
@@ -5430,7 +5430,7 @@ export class ZerosEngine {
             if (this.exitedAgentExecutions.has(msg.sessionId)) {
               this.clearAgentExecutionRoute(msg.sessionId);
             }
-            this.exitPrompt();
+            this.exitPrompt(activePrompt);
           }
           return;
         }
@@ -5677,7 +5677,7 @@ export class ZerosEngine {
               // cancellation even if disposeSession never makes the prompt
               // promise return.
               if (settlements[index]) {
-                this.activePromptContexts.delete(executionId);
+                this.releasePromptContext(executionId);
                 this.promptSessions.delete(executionId);
               }
               this.clearPendingAgentInteractions(executionId);
@@ -6308,7 +6308,7 @@ export class ZerosEngine {
                 `${existingPrompt.terminalPublished ? "already settled" : "no activity"}`,
             );
             this.disarmCancelSettleDeadline(existingPrompt);
-            this.activePromptContexts.delete(requestedExecutionId!);
+            this.releasePromptContext(requestedExecutionId!);
             this.promptSessions.delete(requestedExecutionId!);
           }
           const activePrompt = requestedExecutionId
@@ -9410,28 +9410,36 @@ export class ZerosEngine {
   // apps/desktop/src/engine change. Without coordination, a save mid-turn SIGTERMs the
   // engine and kills the in-flight agent response — the user sees "Agent is
   // responding…" forever with no reply (exactly the reported symptom). We
-  // write `<root>/.zeros/.busy` while any AGENT_PROMPT is in flight,
+  // write the app-data runtime `busy` marker while any AGENT_PROMPT is in flight,
   // heartbeated every 10s so a long turn stays "fresh" while a crashed
   // engine's marker goes stale; the watcher defers respawn until it clears
-  // (capped, so hot-reload can never be blocked forever). Production builds
+  // or expires after a crash. Both main and engine reloaders honor it. Production builds
   // have no watcher, so this marker is simply ignored there.
-  private activePrompts = 0;
+  private readonly activePrompts = new Set<ActivePromptContext>();
   private busyHeartbeat: ReturnType<typeof setInterval> | null = null;
 
   private busyFilePath(): string {
     return path.join(engineRuntimeDir(this.root), "busy");
   }
-  private enterPrompt(): void {
-    this.activePrompts += 1;
-    if (this.activePrompts === 1) {
+  private enterPrompt(prompt: ActivePromptContext): void {
+    if (this.activePrompts.has(prompt)) return;
+    this.activePrompts.add(prompt);
+    if (this.activePrompts.size === 1) {
       this.touchBusy();
       this.busyHeartbeat = setInterval(() => this.touchBusy(), 10_000);
       this.busyHeartbeat.unref?.();
     }
   }
-  private exitPrompt(): void {
-    this.activePrompts = Math.max(0, this.activePrompts - 1);
-    if (this.activePrompts === 0) this.clearBusy();
+  private exitPrompt(prompt: ActivePromptContext): void {
+    if (!this.activePrompts.delete(prompt)) return;
+    if (this.activePrompts.size === 0) this.clearBusy();
+  }
+  private releasePromptContext(sessionId: string): void {
+    const prompt = this.activePromptContexts.get(sessionId);
+    this.activePromptContexts.delete(sessionId);
+    // A retired adapter's promise may never settle. Release its own lease now;
+    // its eventual finally is idempotent and cannot release a later turn.
+    if (prompt) this.exitPrompt(prompt);
   }
   private touchBusy(): void {
     try {
@@ -9439,14 +9447,15 @@ export class ZerosEngine {
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(
         this.busyFilePath(),
-        String(this.activePrompts),
+        String(this.activePrompts.size),
         "utf-8",
       );
     } catch {
-      /* best-effort — the watcher's staleness + max-defer caps cover a miss */
+      /* best-effort — explicit quit/restart remains available */
     }
   }
   private clearBusy(): void {
+    this.activePrompts.clear();
     if (this.busyHeartbeat) {
       clearInterval(this.busyHeartbeat);
       this.busyHeartbeat = null;

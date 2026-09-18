@@ -17,6 +17,7 @@ import {
   rememberRecognizedDesignDirectories,
   stickyRecognizedDesignDirectories,
 } from "../recognition-store";
+import { adoptExistingDesignDirectory, previewExistingDesignDirectory } from "../adopt-directory";
 import { removeDesignDirectory } from "../remove-directory";
 import { renameDesignDirectory } from "../../git/design-mode";
 import { opSettingsWrite, opSettingsResolve } from "../../settings/ops";
@@ -74,7 +75,8 @@ describe("remove Design registration", () => {
       const file = `${directory}/source.txt`;
       mkdirSync(path.join(root, directory));
       writeFileSync(path.join(root, file), "Preserved source");
-      commitDesignMetadata(root, directory, '{"version":3,"frames":{}}');
+      const registration = await previewExistingDesignDirectory(root, directory);
+      await adoptExistingDesignDirectory(root, directory, registration.revision);
       await rememberRecognizedDesignDirectories(root, [directory]);
       if (selected) {
         const id = Object.keys(
@@ -126,7 +128,8 @@ describe("remove Design registration", () => {
 
       // The same folder can be registered again; removal must not exempt it
       // from future Design ownership.
-      commitDesignMetadata(root, directory, '{"version":3,"frames":{}}');
+      const preview = await previewExistingDesignDirectory(root, directory);
+      await adoptExistingDesignDirectory(root, directory, preview.revision);
       await expect(
         new WorkspaceService(root).handle("file.write", {
           workspaceId: LOCAL_MAIN_WORKSPACE_ID,
@@ -248,7 +251,7 @@ describe("remove Design registration", () => {
     await runGit(unborn, ["add", "Draft"]);
     await removeDesignDirectory({ repoRoot: unborn, directory: "Draft" });
     expect((await runGit(unborn, ["ls-files"])).stdout).toBe(
-      "Draft/home.html\n",
+      "Draft/canvas.json\nDraft/home.html\n",
     );
     expect(await discoverDesignDirectories(unborn)).toEqual([]);
     expect(readFileSync(path.join(unborn, "Draft/home.html"), "utf8")).toBe(

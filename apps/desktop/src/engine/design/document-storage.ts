@@ -1,4 +1,7 @@
+import { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
+export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
 import {
   DesignRenderBudgetError,
   MAX_DESIGN_TEXT_BYTES,
@@ -6,7 +9,7 @@ import {
 } from "./render-budget";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
-// Design document — portable HTML/CSS frames + app-owned canvas state
+// Design document — authored HTML/CSS frames and canvas metadata
 // ──────────────────────────────────────────────────────────
 //
 // A design workspace is still a Git worktree, but its authored surface is one
@@ -15,8 +18,9 @@ import { elementRecords } from "./source";
 //   Zeros Design/*.html      one top-level file per frame
 //   Zeros Design/*.css       shared authored styles
 //   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  stable identity, frame and Foundation metadata
-//   Zeros Design/rules.md     short Design API ownership instructions
+//   Zeros Design/design.toml  engine-managed directory registration
+//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
+//   Zeros Design/rules.md     short native-authoring instructions
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
@@ -29,7 +33,7 @@ import path from "node:path";
 
 import { migrateDesignFoundationManifest } from "@zeros/design-core";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
-import { readDesignRegistrySource } from "./metadata";
+import { readDesignRegistrySource, readDirectoryDesignManifest } from "./metadata";
 
 import { designDirectoryNameFor } from "./directory-registry";
 import {
@@ -55,8 +59,6 @@ const FRAME_MAX_SIZE = 16_384;
 export const MAX_FRAME_COUNT = 256;
 export const DEFAULT_FRAME_WIDTH = 1_440;
 export const DEFAULT_FRAME_HEIGHT = 900;
-const FRAME_GRID_GAP = 120;
-const FRAME_GRID_COLUMNS = 3;
 const MAX_DESIGN_METADATA_BYTES = 16 * 1024 * 1024;
 
 export function designDirectory(workspacePath: string): string {
@@ -125,6 +127,8 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
   const target = canvasPath(workspacePath);
   const file = path.relative(workspacePath, target).split(path.sep).join("/");
   const source = readDesignStorageFile(workspacePath, file);
+  const registrationFile = `${designDirectoryNameFor(workspacePath)}/${DESIGN_MANIFEST_FILE}`;
+  const registrationSource = readDesignStorageFile(workspacePath, registrationFile);
   const retainSnapshot = (canvas: CanvasDocument): CanvasDocument =>
     Object.defineProperty(canvas, canvasReadSnapshot, {
       value: {
@@ -132,6 +136,7 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
         registryFile: registry.file,
         file,
         source,
+        registration: { file: registrationFile, source: registrationSource },
       },
     });
   const registered = designDirectoryEntry(
@@ -172,10 +177,14 @@ export async function readCanvas(workspacePath: string): Promise<CanvasDocument>
     raw = (
       file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
         ? parseDesignManifest(source)?.document
-        : JSON.parse(source)
+        : file.endsWith(`/${DESIGN_CANVAS_FILE}`)
+          ? decodeCanvasFile(source)
+          : JSON.parse(source)
     ) as typeof raw;
-  } catch {
-    throw new Error("Design canvas metadata contains invalid JSON.");
+  } catch (error) {
+    if (error instanceof SyntaxError)
+      throw new Error("Design canvas metadata contains invalid JSON.");
+    throw error;
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw))
     throw new Error("Design canvas metadata must be an object.");
@@ -283,7 +292,7 @@ export async function writeCanvas(
   sourceChanges: DesignStorageChange[] = [],
 ): Promise<string[]> {
   const directory = designDirectoryNameFor(workspacePath);
-  if (!designDirectoryEntry(workspacePath, directory)) {
+  if (!readDirectoryDesignManifest(workspacePath, directory)?.canvas) {
     for (const relative of ["assets/.gitkeep", "components/.gitkeep"]) {
       const file = `${directory}/${relative}`;
       if (readDesignStorageFile(workspacePath, file) === "")
@@ -345,80 +354,6 @@ export async function writeCanvas(
   );
 }
 
-export function nextFrameGeometry(
-  existing: DesignFrameGeometry[],
-  meta: { width: number; height: number },
-): DesignFrameGeometry {
-  const index = existing.length;
-  const column = index % FRAME_GRID_COLUMNS;
-  const row = Math.floor(index / FRAME_GRID_COLUMNS);
-  const widest = Math.max(
-    meta.width,
-    ...existing.map((geometry) => geometry.w),
-  );
-  const tallest = Math.max(
-    meta.height,
-    ...existing.map((geometry) => geometry.h),
-  );
-  return {
-    x: column * (widest + FRAME_GRID_GAP),
-    y: row * (tallest + FRAME_GRID_GAP),
-    w: meta.width,
-    h: meta.height,
-    z: index,
-  };
-}
-
-export function readFrameMeta(
-  document: DefaultTreeAdapterTypes.Document,
-  file: string,
-  canvas?: CanvasDocument,
-): FrameMeta {
-  let content = "";
-  for (const { element } of elementRecords(document)) {
-    if (element.tagName !== "meta") continue;
-    const name = element.attrs.find((attribute) => attribute.name === "name");
-    if (name?.value !== "zeros-frame") continue;
-    content =
-      element.attrs.find((attribute) => attribute.name === "content")?.value ??
-      "";
-    break;
-  }
-  const numberValue = (key: string, fallback: number): number => {
-    const match = new RegExp(`(?:^|,)\\s*${key}\\s*=\\s*([0-9.]+)`, "i").exec(
-      content,
-    );
-    return finiteBetween(
-      match ? Number(match[1]) : undefined,
-      fallback,
-      key === "width" ? FRAME_MIN_WIDTH : FRAME_MIN_HEIGHT,
-      FRAME_MAX_SIZE,
-    );
-  };
-  const titleMatch = /(?:^|,)\s*title\s*=\s*(.+)$/i.exec(content);
-  const kindMatch = /(?:^|,)\s*kind\s*=\s*(frame|text)(?:\s*,|\s*$)/i.exec(
-    content,
-  );
-  return {
-    title:
-      canvas?.frame_info[file]?.title ||
-      titleMatch?.[1]?.trim().slice(0, 120) ||
-      elementRecords(document)
-        .find(({ element }) => element.tagName === "title")
-        ?.element.childNodes.map((node) => ("value" in node ? node.value : ""))
-        .join("")
-        .trim()
-        .slice(0, 120) ||
-      file.replace(/\.html$/i, "").replace(/[-_]+/g, " "),
-    width: canvas?.frames[file]?.w ?? numberValue("width", DEFAULT_FRAME_WIDTH),
-    height:
-      canvas?.frames[file]?.h ?? numberValue("height", DEFAULT_FRAME_HEIGHT),
-    kind:
-      canvas?.frame_info[file]?.kind ??
-      (kindMatch?.[1]?.toLowerCase() === "text" ? "text" : "frame"),
-  };
-}
-
 export function stripLegacyFrameMeta(
   source: string,
   document: DefaultTreeAdapterTypes.Document,
@@ -444,6 +379,12 @@ export function stripLegacyFrameMeta(
 }
 
 export async function discoverFrameFiles(workspacePath: string): Promise<string[]> {
+  const registration = readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath));
+  if (registration?.canvas) {
+    // canvas.json is authoritative. Shared templates are not implicitly frames,
+    // and missing sources remain actionable references instead of being erased.
+    return Object.keys((await readCanvas(workspacePath)).frames);
+  }
   let entries;
   try {
     entries = await readdir(designDirectory(workspacePath), {

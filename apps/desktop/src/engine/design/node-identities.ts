@@ -1,3 +1,4 @@
+import { nativeDesignIdentityBase } from "@zeros/design-web";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import { elementRecords, type ElementRecord } from "./source";
 
@@ -74,4 +75,114 @@ export function stripNonDesignOidsForRender(source: string): string {
     rendered = `${rendered.slice(0, edit.start)}${rendered.slice(edit.end)}`;
   }
   return rendered;
+}
+
+function oidForElement(
+  source: string,
+  element: DefaultTreeAdapterTypes.Element,
+): string {
+  const offset = element.sourceCodeLocation?.startOffset ?? 0;
+  return nativeDesignIdentityBase(element.tagName, offset, source);
+}
+
+export function healDesignOids(source: string): {
+  html: string;
+  changed: boolean;
+  fixed: Array<{ kind: "missing" | "duplicate"; line: number; oid: string }>;
+} {
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const records = designNodeRecords(document);
+  const used = new Set<string>();
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  const fixed: Array<{
+    kind: "missing" | "duplicate";
+    line: number;
+    oid: string;
+  }> = [];
+  for (const record of records) {
+    const location = record.element.sourceCodeLocation;
+    const startTag = location?.startTag;
+    if (!startTag) continue;
+    const usableOid =
+      record.oid !== null && record.oid.trim().length > 0 ? record.oid : null;
+    const duplicate = usableOid !== null && used.has(usableOid);
+    if (usableOid !== null && !duplicate) {
+      used.add(usableOid);
+      continue;
+    }
+    const oidBase = oidForElement(source, record.element);
+    let oid = oidBase;
+    for (let suffix = 2; used.has(oid); suffix++) {
+      oid = `${oidBase}-${suffix}`;
+    }
+    used.add(oid);
+    const attrLocation = location?.attrs?.["data-oid"];
+    if (attrLocation) {
+      const original = source.slice(
+        attrLocation.startOffset,
+        attrLocation.endOffset,
+      );
+      const equalsAt = original.indexOf("=");
+      if (equalsAt < 0) {
+        edits.push({
+          start: attrLocation.startOffset,
+          end: attrLocation.endOffset,
+          text: `${original}="${oid}"`,
+        });
+        fixed.push({
+          kind: duplicate ? "duplicate" : "missing",
+          line: attrLocation.startLine,
+          oid,
+        });
+        continue;
+      }
+      let valueStart = equalsAt + 1;
+      while (/\s/.test(original[valueStart] ?? "")) valueStart += 1;
+      const quote = original[valueStart];
+      let valueEnd = valueStart;
+      if (quote === '"' || quote === "'") {
+        valueStart += 1;
+        valueEnd = original.indexOf(quote, valueStart);
+      } else {
+        while (
+          valueEnd < original.length &&
+          !/[\s"'`=<>]/.test(original[valueEnd] ?? "")
+        ) {
+          valueEnd += 1;
+        }
+      }
+      if (valueEnd < valueStart) continue;
+      const replacement = `${original.slice(0, valueStart)}${oid}${original.slice(valueEnd)}`;
+      edits.push({
+        start: attrLocation.startOffset,
+        end: attrLocation.endOffset,
+        text: replacement,
+      });
+      fixed.push({
+        kind: duplicate ? "duplicate" : "missing",
+        line: attrLocation.startLine,
+        oid,
+      });
+    } else {
+      const insertAt = source.lastIndexOf(">", startTag.endOffset - 1);
+      if (insertAt < startTag.startOffset) continue;
+      const slashAt = source.lastIndexOf("/", insertAt);
+      const offset =
+        slashAt >= startTag.startOffset &&
+        source.slice(slashAt, insertAt).trim() === "/"
+          ? slashAt
+          : insertAt;
+      edits.push({
+        start: offset,
+        end: offset,
+        text: ` data-oid="${oid}"`,
+      });
+      fixed.push({ kind: "missing", line: startTag.startLine, oid });
+    }
+  }
+  let html = source;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    html = `${html.slice(0, edit.start)}${edit.text}${html.slice(edit.end)}`;
+  }
+  return { html, changed: edits.length > 0, fixed };
 }

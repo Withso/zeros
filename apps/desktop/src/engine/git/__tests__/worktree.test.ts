@@ -1,7 +1,4 @@
-import {
-  parseDesignManifest,
-  serializeDesignManifest,
-} from "../../design/manifest";
+import { encodeCanvasFile } from "../../design/canvas-file";
 import { useLegacyDesignStorage } from "../../design/__tests__/storage-fixtures";
 import {
   commitDesignMetadata,
@@ -402,7 +399,7 @@ printf ran > '${sentinel}'
         designDocumentMetadataPath(created.path, "Zeros Design"),
         "utf8",
       ),
-    ).toContain("version = 3");
+    ).toContain('"version": 1');
     await deleteWorkspace({
       workspaceId: created.workspaceId,
       includeBranch: true,
@@ -901,8 +898,7 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
-    const dirty = serializeDesignManifest(
-      parseDesignManifest(await readFile(canvas, "utf8"))!.id,
+    const dirty = encodeCanvasFile(
       {
         version: 3,
         frames: {},
@@ -1096,7 +1092,7 @@ printf ran > '${sentinel}'
         cwd: repoRoot,
       })
     ).stdout;
-    expect(staged).toContain("Second Design/design.toml");
+    expect(staged).toContain("Second Design/canvas.json");
     expect(staged).toContain("separate-code.txt");
     expect(staged).not.toContain("Renamed Design");
     expect(
@@ -1157,7 +1153,7 @@ printf ran > '${sentinel}'
             cwd: repoRoot,
           })
         ).stdout,
-      ).toBe(" M .gitignore\n");
+      ).toBe("");
     },
   );
 
@@ -2442,8 +2438,7 @@ printf ran > '${sentinel}'
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
     const frame = path.join(created.path, designDirectory, "draft.html");
-    const draft = serializeDesignManifest(
-      parseDesignManifest(await readFile(canvas, "utf8"))!.id,
+    const draft = encodeCanvasFile(
       { version: 3, uncommitted: true },
     );
     await writeFile(canvas, draft);

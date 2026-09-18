@@ -5,8 +5,7 @@ export const TOKENS_SEED = `@layer reset {
   *, *::before, *::after { box-sizing: border-box; }
   html, body { min-height: 100%; margin: 0; }
   body { background: var(--bg1); color: var(--fg1); font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-  body [data-oid] { display: block; flex-direction: column; flex-shrink: 0; position: relative; margin: 0; }
-  h1, h2, h3, h4, h5, h6, p, span, a, strong, em, small, label { display: block; }
+  h1, h2, h3, h4, h5, h6, p { margin: 0; }
   img, svg { display: block; max-width: 100%; }
   button, input, textarea, select { font: inherit; }
 }

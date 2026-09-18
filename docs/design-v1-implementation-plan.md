@@ -1,7 +1,7 @@
 # Shared Code and Design session: v1 plan
 
 **Decision: 2026-09-17. Status: shared workbench and backend foundations
-implemented; composer mode and provider integration pending.** This replaces the private authored-store/publication plan and the
+implemented; minimal composer-mode and shared-session tool integration implemented.** This replaces the private authored-store/publication plan and the
 separate Design-agent session architecture. It does not replace the later
 feature phases in [the roadmap](design-mode-roadmap.md). The
 [workspace guide](design-workspace.md) describes current runtime behavior.
@@ -16,7 +16,7 @@ The workbench now keeps the existing conversation present and removes the top
 Code/Design surface switch. A one-time migration preserves old view selections;
 `workspace.kind`/`viewMode` must not become agent authorization by accident.
 
-Authored HTML, CSS, assets, `design.toml`, and `rules.md` stay in the checkout,
+Authored HTML, CSS, assets, `canvas.json`, `design.toml`, and `rules.md` stay in the checkout,
 on the same branch and index as Code. Keep `DesignDraftStore`: it is the
 transaction repository over those files, not a second authored database.
 Keep validation, exact-revision CAS, atomic writes, journals, bounded history,
@@ -34,9 +34,10 @@ There is no export checkpoint, private D2, or separate Update Design step.
 | --- | --- | --- |
 | Read Code and Design context | Yes | Yes |
 | Authored Design mutation through Design API | No | Yes |
-| Ordinary Code tools | Available | Available; instructions direct Code edits back to Code mode |
+| Ordinary Code tools | Available | Available |
 | Managed stage, commit, push, pull, merge, PR | Available for authorized scope | Same |
-| Direct authored Design writes through shell/editor/patch/ad hoc Git | Prohibited by workflow rules | Prohibited by workflow rules |
+| Native HTML/CSS/assets/canvas.json writes through Read/Write/Edit/patch/shell | Inspection only | Primary authoring workflow |
+| Registration changes or Git-as-editor | Engine lifecycle only; no bypass | Same |
 
 There is **no Code-write sandbox or restriction toggle** in v1. Design mode is
 a tool/prompt state in the same session. It does not make Code files read-only,
@@ -56,19 +57,38 @@ the next model continuation, including a continuation within the same turn.
 Restore that state on resume, reconnect, and compaction. Provider-native
 permission modes are a different concept; do not overload their identifiers.
 
-Hide Design editing tools in Code mode **and** check mode/generation at server
-admission and immediately before mutation. A stale tool name, bearer, queued
-call, or resumed provider must not bypass the gate. Allow an admitted atomic
-write to finish or recover consistently before confirming a conflicting mode
-transition; do not abandon a half-written journal. Reuse the existing session
-tool registry and write-authority checks. Read-only Design context remains
-available through inspection routes without issuing a write grant.
+The + menu offers **Design — Create and edit designs**. Selection adds the
+removable Design tag before the other composer controls; removal returns to
+Code. No separate mode dropdown, progress state, or frame-context pill is added.
+The engine owns mode state and generation, persists them independently of
+sidebar upserts, and checks Design writes at request and journal admission.
 
-Clicking/attaching a frame can add a context pill in either mode. Its identity
-includes workspace, Design directory ID, document/frame, optional selected
-nodes, and source revision. The pill is context, not an instruction or a mode
-switch. Re-read stale revisions and report deleted/replaced identities; never
-redirect a stale pill into a different document with the same display name.
+MCP schemas stay stable across mode switches so native providers can continue
+within a turn. Code may discover signatures, but has no Design write authority.
+Fresh mode instructions accompany each prompt/steer and agent-switch result.
+Already-admitted atomic writes finish/recover consistently; newer queued work
+must satisfy the current mode and generation. No proposals are exposed by the
+v1 conversation endpoint. Frame context delivery is deferred.
+
+## Native authoring enhancement
+
+HTML/CSS v1 now uses normal provider file tools. The agent reads the active
+folder's rules and canvas index, writes a complete HTML frame and its canvas
+entry, then patches relevant files. The existing workspace watcher refreshes
+the canvas; no apply/import/publish call is required. API inspection, style
+provenance, validation, capture and semantic edits remain optional.
+
+`design.toml` v2 is registration only. `canvas.json` v1 stores a single page of
+stable frame IDs, HTML source references, bounds, titles and existing Foundation
+metadata. Renderer/IPC `frame:<file>` identities stay compatible. Explicit
+Design prompt entry or a trusted Design write migrates old storage with recovery;
+Code inspection and ordinary reads preserve the branch. See the
+[native authoring contract](design-native-authoring.md) for the format, limits,
+concurrency behavior and migration details.
+
+This adds no Phase 2/3 runtime, TSX compilation, framework adapter, new UI state,
+proposal flow or restriction mode. Future kinds require a versioned schema and
+qualified renderer, while ordinary provider tools remain the authoring path.
 
 ## Git and metadata
 
@@ -101,16 +121,10 @@ hand-edit. Track it with `rules.md` and the Design source. Validate incoming
 schema/identity before healing or rendering; unknown formats need an explicit
 upgrade/unsupported outcome, never silent conversion.
 
-Conflicts belong to the same task and conversation. The trusted Git service
-prepares base/local/incoming versions without corrupting the live canvas.
-With Design work authorized, the agent switches to Design mode and resolves
-Design through the API against a temporary integration context; Code conflicts
-use the normal Code workflow. Validate the merged document and recheck branch,
-HEAD, index, paths, and source revisions before applying. Preserve unrelated
-staged and unstaged work on complete, cancel, failure, and restart. Raw conflict
-markers must never become an editable Design document. Temporary integration
-state is recovery data, not a permanent private authored store. Existing
-conflict guards stay in place until this workflow is implemented and tested.
+Semantic Design conflict resolution is deferred. Existing conflict detection,
+canvas pause, Retry and Cancel remain. Do not render raw conflict markers as
+editable Design or bypass the paused Design surface to resolve Design source. No new
+mixed Git workflow, proposal review, or conflict resolver UI is part of v1.
 
 ## Pre-agent foundation delivered
 
@@ -129,43 +143,23 @@ branch merges. They do not implement the composer mode or grant its authority.
 | 8. Conflict recovery | Raw Git status is read before metadata parsing. Unmerged paths pause the canvas; Retry and explicit Cancel integration reuse managed Git. Automatic Design conflict authoring is deferred. |
 | 9. Qualification and guidance | Engine, protocol, state and browser regressions cover the new contracts; repository and macOS qualification results are recorded below. Future roadmap phases remain intact. |
 
-The read-only context and human Design surface are usable without agent-mode
-integration. Existing native-session semantic tools retain Phase 1 authority
-until the separate mode gate lands. Do not describe the present UI as enforcing
-Code/Design agent permissions.
+## Minimal agent integration
 
-## After the agent integration merges
+The [shared Design agent execution plan](design-agent-execution-plan.md) records
+the implemented + menu/tag, per-conversation persistence, mode-gated API,
+continuation instructions, stable MCP connection, direct canvas edits and normal
+expandable tool rows. It also separates the remaining enhancements from v1.
 
-1. Persist composer mode and generation in the existing conversation. Add
-   authorized switches, continuation instructions and server-side Design API
-   admission/revocation. Test stale calls, queued writes, restart/resume,
-   compaction, multiple conversations and supported providers.
-2. Connect frame/node context pills to the versioned inspection contract in
-   either mode. Context attachment alone must not switch mode or authorize edits.
-3. Add temporary Design conflict resolution under the shared Git coordinator.
-   Keep the pause/retry/cancel path for unsupported cases; validate source,
-   manifest, identities, revisions and captured branch/index before applying.
-4. Qualify the complete agent loop, headless/resumed execution and advertised
-   deployed-cloud hosts. Local/native foundation checks do not qualify those
-   pending paths. PR review pinned to the published remote base/head, remote
-   visual evidence, and richer Changes ownership handoff remain follow-ups.
+The acceptance flow is + → Design → request a design → ordinary Design tools →
+frames appear in the Design tab. Removal returns to Code. User-authorized agent
+switches update the same tag, without another conversation or permission mode.
+Revision checks, durable receipts, Stop, identity revocation, retry and undo
+remain backend requirements; new UI treatment is deferred.
 
-| Case | Required outcome |
-| --- | --- |
-| Code-only task with an attached frame | Reads context; no implicit Design write grant |
-| Mixed Code/Design task | One conversation; confirmed mode visible; instructions precede each continuation |
-| Human edits while agent work is queued | Exact-revision conflict; bounded re-read/re-plan, no forced overwrite |
-| Switching mode during a tool call | Revoke stale authority; complete/recover already-admitted atomic work |
-| Duplicate request or lost acknowledgement | Existing durable receipt resolves outcome; changed-body replay fails |
-| Undo after another actor edits | Tip-only or checked compensating change; never erase later edits |
-| Switching workspace/directory/branch | Revoke stale grants and pills; refresh exact-key context |
-| Multiple Design folders or deleted/renamed frame | Resolve stable identity and scope; no name-based fallback |
-| Dirty Code, dirty Design, and partial staging | Preserve each state; no automatic commit-all or destructive stash |
-| Pull/merge with Code and Design conflicts | Same task, appropriate modes; validated temporary resolution before apply |
-| External Git races or unsupported merge strategy | Fail/re-read or pause; never force refs/index over newer work |
-| Archive/delete while edits or Git are running | Existing lifecycle barrier drains ownership; recovery is retained |
-| Old/invalid manifest or conflict markers | Readable diagnostic; no healing mutation or live editable canvas |
-| Headless session or missing capture host | Source/API work remains usable; capture reports unavailable |
+Frame/node context, richer semantic results, optional proposals, additional
+managed Git integration, published-PR review and semantic conflict resolution
+follow v1. They no longer all block Phase 2. Host/provider claims still require
+qualification on the advertised environment.
 
 ## Cleanup and compatibility
 
@@ -237,5 +231,7 @@ and later browser, tool, component, and orchestration features remain planned.
 Earlier smoke attempts exposed a staging-test timing assumption and intermittent
 unrelated navigation failures; the complete final run passed. Native fixtures
 now use canonical temporary paths and isolated app data. This evidence qualifies
-the cleanup, not the pending composer mode, expanded Git workflow, deployed-cloud
-experience, or future performance budgets.
+the earlier cleanup. Current minimal composer-mode verification is recorded in
+the [execution contract](design-agent-execution-plan.md#verification); expanded
+Git workflows, deployed-cloud experience and future performance budgets remain
+separate qualification work.

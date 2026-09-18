@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from "react";
-import { FolderInput, MessageSquareText, Paperclip, Plus } from "lucide-react";
+import { FolderInput, MessageSquareText, Paperclip, Plus, PenTool } from "lucide-react";
 
 import { Button } from "../../shared/ui";
 import {
@@ -18,6 +18,8 @@ interface ComposerAttachmentMenuProps {
   /** Pointer/focus intent warms the transcript catalog without changing the
    *  parent AgentChat's render state. */
   onIntent: () => void;
+  onDesign?: () => void;
+  designSelected?: boolean;
 }
 
 /**
@@ -31,6 +33,8 @@ export const ComposerAttachmentMenu = memo(function ComposerAttachmentMenu({
   onAttachTranscript,
   onLinkWorkspace,
   onIntent,
+  onDesign,
+  designSelected,
 }: ComposerAttachmentMenuProps) {
   const [open, setOpen] = useState(false);
 
@@ -74,6 +78,13 @@ export const ComposerAttachmentMenu = memo(function ComposerAttachmentMenu({
         align="start"
         side="top"
       >
+        {onDesign && (
+          <DropdownMenuItem onSelect={onDesign} disabled={designSelected}>
+            <PenTool size={14} />
+            <span>Design</span>
+            <span className="text-fg3 text-xs">Create and edit designs</span>
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onSelect={() => window.setTimeout(onAttachFiles, 0)}>
           <Paperclip size={14} />
           Add attachment

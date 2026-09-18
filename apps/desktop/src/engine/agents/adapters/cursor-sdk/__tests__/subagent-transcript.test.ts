@@ -69,6 +69,16 @@ describe("native child transcript lookup", () => {
 });
 
 describe("parseSubagentTranscript", () => {
+  it("keeps qualified MCP Design reads and edits as ordinary MCP tools", () => {
+    for (const name of ["design_source_read", "design_provenance_read", "design_frame_delete", "design_transaction_apply"]) {
+      const qualified = `mcp__design-draft__${name}`;
+      const { steps } = parseSubagentTranscript(line({ role: "assistant", message: { content: [
+        { type: "tool_use", id: name, name: qualified, input: { documentId: "frame:landing.html" } },
+      ] } }));
+      expect(steps[0]).toMatchObject({ toolKind: "mcp", title: qualified });
+    }
+  });
+
   const jsonl = [
     line({ role: "user", message: { content: [{ type: "text", text: "<user_query>explore</user_query>" }] } }),
     line({ role: "assistant", message: { content: [

@@ -13,7 +13,7 @@ import {
   sanitizeDesignFrameMarkup,
   type DesignSourceEdit,
 } from "./source";
-import { stripNonDesignOidsForRender } from "./node-identities";
+import { stripNonDesignOidsForRender, healDesignOids } from "./node-identities";
 import {
   MAX_ASSET_BYTES,
   DESIGN_ASSET_MIME_TYPES,
@@ -281,7 +281,7 @@ export async function prepareFrameRenderSource(
     MAX_DESIGN_TEXT_BYTES,
     "Authored frame HTML exceeded the 2 MiB source limit.",
   );
-  const expanded = await expandDesignComponents(workspacePath, source, sources);
+  const expanded = await expandDesignComponents(workspacePath, healDesignOids(source).html, sources);
   assertRenderByteLimit(
     expanded.html,
     MAX_SANITIZED_RENDER_BYTES,
@@ -302,6 +302,8 @@ export async function prepareFrameRenderSource(
     "Sanitized frame HTML exceeded the 15 MiB per-frame render limit.",
   );
   const sourceVersion = createHash("sha256")
+    .update(source)
+    .update("\0")
     .update(sanitized)
     .update("\0")
     .update(`${viewport.width}x${viewport.height}`)

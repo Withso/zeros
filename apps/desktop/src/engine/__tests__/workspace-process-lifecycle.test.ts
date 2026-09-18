@@ -137,6 +137,7 @@ interface ReaperInternals {
     ensureAgent(...args: unknown[]): Promise<unknown>;
     newSession(...args: unknown[]): Promise<unknown>;
     revokeSessionTools(workspaceId?: string): Promise<void>;
+    suspendSessionTools(workspaceId?: string): () => void;
     markBoundaryDraining(
       executionId: string,
       transition: "territory-restart",
@@ -611,7 +612,7 @@ describe("actor-scoped Design identity lifecycle", () => {
     }
   });
 
-  it("revokes scoped Design tools while the shared agent, Setup, and Run stay live", async () => {
+  it("suspends document grants while the shared agent, MCP endpoint, Setup, and Run stay live", async () => {
     const root = await mkdtemp(
       path.join(tmpdir(), "zeros-design-identity-local-"),
     );
@@ -630,7 +631,7 @@ describe("actor-scoped Design identity lifecycle", () => {
       );
     state.sessionWorkspace.set("code-execution", workspace.id);
     state.sessionAgent.set("code-execution", "codex");
-    const revokeTools = vi.spyOn(state.agents, "revokeSessionTools");
+    const revokeTools = vi.spyOn(state.agents, "suspendSessionTools");
     const cancelled: string[][] = [];
     vi.spyOn(state, "cancelLiveAgentSessions").mockImplementation(
       async (sessionIds) => {

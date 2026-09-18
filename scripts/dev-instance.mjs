@@ -276,14 +276,14 @@ if (RUN_ONLY && env.ZEROS_NO_ENGINE_HMR == null) env.ZEROS_NO_ENGINE_HMR = "1";
 // the dedicated binary survives. Both `pnpm electron:dev` and the explicit
 // `electron:dev:watch` alias use this path; `electron:run` remains the
 // low-overhead no-HMR launch. ZEROS_NO_MAIN_HMR=1 forces a direct launch when
-// diagnosing restart behavior (mirrors ZEROS_NO_ENGINE_HMR). The primary
-// (no binPath) uses electronmon under --watch.
+// diagnosing restart behavior (mirrors ZEROS_NO_ENGINE_HMR). The primary also
+// uses this supervisor so its restart honors active agent turns.
 const NO_MAIN_HMR = process.env.ZEROS_NO_MAIN_HMR === "1";
 const useMainSupervisor =
-  Boolean(binPath) && WATCH && !RUN_ONLY && !NO_MAIN_HMR;
-const launchBin = binPath ? `"${binPath}"` : WATCH ? "electronmon" : "electron";
+  WATCH && !RUN_ONLY && !NO_MAIN_HMR;
+const launchBin = binPath ? `"${binPath}"` : "electron";
 const launchExpr = useMainSupervisor
-  ? `node scripts/dev-main-supervisor.mjs "${binPath}"`
+  ? `node scripts/dev-main-supervisor.mjs "${binPath ?? require("electron")}"`
   : `env -u ELECTRON_RUN_AS_NODE ${launchBin} .`;
 const appCmd =
   `wait-on -d 750 http://localhost:${vitePort} ` +

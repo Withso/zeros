@@ -276,6 +276,7 @@ describe("filesystem Design API repository", () => {
       path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json"),
       JSON.stringify(parseCanvasFixture(metadata)),
     );
+    await rm(path.join(root, DESIGN_DIRECTORY_NAME, "canvas.json"), { force: true });
     const original = (await readFile(sourcePath, "utf8")).replace(
       "</head>",
       '<meta name="zeros-frame" content="title=Legacy recovery"></head>',
@@ -327,7 +328,7 @@ describe("filesystem Design API repository", () => {
       readFile(path.join(root, DESIGN_DIRECTORY_NAME, ".zeros-canvas.json")),
     ).rejects.toMatchObject({ code: "ENOENT" });
     expect(designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME)).toContain(
-      `${path.sep}design.toml`,
+      `${path.sep}canvas.json`,
     );
   });
 

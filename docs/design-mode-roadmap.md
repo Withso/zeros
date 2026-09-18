@@ -18,7 +18,11 @@ receives Design API editing authority. User-selected or explicitly authorized
 agent switches inject instructions before the next continuation. There is no
 Code-write restriction, specialist session, or mode-selected execution sandbox.
 Both modes may run authorized managed Git operations over Code and Design.
-Direct authored Design edits still go through the Design API.
+Design mode uses normal provider Read/Write/Edit/patch/shell tools for HTML, CSS,
+assets and `canvas.json`; Design API inspection and semantic edits are optional.
+`design.toml` v2 registers the directory; `canvas.json` v1 owns the single-page
+scene. This is an HTML/CSS v1 enhancement, not Phase 3 implementation. See the
+[native authoring contract](design-native-authoring.md).
 
 **Cleanup status:** the unused private authored backend and its publication,
 reconciliation, integration, recovery UI, and separate-session admission have
@@ -28,9 +32,10 @@ protected for recovery; no user data is automatically migrated or deleted.
 The [shared-session v1 plan](design-v1-implementation-plan.md) replaces the
 A0–A9 private-store plan. The Design tab, shared conversation layout, directory
 lifecycle, mixed managed Git, read-only frame-context contract, and conflict
-pause/retry/cancel are implemented. Composer mode, mode-gated tools, context
-pill delivery and automatic conflict resolution are **not yet implemented**.
-Current native-session Design tools still have their Phase 1 write authority.
+pause/retry/cancel are implemented. Minimal composer mode, mode-gated writes,
+ordinary Design tool rows and direct canvas editing are implemented. Frame/node
+context delivery, new proposal review, additional mixed Git integration and
+semantic conflict resolution are deferred after v1.
 
 > **Retention:** Keep this document until every phase below is shipped,
 > rejected, or moved to another owned roadmap. Update phase status and code
@@ -107,8 +112,8 @@ changes were staged or committed by the implementation pass.
   review, result bundles, and desktop/cloud capture implementations now exist.
   A deployed cloud engine must still demonstrate authenticated admission,
   disconnect/reconnect, and durable state retention. Repository MCP generation
-  remains disabled. Separate Design-agent sessions are retired; composer mode,
-  Design tool gating, context pills, and automatic conflict resolution are pending.
+  remains disabled. Separate Design-agent sessions are retired; composer mode and Design write
+  gating are implemented. Context pills and automatic conflict resolution are deferred.
   The shared Design tab and managed Git foundation are implemented.
 - **Parameters / controls UI.** The schema already models typed parameters
   with bounds, steps, units, options, visibility rules, and seven binding kinds
@@ -225,8 +230,8 @@ separate crash/watchdog qualification and can remain deferred.
 
 ### 2.3 Persistence and compatibility
 
-- Freeze Foundation v1, Design API v1, DOM runtime v2, and canvas document v3
-  independently. Choose a new canvas version before persisting non-HTML
+- Version Foundation v1, Design API v1, DOM runtime v2, registration v2 and
+  authored canvas.json v1 independently; internal/legacy canvas v3 remains readable. Choose a new canvas version before persisting non-HTML
   surfaces. Negotiate versions and capabilities in engine and client; a new
   IPC schema alone is insufficient.
 - Decide the surface envelope in Phase 0: stable surface ID, kind, source
@@ -251,7 +256,7 @@ separate crash/watchdog qualification and can remain deferred.
   does not belong in committed surface descriptors.
 - Reads never migrate. Explicit Design API upgrades journal affected files,
   preserve supported extensions, retain recovery information, and keep
-  `design.toml` and `rules.md` in the normal Design Git lane. Test clone,
+  `design.toml`, `canvas.json` and `rules.md` in the normal Design Git lane. Test clone,
   directory rename, branch switch, newer-file/older-client, and interrupted
   migration paths. Unsupported tools/dependencies open inertly.
 
@@ -361,8 +366,8 @@ A Linux harness does not establish macOS energy, GPU, or native browser results.
 ### 2.6 Design API, concurrent actors, and autonomous jobs
 
 **One session, two composer modes.** Phase 1 currently gives admitted native
-sessions scoped direct Design API writes. Architecture A adds the mode gate to
-that same session, not delegation to a separate Design process. Code mode may
+sessions normal file authoring in Design mode plus optional scoped Design API
+writes, within the same provider conversation. Code mode may
 inspect Code and Design context; authored Design changes require Design mode.
 The user switches modes, or explicitly authorizes the agent to switch for the
 requested work. Merely selecting a frame or viewing the Design tab never grants
@@ -371,9 +376,8 @@ editing authority. See the [v1 plan](design-v1-implementation-plan.md).
 - Persist mode per conversation/workspace with a generation. Confirm a switch
   in the composer and inject instructions before the next model continuation,
   including same-turn continuations. Resume/reconnect/compaction restore it.
-- Design mode does not sandbox Code writes. Instructions direct Code edits
-  back to Code mode; native tools, context, provider, and conversation remain
-  shared. No Code Restriction toggle or designer-only workspace in v1.
+- Design mode does not sandbox Code writes. Native tools, context, provider,
+  and conversation remain shared. No Code Restriction toggle or designer-only workspace in v1.
 - Reuse semantic schemas, scoped MCP, session tools, operation allowlists,
   cancellation, and receipts. Bind write authority to execution, workspace,
   directory/document, mode generation, and revision. Check on admission and
@@ -385,11 +389,12 @@ editing authority. See the [v1 plan](design-v1-implementation-plan.md).
 - Keep source operations independent of the visible tab and usable headlessly.
   UI and agents share the engine mutation authority and change events. The
   legacy workspace view selection is not the new agent permission state.
-- Authored Design source, including `design.toml`, stays API-owned in both
-  modes. Approved managed Git operations may stage/commit/integrate Design;
-  ad hoc shell/patch/editor/Git writes are not Design editing tools. These are
-  workflow guards, not hostile same-user process containment. Renderer/browser
-  isolation and qualified cloud policies remain independent boundaries.
+- Native HTML/CSS/assets/canvas.json authoring is the primary Design-mode path.
+  Only registration (`design.toml`) and generated rules remain engine-owned.
+  Approved managed Git operations may stage/commit/integrate Design; Git-as-editor
+  cannot bypass authoring instructions. Native writes are ordinary file edits,
+  not API receipts or semantic undo entries. Renderer/browser isolation and
+  qualified cloud policies remain independent boundaries.
 
 **Conflicts, retries, and history.** Keep exact-revision CAS and the existing
 workspace write lane first; semantic multiplayer/CRDT work remains deferred.
@@ -620,8 +625,8 @@ stages. Shared Design navigation, mixed managed Git and PR creation without
 auto-commit are implemented. Code Changes ownership/action handoff and a PR
 comparison pinned to published commits remain follow-ups; the current PR tab
 compares committed branch HEAD and can include unpushed commits. The private-store
-prototypes were removed. Composer modes and temporary Design conflict resolution
-remain Architecture A work; existing guards and the pause/retry/cancel surface
+prototypes were removed. Minimal composer modes are implemented; temporary Design conflict resolution
+is deferred after v1; existing guards and the pause/retry/cancel surface
 keep unsupported conflicts out of the live canvas.
 
 - Register the existing capability/MCP path into the shared native session. Resolve exact workspace/directory authority
@@ -643,45 +648,38 @@ restart, stale grant, concurrent human edit, and actor-interleaved undo are
 covered. Code agents can write only through sanctioned Design operations in
 Zeros-owned handlers; no stronger same-user shell containment claim is made.
 
-### Architecture gate A: Shared session, composer modes, Design tab, and Git (L)
+### Architecture gate A: Shared session and minimal Design mode (L)
 
-**Status: pre-agent workbench/backend foundation implemented; agent integration
-pending. Required before Phase 3.**
-Follow the [v1 implementation plan](design-v1-implementation-plan.md).
-The previous A0–A9 private-store rollout is superseded. Its experiments do not
-qualify this workflow. Phase numbers below still identify their original
-feature packages, not private-store implementation steps. The nine completed
-foundation tasks and their limits are recorded in the v1 plan. They include
-explicit directory initialization/selection, a bounded inert Design tab, shared
-Git, versioned read-only context, and conflict pause/recovery. Remaining work:
+**Status: foundation and minimal v1 integration implemented; qualification must
+match the advertised host/provider. Required before Phase 3.**
+Follow the [v1 implementation plan](design-v1-implementation-plan.md) and the
+[current execution contract](design-agent-execution-plan.md). The previous
+private-store rollout and larger UI proposal are superseded. Phase numbers
+below retain their original feature packages.
 
-- Persist Code/Design composer mode in one existing conversation. Gate Design
-  API writes, inject mode instructions on each confirmed transition, and keep
-  native Code tools available without claiming Code-write enforcement.
-- Connect frame context pills in either mode to the implemented Design tab and
-  read-only reference contract. Preserve the migrated tab selection independently
-  of provider permission modes and composer mode.
-- Keep authored files in the checkout through `DesignDraftStore`. Silent
-  autosave, explicit stage/commit, exact index comparisons, bounded evidence,
-  and transaction recovery remain. No private authored store or Update Design.
-- Connect agent mode transitions to the implemented managed Git scope. Preserve
-  its captured-index and no-auto-commit contracts; add PR review pinned to remote
-  base/head commits. Keep direct authored-file guards and `design.toml` ownership.
-- Resolve Code and Design conflicts in the same task. Use temporary Design API
-  integration context, validate complete documents before applying, and retain
-  exact branch/index/worktree preconditions and failure recovery.
-- Qualify native providers, packaged Mac lifecycle, headless work, restart,
-  cancellation, stale-mode calls, concurrent human edits, and deployed cloud
-  hosts before advertising those paths.
+- One shared conversation and Design tab; + → Design adds a removable tag.
+- Conversation-owned persisted mode and generation, Design API write checks,
+  refreshed instructions and user-authorized agent transitions. Ordinary Code
+  tools remain available; provider permissions remain independent.
+- Stable native MCP registration, ordinary expandable Design tool rows, direct
+  canvas edits, directory creation without a new conversation, and existing
+  transaction/receipt/undo/recovery guarantees.
+- Existing checkout storage, silent autosave, explicit stage/commit, mixed managed
+  Git foundations and conflict pause remain. No new proposal-review, mixed Git
+  workflow or Design conflict-resolution UI in v1.
 
-Exit gate: attach a frame in Code mode, inspect it, switch under explicit user
-authorization, edit through Design API, and return to Code in one session.
-Stage D1, save D2 in the checkout, commit D1 while preserving unstaged D2 and
-unrelated staged Code. Pull/merge approved branch updates without commit-all;
-resolve mixed conflicts without corrupting the canvas or losing dirty work.
-Review/create a mixed PR at its actual base/head commits. Repeat after restart
-and with concurrent edits; no second provider or permanent authored store is
-introduced. Phase 2 retains its separate exit gates.
+Exit flow: select Design, create/edit HTML and canvas.json with native tools,
+optionally inspect/validate/capture through the API, see the existing canvas
+update, remove the tag or authorize a return to Code in the same conversation.
+Verify restart, concurrent edits, stale mode calls, stopped work, duplicate
+receipts and separate-conversation ownership. Qualify native/cloud hosts before
+advertising them; local fixtures are not deployed-host evidence.
+
+After v1: frame/node composer context, rich semantic/evidence presentation,
+optional proposal review, agent-accessible managed Git, Changes ownership
+handoff, published-PR comparisons and semantic conflict resolution. These
+follow-ups no longer all block Phase 2. Phase 2 retains its own exit gates;
+Phase 2–8 feature scope below is unchanged.
 
 ### Phase 2: Basic Controls and bounded media (M–L)
 

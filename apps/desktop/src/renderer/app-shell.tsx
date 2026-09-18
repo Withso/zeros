@@ -376,6 +376,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
     r.providerBinding?.providerId === r.agentId ? r.providerBinding : undefined;
   return {
     id: r.id,
+    composerMode: r.composerMode === "design" ? "design" : "code",
+    composerModeRevision: Number.isSafeInteger(r.composerModeRevision) && r.composerModeRevision! >= 0 ? r.composerModeRevision : 0,
     folder: r.folder,
     agentId: r.agentId,
     agentName: r.agentName,

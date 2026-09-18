@@ -106,6 +106,48 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
+  it("persists first-use composer mode without reviving a deleted or moved conversation", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    setZerosDbPathForTesting(path.join(stateDir, "composer-mode.db"));
+    try {
+      const params = {
+        chatId: "mode-chat", folder: dir, mode: "design",
+        initialChat: { id: "mode-chat", folder: dir, permissionMode: "plan" },
+      };
+      expect(await svc.handle("chats.setComposerMode", params)).toEqual({ mode: "design", revision: 1 });
+      // A delayed sidebar write is not authoring authority.
+      await svc.handle("chats.upsert", { chat: { ...params.initialChat, composerMode: "code" } });
+      expect(await svc.handle("chats.setComposerMode", params)).toEqual({ mode: "design", revision: 1 });
+      await expect(svc.handle("chats.setComposerMode", { ...params, mode: "unknown" })).rejects.toThrow("code or design");
+      await expect(svc.handle("chats.setComposerMode", { ...params, folder: `${dir}/moved` })).rejects.toThrow("workspace changed");
+      await svc.handle("chats.delete", { id: params.chatId });
+      await expect(svc.handle("chats.setComposerMode", params)).rejects.toThrow("workspace changed");
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
+  it("denies remote mode selection and first-use seeds in restricted workspaces", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    setZerosDbPathForTesting(path.join(stateDir, "composer-mode-remote.db"));
+    try {
+      await svc.handle("chats.upsert", { chat: { id: "existing-mode", folder: dir } });
+      await svc.handle("workspace.setRemoteRestricted", { workspaceId: LOCAL_MAIN_WORKSPACE_ID, restricted: true });
+      for (const chatId of ["existing-mode", "new-mode"]) {
+        await expect(svc.handle("chats.setComposerMode", {
+          chatId, folder: dir, mode: "design", initialChat: { id: chatId, folder: dir },
+        }, { remote: true })).rejects.toThrow(/restricted/i);
+      }
+      await expect(svc.handle("chats.setComposerMode", {
+        chatId: "existing-mode", folder: "/visible", mode: "design",
+      }, { remote: true })).rejects.toThrow(/restricted/i);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
   it("keeps recovery and snapshot disposal local and validates the archive date", async () => {
     for (const op of ["workspace.recover", "workspace.deleteSnapshot"]) {
       expect(svc.isRemoteAllowed(op)).toBe(false);
@@ -971,6 +1013,7 @@ describe("WorkspaceService", () => {
         { recursive: true },
       );
       fs.rmSync(path.join(design.path, alternateDirectory, "design.toml"));
+      fs.rmSync(path.join(design.path, alternateDirectory, "canvas.json"));
       commitDesignMetadata(
         design.path,
         alternateDirectory,
@@ -2269,6 +2312,7 @@ describe("WorkspaceService", () => {
       const alternateDesign = path.join(created.path, "Alternate Design");
       fs.cpSync(currentDesign, alternateDesign, { recursive: true });
       fs.rmSync(path.join(alternateDesign, "design.toml"));
+      fs.rmSync(path.join(alternateDesign, "canvas.json"));
       commitDesignMetadata(
         created.path,
         "Alternate Design",

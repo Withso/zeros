@@ -216,6 +216,9 @@ function mapTranscriptTool(
 ): { toolKind: string; title: string; rawInput: unknown } {
   const n = name.toLowerCase();
   const inp = isObj(input) ? input : {};
+  // Qualified MCP tools own their names: a Design read/delete is not a native
+  // filesystem operation and must retain its server identity and arguments.
+  if (n.startsWith("mcp__")) return { toolKind: "mcp", title: name, rawInput: inp };
   if (/read/.test(n))
     return {
       toolKind: "read",

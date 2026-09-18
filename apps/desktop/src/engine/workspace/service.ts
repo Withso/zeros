@@ -298,6 +298,8 @@ import {
   listChatsSince,
   summariesForFolder,
   getChat,
+  setChatComposerMode,
+  wasChatDeleted,
   getChatLocation,
   upsertChat,
   deleteChat,
@@ -1134,6 +1136,7 @@ const REMOTE_READABLE = new Set<string>([
  *  host-learned provider capability and is deliberately local-only. Local
  *  desktop clients bypass the gate entirely. */
 const REMOTE_METADATA_OPS = new Set<string>([
+  "chats.setComposerMode",
   "chats.upsert",
   "chats.delete",
   "chats.bulkUpsert",
@@ -1991,7 +1994,7 @@ export class WorkspaceService {
     } = {},
   ) {
     const root = options.root ?? workspace.path;
-    const writeBack = options.writeBack ?? !remote;
+    const writeBack = options.writeBack ?? false;
     const designDirectory =
       options.designDirectory ?? designDirectoryNameFor(workspace.path);
     const hostLocalResources = options.hostLocalResources ?? !remote;
@@ -2318,7 +2321,7 @@ export class WorkspaceService {
         });
       }
       const directFolder =
-        op === "chats.summariesForFolder" || op === "messages.search"
+        op === "chats.summariesForFolder" || op === "messages.search" || op === "chats.setComposerMode"
           ? optStr(params, "folder")
           : undefined;
       const chatInputs =
@@ -3676,6 +3679,23 @@ export class WorkspaceService {
           );
         }
         return { ok: true };
+      }
+      case "chats.setComposerMode": {
+        const mode = reqStr(params, "mode");
+        if (mode !== "code" && mode !== "design")
+          throw new Error("Composer mode must be code or design.");
+        const chatId = reqStr(params, "chatId");
+        let chat = getChat(chatId);
+        if (!chat && !wasChatDeleted(chatId)) {
+          const initial = coerceChatRow(params.initialChat);
+          if (initial?.id === chatId && initial.folder === reqStr(params, "folder") && !initial.archived && initial.kind !== "terminal") {
+            upsertChat(remote ? preserveHostOnlyFields(initial) : preserveProviderIdentity(initial));
+            chat = getChat(chatId);
+          }
+        }
+        if (!chat || chat.folder !== reqStr(params, "folder"))
+          throw new Error("The conversation workspace changed.");
+        return setChatComposerMode(chatId, mode);
       }
       case "chats.delete": {
         const id = reqStr(params, "id");

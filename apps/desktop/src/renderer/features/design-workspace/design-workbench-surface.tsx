@@ -166,10 +166,10 @@ export function DesignWorkbenchSurface({
           disabled={!active || creating}
           onClick={() => void initialize()}
         >
-          {creating ? "Creating…" : "Create Design directory"}
+          {creating ? "Creating…" : "Create design directory"}
         </Button>
       )}
-      {project && (
+      {project && target.data?.exists !== false && (
         <Button
           variant="ghost"
           disabled={!active || creating}

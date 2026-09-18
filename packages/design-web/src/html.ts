@@ -5,6 +5,7 @@ import {
   type ParserError,
 } from "parse5";
 import postcss from "postcss";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 import {
   DESIGN_DOCUMENT_BODY_ID,
@@ -32,6 +33,7 @@ const NON_DESIGN_TAGS = new Set([
   "style",
   "script",
   "template",
+  "noscript",
 ]);
 const ACTIVE_ELEMENTS = new Set([
   "script",
@@ -124,6 +126,33 @@ function oid(element: Element): string | null {
   return value?.trim() || null;
 }
 
+/** Exact-source identity shared with the desktop preview. Explicit IDs remain
+ * authoritative, so existing documents keep their persisted identities. */
+export function nativeDesignIdentityBase(tag: string, offset: number, source: string): string {
+  const digest = sha256(new TextEncoder().encode(`${tag}:${offset}:${source.slice(offset, offset + 80)}`));
+  return `o-${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 9)}`;
+}
+
+/** Attach derived IDs to the parsed tree only. Locations still address the
+ * original file; explicit duplicates retain their validation errors. */
+export function identifyDesignHtmlNodes(document: Document, source: string): void {
+  const used = new Set<string>();
+  for (const element of elements(document).filter(isDesignElement)) {
+    const location = element.sourceCodeLocation;
+    if (!location?.startTag) continue;
+    const current = oid(element);
+    if (current && !used.has(current)) { used.add(current); continue; }
+    const base = nativeDesignIdentityBase(element.tagName, location.startOffset, source);
+    let next = base;
+    for (let suffix = 2; used.has(next); suffix++) next = `${base}-${suffix}`;
+    used.add(next);
+    if (current) continue;
+    const attribute = element.attrs.find((item) => item.name === "data-oid");
+    if (attribute) attribute.value = next;
+    else element.attrs.push({ name: "data-oid", value: next });
+  }
+}
+
 function nearestParentId(element: Element): string | null {
   let parent = element.parentNode;
   while (parent && "tagName" in parent) {
@@ -155,6 +184,7 @@ export function parseDesignWebProjection(input: {
     sourceCodeLocationInfo: true,
     onParseError: (error) => parseErrors.push(error),
   });
+  identifyDesignHtmlNodes(document, input.source);
   const diagnostics: DesignWebDiagnostic[] = parseErrors.map((error) => ({
     severity: "error",
     code: "html-parse",
@@ -753,7 +783,7 @@ function identityBase(tag: string, offset: number, source: string): string {
 
 /** Minimal identity repair. Once written, generated IDs no longer depend on
  * offsets; offsets are used only to seed a previously unidentified element. */
-export function healDesignHtmlIdentities(source: string): {
+export function healDesignHtmlIdentities(source: string, identity = identityBase): {
   source: string;
   changed: boolean;
   healed: number;
@@ -770,7 +800,7 @@ export function healDesignHtmlIdentities(source: string): {
       used.add(current);
       continue;
     }
-    const base = identityBase(element.tagName, location.startOffset, source);
+    const base = identity(element.tagName, location.startOffset, source);
     let next = base;
     for (let suffix = 2; used.has(next); suffix += 1)
       next = `${base}-${suffix}`;

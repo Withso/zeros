@@ -5,6 +5,7 @@ import {
   type DesignResultArtifactName,
 } from "./result-store";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
 import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import {
@@ -41,7 +42,7 @@ import {
 
 const documentId = z
   .string()
-  .regex(/^frame:[A-Za-z0-9][A-Za-z0-9._-]*\.html$/)
+  .regex(/^frame:[A-Za-z0-9][A-Za-z0-9._-]*\.[hH][tT][mM][lL]$/)
   .max(260);
 const revision = z.string().min(1).max(128);
 const exactDocument = { documentId, expectedRevision: revision };
@@ -268,9 +269,23 @@ const toolDefinitions: Tool[] = Object.entries(definitions).map(
     name,
     description,
     inputSchema: z.toJSONSchema(schema) as Tool["inputSchema"],
+    annotations: { readOnlyHint: !isDesignWriteTool(name, {}) },
   }),
 );
 const safeOperations = new Set<string>(DESIGN_AGENT_SAFE_OPERATION_TYPES);
+
+export function designCodeToolDefinitions(capture: boolean): Tool[] {
+  return toolDefinitions.filter((tool) => tool.name !== "design_capture" || capture);
+}
+
+export function isDesignWriteTool(name: string, input: unknown): boolean {
+  if (name === "design_transaction_apply" && input && typeof input === "object" &&
+      (input as { dryRun?: unknown }).dryRun === true) return false;
+  return ["design_transaction_apply", "design_proposal_create", "design_proposal_resolve",
+    "design_history_undo", "design_history_redo", "design_frame_create",
+    "design_frame_rename", "design_frame_duplicate", "design_frame_delete",
+    "design_result_create"].includes(name);
+}
 
 export interface DesignCodeToolTarget {
   workspaceId: string;
@@ -301,6 +316,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       onChanged?: () => void;
       renderer?: DesignHeadlessRenderer;
       now?: () => number;
+      mode?: () => ComposerModeSnapshot;
     } = {},
   ) {
     this.expiresAt = this.now() + 24 * 60 * 60_000;
@@ -380,9 +396,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
   }
 
   listTools(): Tool[] {
-    return toolDefinitions.filter(
-      (tool) => tool.name !== "design_capture" || this.options.renderer,
-    );
+    return designCodeToolDefinitions(!!this.options.renderer);
   }
 
   async callTool(
@@ -407,6 +421,15 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     // the boundary. Dispatch below parses the same small validated object for
     // a concrete type, avoiding unchecked transport casts.
     const validated = definitions[key].schema.parse(raw);
+    const writes = isDesignWriteTool(name, validated);
+    const admittedMode = this.mode();
+    const assertMode = () => {
+      if (!writes) return;
+      const current = this.mode();
+      if (current.mode !== "design" || current.revision !== admittedMode.revision)
+        throw new Error("Design mode is required for this edit, and must remain unchanged until write admission. Read design_capabilities and prepare a new request.");
+    };
+    assertMode();
     if (
       "createdAt" in validated &&
       (validated.createdAt > this.now() + 60_000 ||
@@ -418,6 +441,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
     const assertCurrent = () => {
       joined.throwIfAborted();
       this.assertActive(this.token);
+      assertMode();
     };
     this.pending += 1;
     try {
@@ -450,6 +474,9 @@ export class DesignCodeTools implements DesignMcpToolHandler {
 
   private now(): number {
     return (this.options.now ?? Date.now)();
+  }
+  private mode(): ComposerModeSnapshot {
+    return this.options.mode?.() ?? { mode: "code", revision: 0 };
   }
   private async exact(id: string, expected: string): Promise<void> {
     const current = await this.api.open(id);
@@ -597,6 +624,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
       case "design_capabilities":
         return {
           version: 1,
+          composerMode: this.mode(),
           workspaceId: this.target.workspaceId,
           directoryId: this.target.directoryId,
           actor: this.actor,
@@ -617,7 +645,7 @@ export class DesignCodeTools implements DesignMcpToolHandler {
           retries:
             "Resolved receipts are retained for up to seven days within shared directory count/byte limits. Eviction permanently retires requests at or before its timestamp cutoff. Use serverTime for fresh requests; unknown or indeterminate status never authorizes replay.",
           review:
-            "Proposals are persisted for explicit review; resolving apply performs the change. Tool access does not establish human approval.",
+            "Edits apply directly to the canvas. Tool access does not establish user intent or Git approval.",
           history:
             "Semantic undo/redo is local to this session; external edits or restart invalidate it. Frame lifecycle has separate history.",
         };

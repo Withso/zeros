@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { serializeDesignRegistration } from "../../design/manifest";
 
 import {
   startGitWatcher,
@@ -402,6 +403,52 @@ describe("startGitWatcher", () => {
 
     let before = changes;
     await writeFile(join(root, "created.txt"), "created\n");
+    await waitFor(() => changes > before);
+
+    before = changes;
+    await writeFile(editedPath, "after\n");
+    await waitFor(() => changes > before);
+
+    before = changes;
+    await rm(editedPath);
+    await waitFor(() => changes > before);
+  });
+
+  it("invalidates native HTML and canvas metadata saves in the same workspace", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-design-native-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    await mkdir(join(root, "Design"));
+    await writeFile(join(root, "Design", "design.toml"), serializeDesignRegistration("design_watch"));
+    const editedPath = join(root, "Design", "home.html");
+    await writeFile(editedPath, "before\n");
+
+    let changes = 0;
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-events" }],
+      () => {
+        changes += 1;
+      },
+      {
+        pollIntervalMs: 25,
+        worktreeDebounceMs: 10,
+        awaitWriteFinishMs: 20,
+        // Poll instead of native FS events. FSEvents are flaky/slow on the
+        // macOS CI runner (source-sync), which timed this create/edit/delete
+        // out; polling drives the same chokidar "all" → onChange path
+        // deterministically, matching every other test in this file.
+        usePolling: true,
+        worktreePollIntervalMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+
+    let before = changes;
+    await writeFile(join(root, "Design", "canvas.json"), "created\n");
     await waitFor(() => changes > before);
 
     before = changes;

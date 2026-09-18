@@ -1,3 +1,4 @@
+import { awaitComposerMode } from "./composer-mode";
 // ──────────────────────────────────────────────────────────
 // AgentSessionsProvider — bridge-connected actions over the Zustand store
 // ──────────────────────────────────────────────────────────
@@ -2858,7 +2859,7 @@ export function AgentSessionsProvider({
 
             const selectionRevision = getStore().sessions[chatId]?.modelSelectionRevision ?? 0;
             getStore().patchSession(chatId, { modelSelectionRevisionAtRequest: selectionRevision });
-            void bridge
+            const send = () => bridge
               .request<AgentPromptCompleteMessage | AgentPromptFailedMessage>(
                 {
                   type: "AGENT_PROMPT",
@@ -2877,7 +2878,9 @@ export function AgentSessionsProvider({
                   ...(replay?.text ? { bubble: { ...bubble, displayText: userMessage.text } } : bubble ? { bubble } : {}),
                 },
                 { timeoutMs: 0, signal: controller.signal },
-              )
+              );
+            const modeSelection = awaitComposerMode(bridge, chatId);
+            void (modeSelection ? modeSelection.then(send) : send())
               .then(finishResolve, finishReject);
           });
 
@@ -4513,7 +4516,6 @@ export function AgentSessionsProvider({
         sendQueueRef.current.claim(chatId, messageId);
         markQueuedDelivery(chatId, messageId, "sending");
       }
-      entry.steerRequest = route;
       const [
         ,
         text,
@@ -4545,6 +4547,17 @@ export function AgentSessionsProvider({
           : undefined;
       let steeredTurnId: string | undefined;
       try {
+        if (!retryingReceipt) {
+          const modeSelection = awaitComposerMode(bridge, chatId);
+          if (modeSelection) {
+            await modeSelection;
+            const current = getStore().sessions[chatId];
+            if (!ownsEntry() || cancelledSince(cancelGenerationsRef.current, chatId, generation) ||
+                current?.status !== "streaming" ||
+                (current.executionId ?? current.sessionId) !== route.sessionId) return false;
+          }
+        }
+        entry.steerRequest = route;
         const resp = await bridge.request<
           AgentSteeredMessage | AgentErrorMessage
         >(

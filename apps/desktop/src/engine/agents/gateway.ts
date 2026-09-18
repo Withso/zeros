@@ -4718,6 +4718,10 @@ export class AgentGateway {
     return this.sessionTools.revoke(workspaceId);
   }
 
+  suspendSessionTools(workspaceId?: string): () => void {
+    return this.sessionTools.suspend(workspaceId);
+  }
+
   private async startNewSession(
     agentId: string,
     opts: NewAgentSessionOptions,
@@ -5933,6 +5937,7 @@ export class AgentGateway {
     prompt: ContentBlock[],
     turnId?: string,
   ): Promise<PromptResponse> {
+    this.sessionTools.beginPrompt(sessionId);
     await this.awaitAdapterStartupSettled(sessionId);
     const authFingerprint = this.executionAuthFingerprint.get(sessionId);
     if (authFingerprint && authFingerprint !== this.providerAuthConfigFingerprint(agentId)) {
@@ -5987,9 +5992,11 @@ export class AgentGateway {
     // repo prompts.general), then the cwd hint for agents that don't self-report
     // their cwd. Both one-shot per session; system instruction goes outermost so
     // it's the very first block the model reads.
+    const productInstruction = await this.sessionTools.preparePrompt(sessionId);
     const outgoing = this.withSystemInstruction(
       sessionId,
-      this.withCwdHint(sessionId, adapter.agentId, prompt),
+      this.withCwdHint(sessionId, adapter.agentId, productInstruction
+        ? [{ type: "text", text: productInstruction }, ...prompt] : prompt),
     );
     try {
       const { response } = await this.raceBoundaryAttestation(
@@ -6038,6 +6045,7 @@ export class AgentGateway {
   }
 
   async cancel(agentId: string, sessionId: string): Promise<void> {
+    this.sessionTools.cancel(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId);
     await adapter.cancel({ sessionId });
   }
@@ -6082,7 +6090,9 @@ export class AgentGateway {
     if (!steer) {
       throw new Error(`agent ${adapter.agentId} does not support steering`);
     }
-    return steer({ sessionId, prompt });
+    const instruction = await this.sessionTools.preparePrompt(sessionId);
+    if (isCurrent && !isCurrent()) return "queued";
+    return steer({ sessionId, prompt: instruction ? [{ type: "text", text: instruction }, ...prompt] : prompt });
   }
 
   async setMode(

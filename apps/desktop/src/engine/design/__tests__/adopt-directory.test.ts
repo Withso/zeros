@@ -1,3 +1,4 @@
+import { readCanvasFixture } from "./storage-fixtures";
 import {
   mkdtempSync,
   mkdirSync,
@@ -52,7 +53,7 @@ describe("explicit existing Design folder adoption", () => {
     });
     expect(existsSync(path.join(root, "Brand/design.toml"))).toBe(false);
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
-    expect(manifest().document.frames).toHaveProperty("home.html");
+    expect(readCanvasFixture(root, "Brand").frames).toHaveProperty("home.html");
     expect(readFileSync(path.join(root, "Brand/home.html"), "utf8")).toBe(
       source,
     );
@@ -121,7 +122,7 @@ describe("explicit existing Design folder adoption", () => {
     await adoptExistingDesignDirectory(root, "Brand", preview.revision);
     expect(manifest()).toEqual({
       id: "design_old",
-      document: { version: 3, frames: {}, custom: null },
+      canvas: "canvas.json",
     });
   });
 

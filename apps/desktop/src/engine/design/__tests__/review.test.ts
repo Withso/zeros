@@ -39,7 +39,7 @@ beforeEach(async () => {
     directoryId: identity.directoryId,
     actorId: identity.actorId,
     assertCurrent() {},
-  });
+  }, { mode: () => ({ mode: "design", revision: 1 }) });
   tx = {
     schemaVersion: 1,
     transactionId: identity.requestId,

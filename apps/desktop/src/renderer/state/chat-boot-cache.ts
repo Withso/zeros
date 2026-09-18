@@ -89,6 +89,8 @@ export function sanitizeCachedChat(value: unknown): ChatThread | null {
     fast: raw.fast === true,
     additionalDirectories: sanitizeChatDirectories(raw.additionalDirectories),
     permissionMode: normalizeChatPermissionMode(raw.permissionMode),
+    composerMode: raw.composerMode === "design" ? "design" : "code",
+    composerModeRevision: typeof raw.composerModeRevision === "number" && Number.isSafeInteger(raw.composerModeRevision) && raw.composerModeRevision >= 0 ? raw.composerModeRevision : 0,
     ...(typeof raw.lastModeId === "string"
       ? { lastModeId: raw.lastModeId }
       : {}),

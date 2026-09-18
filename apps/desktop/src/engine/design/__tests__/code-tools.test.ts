@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -48,7 +48,7 @@ describe("Code-session Design tools", () => {
           if (!valid) throw new Error("Target was removed or replaced.");
         },
       },
-      { onChanged: changed, ...options },
+      { onChanged: changed, mode: () => ({ mode: "design", revision: 0 }), ...options },
     );
     sessions.push(value);
     return value;
@@ -108,6 +108,58 @@ describe("Code-session Design tools", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it.each(["Home.HTML", "Home.HtMl"])(
+    "opens and edits the listed frame %s",
+    async (file) => {
+      const folder = path.join(root, DESIGN_DIRECTORY_NAME);
+      const canvasPath = path.join(folder, "canvas.json");
+      const canvas = JSON.parse(await readFile(canvasPath, "utf8"));
+      canvas.frames.home = {
+        kind: "html",
+        source: file,
+        title: "Home",
+        x: 0,
+        y: 0,
+        width: 400,
+        height: 300,
+      };
+      canvas.pages[0].frames.push("home");
+      await writeFile(
+        path.join(folder, file),
+        '<!doctype html><html><body><h1 data-oid="heading">Home</h1></body></html>',
+      );
+      await writeFile(canvasPath, JSON.stringify(canvas));
+      const listed = (await call("design_document_list")).frames.find(
+        (entry: { file: string }) => entry.file === file,
+      );
+      expect(listed.documentId).toBe(`frame:${file}`);
+      const opened = await call("design_document_open", {
+        documentId: listed.documentId,
+      });
+      const changed = await call("design_transaction_apply", {
+        transaction: {
+          ...transaction("uppercase-edit", opened.revision),
+          documentId: listed.documentId,
+          operations: [
+            {
+              operationId: "heading",
+              type: "node.set-text",
+              nodeId: "heading",
+              text: "Updated",
+            },
+          ],
+        },
+      });
+      expect(await readFile(path.join(folder, file), "utf8")).toContain(
+        ">Updated</h1>",
+      );
+      await call("design_lint", {
+        documentId: listed.documentId,
+        expectedRevision: changed.revision,
+      });
+    },
+  );
+
   it("completes list/open/propose/apply/render through MCP without a renderer", async () => {
     const server = new DesignAgentMcpServer({ handler, token: handler.token });
     servers.push(server);
@@ -160,6 +212,37 @@ describe("Code-session Design tools", () => {
       createHash("sha256").update(render.html, "utf8").digest("hex"),
     );
     expect(changed).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps inspection available in Code and rejects Design writes", async () => {
+    let mode = { mode: "code" as "code" | "design", revision: 0 };
+    const tools = session(actorId, { mode: () => mode });
+    expect((await call("design_document_list", {}, tools)).frames).toHaveLength(1);
+    await expect(call("design_transaction_apply", { transaction: transaction() }, tools)).rejects.toThrow("Design mode");
+    expect((await readDesignWebDocumentState(root, frame)).revision).toBe(revision);
+    mode = { mode: "design", revision: 1 };
+    expect((await call("design_transaction_apply", { transaction: transaction() }, tools)).revision).not.toBe(revision);
+  });
+
+  it("rejects a queued write after leaving and reentering Design mode", async () => {
+    let mode = { mode: "design" as "code" | "design", revision: 1 };
+    const tools = session(actorId, { mode: () => mode });
+    let release!: () => void;
+    let entered!: () => void;
+    const ready = new Promise<void>((resolve) => { entered = resolve; });
+    const lock = withDesignWorkspaceMutation(root, async () => {
+      entered();
+      await new Promise<void>((resolve) => { release = resolve; });
+    });
+    await ready;
+    const pending = call("design_transaction_apply", { transaction: transaction() }, tools);
+    const outcome = pending.catch((error: unknown) => error);
+    mode = { mode: "code", revision: 2 };
+    mode = { mode: "design", revision: 3 };
+    release();
+    await lock;
+    expect(await outcome).toBeInstanceOf(Error);
+    expect((await readDesignWebDocumentState(root, frame)).revision).toBe(revision);
   });
 
   it("does not hold the Design write lane while a capture host is rendering", async () => {

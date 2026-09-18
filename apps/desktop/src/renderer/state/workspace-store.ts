@@ -261,6 +261,7 @@ export type Action =
       >;
     }
   | { type: "TOUCH_CHAT"; id: string }
+  | { type: "SET_CHAT_COMPOSER_MODE"; id: string; folder: string; mode: "code" | "design"; revision: number }
   | { type: "TOGGLE_PIN_CHAT"; id: string }
   // Per-surface composer drafts. See comment
   // on `chatComposerDrafts` in WorkspaceState.
@@ -1483,6 +1484,13 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             : c,
         ),
       };
+    case "SET_CHAT_COMPOSER_MODE": {
+      const chat = state.chats.find((value) => value.id === action.id);
+      if (!chat || chat.folder !== action.folder || (chat.composerModeRevision ?? 0) > action.revision ||
+          ((chat.composerMode ?? "code") === action.mode && (chat.composerModeRevision ?? 0) === action.revision)) return state;
+      return { ...state, chats: state.chats.map((value) => value === chat ?
+        { ...chat, composerMode: action.mode, composerModeRevision: action.revision } : value) };
+    }
     case "UPDATE_CHAT_SETTINGS":
       return {
         ...state,

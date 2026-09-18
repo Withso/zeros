@@ -31,13 +31,15 @@ import {
   unlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { app } from "electron";
 import { emitEvent } from "./ipc/events";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
+import { engineTurnIsActive } from "./dev-main-restart";
+import { engineResponsive } from "./engine-health-probe";
+import { createEngineWatchdogTick, sameEngineTarget } from "./engine-watchdog";
 import { engineBasePort, ENGINE_PORT_SPAN } from "../src/engine/runtime";
 import {
   appIdentity,
@@ -65,9 +67,7 @@ import {
 import {
   ENGINE_STARTUP_TIMEOUT_MS,
   engineStartupWaitDecision,
-  isExpectedEngineHealth,
   parseOwnedEngineManifest,
-  zeroContactRespawnBackoffMs,
 } from "./engine-health";
 import { createSharedBackpressureGate } from "./stream-backpressure";
 import { createBoundedLineForwarder } from "./bounded-line-forwarder";
@@ -709,63 +709,6 @@ export function resolveCodexCliPaths(): {
   return { binary, version, managedPackageRoot };
 }
 
-/** Prove the engine event loop can answer, not merely that its kernel listener
- * still owns the port. A wedged Bun process can keep completing TCP handshakes
- * from the accept backlog for minutes while every HTTP/WS request is frozen;
- * the old connect-only watchdog therefore missed the archive hang it was meant
- * to recover. `/health` is synchronous and loopback-only, so a valid response
- * is the smallest application-level liveness check. The manifest's per-boot
- * nonce makes this an ownership check too: a sibling/stale engine returning a
- * generic healthy response on the same port is not OUR engine. */
-function engineResponsive(
-  port: number,
-  expectedInstance: string,
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (responsive: boolean) => {
-      if (settled) return;
-      settled = true;
-      resolve(responsive);
-    };
-    const req = httpRequest(
-      {
-        host: "127.0.0.1",
-        port,
-        path: "/health",
-        method: "GET",
-        timeout: 1500,
-        headers: { Host: `127.0.0.1:${port}` },
-      },
-      (res) => {
-        let body = "";
-        res.setEncoding("utf8");
-        res.on("data", (chunk: string) => {
-          if (body.length < 8192) body += chunk;
-        });
-        res.once("end", () => {
-          if (res.statusCode !== 200) {
-            finish(false);
-            return;
-          }
-          try {
-            finish(isExpectedEngineHealth(JSON.parse(body), expectedInstance));
-          } catch {
-            finish(false);
-          }
-        });
-        res.once("error", () => finish(false));
-      },
-    );
-    req.once("timeout", () => {
-      req.destroy();
-      finish(false);
-    });
-    req.once("error", () => finish(false));
-    req.end();
-  });
-}
-
 /** Run a diagnostic subprocess WITHOUT blocking the Electron main thread.
  *
  *  The reaper/diagnostic paths used spawnSync for lsof/ps — but sidecar.ts IS
@@ -1247,18 +1190,22 @@ export function setEngineSpawnBarrier(barrier: Promise<unknown>): void {
 let pendingSpawnRoot: string | null = null;
 let pendingSpawn: Promise<number> | null = null;
 
+function enqueueEngineSpawn<T>(attempt: () => Promise<T>): Promise<T> {
+  const next = spawnChain.then(attempt, attempt);
+  spawnChain = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
+
 export function spawnEngine(projectRoot: string): Promise<number> {
   if (pendingSpawnRoot === projectRoot && pendingSpawn) {
     return pendingSpawn;
   }
   const prerequisite = engineSpawnBarrier;
-  const next = spawnChain.then(
-    () => spawnEngineWithRecovery(projectRoot, prerequisite),
-    () => spawnEngineWithRecovery(projectRoot, prerequisite),
-  );
-  spawnChain = next.then(
-    () => undefined,
-    () => undefined,
+  const next = enqueueEngineSpawn(() =>
+    spawnEngineWithRecovery(projectRoot, prerequisite),
   );
   pendingSpawnRoot = projectRoot;
   pendingSpawn = next;
@@ -1353,6 +1300,9 @@ async function doSpawnEngine(
   // Cold-start orphan cleanup and macOS shell-PATH hydration are independent.
   // Run them concurrently, then spawn only after both are complete.
   await Promise.all([prerequisite, orphanCleanup]);
+  if (state.shuttingDown) {
+    throw new Error("engine spawn cancelled while the app is shutting down");
+  }
   console.log(
     `[Zeros] engine spawn prerequisites complete; requesting ${requestedPort}-${requestedPort + portSpan - 1}`,
   );
@@ -2121,24 +2071,14 @@ export function startEngineCodeWatcher(): void {
 
   // HMR-safe hot reload: defer respawning while the engine is mid-turn so a
   // save doesn't kill the in-flight agent response (the "Agent is responding…
-  // forever / no reply" symptom). The engine writes `<root>/.zeros/.busy`
+  // forever / no reply" symptom). The engine writes an app-data `busy` marker
   // (heartbeated every 10s, see ZerosEngine.enterPrompt) while any
-  // AGENT_PROMPT is active; we re-check on a short poll until it clears. Two
-  // caps keep hot-reload from ever wedging: a marker older than
-  // BUSY_STALE_MS is treated as a crashed engine (ignored), and we force the
-  // respawn after BUSY_MAX_DEFER_MS regardless.
-  const BUSY_STALE_MS = 30_000;
+  // AGENT_PROMPT is active; we re-check on a short poll until it clears, and
+  // a stale marker from a crashed engine expires. A healthy long turn never
+  // loses its process merely because a source update has waited five minutes.
   const BUSY_POLL_MS = 1500;
-  const BUSY_MAX_DEFER_MS = 5 * 60_000;
   let respawnDeferredSince = 0;
-  const engineBusy = (root: string): boolean => {
-    try {
-      const st = statSync(path.join(engineRuntimeDir(root), "busy"));
-      return Date.now() - st.mtimeMs < BUSY_STALE_MS;
-    } catch {
-      return false; // no marker → idle
-    }
-  };
+  let deferredRespawn: ReturnType<typeof setTimeout> | null = null;
 
   // Burst detection: when >= BURST_THRESHOLD events arrive within
   // BURST_WINDOW_MS we treat the run as a "checkout-class" burst
@@ -2198,30 +2138,26 @@ export function startEngineCodeWatcher(): void {
       return;
     }
 
-    // Defer while an agent turn is in flight (see engineBusy), so a save
+    // Defer while an agent turn is in flight, so a save
     // mid-turn doesn't SIGTERM the engine out from under the running
-    // response. Re-check on a short poll; force the respawn once the cap is
-    // hit so a runaway/hung turn can't block hot-reload forever.
-    if (engineBusy(root)) {
+    // response. Re-check the heartbeat until that turn is idle or has crashed.
+    if (engineTurnIsActive(root)) {
       if (respawnDeferredSince === 0) {
         respawnDeferredSince = Date.now();
         console.log(
           "[Zeros] engine source changed — deferring respawn until the active agent turn finishes",
         );
       }
-      if (Date.now() - respawnDeferredSince < BUSY_MAX_DEFER_MS) {
-        setTimeout(() => {
-          void triggerRespawn().catch((error: unknown) => {
-            console.warn(
-              `[Zeros] deferred engine respawn failed: ${error instanceof Error ? error.message : String(error)}`,
-            );
-          });
-        }, BUSY_POLL_MS);
-        return;
-      }
-      console.warn(
-        "[Zeros] agent turn still active after max defer — respawning anyway",
-      );
+      if (deferredRespawn) clearTimeout(deferredRespawn);
+      deferredRespawn = setTimeout(() => {
+        deferredRespawn = null;
+        void triggerRespawn().catch((error: unknown) => {
+          console.warn(
+            `[Zeros] deferred engine respawn failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      }, BUSY_POLL_MS);
+      return;
     }
     respawnDeferredSince = 0;
 
@@ -2409,6 +2345,7 @@ export function startEngineCodeWatcher(): void {
   }
 
   app.on("before-quit", () => {
+    if (deferredRespawn) clearTimeout(deferredRespawn);
     for (const w of watchers) {
       try {
         w.close();
@@ -2424,129 +2361,43 @@ export function startEngineCodeWatcher(): void {
  *  Five consecutive failed `/health` probes (~15 s) trigger a respawn and emit
  *  `engine-restarted { port: <new> }` so the renderer reconnects. */
 export function startWatchdog(): void {
-  if (state.watchdogTimer) return; // already running; idempotent
-
-  // Threshold bumped from 3 → 5 to tolerate transient stalls during
-  // heavy file activity. A real engine death still triggers a
-  // respawn within ~15s (5 × 3s poll); a brief stall during a
-  // commit/checkout doesn't.
-  const FAIL_THRESHOLD = 5;
-  const POLL_INTERVAL_MS = 3000;
-  let fails = 0;
-  // Consecutive respawns without ONE successful probe in between. A healthy
-  // respawn recovers within a probe or two; several zero-contact cycles in a
-  // row means respawning isn't the cure (beta.82: a stale listener black-holed
-  // the port, and the loop ran silently every ~21s) — say so, with evidence.
-  let respawnsWithoutContact = 0;
-  // Exponential hold-off between zero-contact respawns — the cap the ~21s
-  // kill/respawn loop never had. A 0.0.13 field log showed the watchdog
-  // SIGKILLing and relaunching a "ready" engine every cycle for 13+ hours:
-  // when respawning has already failed to restore contact N times in a row,
-  // the (N+1)th attempt this second is not going to be the one that works,
-  // and each attempt costs a SIGKILL, a full engine boot, an lsof/ps reap
-  // sweep, and a burst of log output. Double the wait after every
-  // zero-contact respawn (first retry stays immediate), capped at 5 minutes,
-  // and reset the moment ANY probe succeeds. Recovery for a genuinely dead
-  // engine is unchanged — that path succeeds on its first respawn.
-  const RESPAWN_BACKOFF_CAP_MS = 5 * 60_000;
-  let nextRespawnAllowedAt = 0;
-
+  if (state.watchdogTimer) return;
+  const current = () =>
+    state.shuttingDown ||
+    state.port === null ||
+    state.instance === null ||
+    !state.root
+      ? null
+      : { root: state.root, port: state.port, instance: state.instance };
+  const tick = createEngineWatchdogTick({
+    current,
+    probe: engineResponsive,
+    log: (message) => console.error(`[Zeros] ${message}`),
+    describeListeners: async () =>
+      `${currentEnginePortRange()}:\n${await describeRangeListeners()}`,
+    restart: async (target) => {
+      // Serialize with ALL other spawn drivers, and recheck ownership when this
+      // request actually reaches the front of the queue. An older health result
+      // must never kill the replacement that got there first.
+      const newPort = await enqueueEngineSpawn(async () => {
+        if (!sameEngineTarget(target, current())) return null;
+        return spawnEngineWithRecovery(target.root, engineSpawnBarrier);
+      });
+      if (newPort === null || state.shuttingDown) return null;
+      const replacement = current();
+      console.log(`[Zeros] watchdog respawned engine on port ${newPort}`);
+      emitEvent("engine-restarted", newPort);
+      await reapOrphanEngines(state.child?.pid);
+      return replacement;
+    },
+  });
   state.watchdogTimer = setInterval(() => {
-    void (async () => {
-      if (state.shuttingDown) return;
-
-      const port = state.port;
-      const instance = state.instance;
-      if (port === null || instance === null) {
-        // No owned manifest — never spawned successfully, or a respawn is
-        // mid-flight. Nothing to monitor. Port and instance are published
-        // together after parseOwnedEngineManifest accepts our exact child.
-        fails = 0;
-        return;
-      }
-
-      if (await engineResponsive(port, instance)) {
-        fails = 0;
-        respawnsWithoutContact = 0;
-        nextRespawnAllowedAt = 0;
-        return;
-      }
-
-      fails += 1;
-      if (fails < FAIL_THRESHOLD) return;
-
-      const root = state.root;
-      if (!root) {
-        fails = 0;
-        return;
-      }
-
-      if (Date.now() < nextRespawnAllowedAt) {
-        // Hold-off window from a previous zero-contact respawn — keep probing
-        // (a recovered engine resets everything above) but don't kill/relaunch
-        // yet. Cap `fails` so the counter can't run away while we wait.
-        fails = FAIL_THRESHOLD;
-        return;
-      }
-
-      console.error(
-        `[Zeros] engine unreachable on port ${port} after ${FAIL_THRESHOLD} probes; respawning`,
-      );
-      fails = 0;
-      respawnsWithoutContact += 1;
-      if (respawnsWithoutContact >= 2) {
-        const backoffMs = zeroContactRespawnBackoffMs(respawnsWithoutContact, {
-          probeWindowMs: POLL_INTERVAL_MS * FAIL_THRESHOLD,
-          capMs: RESPAWN_BACKOFF_CAP_MS,
-        });
-        nextRespawnAllowedAt = Date.now() + backoffMs;
-        // The lsof evidence dump is throttled to the first few zero-contact
-        // cycles: it was logged on EVERY cycle, and during a storm the repeated
-        // multi-line listener tables were a major main.log flooder.
-        if (respawnsWithoutContact <= 3) {
-          console.error(
-            `[Zeros] ${respawnsWithoutContact} watchdog respawns in a row with zero successful probes — ` +
-              `respawning is not recovering this; a stale process may be black-holing the port. ` +
-              `Next attempt in ${Math.round(backoffMs / 1000)}s. ` +
-              `Listeners on ${currentEnginePortRange()}:\n` +
-              (await describeRangeListeners()),
-          );
-        } else {
-          console.error(
-            `[Zeros] watchdog zero-contact respawn #${respawnsWithoutContact}; ` +
-              `backing off ${Math.round(backoffMs / 1000)}s before the next attempt`,
-          );
-        }
-      }
-
-      try {
-        const newPort = await spawnEngine(root);
-        console.log(`[Zeros] watchdog respawned engine on port ${newPort}`);
-        emitEvent("engine-restarted", newPort);
-        // Belt-and-suspenders cleanup: even with killCurrentChild now
-        // doing SIGTERM→SIGKILL escalation, edge cases (a freshly-
-        // spawned child crashing before we got its handle, an engine
-        // that fork-exec'd a stuck subprocess on its port) can still
-        // leave a listener stranded in this channel's range. Reaping
-        // after every respawn — not just cold start — catches those.
-        // Skips the current `state.child` PID via lsof's process
-        // matching (the new engine is `bun apps/desktop/src/cli.ts` or the prod
-        // binary; both match the engine-pattern but we filter by PID
-        // below).
-        await reapOrphanEngines(state.child?.pid);
-      } catch (err) {
-        console.error(
-          `[Zeros] watchdog respawn failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    })().catch((error: unknown) => {
+    void tick().catch((error: unknown) => {
       console.error(
         `[Zeros] watchdog timer failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     });
-  }, POLL_INTERVAL_MS);
+  }, 3000);
 }
 
 // ──────────────────────────────────────────────────────────

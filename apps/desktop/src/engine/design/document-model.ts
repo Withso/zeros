@@ -1,6 +1,6 @@
 import { type DesignAssetSummary } from "./assets";
 // ──────────────────────────────────────────────────────────
-// Design document — portable HTML/CSS frames + app-owned canvas state
+// Design document — authored HTML/CSS frames and canvas metadata
 // ──────────────────────────────────────────────────────────
 //
 // A design workspace is still a Git worktree, but its authored surface is one
@@ -9,8 +9,9 @@ import { type DesignAssetSummary } from "./assets";
 //   Zeros Design/*.html      one top-level file per frame
 //   Zeros Design/*.css       shared authored styles
 //   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  stable identity, frame and Foundation metadata
-//   Zeros Design/rules.md     short Design API ownership instructions
+//   Zeros Design/design.toml  engine-managed directory registration
+//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
+//   Zeros Design/rules.md     short native-authoring instructions
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
@@ -75,7 +76,7 @@ export interface DesignFrameRestorePoint {
   file: string;
   source: string;
   geometry: DesignFrameGeometry;
-  metadata?: Pick<FrameMeta, "title" | "kind">;
+  metadata?: Pick<FrameMeta, "id" | "title" | "kind">;
 }
 
 export interface DesignFrameSummary {
@@ -191,8 +192,8 @@ export interface DesignWorkspaceSnapshot {
 }
 
 export interface DesignReadOptions {
-  /** Local canvas/MCP reads may heal OIDs and persist auto-placement. Remote
-   * reads are strictly observational and pass false at the service boundary. */
+  /** Reads are observational by default. Explicit legacy repair may opt into
+   * OID healing and placement; normal native authoring never requires it. */
   writeBack?: boolean;
 }
 
@@ -201,7 +202,7 @@ export interface CanvasDocument {
   [canvasReadSnapshot]?: DesignMetadataSnapshot;
   version: 3;
   frames: Record<string, DesignFrameGeometry>;
-  frame_info: Record<string, Pick<FrameMeta, "title" | "kind">>;
+  frame_info: Record<string, Pick<FrameMeta, "id" | "title" | "kind">>;
   foundation: DesignFoundationManifest;
   view?: {
     x: number;
@@ -211,6 +212,8 @@ export interface CanvasDocument {
 }
 
 export interface FrameMeta {
+  /** Stable authored canvas identity; legacy documents may not have one yet. */
+  id?: string;
   title: string;
   width: number;
   height: number;

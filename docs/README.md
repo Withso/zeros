@@ -3,6 +3,9 @@
 This directory contains durable engineering contracts that remain useful to
 contributors after the change that introduced them has shipped.
 
+- [Development restarts](development-restarts.md) describes active-turn guards,
+  supervised hot reload and testing a synchronized checkout without backend restarts.
+
 - [UI interaction and performance](ui-interaction-performance.md) defines the
   renderer's loading, caching, navigation, and retained-surface invariants.
 - [Navigation state persistence](navigation-state-persistence.md) documents
@@ -33,10 +36,16 @@ contributors after the change that introduced them has shipped.
 - [Design surface contracts](design-surface-contracts.md) records surface identity,
   compatibility, adapter lifecycle, accepted host restrictions, and resource probes.
 - [Shared Code/Design v1 plan](design-v1-implementation-plan.md) records the
-  delivered pre-agent Design workbench/backend foundation, pending composer
+  delivered Design workbench/backend foundation, minimal composer
   modes, API/Git boundaries, edge cases, cleanup,
   and remaining implementation gates. It replaces the private-store and
   separate Design-session plans; later roadmap phases remain in place.
+- [Native Design authoring](design-native-authoring.md) specifies ordinary file-tool
+  authoring, registration/canvas formats, legacy migration and refresh behavior.
+- [Shared Design agent execution plan](design-agent-execution-plan.md) maps the
+  minimal composer/tag, mode-gated API, ordinary tool rows and direct canvas
+  editing, with post-v1 context/review/Git enhancements and acceptance scenarios. Retain it until the integration
+  ships, then fold its lasting contracts into the owning guides.
 
 - [Color names](color-names.md) records the stable workspace-name palette used
   by the local engine.

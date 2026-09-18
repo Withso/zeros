@@ -203,15 +203,23 @@ export function insertDesignRuntimeScript(
 
 export function insertDesignHeadMarkup(source: string, markup: string): string {
   const document = parse(source, { sourceCodeLocationInfo: true });
-  const head = elementRecords(document).find(
+  const records = elementRecords(document);
+  const head = records.find(
     ({ element }) => element.tagName === "head",
   )?.element;
-  const insertAt = head?.sourceCodeLocation?.startTag?.endOffset;
-  return insertAt === undefined
-    ? `${markup}${source}`
-    : `${source.slice(0, insertAt)}${markup}${source.slice(insertAt)}`;
+  const html = records.find(
+    ({ element }) => element.tagName === "html",
+  )?.element;
+  // An implicit head still accepts metadata after the opening html/doctype.
+  // Keep the doctype first so inserting styles cannot switch to quirks mode.
+  const insertAt =
+    head?.sourceCodeLocation?.startTag?.endOffset ??
+    html?.sourceCodeLocation?.startTag?.endOffset ??
+    document.childNodes.find((node) => node.nodeName === "#documentType")
+      ?.sourceCodeLocation?.endOffset ??
+    0;
+  return `${source.slice(0, insertAt)}${markup}${source.slice(insertAt)}`;
 }
-
 
 export function escapeText(value: string): string {
   return value

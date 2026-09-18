@@ -624,7 +624,7 @@ export async function handleDesignWorkspaceRoute(
         requestedFrame ??
         (
           await listDesignFrames(workspace.path, {
-            writeBack: !remote,
+            writeBack: false,
           })
         )[0]?.file;
       if (!frame) {

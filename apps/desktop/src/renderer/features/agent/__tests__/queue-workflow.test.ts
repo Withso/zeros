@@ -131,6 +131,7 @@ function setup(agentId = "claude", status = "streaming") {
       send: vi.fn(),
     },
     loadedBackgroundTaskState: () => ({}),
+    awaitComposerMode: vi.fn(() => undefined),
     cancelStalledAdmission: vi.fn(),
     evictUnretainedTranscripts: vi.fn(),
     toast: { error: vi.fn() },
@@ -166,6 +167,27 @@ function setup(agentId = "claude", status = "streaming") {
 describe.each(["claude", "codex", "cursor"])(
   "%s queue and Stop workflow",
   (agentId) => {
+    it("does not steer after Stop while a composer mode selection is pending", async () => {
+      const h = setup(agentId);
+      let confirm!: () => void;
+      h.context.awaitComposerMode.mockReturnValue(new Promise<void>((resolve) => { confirm = resolve; }));
+      const sending = h.actions.steerQueued("chat", "C");
+      expect(h.requests).toHaveLength(0);
+      h.actions.cancel("chat");
+      confirm();
+      expect(await sending).toBe(false);
+      expect(h.requests).toHaveLength(0);
+      expect(h.queue.get("chat")?.find((entry) => entry.bubbleId === "C")?.steerRequest).toBeUndefined();
+    });
+
+    it("keeps a message editable when its composer mode selection fails before delivery", async () => {
+      const h = setup(agentId);
+      h.context.awaitComposerMode.mockReturnValue(Promise.reject(new Error("mode selection failed")));
+      expect(await h.actions.steerQueued("chat", "C")).toBe(false);
+      expect(h.requests).toHaveLength(0);
+      expect(h.queue.get("chat")?.find((entry) => entry.bubbleId === "C")?.steerRequest).toBeUndefined();
+    });
+
     it("preserves an uncertain original attempt when its receipt retry is rejected", async () => {
       const h = setup(agentId);
       const first = h.actions.steerQueued("chat", "C");

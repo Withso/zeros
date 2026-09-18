@@ -6,6 +6,14 @@ export interface AgentSessionTools {
   /** Revoke authority synchronously before awaiting transport teardown. */
   revoke(): void;
   dispose(): Promise<void>;
+  /** Current product instructions before every native send/continuation. */
+  preparePrompt?(): string | Promise<string>;
+  beginPrompt?(): void;
+  /** Cancel pending tool work without destroying the provider conversation. */
+  cancel?(): void;
+  /** Retire document grants during an engine-owned directory transition while
+   * preserving the stable provider MCP registration. */
+  suspend?(): () => void;
 }
 export interface AgentSessionToolInput {
   executionId: string;
@@ -23,6 +31,7 @@ interface Entry {
   controller: AbortController;
   ready: Promise<AgentSessionTools | null>;
   tools: AgentSessionTools | null;
+  cancelled: boolean;
   stop?: Promise<void>;
   detach(): void;
 }
@@ -53,6 +62,7 @@ export class AgentSessionToolRegistry {
       controller,
       ready: Promise.resolve(null),
       tools: null,
+      cancelled: false,
       detach: () => input.signal?.removeEventListener("abort", cancel),
     };
     this.entries.set(input.executionId, entry);
@@ -61,6 +71,7 @@ export class AgentSessionToolRegistry {
       .then(() => this.factory!({ ...input, signal: controller.signal }))
       .then(async (tools) => {
         entry.tools = tools;
+        if (entry.cancelled) tools?.cancel?.();
         if (controller.signal.aborted || this.closed) {
           tools?.revoke();
           throw new Error("Session tool admission was cancelled.");
@@ -101,6 +112,27 @@ export class AgentSessionToolRegistry {
       this.entries.delete(executionId);
     });
     return entry.stop;
+  }
+
+  preparePrompt(executionId: string): string | Promise<string> | undefined {
+    return this.entries.get(executionId)?.tools?.preparePrompt?.();
+  }
+
+  cancel(executionId: string): void {
+    const entry = this.entries.get(executionId);
+    if (entry) { entry.cancelled = true; entry.tools?.cancel?.(); }
+  }
+
+  beginPrompt(executionId: string): void {
+    const entry = this.entries.get(executionId);
+    if (entry) { entry.cancelled = false; entry.tools?.beginPrompt?.(); }
+  }
+
+  suspend(workspaceId?: string): () => void {
+    const resume = [...this.entries.values()]
+      .filter((entry) => workspaceId === undefined || entry.workspaceId === workspaceId)
+      .flatMap((entry) => entry.tools?.suspend ? [entry.tools.suspend()] : []);
+    return () => resume.forEach((release) => release());
   }
 
   async dispose(): Promise<void> {

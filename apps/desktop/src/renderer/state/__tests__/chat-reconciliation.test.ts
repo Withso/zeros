@@ -24,6 +24,15 @@ function chat(id: string, updatedAt: number, title = id): ChatThread {
 }
 
 describe("chat snapshot reconciliation", () => {
+  it("accepts an engine mode change despite a newer local title and rejects an older mode response", () => {
+    const local = { ...chat("a", 5, "new title"), composerMode: "code" as const, composerModeRevision: 0 };
+    const remote = { ...chat("a", 2), composerMode: "design" as const, composerModeRevision: 1 };
+    const result = reconcileChatSnapshot([local], [remote], []);
+    expect(result.chats[0]).toMatchObject({ title: "new title", composerMode: "design", composerModeRevision: 1 });
+    const newer = { ...result.chats[0]!, composerMode: "code" as const, composerModeRevision: 2 };
+    expect(reconcileChatSnapshot([newer], [remote], []).chats[0]).toBe(newer);
+    expect(reconcileChatSnapshot([newer], [{ ...remote, updatedAt: 6 }], []).chats[0]).toMatchObject({ composerMode: "code", composerModeRevision: 2 });
+  });
   it("retains the exact array and objects for an unchanged engine snapshot", () => {
     const local = [chat("a", 2), chat("b", 1)];
     const remote = local.map((row) => ({ ...row }));

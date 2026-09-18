@@ -6,7 +6,7 @@ schema v1, Design API v1, and DOM renderer protocol v2 are frozen interfaces.
 This guide describes the implemented editor, checkout-backed Design API,
 shared native agent tools, and compatibility contracts. The
 [shared-session v1 plan](design-v1-implementation-plan.md) describes the agreed
-composer modes and provider integration that still need implementation. The
+implemented minimal composer modes and shared-session integration. The
 Design tab and shared managed Git foundation are implemented.
 The [roadmap](design-mode-roadmap.md) retains the later feature phases.
 
@@ -23,13 +23,11 @@ Git index. Code and Design are concurrent views of that checkout; they are not
 separate worktrees, branches, copies, projections, or execution backends.
 
 ```text
-Shared native agent session ───────────► Code files in shared worktree
-         │ scoped Design tools
-         ▼
-Human Design surface ────────────────► Design API ─► DesignDraftStore
-                                                       │
-                                                       ▼
-                                            Design files in same worktree
+Shared native agent + Design mode ─► HTML/CSS/assets/canvas.json in the checkout
+                                               ▲
+Human canvas + optional Design API ─► DesignDraftStore (checked transactions)
+                                               │
+                                  workspace watcher → canvas refresh
 ```
 
 The active Design directory comes from the private `[design] directory_id`
@@ -51,8 +49,8 @@ is adjustable for narrow layouts. Selecting a tab changes no agent mode.
 `workspace.kind`/`viewMode` and `workspace.setMode` remain serialized legacy
 contracts, including existing creation flows. On first use, a legacy Design
 selection opens Design once; subsequent choices survive reload without forcing
-Design again. These fields do not authorize human Design editing. Composer
-modes and provider tool gating are a separate pending integration.
+Design again. These fields do not authorize human Design editing. The implemented
+composer modes and provider tool gating use separate conversation-owned state.
 
 Frame/node selection, camera, layer disclosure and panel visibility are keyed
 by workspace. A stable directory ID survives rename; replacing it resets the
@@ -77,8 +75,9 @@ own paths through a compatible stable ID; legacy/incompatible pointers block it.
 ```text
 <repo>/
   Product - Design/
-    design.toml         tracked identity and complete document metadata
-    rules.md            short Design API ownership instructions
+    design.toml         engine-managed registration and stable directory ID
+    canvas.json         editable scene, frame IDs, sources and geometry
+    rules.md            short native-authoring and compatibility instructions
     home.html           authored frames
     tokens.css          shared tokens
     components/         shared components
@@ -86,12 +85,16 @@ own paths through a compatible stable ID; legacy/incompatible pointers block it.
   .zeros/               ignored private settings and local state
 ```
 
-Every Design folder, including its manifest and rules, belongs to the Design
-API. Code agents may read it. Generic file editing/discard/restore operations
-cannot author it; approved managed Git stage/unstage/commit and branch
-integration may include it. Zeros Settings and the Design surface manage its
-authored content. Commit the folder, `design.toml`, and `rules.md` together; uncommitted work remains on disk but is not available to
-other clones or branches until committed.
+Code mode may inspect Design files. User-authorized Design mode uses normal
+provider file tools to author HTML, CSS, assets and `canvas.json`. The Design
+surface and optional API edit the same files. Generic app file-editor and
+discard routes keep their existing Design guard; managed Git may stage, commit
+and integrate authorized Code and Design changes. Mode instructions do not
+provide a hostile-process filesystem boundary.
+
+Commit the folder, `design.toml`, `canvas.json`, `rules.md` and referenced source
+together. Uncommitted work is local to the checkout. Registration and generated
+rules are managed by Zeros lifecycle operations.
 
 Repository Settings → Design → Directory scans the main checkout, including
 untracked Zeros manifests, without requiring any worktrees. Its folder list
@@ -111,37 +114,24 @@ open workspaces for this repository must be archived before removal; every
 workspace may now be editing Design, regardless of its legacy kind. The operation is local-only
 and uses the engine's Design-owner handoff and workspace mutation lane. Other
 worktrees retain their own committed copies until updated through normal Git.
-Choosing the folder again rebuilds metadata from its preserved source; removed
-canvas-only state requires restoring the prior manifest from Git.
+Choosing the folder again preserves `canvas.json`; old metadata can also be
+recovered from Git. Source-only rebuilding is the explicit fallback.
 
-The manifest has a format discriminator, an envelope version and a stable ID:
+The current manifest is registration-only:
 
 ```toml
 format = "zeros-design"
-version = 1
+version = 2
 id = "design_example"
-
-[document]
-version = 3
-
-[document.frames]
-[document.frame_info]
-
-[document.foundation]
-schemaVersion = 1
-parameters = []
-variants = []
-components = []
+canvas = "canvas.json"
 ```
 
-`document.frames` stores geometry keyed by HTML filename; `frame_info` stores
-frame titles and kinds; `foundation` stores parameters, variants and components.
-Unknown JSON document extensions survive migration and edits. TOML has no null,
-so an optional envelope `nulls` array records JSON pointers into `document`;
-empty-string placeholders at those exact locations decode to null. No document
-keys are reserved for this encoding. Canvas viewport state and recovery journals
-stay in private engine storage, outside Git. Undo/redo history is bounded
-in-memory session state, separate from durable request receipts and Git history.
+`canvas.json` v1 contains stable frame IDs, a single page, flat HTML source paths,
+geometry, titles and Foundation metadata. It contains no node tree or duplicate
+HTML. Unknown supported extensions survive engine writes; camera state, grants,
+journals and caches remain private. See the [native authoring contract](design-native-authoring.md)
+for a complete example and bounds. Legacy v1 manifests with inline document v3
+and null-pointer encoding remain readable and migrate on explicit authoring.
 
 Discovery validates `format = "zeros-design"`; a file named `design.toml` alone
 does not make a folder Design territory. Working-tree discovery is bounded,
@@ -178,9 +168,9 @@ without a central registry.
 Read-only access remains compatible with `.zeros/design-dir.toml`,
 `.zeros/design/design-dir.toml`, `.zeros/design/design.toml`, each central
 `<id>/document.json` or `metadata.json`, and source `.zeros-canvas.json` markers.
-On a Design write, every entry in a central registry migrates into its source
+On explicit Design prompt entry or a Design write, every entry in a central registry migrates into its source
 folder before the old storage becomes private. IDs, geometry, Foundation data
-and extensions are preserved. Recoverable transactions write the manifests
+and extensions are preserved. Recoverable transactions write canvas files and registration manifests
 before removing predecessor files. Legacy canvas markers and inline frame
 metadata migrate through the Design API. Interrupted older transactions remain
 recoverable. Reading an older branch does not rewrite it.
@@ -189,8 +179,9 @@ Design Stage, Unstage and Commit include the selected source folder and its
 manifest. During migration, projection of shared legacy registry entries keeps
 other folders' staged and committed states independent. Directory renaming moves
 source and manifest together in one scoped commit; the private selection retains
-the same ID. Generic Code actions exclude all recognized Design roots and legacy
-metadata. Archives finish recoverable writes before capturing source and metadata.
+the same ID. Shared workspace Git can include recognized Design roots and legacy
+metadata; generic file-editor and discard routes retain their Design guard.
+Archives finish recoverable writes before capturing source and metadata.
 
 Design writes maintain an idempotent block in the root `.gitignore`: ignore
 `/.zeros/` and keep Design manifests and rules visible. The previous
@@ -204,31 +195,29 @@ until their migration deletions are committed; Git ignore rules cannot untrack
 existing commits.
 
 Surfaces that can enter Design ask the engine first (`design.listDirectories`
-returns the entry `target` and whether it exists). The workspace mode toggle
-offers "Create design directory" instead of a silent switch when the folder
-does not exist, and the Create page's Code/Design toggle shows which folder a
-design workspace will open or create.
+returns the entry `target` and whether it exists). The empty Design tab offers
+"Create design directory". The composer Design tag changes authoring intent;
+it does not create a directory or change the selected workbench tab.
 
-`workspaces.view_mode` selects the visible surface. `kind` remains a synchronized
+Legacy `workspaces.view_mode` selects the initial surface. `kind` remains a synchronized
 compatibility mirror for older clients. Switching views does not run checkout,
 stash, sparse-checkout, stage, commit, merge, rebase, pull, or process migration.
-The mode toggle and shell both select the confirmed workspace mode. A pending
-request marks the control busy but does not select the destination icon before
-its surface is ready. The engine's mode receipt publishes the row and initial
-Design snapshot together; a refused switch keeps the original selection.
+The retained legacy workspace mode endpoint publishes the row and initial
+Design snapshot together; a refused transition keeps the original selection.
+It is separate from the current composer tag and workbench tab selection.
 
-Entering Design may initialize a missing foundation as ordinary uncommitted
-files. Exiting leaves the working tree and index unchanged. A durable transition
+The legacy workspace transition may initialize a missing foundation as ordinary
+uncommitted files. Exiting leaves the working tree and index unchanged. A durable transition
 marker lets startup finish an interrupted database/surface transition without
 rewriting the checkout. The generic Working Directories feature may use
 user-selected sparse-checkout, but it is unrelated to Design containment and is
 unavailable while the Design surface is active so it cannot hide an open
 document.
 
-The current Design surface has no shared composer yet. Separate
-`agentRole: "design"` session requests are rejected before provider admission.
-The old top view switch is still UI state; the planned composer mode and Design
-tab must not be described as implemented permissions.
+The existing conversation is shared by Code and Design. The composer + menu
+adds a removable Design tag; the separate Design tab does not change mode.
+`agentRole: "design"` session requests remain rejected before provider admission.
+Provider permission/Plan modes are independent of composer authoring intent.
 
 ## Canonical Design foundation
 
@@ -342,7 +331,8 @@ commit. `design.save` validates the live draft only. Stage and commit remain
 separate, explicit actions.
 
 Confirmed edits are written to `<workspace>/<selected Design folder>` by the
-engine: authored HTML, CSS, assets, `design.toml`, and `rules.md` are ordinary
+engine; agents may also author files directly in Design mode. HTML, CSS, assets,
+`canvas.json`, `design.toml`, and `rules.md` are ordinary
 versioned source. A gesture previews locally until release; typed fields publish
 on their editor's commit boundary (usually Enter/blur). An unsubmitted field is
 not yet a durable edit. Cmd/Ctrl+S publishes the focused field and waits behind
@@ -596,7 +586,7 @@ reduced motion; unpinned host pixels are never treated as a stable baseline.
 | Actor                    | Code/repository authority                                                                                      | Design authority                                        | Execution                         |
 | ------------------------ | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- | --------------------------------- |
 | Human Code workflow      | Normal native files and Git                                                                                    | Readable; Zeros Code routes reject Design writes        | Native host                       |
-| Code agent               | Normal native tools, hooks, plugins, MCP, credentials, network, containers, Git, and allowed extra directories | Readable context; scoped semantic tools when admitted   | Native host process lifecycle     |
+| Shared Code/Design agent | Normal provider tools and permissions | Code inspects; Design authors with native file tools and optional API | Native host process lifecycle |
 | Human Design surface     | Read-only Code context                                                                                         | Semantic Design API transactions                        | Trusted application process       |
 | External terminal/editor | Normal same-user authority                                                                                     | Normal same-user authority                              | Outside the Zeros actor guarantee |
 
@@ -606,33 +596,42 @@ Zeros ACL, Design sparse shape, alternate checkout, or Code-to-sandbox fallback.
 graceful/forced teardown, and stale-process recovery while preserving normal
 provider and host behavior.
 
-Code agents receive every recognized Design root as readable context and an
-explicit instruction to make Design writes through admitted semantic tools.
-Zeros-owned generic file and Git handlers still reject Design paths. These
+Agents receive recognized roots and mode instructions: Code may inspect;
+Design may author with native file tools. Generic app file writes/discard remain
+guarded, while authorized managed Git includes Design. These
 workflow guards do not change the
 native permissions of the Code process or external same-user tools and are not
 a hostile-process filesystem security claim.
 
-View identity never selects execution posture. Design identity changes revoke
-scoped tool authority while preserving the native provider session. The planned
-composer modes likewise do not select a sandbox or make Code files read-only;
-Design API mode admission is a separate, pending capability gate.
+View identity never selects execution posture. Local Design directory changes
+suspend and revoke document grants while preserving the provider and MCP
+connection; fresh capability discovery binds the current directory. Composer
+mode does not select a sandbox or make Code files read-only.
 
-### Native Code-session Design tools
+### Shared-conversation Design tools
 
-`engine/design/code-tool-admission.ts` resolves a registered workspace and exact
-manifest directory independently of the selected view. New and resumed native
-Code sessions receive an execution-scoped `design-draft` MCP server through
-`agents/session-tools.ts`; the repository's MCP files are not written. Missing,
-ambiguous, unmigrated, or remotely owned Design directories do not receive a
-grant. A cloud row is admitted only on a cloud engine worker. This policy is
-tested locally; it does not qualify a deployed cloud worker.
+`engine/design/code-tool-admission.ts` admits a workspace-owned `design-draft`
+MCP connection for new/resumed native sessions. `conversation-tools.ts` binds a
+valid active directory lazily; Create design directory therefore works without
+a new conversation. Ambiguous, invalid and foreign directory identities never
+receive document authority. Cloud admission remains worker-owned and requires
+separate deployed-host qualification.
 
-The Code tools expose discovery, exact-revision reads, semantic apply/dry-run,
-durable proposals/request status, session-local undo/redo, frame lifecycle,
-authored lint, sanitized HTML, and bounded source-bound result bundles. PNG
-capture is available through the private Electron host or a qualified cloud
-capture worker; absence of a host leaves source tools usable.
+`chats.composer_mode` and its revision are engine-authoritative, persisted
+independently of generic chat upserts. Manual changes use `chats.setComposerMode`;
+agent changes use the revision-checked `design_mode_set`. Each prompt/steer and
+agent-switch result supplies current instructions. MCP schemas remain stable,
+but API writes require Design mode and the current generation at journal
+admission. Code retains read-only inspection. Provider permissions are unchanged.
+
+V1 exposes list/open, bounded source/foundation/projection/provenance reads,
+semantic apply/dry-run, durable request status, actor-local undo/redo, frame
+lifecycle, lint and sanitized render. Capture is advertised only with a host and
+returns native MCP image content plus metadata. Proposal/result-bundle tools
+remain internal and are not exposed by this conversation endpoint. Successful
+edits update the checkout and existing canvas directly; they never auto-stage.
+See [the execution contract](design-agent-execution-plan.md) for tool labels,
+recovery semantics, acceptance checks and deferred UI.
 
 The **Review Design changes** dialog lives inside the Design tab. It is a compact
 640 × 480 dialog, bounded by the window, with an undimmed background. It retains
@@ -722,7 +721,8 @@ paths. `git.commit` uses workspace authority, capturing the exact staged lane
 Internal callers with Code-only authority still refuse Design content; Design
 review retains its narrower lane. Boundary-crossing Design-only renames remain
 rejected. No action silently stages missing metadata companions. A touched
-portable Design folder must include regular `design.toml` and `rules.md` files
+portable Design folder must include regular `design.toml` and `rules.md` files;
+v2 registrations also require valid staged `canvas.json` and its frame sources
 in that captured index; full-folder deletion and recognized legacy metadata
 remain supported. Validation does not read a newer unstaged draft to decide
 whether an earlier staged checkpoint is valid.
@@ -776,8 +776,9 @@ HTML frame, optional node ID and exact semantic revision. Inspection returns
 `ready` with source/geometry, `stale` with the current revision, `missing`, or
 `wrong-directory`; it rejects a mismatched outer workspace. Reads never heal or
 write metadata, and an external source race cannot return newer bytes as the
-referenced revision. The renderer bridge exposes this contract; composer pill
-delivery, agent mode transitions and API permission changes are deferred.
+referenced revision. The renderer bridge exposes this contract; composer frame
+context pills remain deferred. Conversation mode transitions and Design API
+write gating are implemented independently of this context delivery.
 
 ## Cloud, packaging, and compatibility
 
@@ -851,8 +852,8 @@ Acceptance must prove, independently:
 - view changes preserve branch, index, checkout, and running sessions;
 - Design transactions preserve CAS, idempotency, undo, crash recovery, and
   exact bounded authority without changing Git automatically;
-- Code and Design Git actions remain territory-pure and branch-wide rewrites
-  protect live drafts;
+- Design-scoped checkpoints preserve staged Code, shared workspace Git can
+  include Design, and branch-wide rewrites protect live drafts;
 - scoped Design tools reject stale identity/revision/authority and are revoked
   when their owning execution or document identity is retired;
 - contained cloud admission has no native fallback; native and contained
@@ -867,8 +868,8 @@ breakpoint/pseudo-state authoring, deep component-internal overrides, vector
 pen/boolean operations, 3D/shader renderers, multiple coordinated animations,
 advanced motion paths/springs, rich variable dependency tooling, semantic
 Design conflict resolution, or advanced multi-agent orchestration. Proposal
-review is implemented; composer modes and shared conflict handling are the
-next architecture gate.
+internals and existing human review are retained; the minimal composer mode is
+implemented. Rich proposal presentation and semantic conflict handling follow v1.
 
 Those features require explicit source, protocol, authority, or interaction
 contracts. They must reuse stable identity, transactions, provenance,

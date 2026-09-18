@@ -456,6 +456,9 @@ export type ChatPermissionMode = "plan" | "auto" | "tool-approval" | "danger";
  *  bucket — a chat's `lastModeId` still restores its EXACT native mode when set. */
 export type ChatThread = {
   id: string;
+  /** Engine-confirmed authoring intent; independent of provider permissions. */
+  composerMode?: "code" | "design";
+  composerModeRevision?: number;
   /** Absolute path of the project this chat belongs to, or "" for the
    *  ambient "No project" folder when Zeros hasn't been rooted yet.
    *  Doubles as the cwd for the agent session, git panel, terminal, env. */

@@ -55,7 +55,7 @@ beforeEach(async () => {
     directoryId,
     actorId: "agent-1",
     assertCurrent() {},
-  });
+  }, { mode: () => ({ mode: "design", revision: 1 }) });
 });
 afterEach(async () => {
   tools.dispose();
@@ -228,7 +228,7 @@ it("keeps concurrent human edits and request receipts while rendering immutable 
       actorId: "agent-1",
       assertCurrent() {},
     },
-    { renderer },
+    { renderer, mode: () => ({ mode: "design", revision: 1 }) },
   );
   const tx = {
     schemaVersion: 1,

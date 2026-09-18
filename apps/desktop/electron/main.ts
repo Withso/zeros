@@ -126,6 +126,7 @@ import { setCommand } from "./ipc/router";
 import { prepareAttachmentsForQuit } from "./ipc/attachment-source";
 import {
   defaultProjectRoot,
+  currentRoot,
   shutdown as shutdownSidecar,
   setEngineSpawnBarrier,
   setBrowserServiceEnvironment,
@@ -141,6 +142,7 @@ import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
 import { setupContextMenu } from "./context-menu";
 import { installDevToolsGuard } from "./devtools";
+import { installDevMainRestartCheck } from "./dev-main-restart";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
@@ -1563,6 +1565,13 @@ app.whenReady().then(async () => {
   setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady, designCaptureReady]));
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
+  const disposeDevMainRestart = installDevMainRestartCheck({
+    enabled: isDev && !IS_PACKAGED,
+    port: process,
+    currentRoot,
+    quit: () => app.quit(),
+  });
+  app.on("will-quit", disposeDevMainRestart);
 
   // Watchdog runs for the life of the process; shutdown() clears its
   // timer so it doesn't race the clean-quit path.

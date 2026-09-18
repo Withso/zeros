@@ -6,6 +6,7 @@ import type Database from "better-sqlite3";
 import { openZerosDb } from "./db";
 import {
   bulkUpsertChats,
+  restoreChatComposerModes,
   coerceChatRow,
   listChats,
   type ChatRow,
@@ -512,6 +513,7 @@ export function importCloudWorkspaceForkRecords(input: {
       }
     }
     bulkUpsertChats(projection.chats);
+    restoreChatComposerModes(projection.chats);
     for (const [chatId, rows] of projection.messages) {
       if (!importedChatIds.has(chatId)) throw new Error("Fork message owner is invalid");
       rows.sort((a, b) => a.ord - b.ord || a.msgId.localeCompare(b.msgId));

@@ -1,3 +1,4 @@
+import { readDirectoryDesignManifest } from "./metadata";
 import { TOKENS_SEED } from "./document-seeds";
 import { escapeText, escapeAttribute } from "./source";
 import {
@@ -16,7 +17,7 @@ import {
 } from "./render-preparation";
 import { elementRecords } from "./source";
 // ──────────────────────────────────────────────────────────
-// Design document — portable HTML/CSS frames + app-owned canvas state
+// Design document — authored HTML/CSS frames and canvas metadata
 // ──────────────────────────────────────────────────────────
 //
 // A design workspace is still a Git worktree, but its authored surface is one
@@ -25,8 +26,9 @@ import { elementRecords } from "./source";
 //   Zeros Design/*.html      one top-level file per frame
 //   Zeros Design/*.css       shared authored styles
 //   Zeros Design/tokens.css  typed design tokens + layout reset
-//   Zeros Design/design.toml  stable identity, frame and Foundation metadata
-//   Zeros Design/rules.md     short Design API ownership instructions
+//   Zeros Design/design.toml  engine-managed directory registration
+//   Zeros Design/canvas.json  editable scene, frame and Foundation metadata
+//   Zeros Design/rules.md     short native-authoring instructions
 //
 // This module is the single engine-side interpretation of that format. The
 // renderer and first-party MCP server both consume these functions, so frame
@@ -496,12 +498,14 @@ async function mutateDesignFrameSource(
     throw new Error("sourceVersion must be an exact design render generation.");
   }
   return withDocumentWrite(workspacePath, async () => {
-    const { target } = await designFrameTarget(workspacePath, file);
-    const source = await readBoundedDesignFrameSource(workspacePath, file);
+    await designFrameTarget(workspacePath, file);
+    const before = await readBoundedDesignFrameSource(workspacePath, file);
+    const source = healDesignOids(before).html;
+    const canvas = await readCanvas(workspacePath);
     const document = parse(source, { sourceCodeLocationInfo: true });
-    const meta = readFrameMeta(document, file, await readCanvas(workspacePath));
-    const geometry = (await readCanvas(workspacePath)).frames[file];
-    const current = await prepareFrameRenderSource(workspacePath, source, {
+    const meta = readFrameMeta(document, file, canvas);
+    const geometry = canvas.frames[file];
+    const current = await prepareFrameRenderSource(workspacePath, before, {
       width: geometry?.w ?? meta.width,
       height: geometry?.h ?? meta.height,
     });
@@ -513,7 +517,7 @@ async function mutateDesignFrameSource(
     const element = elementForMutation(document, nodeId);
     const updated = mutate(source, document, element);
     const healed = healDesignOids(updated).html;
-    const changed = healed !== source;
+    const changed = updated !== source;
     if (changed) {
       const knownTokens = await knownTokenNames(workspacePath);
       const [baseline, linted] = await Promise.all([
@@ -557,7 +561,9 @@ async function mutateDesignFrameSource(
           `Design mutation failed ${ruleIds}: ${errors[0]!.message}`,
         );
       }
-      await atomicWriteDesignSource(target, healed);
+      await writeCanvas(workspacePath, canvas, [{
+        file: `${designDirectoryNameFor(workspacePath)}/${file}`, before, after: healed,
+      }]);
     }
     return mutationResultUnlocked(workspacePath, file, healed, changed);
   });
@@ -850,8 +856,11 @@ export async function readDesignElementOffsetMap(
   await designFrameTarget(workspacePath, frame);
   const source = await readBoundedDesignFrameSource(workspacePath, frame);
   const document = parse(source, { sourceCodeLocationInfo: true });
+  const identified = designNodeRecords(parse(healDesignOids(source).html));
   const offsets: DesignElementOffset[] = [];
-  for (const { element, oid } of designNodeRecords(document)) {
+  let index = 0;
+  for (const { element } of designNodeRecords(document)) {
+    const oid = identified[index++]?.oid;
     const location = element.sourceCodeLocation;
     if (!oid || !location?.startTag) continue;
     offsets.push({
@@ -971,7 +980,7 @@ async function readDesignFrameFromSummary(
     workspacePath,
     summary.file,
   );
-  const document = parse(source, { sourceCodeLocationInfo: true });
+  const document = parse(healDesignOids(source).html, { sourceCodeLocationInfo: true });
   const composed = await composeFrameSrcDoc(workspacePath, source, {
     width: summary.width,
     height: summary.height,
@@ -1030,7 +1039,7 @@ export async function readDesignWorkspaceSnapshot(
   workspacePath: string,
   options: DesignReadOptions = {},
 ): Promise<DesignWorkspaceSnapshot> {
-  const writeBack = options.writeBack !== false;
+  const writeBack = options.writeBack === true;
   return withDocumentWrite(workspacePath, async () => {
     // Hold one semantic-owner turn from journal recovery through composition;
     // app-driven transactions cannot interleave lint from one generation with
@@ -1237,6 +1246,7 @@ async function lintFrame(
   );
 
   const records = elementRecords(document);
+  const nativeIdentities = !!readDirectoryDesignManifest(workspacePath, designDirectoryNameFor(workspacePath))?.canvas;
   const seen = new Set<string>();
   for (const { element, oid } of records) {
     const location = element.sourceCodeLocation?.startTag;
@@ -1316,6 +1326,7 @@ async function lintFrame(
     }
     if (!isDesignNodeElement(element)) continue;
     if (!oid || oid.trim().length === 0) {
+      if (nativeIdentities) continue;
       violations.push(
         violationAt(
           file,

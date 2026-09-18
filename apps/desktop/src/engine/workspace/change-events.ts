@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────
 
 const CHAT_MUTATIONS = new Set([
+  "chats.setComposerMode",
   "chats.upsert",
   "chats.delete",
   "chats.bulkUpsert",
@@ -197,6 +198,7 @@ export function dbChangedIncludesOriginator(op: string): boolean {
   return (
     LONG_LIFECYCLE_OPS.has(op) ||
     SETTINGS_MUTATIONS.has(op) ||
+    op === "chats.setComposerMode" ||
     // The Design surface does not own a Git-status cache to update
     // optimistically. Echo its index checkpoint so a retained Code/Changes
     // surface immediately re-reads staged state.

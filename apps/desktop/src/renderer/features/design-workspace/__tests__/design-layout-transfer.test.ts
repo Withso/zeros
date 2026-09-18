@@ -77,6 +77,41 @@ beforeEach(() => {
 });
 
 describe("canvas transfer presentation", () => {
+  it.each([
+    { lowerZ: 1, upperZ: 2, upperWidth: 600 },
+    { lowerZ: 1, upperZ: 2, upperWidth: 800 },
+    { lowerZ: 2, upperZ: 2, upperWidth: 600 },
+  ])(
+    "transfers into the visible overlapping frame ($lowerZ/$upperZ, $upperWidth px)",
+    async ({ lowerZ, upperZ, upperWidth }) => {
+      const lower = { ...destination, file: "lower.html", z: lowerZ };
+      const upper = {
+        ...destination,
+        file: "upper.html",
+        z: upperZ,
+        width: upperWidth,
+      };
+      mocks.transfer.mockResolvedValue({
+        frame: upper.file,
+        nodeId: node.oid,
+        snapshot: { frames: [source, lower, upper] },
+      });
+
+      await expect(
+        transferDesignLayerOnCanvas({
+          ...input,
+          frames: [source, lower, upper],
+        }),
+      ).resolves.toBe(true);
+      expect(mocks.transfer).toHaveBeenCalledWith(
+        input.workspaceId,
+        expect.objectContaining({
+          destinationFrame: upper.file,
+        }),
+      );
+    },
+  );
+
   it("waits for the destination generation before inspecting its newly inserted layer", async () => {
     let reveal!: () => void;
     const presented = vi.fn(

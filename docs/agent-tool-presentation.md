@@ -44,8 +44,9 @@ and statuses remain available even when routine metadata is hidden in the UI.
   `.context/local/artifacts/<task>/` and investigations/logs in
   `.context/local/scratch/<task>/`. Read relevant existing context, pass exact
   paths to delegates, preserve other agents' work, and link actual saved files.
-  Required project source/build outputs keep their normal locations. Design
-  agents retain their read-only filesystem contract. See
+  Required project source/build outputs keep their normal locations. Shared
+  Design mode uses ordinary provider file tools for authored Design files;
+  the mode-gated Design API remains optional. See
   [context-storage.md](context-storage.md) for local/shared ownership.
 
 Contract references: the installed Claude SDK's `SDKMcpResourceLink` and task
@@ -654,3 +655,12 @@ Protocol 18 combines these steering receipts, transcript replacement/fallback
 events and turn-usage snapshots with protocol 17's native attachment sources.
 The desktop and control-plane compatibility ranges advance together; optional
 fields keep older transcript records and supported peers readable.
+
+## Minimal Design-mode tools
+
+The engine-owned `design-draft` MCP endpoint uses ordinary expandable rows with
+the existing pen icon and short labels (List, Inspect, Inspect Styles, Edit,
+Validate, Capture, Undo). Native qualified tool identity selects that treatment;
+unqualified names or foreign servers do not. Keep native IDs and normal detail
+rendering. No new semantic cards, proposal review or switching banners. The
+composer + menu and removable Design tag are the only mode controls in v1.

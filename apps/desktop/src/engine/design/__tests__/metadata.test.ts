@@ -1,3 +1,4 @@
+import { readCanvasFixture } from "./storage-fixtures";
 import {
   mkdtempSync,
   mkdirSync,
@@ -105,7 +106,7 @@ describe("portable Design metadata", () => {
 
   it("keeps identity, complete metadata and short ownership rules with the source", () => {
     commitDesignMetadata(root, directory, json);
-    expect(manifest().document).toEqual(model);
+    expect(readCanvasFixture(root, directory)).toMatchObject(model);
     expect(existsSync(path.join(root, ".zeros"))).toBe(false);
     const rules = read(`${directory}/rules.md`);
     expect(rules).toMatch(/Do not gitignore/);
@@ -132,7 +133,8 @@ describe("portable Design metadata", () => {
       ).toBe(directory);
       expect(existsSync(path.join(root, directory, "design.toml"))).toBe(false);
       ensureDesignMetadataLayout(root, directory);
-      expect(manifest()).toEqual({ id: "design_existing", document: model });
+      expect(manifest()).toEqual({ id: "design_existing", canvas: "canvas.json" });
+      expect(readCanvasFixture(root, directory)).toMatchObject(model);
       expect(existsSync(path.join(root, registryFile))).toBe(false);
       expect(
         existsSync(
@@ -153,7 +155,7 @@ describe("portable Design metadata", () => {
     commitDesignMetadata(root, directory, json);
     expect(parseDesignManifest(read("Other/design.toml"))).toEqual({
       id: "design_other",
-      document: model,
+      canvas: "canvas.json",
     });
     expect(read(".gitignore")).toContain("/.zeros/");
   });
@@ -266,7 +268,7 @@ describe("portable Design metadata", () => {
       resolveDesignDirectoryForEnter({ path: root, repoRoot: root }),
     ).resolves.toBe(directory);
     ensureDesignMetadataLayout(root, directory);
-    expect(manifest().document).toEqual(model);
+    expect(readCanvasFixture(root, directory)).toMatchObject(model);
     expect(existsSync(path.join(root, ".zeros/design/design.toml"))).toBe(
       false,
     );
@@ -283,7 +285,7 @@ describe("portable Design metadata", () => {
     ]);
     recoverWorkspaceDesignMetadata(root);
     ensureDesignMetadataLayout(root, directory);
-    expect(manifest().document).toEqual(model);
+    expect(readCanvasFixture(root, directory)).toMatchObject(model);
   });
 
   it("keeps the deterministic legacy ID when replacing a canvas marker", () => {
@@ -292,7 +294,7 @@ describe("portable Design metadata", () => {
     const id = manifest().id;
     expect(id).toMatch(/^design_legacy_/);
     expect(designDocumentMetadataPath(root, directory)).toBe(
-      path.join(root, directory, "design.toml"),
+      path.join(root, directory, "canvas.json"),
     );
     expect(existsSync(path.join(root, directory, ".zeros-canvas.json"))).toBe(
       false,

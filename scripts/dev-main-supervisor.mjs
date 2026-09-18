@@ -1,39 +1,20 @@
-// ──────────────────────────────────────────────────────────
-// Named-instance Electron main hot-restart (`pnpm electron:dev:watch`)
-// ──────────────────────────────────────────────────────────
+// Development Electron main hot restart for primary and named instances.
 //
-// The gap this closes: the PRIMARY dev checkout launches Electron via
-// `electronmon`, which watches dist-electron and restarts the main process when
-// it's rebuilt. A NAMED worktree instance instead launches its
-// own renamed bundle binary DIRECTLY (for a distinct Dock/Cmd-Tab identity — see
-// scripts/dev-electron-bundle.cjs), so it forgoes electronmon. Result: the
-// renderer hot-reloads (Vite) and the engine hot-reloads (source watcher), but
-// the Electron MAIN process keeps the stale main.cjs it launched with. Edit
-// anything under apps/desktop/electron/ — add an IPC command, change preload — and the
-// renderer calls it while the stale main answers "unknown command" until you
-// manually quit and re-run. (That exact trap produced the "Couldn't copy the app
-// logs" failure: logs_recent was added to main, the renderer picked it up, the
-// running main hadn't.)
+// Watch dist-electron/{main,preload}.cjs while preserving a named instance's
+// dedicated bundle identity. Once both outputs are ready and changed, ask the
+// running main over private child IPC whether its engine is idle. Busy or
+// unknown replies defer the restart without a duration limit on a healthy turn.
+// SIGTERM enters normal Electron quit cleanup; bounded escalation waits for the
+// old process to exit before launching its replacement.
 //
-// This supervisor gives a named instance the SAME hot-restart electronmon gives
-// the primary, without losing the dedicated binary: launch <binPath> ., watch
-// dist-electron/{main,preload}.cjs, and on a rebuild gracefully restart —
-// SIGTERM, wait for the old process to FULLY exit (so the single-instance lock
-// is released before the new one asks for it), escalate to SIGKILL only if it
-// ignores SIGTERM, then relaunch. A restart can briefly orphan the engine child
-// (it's a detached process-group leader killed only by main's before-quit), but
-// the respawned main's reapOrphanEngines() SIGKILLs any engine left in its port
-// range on boot — so the restart self-heals, exactly as the primary's
-// electronmon path already relies on.
-//
-// Best-effort throughout: if the watcher can't be established the app still
-// runs without main-process hot restart. The default `electron:dev` and its
-// explicit `:watch` alias both route named instances through here so renderer
-// HMR can never outrun main/preload IPC. `electron:run` remains the no-HMR path.
-// Set ZEROS_NO_MAIN_HMR=1 to force a direct launch while diagnosing restarts.
-// ──────────────────────────────────────────────────────────
+// Both electron:dev and electron:dev:watch use this supervisor. electron:run
+// builds once without backend reloaders. ZEROS_NO_MAIN_HMR=1 disables this
+// watcher independently of engine HMR. Restart the development command once
+// after changing the launcher or supervisor itself.
+// See docs/development-restarts.md for lifecycle and recovery behavior.
 
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -50,8 +31,10 @@ const DIST_DIR = path.join(REPO_ROOT, "dist-electron");
 // runtime behavior and would just add restart churn.
 const TRIGGER_FILES = new Set(["main.cjs", "preload.cjs"]);
 const RESTART_DEBOUNCE_MS = 300; // coalesce the burst of writes for one rebuild
-const SIGTERM_GRACE_MS = 4000; // clean shutdown budget (before-quit + engine kill)
+const SIGTERM_GRACE_MS = 15_000; // includes before-quit + engine shutdown
 const SIGKILL_GRACE_MS = 1500;
+const RESTART_CHECK_MS = 2000;
+const BUSY_POLL_MS = 1500;
 
 // Mirror the shell's `env -u ELECTRON_RUN_AS_NODE` — the child must boot as the
 // Electron app, not as a Node script.
@@ -60,13 +43,39 @@ delete childEnv.ELECTRON_RUN_AS_NODE;
 
 let child = null;
 let restarting = false;
+let checking = false;
 let shuttingDown = false;
 let restartTimer = null;
+let requestId = 0;
+let deferredReason = null;
+let launchedBuild = null;
+
+function readyBuild() {
+  try {
+    const hash = createHash("sha256");
+    for (const name of TRIGGER_FILES) {
+      const file = path.join(DIST_DIR, name);
+      if (!fs.statSync(file).isFile()) return null;
+      const contents = fs.readFileSync(file);
+      if (contents.length === 0) return null;
+      hash.update(name).update(contents);
+    }
+    return hash.digest("hex");
+  } catch {
+    // tsup can remove outputs during a clean build. Keep the working app until
+    // both replacements are present; a deletion is not a runnable build.
+    return null;
+  }
+}
 
 /** Launch the Electron binary. Its stdio is inherited so console output flows
  *  through concurrently exactly as the direct launch did. */
 function launch() {
-  child = spawn(binPath, ["."], { stdio: "inherit", env: childEnv });
+  launchedBuild = readyBuild();
+  child = spawn(binPath, ["."], {
+    stdio: ["inherit", "inherit", "inherit", "ipc"],
+    env: childEnv,
+  });
   const launched = child;
   launched.on("exit", (code) => {
     // Ignore exits we caused (a restart) or a supervisor teardown.
@@ -84,22 +93,104 @@ function launch() {
 
 /** Resolve once `proc` emits "exit", or after `ms` (→ false = still alive). */
 function waitForExit(proc, ms) {
+  if (proc.exitCode !== null || proc.signalCode !== null)
+    return Promise.resolve(true);
   return new Promise((resolve) => {
     let settled = false;
     const done = (exited) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      proc.off("exit", onExit);
       resolve(exited);
     };
-    proc.once("exit", () => done(true));
-    setTimeout(() => done(false), ms);
+    const onExit = () => done(true);
+    const timer = setTimeout(() => done(false), ms);
+    proc.once("exit", onExit);
+  });
+}
+
+/** Read readiness from this child only. Silence, malformed replies and channel
+ * failure are unknown, never permission to terminate a possibly active turn. */
+function restartStatus(proc) {
+  const id = ++requestId;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (status) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      proc.off("message", onMessage);
+      proc.off("exit", onExit);
+      resolve(status);
+    };
+    const onMessage = (message) => {
+      if (
+        message?.type !== "zeros:dev-main-restart-status" ||
+        message.requestId !== id ||
+        typeof message.busy !== "boolean"
+      )
+        return;
+      finish(message.busy ? "busy" : "idle");
+    };
+    const onExit = () => finish("unknown");
+    const timer = setTimeout(() => finish("unknown"), RESTART_CHECK_MS);
+    proc.on("message", onMessage);
+    proc.once("exit", onExit);
+    try {
+      proc.send(
+        { type: "zeros:dev-main-restart-check", requestId: id },
+        (error) => {
+          if (error) finish("unknown");
+        },
+      );
+    } catch {
+      finish("unknown");
+    }
   });
 }
 
 async function restart() {
-  if (restarting || shuttingDown || !child) return;
-  restarting = true;
+  if (shuttingDown || !child) return;
+  if (checking || restarting) {
+    scheduleRestart(BUSY_POLL_MS);
+    return;
+  }
+  const build = readyBuild();
+  if (!build) {
+    scheduleRestart(BUSY_POLL_MS);
+    return;
+  }
+  if (build === launchedBuild) return;
   const dying = child;
+  checking = true;
+  const status = await restartStatus(dying);
+  checking = false;
+  if (
+    shuttingDown ||
+    dying !== child ||
+    dying.exitCode !== null ||
+    dying.signalCode !== null
+  )
+    return;
+  if (readyBuild() !== build) {
+    scheduleRestart();
+    return;
+  }
+  if (status !== "idle") {
+    if (deferredReason !== status) {
+      console.log(
+        status === "busy"
+          ? "[dev-main-supervisor] rebuild ready — waiting for the active agent turn to finish"
+          : "[dev-main-supervisor] restart readiness unavailable — keeping the running app; restart manually if needed",
+      );
+      deferredReason = status;
+    }
+    scheduleRestart(BUSY_POLL_MS);
+    return;
+  }
+  deferredReason = null;
+  restarting = true;
   console.log(
     "\n[dev-main-supervisor] dist-electron changed → restarting main process…",
   );
@@ -118,23 +209,35 @@ async function restart() {
       } catch {
         /* already gone */
       }
-      await waitForExit(dying, SIGKILL_GRACE_MS);
+      if (!(await waitForExit(dying, SIGKILL_GRACE_MS))) {
+        console.error(
+          "[dev-main-supervisor] old main has not exited; deferring replacement",
+        );
+        scheduleRestart(BUSY_POLL_MS);
+        return;
+      }
     }
   } catch (err) {
     console.error("[dev-main-supervisor] error during restart:", err);
+    scheduleRestart(BUSY_POLL_MS);
+    return;
   } finally {
+    // Keep exit ownership while a concurrent rebuild replaces its outputs.
+    while (!shuttingDown && !readyBuild()) {
+      await new Promise((resolve) => setTimeout(resolve, RESTART_DEBOUNCE_MS));
+    }
     restarting = false;
   }
   if (!shuttingDown) launch();
 }
 
-function scheduleRestart() {
+function scheduleRestart(delay = RESTART_DEBOUNCE_MS) {
   if (shuttingDown) return;
   if (restartTimer) clearTimeout(restartTimer);
   restartTimer = setTimeout(() => {
     restartTimer = null;
     void restart();
-  }, RESTART_DEBOUNCE_MS);
+  }, delay);
 }
 
 /** Watch dist-electron for main/preload rebuilds. Non-fatal: on failure the app
@@ -180,18 +283,19 @@ for (const sig of ["SIGINT", "SIGTERM"]) {
     if (!dying || dying.exitCode !== null || dying.signalCode !== null) {
       process.exit(0);
     }
-    // Wait for the app to quit on the signal so we don't leave it orphaned;
-    // force-exit as a backstop if it wedges.
-    const force = setTimeout(() => process.exit(0), 2500);
-    dying.once("exit", () => {
-      clearTimeout(force);
-      process.exit(0);
-    });
-    try {
-      dying.kill("SIGTERM");
-    } catch {
-      process.exit(0);
-    }
+    // The parent's lifetime must cover normal Electron/engine cleanup too.
+    // Exiting after 2.5 s used to orphan a still-shutting-down app.
+    void (async () => {
+      try {
+        dying.kill("SIGTERM");
+        if (!(await waitForExit(dying, SIGTERM_GRACE_MS))) {
+          dying.kill("SIGKILL");
+          await waitForExit(dying, SIGKILL_GRACE_MS);
+        }
+      } finally {
+        process.exit(0);
+      }
+    })();
   });
 }
 

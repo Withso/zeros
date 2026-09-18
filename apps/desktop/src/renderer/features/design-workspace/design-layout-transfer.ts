@@ -36,7 +36,11 @@ export async function transferDesignLayerOnCanvas(input: {
         candidate.width * candidate.height >
           details.rect.width * details.rect.height,
     )
-    .sort((a, b) => a.width * a.height - b.width * b.height)[0];
+    // Match canvas painting: higher z wins; later siblings win ties.
+    .reduce<DesignCanvasFrameWire | undefined>(
+      (top, candidate) => !top || candidate.z >= top.z ? candidate : top,
+      undefined,
+    );
   if (!destination && !input.detach) return false;
   const targetRuntime = destination
     ? designFrameRuntime(workspaceId, destination.file)

@@ -508,6 +508,8 @@ export async function readTextAttachment(args: {
  *  field types (booleans, optional fields). */
 export interface ChatRowWire {
   id: string;
+  composerMode?: "code" | "design";
+  composerModeRevision?: number;
   folder: string;
   agentId: string | null;
   agentName: string | null;
