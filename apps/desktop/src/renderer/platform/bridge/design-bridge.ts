@@ -19,7 +19,19 @@ import type {
 import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-runtime";
 
 import type { RuntimeClient } from "./ws-client";
-import { workspaceOp } from "./workspace-bridge";
+import { workspaceOp as rawWorkspaceOp } from "./workspace-bridge";
+
+const directoryIds = new Map<string, string>();
+export function rememberDesignDirectoryIdentity(workspaceId: string, directoryId: string): void {
+  directoryIds.delete(workspaceId);
+  directoryIds.set(workspaceId, directoryId);
+  if (directoryIds.size > 64) directoryIds.delete(directoryIds.keys().next().value!);
+}
+
+const workspaceOp: typeof rawWorkspaceOp = (bridge, op, params = {}, ...rest) => {
+  const directoryId = typeof params.workspaceId === "string" ? directoryIds.get(params.workspaceId) : undefined;
+  return rawWorkspaceOp(bridge, op, { ...params, ...(directoryId ? { directoryId } : {}) }, ...rest);
+};
 
 // A cold aggregate snapshot intentionally parses, lints, and composes every
 // frame's lightweight render identity. Large documents can exceed the generic
@@ -121,6 +133,9 @@ export interface DesignAssetWire {
 }
 
 export interface DesignWorkspaceSnapshotWire {
+  /** Absent only on older engines and pre-migration boot snapshots. */
+  directoryId?: string;
+  directory?: string;
   /** Host-local resource authority. Null on remote/srcDoc renderers. */
   protocolCapability: string | null;
   frames: DesignCanvasFrameWire[];
@@ -740,6 +755,48 @@ export async function bridgeDesignDeleteFrame(
   return { deleted: result.deleted, snapshot: result.snapshot };
 }
 
+export interface DesignNodeTransferInput {
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+  destinationFrame?: string;
+  destinationSourceVersion?: string;
+  parentId?: string;
+  beforeId?: string | null;
+  styles?: Record<string, string | null>;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  z: number;
+}
+
+export async function bridgeDesignTransferNode(
+  bridge: RuntimeClient,
+  workspaceId: string,
+  input: DesignNodeTransferInput,
+): Promise<{
+  frame: string;
+  nodeId: string;
+  snapshot: DesignWorkspaceSnapshotWire;
+}> {
+  const value = (await workspaceOp(bridge, "design.node.transfer", {
+    workspaceId,
+    ...input,
+  })) as {
+    frame?: string;
+    nodeId?: string;
+    snapshot?: DesignWorkspaceSnapshotWire;
+  };
+  if (
+    typeof value.frame !== "string" ||
+    typeof value.nodeId !== "string" ||
+    !isDesignWorkspaceSnapshotWire(value.snapshot)
+  )
+    throw new Error("Invalid layer transfer response.");
+  return { frame: value.frame, nodeId: value.nodeId, snapshot: value.snapshot };
+}
+
 export async function bridgeDesignUpdateStyles(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -876,9 +933,8 @@ export async function bridgeDesignListDirectories(
   })) as DesignDirectoryListingWire;
 }
 
-/** Rename the repo's design folder — `git mv` + the committed pointer update
- *  in ONE commit, in the repo's main checkout. The engine refuses while live
- *  design-mode workspaces exist for the repo. */
+/** Rename the Design folder in one explicit main-checkout commit. Compatible
+ * live workspaces keep their own checkout paths through stable directory IDs. */
 export async function bridgeDesignRenameDirectory(
   bridge: RuntimeClient,
   args: { repoRoot: string; from: string; to: string },

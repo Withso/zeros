@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { parseDesignManifest, serializeDesignManifest } from "../manifest";
+import { parseDesignManifest, serializeDesignManifest, serializeDesignRegistration } from "../manifest";
 
 describe("portable Design manifest", () => {
+  it("registers an editable canvas without embedding its authored document", () => {
+    const source = serializeDesignRegistration("design_example");
+    expect(parseDesignManifest(source)).toEqual({ id: "design_example", canvas: "canvas.json" });
+    expect(source).not.toContain("document");
+    expect(() => parseDesignManifest(source.replace("canvas.json", "../canvas.json"))).toThrow();
+    expect(() => parseDesignManifest(source + "\n[document]\nversion = 3")).toThrow();
+  });
   it("round trips JSON metadata, including nulls and extension fields", () => {
     const document = JSON.parse(
       '{"version":3,"frames":{},"frame_info":{},"foundation":{"parameters":[{"default":null}]},"extra":{"a/b~c":[null,{"__proto__":null}],"empty":{},"list":[],"text":"","flag":false}}',

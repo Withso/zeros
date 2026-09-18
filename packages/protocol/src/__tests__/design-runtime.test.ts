@@ -6,6 +6,7 @@ import {
   DESIGN_RUNTIME_SOURCE,
   DESIGN_RUNTIME_VERSION,
   isDesignRuntimeFrameMessage,
+  isRuntimeNodeLayout,
   type DesignRuntimeFrameMessage,
   type DesignRuntimeNodeBox,
   type DesignRuntimeNodeDetails,
@@ -14,6 +15,32 @@ import {
 } from "../design-runtime";
 
 describe("design runtime protocol", () => {
+  it("accepts older layout snapshots and validates optional sizing context", () => {
+    const layout = {
+      x: 0,
+      y: 0,
+      parentId: "parent",
+      parentWidth: 400,
+      parentHeight: 300,
+      parentDisplay: "flex",
+      parentPosition: "relative",
+      isContainingBlock: true,
+    };
+    expect(isRuntimeNodeLayout(layout)).toBe(true);
+    expect(
+      isRuntimeNodeLayout({
+        ...layout,
+        widthValue: "max-content",
+        heightValue: "auto",
+        parentFlexDirection: "column",
+        parentAlignItems: "stretch",
+      }),
+    ).toBe(true);
+    expect(isRuntimeNodeLayout({ ...layout, widthValue: 120 })).toBe(false);
+    expect(
+      isRuntimeNodeLayout({ ...layout, parentFlexDirection: "x".repeat(1025) }),
+    ).toBe(false);
+  });
   it("ships one self-contained runtime with the stable protocol marker", () => {
     expect(DESIGN_RUNTIME_SOURCE).toContain(DESIGN_RUNTIME_PROTOCOL);
     expect(DESIGN_RUNTIME_SOURCE).toContain("MutationObserver");

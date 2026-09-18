@@ -37,6 +37,8 @@ describe("design workspace UI memory", () => {
         updatedAt: -1,
       }),
     ).toEqual({
+      layersVisible: true,
+      inspectorVisible: true,
       selectedFrame: null,
       frameSelected: false,
       selectedNodeId: null,
@@ -191,4 +193,19 @@ describe("design workspace UI memory", () => {
     forgetDesignWorkspaceView("workspace-34");
     expect(designWorkspaceView("workspace-34").panel).toBe("layers");
   });
+  it("preserves panels and navigation for the same directory and clears replaced document selections", () => {
+    const store = useDesignWorkspaceUiStore.getState();
+    store.setSelection("workspace-a", "home.html", "hero");
+    store.bindDirectory("workspace-a", "design_first");
+    store.setPanels("workspace-a", { layersVisible: false, inspectorVisible: false });
+    store.setViewport("workspace-a", { zoom: 0.5, panX: 20, panY: 40 });
+    store.bindDirectory("workspace-a", "design_first");
+    expect(designWorkspaceView("workspace-a")).toMatchObject({ selectedNodeId: "hero", layersVisible: false, inspectorVisible: false, zoom: 0.5 });
+    store.bindDirectory("workspace-b", "design_second");
+    expect(designWorkspaceView("workspace-b").selectedFrame).toBeNull();
+    expect(designWorkspaceView("workspace-a").selectedFrame).toBe("home.html");
+    store.bindDirectory("workspace-a", "design_replacement");
+    expect(designWorkspaceView("workspace-a")).toMatchObject({ directoryId: "design_replacement", selectedFrame: null, selectedNodeId: null, zoom: 0.25 });
+  });
+
 });

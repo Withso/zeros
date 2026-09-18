@@ -1,3 +1,4 @@
+import { warmDesignWorkspaceSnapshot } from "../../features/design-workspace/state/design-workspace-cache";
 // ──────────────────────────────────────────────────────────
 // Workbench Tab Strip — inline tab strip for Workbench's header band
 // ──────────────────────────────────────────────────────────
@@ -118,7 +119,7 @@ export function WorkbenchTabStrip({
     if (
       tab.type === "changes" ||
       tab.type === "review" ||
-      tab.type === "context"
+      tab.type === "context" || tab.type === "design"
     )
       return;
     if (tab.type === "browser") {
@@ -166,6 +167,7 @@ export function WorkbenchTabStrip({
                     ? terminalIndicators[tab.terminalId]
                     : undefined
                 }
+                onIntent={() => { if (tab.type === "design" && workspaceId) warmDesignWorkspaceSnapshot(workspaceId); }}
                 onActivate={() => handleActivate(tab.id)}
                 onClose={(e, browserSessionId) =>
                   handleClose(e, tab, browserSessionId)
@@ -200,6 +202,7 @@ interface TabPillProps {
   /** Count rendered after the label (the Changes pill's live change count). */
   badge: number;
   terminalIndicator?: TerminalTabIndicator;
+  onIntent: () => void;
   onActivate: () => void;
   onClose: (e: React.MouseEvent, browserSessionId?: string) => void;
   /** Registers the pill with the sticky strip (pin math + reveal). */
@@ -218,6 +221,7 @@ function TabPill({
   canClose,
   badge,
   terminalIndicator,
+  onIntent,
   onActivate,
   onClose,
   registerRef,
@@ -266,6 +270,8 @@ function TabPill({
       aria-selected={active}
       aria-label={tab.title}
       tabIndex={0}
+      onPointerEnter={onIntent}
+      onFocus={onIntent}
       onClick={onActivate}
       onKeyDown={(e) => {
         if (e.key === "Enter" || e.key === " ") {

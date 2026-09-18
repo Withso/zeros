@@ -26,10 +26,12 @@ import {
   assertSafeDesignHtmlFragment,
   designHtmlUsesComponent,
   healDesignHtmlIdentities,
+  nativeDesignIdentityBase,
   mutateDesignNodeAttributeSource,
   mutateDesignNodeDeleteSource,
   mutateDesignNodeDuplicateSource,
   mutateDesignNodeHtmlSource,
+  mutateDesignNodeMoveSource,
   mutateDesignNodeTextSource,
   parseDesignWebProjection,
 } from "./html";
@@ -415,6 +417,20 @@ function applyOperation(
       operation,
       { ...state.files, [state.entryFile]: healed },
       [operation.nodeId],
+    );
+  }
+  if (operation.type === "node.move") {
+    const updated = mutateDesignNodeMoveSource(
+      state.files[state.entryFile]!,
+      operation.nodeId,
+      operation.parentId,
+      operation.beforeId,
+    );
+    return withFiles(
+      state,
+      operation,
+      { ...state.files, [state.entryFile]: updated },
+      [operation.nodeId, operation.parentId],
     );
   }
   if (operation.type === "node.duplicate") {
@@ -916,13 +932,43 @@ export const designWebTransactionAdapter: DesignTransactionAdapter<DesignWebDocu
     documentId: (state) => state.documentId,
     revision: (state) => state.revision,
     apply: (state, operation) => {
-      const mutation = applyOperation(state, operation);
+      // Hydrate identities only for an explicit semantic edit. Its inverse
+      // includes the hydration so undo restores the exact original HTML.
+      const identified = operation.type.startsWith("node.")
+        ? healDesignHtmlIdentities(
+            state.files[state.entryFile]!,
+            nativeDesignIdentityBase,
+          )
+        : null;
+      const working = identified?.changed
+        ? updateDesignWebState(state, {
+            files: { ...state.files, [state.entryFile]: identified.source },
+          })
+        : state;
+      const mutation = applyOperation(working, operation);
+      if (working !== state && !mutation.changed) {
+        // Derived identities are preparation, not an authored change by
+        // themselves. A no-op must keep both the original bytes and revision.
+        return {
+          state,
+          changed: false,
+          inverse: [],
+          affectedNodeIds: [],
+          affectedFiles: [],
+        };
+      }
       return {
         state: mutation.state,
         changed: mutation.changed,
-        inverse: mutation.inverseOperations,
+        inverse:
+          working !== state
+            ? sourceInverseOperations(operation, state.files, mutation.state.files)
+            : mutation.inverseOperations,
         affectedNodeIds: mutation.affectedNodeIds,
-        affectedFiles: mutation.affectedFiles,
+        affectedFiles:
+          working !== state
+            ? [...new Set([state.entryFile, ...mutation.affectedFiles])]
+            : mutation.affectedFiles,
       };
     },
   };

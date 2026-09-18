@@ -1,6 +1,6 @@
 // React binding for the shared design-workspace aggregate snapshot.
 
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect } from "react";
 
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import { useGitRefreshKey } from "../../../shell/use-git-refresh-key";
@@ -10,6 +10,7 @@ import {
 } from "../../../state/use-cached-read";
 import {
   applyDesignWorkspaceRefreshVersion,
+  observeDesignDirectory,
   DESIGN_SNAPSHOT_MAX_AGE_MS,
   designWorkspaceSnapshotCache,
   fetchDesignWorkspaceSnapshot,
@@ -61,5 +62,8 @@ export function useDesignWorkspaceSnapshot(
       enabled: active,
     },
   );
+  useLayoutEffect(() => {
+    if (active && workspaceId && read.data && designWorkspaceSnapshotMatchesPath(read.data, workspacePath)) observeDesignDirectory(workspaceId, read.data);
+  }, [active, workspaceId, workspacePath, read.data]);
   return presentDesignWorkspaceSnapshotRead(read, workspacePath, active);
 }

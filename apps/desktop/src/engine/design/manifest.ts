@@ -4,6 +4,18 @@ import { DESIGN_DIRECTORY_ID_PATTERN } from "./directory-path";
 
 export const DESIGN_MANIFEST_FILE = "design.toml";
 export const DESIGN_MANIFEST_FORMAT = "zeros-design";
+const registrationSchema = z.object({
+  format: z.literal(DESIGN_MANIFEST_FORMAT),
+  version: z.literal(2),
+  id: z.string().regex(DESIGN_DIRECTORY_ID_PATTERN),
+  canvas: z.literal("canvas.json"),
+}).strict();
+
+export function serializeDesignRegistration(id: string): string {
+  return stringify(registrationSchema.parse({
+    format: DESIGN_MANIFEST_FORMAT, version: 2, id, canvas: "canvas.json",
+  })) + "\n";
+}
 export const designManifestSchema = z
   .object({
     format: z.literal(DESIGN_MANIFEST_FORMAT),
@@ -79,7 +91,7 @@ export function serializeDesignManifest(
  * closed; unrelated TOML belongs to the repository and is left alone. */
 export function parseDesignManifest(
   source: string,
-): { id: string; document: Record<string, unknown> } | null {
+): { id: string; document?: Record<string, unknown>; canvas?: "canvas.json" } | null {
   if (Buffer.byteLength(source) > 16 * 1024 * 1024)
     throw new Error("Design manifest is too large.");
   let raw: Record<string, unknown>;
@@ -90,6 +102,10 @@ export function parseDesignManifest(
     return null;
   }
   if (raw.format !== DESIGN_MANIFEST_FORMAT) return null;
+  if (raw.version === 2) {
+    const registration = registrationSchema.parse(raw);
+    return { id: registration.id, canvas: registration.canvas };
+  }
   const envelope = designManifestSchema.parse(raw);
   const document = mapJson(envelope.document, () => {
     throw new Error("Invalid TOML null.");

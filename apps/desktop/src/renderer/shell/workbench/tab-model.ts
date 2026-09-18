@@ -15,10 +15,12 @@ import {
   GitPullRequestArrow,
   Book,
   Terminal,
+  PenTool,
   type LucideIcon,
 } from "lucide-react";
 
 export type WorkbenchTabType =
+  | "design"
   | "changes"
   | "review"
   | "context"
@@ -474,6 +476,7 @@ export function createContextTab(): WorkbenchTab {
 }
 
 export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
+  design: { label: "Design", icon: PenTool },
   terminal: { label: "Terminal", icon: Terminal },
   changes: {
     label: "Changes",
@@ -516,8 +519,9 @@ const LEGACY_KEY_ACTIVE = "column3-active-tab-id";
  *  the PR surface is the pinned "review" home tab now, a DIFFERENT type so a
  *  stale persisted "pr" entry still drops cleanly. Old generic Terminal tabs
  *  without a session identity are dropped during normalization below. */
-const REMOVED_TAB_TYPES = new Set(["design", "git", "env", "todo", "pr"]);
+const REMOVED_TAB_TYPES = new Set(["git", "env", "todo", "pr"]);
 const CURRENT_TAB_TYPES = new Set<WorkbenchTabType>([
+  "design",
   "terminal",
   "changes",
   "review",
@@ -560,11 +564,12 @@ function validViewerMode(raw: unknown): ViewerMode | undefined {
  *  relative order. The leading slot is stable: extra File tabs never migrate
  *  into it while the home exists. */
 export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
+  const design = tabs.find((t) => t.type === "design");
   const changes = tabs.find((t) => t.type === "changes");
   const review = tabs.find((t) => t.type === "review");
   const context = tabs.find((t) => t.type === "context");
   const systemIds = new Set(
-    [changes?.id, review?.id, context?.id].filter((id): id is string =>
+    [design?.id, changes?.id, review?.id, context?.id].filter((id): id is string =>
       Boolean(id),
     ),
   );
@@ -582,6 +587,7 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
   const rest = closable.filter((_, index) => index !== firstFileIndex);
   return [
     ...(firstFile ? [firstFile] : []),
+    ...(design ? [{ ...design, pinned: true }] : []),
     ...(changes ? [{ ...changes, pinned: true }] : []),
     ...(review ? [{ ...review, pinned: true }] : []),
     ...(context ? [{ ...context, pinned: true }] : []),
@@ -590,7 +596,8 @@ export function orderWorkbenchTabs(tabs: WorkbenchTab[]): WorkbenchTab[] {
 }
 
 /** Enforce the workbench invariants on a persisted tab list:
- *   • legacy types (design/git/…/pr) are dropped;
+ *   • legacy types (git/…/pr) are dropped;
+ *   • exactly ONE Design tab, restoring an older Design tab's identity;
  *   • exactly ONE Changes tab — the first persisted one becomes THE pinned
  *     Changes tab (its sidebar selection survives), or one is seeded;
  *   • exactly ONE Review tab — the first persisted one is promoted, or one is
@@ -647,6 +654,12 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
     });
   }
   const firstChanges = tabs.find((t) => t.type === "changes");
+  const homeDesign: WorkbenchTab = {
+    id: tabs.find((t) => t.type === "design")?.id ?? nextId("design"),
+    type: "design",
+    title: "Design",
+    pinned: true,
+  };
   const firstReview = tabs.find((t) => t.type === "review");
   const changesFilePath =
     typeof firstChanges?.filePath === "string"
@@ -798,6 +811,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
   );
   if (!fixedId) withHome.unshift({ ...createEmptyFilesTab(), fixed: true });
   return orderWorkbenchTabs([
+    homeDesign,
     { ...homeChanges, fixed: undefined },
     { ...homeReview, fixed: undefined },
     { ...homeContext, fixed: undefined },
@@ -814,6 +828,8 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
 
 /** One worktree's workbench tab state. */
 export interface WorkbenchScopeState {
+  /** Legacy workspace presentation has been mapped to this tab selection. */
+  designPresentationMigrated?: boolean;
   tabs: WorkbenchTab[];
   activeId: string | null;
   recentBrowsers: RecentBrowserEntry[];
@@ -822,6 +838,22 @@ export interface WorkbenchScopeState {
   /** One-time discovery migration from the former always-visible bottom panel.
    * Closing the seeded Setup tab is respected on subsequent reloads. */
   terminalTabsInitialized?: boolean;
+}
+
+/** Presentation migration only: no API writes or conversation mode changes.
+ * Callers use this same projection for the first paint and persisted state. */
+export function migrateDesignPresentation(
+  slice: WorkbenchScopeState,
+  legacyKind: "code" | "design",
+): WorkbenchScopeState {
+  if (slice.designPresentationMigrated) return slice;
+  return {
+    ...slice,
+    designPresentationMigrated: true,
+    activeId: legacyKind === "design"
+      ? slice.tabs.find((tab) => tab.type === "design")?.id ?? slice.activeId
+      : slice.activeId,
+  };
 }
 
 /** Per-worktree tab state, keyed by the worktree's folder path. */
@@ -954,6 +986,9 @@ export function migrateScopes(parsed: WorkbenchScopeMap): WorkbenchScopeMap {
         ? slice.activeId
         : defaultActiveId(tabs);
     out[scope] = {
+      ...(slice.designPresentationMigrated === true
+        ? { designPresentationMigrated: true }
+        : {}),
       tabs,
       activeId,
       recentBrowsers: normalizeRecentBrowsers(slice.recentBrowsers),

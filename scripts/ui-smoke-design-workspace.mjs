@@ -1,7 +1,11 @@
+import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
 // Design-workspace portion of the real-browser interaction contract. Keeping
 // it beside (rather than embedded in) ui-smoke-composer lets the design surface
 // grow independently from the coding-agent/GitHub smoke path.
 
+import { runDesignLayoutGesturesSmoke } from "./ui-smoke-design-layout-gestures.mjs";
+import { runDesignInspectorRacesSmoke } from "./ui-smoke-design-inspector-races.mjs";
+import { runDesignAutoLayoutSmoke } from "./ui-smoke-design-auto-layout.mjs";
 import { runDesignLayoutSmoke } from "./ui-smoke-design-layout.mjs";
 import { runDesignFrameRecoverySmoke } from "./ui-smoke-design-frame-recovery.mjs";
 import { runDesignLayoutChildrenSmoke } from "./ui-smoke-design-layout-children.mjs";
@@ -10,10 +14,16 @@ import { runDesignAuthoredFrameSmoke } from "./ui-smoke-design-authored-frame.mj
 import { runDesignLoadingEditsSmoke } from "./ui-smoke-design-loading-edits.mjs";
 import { runDesignGitMenuSmoke } from "./ui-smoke-design-git-menu.mjs";
 import { runDesignSelectionSmoke } from "./ui-smoke-design-selection.mjs";
+import { runDesignSpacingSmoke } from "./ui-smoke-design-spacing.mjs";
 
 export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
+  await runDesignWorkbenchSmoke({ page, check });
   await runDesignGitMenuSmoke({ page, check });
   await runDesignSelectionSmoke({ page, waitFor, check });
+  await runDesignAutoLayoutSmoke({ page, check });
+  await runDesignSpacingSmoke({ page, check });
+  await runDesignLayoutGesturesSmoke({ page, check });
+  await runDesignInspectorRacesSmoke({ page, check });
   await runDesignLayoutSmoke({ page, waitFor, check });
   await runDesignLayoutChildrenSmoke({ page, waitFor, check });
   await runDesignFrameChildrenSmoke({ page, waitFor, check });
@@ -50,25 +60,17 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const designSidebar = page.getByRole("region", {
     name: "Design workspace sidebar",
   });
-  const workspaceModeHeader = designSidebar.locator(
-    "[data-workspace-mode-header]",
-  );
-  const workspaceModeToggle = workspaceModeHeader.locator(
-    "[data-workspace-mode-toggle]",
-  );
-  const designDirectoryName = workspaceModeHeader.locator(
-    "[data-design-directory-name]",
-  );
+  const directoryHeader = designSidebar.locator("[data-design-directory-header]");
+  const designDirectoryName = directoryHeader.locator("[data-design-directory-name]");
   await layersPanel.waitFor({ state: "visible", timeout: 10_000 });
   await designSidebar.waitFor({ state: "visible", timeout: 10_000 });
-  await workspaceModeHeader.waitFor({ state: "visible", timeout: 10_000 });
+  await directoryHeader.waitFor({ state: "visible", timeout: 10_000 });
   const initialLayersBox = await layersPanel.boundingBox();
   const initialSidebarBox = await designSidebar.boundingBox();
   const initialStylePanelBox = await page
     .locator("[data-design-inspector]")
     .boundingBox();
-  const workspaceModeHeaderBox = await workspaceModeHeader.boundingBox();
-  const workspaceModeToggleBox = await workspaceModeToggle.boundingBox();
+  const directoryHeaderBox = await directoryHeader.boundingBox();
   const designDirectoryNameBox = await designDirectoryName.boundingBox();
   check(
     "design Layers fill a dedicated native sidebar",
@@ -85,172 +87,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       Math.abs(initialSidebarBox.width - 240) < 0.5,
   );
   check(
-    "mode toggle stays first and the Design directory name follows above Layers",
-    !!workspaceModeHeaderBox &&
-      !!workspaceModeToggleBox &&
-      !!designDirectoryNameBox &&
-      !!initialLayersBox &&
-      workspaceModeHeaderBox.y + workspaceModeHeaderBox.height <=
-        initialLayersBox.y &&
-      Math.abs(workspaceModeToggleBox.x - workspaceModeHeaderBox.x - 8) < 0.5 &&
-      designDirectoryNameBox.x >=
-        workspaceModeToggleBox.x + workspaceModeToggleBox.width &&
-      (await designDirectoryName.count()) === 1 &&
+    "Design directory name sits above Layers without the old mode switch",
+    !!directoryHeaderBox && !!designDirectoryNameBox && !!initialLayersBox &&
+      directoryHeaderBox.y + directoryHeaderBox.height <= initialLayersBox.y &&
       ((await designDirectoryName.textContent())?.trim().length ?? 0) > 0 &&
-      (await workspaceModeHeader.getByRole("button").count()) === 2 &&
-      (await workspaceModeHeader
-        .getByRole("button", { name: "Code mode" })
-        .count()) === 1 &&
-      (await workspaceModeHeader
-        .getByRole("button", { name: "Design mode" })
-        .getAttribute("aria-pressed")) === "true" &&
-      (await workspaceModeHeader
-        .locator("[data-workspace-mode-toggle]")
-        .innerText()) === "",
-  );
-  const workspaceModeChrome = await workspaceModeHeader.evaluate((header) => {
-    const toggle = header.querySelector("[data-workspace-mode-toggle]");
-    const buttons = [...header.querySelectorAll("[data-workspace-mode]")];
-    const icons = [...header.querySelectorAll("[data-workspace-mode] svg")];
-    const toggleStyle = toggle ? window.getComputedStyle(toggle) : null;
-    const headerStyle = window.getComputedStyle(header);
-    const resolveColor = (token) => {
-      const probe = document.createElement("span");
-      probe.style.color = `var(${token})`;
-      header.appendChild(probe);
-      const color = window.getComputedStyle(probe).color;
-      probe.remove();
-      return color;
-    };
-    return {
-      buttonSizes: buttons.map((button) => {
-        const box = button.getBoundingClientRect();
-        return [box.width, box.height];
-      }),
-      buttonStyles: buttons.map((button) => {
-        const style = window.getComputedStyle(button);
-        return {
-          active: button.getAttribute("aria-pressed") === "true",
-          backgroundColor: style.backgroundColor,
-          color: style.color,
-        };
-      }),
-      blueFg: resolveColor("--blue-fg"),
-      fg3: resolveColor("--fg3"),
-      bg1Highlight: resolveColor("--bg1-highlight"),
-      bg2: resolveColor("--bg2"),
-      backgroundColor: toggleStyle?.backgroundColor,
-      borderWidth: toggleStyle?.borderWidth,
-      borderRadius: parseFloat(toggleStyle?.borderRadius ?? "0"),
-      height: toggle?.getBoundingClientRect().height,
-      iconSizes: icons.map((icon) => {
-        const box = icon.getBoundingClientRect();
-        return [box.width, box.height];
-      }),
-      padding: toggleStyle
-        ? [
-            toggleStyle.paddingTop,
-            toggleStyle.paddingRight,
-            toggleStyle.paddingBottom,
-            toggleStyle.paddingLeft,
-          ]
-        : [],
-      separator: headerStyle.borderBottomWidth,
-    };
-  });
-  check(
-    "workspace mode matches 28px chat tabs with 8px corners and inset 24px buttons",
-    workspaceModeChrome.height === 28 &&
-      workspaceModeChrome.borderWidth === "0px" &&
-      workspaceModeChrome.borderRadius === 8 &&
-      workspaceModeChrome.backgroundColor === workspaceModeChrome.bg2 &&
-      workspaceModeChrome.buttonSizes.length === 2 &&
-      workspaceModeChrome.buttonSizes.every(
-        ([width, height]) => width === 24 && height === 24,
-      ) &&
-      workspaceModeChrome.iconSizes.length === 2 &&
-      workspaceModeChrome.iconSizes.every(
-        ([width, height]) => width === 16 && height === 16,
-      ) &&
-      workspaceModeChrome.padding.every((value) => value === "2px") &&
-      workspaceModeChrome.separator === "1px",
-  );
-  const selectedModeStyle = workspaceModeChrome.buttonStyles.find(
-    ({ active }) => active,
-  );
-  const unselectedModeStyle = workspaceModeChrome.buttonStyles.find(
-    ({ active }) => !active,
-  );
-  check(
-    "workspace mode selection uses blue-fg on bg1-highlight with an unfilled inactive choice",
-    selectedModeStyle?.backgroundColor === workspaceModeChrome.bg1Highlight &&
-      selectedModeStyle.color === workspaceModeChrome.blueFg &&
-      unselectedModeStyle?.backgroundColor === "rgba(0, 0, 0, 0)" &&
-      unselectedModeStyle?.color === workspaceModeChrome.fg3,
-  );
-  // Hold the real header in the interval between Code intent and the engine's
-  // confirmation. The Design surface still owns this row during that interval.
-  await page.evaluate(async () => {
-    const { designDirectoryTargetCache } =
-      await import("/apps/desktop/src/renderer/state/read-caches.ts");
-    designDirectoryTargetCache.setData("ws:ws_design_harness", {
-      directory: "North One - Design",
-      exists: true,
-    });
-  });
-  check(
-    "Design header renders its confirmed directory name",
-    await waitFor(
-      async () =>
-        (await designDirectoryName.textContent()) === "North One - Design",
-      "design-header-directory-name",
-    ),
-  );
-  const modeSwitchToken = await page.evaluate(async () => {
-    const { beginWorkspaceModeSwitch } =
-      await import("/apps/desktop/src/renderer/state/pending-workspaces.ts");
-    return beginWorkspaceModeSwitch("ws_design_harness", "code");
-  });
-  try {
-    const switching = await waitFor(
-      async () =>
-        (await workspaceModeToggle.getAttribute("aria-busy")) === "true",
-      "design-header-code-pending",
-    );
-    check(
-      "Design-to-Code intent keeps the directory name while the Design header is visible",
-      switching &&
-        (await designDirectoryName.textContent()) === "North One - Design",
-    );
-    check(
-      "A pending mode request keeps the selected icon aligned with the visible Design surface",
-      (await workspaceModeToggle
-        .locator('[data-workspace-mode="design"]')
-        .getAttribute("aria-pressed")) === "true" &&
-        (await workspaceModeToggle
-          .locator('[data-workspace-mode="code"]')
-          .getAttribute("aria-pressed")) === "false",
-    );
-  } finally {
-    await page.evaluate(async (token) => {
-      const { finishWorkspaceModeSwitch } =
-        await import("/apps/desktop/src/renderer/state/pending-workspaces.ts");
-      finishWorkspaceModeSwitch("ws_design_harness", token);
-    }, modeSwitchToken);
-  }
-  check(
-    "Returning from pending Code intent restores Design without replacing its name",
-    await waitFor(
-      async () =>
-        (await workspaceModeToggle.getAttribute("aria-busy")) === null &&
-        (await designDirectoryName.textContent()) === "North One - Design",
-      "design-header-code-rollback",
-    ),
-  );
-  check(
-    "design workspace mounts no coding-agent chat",
-    (await page.getByRole("region", { name: "Agent chat preview" }).count()) ===
-      0 && (await page.getByLabel("Agent Workspace").count()) === 0,
+      (await page.locator("[data-workspace-mode-toggle]").count()) === 0,
   );
   check(
     "design inspector omits the code-column collapse control",
@@ -1331,7 +1172,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       frameStyleGeometry?.x === "0" &&
       frameStyleGeometry.y === "0" &&
       frameStyleGeometry.width === "1440" &&
-      frameStyleGeometry.height === "900" &&
+      frameStyleGeometry.height === "Hug" &&
       (await inspector
         .locator("[data-design-layout-section] h3")
         .textContent()) === "Layout" &&
@@ -1357,7 +1198,9 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
           ?.querySelector("[data-design-layout-icon]")
           ?.getAttribute("data-design-layout-icon") ?? null,
     }));
-  await inspector.getByRole("button", { name: "Row", exact: true }).click();
+  await inspector
+    .getByRole("button", { name: "Auto layout: Horizontal", exact: true })
+    .click();
   const horizontalFrameIcons = await waitFor(async () => {
     const icons = await readHomeFlexIcons();
     return icons.frame === "flex-horizontal" && icons.main === null;
@@ -1367,13 +1210,15 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     horizontalFrameIcons,
     JSON.stringify(await readHomeFlexIcons()),
   );
-  await inspector.getByRole("button", { name: "Column", exact: true }).click();
+  await inspector
+    .getByRole("button", { name: "Auto layout: Vertical", exact: true })
+    .click();
   await waitFor(async () => {
     const icons = await readHomeFlexIcons();
     return icons.frame === "flex-vertical" && icons.main === null;
   }, "design-frame-vertical-icon-restore");
   const frameOpacity = inspector.getByLabel("Opacity", { exact: true });
-  await frameOpacity.fill("0.92");
+  await frameOpacity.fill("92");
   await page.keyboard.press("Enter");
   check(
     "normal Frame style edits apply to the live frame root",
@@ -1431,13 +1276,13 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     (await page.getByText("Themes", { exact: true }).count()) === 0,
   );
   check(
-    "leaf style controls retain their labels without child constraints",
+    "text controls retain their labels without container layout options",
     (await page
       .getByRole("combobox", { name: "Horizontal constraint" })
       .count()) === 0 &&
       (await page
         .getByRole("group", { name: "Auto layout", exact: true })
-        .isVisible()),
+        .count()) === 0,
   );
   const quietInspectorField = page
     .locator("[data-design-inspector-field]:not([data-design-layout-field])")
@@ -1453,8 +1298,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         })
       : null;
   check(
-    "inspector fields are quiet until hover or focus",
-    quietInspectorVisual?.background === "rgba(0, 0, 0, 0)" &&
+    "inspector fields have a consistent tonal surface",
+    quietInspectorVisual?.background !== "rgba(0, 0, 0, 0)" &&
       quietInspectorVisual.borderWidth === "0px",
   );
   const appliedInspectorField = page
@@ -1485,41 +1330,20 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     !!appliedInspectorVisual &&
       appliedInspectorVisual.background !== "rgba(0, 0, 0, 0)" &&
       appliedInspectorVisual.borderWidth === "0px" &&
-      appliedInspectorVisual.fontSize === "11px" &&
-      appliedInspectorVisual.fontFamily?.toLowerCase().includes("mono"),
-  );
-  await inspector
-    .getByRole("button", { name: "Sizing limits", exact: true })
-    .click();
-  const authoredMarginTop = page.locator(
-    '[data-design-style-property="margin-top"]',
+      appliedInspectorVisual.fontSize === "13px" &&
+      !appliedInspectorVisual.fontFamily?.toLowerCase().includes("mono"),
   );
   const untouchedPaddingTop = page.locator(
-    '[data-design-style-property="padding-top"]',
+    '[data-design-style-property="word-spacing"]',
   );
+  await inspector
+    .getByRole("button", { name: "Text details", exact: true })
+    .click();
   check(
-    "an authored margin shorthand fills every affected side field",
-    (await authoredMarginTop.getAttribute("data-design-applied")) === "" &&
-      (await authoredMarginTop.locator("input").inputValue()) === "0" &&
-      (
-        await authoredMarginTop.getByLabel("Unit for T").textContent()
-      )?.includes("px") &&
-      (await authoredMarginTop.evaluate(
-        (element) =>
-          getComputedStyle(element).backgroundColor !== "rgba(0, 0, 0, 0)",
-      )),
-  );
-  check(
-    "an untouched style field shows its computed value without a fill",
-    (await untouchedPaddingTop.getAttribute("data-design-applied")) === null &&
-      (await untouchedPaddingTop.locator("input").inputValue()) === "0" &&
-      (await untouchedPaddingTop
-        .locator("input")
-        .getAttribute("placeholder")) === "-" &&
-      (await untouchedPaddingTop.evaluate(
-        (element) =>
-          getComputedStyle(element).backgroundColor === "rgba(0, 0, 0, 0)",
-      )),
+    "margin is omitted from the design inspector",
+    (await page
+      .locator('[data-design-style-property="margin-top"]')
+      .count()) === 0,
   );
   const untouchedPaddingInput = untouchedPaddingTop.locator("input");
   await untouchedPaddingInput.fill("12");
@@ -1532,7 +1356,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     await homeRuntime
       .locator('[data-oid="home-heading"]')
       .evaluate(
-        (element) => element.style.getPropertyValue("padding-top") === "",
+        (element) => element.style.getPropertyValue("word-spacing") === "",
       )
       .catch(() => false),
   );
@@ -1545,15 +1369,16 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
           .locator('[data-oid="home-heading"]')
           .evaluate(
             (element) =>
-              element.style.getPropertyValue("padding-top") === "12px",
+              element.style.getPropertyValue("word-spacing") === "12px",
           )
           .catch(() => false),
       "design-neutral-style-commit",
     ),
   );
-  const untouchedPaddingUnit = untouchedPaddingTop.getByLabel("Unit for T");
+  const untouchedPaddingUnit =
+    untouchedPaddingTop.getByLabel("Unit for Word gap");
   await untouchedPaddingUnit.click();
-  await page.getByRole("option", { name: "%", exact: true }).click();
+  await page.getByRole("option", { name: "em", exact: true }).click();
   check(
     "a numeric field changes units without rewriting its value",
     await waitFor(
@@ -1562,23 +1387,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
           .locator('[data-oid="home-heading"]')
           .evaluate(
             (element) =>
-              element.style.getPropertyValue("padding-top") === "12%",
+              element.style.getPropertyValue("word-spacing") === "12em",
           )
           .catch(() => false),
       "design-style-unit-percent",
     ),
-  );
-  await untouchedPaddingUnit.click();
-  await page.getByRole("option", { name: "px", exact: true }).click();
-  await waitFor(
-    () =>
-      homeRuntime
-        .locator('[data-oid="home-heading"]')
-        .evaluate(
-          (element) => element.style.getPropertyValue("padding-top") === "12px",
-        )
-        .catch(() => false),
-    "design-style-unit-pixels",
   );
   // An empty field means "remove the authored declaration", so this restores
   // the fixture without leaving a 0px of its own behind.
@@ -1589,7 +1402,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       homeRuntime
         .locator('[data-oid="home-heading"]')
         .evaluate(
-          (element) => element.style.getPropertyValue("padding-top") === "",
+          (element) => element.style.getPropertyValue("word-spacing") === "",
         )
         .catch(() => false),
     "design-neutral-style-removal",
@@ -1604,7 +1417,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         (await homeRuntime
           .locator('[data-oid="home-heading"]')
           .evaluate(
-            (element) => element.style.getPropertyValue("padding-top") === "",
+            (element) => element.style.getPropertyValue("word-spacing") === "",
           )
           .catch(() => false)),
       "design-neutral-style-cancel",
@@ -1662,13 +1475,40 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const heightInput = page
     .locator('[data-design-style-property="height"]')
     .locator("input");
+  // Show first republishes the layer tree and then refreshes selected geometry.
+  // Retain identity only after that preceding edit has reached its current
+  // runtime generation, so a temporary hidden/hover outline is not mistaken
+  // for a remount caused by the width edit below.
+  check(
+    "showing a layer restores its current selection geometry",
+    await waitFor(
+      () =>
+        page.evaluate(() => {
+          const iframe = document.querySelector(
+            '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
+          );
+          const selection = iframe
+            ?.closest('[data-design-frame="home.html"]')
+            ?.querySelector(
+              '[data-design-selected-element][data-design-element-overlay="home-heading"]',
+            );
+          return (
+            selection instanceof HTMLElement &&
+            selection.style.width === "900px" &&
+            selection.dataset.designOverlaySourceVersion ===
+              iframe?.getAttribute("data-design-source-version")
+          );
+        }),
+      "design-shown-selection-ready",
+    ),
+  );
   await page.evaluate(() => {
     const iframe = document.querySelector(
       '[data-design-frame="home.html"] iframe[data-design-document-buffer="displayed"][data-design-document-ready]',
     );
     const frame = iframe?.closest('[data-design-frame="home.html"]');
     const selection = frame?.querySelector(
-      '[data-design-element-overlay="home-heading"]',
+      '[data-design-selected-element][data-design-element-overlay="home-heading"]',
     );
     const styleEditor = document.querySelector("[data-design-style-editor]");
     if (
@@ -1877,6 +1717,9 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .catch(() => false),
     "design-authored-padding-selection",
   );
+  await inspector
+    .getByRole("button", { name: "Independent padding", exact: true })
+    .click();
   const authoredPaddingSides = page.locator(
     '[data-design-style-property^="padding-"]',
   );
@@ -1888,9 +1731,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
           (field) =>
             field.getAttribute("data-design-applied") === "" &&
             field.querySelector("input")?.value === "72" &&
-            field
-              .querySelector('button[aria-label^="Unit for "]')
-              ?.textContent?.includes("px") &&
             getComputedStyle(field).backgroundColor !== "rgba(0, 0, 0, 0)",
         ),
       )),
@@ -2084,6 +1924,53 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         !!draggedPaddingBox &&
         Math.abs(draggedPaddingBox.x - inlinePaddingBox.x) > 8,
     );
+    // A metadata refresh can finish while the gesture is previewing. Let the
+    // aggregate child read observe that preview before canceling, so the next
+    // gesture cannot accidentally use those cached boxes as its baseline.
+    await page.evaluate(async () => {
+      const { designFrameRuntime } = await import(
+        "/apps/desktop/src/renderer/platform/bridge/design-frame-runtime.ts"
+      );
+      const { useDesignRuntimeStore } = await import(
+        "/apps/desktop/src/renderer/features/design-workspace/state/design-runtime-store.ts"
+      );
+      const workspaceId = "ws_design_harness";
+      const runtime = designFrameRuntime(workspaceId, "home.html");
+      const readGeometry = runtime.previewGeometry.bind(runtime);
+      let finishRead;
+      let timeout;
+      const read = new Promise((resolve, reject) => {
+        finishRead = resolve;
+        timeout = setTimeout(
+          () => reject(new Error("Child geometry did not refresh")),
+          10_000,
+        );
+      });
+      runtime.previewGeometry = async (...args) => {
+        const geometry = await readGeometry(...args);
+        if (args[0] === "home-main" && !args[1] && args[2]?.children)
+          finishRead();
+        return geometry;
+      };
+      try {
+        const store = useDesignRuntimeStore.getState();
+        const snapshot = store.byWorkspace[workspaceId].frames["home.html"].snapshot;
+        store.publishSnapshot(
+          workspaceId,
+          store.byWorkspace[workspaceId].folder,
+          "home.html",
+          { ...snapshot, revision: snapshot.revision + 1 },
+          snapshot.sourceVersion,
+        );
+        await read;
+        await new Promise((resolve) =>
+          requestAnimationFrame(() => requestAnimationFrame(resolve)),
+        );
+      } finally {
+        clearTimeout(timeout);
+        runtime.previewGeometry = readGeometry;
+      }
+    });
     await page.keyboard.press("Escape");
     await page.mouse.up();
     check(
@@ -2114,6 +2001,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     )
     .first();
   const distributedGapBox = await distributedGapHandle.boundingBox();
+  const distributedGapValue = await distributedGapHandle.textContent();
   if (distributedGapBox) {
     await page.mouse.move(
       distributedGapBox.x + distributedGapBox.width / 2,
@@ -2144,9 +2032,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       await waitFor(async () => {
         const restoredBox = await distributedGapHandle.boundingBox();
         return (
-          (await distributedGapHandle.textContent()) === "0" &&
+          (await distributedGapHandle.textContent()) === distributedGapValue &&
           !!restoredBox &&
+          Math.abs(restoredBox.x - distributedGapBox.x) < 1 &&
           Math.abs(restoredBox.y - distributedGapBox.y) < 1 &&
+          Math.abs(restoredBox.width - distributedGapBox.width) < 1 &&
           Math.abs(restoredBox.height - distributedGapBox.height) < 1
         );
       }, "design-inline-distributed-gap-cancel"),
@@ -2845,9 +2735,9 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   // One Enter is one source write. The colour picker used to commit from its
   // own key handler and then blur — and blur commits too — so a single keypress
   // authored the same value twice and one undo left it in place.
-  await page.getByRole("button", { name: "Edit text color" }).click();
+  await page.getByRole("button", { name: "Edit fill" }).click();
   const textColorInput = page.getByRole("textbox", {
-    name: "Text color value",
+    name: "Fill value",
   });
   const beforeTextColorCommit = await page.evaluate(
     () => window.__zerosHarnessStyleMutationSources?.length ?? 0,
@@ -2898,17 +2788,17 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await page.keyboard.press("Escape");
 
   await page.getByRole("button", { name: "Edit fill" }).click();
-  const fillInput = page.getByRole("textbox", { name: "Fill color value" });
+  const fillInput = page.getByRole("textbox", { name: "Fill value" });
   const selectedHeading = homeRuntime.locator('[data-oid="home-heading"]');
   const authoredFill = await selectedHeading.evaluate((element) =>
-    element.style.getPropertyValue("background-color"),
+    element.style.getPropertyValue("color"),
   );
   await fillInput.fill("rgb(1, 2, 3)");
   await page.waitForTimeout(150);
   check(
     "a typed fill value stays a draft until it is committed",
     (await selectedHeading.evaluate((element) =>
-      element.style.getPropertyValue("background-color"),
+      element.style.getPropertyValue("color"),
     )) === authoredFill,
   );
   await fillInput.press("Enter");
@@ -2917,8 +2807,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       selectedHeading
         .evaluate(
           (element) =>
-            element.style.getPropertyValue("background-color") ===
-            "rgb(1, 2, 3)",
+            element.style.getPropertyValue("color") === "rgb(1, 2, 3)",
         )
         .catch(() => false),
     "design-style-preview-applied",
@@ -2926,7 +2815,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "a committed style edit applies inside the live frame runtime",
     stylePreviewApplied,
-    `inline=${await selectedHeading.evaluate((element) => element.style.getPropertyValue("background-color"))}`,
+    `inline=${await selectedHeading.evaluate((element) => element.style.getPropertyValue("color"))}`,
   );
   await fillInput.fill(authoredFill);
   await fillInput.press("Enter");
@@ -2935,7 +2824,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       selectedHeading
         .evaluate(
           (element, expected) =>
-            element.style.getPropertyValue("background-color") === expected,
+            element.style.getPropertyValue("color") === expected,
           authoredFill,
         )
         .catch(() => false),
@@ -2951,7 +2840,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         selectedHeading
           .evaluate(
             (element, expected) =>
-              element.style.getPropertyValue("background-color") === expected,
+              element.style.getPropertyValue("color") === expected,
             authoredFill,
           )
           .catch(() => false),
@@ -3001,11 +2890,17 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       }),
     "design-static-offset-removal-settled",
   );
+  await page.getByLabel("Review Design changes", { exact: true }).click();
+  // Opening review flushes the focused inspector field. Count Git actions
+  // only after that save and the review snapshot have settled.
+  await waitFor(
+    () => page.getByLabel("Stage Design changes", { exact: true }).isEnabled(),
+    "design-explicit-review-ready",
+  );
   const beforeExplicitGitActions = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );
-  await page.getByLabel("Design Git actions").click();
-  await page.getByLabel("Stage Design changes").click();
+  await page.getByLabel("Stage Design changes", { exact: true }).click();
   await waitFor(
     async () =>
       (await page.evaluate(
@@ -3016,7 +2911,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       )) === true,
     "design-explicit-stage",
   );
-  await page.getByLabel("Design Git actions").click();
   await page.getByLabel("Commit staged Design changes").click();
   const explicitGitActionsSettled = await waitFor(async () => {
     const operations = await page.evaluate(
@@ -3038,6 +2932,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         "stage:start,stage:end,commit",
     JSON.stringify(explicitGitActions),
   );
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Close", exact: true })
+    .click();
   const beforeSaveShortcut = await page.evaluate(
     () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
   );
@@ -3166,18 +3064,55 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     )) === "",
   );
   await transformInput.press("Enter");
+  const transformCommitted = await waitFor(
+    () =>
+      selectedHeading
+        .evaluate(
+          (element) =>
+            element.style.getPropertyValue("transform") === "rotate(12deg)",
+        )
+        .catch(() => false),
+    "design-transform-preview",
+  );
   check(
     "committed transform CSS expressions apply to the selected runtime element",
-    await waitFor(
-      () =>
-        selectedHeading
-          .evaluate(
-            (element) =>
-              element.style.getPropertyValue("transform") === "rotate(12deg)",
-          )
-          .catch(() => false),
-      "design-transform-preview",
-    ),
+    transformCommitted,
+    transformCommitted
+      ? ""
+      : JSON.stringify({
+          heading: await selectedHeading
+            .evaluate((element) => ({
+              style: element.getAttribute("style"),
+              generation: window.__zerosDesignSourceVersion,
+            }))
+            .catch(() => null),
+          parent: await page.evaluate(() => ({
+            selected: Array.from(
+              document.querySelectorAll(
+                '[data-design-layer-id][aria-selected="true"]',
+              ),
+              (el) => el.getAttribute("data-design-layer-id"),
+            ),
+            overlays: Array.from(
+              document.querySelectorAll("[data-design-selected-element]"),
+              (el) => ({
+                node: el.getAttribute("data-design-element-overlay"),
+                generation: el.getAttribute(
+                  "data-design-overlay-source-version",
+                ),
+              }),
+            ),
+            errors: Array.from(
+              document.querySelectorAll("[data-sonner-toast]"),
+              (el) => el.textContent,
+            ),
+            operations:
+              window.__zerosHarnessDesignShortcutOperations?.slice(-12),
+            transformInput: !!document.querySelector(
+              '[aria-label="Transform CSS value"]',
+            ),
+          })),
+        }),
   );
   await transformInput.press("ControlOrMeta+A");
   await transformInput.press("Backspace");
@@ -3195,10 +3130,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     ),
   );
   check(
-    "design advisories are compact and explicitly non-blocking",
-    (await page
-      .getByText("Review 1 rule · non-blocking", { exact: true })
-      .count()) === 1,
+    "design advisories stay out of the style editor",
+    (await page.locator("[data-design-lint-review]").count()) === 0,
   );
   check(
     "style keyframe actions stay unavailable until Motion mode opens",
@@ -3351,7 +3284,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     );
     const styleEditor = document.querySelector("[data-design-style-editor]");
     const timeline = document.querySelector('[aria-label="Motion timeline"]');
-    const review = document.querySelector("[data-design-lint-review]");
     const frame = iframe?.closest('[data-design-frame="home.html"]');
     const selection = frame?.querySelector(
       "[data-design-element-overlay].zd-design-selection-outline",
@@ -3361,8 +3293,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       !frame ||
       !selection ||
       !styleEditor ||
-      !timeline ||
-      !review
+      !timeline
     ) {
       throw new Error("The hot-generation identity surfaces are unavailable.");
     }
@@ -3376,7 +3307,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       selection,
       styleEditor,
       timeline,
-      review,
       iframeLoads: () => iframeLoads,
     };
   });
@@ -3404,12 +3334,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
               identity.styleEditor &&
             document.querySelector('[aria-label="Motion timeline"]') ===
               identity.timeline &&
-            identity.review.isConnected &&
-            document.querySelector("[data-design-lint-review]") ===
-              identity.review &&
-            identity.review.textContent?.includes(
-              "Review 1 rule · non-blocking",
-            ) &&
+            document.querySelector("[data-design-lint-review]") === null &&
             identity.iframeLoads() === 0 &&
             iframe?.getAttribute("data-design-source-version") ===
               nextSourceVersion &&
@@ -3443,8 +3368,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         timelineIdentity:
           document.querySelector('[aria-label="Motion timeline"]') ===
           identity?.timeline,
-        reviewConnected: identity?.review.isConnected ?? false,
-        reviewText: identity?.review.textContent ?? null,
+        advisoryHidden:
+          document.querySelector("[data-design-lint-review]") === null,
         iframeLoads: identity?.iframeLoads() ?? null,
         source: iframe?.getAttribute("data-design-source-version") ?? null,
         documentSource:
@@ -3542,7 +3467,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       frame,
       styleEditor: hotIdentity.styleEditor,
       timeline: hotIdentity.timeline,
-      review: hotIdentity.review,
       selection: hotIdentity.selection,
       incomingLoads: () => incomingLoads,
       sawDualDocumentBuffers: () => sawDualDocumentBuffers,
@@ -3605,8 +3529,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         document.querySelector('[aria-label="Motion timeline"]') ===
         identity?.timeline,
       reviewIdentity:
-        document.querySelector("[data-design-lint-review]") ===
-        identity?.review,
+        document.querySelector("[data-design-lint-review]") === null,
       incomingLoads: identity?.incomingLoads() ?? null,
       sawDualDocumentBuffers: identity?.sawDualDocumentBuffers() ?? false,
       maxDocumentBuffers: identity?.maxDocumentBuffers() ?? null,
@@ -4654,14 +4577,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
 
   const headingGroupFill = await selectedHeading.evaluate((element) =>
-    element.style.getPropertyValue("background-color"),
-  );
-  const copyGroupFill = await selectedCopy.evaluate((element) =>
-    element.style.getPropertyValue("background-color"),
+    element.style.getPropertyValue("color"),
   );
   await page.getByRole("button", { name: "Edit fill" }).click();
   const groupFillInput = page.getByRole("textbox", {
-    name: "Fill color value",
+    name: "Fill value",
   });
   await groupFillInput.fill("rgb(4, 5, 6)");
   await groupFillInput.press("Enter");
@@ -4671,13 +4591,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       async () =>
         (await selectedHeading.evaluate(
           (element) =>
-            element.style.getPropertyValue("background-color") ===
-            "rgb(4, 5, 6)",
+            element.style.getPropertyValue("color") === "rgb(4, 5, 6)",
         )) &&
         (await selectedCopy.evaluate(
           (element) =>
-            element.style.getPropertyValue("background-color") ===
-            "rgb(4, 5, 6)",
+            element.style.getPropertyValue("color") === "rgb(4, 5, 6)",
         )),
       "design-multi-style-preview",
     ),
@@ -4685,18 +4603,18 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await groupFillInput.fill(headingGroupFill);
   await groupFillInput.press("Enter");
   check(
-    "committing again restores every layer in the group",
+    "committing again updates every layer in the group",
     await waitFor(
       async () =>
         (await selectedHeading.evaluate(
           (element, expected) =>
-            element.style.getPropertyValue("background-color") === expected,
+            element.style.getPropertyValue("color") === expected,
           headingGroupFill,
         )) &&
         (await selectedCopy.evaluate(
           (element, expected) =>
-            element.style.getPropertyValue("background-color") === expected,
-          copyGroupFill,
+            element.style.getPropertyValue("color") === expected,
+          headingGroupFill,
         )),
       "design-multi-style-escape",
     ),
@@ -4801,26 +4719,24 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     headingOverlayBox.y + headingOverlayBox.height / 2 + 1,
   );
   check(
-    "nested element movement snaps to peer axes with a live guide",
+    "an auto-layout drag shows its sibling insertion guide",
     await waitFor(
-      () =>
-        page
-          .locator('[data-design-guide="vertical"]')
-          .evaluate((element) => getComputedStyle(element).display !== "none"),
+      () => page.locator("[data-design-layout-insertion]").isVisible(),
       "design-element-snap-guide",
     ),
   );
-  // Snapping can keep the original X. Move beyond its tolerance before
-  // expecting a whole-number parent-local coordinate to change.
+  // Horizontal pointer travel must not offset a child in this column layout.
   await page.mouse.move(
     headingOverlayBox.x + headingOverlayBox.width / 2 + 24,
     headingOverlayBox.y + headingOverlayBox.height / 2 + 1,
   );
   check(
-    "canvas movement updates only the keyed inspector scalar without remounting it",
+    "auto-layout movement retains its aligned X and the inspector input identity",
     await waitFor(
       async () =>
-        (await liveLeftInput.inputValue()) !== leftBeforeCanvasMove &&
+        (await liveLeftInput.inputValue()) === leftBeforeCanvasMove &&
+        (await runtimeHeading.evaluate((element) => element.style.left)) ===
+          "auto" &&
         (await liveLeftField.getAttribute("data-design-live-identity")) ===
           "heading-left",
       "design-live-left-scalar",
@@ -5291,8 +5207,8 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       (constraintRuns.find((run) => run.side === "top")?.height ?? 0) > 4,
     JSON.stringify(constraintRuns),
   );
-  // Gesture paints own the runs too: the parent stays put while one element
-  // moves, so the dashed distance has to follow it and snap back on cancel.
+  // An in-flow child stays under its parent's alignment until it crosses a
+  // sibling insertion point; a small drag must not author a positional offset.
   const copyOverlayBox = await homeFrame
     .locator('[data-design-element-overlay="home-copy"]')
     .boundingBox();
@@ -5310,11 +5226,17 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     { steps: 4 },
   );
   check(
-    "a moved element drags its constraint distance with it",
+    "flow drag distance guides follow the child's rendered layout position",
     await waitFor(async () => {
       const runs = await readConstraintRuns();
       const top = runs.find((run) => run.side === "top")?.height ?? 0;
-      return top > restingTopRun + 12;
+      const child = await runtimeCopyForPeerSelection.boundingBox();
+      const parent = await homeRuntime
+        .locator('[data-oid="home-hero"]')
+        .boundingBox();
+      return (
+        child && parent && Math.abs(top - Math.abs(child.y - parent.y)) < 1.5
+      );
     }, "design-constraint-live-run"),
   );
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));

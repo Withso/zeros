@@ -90,7 +90,7 @@ describe("Design manifest Git ownership", () => {
       await writeFile(path.join(root, legacyFile), stringify(original));
       await runGit(root, ["add", "-f", "A", "B", ".zeros"]);
       await runGit(root, ["commit", "-m", "old registry"]);
-      commitDesignMetadata(root, "A", '{"version":3,"frames":{"a.html":{}}}');
+      commitDesignMetadata(root, "A", '{"version":3,"frames":{"a.html":{"x":0,"y":0,"w":800,"h":600,"z":0}}}');
       await stage("A");
       expect(await designRegistryAtGitRef(root, ":")).toEqual(original);
       const stagedRegistry = (await runGit(root, ["show", `:${legacyFile}`]))
@@ -150,7 +150,7 @@ describe("Design manifest Git ownership", () => {
     await writeFile(
       path.join(root, "A/design.toml"),
       (await readFile(path.join(root, "A/design.toml"), "utf8")).replace(
-        "version = 1",
+        "version = 2",
         "version = 9",
       ),
     );
@@ -163,6 +163,7 @@ describe("Design manifest Git ownership", () => {
 
   it("migrates an older branch using the inherited legacy ID", async () => {
     await rm(path.join(root, "A/design.toml"));
+    await rm(path.join(root, "A/canvas.json"));
     await rm(path.join(root, "B"), { recursive: true });
     await writeFile(
       path.join(root, "A/.zeros-canvas.json"),

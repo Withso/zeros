@@ -11,9 +11,10 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
+import { closeZerosDb } from "../../db";
 import type {
   AgentAdapter,
   AgentFilesystemTerritory,
@@ -121,6 +122,20 @@ function text(t: string): ContentBlock {
 }
 
 let CWD: string;
+let previousDataDir: string | undefined;
+let testDataDir: string;
+beforeAll(() => {
+  previousDataDir = process.env.ZEROS_DATA_DIR;
+  testDataDir = mkdtempSync(path.join(os.tmpdir(), "zeros-native-instructions-data-"));
+  // Registered Design owners must come from this fixture, never the user's app.
+  process.env.ZEROS_DATA_DIR = testDataDir;
+});
+afterAll(() => {
+  closeZerosDb();
+  if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
+  else process.env.ZEROS_DATA_DIR = previousDataDir;
+  rmSync(testDataDir, { recursive: true, force: true });
+});
 beforeEach(() => {
   CWD = realpathSync(
     mkdtempSync(path.join(os.tmpdir(), "zeros-gateway-native-")),
@@ -319,118 +334,6 @@ describe("gateway native system-instruction routing", () => {
     await gw.dispose();
   });
 
-  it("admits a persistent Design session with only its scoped MCP and ZSR actor", async () => {
-    const requests: BoundaryRequest[] = [];
-    const gw = makeGateway(
-      testExecutionBoundary({ onPrepare: (request) => requests.push(request) }),
-    );
-    gw.setGatewayServer("http://127.0.0.1:45291/mcp");
-    const c = calls();
-    const territory: AgentFilesystemTerritory = {
-      agentRole: "code",
-      workspaceRoot: CWD,
-      designDirectory: `${CWD}/Zeros Design`,
-      protectedDesignDirectories: [`${CWD}/Zeros Design`],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write",
-        deniedPaths: [`${CWD}/Zeros Design`, `${CWD}/.git`],
-      },
-    };
-    const internals = gw as unknown as GwInternals;
-    internals.adapters.set(
-      "codex",
-      fakeAdapter({
-        agentId: "codex",
-        native: true,
-        sessionId: "design-session",
-        calls: c,
-      }),
-    );
-    internals.prepareCodeAgentTerritory = async () => territory;
-    const resolveMcp = vi.fn(async () => [
-      { name: "user-server", transport: "stdio", command: "unsafe" },
-    ]);
-    internals.resolveSessionMcp = resolveMcp;
-
-    const session = await gw.newDesignSession(
-      "codex",
-      {
-        actor: "design-agent",
-        agentRunId: "design-run-1",
-        env: {
-          ZEROS_DESIGN_AGENT_CAPABILITY: `Bearer ${"a".repeat(64)}`,
-        },
-        mcpServers: [
-          {
-            name: "design-draft",
-            transport: "http",
-            url: "http://127.0.0.1:43123/mcp",
-            headersFromEnv: {
-              Authorization: "ZEROS_DESIGN_AGENT_CAPABILITY",
-            },
-          },
-        ],
-        trustedLocalPorts: [43123],
-      },
-      {
-        cwd: CWD,
-        workspaceId: "workspace-1",
-        env: {
-          ZEROS_DESIGN_AGENT_CAPABILITY: "untrusted-override",
-          ZEROS_ADDITIONAL_DIRS: '["/work/reference"]',
-        },
-      },
-    );
-
-    expect(resolveMcp).not.toHaveBeenCalled();
-    expect(c.newSessionOpts[0]).toMatchObject({
-      env: {
-        ZEROS_DESIGN_AGENT_CAPABILITY: `Bearer ${"a".repeat(64)}`,
-        ZEROS_ADDITIONAL_DIRS: '["/work/reference"]',
-      },
-      mcpServers: [
-        {
-          name: "design-draft",
-          transport: "http",
-          url: "http://127.0.0.1:43123/mcp",
-        },
-      ],
-    });
-    expect(c.newSessionOpts[0]!.territory).toBeUndefined();
-    const instruction = c.newSessionOpts[0]!.systemInstruction as string;
-    expect(instruction).toContain("Design agent");
-    expect(instruction).toContain("design_transaction_apply");
-    expect(instruction).not.toContain("You are a coding agent");
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({
-      actor: "design-agent",
-      allowedLocalPorts: [43123],
-      trustedLocalPorts: [43123],
-    });
-    expect(session.executionId).toBeTruthy();
-    expect(gw.sessionActor(session.executionId)).toBe("design-agent");
-    expect(
-      gw.workspaceSessionIds("workspace-1", CWD, {
-        actor: "agent-code",
-      }),
-    ).toEqual([]);
-    expect(
-      gw.workspaceSessionIds("workspace-1", CWD, {
-        actor: "design-agent",
-      }),
-    ).toEqual([session.executionId]);
-    expect(
-      gw.workspaceTerritoryChanged("workspace-1", CWD, undefined, {
-        actor: "agent-code",
-      }),
-    ).toBe(false);
-    expect(
-      gw.workspaceTerritoryChanged("workspace-1", CWD, undefined, {
-        actor: "design-agent",
-      }),
-    ).toBe(true);
-  });
 
   it("falls back to the active Design directory when a native Code refresh carries an empty recognized set", async () => {
     const gw = makeGateway({ ...testExecutionBoundary(), backend: "none" });

@@ -22,22 +22,23 @@ describe("ZerosEngine.stop", () => {
     const calls: string[] = [];
     const engine = {
       running: true,
+      cloudRuntimeRegistration: {
+        stop: async () => {
+          calls.push("cloud-registration");
+        },
+      },
       bindingSweep: null,
       cloudGithubCredentialWatcher: null,
       parentWatchTimer: null,
       agents: {
+        revokeSessionTools: async () => {
+          calls.push("product-tools");
+        },
         dispose: async () => {
           calls.push("agents");
           throw new Error("agent boundary proof failed");
         },
       },
-      designAgentAdmissions: {
-        stopAll: async () => {
-          calls.push("design-admissions");
-          throw new Error("design admission stop failed");
-        },
-      },
-      designAgentRunByExecution: new Map(),
       vaultPersistTimer: null,
       mcpGateway: {
         stop: async () => {
@@ -63,13 +64,13 @@ describe("ZerosEngine.stop", () => {
     expect((error as AggregateError).errors).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ message: "agent boundary proof failed" }),
-        expect.objectContaining({ message: "design admission stop failed" }),
         expect.objectContaining({ message: "mcp stop failed" }),
       ]),
     );
     expect(calls).toEqual([
+      "product-tools",
+      "cloud-registration",
       "agents",
-      "design-admissions",
       "mcp",
       "pty",
       "terminals",

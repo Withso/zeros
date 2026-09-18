@@ -2,6 +2,7 @@ import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import postcss, { type AtRule, type Declaration, type Rule } from "postcss";
 import { DESIGN_DOCUMENT_BODY_ID } from "@zeros/design-core";
 import { designDocumentBody, withExplicitDesignBody } from "./document-body";
+import { identifyDesignHtmlNodes } from "./html";
 
 import type {
   DesignAuthoredKeyframes,
@@ -329,6 +330,7 @@ function inlineStyleForNode(
   nodeId: string,
 ): InlineStyleAttribute | null {
   const document = parse(source, { sourceCodeLocationInfo: true });
+  identifyDesignHtmlNodes(document, source);
   const matches =
     nodeId === DESIGN_DOCUMENT_BODY_ID
       ? [designDocumentBody(document)]

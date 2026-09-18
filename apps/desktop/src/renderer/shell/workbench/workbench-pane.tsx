@@ -20,9 +20,10 @@ import {
   useWorkspaceDispatch,
   useWorkspaceStore,
 } from "../../state/store";
-import { workbenchScopeKey } from "../../state/workspace-store";
+import { workbenchScopeKey, selectWorkbench } from "../../state/workspace-store";
+import { RetainedDesignDeck } from "./design-deck";
 import { WorkbenchTabContent } from "./tab-content";
-import { shouldMountWorkbenchTab, type WorkbenchTab } from "./tab-model";
+import { migrateDesignPresentation, shouldMountWorkbenchTab, type WorkbenchTab } from "./tab-model";
 import {
   isWorkbenchEditorDirty,
   useWorkbenchDirtyEditorIds,
@@ -252,13 +253,18 @@ export function WorkbenchPane({
   const allTabs = useWorkbenchTabs();
   const tabs = useMemo(() => visibleWorkbenchTabs(allTabs), [allTabs]);
   const [terminalHost, setTerminalHost] = useState<HTMLDivElement | null>(null);
-  const storedActiveId = useActiveWorkbenchTabId();
+  const persistedActiveId = useActiveWorkbenchTabId();
+  const workbenchSlice = useWorkspaceStore(selectWorkbench);
+  const scope = useWorkspaceStore(workbenchScopeKey);
   const dirtyEditorIds = useWorkbenchDirtyEditorIds();
   // The Changes tab's PR status row and the Review tab share one condition:
   // the active workspace has a PR. Tracked here for the creation-moment
   // auto-focus below.
   const { workspace: activeWorkspace, project: activeProject } =
     useActiveWorkspace();
+  const storedActiveId = activeWorkspace
+    ? migrateDesignPresentation(workbenchSlice, activeWorkspace.kind === "design" ? "design" : "code").activeId
+    : persistedActiveId;
   const refreshWorkspaceId = activeWorkspace
     ? isLocalMainWorkspace(activeWorkspace)
       ? activeWorkspace.repoRoot
@@ -315,6 +321,11 @@ export function WorkbenchPane({
   }, [collapsed]);
 
   const dispatch = useWorkspaceDispatch();
+  useLayoutEffect(() => {
+    if (activeWorkspace && !workbenchSlice.designPresentationMigrated) {
+      dispatch({ type: "MIGRATE_DESIGN_PRESENTATION", scope, kind: activeWorkspace.kind === "design" ? "design" : "code" });
+    }
+  }, [activeWorkspace, dispatch, scope, workbenchSlice.designPresentationMigrated]);
 
   // ── Auto-focus the Review tab when a PR is CREATED ──────────────────
   // The moment the in-view workspace's prNumber flips null → number, reveal
@@ -438,6 +449,7 @@ export function WorkbenchPane({
   const mountedTabs = tabs.filter(
     (tab) =>
       tab.type !== "browser" &&
+      tab.type !== "design" &&
       tab.type !== "terminal" &&
       (retainedWorkbenchSet.has(tab.id) ||
         shouldMountWorkbenchTab(tab, activeId, dirtyEditorIds)),
@@ -501,6 +513,11 @@ export function WorkbenchPane({
                 />
               )}
               <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                <RetainedDesignDeck
+                  workspace={activeWorkspace}
+                  folder={folderKey}
+                  active={surfaceActive && !collapsed && activeWorkbenchTab?.type === "design"}
+                />
                 {/* Pinned sources and active/dirty File surfaces stay mounted;
                   only the active tab is visible. */}
                 {mountedTabs.map((tab) => {

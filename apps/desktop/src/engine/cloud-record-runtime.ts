@@ -3,6 +3,7 @@ import path from "node:path";
 
 import {
   bulkUpsertChats,
+  restoreChatComposerModes,
   coerceChatRow,
   listChats,
   type ChatRow,
@@ -659,7 +660,10 @@ export class CloudWorkspaceRecordRuntime {
           deleteTombstone.run("msgreset", chatId);
         }
       }
-      if (chatDocuments.length > 0) bulkUpsertChats(chatDocuments);
+      if (chatDocuments.length > 0) {
+        bulkUpsertChats(chatDocuments);
+        restoreChatComposerModes(chatDocuments);
+      }
       for (const [chatId, rows] of messages) {
         rows.sort((a, b) => a.ord - b.ord || a.msgId.localeCompare(b.msgId));
         if (mode === "replace") {

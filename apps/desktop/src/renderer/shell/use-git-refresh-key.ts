@@ -41,6 +41,7 @@ import {
 } from "./workspace-file-data-cache";
 import {
   invalidateAllEngineReadCaches,
+  invalidateDesignReviewCache,
   invalidateDesignDirectoryTargetReadCache,
   invalidateExternalGitRefCaches,
   invalidateWorkingDirectoriesReadCache,
@@ -334,6 +335,8 @@ function handleWorkspaceDbChanged(msg: unknown): void {
   // '*' for an unknown/remote id) — keeping the common per-change case off the
   // global invalidate storm that made the Dashboard lag the top bar. With no
   // ids, the coarse workspace-list invalidation is the only safe choice.
+  if (changedIds.length > 0) changedIds.forEach(id => invalidateDesignReviewCache(id));
+  else invalidateDesignReviewCache();
   if (changedIds.length > 0) notifyWorkspacesChangedForIds(changedIds);
   else notifyWorkspacesChanged("*");
 

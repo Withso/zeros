@@ -225,7 +225,7 @@ export function repoSlugFromPath(repoRoot: string): string {
 }
 
 function projectId(): string {
-  return `proj_${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  return `proj_${crypto.randomUUID()}`;
 }
 
 // ── CRUD ─────────────────────────────────────────────────

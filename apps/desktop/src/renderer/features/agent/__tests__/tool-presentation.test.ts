@@ -9,6 +9,7 @@ import {
   renderDetail,
 } from "../renderers/event-row-renderer";
 import { metaForEvent } from "../renderers/event-meta";
+import { PenTool } from "lucide-react";
 import { commandReadActions, displayCommand } from "../renderers/tool-command";
 import { isVisibleTranscriptEvent } from "../turn-partition";
 import { EventStripe } from "../renderers/event-stripe";
@@ -53,6 +54,23 @@ const row = (value: AgentToolMessage, open = true) =>
   );
 
 describe("tool presentation contract", () => {
+  it.each([
+    ["design_document_list", "List"], ["design_document_open", "Inspect"],
+    ["design_provenance_read", "Inspect Styles"], ["design_transaction_apply", "Edit"],
+    ["design_lint", "Validate"], ["design_capture", "Capture"], ["design_history_undo", "Undo"],
+  ])("presents %s as a normal Design tool across native provider envelopes", (name, label) => {
+    for (const input of [
+      { title: name, rawInput: { server: "design-draft", tool: name, arguments: {} } },
+      { title: `mcp__design-draft__${name}`, rawInput: {} },
+      { title: `MCP mcp__design-draft__${name}`, rawInput: { toolName: `mcp__design-draft__${name}` } },
+      { title: `MCP ${name}`, rawInput: { providerIdentifier: "design-draft", toolName: name } },
+    ]) {
+      const value = tool({ toolKind: "mcp", ...input, rawOutput: { revision: "recorded" } });
+      expect(metaForEvent(value)).toMatchObject({ Icon: PenTool, label, expandable: true });
+      expect(row(value)).toContain("recorded");
+    }
+    expect(metaForEvent(tool({ toolKind: "mcp", title: `mcp__design-draft__${name}`, rawInput: { server: "other", tool: name } })).Icon).not.toBe(PenTool);
+  });
   it("presents native Codex waits as coordination without exposing transport ids", () => {
     const waiting = tool({ toolKind: "other", title: "Waiting for agent", status: "in_progress", rawInput: { tool: "wait", senderThreadId: "parent-private-id", receiverThreadIds: ["child-private-id"] } });
     expect(metaForEvent(waiting)).toMatchObject({ label: "Waiting for agent", expandable: false });

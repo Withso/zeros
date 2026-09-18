@@ -96,6 +96,8 @@ import {
   PROMPT_SURFACE_RADIUS,
 } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
+import { ComposerDesignTag } from "./composer-design-tag";
+import { setComposerMode } from "./composer-mode";
 import {
   Conversation,
   ConversationContent,
@@ -844,6 +846,14 @@ export function AgentChat({
     [agentSessions, chatId, dispatch, surfaceActive],
   );
   const capabilitiesBridge = useBridge();
+  const changeComposerMode = useCallback((mode: "code" | "design") => {
+    if (!capabilitiesBridge || !chatId) return;
+    void setComposerMode(capabilitiesBridge, chatId, mode).catch((error: unknown) => {
+      toast.error("Could not change Design mode", { description: error instanceof Error ? error.message : String(error) });
+    });
+  }, [capabilitiesBridge, chatId]);
+  const enterDesignMode = useCallback(() => changeComposerMode("design"), [changeComposerMode]);
+  const leaveDesignMode = useCallback(() => changeComposerMode("code"), [changeComposerMode]);
   const preparationOwner = JSON.stringify([
     chatId,
     session.agentId ?? chatThread?.agentId,
@@ -4966,7 +4976,10 @@ export function AgentChat({
                         onAttachTranscript={openTranscriptPicker}
                         onLinkWorkspace={openWorkspacePicker}
                         onIntent={warmTranscriptPicker}
+                        onDesign={chatId && capabilitiesBridge ? enterDesignMode : undefined}
+                        designSelected={chatThread?.composerMode === "design"}
                       />
+                      {chatThread?.composerMode === "design" && <ComposerDesignTag onRemove={leaveDesignMode} />}
                       <input
                         ref={fileInputRef}
                         type="file"

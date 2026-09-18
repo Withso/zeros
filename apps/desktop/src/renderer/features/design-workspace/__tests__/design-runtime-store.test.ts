@@ -30,6 +30,49 @@ function details(): DesignRuntimeNodeDetails {
 describe("design runtime store", () => {
   beforeEach(() => resetDesignRuntimeStoreForTests());
 
+  it("bounds screenshot bytes across all workspace owners while preserving their geometry", () => {
+    for (let index = 0; index < 40; index++) {
+      const workspace = `workspace-${index}`;
+      useDesignRuntimeStore
+        .getState()
+        .publishNodeDetails(
+          workspace,
+          `/design/${index}`,
+          "home.html",
+          details(),
+          SOURCE_VERSION,
+        );
+      useDesignRuntimeStore.getState().publishScreenshot(
+        workspace,
+        `/design/${index}`,
+        "home.html",
+        {
+          sourceVersion: SOURCE_VERSION,
+          nodeId: null,
+          mimeType: "image/png",
+          dataUrl: "data:image/png;base64," + "a".repeat(1024 * 1024),
+          width: 1000,
+          height: 1000,
+          scale: 1,
+        },
+        SOURCE_VERSION,
+      );
+    }
+    const frames = Object.values(
+      useDesignRuntimeStore.getState().byWorkspace,
+    ).flatMap((workspace) => Object.values(workspace.frames));
+    const bytes = frames
+      .flatMap((frame) => Object.values(frame.screenshotsByNode))
+      .reduce((total, shot) => total + shot.dataUrl.length * 2, 0);
+    expect(bytes).toBeLessThanOrEqual(24 * 1024 * 1024);
+    expect(frames.every((frame) => frame.detailsByNode.heading)).toBe(true);
+    expect(
+      designRuntimeFrameState("workspace-39", "home.html")?.screenshotsByNode[
+        ""
+      ],
+    ).toBeDefined();
+  });
+
   it("publishes child membership and pin changes while retaining identical exact-key readbacks", () => {
     const store = useDesignRuntimeStore.getState();
     const initial: DesignRuntimeNodeDetails = {

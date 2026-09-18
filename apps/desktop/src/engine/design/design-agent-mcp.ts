@@ -7,6 +7,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolResult,
+  type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
 
 import type { McpServerRegistration } from "../agents/types";
@@ -19,9 +21,22 @@ const SERVER_VERSION = "1.0.0";
 const MAX_MCP_SESSIONS = 8;
 const MAX_MCP_BODY_BYTES = 4 * 1024 * 1024;
 const MAX_MCP_HEADER_BYTES = 16 * 1024;
+const MAX_CONCURRENT_REQUESTS = 4;
 
 class McpBodyTooLargeError extends Error {}
 class McpInvalidJsonError extends Error {}
+
+/** Trusted engine adapter. The transport owns authentication and resource
+ * bounds; the handler owns exact workspace/document authority. */
+export interface DesignMcpToolHandler {
+  assertActive(token: string): void;
+  listTools(): Tool[];
+  callTool(
+    name: string,
+    input: unknown,
+    signal: AbortSignal,
+  ): Promise<CallToolResult>;
+}
 
 const EMPTY_INPUT = {
   type: "object",
@@ -247,20 +262,23 @@ function endStatus(response: http.ServerResponse, statusCode: number): void {
   response.end();
 }
 
-/** One loopback MCP endpoint per persistent Design-agent run. The trusted
- * engine hosts it outside ZSR; only semantic operations cross this boundary,
- * and every HTTP request must present the run's scoped capability. */
+/** One engine-hosted loopback MCP endpoint per admitted execution. Shared
+ * conversations retain it across mode changes; the handler checks mode and
+ * authority. Every HTTP request must present the scoped capability. The class
+ * name also serves the retained capability API compatibility path. */
 export class DesignAgentMcpServer {
   private port = 0;
   private httpServer: http.Server | null = null;
+  private activeRequests = 0;
+  private activeToolCalls = 0;
   private readonly sessions = new Map<string, StreamableHTTPServerTransport>();
   private readonly initializing = new Set<StreamableHTTPServerTransport>();
 
   constructor(
-    private readonly options: {
-      manager: DesignAgentCapabilityManager;
-      token: string;
-    },
+    private readonly options: { token: string } & (
+      | { manager: DesignAgentCapabilityManager; handler?: never }
+      | { handler: DesignMcpToolHandler; manager?: never }
+    ),
   ) {}
 
   get url(): string {
@@ -290,7 +308,7 @@ export class DesignAgentMcpServer {
 
   async start(): Promise<void> {
     if (this.httpServer) return;
-    this.options.manager.assertActive(this.options.token);
+    this.assertActive();
     const server = http.createServer(
       {
         headersTimeout: 10_000,
@@ -339,121 +357,141 @@ export class DesignAgentMcpServer {
       { capabilities: { tools: {} } },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: TOOLS as never,
+      tools: (this.options.handler?.listTools() ?? TOOLS) as never,
     }));
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      this.options.manager.assertActive(this.options.token);
-      const input = objectArguments(request.params.arguments ?? {});
-      switch (request.params.name) {
-        case "design_document_open": {
-          exactArguments(input, []);
-          return result(
-            await this.options.manager.open(this.options.token),
-          ) as never;
-        }
-        case "design_source_read":
-          exactArguments(input, ["file", "expectedRevision"], ["file"]);
-          return result(
-            await this.options.manager.readSource(this.options.token, {
-              file: requiredString(input, "file"),
-              expectedRevision: optionalString(input, "expectedRevision"),
-            }),
-          ) as never;
-        case "design_foundation_read":
-          exactArguments(input, ["expectedRevision"]);
-          return result(
-            await this.options.manager.readFoundation(this.options.token, {
-              expectedRevision: optionalString(input, "expectedRevision"),
-            }),
-          ) as never;
-        case "design_projection_read":
-          exactArguments(input, [
-            "expectedRevision",
-            "cursor",
-            "limit",
-            "maxDepth",
-          ]);
-          return result(
-            await this.options.manager.readProjection(this.options.token, {
-              expectedRevision: optionalString(input, "expectedRevision"),
-              cursor: optionalString(input, "cursor"),
-              limit: optionalInteger(input, "limit"),
-              maxDepth: optionalInteger(input, "maxDepth"),
-            }),
-          ) as never;
-        case "design_provenance_read": {
-          exactArguments(
-            input,
-            [
-              "nodeId",
-              "property",
-              "expectedRevision",
-              "computedValue",
-              "matched",
-            ],
-            ["nodeId", "property"],
+    server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+      if (this.activeToolCalls >= MAX_CONCURRENT_REQUESTS) {
+        throw new Error(
+          "Design tool capacity reached; wait for an active request to settle.",
+        );
+      }
+      this.activeToolCalls += 1;
+      try {
+        this.assertActive();
+        if (this.options.handler) {
+          return await this.options.handler.callTool(
+            request.params.name,
+            request.params.arguments ?? {},
+            extra.signal,
           );
-          const computedValue = input.computedValue;
-          if (
-            computedValue !== undefined &&
-            computedValue !== null &&
-            typeof computedValue !== "string"
-          ) {
-            throw new Error("Design tool computedValue is invalid.");
-          }
-          if (
-            input.matched !== undefined &&
-            (!Array.isArray(input.matched) ||
-              input.matched.some(
-                (entry) =>
-                  !entry || typeof entry !== "object" || Array.isArray(entry),
-              ))
-          ) {
-            throw new Error("Design tool matched provenance is invalid.");
-          }
-          return result(
-            await this.options.manager.readProvenance(this.options.token, {
-              nodeId: requiredString(input, "nodeId"),
-              property: requiredString(input, "property"),
-              expectedRevision: optionalString(input, "expectedRevision"),
-              ...(computedValue !== undefined ? { computedValue } : {}),
-              ...(input.matched !== undefined
-                ? { matched: input.matched as never }
-                : {}),
-            }),
-          ) as never;
         }
-        case "design_transaction_apply":
-          exactArguments(input, ["transaction", "dryRun"], ["transaction"]);
-          if (
-            !input.transaction ||
-            typeof input.transaction !== "object" ||
-            Array.isArray(input.transaction)
-          ) {
-            throw new Error("Design tool transaction must be an object.");
+        const input = objectArguments(request.params.arguments ?? {});
+        switch (request.params.name) {
+          case "design_document_open": {
+            exactArguments(input, []);
+            return result(
+              await this.options.manager.open(this.options.token),
+            ) as never;
           }
-          if (input.dryRun !== undefined && typeof input.dryRun !== "boolean") {
-            throw new Error("Design tool dryRun must be a boolean.");
+          case "design_source_read":
+            exactArguments(input, ["file", "expectedRevision"], ["file"]);
+            return result(
+              await this.options.manager.readSource(this.options.token, {
+                file: requiredString(input, "file"),
+                expectedRevision: optionalString(input, "expectedRevision"),
+              }),
+            ) as never;
+          case "design_foundation_read":
+            exactArguments(input, ["expectedRevision"]);
+            return result(
+              await this.options.manager.readFoundation(this.options.token, {
+                expectedRevision: optionalString(input, "expectedRevision"),
+              }),
+            ) as never;
+          case "design_projection_read":
+            exactArguments(input, [
+              "expectedRevision",
+              "cursor",
+              "limit",
+              "maxDepth",
+            ]);
+            return result(
+              await this.options.manager.readProjection(this.options.token, {
+                expectedRevision: optionalString(input, "expectedRevision"),
+                cursor: optionalString(input, "cursor"),
+                limit: optionalInteger(input, "limit"),
+                maxDepth: optionalInteger(input, "maxDepth"),
+              }),
+            ) as never;
+          case "design_provenance_read": {
+            exactArguments(
+              input,
+              [
+                "nodeId",
+                "property",
+                "expectedRevision",
+                "computedValue",
+                "matched",
+              ],
+              ["nodeId", "property"],
+            );
+            const computedValue = input.computedValue;
+            if (
+              computedValue !== undefined &&
+              computedValue !== null &&
+              typeof computedValue !== "string"
+            ) {
+              throw new Error("Design tool computedValue is invalid.");
+            }
+            if (
+              input.matched !== undefined &&
+              (!Array.isArray(input.matched) ||
+                input.matched.some(
+                  (entry) =>
+                    !entry || typeof entry !== "object" || Array.isArray(entry),
+                ))
+            ) {
+              throw new Error("Design tool matched provenance is invalid.");
+            }
+            return result(
+              await this.options.manager.readProvenance(this.options.token, {
+                nodeId: requiredString(input, "nodeId"),
+                property: requiredString(input, "property"),
+                expectedRevision: optionalString(input, "expectedRevision"),
+                ...(computedValue !== undefined ? { computedValue } : {}),
+                ...(input.matched !== undefined
+                  ? { matched: input.matched as never }
+                  : {}),
+              }),
+            ) as never;
           }
-          return result(
-            await this.options.manager.apply(
-              this.options.token,
-              input.transaction,
-              { dryRun: input.dryRun === true },
-            ),
-          ) as never;
-        case "design_history_undo":
-          exactArguments(input, []);
-          return result(
-            await this.options.manager.undo(this.options.token),
-          ) as never;
-        case "design_history_redo":
-          exactArguments(input, []);
-          return result(
-            await this.options.manager.redo(this.options.token),
-          ) as never;
-        default:
-          throw new Error("Unknown Design tool.");
+          case "design_transaction_apply":
+            exactArguments(input, ["transaction", "dryRun"], ["transaction"]);
+            if (
+              !input.transaction ||
+              typeof input.transaction !== "object" ||
+              Array.isArray(input.transaction)
+            ) {
+              throw new Error("Design tool transaction must be an object.");
+            }
+            if (
+              input.dryRun !== undefined &&
+              typeof input.dryRun !== "boolean"
+            ) {
+              throw new Error("Design tool dryRun must be a boolean.");
+            }
+            return result(
+              await this.options.manager.apply(
+                this.options.token,
+                input.transaction,
+                { dryRun: input.dryRun === true },
+              ),
+            ) as never;
+          case "design_history_undo":
+            exactArguments(input, []);
+            return result(
+              await this.options.manager.undo(this.options.token),
+            ) as never;
+          case "design_history_redo":
+            exactArguments(input, []);
+            return result(
+              await this.options.manager.redo(this.options.token),
+            ) as never;
+          default:
+            throw new Error("Unknown Design tool.");
+        }
+      } finally {
+        this.activeToolCalls -= 1;
       }
     });
     return server;
@@ -480,11 +518,17 @@ export class DesignAgentMcpServer {
       return false;
     }
     try {
-      this.options.manager.assertActive(this.options.token);
+      this.assertActive();
       return true;
     } catch {
       return false;
     }
+  }
+
+  private assertActive(): void {
+    (this.options.handler ?? this.options.manager).assertActive(
+      this.options.token,
+    );
   }
 
   private async handle(
@@ -523,12 +567,34 @@ export class DesignAgentMcpServer {
         return;
       }
 
-      const parsedBody =
-        request.method === "POST"
-          ? await readBoundedJsonBody(request)
-          : undefined;
+      let parsedBody: unknown;
+      if (request.method === "POST") {
+        if (this.activeRequests >= MAX_CONCURRENT_REQUESTS) {
+          request.resume();
+          endStatus(response, 429);
+          return;
+        }
+        this.activeRequests += 1;
+        try {
+          parsedBody = await readBoundedJsonBody(request);
+        } finally {
+          // Upload slots do not belong to long-lived SSE streams or running
+          // tools. A saturated tool lane must still receive cancellation.
+          this.activeRequests -= 1;
+        }
+      }
       let created: StreamableHTTPServerTransport | null = null;
       if (!transport) {
+        // Reading a request body yields. Recheck the limit before allocation
+        // so simultaneous initialization requests cannot all claim the last slot.
+        this.assertActive();
+        if (
+          !this.httpServer ||
+          this.sessions.size + this.initializing.size >= MAX_MCP_SESSIONS
+        ) {
+          endStatus(response, 429);
+          return;
+        }
         const next = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => {
             let id: string;

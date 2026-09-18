@@ -59,6 +59,8 @@ describe("Zeros browser tool client", () => {
         KEEP: "yes",
         ZEROS_BROWSER_SERVICE_URL: "http://127.0.0.1:1",
         ZEROS_BROWSER_SERVICE_TOKEN: "secret",
+        ZEROS_DESIGN_CAPTURE_URL: "http://127.0.0.1:2",
+        ZEROS_DESIGN_CAPTURE_TOKEN: "fixture-private-capture",
       }),
     ).toEqual({ KEEP: "yes" });
     expect(

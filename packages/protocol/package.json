@@ -6,6 +6,7 @@
   "description": "Shared Zeros bridge protocol — wire types, Zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives consumed across desktop renderer, Electron, and engine process boundaries.",
   "type": "module",
   "exports": {
+    "./composer-mode": "./src/composer-mode.ts",
     "./attachment-policy": "./src/attachment-policy.ts",
     "./tool-artwork": "./src/tool-artwork.ts",
     ".": "./src/index.ts",
@@ -18,6 +19,9 @@
     "./builtin-commands": "./src/builtin-commands.ts",
     "./agent-messages": "./src/agent-messages.ts",
     "./design-runtime": "./src/design-runtime.ts",
+    "./design-context": "./src/design-context.ts",
+    "./design-review": "./src/design-review.ts",
+    "./design-capture": "./src/design-capture.ts",
     "./system-instructions": "./src/system-instructions/index.ts",
     "./version": "./src/version.ts",
     "./schemas": "./src/schemas.ts",

@@ -94,6 +94,9 @@ export function buildEngineImage(): Image {
         "rm -rf /var/lib/apt/lists/*",
         `groupadd --gid ${SANDBOX_AGENT_GID} zeros-agent`,
         `useradd --uid ${SANDBOX_AGENT_UID} --gid ${SANDBOX_AGENT_GID} --create-home --home-dir /home/zeros-agent --shell /bin/bash zeros-agent`,
+        "groupadd --gid 10002 zeros-capture",
+        "useradd --uid 10002 --gid 10002 --create-home --home-dir /home/zeros-capture --shell /usr/sbin/nologin zeros-capture",
+        "chmod 0700 /home/zeros-capture",
         "usermod --add-subuids 100000-165535 --add-subgids 100000-165535 zeros-agent",
         // 2. Exact pnpm version (matches packageManager). No curl-piped
         //    installer or unattested optional runtime enters the image.
@@ -112,6 +115,9 @@ export function buildEngineImage(): Image {
             ]),
         `cd ${engineDirectory} && pnpm install --frozen-lockfile`,
         `cd ${engineDirectory} && pnpm build:engine`,
+        // Pinned Playwright browser revision, installed read-only outside every
+        // writable workspace. Capture runs as its own UID with Chromium sandboxing.
+        `cd ${engineDirectory} && PLAYWRIGHT_BROWSERS_PATH=/opt/zeros/design-browsers pnpm exec playwright-core install --with-deps chromium`,
         // Ensure the SQLite binding matches the box Node. A failed rebuild is a
         // broken engine image, so image creation must stop here.
         `cd ${engineDirectory} && pnpm rebuild better-sqlite3`,

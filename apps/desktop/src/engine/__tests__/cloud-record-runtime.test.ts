@@ -83,6 +83,8 @@ function remoteConversation(status: unknown): RemoteEntry[] {
           model: "gpt-test",
           effort: "medium",
           permissionMode: "default",
+          composerMode: "design",
+          composerModeRevision: 7,
           lastModeId: null,
           prePlanModeId: null,
           fast: false,
@@ -284,7 +286,7 @@ describe("cloud durable record runtime", () => {
           folder: outside,
           title: "Unrelated conversation",
         }),
-        expect.objectContaining({ id: "chat-1", folder: root }),
+        expect.objectContaining({ id: "chat-1", folder: root, composerMode: "design", composerModeRevision: 7 }),
       ]),
     );
     expect(listChatMessagesSince(0)).toContainEqual(

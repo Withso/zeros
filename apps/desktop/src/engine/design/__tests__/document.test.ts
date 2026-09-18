@@ -1,21 +1,24 @@
-import { parseCanvasFixture } from "./storage-fixtures";
-import { parseDesignManifest, serializeDesignManifest } from "../manifest";
+import { useLegacyDesignStorage } from "./storage-fixtures";
+import { parseCanvasFixture, writeDesignFixtureFile as writeFile } from "./storage-fixtures";
+import { encodeCanvasFile } from "../canvas-file";
 import {
   mkdtemp,
   mkdir,
   readFile,
   rm,
   symlink,
-  writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { parse } from "parse5";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   captureDesignFrameRestorePoint,
   createDesignFrame,
+  transferDesignNode,
+  restoreDesignFrameChanges,
   deleteDesignFrame,
   DESIGN_DIRECTORY_NAME,
   duplicateDesignFrame,
@@ -57,6 +60,102 @@ describe("design document", () => {
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
   });
+
+  it("detaches and reattaches a child atomically with exact structural undo", async () => {
+    const frame = await createDesignFrame(root);
+    const before = await readDesignFrame(root, frame.file);
+    const rootId = before.source.match(/data-oid="([^"]+)"/)?.[1];
+    expect(rootId).toBeTruthy();
+    await writeDesignNodeHtml(root, {
+      frame: frame.file,
+      sourceVersion: before.sourceVersion,
+      nodeId: rootId!,
+      html: '<div data-oid="moving" style="width:100px;height:80px;background:red"><span data-oid="label">Keep</span></div>',
+      mode: "append",
+    });
+    const original = await captureDesignFrameRestorePoint(root, frame.file);
+    const identity = await readDesignFrameRenderIdentity(root, frame.file);
+    const detached = await transferDesignNode(root, {
+      frame: frame.file,
+      sourceVersion: identity.sourceVersion,
+      nodeId: "moving",
+      geometry: { x: 700, y: 50, w: 100, h: 80, z: 1 },
+    });
+    expect((await listDesignFrames(root)).length).toBe(2);
+    expect(
+      (await captureDesignFrameRestorePoint(root, frame.file)).source,
+    ).not.toContain('data-oid="moving"');
+    expect(
+      (await captureDesignFrameRestorePoint(root, detached.frame)).source,
+    ).toContain('data-oid="label"');
+    await restoreDesignFrameChanges(root, detached.changes, "undo");
+    expect(await captureDesignFrameRestorePoint(root, frame.file)).toEqual(
+      original,
+    );
+    expect((await listDesignFrames(root)).length).toBe(1);
+    await restoreDesignFrameChanges(root, detached.changes, "redo");
+    const movedIdentity = await readDesignFrameRenderIdentity(
+      root,
+      detached.frame,
+    );
+    const destination = await readDesignFrameRenderIdentity(root, frame.file);
+    const attached = await transferDesignNode(root, {
+      frame: detached.frame,
+      sourceVersion: movedIdentity.sourceVersion,
+      nodeId: "moving",
+      destinationFrame: frame.file,
+      destinationSourceVersion: destination.sourceVersion,
+      parentId: rootId!,
+      styles: { position: "relative", width: "100px", height: "80px" },
+      geometry: { x: 0, y: 0, w: 100, h: 80, z: 1 },
+    });
+    expect((await listDesignFrames(root)).length).toBe(1);
+    expect(
+      (await captureDesignFrameRestorePoint(root, frame.file)).source,
+    ).toContain('data-oid="moving"');
+    await restoreDesignFrameChanges(root, attached.changes, "undo");
+    expect((await listDesignFrames(root)).length).toBe(2);
+  });
+
+  it.each([
+    '<!doctype html><html><head><title>Destination</title></head><body><main data-oid="destination">Keep</main></body></html>',
+    '<!doctype html><html><body><main data-oid="destination">Keep</main></body></html>',
+    '<!doctype html><body><main data-oid="destination">Keep</main></body>',
+  ])(
+    "preserves stylesheet dependencies and document mode during a transfer into %s",
+    async (destinationSource) => {
+      const from = await createDesignFrame(root, { title: "Source" });
+      const to = await createDesignFrame(root, { title: "Destination" });
+      const style = "<style>.heading { color: red; font-size: 40px; }</style>";
+      const link = '<link rel="stylesheet" href="./tokens.css">';
+      const source = `<!doctype html><html><head>${style}${link}</head><body><h1 data-oid="moving" class="heading">Move me</h1><p>Stay</p></body></html>`;
+      const fromPath = path.join(root, DESIGN_DIRECTORY_NAME, from.file);
+      const toPath = path.join(root, DESIGN_DIRECTORY_NAME, to.file);
+      await writeFile(fromPath, source);
+      await writeFile(toPath, destinationSource);
+      const fromIdentity = await readDesignFrameRenderIdentity(root, from.file);
+      const toIdentity = await readDesignFrameRenderIdentity(root, to.file);
+
+      const result = await transferDesignNode(root, {
+        frame: from.file,
+        sourceVersion: fromIdentity.sourceVersion,
+        nodeId: "moving",
+        destinationFrame: to.file,
+        destinationSourceVersion: toIdentity.sourceVersion,
+        parentId: "destination",
+        geometry: { x: 0, y: 0, w: 100, h: 80, z: 1 },
+      });
+      const saved = await readFile(toPath, "utf8");
+      expect(saved).toContain('class="heading">Move me</h1>');
+      expect(saved).toContain(style);
+      expect(saved).toContain(link);
+      expect(parse(saved).mode).toBe("no-quirks");
+      expect(await readFile(fromPath, "utf8")).not.toContain('data-oid="moving"');
+      await restoreDesignFrameChanges(root, result.changes, "undo");
+      expect(await readFile(fromPath, "utf8")).toBe(source);
+      expect(await readFile(toPath, "utf8")).toBe(destinationSource);
+    },
+  );
 
   it("seeds the portable HTML/CSS document and discovers stable frame geometry", async () => {
     const result = await initializeDesignDocument(root);
@@ -101,6 +200,7 @@ describe("design document", () => {
     expect(source).toContain('href="./tokens.css"');
     expect(source).toMatch(/<main\b[^>]*style="[^"]*display:block/);
     expect(source).toContain("height:100vh;");
+    expect(source).toContain("background-color:#ffffff; opacity:1;"); // check:ui ignore-line -- authored frame defaults.
     expect(source).toContain("data-zeros-frame-root");
     expect(source).not.toContain("<script");
     expect(source).toMatch(/<main\b[^>]*>\s*<\/main>/);
@@ -114,8 +214,7 @@ describe("design document", () => {
       path.join(root, DESIGN_DIRECTORY_NAME, "tokens.css"),
       "utf8",
     );
-    expect(tokens).toContain("body [data-oid]");
-    expect(tokens).toMatch(/body \[data-oid\] \{ display: block;/);
+    expect(tokens).not.toContain("body [data-oid]");
     expect(tokens).not.toMatch(/^\s*\[data-oid\]/m);
 
     await updateDesignFrameGeometry(root, created.file, {
@@ -217,10 +316,7 @@ describe("design document", () => {
           )
           .split(path.sep),
       );
-      const unsupported = serializeDesignManifest(
-        parseDesignManifest(await readFile(target, "utf8"))!.id,
-        { version, frames: {} },
-      );
+      const unsupported = JSON.stringify({ version, frames: {} });
       await writeFile(target, unsupported, "utf8");
 
       await expect(readDesignWorkspaceSnapshot(root)).rejects.toThrow(
@@ -315,6 +411,7 @@ describe("design document", () => {
       "utf8",
     );
 
+    useLegacyDesignStorage(root, DESIGN_DIRECTORY_NAME, ".zeros/design-dir.toml");
     const report = await lintDesignDocument(root, "blank-oid.html", {
       healOids: false,
     });
@@ -340,6 +437,7 @@ describe("design document", () => {
       "utf8",
     );
 
+    useLegacyDesignStorage(root, DESIGN_DIRECTORY_NAME, ".zeros/design-dir.toml");
     const before = await lintDesignDocument(root, "healed-report.html", {
       healOids: false,
     });
@@ -375,6 +473,7 @@ describe("design document", () => {
       "utf8",
     );
 
+    useLegacyDesignStorage(root, DESIGN_DIRECTORY_NAME, ".zeros/design-dir.toml");
     const report = await lintDesignDocument(root, "visual-nodes.html", {
       healOids: false,
     });
@@ -854,7 +953,7 @@ describe("design document", () => {
     expect(snapshot.frames[0]?.file).toBe("remote.html");
     expect(
       snapshot.lint.violations.some((item) => item.ruleId === "oid-missing"),
-    ).toBe(true);
+    ).toBe(false);
     expect(await readFile(path.join(directory, "remote.html"), "utf8")).toBe(
       source,
     );
@@ -885,10 +984,7 @@ describe("design document", () => {
     original.frame_info[frame.file].extension = "frame";
     await writeFile(
       target,
-      serializeDesignManifest(
-        parseDesignManifest(await readFile(target, "utf8"))!.id,
-        original,
-      ),
+      encodeCanvasFile(original),
     );
     await updateDesignFrameGeometry(root, frame.file, { x: 200 });
     const saved = parseCanvasFixture(await readFile(target, "utf8"));
@@ -902,12 +998,9 @@ describe("design document", () => {
     async (geometry) => {
       const frame = await createDesignFrame(root);
       const target = designDocumentMetadataPath(root, DESIGN_DIRECTORY_NAME);
-      const original = parseCanvasFixture(await readFile(target, "utf8"));
-      original.frames[frame.file] = geometry;
-      const source = serializeDesignManifest(
-        parseDesignManifest(await readFile(target, "utf8"))!.id,
-        original,
-      );
+      const original = JSON.parse(await readFile(target, "utf8"));
+      original.frames[Object.keys(original.frames)[0]] = geometry;
+      const source = JSON.stringify(original);
       await writeFile(target, source);
       await expect(
         updateDesignFrameGeometry(root, frame.file, { x: 200 }),
@@ -939,8 +1032,8 @@ describe("design document", () => {
     expect(mutation.frame.sourceVersion).not.toBe(before.sourceVersion);
     expect(mutation.frame.source).toBe(
       sourceBefore.replace(
-        "height:100vh;",
-        "height:100vh; padding:32px; background-color:var(--bg2);",
+        "background-color:#ffffff; opacity:1;", // check:ui ignore-line -- authored frame defaults.
+        "background-color:var(--bg2); opacity:1; padding:32px;",
       ),
     );
     expect(

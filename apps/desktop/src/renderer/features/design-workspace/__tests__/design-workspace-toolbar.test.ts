@@ -1,15 +1,10 @@
+import { readDesignWorkspaceSource } from "./workspace-source";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(
-  resolve(
-    process.cwd(),
-    "apps/desktop/src/renderer/features/design-workspace/design-workspace.tsx",
-  ),
-  "utf8",
-);
+const source = readDesignWorkspaceSource();
 const styleEditorSource = readFileSync(
   resolve(
     process.cwd(),
@@ -26,6 +21,16 @@ const sidebarSource = readFileSync(
 );
 
 describe("design workspace inspector toolbar", () => {
+  it("keeps successful saves silent and reports failures through a toast", () => {
+    expect(source).not.toContain('toast.success("Design draft saved"');
+    expect(source).toContain('toast.error("Couldn\'t save design draft"');
+  });
+  it("reports load and review errors through toasts without a canvas error card", () => {
+    expect(source).not.toContain("<AlertTitle>Design unavailable</AlertTitle>");
+    const review = readFileSync(resolve(process.cwd(), "apps/desktop/src/renderer/features/design-workspace/design-review-dialog.tsx"), "utf8");
+    expect(review).not.toContain('<p role="alert" className="design-review-error">');
+    expect(review).toContain('toast.error("Design review needs attention"');
+  });
   it("keeps save, undo, and redo keyboard-only while exposing explicit Design Git actions", () => {
     const inspector = source.match(
       /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
@@ -38,11 +43,7 @@ describe("design workspace inspector toolbar", () => {
     expect(inspector).not.toContain('aria-label="Redo design edit"');
     expect(source).not.toMatch(/\bSave,|\bUndo2,|\bRedo2,/);
     expect(source).toContain("saveDesigns(");
-    expect(source).toContain("stageDesigns(");
-    expect(source).toContain("commitDesigns(");
-    expect(inspector).toContain('aria-label="Design Git actions"');
-    expect(inspector).toContain('aria-label="Stage Design changes"');
-    expect(inspector).toContain('aria-label="Commit staged Design changes"');
+    expect(inspector).toContain("<DesignReviewDialog");
   });
 
   it("deletes frames and elements immediately without confirmation or success toasts", () => {

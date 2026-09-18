@@ -84,6 +84,7 @@ function referencedComponentNames(node: ParentNode): string[] {
 async function loadDefinitions(
   workspacePath: string,
   frameSource: string,
+  sources?: Readonly<Record<string, string>>,
 ): Promise<{
   definitions: Map<string, ComponentDefinition>;
   errors: DesignComponentExpansionError[];
@@ -96,11 +97,11 @@ async function loadDefinitions(
   const directory = path.join(designRoot, "components");
   let canonicalDirectory: string;
   try {
-    canonicalDirectory = await realpath(directory);
+    canonicalDirectory = sources ? directory : await realpath(directory);
   } catch {
     return { definitions: new Map(), errors };
   }
-  const canonicalDesignRoot = await realpath(designRoot);
+  const canonicalDesignRoot = sources ? designRoot : await realpath(designRoot);
   if (!canonicalDirectory.startsWith(`${canonicalDesignRoot}${path.sep}`)) {
     return { definitions: new Map(), errors };
   }
@@ -120,12 +121,9 @@ async function loadDefinitions(
       break;
     }
     const target = path.join(canonicalDirectory, `${name}.html`);
-    const safe = await readSafeRegularFile(
-      canonicalDirectory,
-      target,
-      MAX_COMPONENT_BYTES,
-    );
-    if (!safe) continue;
+    const captured = sources?.[`components/${name}.html`];
+    const safe = sources ? (captured === undefined ? null : { body: Buffer.from(captured), size: Buffer.byteLength(captured) }) : await readSafeRegularFile(canonicalDirectory, target, MAX_COMPONENT_BYTES);
+    if (!safe || safe.size > MAX_COMPONENT_BYTES) continue;
     if (totalSourceBytes + safe.size > MAX_COMPONENT_SOURCE_BYTES_PER_FRAME) {
       errors.push({
         component: name,
@@ -303,8 +301,9 @@ function injectComponentStyles(
 export async function expandDesignComponents(
   workspacePath: string,
   source: string,
+  sources?: Readonly<Record<string, string>>,
 ): Promise<DesignComponentExpansion> {
-  const loaded = await loadDefinitions(workspacePath, source);
+  const loaded = await loadDefinitions(workspacePath, source, sources);
   const definitions = loaded.definitions;
   const used = new Set<string>();
   const errors: DesignComponentExpansionError[] = [];

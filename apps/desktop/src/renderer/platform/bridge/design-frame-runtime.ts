@@ -31,6 +31,7 @@ import {
   type DesignRuntimeSnapshot,
   type DesignRuntimeStyleCommit,
   type DesignRuntimeStyleUpdate,
+  type DesignRuntimeLayoutPreview,
 } from "@zeros/protocol/design-runtime";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
@@ -50,6 +51,8 @@ interface PendingRequest {
 }
 
 export interface DesignFrameRuntimeCallbacks {
+  /** Read current surface visibility without recreating a retained port. */
+  isActive?: () => boolean;
   onSnapshot?: (
     snapshot: DesignRuntimeSnapshot,
     event: "ready" | "mutation",
@@ -60,6 +63,8 @@ export interface DesignFrameRuntimeCallbacks {
 export interface DesignFrameRuntimeConnection {
   /** Semantic generation currently owned by this mounted document/port. */
   readonly sourceVersion: string;
+  /** Optional readback may run only while its retained surface is active. */
+  isActive?(): boolean;
   /** Whether the mounted runtime implements one method. A document painted by
    * an older engine build negotiates its capabilities at handshake time, so a
    * caller can choose a leaner path without risking a rejected request. */
@@ -110,6 +115,19 @@ export interface DesignFrameRuntimeConnection {
     options?: { children?: boolean },
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeGeometry>;
+  getLayoutTargets(
+    signal?: AbortSignal,
+    nodeId?: string,
+  ): Promise<DesignRuntimeNodeDetails[]>;
+  previewLayout(
+    input: DesignRuntimeLayoutPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeGeometry[]>;
+  restoreGeneration(
+    targetSourceVersion: string,
+    commit: boolean,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit>;
   previewText(
     nodeId: string,
     text: string,
@@ -270,7 +288,7 @@ function isStyleCommit(value: unknown): value is DesignRuntimeStyleCommit {
     typeof commit.treeUnchanged === "boolean" &&
     isRuntimeSnapshot(commit.snapshot) &&
     Array.isArray(commit.details) &&
-    commit.details.length <= 32 &&
+    commit.details.length <= 256 &&
     commit.details.every(isNodeDetails)
   );
 }
@@ -310,6 +328,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   private readonly pending = new Map<string, PendingRequest>();
   private destroyed = false;
   private expectedSourceVersion: string;
+  private generationTransition: Promise<void> | null = null;
   private methods: ReadonlySet<DesignRuntimeMethod> | null = null;
 
   constructor(
@@ -336,6 +355,10 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
 
   get sourceVersion(): string {
     return this.expectedSourceVersion;
+  }
+
+  isActive(): boolean {
+    return !this.destroyed && (this.callbacks.isActive?.() ?? true);
   }
 
   supports(method: DesignRuntimeMethod): boolean {
@@ -404,6 +427,37 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   }
 
   private request(
+    method: DesignRuntimeMethod,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    // A commit changes the iframe's version before its reply reaches this
+    // channel. Hold subsequent requests for that local handshake so they carry
+    // the accepted version. File persistence never enters this short lane.
+    return this.generationTransition
+      ? this.generationTransition.then(() =>
+          this.sendRequest(method, args, signal),
+        )
+      : this.sendRequest(method, args, signal);
+  }
+
+  private changeGeneration<T>(apply: () => Promise<T>): Promise<T> {
+    const result = this.generationTransition
+      ? this.generationTransition.then(apply)
+      : apply();
+    const settled = result.then(
+      () => {},
+      () => {},
+    );
+    this.generationTransition = settled;
+    void settled.then(() => {
+      if (this.generationTransition === settled)
+        this.generationTransition = null;
+    });
+    return result;
+  }
+
+  private sendRequest(
     method: DesignRuntimeMethod,
     args: Record<string, unknown>,
     signal?: AbortSignal,
@@ -644,34 +698,103 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
+  async getLayoutTargets(
+    signal?: AbortSignal,
+    nodeId?: string,
+  ): Promise<DesignRuntimeNodeDetails[]> {
+    const result = await this.request("getLayoutTargets", { nodeId }, signal);
+    if (
+      !Array.isArray(result) ||
+      result.length > 512 ||
+      result.some(
+        (node) =>
+          !isNodeDetails(node) ||
+          node.sourceVersion !== this.expectedSourceVersion,
+      )
+    )
+      throw runtimeError("getLayoutTargets returned malformed data");
+    return result;
+  }
+
+  async previewLayout(
+    input: DesignRuntimeLayoutPreview,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeGeometry[]> {
+    const result = await this.request("previewLayout", { ...input }, signal);
+    if (
+      !Array.isArray(result) ||
+      result.length > 32 ||
+      result.some(
+        (geometry) =>
+          !isNodeGeometry(geometry) ||
+          geometry.sourceVersion !== this.expectedSourceVersion,
+      )
+    )
+      throw runtimeError("previewLayout returned malformed data");
+    return result;
+  }
+
+  async restoreGeneration(
+    targetSourceVersion: string,
+    commit: boolean,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit> {
+    const restore = async () => {
+      const result = await (commit
+        ? this.sendRequest(
+            "restoreGeneration",
+            { targetSourceVersion, commit },
+            signal,
+          )
+        : this.request(
+            "restoreGeneration",
+            { targetSourceVersion, commit },
+            signal,
+          ));
+      const expected = commit
+        ? targetSourceVersion
+        : this.expectedSourceVersion;
+      if (
+        !isStyleCommit(result) ||
+        result.sourceVersion !== expected ||
+        result.snapshot.sourceVersion !== expected ||
+        result.details.some((details) => details.sourceVersion !== expected)
+      )
+        throw runtimeError("restoreGeneration returned malformed data");
+      if (commit) this.expectedSourceVersion = targetSourceVersion;
+      return result;
+    };
+    return commit ? this.changeGeneration(restore) : restore();
+  }
+
   async commitStyles(
     updates: DesignRuntimeStyleUpdate[],
     nextSourceVersion: string,
     patch?: DesignRuntimeGenerationPatch,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeStyleCommit> {
-    const previousSourceVersion = this.expectedSourceVersion;
     if (!/^[a-f0-9]{24}$/.test(nextSourceVersion)) {
       throw runtimeError("invalid next source generation", "BAD_REQUEST");
     }
-    const result = await this.request(
-      "commitStyles",
-      { updates, nextSourceVersion, ...(patch ? { patch } : {}) },
-      signal,
-    );
-    if (
-      this.expectedSourceVersion !== previousSourceVersion ||
-      !isStyleCommit(result) ||
-      result.sourceVersion !== nextSourceVersion ||
-      result.snapshot.sourceVersion !== nextSourceVersion ||
-      result.details.some(
-        (details) => details.sourceVersion !== nextSourceVersion,
-      )
-    ) {
-      throw runtimeError("commitStyles returned malformed data");
-    }
-    this.expectedSourceVersion = nextSourceVersion;
-    return result;
+    return this.changeGeneration(async () => {
+      const result = await this.sendRequest(
+        "commitStyles",
+        { updates, nextSourceVersion, ...(patch ? { patch } : {}) },
+        signal,
+      );
+      if (
+        !isStyleCommit(result) ||
+        result.sourceVersion !== nextSourceVersion ||
+        result.snapshot.sourceVersion !== nextSourceVersion ||
+        result.details.some(
+          (details) => details.sourceVersion !== nextSourceVersion,
+        )
+      ) {
+        throw runtimeError("commitStyles returned malformed data");
+      }
+      this.expectedSourceVersion = nextSourceVersion;
+      return result;
+    });
   }
 
   async previewText(

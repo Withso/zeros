@@ -18,6 +18,7 @@ const MAX_WORKSPACES = 32;
 const MAX_FRAMES_PER_WORKSPACE = 24;
 const MAX_DETAILS_PER_FRAME = 32;
 const MAX_SCREENSHOTS_PER_FRAME = 4;
+const MAX_SCREENSHOT_BYTES = 24 * 1024 * 1024;
 
 export interface DesignRuntimeScreenshotEntry extends DesignRuntimeScreenshot {
   capturedAt: number;
@@ -116,6 +117,61 @@ function emptyFrame(now: number): DesignRuntimeFrameState {
     screenshotOrder: [],
     updatedAt: now,
   };
+}
+
+/** Count limits alone permit several gigabytes of base64 across retained
+ * workspaces. Evict only old pixels, leaving semantic details and trees warm. */
+function boundScreenshotBytes<
+  T extends Pick<DesignRuntimeStore, "byWorkspace">,
+>(state: T): T {
+  const images: Array<{
+    workspaceId: string;
+    frame: string;
+    key: string;
+    bytes: number;
+    capturedAt: number;
+  }> = [];
+  let total = 0;
+  for (const [workspaceId, workspace] of Object.entries(state.byWorkspace))
+    for (const [frame, entry] of Object.entries(workspace.frames))
+      for (const [key, image] of Object.entries(entry.screenshotsByNode)) {
+        const bytes = Math.max(
+          image.dataUrl.length * 2,
+          image.width * image.height * 4,
+        );
+        images.push({
+          workspaceId,
+          frame,
+          key,
+          bytes,
+          capturedAt: image.capturedAt,
+        });
+        total += bytes;
+      }
+  if (total <= MAX_SCREENSHOT_BYTES) return state;
+  const byWorkspace = { ...state.byWorkspace };
+  for (const image of images.sort((a, b) => a.capturedAt - b.capturedAt)) {
+    if (total <= MAX_SCREENSHOT_BYTES) break;
+    const workspace = byWorkspace[image.workspaceId]!;
+    const frame = workspace.frames[image.frame]!;
+    const screenshotsByNode = { ...frame.screenshotsByNode };
+    delete screenshotsByNode[image.key];
+    byWorkspace[image.workspaceId] = {
+      ...workspace,
+      frames: {
+        ...workspace.frames,
+        [image.frame]: {
+          ...frame,
+          screenshotsByNode,
+          screenshotOrder: frame.screenshotOrder.filter(
+            (key) => key !== image.key,
+          ),
+        },
+      },
+    };
+    total -= image.bytes;
+  }
+  return { ...state, byWorkspace };
 }
 
 function sameStringArray(
@@ -350,33 +406,35 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
   publishScreenshot(workspaceId, folder, frame, screenshot, sourceVersion) {
     if (screenshot.sourceVersion !== sourceVersion) return;
     set((state) =>
-      updateWorkspace(state, workspaceId, folder, frame, (current, now) => {
-        if (
-          current.sourceVersion !== undefined &&
-          current.sourceVersion !== sourceVersion
-        ) {
-          return current;
-        }
-        const key = nodeKey(screenshot.nodeId);
-        const screenshotOrder = touchOrder(
-          current.screenshotOrder,
-          key,
-          MAX_SCREENSHOTS_PER_FRAME,
-        );
-        return {
-          ...current,
-          sourceVersion: current.sourceVersion ?? sourceVersion,
-          screenshotsByNode: keepKeys(
-            {
-              ...current.screenshotsByNode,
-              [key]: { ...screenshot, capturedAt: now },
-            },
+      boundScreenshotBytes(
+        updateWorkspace(state, workspaceId, folder, frame, (current, now) => {
+          if (
+            current.sourceVersion !== undefined &&
+            current.sourceVersion !== sourceVersion
+          ) {
+            return current;
+          }
+          const key = nodeKey(screenshot.nodeId);
+          const screenshotOrder = touchOrder(
+            current.screenshotOrder,
+            key,
+            MAX_SCREENSHOTS_PER_FRAME,
+          );
+          return {
+            ...current,
+            sourceVersion: current.sourceVersion ?? sourceVersion,
+            screenshotsByNode: keepKeys(
+              {
+                ...current.screenshotsByNode,
+                [key]: { ...screenshot, capturedAt: now },
+              },
+              screenshotOrder,
+            ),
             screenshotOrder,
-          ),
-          screenshotOrder,
-          updatedAt: now,
-        };
-      }),
+            updatedAt: now,
+          };
+        }),
+      ),
     );
   },
 

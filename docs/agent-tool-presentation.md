@@ -45,7 +45,8 @@ and statuses remain available even when routine metadata is hidden in the UI.
   `.context/local/scratch/<task>/`. Read relevant existing context, pass exact
   paths to delegates, preserve other agents' work, and link actual saved files.
   Required project source/build outputs keep their normal locations. Design
-  agents retain their read-only filesystem contract. See
+  source placement and native/API authoring follow the
+  [Design contract](design-mode-roadmap.md#native-authoring-and-optional-tools). See
   [context-storage.md](context-storage.md) for local/shared ownership.
 
 Contract references: the installed Claude SDK's `SDKMcpResourceLink` and task
@@ -654,3 +655,11 @@ Protocol 18 combines these steering receipts, transcript replacement/fallback
 events and turn-usage snapshots with protocol 17's native attachment sources.
 The desktop and control-plane compatibility ranges advance together; optional
 fields keep older transcript records and supported peers readable.
+
+## Minimal Design-mode tools
+
+Design helpers follow the ordinary native-identity, expandable-row and detail
+contracts above. Keep Design-specific labels, catalog limits, authoring modes
+and UI scope in the [canonical Design tool contract](design-mode-roadmap.md#native-authoring-and-optional-tools).
+Native file edits retain their provider's ordinary presentation; an unqualified
+Design-looking tool name or foreign MCP server never selects trusted Design UI.

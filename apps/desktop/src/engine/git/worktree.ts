@@ -1627,9 +1627,9 @@ async function createWorkspaceInner(
     prNumber: null,
     prState: null,
     prUrl: null,
-    // Design workspaces intentionally have no coding-agent owner. Ignore stale
-    // or external callers that still submit the old optimistic-chat fields;
-    // a future native design harness will own a separate identity contract.
+    // Preserve the legacy Design-kind creation contract: ignore old optimistic
+    // agent fields here. Shared Code/Design conversation identity is bound by
+    // the normal session lifecycle, independently of workspace view kind.
     agentId: kind === "code" ? (input.agentId ?? null) : null,
     lastActiveAt: now,
     setupState: setupCommand ? "running" : null,

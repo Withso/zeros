@@ -122,12 +122,13 @@ describe("Zeros-scoped design-directory containment guarantees", () => {
     ).resolves.toContain("through-hardlink");
   });
 
-  it("documents that enforcement belongs to Zeros-launched actors", () => {
+  it("documents native mode policy separately from filesystem permissions", () => {
     const designWorkspace = readFileSync(
-      path.join(repositoryRoot, "docs", "design-workspace.md"),
+      path.join(repositoryRoot, "docs", "design-mode-roadmap.md"),
       "utf8",
     );
-    expect(designWorkspace).toContain("Code agent");
+    expect(designWorkspace).toContain("Shared Code/Design agent");
+    expect(designWorkspace).toContain("Design may author with native file tools");
     expect(designWorkspace).toContain("External terminal/editor");
     expect(designWorkspace).toMatch(
       /do not change the\s+native permissions of the Code process or external same-user tools/,

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { assertDesignWriteAuthorized } from "./write-authority";
 import {
   closeSync,
   constants,
@@ -19,11 +20,15 @@ import path from "node:path";
 import { parse, stringify } from "smol-toml";
 import { z } from "zod";
 import { isDeepStrictEqual } from "node:util";
+import { parse as parseHtml } from "parse5";
+import { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
+import type { CanvasDocument } from "./document-model";
 import {
   DESIGN_MANIFEST_FILE,
   parseDesignManifest,
-  serializeDesignManifest,
+  serializeDesignRegistration,
 } from "./manifest";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile, encodeCanvasFile } from "./canvas-file";
 import {
   assertDesignFilesNotIgnored,
   designGitignoreSource,
@@ -48,11 +53,20 @@ export const DESIGN_METADATA_PROTECTED_PATHS = [
   LEGACY_DESIGN_DIRECTORY_REGISTRY_FILE,
 ] as const;
 export const DESIGN_RULES_FILE = `${DESIGN_METADATA_ROOT}/rules.md`;
-export const DESIGN_RULES = `# Zeros Design
+export const LEGACY_DESIGN_RULES = `# Zeros Design
 This is a Design directory; design.toml identifies it and stores its shared metadata.
 Commit this folder and design.toml together. Do not gitignore them.
 Edit through Zeros Settings or Design mode using the Design API.
 Code agents may read this folder but must not create, edit, move, delete, stage, or commit its files through generic tools.
+`;
+export const DESIGN_RULES = `# Zeros Design
+design.toml registers this directory; canvas.json owns its canvas metadata. Commit this folder together. Do not gitignore it.
+In Design mode, use normal Read, Write, Edit, patch or Bash tools to author HTML, CSS, assets and canvas.json. No API apply or publish is required.
+Code agents may inspect this folder; switch to Design mode only for user-authorized Design edits. Provider permissions and Plan still apply.
+Create a frame by writing a complete HTML file and adding a stable ID to canvas.json frames and pages[0].frames. Example frame: {"kind":"html","source":"home.html","title":"Home","x":0,"y":0,"width":390,"height":844}.
+Keep existing IDs and unrelated metadata. Patch existing source; canvas dimensions set its viewport. HTML uses normal browser layout. Only listed HTML files are frames; one page is supported.
+Use Zeros Settings or Design mode lifecycle tools for directory registration and design.toml. Design API inspect, styles, validate and capture are optional helpers; visual controls edit the same source.
+Save sources before canvas references. Re-read changed files before edits; do not overwrite concurrent work. Normal authorized Git operations publish these checkout files; saving never auto-commits.
 `;
 const MAX_METADATA_BYTES = 16 * 1024 * 1024;
 const MAX_JOURNAL_BYTES = 64 * 1024 * 1024;
@@ -181,7 +195,9 @@ export function readDesignStorageFile(
   try {
     target = assertSafeDesignStoragePath(root, relative);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
     throw error;
   }
   let fd: number;
@@ -192,7 +208,9 @@ export function readDesignStorageFile(
       0o600,
     );
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return null;
+    }
     throw error;
   }
   try {
@@ -216,7 +234,8 @@ export function readDesignStorageFile(
       current.nlink !== 1
     )
       throw new Error("Design metadata changed during read.");
-    return bytes.subarray(0, offset).toString("utf8");
+    const content = bytes.subarray(0, offset);
+    return content.toString("utf8");
   } finally {
     closeSync(fd);
   }
@@ -506,7 +525,7 @@ export function designDocumentMetadataPath(
       throw new Error(
         "Both legacy and registered Design metadata exist. Resolve the conflict before editing.",
       );
-    return path.join(workspace, manifestFile);
+    return path.join(workspace, manifest.canvas ? `${directory}/${manifest.canvas}` : manifestFile);
   }
   return path.join(
     workspace,
@@ -550,6 +569,9 @@ export function ensureDesignMetadataLayout(
   workspace: string,
   directory: string,
 ): string[] {
+  // A current canvas is agent-authored input, not a normalization job on read.
+  recoverDesignMetadataMigration(workspace, directory);
+  if (readDirectoryDesignManifest(workspace, directory)?.canvas) return [];
   const registry = readDesignRegistrySource(workspace);
   if (!designDirectoryEntry(workspace, directory)) return [];
   const file = path
@@ -561,7 +583,9 @@ export function ensureDesignMetadataLayout(
     throw new Error("The registered Design document metadata is missing.");
   const document = file.endsWith(`/${DESIGN_MANIFEST_FILE}`)
     ? JSON.stringify(parseDesignManifest(source)!.document)
-    : source;
+    : file.endsWith(`/${DESIGN_CANVAS_FILE}`)
+      ? JSON.stringify(decodeCanvasFile(source))
+      : source;
   return commitDesignMetadata(workspace, directory, document, [], {
     registry: registry.source,
     registryFile: registry.file,
@@ -632,6 +656,7 @@ export interface DesignMetadataSnapshot {
   registryFile?: string;
   file: string;
   source: string | null;
+  registration?: { file: string; source: string | null };
 }
 const storageChangeSchema = z
   .object({
@@ -650,6 +675,17 @@ const migrationSchema = z
   .strict();
 const journalName = (directory: string) =>
   `metadata-${createHash("sha256").update(directory).digest("hex").slice(0, 24)}.json`;
+// Compatibility only: experimental builds could move authored files out of the
+// checkout. Never erase that ownership marker or silently fall back to writes.
+const privateDraftFenceName = journalName("private-draft-migration");
+const privateDraftFenceSchema = z.object({ version: z.literal(2), workspace: z.string(), directory: z.literal("private-draft-migration"), owner: z.string().min(1).max(128) }).strict();
+export function assertLegacyDesignDraftWritable(workspace: string): void {
+  const source = readDesignStorageFile(designPrivateStorageDirectory(workspace), privateDraftFenceName);
+  if (source !== null) {
+    privateDraftFenceSchema.parse(JSON.parse(source));
+    throw new Error("This workspace has a retired private Design draft. Preserve its data and use a recovery-capable build to export it before editing the checkout.");
+  }
+}
 
 function applyStorageChanges(
   workspace: string,
@@ -682,6 +718,7 @@ function applyStorageChanges(
       ![...migrationDirectories].some(
         (folder) =>
           change.file === `${folder}/${DESIGN_MANIFEST_FILE}` ||
+          change.file === `${folder}/${DESIGN_CANVAS_FILE}` ||
           change.file === `${folder}/rules.md`,
       )
     )
@@ -713,6 +750,7 @@ export function recoverWorkspaceDesignMetadata(workspace: string): void {
   )) {
     const source = readDesignStorageFile(root, name, MAX_JOURNAL_BYTES);
     if (source === null) continue;
+    if (name === privateDraftFenceName) { privateDraftFenceSchema.parse(JSON.parse(source)); continue; }
     const journal = migrationSchema.parse(JSON.parse(source));
     if (journalName(journal.directory) !== name)
       throw new Error("Invalid Design recovery record identity.");
@@ -750,6 +788,7 @@ export function commitDesignMetadata(
   expected?: DesignMetadataSnapshot,
   restoredId?: string,
 ): string[] {
+  assertDesignWriteAuthorized();
   if (sanitizeDesignDirectoryName(directory) !== directory)
     throw new Error("Invalid Design directory.");
   recoverDesignMetadataMigration(workspace, directory);
@@ -760,7 +799,9 @@ export function commitDesignMetadata(
     (registryBefore !== expected.registry ||
       (expected.registryFile !== undefined &&
         registrySnapshot.file !== expected.registryFile) ||
-      readDesignStorageFile(workspace, expected.file) !== expected.source)
+      readDesignStorageFile(workspace, expected.file) !== expected.source ||
+      (expected.registration !== undefined &&
+        readDesignStorageFile(workspace, expected.registration.file) !== expected.registration.source))
   )
     throw new Error(
       "Design metadata changed while this edit was being prepared. Refresh before retrying.",
@@ -833,21 +874,54 @@ export function commitDesignMetadata(
       throw new Error(
         "Both legacy and registered Design metadata exist. Resolve the conflict before editing.",
       );
+    const canvasFile = `${folder}/${DESIGN_CANVAS_FILE}`;
+    const canvasBefore = readDesignStorageFile(workspace, canvasFile);
+    if (canvasBefore !== null && !manifest?.canvas && expected?.file !== canvasFile)
+      throw new Error(`The existing ${canvasFile} conflicts with legacy Design metadata. Preserve both files before migrating.`);
     const json = folder === directory ? document : oldSource;
     if (json === null)
       throw new Error(
         `The registered Design metadata for ${folder} is missing.`,
       );
-    const model = JSON.parse(json) as Record<string, unknown>;
-    const after =
-      manifest && isDeepStrictEqual(manifest.document, model)
-        ? before
-        : serializeDesignManifest(entryId, model);
-    changes.push({ file: metadata, before, after });
+    let model = JSON.parse(json) as Record<string, unknown>;
+    if (!manifest?.canvas) {
+      // Old documents discovered every top-level HTML file. Capture that
+      // membership and inline metadata before switching to explicit entries,
+      // including other folders migrated with a shared central registry.
+      const normalized = decodeCanvasFile(encodeCanvasFile(model)) as unknown as CanvasDocument;
+      const information = (model.frame_info ?? {}) as Record<string, unknown>;
+      const names = new Set([
+        ...Object.keys(normalized.frames),
+        ...(existsSync(path.join(workspace, folder)) ? readdirSync(path.join(workspace, folder), { withFileTypes: true }) : [])
+          .filter((entry) => entry.isFile() && /^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(entry.name))
+          .map((entry) => entry.name),
+      ]);
+      for (const file of [...names].sort()) {
+        const pending = sourceChanges.find((change) => change.file === `${folder}/${file}`);
+        if (pending?.after === null) continue;
+        if (Object.hasOwn(information, file) && normalized.frames[file]) continue;
+        const source = pending?.after ?? readDesignStorageFile(workspace, `${folder}/${file}`, 2 * 1024 * 1024);
+        if (source === null) {
+          if (normalized.frames[file]) continue; // Preserve an existing missing reference for recovery.
+          throw new Error(`Design frame source is missing: ${folder}/${file}`);
+        }
+        const meta = readFrameMeta(parseHtml(source, { sourceCodeLocationInfo: true }), file);
+        normalized.frames[file] ??= nextFrameGeometry(Object.values(normalized.frames), meta);
+        normalized.frame_info[file] = { ...normalized.frame_info[file], title: meta.title, kind: meta.kind };
+      }
+      model = { ...normalized };
+    }
+    const canvasAfter = encodeCanvasFile(model);
+    // Preserve formatting when the authored scene itself is unchanged.
+    const unchanged = canvasBefore !== null &&
+      isDeepStrictEqual(JSON.parse(canvasBefore), JSON.parse(canvasAfter));
+    changes.push({ file: canvasFile, before: canvasBefore, after: unchanged ? canvasBefore : canvasAfter });
+    changes.push({ file: metadata, before, after: manifest?.canvas ? before : serializeDesignRegistration(entryId) });
     const rules = `${folder}/rules.md`;
-    if (readDesignStorageFile(workspace, rules) === null)
-      changes.push({ file: rules, before: null, after: DESIGN_RULES });
-    visibleFiles.push(metadata, rules);
+    const rulesBefore = readDesignStorageFile(workspace, rules);
+    if (rulesBefore === null || rulesBefore === LEGACY_DESIGN_RULES)
+      changes.push({ file: rules, before: rulesBefore, after: DESIGN_RULES });
+    visibleFiles.push(metadata, canvasFile, rules);
     if (oldSource !== null)
       deletions.push({ file: oldFile, before: oldSource, after: null });
   }
@@ -959,7 +1033,7 @@ export function prepareDesignMetadataRemoval(
   remove(`${directory}/${DESIGN_MANIFEST_FILE}`);
   remove(legacy);
   const rules = `${directory}/rules.md`;
-  if (readDesignStorageFile(workspace, rules) === DESIGN_RULES) remove(rules);
+  if ([DESIGN_RULES, LEGACY_DESIGN_RULES].includes(readDesignStorageFile(workspace, rules) ?? "")) remove(rules);
   if (entry) {
     remove(designDocumentRelativePath(entry.id));
     remove(`${designDocumentMetadataDirectory(entry.id)}/document.json`);

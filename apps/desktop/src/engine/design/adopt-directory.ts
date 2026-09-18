@@ -13,6 +13,7 @@ import { primeDesignDirectoryName } from "./directory-registry";
 import { sanitizeDesignDirectoryName } from "./directory-path";
 import { inspectDesignFilesForAdoption } from "./document";
 import { parseDesignManifest } from "./manifest";
+import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
 import {
   assertSafeDesignStoragePath,
   commitDesignMetadata,
@@ -149,12 +150,22 @@ async function inspectFolder(root: string, selected: string) {
       .join("/");
     const legacy = readDesignStorageFile(root, previousPath);
     if (legacy !== null) {
-      document = JSON.parse(legacy) as Record<string, unknown>;
+      document = previousPath.endsWith(`/${DESIGN_CANVAS_FILE}`)
+        ? decodeCanvasFile(legacy)
+        : JSON.parse(legacy) as Record<string, unknown>;
       expectedFile = previousPath;
       expectedSource = legacy;
     }
   }
-  if (!document && existsSync(path.join(root, ".git"))) {
+  if (!document && !manifest) {
+    const preservedCanvas = readDesignStorageFile(root, `${directory}/${DESIGN_CANVAS_FILE}`);
+    if (preservedCanvas !== null) {
+      document = decodeCanvasFile(preservedCanvas);
+      expectedFile = `${directory}/${DESIGN_CANVAS_FILE}`;
+      expectedSource = preservedCanvas;
+    }
+  }
+  if ((!document || !id) && existsSync(path.join(root, ".git"))) {
     let head: string | null = null;
     try {
       head = (
@@ -176,7 +187,16 @@ async function inspectFolder(root: string, selected: string) {
         if (id && id !== recovered.id)
           throw new Error("Saved Design metadata has a conflicting ID.");
         id = recovered.id;
-        document = recovered.document;
+        if (recovered.canvas) {
+          const localCanvas = readDesignStorageFile(root, `${directory}/${recovered.canvas}`);
+          const savedCanvas = localCanvas ?? await gitFile(root, `${directory}/${recovered.canvas}`, ref);
+          if (savedCanvas === null) throw new Error("The saved Design canvas metadata is missing.");
+          document = decodeCanvasFile(savedCanvas);
+          if (localCanvas !== null) {
+            expectedFile = `${directory}/${recovered.canvas}`;
+            expectedSource = localCanvas;
+          }
+        } else document ??= recovered.document;
         metadataSource = "git";
         break;
       }
@@ -250,6 +270,7 @@ async function inspectFolder(root: string, selected: string) {
       source: expectedSource,
       registry: registry.source,
       registryFile: registry.file,
+      registration: { file, source },
     },
   };
 }

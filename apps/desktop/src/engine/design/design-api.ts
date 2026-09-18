@@ -12,6 +12,7 @@ import {
   designWebDocumentId,
   readDesignWebDocumentState,
 } from "./document";
+import { withDesignDirectoryNameLease } from "./directory-registry";
 
 const MAX_WORKSPACE_DESIGN_APIS = 8;
 const workspaceApis = new Map<string, DesignApi>();
@@ -28,18 +29,35 @@ function frameFromDocumentId(documentId: string): string {
   return frame;
 }
 
-/** Durable, engine-owned Design draft repository. The active draft remains
- * ordinary uncommitted repository content, but every mutation reaches it
- * through the Design transaction journal/CAS implementation in document.ts.
- * Agent adapters receive a DesignApi backed by this store; they never receive
- * this path or direct filesystem authority. */
+/** Engine-owned semantic repository backed by the workspace checkout. Drafts
+ * are ordinary uncommitted Design files, written through the transaction
+ * journal/CAS implementation in document.ts.
+ * Optional agent helpers and visual edits use this store. In Design mode,
+ * native provider tools also author the same checkout files directly. */
 export class DesignDraftStore implements DesignDocumentRepository {
-  constructor(private readonly workspacePath: string) {}
+  constructor(
+    private readonly workspacePath: string,
+    private readonly options: {
+      directory?: string;
+      assertAuthorized?: () => void;
+    } = {},
+  ) {}
+
+  private async withAuthority<T>(
+    run: (root: string) => Promise<T>,
+  ): Promise<T> {
+    this.options.assertAuthorized?.();
+    const invoke = (root: string) => this.options.directory
+      ? withDesignDirectoryNameLease(root, this.options.directory, () => run(root))
+      : run(root);
+    const result = await invoke(this.workspacePath);
+    this.options.assertAuthorized?.();
+    return result;
+  }
 
   async read(documentId: string): Promise<DesignWebDocumentInput> {
-    const state = await readDesignWebDocumentState(
-      this.workspacePath,
-      frameFromDocumentId(documentId),
+    const state = await this.withAuthority((root) =>
+      readDesignWebDocumentState(root, frameFromDocumentId(documentId)),
     );
     return {
       documentId: state.documentId,
@@ -55,11 +73,14 @@ export class DesignDraftStore implements DesignDocumentRepository {
     expectedRevision: string;
     state: DesignWebDocumentState;
   }): Promise<void> {
-    await commitDesignWebDocumentState(
-      this.workspacePath,
-      frameFromDocumentId(input.documentId),
-      input.expectedRevision,
-      input.state,
+    await this.withAuthority((root) =>
+      commitDesignWebDocumentState(
+        root,
+        frameFromDocumentId(input.documentId),
+        input.expectedRevision,
+        input.state,
+        { assertAuthorized: this.options.assertAuthorized },
+      ),
     );
   }
 }
@@ -74,8 +95,8 @@ export function getWorkspaceDesignApi(workspacePath: string): DesignApi {
   }
   const api = new DesignApi(new DesignDraftStore(key), {
     // This instance is retained exclusively behind WorkspaceService's local,
-    // workspace-id-resolved human Design surface. Any future agent/transport
-    // adapter must construct its own fail-closed, capability-authorized API.
+    // workspace-id-resolved human Design surface. Scoped agent/transport
+    // callers use their own fail-closed, capability-authorized API.
     authorization: { kind: "trusted-in-process" },
     maxSessions: 16,
     maxSessionBytes: 32 * 1024 * 1024,

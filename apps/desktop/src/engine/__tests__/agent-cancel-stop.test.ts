@@ -30,6 +30,7 @@ import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
 import { AgentFailureError } from "../agents/types";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
+import { engineRuntimeDir } from "../db/paths";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
 
@@ -91,18 +92,24 @@ interface TestEngineInternals {
   ): Promise<T>;
   handleMessage(message: EngineMessage, client: TransportClient): Promise<void>;
   persistSessionUpdate(...args: unknown[]): void;
+  enterPrompt(prompt: ActivePromptRecord): void;
+  exitPrompt(prompt: ActivePromptRecord): void;
+  clearBusy(): void;
+  clearAgentExecutionRoute(executionId: string): void;
 }
 
 const roots: string[] = [];
+const engines: TestEngineInternals[] = [];
 
 function testEngine(port: number): {
   engine: ZerosEngine;
   state: TestEngineInternals;
 } {
-  // Own root per engine: an accepted prompt writes a busy marker under it.
+  // Each root owns a distinct app-data runtime directory and busy marker.
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-cancel-"));
   roots.push(root);
   const engine = new ZerosEngine({ root, port });
+  engines.push(engine as unknown as TestEngineInternals);
   return { engine, state: engine as unknown as TestEngineInternals };
 }
 
@@ -199,10 +206,12 @@ function turnStates(messages: EngineMessage[]): Array<{
 }
 
 afterEach(() => {
+  for (const engine of engines.splice(0)) engine.clearBusy();
   vi.useRealTimers();
   vi.restoreAllMocks();
   while (roots.length > 0) {
     const root = roots.pop()!;
+    fs.rmSync(engineRuntimeDir(root), { recursive: true, force: true });
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
@@ -302,6 +311,43 @@ describe("prompt start time continuity", () => {
 });
 
 describe("a Stop during the pre-dispatch window", () => {
+  it("protects prompt preparation from reload and clears the marker after Stop", async () => {
+    const { state } = testEngine(30_031);
+    const { client } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "cursor");
+    vi.spyOn(state.agents, "cancel").mockResolvedValue(undefined);
+    const busy = path.join(engineRuntimeDir(roots.at(-1)!), "busy");
+    const inFlight = state.handleMessage(promptMessage(), client);
+    const protectedDuringPreparation = fs.existsSync(busy);
+    await state.handleMessage(cancelMessage(), client);
+    await inFlight;
+    expect(protectedDuringPreparation).toBe(true);
+    expect(fs.existsSync(busy)).toBe(false);
+  });
+
+  it("releases retired prompts without allowing their late finalizers to release a successor", () => {
+    const { state } = testEngine(30_032);
+    const busy = path.join(engineRuntimeDir(roots.at(-1)!), "busy");
+    const previous: ActivePromptRecord = {
+      sessionId: "session-1", agentId: "cursor", chatId: null,
+      turnId: "previous", promptId: "previous", startedAt: 1, lastActivityAt: 1,
+    };
+    state.activePromptContexts.set(previous.sessionId, previous);
+    state.enterPrompt(previous);
+    state.clearAgentExecutionRoute(previous.sessionId);
+    const releasedWhenRetired = !fs.existsSync(busy);
+    const next = { ...previous, turnId: "next", promptId: "next" };
+    state.activePromptContexts.set(next.sessionId, next);
+    state.enterPrompt(next);
+    state.exitPrompt(previous);
+    const successorStillProtected = fs.existsSync(busy);
+    state.clearAgentExecutionRoute(next.sessionId);
+    expect(releasedWhenRetired).toBe(true);
+    expect(successorStillProtected).toBe(true);
+    expect(fs.existsSync(busy)).toBe(false);
+  });
+
   it("never hands the prompt to the adapter and settles the turn cancelled", async () => {
     const { state } = testEngine(29_891);
     const { client, messages } = testClient();

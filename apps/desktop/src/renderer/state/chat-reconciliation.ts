@@ -5,6 +5,11 @@ import {
 
 import type { ChatThread } from "./store";
 
+function sameComposerMode(left: ChatThread, right: ChatThread): boolean {
+  return (left.composerMode ?? "code") === (right.composerMode ?? "code") &&
+    (left.composerModeRevision ?? 0) === (right.composerModeRevision ?? 0);
+}
+
 function sameDirectories(left: string[], right: string[]): boolean {
   return (
     left.length === right.length &&
@@ -30,6 +35,8 @@ export function samePersistedChat(
     left.permissionMode === right.permissionMode &&
     left.lastModeId === right.lastModeId &&
     left.prePlanModeId === right.prePlanModeId &&
+    (left.composerMode ?? "code") === (right.composerMode ?? "code") &&
+    (left.composerModeRevision ?? 0) === (right.composerModeRevision ?? 0) &&
     left.title === right.title &&
     left.createdAt === right.createdAt &&
     left.updatedAt === right.updatedAt &&
@@ -86,7 +93,7 @@ export function reconcileChatSnapshot(
       continue;
     }
 
-    const remoteChat = remoteById.get(localChat.id);
+    let remoteChat = remoteById.get(localChat.id);
     if (!remoteChat) {
       // The row may have been created immediately before a crash, before the
       // bridge write landed. No tombstone means preserving and backfilling it
@@ -97,9 +104,19 @@ export function reconcileChatSnapshot(
     }
     remoteById.delete(localChat.id);
 
+    // Product mode is engine-owned, with its own revision. A title/model edit
+    // must neither hide a newer mode nor restore an older in-flight snapshot.
+    const modeOwner = (remoteChat.composerModeRevision ?? 0) >= (localChat.composerModeRevision ?? 0)
+      ? remoteChat : localChat;
+    const modeFields = { composerMode: modeOwner.composerMode, composerModeRevision: modeOwner.composerModeRevision };
+    if (modeOwner === localChat && remoteChat.composerModeRevision !== localChat.composerModeRevision)
+      remoteChat = { ...remoteChat, ...modeFields };
+
     if (localChat.updatedAt > remoteChat.updatedAt) {
-      chats.push(localChat);
-      rowsToPush.push(localChat);
+      const merged = modeOwner === remoteChat && !sameComposerMode(localChat, remoteChat)
+        ? { ...localChat, ...modeFields } : localChat;
+      chats.push(merged);
+      rowsToPush.push(merged);
     } else if (samePersistedChat(localChat, remoteChat)) {
       chats.push(localChat);
     } else {

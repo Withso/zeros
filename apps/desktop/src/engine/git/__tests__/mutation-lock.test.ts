@@ -157,21 +157,9 @@ describe("workspace Git mutation lane", () => {
     attemptNested.resolve();
 
     try {
-      const outcome = await Promise.race([
-        first.then(
-          () => ({ state: "resolved" as const }),
-          (error: unknown) => ({ state: "rejected" as const, error }),
-        ),
-        new Promise<{ state: "timed-out" }>((resolve) =>
-          setTimeout(() => resolve({ state: "timed-out" }), 100),
-        ),
-      ]);
-      expect(outcome.state).toBe("rejected");
-      expect(outcome).toMatchObject({
-        error: expect.objectContaining({
-          message: expect.stringMatching(/nested.*different worktree/i),
-        }),
-      });
+      // Resolving both worktree identities performs filesystem I/O. Assert the
+      // rejection itself; Vitest's timeout still detects an actual deadlock.
+      await expect(first).rejects.toThrow(/nested.*different worktree/i);
       await second;
     } finally {
       await rm(root, { recursive: true, force: true });

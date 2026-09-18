@@ -1,3 +1,4 @@
+import { readDesignWorkspaceSource } from "./workspace-source";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -12,13 +13,7 @@ const editorSource = readFileSync(
   ),
   "utf8",
 );
-const workspaceSource = readFileSync(
-  resolve(
-    process.cwd(),
-    "apps/desktop/src/renderer/features/design-workspace/design-workspace.tsx",
-  ),
-  "utf8",
-);
+const workspaceSource = readDesignWorkspaceSource();
 
 function flushBody(): string {
   const start = editorSource.indexOf("const flushValidDraft = useCallback(");

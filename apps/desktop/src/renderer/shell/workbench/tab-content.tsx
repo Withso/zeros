@@ -24,6 +24,8 @@ const TAB_BODY_MAP: Record<
   // The shared terminal deck owns these bodies in both placements, preserving
   // xterm identity when a tab moves between the workbench and bottom panel.
   terminal: () => null,
+  // The bounded Design deck preserves canvas iframes across workspace hops.
+  design: () => null,
   changes: ChangesWorkbenchSurface,
   review: ReviewSurface,
   context: ContextSurface,

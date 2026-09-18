@@ -1,11 +1,81 @@
-import { DesignTransactionSession } from "@zeros/design-core";
+import {
+  applyDesignTransaction,
+  DesignTransactionSession,
+} from "@zeros/design-core";
 import { describe, expect, it, vi } from "vitest";
 
-import { designWebTransactionAdapter } from "../adapter";
+import { designWebTransactionAdapter, readDesignWebProjection } from "../adapter";
 import { createDesignWebDocumentState } from "../revision";
 import { FRAME_CSS, FRAME_HTML, webState, webTransaction } from "./fixtures";
 
 describe("web transaction adapter", () => {
+  it("keeps a no-op native HTML edit byte-for-byte unchanged", () => {
+    const initial = createDesignWebDocumentState({
+      documentId: "native-noop",
+      entryFile: "index.html",
+      files: { "index.html": "<p>Hello</p>" },
+    });
+    const nodeId = readDesignWebProjection(initial).nodes.find(
+      (node) => node.tag === "p",
+    )!.id;
+    const outcome = applyDesignTransaction(
+      initial,
+      webTransaction(initial, "same-text", [
+        {
+          operationId: "text",
+          type: "node.set-text",
+          nodeId,
+          text: "Hello",
+        },
+      ]),
+      designWebTransactionAdapter,
+    );
+    expect(outcome.receipt.status).toBe("noop");
+    expect(outcome.state).toBe(initial);
+    expect(outcome.receipt.afterRevision).toBe(initial.revision);
+    expect(outcome.receipt.affectedFiles).toEqual([]);
+    expect(outcome.inverseOperations).toEqual([]);
+  });
+
+  it("includes native identity persistence in a stylesheet edit receipt and undo", () => {
+    const initial = createDesignWebDocumentState({
+      documentId: "native-css",
+      entryFile: "index.html",
+      files: {
+        "index.html":
+          '<!doctype html><html><head><link rel="stylesheet" href="styles.css"></head><body><main><p data-oid="label">Hello</p><span>Native sibling</span></main></body></html>',
+        "styles.css": '[data-oid="label"] { color: red; }',
+      },
+    });
+    const nodeId = readDesignWebProjection(initial).nodes.find(
+      (node) => node.tag === "p",
+    )!.id;
+    const session = new DesignTransactionSession(
+      initial,
+      designWebTransactionAdapter,
+    );
+    const outcome = session.apply(
+      webTransaction(initial, "color", [
+        {
+          operationId: "style",
+          type: "node.set-styles",
+          nodeId,
+          styles: { color: "blue" },
+          scope: "rule",
+          responsiveContext: "base",
+          stateContext: "default",
+        },
+      ]),
+    );
+    expect(outcome.receipt.affectedFiles.sort()).toEqual([
+      "index.html",
+      "styles.css",
+    ]);
+    expect(outcome.state.files["index.html"]).toContain("data-oid");
+    expect(outcome.state.files["styles.css"]).toContain("blue");
+    expect(session.undo()?.state.files).toEqual(initial.files);
+  });
+
   it.each([
     '<style>body { overflow:visible; }</style><div data-oid="child">Keep</div>',
     '<!doctype html><style>body { overflow:visible; }</style><div data-oid="child">Keep</div></html>',

@@ -1,4 +1,5 @@
 import { generatedImagePath, isImageGenerationTool } from "./tool-artifacts";
+import { designToolLabel } from "./design-tool-presentation";
 // ──────────────────────────────────────────────────────────
 // event-meta — pure label/meta extractors per event kind
 // ──────────────────────────────────────────────────────────
@@ -27,6 +28,7 @@ import {
   FileSearch,
   Globe,
   Plug,
+  PenTool,
   RefreshCw,
   Search as SearchIcon,
   Shield,
@@ -362,6 +364,8 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "mcp") {
+    const designLabel = designToolLabel(tool);
+    if (designLabel) return { Icon: PenTool, label: designLabel, expandable: true };
     const nativeTitle = nativeToolTitle(tool);
     if (
       nativeToolSurface(tool)?.kind === "computer" ||

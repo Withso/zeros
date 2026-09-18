@@ -12,7 +12,7 @@
 // ───────────────────────────────────────
 // Same-user ACLs affect every app running as the user and can also be removed
 // by that user. Native Code uses a behavioral contract plus Zeros-owned path
-// guards; a future autonomous Design agent uses ZSR and the Design API. These
+// guards; scoped tools route authored edits through the Design API. These
 // constants exist solely to identify old metadata.
 //
 // What historical builds locked

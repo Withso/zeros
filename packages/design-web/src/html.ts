@@ -5,6 +5,7 @@ import {
   type ParserError,
 } from "parse5";
 import postcss from "postcss";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 import {
   DESIGN_DOCUMENT_BODY_ID,
@@ -32,6 +33,7 @@ const NON_DESIGN_TAGS = new Set([
   "style",
   "script",
   "template",
+  "noscript",
 ]);
 const ACTIVE_ELEMENTS = new Set([
   "script",
@@ -124,6 +126,33 @@ function oid(element: Element): string | null {
   return value?.trim() || null;
 }
 
+/** Exact-source identity shared with the desktop preview. Explicit IDs remain
+ * authoritative, so existing documents keep their persisted identities. */
+export function nativeDesignIdentityBase(tag: string, offset: number, source: string): string {
+  const digest = sha256(new TextEncoder().encode(`${tag}:${offset}:${source.slice(offset, offset + 80)}`));
+  return `o-${Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("").slice(0, 9)}`;
+}
+
+/** Attach derived IDs to the parsed tree only. Locations still address the
+ * original file; explicit duplicates retain their validation errors. */
+export function identifyDesignHtmlNodes(document: Document, source: string): void {
+  const used = new Set<string>();
+  for (const element of elements(document).filter(isDesignElement)) {
+    const location = element.sourceCodeLocation;
+    if (!location?.startTag) continue;
+    const current = oid(element);
+    if (current && !used.has(current)) { used.add(current); continue; }
+    const base = nativeDesignIdentityBase(element.tagName, location.startOffset, source);
+    let next = base;
+    for (let suffix = 2; used.has(next); suffix++) next = `${base}-${suffix}`;
+    used.add(next);
+    if (current) continue;
+    const attribute = element.attrs.find((item) => item.name === "data-oid");
+    if (attribute) attribute.value = next;
+    else element.attrs.push({ name: "data-oid", value: next });
+  }
+}
+
 function nearestParentId(element: Element): string | null {
   let parent = element.parentNode;
   while (parent && "tagName" in parent) {
@@ -155,6 +184,7 @@ export function parseDesignWebProjection(input: {
     sourceCodeLocationInfo: true,
     onParseError: (error) => parseErrors.push(error),
   });
+  identifyDesignHtmlNodes(document, input.source);
   const diagnostics: DesignWebDiagnostic[] = parseErrors.map((error) => ({
     severity: "error",
     code: "html-parse",
@@ -346,6 +376,61 @@ export function mutateDesignNodeDuplicateSource(
     duplicate = `${duplicate.slice(0, edit.start)}${edit.text}${duplicate.slice(edit.end)}`;
   }
   return `${source.slice(0, location.endOffset)}${duplicate}${source.slice(location.endOffset)}`;
+}
+
+/** Move the exact authored span; do not serialize and normalize its subtree. */
+export function mutateDesignNodeMoveSource(
+  source: string,
+  nodeId: string,
+  parentId: string,
+  beforeId: string | null,
+): string {
+  if (parentId === DESIGN_DOCUMENT_BODY_ID)
+    source = withExplicitDesignBody(source);
+  const document = parse(source, { sourceCodeLocationInfo: true });
+  const records = elements(document);
+  const find = (id: string): Element => {
+    const element =
+      id === DESIGN_DOCUMENT_BODY_ID
+        ? designDocumentBody(document)
+        : records.find((record) => oid(record) === id);
+    if (!element) throw new Error(`Design element not found: ${id}`);
+    return element;
+  };
+  const element = find(nodeId);
+  const parent = find(parentId);
+  const before = beforeId ? find(beforeId) : null;
+  const span = element.sourceCodeLocation;
+  const container = parent.sourceCodeLocation;
+  if (
+    !span ||
+    !container?.startTag ||
+    !container.endTag ||
+    element.tagName === "body"
+  )
+    throw new Error("The layer destination has no editable source span.");
+  if (
+    element === parent ||
+    (container.startOffset >= span.startOffset &&
+      container.endOffset <= span.endOffset)
+  )
+    throw new Error("A layer cannot be moved inside itself.");
+  if (before && (before === element || before.parentNode !== parent))
+    throw new Error("The insertion sibling must belong to the destination.");
+  if (
+    /^(select|option|table|thead|tbody|tfoot|tr|ul|ol|dl)$/.test(parent.tagName)
+  )
+    throw new Error("This layer cannot contain a frame.");
+  const insertion =
+    before?.sourceCodeLocation?.startOffset ?? container.endTag.startOffset;
+  if (insertion === span.startOffset || insertion === span.endOffset)
+    return source;
+  const content = source.slice(span.startOffset, span.endOffset);
+  const removed =
+    source.slice(0, span.startOffset) + source.slice(span.endOffset);
+  const offset =
+    insertion > span.startOffset ? insertion - content.length : insertion;
+  return removed.slice(0, offset) + content + removed.slice(offset);
 }
 
 /** Remove exactly one authored element subtree, preserving all neighboring
@@ -698,7 +783,7 @@ function identityBase(tag: string, offset: number, source: string): string {
 
 /** Minimal identity repair. Once written, generated IDs no longer depend on
  * offsets; offsets are used only to seed a previously unidentified element. */
-export function healDesignHtmlIdentities(source: string): {
+export function healDesignHtmlIdentities(source: string, identity = identityBase): {
   source: string;
   changed: boolean;
   healed: number;
@@ -715,7 +800,7 @@ export function healDesignHtmlIdentities(source: string): {
       used.add(current);
       continue;
     }
-    const base = identityBase(element.tagName, location.startOffset, source);
+    const base = identity(element.tagName, location.startOffset, source);
     let next = base;
     for (let suffix = 2; used.has(next); suffix += 1)
       next = `${base}-${suffix}`;

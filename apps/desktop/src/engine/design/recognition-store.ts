@@ -13,7 +13,7 @@
 // recognition from the repository.
 //
 // Recognition therefore also becomes engine-side state: once Zeros observes a
-// Design root, its own path guards and later Design-agent admission continue to
+// Design root, its path guards and scoped tool admission continue to
 // recognize that existing directory while repository evidence is in flight.
 //
 // THE ONE RULE THAT KEEPS THIS SAFE: a remembered name is normally honoured
@@ -21,8 +21,8 @@
 // legitimately deletes a Design folder would hit "the recognized Design folder
 // is missing from this checkout" on every future session.
 //
-// The store itself is engine data, not repository content. Design-agent ZSR
-// cannot read or write it. Native Code remains unrestricted and could change it,
+// The store itself is engine data, not repository content. Qualified contained
+// policies protect it. Native Code remains unrestricted and could change it,
 // so this memory is an application-safety backstop, not a hostile-Code security
 // boundary.
 // ──────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@ interface StoredRecognition {
   readonly workspaces: Record<string, StoredWorkspace>;
 }
 
-/** Exported so the Design-agent policy and store cannot disagree about which
+/** Exported so contained policy and the store cannot disagree about which
  * engine-owned path must be inaccessible. */
 export function designRecognitionStorePath(): string {
   return path.join(zerosDataDir(), "design-recognition.json");

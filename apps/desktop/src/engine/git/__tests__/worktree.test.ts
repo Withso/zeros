@@ -1,7 +1,4 @@
-import {
-  parseDesignManifest,
-  serializeDesignManifest,
-} from "../../design/manifest";
+import { encodeCanvasFile } from "../../design/canvas-file";
 import { useLegacyDesignStorage } from "../../design/__tests__/storage-fixtures";
 import {
   commitDesignMetadata,
@@ -402,7 +399,7 @@ printf ran > '${sentinel}'
         designDocumentMetadataPath(created.path, "Zeros Design"),
         "utf8",
       ),
-    ).toContain("version = 3");
+    ).toContain('"version": 1');
     await deleteWorkspace({
       workspaceId: created.workspaceId,
       includeBranch: true,
@@ -901,8 +898,7 @@ printf ran > '${sentinel}'
     const created = await createWorkspace({ repoRoot, kind: "design" });
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
-    const dirty = serializeDesignManifest(
-      parseDesignManifest(await readFile(canvas, "utf8"))!.id,
+    const dirty = encodeCanvasFile(
       {
         version: 3,
         frames: {},
@@ -968,7 +964,7 @@ printf ran > '${sentinel}'
     }
   });
 
-  it("renameDesignDirectory commits the folder and keeps its pointer personal, refusing live design workspaces", async () => {
+  it("renameDesignDirectory commits the folder and keeps its pointer personal, refusing incompatible legacy metadata", async () => {
     // Seed a committed design folder in the MAIN checkout.
     const designDir = path.join(repoRoot, "Zeros Design");
     await mkdir(designDir, { recursive: true });
@@ -991,7 +987,7 @@ printf ran > '${sentinel}'
         to: "Brand",
       }),
     ).rejects.toMatchObject({
-      message: expect.stringContaining("design workspace"),
+      message: expect.stringContaining("Design folder metadata"),
     });
     await deleteWorkspace({
       workspaceId: live.workspaceId,
@@ -1038,6 +1034,21 @@ printf ran > '${sentinel}'
     });
   });
 
+  it("renames the repository Design folder without changing a live workspace's checkout or presentation", async () => {
+    const folder = "Shared Design";
+    await mkdir(path.join(repoRoot, folder));
+    commitDesignMetadata(repoRoot, folder, '{"version":3,"frames":{}}');
+    await execFileAsync("git", ["add", folder, ".gitignore"], { cwd: repoRoot });
+    await execFileAsync("git", ["commit", "-qm", "Design metadata"], { cwd: repoRoot });
+    const live = await createWorkspace({ repoRoot, kind: "design", baseBranch: "main" });
+    const before = await readFile(path.join(live.path, folder, "design.toml"), "utf8");
+    try {
+      await renameDesignDirectory({ repoRoot, from: folder, to: "Renamed Design" });
+      expect(await readFile(path.join(live.path, folder, "design.toml"), "utf8")).toBe(before);
+      expect(existsSync(path.join(live.path, "Renamed Design"))).toBe(false);
+    } finally { await deleteWorkspace({ workspaceId: live.workspaceId, includeBranch: true }); }
+  });
+
   it("renames only the chosen Design folder and retains other staged changes", async () => {
     for (const folder of ["First Design", "Second Design"]) {
       await mkdir(path.join(repoRoot, folder));
@@ -1081,7 +1092,7 @@ printf ran > '${sentinel}'
         cwd: repoRoot,
       })
     ).stdout;
-    expect(staged).toContain("Second Design/design.toml");
+    expect(staged).toContain("Second Design/canvas.json");
     expect(staged).toContain("separate-code.txt");
     expect(staged).not.toContain("Renamed Design");
     expect(
@@ -1142,7 +1153,7 @@ printf ran > '${sentinel}'
             cwd: repoRoot,
           })
         ).stdout,
-      ).toBe(" M .gitignore\n");
+      ).toBe("");
     },
   );
 
@@ -2427,8 +2438,7 @@ printf ran > '${sentinel}'
     const designDirectory = designDirectoryNameFor(created.path);
     const canvas = designDocumentMetadataPath(created.path, designDirectory);
     const frame = path.join(created.path, designDirectory, "draft.html");
-    const draft = serializeDesignManifest(
-      parseDesignManifest(await readFile(canvas, "utf8"))!.id,
+    const draft = encodeCanvasFile(
       { version: 3, uncommitted: true },
     );
     await writeFile(canvas, draft);

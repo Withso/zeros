@@ -3,10 +3,10 @@
 // ──────────────────────────────────────────────────────────
 //
 // A persistent same-user ACL is the wrong scope: it also blocks the user's
-// other editors, Git clients, and coding platforms. Native Code now uses an
-// explicit behavioral contract plus Zeros-owned path authorization; a future
-// autonomous Design agent uses ZSR and the Design API. New builds never install
-// a checkout ACL for either actor.
+// other editors, Git clients, and coding platforms. The shared Code/Design
+// session uses mode instructions plus Zeros-owned path authorization. Local
+// Design mode permits native file authoring; cloud execution policy is separate.
+// New builds never install a checkout ACL for either mode.
 //
 // Boot owns the cold, durable ACL migration so admission and canvas writes do
 // not walk the tree.

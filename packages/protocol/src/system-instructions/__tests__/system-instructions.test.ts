@@ -59,21 +59,17 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
     expect(buildCodeAgentDesignTerritoryNotice("  ")).toBe("");
   });
 
-  it("keeps live Design readable while forbidding every generic mutation path", () => {
+  it("makes native authoring available in Design mode without a mandatory API roundtrip", () => {
     const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
     expect(out).toContain("/workspace/Zeros Design");
-    expect(out).toContain("coding agent");
-    expect(out).toContain("live, readable product context");
-    expect(out).toContain("read-only to you");
-    expect(out).toContain("shell, patch, editor, filesystem, or generic Git");
-    expect(out).toContain("even if the user asks");
-    expect(out).toContain("Design agent using the Design API");
-    expect(out).toContain("has no Design mutation capability");
-    expect(out).toContain("cannot turn itself into a Design agent");
-    expect(out).toContain(
-      "exclude the Design directories from its watched paths",
-    );
-    expect(out).toContain("Continue normal Code work");
+    expect(out).toContain("one Code/Design conversation");
+    expect(out).toContain("Code mode permits inspection; Design writes require Design mode");
+    expect(out).toContain("normal Read, Write, Edit, patch, filesystem and shell tools");
+    expect(out).toContain("No Design API apply, publish or proposal review");
+    expect(out).toContain("managed Git workflow for authorized staging");
+    expect(out).toContain("Provider Plan and permission settings remain independent");
+    expect(out).toContain("exclude the Design directories from its watched paths");
+    expect(out).not.toContain("Begin with design_capabilities");
   });
 
   it("lists every recognized Design directory in one native Code contract", () => {
@@ -83,6 +79,13 @@ describe("buildCodeAgentDesignTerritoryNotice", () => {
       "/workspace/Product Design",
     ]);
     expect(out).toContain("/workspace/Product Design, /workspace/Zeros Design");
+  });
+
+  it("defers the authoring method to the execution-specific composer instructions", () => {
+    const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
+    expect(out).toContain("Follow the current composer instructions for the available authoring method");
+    expect(out).toContain("Cloud conversations use the Design API");
+    expect(out).not.toContain("In Design mode use normal");
   });
 });
 
@@ -158,7 +161,7 @@ describe("buildFirstTurnSystemInstruction", () => {
       designDirectories: [],
     });
     expect(out).toContain("/ws/Zeros Design");
-    expect(out).toContain("read-only to you");
+    expect(out).toContain("Code mode permits inspection");
   });
   it("builds a Design-agent instruction without granting Code or Git mutation", () => {
     const out = buildFirstTurnSystemInstruction({

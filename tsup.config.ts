@@ -12,7 +12,7 @@ const VERSION = pkg.version;
 // extraResources). See electron-builder.yml.
 export default defineConfig([
   {
-    entry: ["apps/desktop/src/cli.ts"],
+    entry: { cli: "apps/desktop/src/cli.ts", "design-capture-worker": "apps/desktop/src/engine/design/design-capture-worker.ts" },
     format: ["cjs"],
     dts: false,
     splitting: false,
@@ -24,6 +24,7 @@ export default defineConfig([
     external: [
       /^node:/,
       "postcss",
+      "playwright-core",
       "chokidar",
       "ws",
       "tinyglobby",

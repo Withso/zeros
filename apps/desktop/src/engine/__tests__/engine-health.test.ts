@@ -4,6 +4,7 @@ import {
   engineStartupWaitDecision,
   isExpectedEngineHealth,
   parseOwnedEngineManifest,
+  selectEnginePort,
   zeroContactRespawnBackoffMs,
 } from "../../../electron/engine-health";
 
@@ -40,6 +41,18 @@ describe("owned engine manifest", () => {
 });
 
 describe("engine health ownership", () => {
+  it("selects only a configured port matching the manifest", () => {
+    expect(selectEnginePort(24203, 24200, 8)).toBe(24203);
+    expect(selectEnginePort(24200, 24200, 8)).toBe(24200);
+    expect(selectEnginePort(24207, 24200, 8)).toBe(24207);
+    for (const port of [24199, 24208, 24200.5, NaN, Infinity]) {
+      expect(selectEnginePort(port, 24200, 8)).toBeNull();
+    }
+    expect(selectEnginePort(24200, 24200, Infinity)).toBeNull();
+    expect(selectEnginePort(0, 0, 8)).toBeNull();
+    expect(selectEnginePort(65535, 65535, 2)).toBeNull();
+  });
+
   it("accepts only the expected engine generation", () => {
     expect(
       isExpectedEngineHealth(

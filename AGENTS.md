@@ -17,17 +17,24 @@ These instructions apply to the entire repository. Read and follow
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
-- Treat every Design directory identified by a Zeros `design.toml` as
-  engine-owned territory, including its `rules.md`, source and metadata. Private
-  `[design] directory_id` selects the active folder; legacy `directory` paths,
+- A Zeros `design.toml` registers a Design directory. Code mode may inspect it;
+  user-authorized local Design mode may author HTML, CSS, assets and `canvas.json`
+  using normal provider Read/Write/Edit/patch/shell tools. Read the directory's
+  `rules.md`, preserve stable frame IDs, and re-read changed files before editing.
+  No Design API apply/import/publish is required after native edits. The Design
+  API remains available for inspection and optional semantic edits. Cloud
+  workers retain their execution policy and use API authoring instead.
+- Use Zeros Settings/lifecycle operations for `design.toml`, generated `rules.md`,
+  registration and legacy migration. Do not bypass mode instructions or provider
+  permissions with Git-as-editor, ACL changes or filesystem aliases. Mode is an
+  authoring policy, not a filesystem sandbox; Design mode can still edit Code.
+- Commit each Design folder with its `design.toml`, `canvas.json`, `rules.md` and
+  referenced source. Authorized managed Git operations may include both Code
+  and Design. Saving never implicitly stages or commits. `.zeros/` is private
+  local state, ignored by default. Private `[design] directory_id` selects the
+  active folder; legacy directory pointers, inline manifest documents,
   `.zeros/design-dir.toml`, `.zeros/design/` metadata and `.zeros-canvas.json`
-  remain readable compatibility formats. Do not create, edit, move, delete,
-  stage or commit Design files through shell, patch, editor or generic Git
-  tools. Use the Design API/Design surface; when it is unavailable, stop and
-  ask the user instead of removing ACLs or retrying around an error.
-- Commit each Design folder with its `design.toml` and `rules.md`; do not
-  gitignore it. Zeros Settings and Design mode manage it through the Design
-  API. `.zeros/` contains private local state and is ignored by default.
+  remain readable. Explicit Design authoring upgrades them recoverably.
 
 ## Renderer invariants
 
@@ -52,6 +59,8 @@ These instructions apply to the entire repository. Read and follow
 - Internal-only runtime surfaces must use `useInternalFeatureActive(...)`, not a
   raw flag, and may attach hotkeys only while that gate is active.
 
+For Design work, read `docs/design-mode-roadmap.md`, the single Design
+architecture, implementation and future-phase reference.
 For renderer state, navigation, loading, tabs, panels, or list work, also read
 `docs/ui-interaction-performance.md` when it is present.
 For provider event handling or tool transcript UI, also read

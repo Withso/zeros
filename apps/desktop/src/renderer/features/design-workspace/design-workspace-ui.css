@@ -58,6 +58,90 @@
   font-family: var(--font-sans);
 }
 
+/* The style inspector shares the desktop control scale. Values have a steady
+ * tonal surface, tabular digits and the same type as labels and menus. */
+[data-design-style-editor] {
+  container: design-style / inline-size;
+}
+
+@container design-style (max-width: 255px) {
+  [data-design-layout-geometry] {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  [data-design-layout-geometry] > :nth-child(3) {
+    grid-column: 1;
+    grid-row: 3;
+  }
+  [data-design-layout-geometry] > :nth-child(6) {
+    grid-column: 2;
+    grid-row: 3;
+  }
+}
+
+[data-design-style-editor] [data-design-inspector-field],
+[data-design-style-editor] .zd-design-control-quiet,
+.zd-design-layout-select,
+.zd-design-size-control,
+.zd-design-layout-flow,
+.zd-design-alignment-grid {
+  border-width: 0;
+  border-radius: var(--radius-md);
+  background-color: var(--bg2);
+  box-shadow: none;
+}
+
+[data-design-style-editor] [data-design-inspector-field] input {
+  font-family: var(--font-sans);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+[data-design-style-editor] [data-design-inspector-field] label {
+  font-size: var(--text-xs);
+}
+
+[data-design-style-editor] [data-design-inspector-field]:hover,
+.zd-design-layout-select:hover,
+.zd-design-size-control:hover {
+  background-color: var(--bg2-hover);
+}
+
+.zd-design-layout-select:focus-visible,
+.zd-design-size-control:focus-within {
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+.zd-design-size-control [data-design-inspector-field] {
+  border-radius: var(--radius-md) 0 0 var(--radius-md);
+}
+
+.zd-design-layout-flow .zd-design-segment[aria-pressed="true"] {
+  background-color: var(--bg1-highlight);
+  outline: 1px solid var(--border3);
+  outline-offset: -1px;
+}
+
+.zd-design-alignment-point[aria-pressed="true"] {
+  color: var(--design-selection-stroke);
+}
+
+.zd-design-alignment-mark {
+  width: 3px;
+  height: 3px;
+  border-radius: var(--radius-full);
+  background-color: var(--muted-fg);
+}
+
+.zd-design-alignment-mark-selected {
+  width: 12px;
+  height: 3px;
+  background-color: currentColor;
+  box-shadow:
+    0 -4px currentColor,
+    0 4px currentColor;
+}
+
 .zd-design-control-quiet:hover {
   border-color: transparent;
   background-color: var(--bg1-hover);
@@ -697,4 +781,30 @@
   .zd-design-floating-toolbar button {
     transition: none;
   }
+}
+
+.zd-design-layout-insertion {
+  position: absolute;
+  pointer-events: none;
+  background: var(--design-selection-stroke);
+  z-index: var(--z-panel);
+}
+.zd-design-drag-preview {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: hidden;
+  contain: layout paint;
+  will-change: transform;
+  outline: calc(1px * var(--design-canvas-inverse-zoom, 1)) solid
+    var(--design-selection-stroke);
+}
+
+.zd-design-drag-preview[hidden] {
+  display: none;
+}
+.zd-design-drag-preview img {
+  position: absolute;
+  max-width: none;
 }

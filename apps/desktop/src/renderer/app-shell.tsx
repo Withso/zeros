@@ -70,8 +70,6 @@ import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-p
 import { TopBar } from "./shell/top-bar";
 import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
-import { DesignWorkspaceColumn } from "./features/design-workspace/design-workspace";
-import { DesignWorkspaceSidebar } from "./features/design-workspace/design-workspace-sidebar";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
 import {
@@ -82,11 +80,6 @@ import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./state/use-active-workspace";
-import {
-  usePendingWorkspaceKind,
-  usePendingWorkspaceMode,
-} from "./state/pending-workspaces";
-import { resolveWorkspacePresentationKind } from "./state/workspace-resolution";
 import { notifyWorkspacesChanged, useProjects } from "./state/use-projects";
 import { restoreWorkspaceWithFeedback } from "./state/archive-actions";
 import { SettingsPage } from "./features/settings/settings-page";
@@ -143,16 +136,9 @@ import { TooltipProvider } from "./shared/ui/primitives/tooltip";
 import { useInstantViewSwitch } from "./shared/ui/use-instant-view-switch";
 import {
   useRetainedViewKeys,
-  useStableRetainedViewOrder,
 } from "./shell/use-retained-view-keys";
 import { useGitRefreshCoordinator } from "./shell/use-git-refresh-key";
 import { GithubAppNotifications } from "./platform/bridge/github-app-notifications";
-import type { Workspace } from "./platform/git";
-
-interface RetainedDesignWorkspace {
-  workspace: Workspace;
-  folder: string;
-}
 
 // Chat localStorage cache keys live in a shared module so the repo-removal
 // path (which bulk-deletes a repo's chats) reconciles the exact same keys this
@@ -390,6 +376,8 @@ function rowToThread(r: ChatRowWire): ChatThread {
     r.providerBinding?.providerId === r.agentId ? r.providerBinding : undefined;
   return {
     id: r.id,
+    composerMode: r.composerMode === "design" ? "design" : "code",
+    composerModeRevision: Number.isSafeInteger(r.composerModeRevision) && r.composerModeRevision! >= 0 ? r.composerModeRevision : 0,
     folder: r.folder,
     agentId: r.agentId,
     agentName: r.agentName,
@@ -988,36 +976,24 @@ function MainShellBody({
     folder: activeWorkspaceFolder,
     project: activeProject,
   } = useActiveWorkspace();
-  const pendingWorkspaceKind = usePendingWorkspaceKind(activeWorkspaceFolder);
-  const requestedWorkspaceKind = usePendingWorkspaceMode(activeWorkspace?.id);
-  const designWorkspaceRequested =
-    resolveWorkspacePresentationKind({
-      confirmedKind: activeWorkspace?.kind,
-      requestedKind: requestedWorkspaceKind,
-      pendingKind: pendingWorkspaceKind,
-      folder: activeWorkspaceFolder,
-    }) === "design";
-  const designWorkspaceActive = designWorkspaceRequested;
   useOpenBrowserHotkey(
-    activePage === "workspace" &&
-      Boolean(activeWorkspaceFolder) &&
-      !designWorkspaceRequested,
+    activePage === "workspace" && Boolean(activeWorkspaceFolder),
     revealWorkbench,
   );
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
-    `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}:${designWorkspaceRequested ? "design" : "code"}`,
+    `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
     shellSurfaceRef,
   );
   // Reveal a PR opened outside the engine (agent `gh pr create` / terminal): if
   // the active workspace has no recorded prNumber, detect + backfill it so the
   // Workbench PR-status island appears and the header "Create PR" button hides.
-  useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
+  useWorkspacePrSync(activeWorkspace);
   const { projects } = useProjects();
   useWarmAutomaticRepositoryIcons(projects);
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
-  useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested);
+  useNewTabHotkeys(activePage === "workspace");
   const worktreeMissing =
     !!activeWorkspace && activeWorkspace.present === false;
   // Zero projects -> full-window welcome (logo + Open project / GitHub /
@@ -1076,51 +1052,6 @@ function MainShellBody({
   const renderWorkspaceShell =
     !showWelcome &&
     (workspaceShellRetainedRef.current || activePage === "workspace");
-  const activeDesignWorkspace = React.useMemo<RetainedDesignWorkspace | null>(
-    () =>
-      designWorkspaceActive && activeWorkspace && activeWorkspaceFolder
-        ? { workspace: activeWorkspace, folder: activeWorkspaceFolder }
-        : null,
-    [designWorkspaceActive, activeWorkspace, activeWorkspaceFolder],
-  );
-  const retainedDesignWorkspaceRef = React.useRef(
-    new Map<string, RetainedDesignWorkspace>(),
-  );
-  const designWorkspaceIdsToRender = useRetainedViewKeys(
-    activeDesignWorkspace?.workspace.id ?? null,
-    2,
-    undefined,
-    "design-workspaces",
-  );
-  // MRU chooses the two live Design surfaces, but rendering that changing
-  // order physically moves their iframe-owning DOM nodes. Chromium reloads a
-  // nested browsing context when it moves, so keep surviving A → B → A
-  // siblings in place and append only genuinely new workspaces.
-  const stableDesignWorkspaceIdsToRender = useStableRetainedViewOrder(
-    designWorkspaceIdsToRender,
-    "design-workspaces",
-  );
-  const designWorkspaceEntriesToRender =
-    stableDesignWorkspaceIdsToRender.flatMap((id) => {
-      if (activeDesignWorkspace?.workspace.id === id) {
-        return [activeDesignWorkspace];
-      }
-      const retained = retainedDesignWorkspaceRef.current.get(id);
-      return retained ? [retained] : [];
-    });
-  React.useLayoutEffect(() => {
-    if (activeDesignWorkspace) {
-      retainedDesignWorkspaceRef.current.set(
-        activeDesignWorkspace.workspace.id,
-        activeDesignWorkspace,
-      );
-    }
-    const retainedIds = new Set(designWorkspaceIdsToRender);
-    for (const id of retainedDesignWorkspaceRef.current.keys()) {
-      if (!retainedIds.has(id)) retainedDesignWorkspaceRef.current.delete(id);
-    }
-  }, [activeDesignWorkspace, designWorkspaceIdsToRender]);
-
   // Only the workspace view swaps in the missing-worktree panel — the Home
   // sub-pages have no active worktree content to lose, so they render normally
   // even while the selected workspace's folder is gone.
@@ -1178,46 +1109,7 @@ function MainShellBody({
               aria-hidden={isHome}
             >
               <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-                {designWorkspaceEntriesToRender.map((entry) => {
-                  const entryActive =
-                    designWorkspaceActive &&
-                    entry.workspace.id === activeDesignWorkspace?.workspace.id;
-                  // `visible` re-enables painting under any hidden ancestor,
-                  // so the active deck must drop it while a Home page owns the
-                  // window — otherwise its z-indexed layer rows paint straight
-                  // through the Home sidebar.
-                  const entryVisible = entryActive && !isHome;
-                  return (
-                    <div
-                      key={entry.workspace.id}
-                      data-design-retained-workspace={entry.workspace.id}
-                      {...(!entryVisible ? { inert: "" } : {})}
-                      aria-hidden={!entryVisible}
-                      className={[
-                        "absolute inset-0 flex min-h-0 min-w-0 overflow-hidden",
-                        entryVisible
-                          ? "pointer-events-auto visible"
-                          : "pointer-events-none invisible",
-                      ].join(" ")}
-                    >
-                      {/* Design owns an always-present canvas/inspector pair;
-                          the persisted code Workbench collapse applies only to
-                          ordinary coding workspaces. */}
-                      <DesignWorkspaceSidebar
-                        workspace={entry.workspace}
-                        folder={entry.folder}
-                        surfaceActive={entryActive && !isHome}
-                      />
-                      <DesignWorkspaceColumn
-                        workspace={entry.workspace}
-                        folder={entry.folder}
-                        surfaceActive={entryActive && !isHome}
-                      />
-                    </div>
-                  );
-                })}
-                {!designWorkspaceActive ? (
-                  <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
+                <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
                     <ConversationPane
                       workbenchCollapsed={workbenchCollapsed}
                       onToggleWorkbench={toggleWorkbench}
@@ -1228,8 +1120,7 @@ function MainShellBody({
                       surfaceActive={!isHome && !workbenchCollapsed}
                       collapsed={workbenchCollapsed}
                     />
-                  </div>
-                ) : null}
+                </div>
               </div>
             </div>
           )}

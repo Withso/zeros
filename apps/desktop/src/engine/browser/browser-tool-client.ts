@@ -104,13 +104,17 @@ export function stripBrowserServiceCredentials(
   if (
     !env ||
     (!Object.prototype.hasOwnProperty.call(env, URL_ENV) &&
-      !Object.prototype.hasOwnProperty.call(env, TOKEN_ENV))
+      !Object.prototype.hasOwnProperty.call(env, TOKEN_ENV) &&
+      !Object.prototype.hasOwnProperty.call(env, "ZEROS_DESIGN_CAPTURE_URL") &&
+      !Object.prototype.hasOwnProperty.call(env, "ZEROS_DESIGN_CAPTURE_TOKEN"))
   ) {
     return env;
   }
   const safe = { ...env };
   delete safe[URL_ENV];
   delete safe[TOKEN_ENV];
+  delete safe.ZEROS_DESIGN_CAPTURE_URL;
+  delete safe.ZEROS_DESIGN_CAPTURE_TOKEN;
   return safe;
 }
 

@@ -1464,6 +1464,12 @@ export const MIGRATIONS: Migration[] = [
     name: "restart-safe local and cloud workspace copy jobs",
     up: MIGRATION_38_CLOUD_WORKSPACE_FORK_JOBS,
   },
+  {
+    version: 39,
+    name: "conversation composer mode",
+    up: `ALTER TABLE chats ADD COLUMN composer_mode TEXT NOT NULL DEFAULT 'code' CHECK (composer_mode IN ('code', 'design'));
+         ALTER TABLE chats ADD COLUMN composer_mode_revision INTEGER NOT NULL DEFAULT 0;`,
+  },
 ];
 
 /** Run all pending migrations in order, each in its own transaction. Idempotent

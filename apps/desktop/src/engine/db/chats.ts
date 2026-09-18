@@ -18,6 +18,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { openZerosDb } from "./index";
+import { composerModeSchema, type ComposerMode, type ComposerModeSnapshot } from "@zeros/protocol/composer-mode";
 import { nextRev, recordTombstone, clearTombstone } from "./sync";
 import {
   coerceProviderBinding,
@@ -64,6 +65,9 @@ function workspaceIdForChat(folder: string | null | undefined): string | null {
 /** Mirrors the renderer's ChatRowWire. */
 export interface ChatRow {
   id: string;
+  /** Engine-owned; ordinary chat upserts never change authoring authority. */
+  composerMode?: ComposerMode;
+  composerModeRevision?: number;
   folder: string;
   agentId: string | null;
   agentName: string | null;
@@ -97,6 +101,8 @@ export interface ChatRow {
 
 interface ChatDbRow {
   id: string;
+  composer_mode: ComposerMode;
+  composer_mode_revision: number;
   folder: string | null;
   agent_id: string | null;
   agent_name: string | null;
@@ -159,6 +165,8 @@ function toChatRow(r: ChatDbRow): ChatRow {
       : null;
   return {
     id: r.id,
+    composerMode: r.composer_mode === "design" ? "design" : "code",
+    composerModeRevision: r.composer_mode_revision ?? 0,
     folder: r.folder ?? "",
     agentId: r.agent_id,
     agentName: r.agent_name,
@@ -278,6 +286,8 @@ export function coerceChatRow(o: unknown): ChatRow | null {
   return {
     id: r.id,
     folder: str(r.folder),
+    composerMode: r.composerMode === "design" ? "design" : "code",
+    composerModeRevision: typeof r.composerModeRevision === "number" && Number.isSafeInteger(r.composerModeRevision) && r.composerModeRevision >= 0 ? r.composerModeRevision : 0,
     agentId,
     agentName: strOrNull(r.agentName),
     model: strOrNull(r.model),
@@ -319,7 +329,7 @@ export function listChats(): ChatRow[] {
   const db = openZerosDb();
   const rows = db
     .prepare(
-      `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
+      `SELECT id, composer_mode, composer_mode_revision, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
               created_at, updated_at, session_id, provider_binding, provider_metadata,
@@ -338,7 +348,7 @@ export function getChat(id: string): ChatRow | null {
   const db = openZerosDb();
   const row = db
     .prepare(
-      `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
+      `SELECT id, composer_mode, composer_mode_revision, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
               created_at, updated_at, session_id, provider_binding, provider_metadata,
@@ -347,6 +357,49 @@ export function getChat(id: string): ChatRow | null {
     )
     .get(id) as ChatDbRow | undefined;
   return row ? toChatRow(row) : null;
+}
+
+export function wasChatDeleted(id: string): boolean {
+  return !!openZerosDb().prepare("SELECT 1 FROM sync_tombstones WHERE kind = 'chat' AND id = ?").get(id);
+}
+
+/** Trusted durable-record restore only. Ordinary renderer upserts deliberately
+ * ignore these fields so stale sidebar writes cannot change tool authority. */
+export function restoreChatComposerModes(chats: readonly ChatRow[]): void {
+  const db = openZerosDb();
+  const update = db.prepare("UPDATE chats SET composer_mode = ?, composer_mode_revision = ?, rev = ? WHERE id = ?");
+  db.transaction(() => {
+    for (const chat of chats) {
+      const mode = composerModeSchema.parse(chat.composerMode ?? "code");
+      const revision = chat.composerModeRevision ?? 0;
+      if (!Number.isSafeInteger(revision) || revision < 0) throw new Error("Invalid composer mode revision.");
+      update.run(mode, revision, nextRev(), chat.id);
+    }
+  })();
+}
+
+/** Atomic compare-and-set for agent switches. Manual selection may omit the
+ * revision; delayed agent requests must never overwrite a newer user choice. */
+export function setChatComposerMode(
+  id: string,
+  mode: ComposerMode,
+  expectedRevision?: number,
+): ComposerModeSnapshot {
+  composerModeSchema.parse(mode);
+  const db = openZerosDb();
+  return db.transaction(() => {
+    const chat = getChat(id);
+    if (!chat || chat.archived || chat.kind === "terminal")
+      throw new Error("This conversation is unavailable for Design mode.");
+    const revision = chat.composerModeRevision ?? 0;
+    if (expectedRevision !== undefined && expectedRevision !== revision)
+      throw new Error("Composer mode changed. Read design_capabilities before requesting another switch.");
+    if ((chat.composerMode ?? "code") === mode) return { mode, revision };
+    if (revision >= Number.MAX_SAFE_INTEGER) throw new Error("Composer mode revision exhausted.");
+    db.prepare("UPDATE chats SET composer_mode = ?, composer_mode_revision = ?, rev = ? WHERE id = ?")
+      .run(mode, revision + 1, nextRev(), id);
+    return { mode, revision: revision + 1 };
+  })();
 }
 
 /** The chat's agent cwd (`folder`) and cached owning workspace id
@@ -813,7 +866,7 @@ export function summariesForFolder(
 export function listChatsSince(since: number): ChatRow[] {
   const rows = openZerosDb()
     .prepare(
-      `SELECT id, folder, agent_id, agent_name, model, effort, permission_mode,
+      `SELECT id, composer_mode, composer_mode_revision, folder, agent_id, agent_name, model, effort, permission_mode,
               last_mode_id, pre_plan_mode_id, fast,
               additional_directories, title,
               created_at, updated_at, session_id, provider_binding, provider_metadata,

@@ -60,10 +60,10 @@ export async function stagePaths(opts: StageOptions): Promise<void> {
 export async function unstagePaths(opts: StageOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const paths = validatePaths(opts.paths);
+  // reset accepts an unborn HEAD and removes only the selected index entries;
+  // restore --staged requires an existing HEAD. Neither touches draft bytes.
   await runGit(ws.path, [
-    "restore",
-    "--staged",
-    "--",
+    "reset", "--quiet", "--",
     ...paths.map((candidate) => `:(literal)${candidate}`),
   ]);
 }

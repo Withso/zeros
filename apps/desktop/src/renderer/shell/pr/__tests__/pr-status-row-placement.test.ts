@@ -58,18 +58,18 @@ describe("Create PR routing", () => {
       "apps/desktop/src/renderer/shell/pr/create-pr-button.tsx",
     );
     expect(button).toMatch(
-      /directOnly\s*\?\s*createDirect\(false\)\s*:\s*askAgentToCreate\(false\)/,
+      /void askAgentToCreate\(false\)/,
     );
     expect(button).toContain("<span>Create PR directly</span>");
   });
 
-  it("uses the direct engine action when a design workspace has no chat", () => {
+  it("keeps PR controls independent of legacy workspace kind", () => {
     const button = source(
       "apps/desktop/src/renderer/shell/pr/create-pr-button.tsx",
     );
-    expect(button).toContain('workspace.kind === "design"');
+    expect(button).not.toContain('workspace.kind === "design"');
     expect(button).toMatch(
-      /directOnly\s*\?\s*createDirect\(false\)\s*:\s*askAgentToCreate\(false\)/,
+      /void askAgentToCreate\(false\)/,
     );
   });
 });

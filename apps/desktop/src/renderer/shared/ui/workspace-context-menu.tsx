@@ -1,5 +1,5 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
-import { Archive, Check, Code2, PenTool } from "lucide-react";
+import { Archive, Check } from "lucide-react";
 
 import {
   workspaceSetStatus,
@@ -11,7 +11,7 @@ import { LIFECYCLE_STATUSES } from "@/renderer/shared/lib/workspace-status";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { StatusIcon } from "@/renderer/shared/ui/primitives/status-icon";
-import { useWorkspaceModeSwitch } from "@/renderer/shared/ui/workspace-mode-header";
+import { useWorkspaceArchiving } from "@/renderer/state/pending-workspaces";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -58,14 +58,8 @@ export function WorkspaceContextMenu({
   children,
   placement = "pointer",
 }: WorkspaceContextMenuProps) {
-  const {
-    archiving,
-    canSwitch: showModeSwitch,
-    mode,
-    setMode,
-    switching: switchingMode,
-  } = useWorkspaceModeSwitch(workspace);
-  const archiveInert = archiveDisabled || archiving || switchingMode;
+  const archiving = useWorkspaceArchiving(workspace.id);
+  const archiveInert = archiveDisabled || archiving;
   const setStatus = (status: WorkspaceStatus) => {
     if (status === workspace.status) return;
     void workspaceSetStatus({ workspaceId: workspace.id, status })
@@ -76,11 +70,6 @@ export function WorkspaceContextMenu({
         );
       });
   };
-
-  // Mode switch — one workspace, two modes. Hidden for the synthetic
-  // local-main trunk (no managed row to flip) and while a lifecycle operation
-  // owns the row (archive shares that signal).
-  const inDesignMode = mode === "design";
 
   // Timestamp of the most recent menu close, used to eat the phantom click above.
   const menuClosedAtRef = useRef(0);
@@ -151,20 +140,7 @@ export function WorkspaceContextMenu({
             ))}
           </ContextMenuSubContent>
         </ContextMenuSub>
-        {showModeSwitch && (
-          <>
-            <ContextMenuSeparator />
-            <ContextMenuItem
-              onSelect={() => setMode(inDesignMode ? "code" : "design")}
-              disabled={switchingMode || archiving}
-            >
-              {inDesignMode ? <Code2 /> : <PenTool />}
-              <span>
-                {inDesignMode ? "Switch to Code Mode" : "Switch to Design Mode"}
-              </span>
-            </ContextMenuItem>
-          </>
-        )}
+
         {onArchive && (
           <>
             <ContextMenuSeparator />

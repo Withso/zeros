@@ -367,7 +367,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
     const head = sink[0]![0] as { text: string };
     expect(head.text).toContain("<system_instruction>");
     expect(head.text).toContain(designDirectory);
-    expect(head.text).toContain("never create, edit, append, truncate");
+    expect(head.text).toContain("Code mode permits inspection; Design writes require Design mode");
     expect(head.text).not.toContain("zeros-isolation-context");
     expect(head.text).toContain("live, readable product context");
     expect(head.text).not.toContain("target branch");

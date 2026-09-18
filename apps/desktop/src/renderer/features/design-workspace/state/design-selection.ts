@@ -7,6 +7,7 @@
 // readback uses a per-workspace generation so A → B races cannot republish A
 // after the user has already selected B.
 
+import { designBackgroundWork } from "./design-background-work";
 import type {
   DesignRuntimeNodeDetails,
   DesignRuntimeNodeGeometry,
@@ -328,8 +329,26 @@ export async function captureDesignRuntimeScreenshot(
   scale: number,
 ): Promise<DesignRuntimeScreenshot | null> {
   const runtime = designFrameRuntime(workspaceId, frame);
-  if (!runtime) return null;
-  const screenshot = await runtime.captureScreenshot(nodeId, scale);
+  if (!runtime || runtime.isActive?.() === false) return null;
+  const screenshot = await designBackgroundWork.schedule(
+    `capture:${workspaceId}\0${frame}\0${nodeId ?? ""}`,
+    async () => {
+      if (
+        runtime.isActive?.() === false ||
+        designFrameRuntime(workspaceId, frame) !== runtime ||
+        (runtime.sourceVersion !== undefined &&
+          runtime.sourceVersion !== sourceVersion)
+      )
+        return null;
+      return runtime.captureScreenshot(nodeId, scale);
+    },
+  );
+  if (
+    !screenshot ||
+    runtime.isActive?.() === false ||
+    designFrameRuntime(workspaceId, frame) !== runtime
+  )
+    return null;
   if (screenshot.sourceVersion !== sourceVersion) return null;
   const data = screenshotBase64(screenshot);
   if (!data) return null;
@@ -658,19 +677,22 @@ export async function selectDesignNodeAtLocation(input: {
 /** Canvas body selection shares the generation used by Layers, frame labels,
  * and outside clicks. A late hit can never reopen a selection they replaced.
  * Entering a frame is synchronous; only explicit nested intent needs a hit. */
-export async function selectDesignFrameBodyAtLocation(input: {
-  workspaceId: string;
-  folder: string;
-  frame: DesignCanvasFrameWire;
-  x: number;
-  y: number;
-  intent: DesignFrameBodyIntent;
-  additive?: boolean;
-  /** Double-click retains direct entry into editable text. */
-  preferText?: boolean;
-  /** Single-node entry can open its editor before selection persistence. */
-  onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
-}): Promise<DesignRuntimeNodeDetails | null> {
+export async function selectDesignFrameBodyAtLocation(
+  input: {
+    workspaceId: string;
+    folder: string;
+    frame: DesignCanvasFrameWire;
+    x: number;
+    y: number;
+    intent: DesignFrameBodyIntent;
+    additive?: boolean;
+    /** Double-click retains direct entry into editable text. */
+    preferText?: boolean;
+    /** Single-node entry can open its editor before selection persistence. */
+    onLocalSelection?: (details: DesignRuntimeNodeDetails) => void;
+  },
+  retries = 2,
+): Promise<DesignRuntimeNodeDetails | null> {
   const { workspaceId, frame } = input;
   const current = designWorkspaceView(workspaceId);
   const selectedNodeId =
@@ -701,79 +723,107 @@ export async function selectDesignFrameBodyAtLocation(input: {
     const state = designRuntimeFrameState(workspaceId, frame.file);
     return (
       selectionGenerationByWorkspace.get(workspaceId) === generation &&
-      (!state?.sourceVersion || state.sourceVersion === frame.sourceVersion)
+      designFrameRuntime(workspaceId, frame.file) === runtime &&
+      (runtime.sourceVersion
+        ? runtime.sourceVersion === frame.sourceVersion
+        : !state?.sourceVersion || state.sourceVersion === frame.sourceVersion)
     );
   };
-  let details = await runtime.getElementAtLoc(input.x, input.y, {
-    mode: "deepest",
-  });
-  if (
-    !isCurrent() ||
-    (details && details.sourceVersion !== frame.sourceVersion)
-  ) {
-    return null;
-  }
-  if (!details) return selectFrame();
-  const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
-  const exactSnapshot =
-    snapshot?.sourceVersion === frame.sourceVersion ? snapshot : null;
-  const isFrameOwner = (candidate: DesignRuntimeNodeDetails) =>
-    labeledFrame &&
-    (candidate.oid === exactSnapshot?.frame.oid ||
-      candidate.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID ||
-      candidate.tag === "body" ||
-      candidate.tag === "html");
-  if (isFrameOwner(details)) return selectFrame();
-  const intent =
-    input.preferText && canEditDesignNodeText(details)
-      ? "deepest"
-      : input.intent;
-  const target = exactSnapshot
-    ? resolveDesignFrameBodyTarget({
-        nodes: exactSnapshot.tree,
-        deepestNodeId: details.oid,
-        deepestRect: details.rect,
-        selectedNodeId,
-        intent,
-        frameSize: frame,
-        rootRect: exactSnapshot.frame.rect,
-        labeledFrame,
-        frameRootId: exactSnapshot.frame.oid,
-      })
-    : { kind: "unresolved" as const };
-  if (target.kind === "frame") return selectFrame();
-  if (target.kind === "node" && target.nodeId !== details.oid) {
-    details = await runtime.getNodeDetails(target.nodeId);
-  } else if (target.kind === "unresolved" && intent !== "deepest") {
-    // A semantic frame selection has no selected node. Give fallback descent
-    // its runtime owner so a bounded tree cannot trap entry on that same root.
-    details = await runtime.getElementAtLoc(input.x, input.y, {
-      mode: intent === "plain" ? "preserve" : "descend",
-      selectedNodeId:
-        selectedNodeId ??
-        (labeledFrame && intent === "descend"
-          ? exactSnapshot?.frame.oid
-          : null),
+  const retryAdoptedClick = () => {
+    if (
+      retries > 0 &&
+      selectionGenerationByWorkspace.get(workspaceId) === generation &&
+      designFrameRuntime(workspaceId, frame.file) === runtime &&
+      runtime.sourceVersion &&
+      runtime.sourceVersion !== frame.sourceVersion
+    ) {
+      return selectDesignFrameBodyAtLocation(
+        { ...input, frame: { ...frame, sourceVersion: runtime.sourceVersion } },
+        retries - 1,
+      );
+    }
+    return Promise.resolve(null);
+  };
+  if (runtime.sourceVersion && runtime.sourceVersion !== frame.sourceVersion)
+    return retryAdoptedClick();
+  try {
+    let details = await runtime.getElementAtLoc(input.x, input.y, {
+      mode: "deepest",
     });
+    if (
+      !isCurrent() ||
+      (details && details.sourceVersion !== frame.sourceVersion)
+    ) {
+      return retryAdoptedClick();
+    }
+    if (!details) return selectFrame();
+    const snapshot = designRuntimeFrameState(workspaceId, frame.file)?.snapshot;
+    const exactSnapshot =
+      snapshot?.sourceVersion === frame.sourceVersion ? snapshot : null;
+    const isFrameOwner = (candidate: DesignRuntimeNodeDetails) =>
+      labeledFrame &&
+      (candidate.oid === exactSnapshot?.frame.oid ||
+        candidate.oid === DESIGN_RUNTIME_DOCUMENT_BODY_ID ||
+        candidate.tag === "body" ||
+        candidate.tag === "html");
+    if (isFrameOwner(details)) return selectFrame();
+    const intent =
+      input.preferText && canEditDesignNodeText(details)
+        ? "deepest"
+        : input.intent;
+    const target = exactSnapshot
+      ? resolveDesignFrameBodyTarget({
+          nodes: exactSnapshot.tree,
+          deepestNodeId: details.oid,
+          deepestRect: details.rect,
+          selectedNodeId,
+          intent,
+          frameSize: frame,
+          rootRect: exactSnapshot.frame.rect,
+          labeledFrame,
+          frameRootId: exactSnapshot.frame.oid,
+        })
+      : { kind: "unresolved" as const };
+    if (target.kind === "frame") return selectFrame();
+    if (target.kind === "node" && target.nodeId !== details.oid) {
+      details = await runtime.getNodeDetails(target.nodeId);
+    } else if (target.kind === "unresolved" && intent !== "deepest") {
+      // A semantic frame selection has no selected node. Give fallback descent
+      // its runtime owner so a bounded tree cannot trap entry on that same root.
+      details = await runtime.getElementAtLoc(input.x, input.y, {
+        mode: intent === "plain" ? "preserve" : "descend",
+        selectedNodeId:
+          selectedNodeId ??
+          (labeledFrame && intent === "descend"
+            ? exactSnapshot?.frame.oid
+            : null),
+      });
+    }
+    if (
+      !isCurrent() ||
+      (details && details.sourceVersion !== frame.sourceVersion)
+    ) {
+      return retryAdoptedClick();
+    }
+    if (!details || isFrameOwner(details)) return selectFrame();
+    if (input.additive) {
+      const selection = await toggleDesignNodeSelection({
+        ...input,
+        nodeId: details.oid,
+        details,
+      });
+      return (
+        selection?.find((candidate) => candidate.oid === details.oid) ?? null
+      );
+    }
+    return selectDesignNode({ ...input, nodeId: details.oid, details });
+  } catch (error) {
+    // An in-place commit may advance the port while this hit response travels
+    // back. Retry only that exact live frame; a newer selection always wins.
+    if (runtime.sourceVersion && runtime.sourceVersion !== frame.sourceVersion)
+      return retryAdoptedClick();
+    throw error;
   }
-  if (
-    !isCurrent() ||
-    (details && details.sourceVersion !== frame.sourceVersion)
-  ) {
-    return null;
-  }
-  if (!details || isFrameOwner(details)) return selectFrame();
-  if (input.additive) {
-    const selection = await toggleDesignNodeSelection({
-      ...input,
-      nodeId: details.oid,
-      details,
-    });
-    return (
-      selection?.find((candidate) => candidate.oid === details.oid) ?? null
-    );
-  }
-  return selectDesignNode({ ...input, nodeId: details.oid, details });
 }
 
 /** Read the deepest hit for context-stack tooling without mutating selection. */
@@ -844,16 +894,19 @@ export async function previewDesignNodeGeometry(input: {
   styles?: Record<string, string | null> | null;
   children?: boolean;
 }): Promise<DesignRuntimeNodeGeometry> {
+  if (input.styles) designBackgroundWork.touch();
   const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
   if (!runtime) throw new Error("The design frame is not ready.");
-  const runtimeSourceVersion =
-    runtime.sourceVersion ?? input.frame.sourceVersion;
   const geometry = runtime.supports("previewGeometry")
     ? await runtime.previewGeometry(input.nodeId, input.styles ?? null, {
         children: input.children === true,
       })
     : await legacyDesignNodeGeometry(runtime, input);
-  if (geometry.sourceVersion !== runtimeSourceVersion) {
+  if (
+    designFrameRuntime(input.workspaceId, input.frame.file) !== runtime ||
+    geometry.sourceVersion !==
+      (runtime.sourceVersion ?? input.frame.sourceVersion)
+  ) {
     throw new Error("The design frame changed before the preview was applied.");
   }
   return geometry;
@@ -1262,9 +1315,11 @@ export async function clearDesignNodeStylePreviewTransient(input: {
   clearDesignLivePreview(input.workspaceId, input.frame, input.nodeId);
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
-  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
   const details = await runtime.clearPreviewStyles(input.nodeId);
-  if (details.sourceVersion !== runtimeSourceVersion) {
+  if (
+    designFrameRuntime(input.workspaceId, input.frame) !== runtime ||
+    details.sourceVersion !== (runtime.sourceVersion ?? input.sourceVersion)
+  ) {
     throw new Error("The design frame changed before the preview was cleared.");
   }
   return details;
@@ -1440,6 +1495,7 @@ export function persistDesignRuntimeAuditSnapshot(input: {
 }
 
 export function resetDesignSelectionWorkflowsForTests(): void {
+  designBackgroundWork.reset();
   selectionGenerationByWorkspace.clear();
   hoverGenerationByWorkspace.clear();
   for (const queue of hoverReadQueueByWorkspace.values()) {

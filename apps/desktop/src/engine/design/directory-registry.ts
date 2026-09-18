@@ -2,15 +2,16 @@
 // Design directory registry — which folder is "the design folder" per workspace
 // ──────────────────────────────────────────────────────────
 //
-// The design folder's NAME is configuration (`[design] directory` in the
-// private settings layers and this checkout's tracked registry), but the thirty-plus code paths that join it onto a workspace path are
-// SYNCHRONOUS (document reads, protocol resources, component expansion, lock
-// sweeps). This tiny module bridges the two: the engine resolves the setting
+// The active folder is selected by private `[design] directory_id` and resolved
+// from this checkout's design.toml manifests. Legacy directory paths and tracked
+// registries remain readable. Consumers join the resolved name synchronously
+// (document reads, protocol resources, component expansion, lock sweeps).
+// This module bridges the two: the engine resolves the selection
 // asynchronously at well-defined moments (boot, create, restore, mode entry,
 // settings change — see design/directory.ts) and PRIMES the answer here; every
 // sync consumer just asks.
 //
-// Deliberately dependency-free: document.ts, components.ts,
+// Deliberately lightweight: document.ts, components.ts,
 // protocol-resource.ts and workspace-lock.ts all import it, so anything it
 // imported would be welded into every one of those graphs (components.ts ←
 // document.ts already forms a cycle risk on its own).
@@ -25,15 +26,13 @@ import path from "node:path";
 import { sanitizeDesignDirectoryName } from "./directory-path";
 export { sanitizeDesignDirectoryName } from "./directory-path";
 
-/** The default design folder name — and the only one pre-pointer builds knew.
- *  (Kept here so the registry has no imports; design/document.ts re-exports it
- *  as the public constant.) */
+/** The legacy read fallback, not the name chosen by explicit creation today.
+ *  Kept here to avoid importing document.ts; it re-exports this public constant. */
 export const DEFAULT_DESIGN_DIRECTORY_NAME = "Zeros Design";
 
 /** The legacy marker that recognizes an older Design document in Git's index or
- *  HEAD. Lives here for the same reason as the default name: code-agent admission
- *  has to name this file (it is write-denied so a fenced agent cannot
- *  de-register a Design folder), and admission must not drag document.ts —
+ *  HEAD. Lives here for the same reason as the default name: managed path guards
+ *  recognize it as Design metadata, and admission must not drag document.ts —
  *  parse5, postcss, @zeros/design-web — into its import graph to learn one
  *  filename. design/document.ts re-exports it as the public constant. */
 export const DESIGN_CANVAS_FILE = ".zeros-canvas.json";

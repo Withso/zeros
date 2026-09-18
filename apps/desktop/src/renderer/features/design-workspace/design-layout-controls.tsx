@@ -60,6 +60,9 @@ export function DesignLayoutControls({
   frameSelected,
   childrenLayout = details.childrenLayout,
   canDistribute = (childrenLayout?.nodeIds.length ?? 0) >= 3,
+  renderSize,
+  showChildren = true,
+  showClip = true,
 }: {
   details: DesignRuntimeNodeDetails;
   renderField: (
@@ -73,10 +76,16 @@ export function DesignLayoutControls({
   frameSelected?: boolean;
   childrenLayout?: DesignRuntimeChildrenLayout;
   canDistribute?: boolean;
+  renderSize?: (
+    axis: DesignLayoutAxis,
+    field: React.ReactNode,
+  ) => React.ReactNode;
+  showChildren?: boolean;
+  showClip?: boolean;
 }) {
   const x = childrenLayout?.x ?? "start";
   const y = childrenLayout?.y ?? "start";
-  const hasChildren = (childrenLayout?.count ?? 0) > 0;
+  const hasChildren = showChildren && (childrenLayout?.count ?? 0) > 0;
   const unavailable = childrenLayout?.truncated
     ? "Select a smaller frame to arrange its children together"
     : childrenLayout?.nodeIds.length === 0
@@ -110,8 +119,12 @@ export function DesignLayoutControls({
         {field("X", "left")}
         {field("Y", "top")}
         {field("Rotation", "rotate")}
-        {field("W", "width")}
-        {field("H", "height")}
+        {renderSize
+          ? renderSize("x", field("W", "width"))
+          : field("W", "width")}
+        {renderSize
+          ? renderSize("y", field("H", "height"))
+          : field("H", "height")}
         <div
           className="bg-bg2 grid h-7 min-w-0 grid-cols-3 overflow-hidden rounded-md"
           role="group"
@@ -326,15 +339,17 @@ export function DesignLayoutControls({
           </div>
         </div>
       ) : null}
-      <label className="text-fg2 flex h-7 cursor-pointer items-center gap-2 text-[11px]">
-        <Checkbox
-          aria-label="Clip content"
-          disabled={disabled}
-          checked={clipped}
-          onChange={() => onAction({ type: "clip" })}
-        />
-        Clip content
-      </label>
+      {showClip ? (
+        <label className="text-fg2 flex h-7 cursor-pointer items-center gap-2 text-[11px]">
+          <Checkbox
+            aria-label="Clip content"
+            disabled={disabled}
+            checked={clipped}
+            onChange={() => onAction({ type: "clip" })}
+          />
+          Clip content
+        </label>
+      ) : null}
     </div>
   );
 }

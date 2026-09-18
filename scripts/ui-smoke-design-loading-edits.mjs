@@ -57,6 +57,9 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
   };
 
   await open();
+  await runtime.locator('[data-oid="home-hero"]').evaluate((el) => {
+    el.style.display = "block";
+  });
   await layers.locator('[data-design-layer-id="home-hero"]').click();
   await layout
     .getByRole("button", { name: "Align right", exact: true })
@@ -130,7 +133,7 @@ export async function runDesignLoadingEditsSmoke({ page, waitFor, check }) {
       const opacity = page
         .locator("[data-design-inspector]")
         .getByLabel("Opacity", { exact: true });
-      await opacity.fill("0.5");
+      await opacity.fill("50");
       await opacity.press("Enter");
     } else {
       await page.getByLabel("Design canvas", { exact: true }).focus();

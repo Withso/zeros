@@ -71,6 +71,7 @@ import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
 import { runTerminalWorkbenchSmoke } from "./ui-smoke-terminal-workbench.mjs";
 import { runWorkspaceArchivesSmoke } from "./ui-smoke-workspace-archives.mjs";
 import { runComposerEditorSmoke } from "./ui-smoke-composer-editor.mjs";
+import { runDesignModeSmoke } from "./ui-smoke-design-mode.mjs";
 import { runAttachmentPersistenceSmoke } from "./ui-smoke-attachment-persistence.mjs";
 import { runAttachmentLayoutSmoke } from "./ui-smoke-attachment-layout.mjs";
 import { runPrActionsSmoke } from "./ui-smoke-pr-actions.mjs";
@@ -168,6 +169,7 @@ try {
 
   await page.goto(pageUrl, { waitUntil: "networkidle" });
   await runComposerEditorSmoke({ page, check });
+  await runDesignModeSmoke({ page, check });
   await runAttachmentPersistenceSmoke({ page, check });
   await runAttachmentLayoutSmoke({ page, check });
   await page.goto(pageUrl, { waitUntil: "networkidle" });

@@ -19,6 +19,9 @@ export const DESIGN_MAX_ZOOM = 256;
 export type DesignBottomPanel = "layers" | "assets";
 
 export interface DesignWorkspaceViewState {
+  directoryId?: string;
+  layersVisible: boolean;
+  inspectorVisible: boolean;
   selectedFrame: string | null;
   /** True only when the frame itself is the selection target (label, Layers
    * row, or Escape from a root child). An active frame whose tree is merely
@@ -42,6 +45,8 @@ export interface DesignWorkspaceViewState {
 
 export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
   Object.freeze({
+    layersVisible: true,
+    inspectorVisible: true,
     selectedFrame: null,
     frameSelected: false,
     selectedNodeId: null,
@@ -104,6 +109,9 @@ export function normalizeDesignWorkspaceView(
       ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
     : [];
   return {
+    ...(typeof record.directoryId === "string" && record.directoryId.length <= 128 ? { directoryId: record.directoryId } : {}),
+    layersVisible: record.layersVisible !== false,
+    inspectorVisible: record.inspectorVisible !== false,
     selectedFrame,
     // A remembered node selection owns the selection; the frame flag only
     // survives when the frame itself was the target.
@@ -221,6 +229,7 @@ if (typeof window !== "undefined") {
 
 interface DesignWorkspaceUiStore {
   byWorkspace: Record<string, DesignWorkspaceViewState>;
+  bindDirectory(workspaceId: string, directoryId: string): void;
   setSelectedFrame(workspaceId: string, frame: string | null): void;
   setSelection(
     workspaceId: string,
@@ -229,6 +238,7 @@ interface DesignWorkspaceUiStore {
     nodeIds?: readonly string[],
     options?: { frameSelected?: boolean },
   ): void;
+  setPanels(workspaceId: string, panels: Partial<Pick<DesignWorkspaceViewState, "layersVisible" | "inspectorVisible">>): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setCodeView(workspaceId: string, codeView: boolean): void;
   setActiveTheme(workspaceId: string, activeTheme: string | null): void;
@@ -261,6 +271,15 @@ function updateWorkspaceView(
 export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
   (set) => ({
     byWorkspace: loadViews(),
+    bindDirectory(workspaceId, directoryId) {
+      set((state) => {
+        const previous = state.byWorkspace[workspaceId];
+        if (previous?.directoryId === directoryId) return state;
+        return { byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
+          ...(previous?.directoryId ? DEFAULT_DESIGN_WORKSPACE_VIEW : {}), directoryId,
+        }) };
+      });
+    },
 
     setSelectedFrame(workspaceId, selectedFrame) {
       set((state) => ({
@@ -306,6 +325,9 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       }));
     },
 
+    setPanels(workspaceId, panels) {
+      set((state) => ({ byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, panels) }));
+    },
     setPanel(workspaceId, panel) {
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {

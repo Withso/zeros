@@ -1,3 +1,6 @@
+import { startElectronDesignCapture } from "./design-capture";
+import { setDesignCaptureEnvironment } from "./sidecar";
+import type { DesignCaptureService } from "../src/engine/design/capture-service";
 // ──────────────────────────────────────────────────────────
 // Zeros Electron — main process entry
 // ──────────────────────────────────────────────────────────
@@ -123,6 +126,7 @@ import { setCommand } from "./ipc/router";
 import { prepareAttachmentsForQuit } from "./ipc/attachment-source";
 import {
   defaultProjectRoot,
+  currentRoot,
   shutdown as shutdownSidecar,
   setEngineSpawnBarrier,
   setBrowserServiceEnvironment,
@@ -138,6 +142,7 @@ import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
 import { setupContextMenu } from "./context-menu";
 import { installDevToolsGuard } from "./devtools";
+import { installDevMainRestartCheck } from "./dev-main-restart";
 import { setupDeepLink } from "./deep-link";
 import { setupUpdater } from "./updater";
 import { IS_DEV, IS_PACKAGED } from "./runtime-mode";
@@ -184,6 +189,7 @@ import {
 } from "./browser/surface";
 
 let browserService: ZerosBrowserServiceHandle | null = null;
+let designCaptureService: DesignCaptureService | null = null;
 
 // Custom schemes must be privileged before Electron reaches ready. The handler
 // itself is installed after ready, before the first renderer window loads.
@@ -1297,6 +1303,10 @@ app.whenReady().then(async () => {
   // couriered into provider subprocesses.
   setBrowserServiceEnvironment(null);
   let browserRendererEpoch = 0;
+  const designCaptureReady = startElectronDesignCapture().then(service => {
+    designCaptureService = service;
+    setDesignCaptureEnvironment({ url: service.url, token: service.token });
+  }).catch(() => { console.warn("[Zeros] Design capture service unavailable."); });
   const browserReady = startZerosBrowserService({
     artifactRoot: path.join(zerosDataDir(), "browser-artifacts"),
     isTrustedSurfaceAvailable: () => getMainWindow() !== null,
@@ -1552,9 +1562,16 @@ app.whenReady().then(async () => {
     powerMonitor.off("unlock-screen", onAuthResume);
     void authSecurityMonitor.stop();
   });
-  setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady]));
+  setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady, designCaptureReady]));
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
+  const disposeDevMainRestart = installDevMainRestartCheck({
+    enabled: isDev && !IS_PACKAGED,
+    port: process,
+    currentRoot,
+    quit: () => app.quit(),
+  });
+  app.on("will-quit", disposeDevMainRestart);
 
   // Watchdog runs for the life of the process; shutdown() clears its
   // timer so it doesn't race the clean-quit path.
@@ -1679,6 +1696,10 @@ app.on("before-quit", (event) => {
     return;
   }
   shutdownSidecar();
+  const capture = designCaptureService;
+  designCaptureService = null;
+  setDesignCaptureEnvironment(null);
+  if (capture) void capture.stop().catch(() => {});
   const service = browserService;
   browserService = null;
   setBrowserServiceEnvironment(null);

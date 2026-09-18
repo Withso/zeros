@@ -358,13 +358,20 @@ export function designInlineGapDistributionStyles(input: {
 }): Record<string, string> {
   if (input.display !== "flex" && input.display !== "inline-flex") return {};
   const mainAxis = (input.flexDirection ?? "row").startsWith("row") ? "x" : "y";
-  if (input.axis === mainAxis && input.justifyContent === "space-between") {
+  if (
+    input.axis === mainAxis &&
+    ["space-between", "space-around", "space-evenly"].includes(
+      input.justifyContent ?? "",
+    )
+  ) {
     return { "justify-content": "flex-start" };
   }
   if (
     input.axis !== mainAxis &&
     (input.flexWrap ?? "nowrap") !== "nowrap" &&
-    input.alignContent === "space-between"
+    ["space-between", "space-around", "space-evenly"].includes(
+      input.alignContent ?? "",
+    )
   ) {
     return { "align-content": "flex-start" };
   }
@@ -1708,6 +1715,7 @@ export function selectLiveDesignFrameFiles(input: {
   }
   for (const candidate of ranked) {
     if (result.size >= limit) break;
+    if (!candidate.near) break;
     result.add(candidate.frame.file);
   }
   return result;

@@ -37,11 +37,9 @@ import {
   DesignShadowControl,
   DesignTransformControl,
 } from "./design-effect-editor";
-import { DesignLayoutControls } from "./design-layout-controls";
-import { designLayoutChildrenSummary } from "./design-layout-children";
+import { DesignAutoLayoutControls } from "./design-auto-layout-controls";
+import { designRuntimeLayerLabel } from "./design-layer-label";
 import {
-  designLayoutMode,
-  designLayoutModeStyles,
   type DesignLayoutAction,
   type DesignLayoutFieldOptions,
 } from "./design-layout-values";
@@ -132,7 +130,10 @@ function StyleSection({
   const [open, setOpen] = useState(defaultOpen);
   if (fixed)
     return (
-      <section data-design-layout-section className="border-border1 border-b">
+      <section
+        data-design-layout-section={title === "Layout" ? "" : undefined}
+        className="border-border1 border-b"
+      >
         <h3 className="text-fg1 flex h-9 items-center px-3 text-xs font-medium">
           {title}
         </h3>
@@ -208,101 +209,6 @@ function PropertySelect({
           ))}
         </SelectContent>
       </Select>
-    </div>
-  );
-}
-
-function FlexAlignmentControl({
-  align,
-  justify,
-  direction,
-  disabled,
-  onChange,
-}: {
-  align: string;
-  justify: string;
-  direction: string;
-  disabled?: boolean;
-  onChange: (styles: Record<string, string>) => void;
-}) {
-  const values = ["flex-start", "center", "flex-end"] as const;
-  const column = direction.startsWith("column");
-  const resolvedAlign = align === "normal" ? "stretch" : align;
-  const resolvedJustify = justify === "normal" ? "flex-start" : justify;
-  const selectedX = column ? resolvedAlign : resolvedJustify;
-  const selectedY = column ? resolvedJustify : resolvedAlign;
-  return (
-    <div className="grid grid-cols-[68px_minmax(0,1fr)] items-start gap-3">
-      <div
-        className="zd-design-control-applied grid size-[68px] grid-cols-3 rounded-md p-1"
-        role="group"
-        aria-label="Quick alignment"
-      >
-        {values.flatMap((vertical) =>
-          values.map((horizontal) => {
-            const selected = selectedX === horizontal && selectedY === vertical;
-            return (
-              <button
-                key={`${horizontal}:${vertical}`}
-                type="button"
-                disabled={disabled}
-                aria-label={`Align ${horizontal} ${vertical}`}
-                aria-pressed={selected}
-                className="hover:bg-bg2-hover focus-visible:ring-highlighted-bright/50 relative rounded-sm focus-visible:ring-2 focus-visible:outline-none disabled:opacity-50"
-                onClick={() =>
-                  onChange(
-                    column
-                      ? {
-                          "align-items": horizontal,
-                          "justify-content": vertical,
-                        }
-                      : {
-                          "justify-content": horizontal,
-                          "align-items": vertical,
-                        },
-                  )
-                }
-              >
-                <span
-                  className={cn(
-                    "absolute top-1/2 left-1/2 size-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full",
-                    selected ? "bg-highlighted-bright" : "bg-muted-fg",
-                  )}
-                />
-              </button>
-            );
-          }),
-        )}
-      </div>
-      <div className="flex min-w-0 flex-col gap-1.5">
-        <PropertySelect
-          label="Align"
-          value={resolvedAlign}
-          disabled={disabled}
-          options={[
-            { value: "stretch", label: "Stretch" },
-            { value: "flex-start", label: "Start" },
-            { value: "center", label: "Center" },
-            { value: "flex-end", label: "End" },
-            { value: "baseline", label: "Baseline" },
-          ]}
-          onChange={(value) => onChange({ "align-items": value })}
-        />
-        <PropertySelect
-          label="Distribute"
-          value={resolvedJustify}
-          disabled={disabled}
-          options={[
-            { value: "flex-start", label: "Start" },
-            { value: "center", label: "Center" },
-            { value: "flex-end", label: "End" },
-            { value: "space-between", label: "Space between" },
-            { value: "space-around", label: "Space around" },
-            { value: "space-evenly", label: "Space evenly" },
-          ]}
-          onChange={(value) => onChange({ "justify-content": value })}
-        />
-      </div>
     </div>
   );
 }
@@ -442,14 +348,6 @@ function styleValue(
   return readDesignComputedStyle(details.styles, property) || fallback;
 }
 
-function spacingStyleValue(
-  details: DesignRuntimeNodeDetails,
-  property: "gap" | "row-gap" | "column-gap",
-): string {
-  const value = styleValue(details, property, "0px");
-  return value === "normal" ? "0px" : value;
-}
-
 const OBJECT_FIT_TAGS = new Set(["img", "video", "canvas", "svg", "iframe"]);
 
 export function DesignStyleEditor({
@@ -467,7 +365,6 @@ export function DesignStyleEditor({
   onOpenMotionTimeline,
   disabled = false,
 }: DesignStyleEditorProps) {
-  const [layoutAdvancedOpen, setLayoutAdvancedOpen] = useState(false);
   const [appearanceAdvancedOpen, setAppearanceAdvancedOpen] = useState(false);
   const [typographyAdvancedOpen, setTypographyAdvancedOpen] = useState(false);
 
@@ -483,29 +380,21 @@ export function DesignStyleEditor({
     });
   };
 
-  const display = styleValue(details, "display", "block");
-  const flexLayout = display === "flex" || display === "inline-flex";
-  const gridLayout = display === "grid" || display === "inline-grid";
-  const showAdvancedLayout = layoutAdvancedOpen;
+  const textLayer = designRuntimeLayerLabel(details) === "Text";
   const showAdvancedAppearance = appearanceAdvancedOpen;
   const showAdvancedTypography = typographyAdvancedOpen;
 
   return (
     <div data-design-style-editor className="flex flex-col">
       <StyleSection title="Layout" fixed>
-        <DesignLayoutControls
+        <DesignAutoLayoutControls
           details={details}
+          livePreviewOwner={livePreviewOwner}
           renderField={renderField}
           disabled={disabled}
           frameSelected={frameSelected}
-          childrenLayout={
-            layoutParents
-              ? designLayoutChildrenSummary(layoutParents)
-              : details.childrenLayout
-          }
-          canDistribute={layoutParents?.some(
-            (parent) => (parent.childrenLayout?.nodeIds.length ?? 0) >= 3,
-          )}
+          layoutParents={layoutParents}
+          onCommit={(styles) => commit(styles, "layout")}
           onAction={(action) => {
             void onLayoutAction(action).catch((error) =>
               toast.error("Couldn't update layout", {
@@ -538,436 +427,110 @@ export function DesignStyleEditor({
             )}
           </>
         ) : null}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="text-muted-fg h-7 justify-start px-1.5 text-[10px]"
-          aria-expanded={showAdvancedLayout}
-          onClick={() => setLayoutAdvancedOpen((open) => !open)}
-        >
-          <ChevronDown
-            className={cn(
-              "size-3 transition-transform",
-              showAdvancedLayout ? "rotate-0" : "-rotate-90",
-            )}
-          />
-          {showAdvancedLayout ? "Hide sizing limits" : "Sizing limits"}
-        </Button>
-        {showAdvancedLayout ? (
-          <>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Min W",
-                "min-width",
-                styleValue(details, "min-width", "0px"),
-              )}
-              {renderField(
-                "Min H",
-                "min-height",
-                styleValue(details, "min-height", "0px"),
-              )}
-              {renderField(
-                "Max W",
-                "max-width",
-                styleValue(details, "max-width", "none"),
-              )}
-              {renderField(
-                "Max H",
-                "max-height",
-                styleValue(details, "max-height", "none"),
-              )}
-              {renderField(
-                "Ratio",
-                "aspect-ratio",
-                styleValue(details, "aspect-ratio", "auto"),
-              )}
-            </div>
-          </>
-        ) : null}
-        <ChoiceGroup
-          label="Auto layout"
-          value={designLayoutMode(display)}
-          disabled={disabled}
-          options={[
-            { value: "none", label: "None" },
-            { value: "flex", label: "Stack" },
-            { value: "grid", label: "Grid" },
-          ]}
-          onChange={(value) => commit(designLayoutModeStyles(value), "layout")}
-        />
-        {flexLayout ? (
-          <>
-            <ChoiceGroup
-              label="Flow"
-              value={styleValue(details, "flex-direction", "row")}
-              disabled={disabled}
-              options={[
-                { value: "row", label: "→", title: "Row" },
-                { value: "column", label: "↓", title: "Column" },
-                { value: "row-reverse", label: "←", title: "Reverse row" },
-                {
-                  value: "column-reverse",
-                  label: "↑",
-                  title: "Reverse column",
-                },
-              ]}
-              onChange={(value) => commit({ "flex-direction": value }, "flow")}
-            />
-            <FlexAlignmentControl
-              align={styleValue(details, "align-items", "flex-start")}
-              justify={styleValue(details, "justify-content", "flex-start")}
-              direction={styleValue(details, "flex-direction", "row")}
-              disabled={disabled}
-              onChange={(styles) => commit(styles, "alignment")}
-            />
-            <div className="grid grid-cols-2 gap-2">
-              {renderField("Gap", "gap", spacingStyleValue(details, "gap"))}
-              {renderField(
-                "Row",
-                "row-gap",
-                spacingStyleValue(details, "row-gap"),
-              )}
-              {renderField(
-                "Column",
-                "column-gap",
-                spacingStyleValue(details, "column-gap"),
-              )}
-            </div>
-            <PropertySelect
-              label="Wrap"
-              value={styleValue(details, "flex-wrap", "nowrap")}
-              disabled={disabled}
-              options={[
-                { value: "nowrap", label: "No wrap" },
-                { value: "wrap", label: "Wrap" },
-                { value: "wrap-reverse", label: "Reverse wrap" },
-              ]}
-              onChange={(value) => commit({ "flex-wrap": value }, "wrap")}
-            />
-          </>
-        ) : null}
-        {gridLayout ? (
-          <>
-            <ChoiceGroup
-              label="Flow"
-              value={styleValue(details, "grid-auto-flow", "row")}
-              disabled={disabled}
-              options={[
-                { value: "row", label: "Row" },
-                { value: "column", label: "Col" },
-                { value: "row dense", label: "R dense" },
-                { value: "column dense", label: "C dense" },
-              ]}
-              onChange={(value) =>
-                commit({ "grid-auto-flow": value }, "grid flow")
-              }
-            />
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Tracks
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Col gap",
-                "column-gap",
-                spacingStyleValue(details, "column-gap"),
-              )}
-              {renderField(
-                "Row gap",
-                "row-gap",
-                spacingStyleValue(details, "row-gap"),
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Columns",
-                "grid-template-columns",
-                styleValue(details, "grid-template-columns", "none"),
-              )}
-              {renderField(
-                "Rows",
-                "grid-template-rows",
-                styleValue(details, "grid-template-rows", "none"),
-              )}
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Auto col",
-                "grid-auto-columns",
-                styleValue(details, "grid-auto-columns", "auto"),
-              )}
-              {renderField(
-                "Auto row",
-                "grid-auto-rows",
-                styleValue(details, "grid-auto-rows", "auto"),
-              )}
-            </div>
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Grid alignment
-            </span>
-            <PropertySelect
-              label="Items"
-              value={styleValue(details, "align-items", "stretch")}
-              disabled={disabled}
-              options={[
-                { value: "stretch", label: "Stretch" },
-                { value: "start", label: "Start" },
-                { value: "center", label: "Center" },
-                { value: "end", label: "End" },
-                { value: "baseline", label: "Baseline" },
-              ]}
-              onChange={(value) =>
-                commit({ "align-items": value }, "grid item alignment")
-              }
-            />
-            <PropertySelect
-              label="Justify"
-              value={styleValue(details, "justify-items", "stretch")}
-              disabled={disabled}
-              options={[
-                { value: "stretch", label: "Stretch" },
-                { value: "start", label: "Start" },
-                { value: "center", label: "Center" },
-                { value: "end", label: "End" },
-              ]}
-              onChange={(value) =>
-                commit({ "justify-items": value }, "grid justification")
-              }
-            />
-            <PropertySelect
-              label="Content"
-              value={styleValue(details, "align-content", "normal")}
-              disabled={disabled}
-              options={[
-                { value: "normal", label: "Normal" },
-                { value: "start", label: "Start" },
-                { value: "center", label: "Center" },
-                { value: "end", label: "End" },
-                { value: "stretch", label: "Stretch" },
-                { value: "space-between", label: "Space between" },
-              ]}
-              onChange={(value) =>
-                commit({ "align-content": value }, "grid content alignment")
-              }
-            />
-            <PropertySelect
-              label="Distribute"
-              value={styleValue(details, "justify-content", "normal")}
-              disabled={disabled}
-              options={[
-                { value: "normal", label: "Normal" },
-                { value: "start", label: "Start" },
-                { value: "center", label: "Center" },
-                { value: "end", label: "End" },
-                { value: "stretch", label: "Stretch" },
-                { value: "space-between", label: "Space between" },
-              ]}
-              onChange={(value) =>
-                commit({ "justify-content": value }, "grid distribution")
-              }
-            />
-          </>
-        ) : null}
-        {flexLayout || gridLayout || showAdvancedLayout ? (
-          <>
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Padding
-            </span>
-            <div className="grid grid-cols-2 gap-1.5">
-              {renderField(
-                "T",
-                "padding-top",
-                styleValue(details, "padding-top", "0px"),
-              )}
-              {renderField(
-                "R",
-                "padding-right",
-                styleValue(details, "padding-right", "0px"),
-              )}
-              {renderField(
-                "B",
-                "padding-bottom",
-                styleValue(details, "padding-bottom", "0px"),
-              )}
-              {renderField(
-                "L",
-                "padding-left",
-                styleValue(details, "padding-left", "0px"),
-              )}
-            </div>
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Margin
-            </span>
-            <div className="grid grid-cols-2 gap-1.5">
-              {renderField(
-                "T",
-                "margin-top",
-                styleValue(details, "margin-top", "0px"),
-              )}
-              {renderField(
-                "R",
-                "margin-right",
-                styleValue(details, "margin-right", "0px"),
-              )}
-              {renderField(
-                "B",
-                "margin-bottom",
-                styleValue(details, "margin-bottom", "0px"),
-              )}
-              {renderField(
-                "L",
-                "margin-left",
-                styleValue(details, "margin-left", "0px"),
-              )}
-            </div>
-            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-              Child layout
-            </span>
-            <div className="grid grid-cols-2 gap-2">
-              {renderField(
-                "Grow",
-                "flex-grow",
-                styleValue(details, "flex-grow", "0"),
-              )}
-              {renderField(
-                "Shrink",
-                "flex-shrink",
-                styleValue(details, "flex-shrink", "1"),
-              )}
-              {renderField(
-                "Basis",
-                "flex-basis",
-                styleValue(details, "flex-basis", "auto"),
-              )}
-              {renderField("Order", "order", styleValue(details, "order", "0"))}
-              <PropertySelect
-                label="Self"
-                value={styleValue(details, "align-self", "auto")}
-                disabled={disabled}
-                options={[
-                  { value: "auto", label: "Auto" },
-                  { value: "flex-start", label: "Start" },
-                  { value: "center", label: "Center" },
-                  { value: "flex-end", label: "End" },
-                  { value: "stretch", label: "Stretch" },
-                ]}
-                onChange={(value) =>
-                  commit({ "align-self": value }, "align self")
-                }
-              />
-              {renderField(
-                "Grid col",
-                "grid-column",
-                styleValue(details, "grid-column", "auto"),
-              )}
-              {renderField(
-                "Grid row",
-                "grid-row",
-                styleValue(details, "grid-row", "auto"),
-              )}
-            </div>
-            <PropertySelect
-              label="Justify self"
-              value={styleValue(details, "justify-self", "auto")}
-              disabled={disabled}
-              options={[
-                { value: "auto", label: "Auto" },
-                { value: "start", label: "Start" },
-                { value: "center", label: "Center" },
-                { value: "end", label: "End" },
-                { value: "stretch", label: "Stretch" },
-              ]}
-              onChange={(value) =>
-                commit({ "justify-self": value }, "justify self")
-              }
-            />
-          </>
-        ) : null}
       </StyleSection>
 
       <StyleSection
         title="Appearance"
         icon={<Square />}
         defaultOpen
-        summary={styleValue(details, "background-color", "transparent")}
+        summary={textLayer ? "Text" : undefined}
       >
         <div className="grid grid-cols-2 gap-2">
           {renderField(
             "Opacity",
             "opacity",
             styleValue(details, "opacity", "1"),
+            { percentage: true, compact: true, icon: "opacity" },
           )}
-          <PropertySelect
-            label="Blend"
-            value={styleValue(details, "mix-blend-mode", "normal")}
-            disabled={disabled}
-            options={[
-              { value: "normal", label: "Normal" },
-              { value: "multiply", label: "Multiply" },
-              { value: "screen", label: "Screen" },
-              { value: "overlay", label: "Overlay" },
-              { value: "difference", label: "Difference" },
-            ]}
-            onChange={(value) =>
-              commit({ "mix-blend-mode": value }, "blend mode")
-            }
-          />
+          {!textLayer &&
+            renderField(
+              "Radius",
+              "border-radius",
+              styleValue(details, "border-radius", "0px"),
+              { compact: true, shortLabel: "R" },
+            )}
         </div>
         <PropertySelect
-          label="Isolation"
-          value={styleValue(details, "isolation", "auto")}
-          disabled={disabled}
-          options={[
-            { value: "auto", label: "Auto" },
-            { value: "isolate", label: "Isolate" },
-          ]}
-          onChange={(value) => commit({ isolation: value }, "isolation")}
-        />
-        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Fill
-        </span>
-        <div className="group/motion flex min-w-0 items-center gap-1">
-          <div className="min-w-0 flex-1">
-            <DesignFillEditor
-              color={styleValue(details, "background-color", "transparent")}
-              image={styleValue(details, "background-image", "none")}
-              position={styleValue(details, "background-position", "0% 0%")}
-              size={styleValue(details, "background-size", "auto")}
-              repeat={styleValue(details, "background-repeat", "repeat")}
-              disabled={disabled}
-              onPreview={(styles) => void onPreviewStyles?.(styles)}
-              onCancelPreview={() => void onCancelStylePreview?.()}
-              onCommit={(styles) => commit(styles, "fill")}
-            />
-          </div>
-          <MotionPropertyAction
-            label="fill"
-            property="background-color"
-            value={styleValue(details, "background-color", "transparent")}
-            active={motionProperties.includes("background-color")}
-            timelineOpen={motionTimelineOpen}
-            disabled={disabled}
-            onRequest={onOpenMotionTimeline}
-          />
-        </div>
-        <PropertySelect
-          label="Fill mode"
-          value={styleValue(details, "background-blend-mode", "normal")}
+          label="Blend"
+          value={styleValue(details, "mix-blend-mode", "normal")}
           disabled={disabled}
           options={[
             { value: "normal", label: "Normal" },
             { value: "multiply", label: "Multiply" },
             { value: "screen", label: "Screen" },
             { value: "overlay", label: "Overlay" },
-            { value: "soft-light", label: "Soft light" },
+            { value: "difference", label: "Difference" },
           ]}
           onChange={(value) =>
-            commit({ "background-blend-mode": value }, "blend")
+            commit({ "mix-blend-mode": value }, "blend mode")
           }
         />
-        <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
-          Border
-        </span>
+      </StyleSection>
+      <StyleSection title="Fill" defaultOpen>
+        <div className="group/motion flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            {textLayer ? (
+              <ColorField
+                label="Fill"
+                property="color"
+                value={styleValue(details, "color", "currentColor")}
+                disabled={disabled}
+                renderField={renderField}
+                onPreview={(color) => void onPreviewStyles?.({ color })}
+                onCancelPreview={() => void onCancelStylePreview?.()}
+                onCommit={(color) => commit({ color }, "text fill")}
+              />
+            ) : (
+              <DesignFillEditor
+                color={styleValue(details, "background-color", "transparent")}
+                image={styleValue(details, "background-image", "none")}
+                position={styleValue(details, "background-position", "0% 0%")}
+                size={styleValue(details, "background-size", "auto")}
+                repeat={styleValue(details, "background-repeat", "repeat")}
+                disabled={disabled}
+                onPreview={(styles) => void onPreviewStyles?.(styles)}
+                onCancelPreview={() => void onCancelStylePreview?.()}
+                onCommit={(styles) => commit(styles, "fill")}
+              />
+            )}
+          </div>
+          <MotionPropertyAction
+            label="fill"
+            property={textLayer ? "color" : "background-color"}
+            value={styleValue(
+              details,
+              textLayer ? "color" : "background-color",
+              "transparent",
+            )}
+            active={motionProperties.includes(
+              textLayer ? "color" : "background-color",
+            )}
+            timelineOpen={motionTimelineOpen}
+            disabled={disabled}
+            onRequest={onOpenMotionTimeline}
+          />
+        </div>
+        {!textLayer &&
+          styleValue(details, "background-blend-mode", "normal") !==
+            "normal" && (
+            <PropertySelect
+              label="Fill mode"
+              value={styleValue(details, "background-blend-mode", "normal")}
+              disabled={disabled}
+              options={[
+                { value: "normal", label: "Normal" },
+                { value: "multiply", label: "Multiply" },
+                { value: "screen", label: "Screen" },
+                { value: "overlay", label: "Overlay" },
+                { value: "soft-light", label: "Soft light" },
+              ]}
+              onChange={(value) =>
+                commit({ "background-blend-mode": value }, "blend")
+              }
+            />
+          )}
+      </StyleSection>
+      <StyleSection title="Stroke">
         <div className="grid grid-cols-2 gap-2">
           {renderField(
             "Width",
@@ -1004,11 +567,6 @@ export function DesignStyleEditor({
             commit({ "border-color": value }, "border color")
           }
         />
-        {renderField(
-          "Radius",
-          "border-radius",
-          styleValue(details, "border-radius", "0px"),
-        )}
         <Button
           type="button"
           variant="ghost"
@@ -1163,16 +721,18 @@ export function DesignStyleEditor({
           ]}
           onChange={(value) => commit({ "font-style": value }, "font style")}
         />
-        <ColorField
-          label="Text color"
-          property="color"
-          value={styleValue(details, "color", "currentColor")}
-          disabled={disabled}
-          renderField={renderField}
-          onPreview={(value) => void onPreviewStyles?.({ color: value })}
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(value) => commit({ color: value }, "text color")}
-        />
+        {!textLayer && (
+          <ColorField
+            label="Text color"
+            property="color"
+            value={styleValue(details, "color", "currentColor")}
+            disabled={disabled}
+            renderField={renderField}
+            onPreview={(value) => void onPreviewStyles?.({ color: value })}
+            onCancelPreview={() => void onCancelStylePreview?.()}
+            onCommit={(value) => commit({ color: value }, "text color")}
+          />
+        )}
         <ChoiceGroup
           label="Align"
           value={styleValue(details, "text-align", "start")}
