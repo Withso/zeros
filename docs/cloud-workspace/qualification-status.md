@@ -1,6 +1,6 @@
 # Cloud backend qualification status
 
-Reviewed September 20, 2026. This matrix distinguishes implemented behavior,
+Reviewed September 21, 2026. This matrix distinguishes implemented behavior,
 live evidence and release qualification. Both production cloud execution flags
 remain disabled. Desktop cloud creation UI is outside this backend change.
 
@@ -27,7 +27,7 @@ change, not evidence of a completed migration. See
 | 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat | Fleet/region load qualification and later native client release tests |
 | 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; active-turn loss leaves an uncertain command and paused queue | Literal provider-host destruction, target PlanetScale database plus offsite object-store recovery and reviewed RPO/RTO |
 | 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes | Linux-VM snapshot/region/quota preflight implemented; available test account lacks eligible Linux-VM quota. Full parity remains open |
-| 8. Spend and operations | Credit grants, reservations, cumulative meter, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup and local backup-restore evidence | Internal staff admission/revocation, deployed identity, PlanetScale compatibility/failover, deletion completion, backups/alerts and sustained load/soak; customer billing deferred |
+| 8. Spend and operations | Credit grants, reservations, cumulative meter, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, isolated deployed WorkOS identity, PlanetScale restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence | Main writer cutover, exact deployed runtime requalification, deletion completion, operational alerts and sustained load/soak; customer billing deferred |
 
 The eight steps are not all complete. Local tests and a successful Boat runtime
 do not clear Daytona or production operations gates.
@@ -44,8 +44,8 @@ do not clear Daytona or production operations gates.
 | Ordered live streams, replay and Stop/approval receipts | Shared schemas, durable receipts, bounded buffers, per-device authority | Boat headless clients, including late and suspended receivers |
 | Receive-only replicas and immutable copy/fork | Backend services and regression coverage | Signed desktop lifecycle qualification remains open |
 | TypeScript, JavaScript and Python language services | Typed disk-backed symbols/completions, actor and execution isolation, bounded RPC and retirement | Real native and root namespace canaries plus actual Boat v3 engine image attestation; Daytona remains open |
-| Personal Codex subscription renewal | Encrypted native cache, durable single-use refresh attempts, access-only leases, per-owner consent | Synthetic regressions and real pinned native authentication-only cache renewal; paid turn/resume qualification remains open |
-| Windows/macOS compute, public ports, UDP and collaborative editing | Outside current Linux single-owner release | No claim |
+| Personal Codex subscription renewal | Encrypted native cache, durable single-use refresh attempts, access-only leases, per-owner consent | Real pinned native cache renewal and paid native turn/resume on qualified Boat images; exact deployed account-connection and delegation qualification remains open |
+| Windows/macOS compute, public ports, UDP and simultaneous text editing with conflict resolution | Outside the current Linux pilot | No claim |
 
 ## Evidence limits
 
@@ -54,10 +54,23 @@ do not clear Daytona or production operations gates.
   simulate the provider's physical host disappearing.
 - Concurrent headless clients exercise the platform-independent protocol. They
   do not qualify native iOS, iPadOS, Windows or signed macOS applications.
-- Qualification used production backend services with fixture identity issuance
-  and a public-repository credential broker. Production WorkOS and GitHub App
-  integration still need their own deployed tests.
-- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery with encrypted R2 objects. Live writer cutover and regional recovery remain open; these are not production migration claims.
+- Earlier engine qualification used fixture identity issuance. Subsequent
+  isolated Railway tests exercised normal WorkOS authentication, delivered
+  invitations, workspace-scoped guest acceptance, concurrent devices and guest
+  revocation through the public API. GitHub App repository-scoped token issue,
+  resolution and revocation were tested separately. Main deployment and private
+  repository qualification remain distinct exit conditions.
+- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. Main writer cutover, end-to-end recovery of the main dataset from R2 and regional recovery remain open; these are not production migration claims.
+- Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
+  connection fencing, dropped-column and enum restore compatibility, sequence
+  ownership, role drift, cancellation and uncertain fence acknowledgements.
+  A real R2 round trip verifies encrypted evidence by downloading and decrypting
+  it. Main cutover still requires a fresh fenced copy and target comparison;
+  source and target collation-library versions must be explicitly qualified.
+- Exhausted Boat trial compute and unavailable Daytona Linux-VM quota currently
+  prevent final provider requalification. Earlier immutable-image evidence does
+  not qualify subsequent engine changes. Provider admission, registry publication
+  and exact-image public API recovery must pass before activation.
 - Provider DELETE acceptance and a subsequent 404 are not data-erasure evidence.
   Storage and cleanup records remain until a matching terminal receipt exists.
 
