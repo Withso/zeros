@@ -7,3 +7,7 @@ c7807fd9b0dfba0a90c5ba7f6b98dff6a090a6af:apps/control-plane/src/manage-cloud-com
 c7807fd9b0dfba0a90c5ba7f6b98dff6a090a6af:docs/cloud-workspace/compute-credits.md:generic-api-key:121
 # RFC 6455's public WebSocket handshake nonce in a rejection regression.
 c7807fd9b0dfba0a90c5ba7f6b98dff6a090a6af:apps/desktop/src/engine/agents/adapters/codex/__tests__/cloud-exec-server.test.ts:generic-api-key:72
+# The same reviewed fixtures in the squash commit; findings are commit-scoped.
+bccd4f86d9a31106a335aab910905ffb6413d160:apps/control-plane/src/manage-cloud-compute-credit.test.ts:generic-api-key:23
+bccd4f86d9a31106a335aab910905ffb6413d160:docs/cloud-workspace/compute-credits.md:generic-api-key:121
+bccd4f86d9a31106a335aab910905ffb6413d160:apps/desktop/src/engine/agents/adapters/codex/__tests__/cloud-exec-server.test.ts:generic-api-key:72
