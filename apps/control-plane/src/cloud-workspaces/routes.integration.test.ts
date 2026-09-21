@@ -1248,6 +1248,29 @@ d("cloud workspace API contracts", () => {
     expect((await pool.query("SELECT 1 FROM team_members WHERE team_id=$1 AND user_id=$2",[teamId,outsider.id])).rowCount).toBe(0);
   });
 
+  it("requires a new workspace or checkpoint recovery after a conclusively rejected allocation", async () => {
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId = created.body.workspace.id;
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='failed',completed_at=now() WHERE workspace_id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspaces SET status='failed',desired_state='stopped' WHERE id=$1", [workspaceId]);
+      await tx.query(`INSERT INTO cloud_workspace_provider_operations
+        (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,create_closed_at)
+        VALUES ('daytona','test-account',$1,1,$2,$3,$4,true,now())`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
+    });
+    const before = (await pool.query("SELECT current_billing_epoch,version FROM cloud_workspaces WHERE id=$1", [workspaceId])).rows;
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, {method:"POST",key:randomUUID()});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({error:{code:"cloud_workspace_recreate_required"}});
+    expect((await pool.query("SELECT current_billing_epoch,version FROM cloud_workspaces WHERE id=$1", [workspaceId])).rows).toEqual(before);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspaceId])).rowCount).toBe(0);
+    const retry = await createWorkspace();
+    expect(retry.response.status).toBe(202);
+    expect(retry.body.workspace.id).not.toBe(workspaceId);
+    expect((await pool.query("SELECT create_closed_at FROM cloud_workspace_provider_operations WHERE workspace_id=$1", [workspaceId])).rows[0].create_closed_at).not.toBeNull();
+  });
+
   it("rebinds a renewed entitlement before waking a stopped generation", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;

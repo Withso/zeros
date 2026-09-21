@@ -108,4 +108,58 @@ describe("Boat API boundary", () => {
     expect(error).toMatchObject({code:"provider_budget_exhausted",retryable:false});
     expect(String(error)).not.toContain("private provider account details");
   });
+
+  it("retains only a qualified, request-bound create rejection", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({
+      ok: false, type: "sandbox.error", status: 429, requestId: "req_test_rejected_create",
+      code: "trial_compute_limit_reached",
+      error: { code: "trial_compute_limit_reached", status: 429, message: "private details" },
+    }, { status: 429 }));
+    const error = await f.client.request("/sandboxes", {
+      method: "POST", body: {}, idempotencyKey: "test-attempt",
+    }).catch((error: unknown) => error);
+    expect(error).toMatchObject({ createRejectionCode: "trial_compute_limit_reached", retryable: false });
+    expect(JSON.stringify(error)).not.toContain("private details");
+  });
+
+  it.each([
+    { method: "GET" }, { path: "/sandboxes/bx_23456789/resume" },
+    { httpStatus: 503 }, { code: "unqualified_error" }, { ok: true },
+    { status: 200 }, { type: "sandbox.created" }, { sandbox: { id: "bx_23456789" } },
+    { error: { code: "different_error", status: 429 } },
+    { requestId: "" }, { requestId: "x".repeat(300) },
+    { sandboxId: "bx_23456789" }, { operation: { id: "unexpected-allocation" } },
+    { error: { code: "trial_compute_limit_reached", status: 429, details: { sandboxId: "bx_23456789" } } },
+    { id: "bx_23456789" }, { message: { sandbox: { id: "bx_23456789" } } },
+    { error: { code: "trial_compute_limit_reached", status: 429, sandbox: { id: "bx_23456789" } } },
+    { error: { code: "trial_compute_limit_reached", status: 429, message: { operation: "accepted" } } },
+    { error: { code: "trial_compute_limit_reached", status: 429, details: { newProviderField: true } } },
+  ])("does not certify ambiguous or unrelated rejection evidence: %j", async (override) => {
+    const f = fixture();
+    const { method = "POST", path = "/sandboxes", httpStatus = 429, ...body } = override;
+    f.fetcher.mockResolvedValue(Response.json({
+      ok: false, type: "sandbox.error", status: 429, code: "trial_compute_limit_reached", requestId: "req_test_rejected_create",
+      error: { code: "trial_compute_limit_reached", status: 429 }, ...body,
+    }, { status: httpStatus }));
+    const error = await f.client.request(path, {
+      method: method as "POST" | "GET", idempotencyKey: "test-attempt",
+    }).catch((error: unknown) => error);
+    expect(error).not.toHaveProperty("createRejectionCode");
+  });
+
+  it("accepts the known bounded limit diagnostics without retaining their values", async () => {
+    const f=fixture();
+    f.fetcher.mockResolvedValue(Response.json({
+      ok:false,type:"sandbox.error",status:429,code:"limit_reached",requestId:"req_test_limit",
+      error:{code:"limit_reached",status:429,message:"private account",details:{
+        currentLimits:{activeSandboxes:2,startsPerDay:75},maxActiveSandboxes:2,
+        sandboxPlanTiers:[{key:"trial",dollars:0}],status:"blocked",
+      }},
+    },{status:429}));
+    const error=await f.client.request("/sandboxes",{method:"POST",idempotencyKey:"known-limit"}).catch((value:unknown)=>value);
+    expect(error).toMatchObject({createRejectionCode:"limit_reached",retryable:true});
+    expect(JSON.stringify(error)).not.toContain("private account");
+    expect(JSON.stringify(error)).not.toContain("currentLimits");
+  });
 });

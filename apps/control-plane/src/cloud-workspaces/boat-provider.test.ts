@@ -4,7 +4,7 @@ import type {
   CloudProviderOperationRecord,
   CloudProviderOperationStore,
 } from "./provider-operation-store.js";
-import type { CloudProviderCreateInput } from "./provider.js";
+import { CloudProviderError, type CloudProviderCreateInput } from "./provider.js";
 
 const NOW = Date.parse("2026-09-18T12:00:00Z");
 const RESOURCE = "bx_23456789";
@@ -47,8 +47,15 @@ function deletion(status = "processing", extra: Record<string, unknown> = {}) {
 function json(body: unknown, status = 200) {
   return Response.json(body, { status });
 }
+function rejectedCreate() {
+  return json({
+    ok: false, type: "sandbox.error", status: 429, code: "trial_compute_limit_reached", requestId: "req_test_rejected_create",
+    error: { status: 429, code: "trial_compute_limit_reached" },
+  }, 429);
+}
 function fixture() {
   let stored: CloudProviderOperationRecord | null = null;
+  const attempts = new Map<string, boolean>();
   const operations: CloudProviderOperationStore = {
     prepareCreate: vi.fn(async (input) => {
       if (stored && stored.requestSha256 !== input.requestSha256)
@@ -60,8 +67,25 @@ function fixture() {
         deletionRequestedAt: null,
         deletionOperationId: null,
         deletedAt: null,
+        createAttemptsTracked: true,
+        createClosedAt: null,
       };
       return { ...stored };
+    }),
+    beginCreateAttempt: vi.fn(async (_identity, id) => {
+      if (stored?.createClosedAt)
+        throw new CloudProviderError("provider_generation_retired", "Retired generation", false);
+      if (!stored?.resourceId) attempts.set(id, false);
+      return { ...stored! };
+    }),
+    recordCreateRejection: vi.fn(async (_identity, id) => {
+      if (!attempts.has(id)) throw new Error("Missing dispatch");
+      attempts.set(id, true);
+    }),
+    closeUnallocatedCreate: vi.fn(async () => {
+      if (!stored?.createAttemptsTracked || stored.resourceId || [...attempts.values()].some(value => !value)) return false;
+      stored.createClosedAt ??= new Date(NOW);
+      return true;
     }),
     bindResource: vi.fn(async (_identity, id) => {
       stored!.resourceId = id;
@@ -119,6 +143,53 @@ function fixture() {
 }
 
 describe("Boat allocation lifecycle", () => {
+  it("closes a rejected create after restart without inventing a resource or deletion receipt", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(rejectedCreate());
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_budget_exhausted" });
+    const restarted = new BoatWorkspaceProvider(f.options);
+    expect(await restarted.verifyAbsence(INPUT)).toBe(true);
+    expect(f.stored().resourceId).toBeNull();
+    expect(f.stored().deletedAt).toBeNull();
+    await expect(restarted.create(INPUT)).rejects.toMatchObject({ code: "provider_generation_retired" });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("does not erase a lost create outcome when a later dispatch is rejected", async () => {
+    const f = fixture();
+    f.fetcher.mockRejectedValueOnce(new Error("lost reply"));
+    await expect(f.provider.create(INPUT)).rejects.toThrow();
+    f.fetcher.mockResolvedValueOnce(rejectedCreate());
+    await expect(new BoatWorkspaceProvider(f.options).create(INPUT)).rejects.toThrow();
+    expect(await f.provider.verifyAbsence(INPUT)).toBe(false);
+  });
+
+  it("does not erase an in-flight create when a concurrent dispatch is rejected", async () => {
+    const f = fixture();
+    let resolve!: (value: Response) => void;
+    f.fetcher.mockImplementationOnce(() => new Promise<Response>((r) => { resolve = r; }));
+    const pending = f.provider.create(INPUT);
+    await vi.waitFor(() => expect(f.fetcher).toHaveBeenCalledOnce());
+    f.fetcher.mockResolvedValueOnce(rejectedCreate());
+    await expect(new BoatWorkspaceProvider(f.options).create(INPUT)).rejects.toThrow();
+    expect(await f.provider.verifyAbsence(INPUT)).toBe(false);
+    resolve(json(sandbox()));
+    expect((await pending).resourceId).toBe(RESOURCE);
+  });
+
+  it("adopts an allocation bound between preparation and dispatch without another POST", async () => {
+    const f=fixture();
+    vi.mocked(f.operations.beginCreateAttempt).mockImplementationOnce(async () => {
+      await f.operations.bindResource(INPUT,RESOURCE);
+      return f.stored();
+    });
+    f.fetcher.mockResolvedValueOnce(json(sandbox()));
+    expect((await f.provider.create(INPUT)).resourceId).toBe(RESOURCE);
+    expect(f.fetcher).toHaveBeenCalledOnce();
+    expect(f.fetcher.mock.calls[0]![0]).toBe(`https://boat.dev/api/v1/sandboxes/${RESOURCE}`);
+    expect(f.fetcher.mock.calls[0]![1]!.method).toBe("GET");
+  });
+
   it("rejects mutable-only or invalid snapshot references before allocating", () => {
     const f = fixture();
     for (const imageRef of [
@@ -137,6 +208,7 @@ describe("Boat allocation lifecycle", () => {
     const f = fixture();
     f.fetcher.mockImplementationOnce(async (_url, init) => {
       expect(f.stored().idempotencyKey).toBe(INPUT.idempotencyKey);
+      expect(f.operations.beginCreateAttempt).toHaveBeenCalledOnce();
       expect(JSON.parse(String(init!.body))).toEqual({
         type: "default",
         from: "zeros-linux-qualified",

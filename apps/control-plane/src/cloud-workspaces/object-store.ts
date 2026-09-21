@@ -524,6 +524,34 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
     throw new Error("workspace object staging publication did not converge");
   }
 
+  private async stagedUploadStat(candidate: string) {
+    for (let attempt = 0; attempt < MAX_FENCE_CONVERGENCE_ATTEMPTS; attempt += 1) {
+      let candidateStat;
+      try {
+        candidateStat = await lstat(candidate);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+      if (
+        !candidateStat.isFile() ||
+        candidateStat.isSymbolicLink() ||
+        candidateStat.nlink < 0 ||
+        candidateStat.nlink > 2 ||
+        candidateStat.size < 0 ||
+        candidateStat.size > MAX_INLINE_BLOB_BYTES
+      ) {
+        throw new Error("workspace object staging file is unsafe");
+      }
+      // The kernel can resolve an inode before a concurrent unlink and read
+      // its link count afterwards. Confirm absence or validate the replacement
+      // instead of treating that transient zero-link snapshot as corruption.
+      if (candidateStat.nlink === 0) continue;
+      return candidateStat;
+    }
+    throw new Error("workspace object staging inspection did not converge");
+  }
+
   private async removeStagedUploadsFromShard(
     shard: string | null,
   ): Promise<void> {
@@ -547,23 +575,7 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
           throw new Error("workspace object staging directory is unsafe");
         }
         const candidate = path.join(shard, entry.name);
-        let candidateStat;
-        try {
-          candidateStat = await lstat(candidate);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw error;
-        }
-        if (
-          !candidateStat.isFile() ||
-          candidateStat.isSymbolicLink() ||
-          candidateStat.nlink < 1 ||
-          candidateStat.nlink > 2 ||
-          candidateStat.size < 0 ||
-          candidateStat.size > MAX_INLINE_BLOB_BYTES
-        ) {
-          throw new Error("workspace object staging file is unsafe");
-        }
+        if (!(await this.stagedUploadStat(candidate))) continue;
         await unlink(candidate)
           .then(() => {
             removed = true;
@@ -827,7 +839,10 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
         await unlink(target);
         await this.syncDirectory(path.dirname(target));
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const code = (error as NodeJS.ErrnoException).code;
+        // Another deleter can replace the inspected file with its permanent
+        // fence before unlink. Re-enter the bounded directory-validation path.
+        if (code !== "ENOENT" && code !== "EISDIR") throw error;
       }
     }
     throw new Error("workspace object deletion fence did not converge");
@@ -1017,23 +1032,8 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
             inspectedEntries += 1;
             if (!OBJECT_UPLOAD_NAME_PATTERN.test(entry.name)) continue;
             const candidate = path.join(shard, entry.name);
-            let candidateStat;
-            try {
-              candidateStat = await lstat(candidate);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
-              throw error;
-            }
-            if (
-              !candidateStat.isFile() ||
-              candidateStat.isSymbolicLink() ||
-              candidateStat.nlink < 1 ||
-              candidateStat.nlink > 2 ||
-              candidateStat.size < 0 ||
-              candidateStat.size > MAX_INLINE_BLOB_BYTES
-            ) {
-              throw new Error("workspace object staging file is unsafe");
-            }
+            const candidateStat = await this.stagedUploadStat(candidate);
+            if (!candidateStat) continue;
             if (candidateStat.mtimeMs > cutoff) continue;
             await unlink(candidate)
               .then(() => {

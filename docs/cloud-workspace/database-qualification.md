@@ -1,7 +1,10 @@
 # Hosted Postgres qualification
 
-Status: compatibility guards and local regressions are implemented; deployed
-qualification and final data cutover remain pending. The control-plane application stays on
+Status: Alpha's main writer is on PlanetScale after a fenced copy, exact source
+row comparison, forward migrations, runtime-role verification and public API
+checks. Beta's read-only source profile and encrypted archive have passed
+independent readback; Beta and Production cutovers remain pending. Main-dataset
+disaster recovery and sustained production load remain open. The control-plane application stays on
 Railway and its database target is standard PlanetScale Postgres. Existing
 SQL, workspace identities, RLS, migrations and portable client contracts remain
 authoritative. The compute providers remain independent of database hosting.

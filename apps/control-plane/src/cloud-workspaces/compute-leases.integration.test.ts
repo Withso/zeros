@@ -21,6 +21,7 @@ import {
 } from "./compute-leases.js";
 import {
   CloudProviderError,
+  type CloudProviderIdentity,
   type CloudProviderResource,
   type CloudWorkspaceProvider,
 } from "./provider.js";
@@ -29,6 +30,7 @@ import { requestManagedComputeStop } from "./compute-credit-stop.js";
 import { computeMicroUsd } from "./provider-compute.js";
 import { DatabaseCloudWorkspaceHealthService } from "./health.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
+import { DatabaseCloudProviderOperationStore } from "./provider-operation-store.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("managed compute lifecycle admission", () => {
@@ -83,7 +85,7 @@ suite("managed compute lifecycle admission", () => {
       ),
       inspect: vi.fn(async () => resource()),
       find: vi.fn(async () => [resource()]),
-      verifyAbsence: vi.fn(async () => false),
+      verifyAbsence: vi.fn(async (_identity: CloudProviderIdentity) => false),
       stop: vi.fn(),
       archive: vi.fn(),
       delete: vi.fn(),
@@ -652,6 +654,37 @@ suite("managed compute lifecycle admission", () => {
     expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0].state).toBe("authorized");
     expect((await balance())[0]!.reservedMicroUsd).toBe(reserved);
     await expect(coordinator.allocate(input, asProvider(), null)).resolves.toMatchObject({ state: "running" });
+  });
+
+  it.each([false,true])("settles a rejected create only with a complete dispatch journal (earlier unknown=%s)",async earlierUnknown=>{
+    await grant();
+    const journal=new DatabaseCloudProviderOperationStore(pool,"daytona","credit-journal-test");
+    provider.find.mockResolvedValue([]);
+    provider.verifyAbsence.mockImplementation(identity=>journal.closeUnallocatedCreate(identity));
+    provider.createWithComputeLease.mockImplementationOnce(async()=>{
+      await journal.prepareCreate({...input,requestSha256:"a".repeat(64)});
+      if(earlierUnknown)await journal.beginCreateAttempt(input,randomUUID());
+      const attempt=randomUUID();await journal.beginCreateAttempt(input,attempt);
+      await journal.recordCreateRejection(input,attempt,"trial_compute_limit_reached");
+      throw new CloudProviderError("provider_budget_exhausted","Allocation rejected",false);
+    });
+    const reconciler=new CloudWorkspaceReconciler({pool,provider:asProvider(),providerResolver:resolver(),computePolicy:policy,workosEnabled:false,intervalMs:1000});
+    expect(await reconciler.runOnce()).toBe(true);
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[input.intentId])).rows[0].state).toBe("failed");
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+    expect(await coordinator.runOnce()).toBe(true);
+    const after=(await balance())[0]!;
+    expect(after.debitedMicroUsd).toBe(0);
+    if(earlierUnknown){
+      expect(after.reservedMicroUsd).toBeGreaterThan(0);
+      expect((await journal.find(input))!.createClosedAt).toBeNull();
+    }else{
+      expect(after.reservedMicroUsd).toBe(0);
+      expect((await journal.find(input))!.createClosedAt).not.toBeNull();
+      expect((await pool.query("SELECT state FROM managed_compute_allocation_leases WHERE id=$1",[input.intentId])).rows[0].state).toBe("settled");
+      expect(await coordinator.runOnce()).toBe(false);
+      expect((await balance())[0]!.reservedMicroUsd).toBe(0);
+    }
   });
   it.each(["expired", "unfunded", "revoked", "terminal", "stopped"])(
     "does not defer ambiguous allocation cleanup after its authority becomes %s", async change => {

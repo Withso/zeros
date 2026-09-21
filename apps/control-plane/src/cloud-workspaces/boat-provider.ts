@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { BoatApiClient, type BoatApiClientOptions } from "./boat-client.js";
+import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions } from "./boat-client.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import type {
   CloudProviderOperationRecord,
@@ -201,7 +201,8 @@ export class BoatWorkspaceProvider
 
   async verifyAbsence(identity: CloudProviderIdentity): Promise<boolean> {
     const record = await this.options.operations.find(identity);
-    return record === null || record.deletedAt !== null;
+    if (record === null || record.deletedAt !== null || record.createClosedAt !== null) return true;
+    return this.options.operations.closeUnallocatedCreate(identity);
   }
 
   async create(
@@ -251,10 +252,13 @@ export class BoatWorkspaceProvider
       generation: input.generation,
       idempotencyKey: input.idempotencyKey,
       requestSha256: createHash("sha256")
+        .update(JSON.stringify({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 }))
+        .digest("hex"),
+      legacyRequestSha256: createHash("sha256")
         .update(JSON.stringify({ imageRef: input.imageRef, body }))
         .digest("hex"),
     });
-    if (record.deletionRequestedAt || record.deletedAt)
+    if (record.deletionRequestedAt || record.deletedAt || record.createClosedAt)
       throw failure("provider_generation_retired");
     if (record.resourceId) {
       const existing = await this.inspect(record.resourceId);
@@ -264,11 +268,25 @@ export class BoatWorkspaceProvider
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
-    const response = await this.client.request("/sandboxes", {
-      method: "POST",
-      body,
-      idempotencyKey: record.idempotencyKey,
-    });
+    // Persist every dispatch before I/O. A timeout remains unknown even when
+    // another request using the same key receives a definite refusal later.
+    const attemptId = randomUUID();
+    const dispatch = await this.options.operations.beginCreateAttempt(input, attemptId);
+    if (dispatch.resourceId) {
+      const existing = await this.inspect(dispatch.resourceId);
+      if (!existing) throw failure("provider_generation_retired");
+      return existing;
+    }
+    let response: Record<string, unknown>;
+    try {
+      response = await this.client.request("/sandboxes", {
+        method: "POST", body, idempotencyKey: record.idempotencyKey,
+      });
+    } catch (error) {
+      if (error instanceof BoatCreateRejectedError)
+        await this.options.operations.recordCreateRejection(input, attemptId, error.createRejectionCode);
+      throw error;
+    }
     // Record a syntactically valid resource id even if the remaining response
     // is malformed: cleanup must retain the allocation's identity.
     const id = z

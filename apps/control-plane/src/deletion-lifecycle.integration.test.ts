@@ -1943,13 +1943,22 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({ rows: [{ lease_owner: null }] });
   });
 
-  it.each(["object", "provider"])(
+  it.each(["object", "provider", "rejected-create"])(
     "does not purge an Organization until %s deletion is durably confirmed",
     async (kind) => {
       const owner = await signup("OrgFencePurge");
       const organizationId = await createOrganization(owner, "Fence Company");
       const blobId = randomUUID();
-      if (kind === "provider") {
+      if (kind === "rejected-create") {
+        await pool.query(`INSERT INTO cloud_workspace_provider_operations
+          (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked)
+          VALUES ('boat','test-account',$1,1,$2,$3,$4,true)`,
+        [randomUUID(),organizationId,randomUUID(),"a".repeat(64)]);
+        await pool.query(`INSERT INTO cloud_workspace_provider_create_attempts
+          (provider,account_scope,workspace_id,generation,attempt_id)
+          SELECT provider,account_scope,workspace_id,generation,$2
+          FROM cloud_workspace_provider_operations WHERE org_id=$1`,[organizationId,randomUUID()]);
+      } else if (kind === "provider") {
         await pool.query(
           `INSERT INTO cloud_workspace_provider_operations
           (provider, account_scope, workspace_id, generation, org_id, idempotency_key,
@@ -2011,7 +2020,12 @@ d("account, organization, and operator deletion lifecycle", () => {
         ]),
       ).resolves.toMatchObject({ rows: [{ id: organizationId }] });
 
-      if (kind === "provider") {
+      if (kind === "rejected-create") {
+        await pool.query(`UPDATE cloud_workspace_provider_create_attempts
+          SET rejection_code='limit_reached',rejected_at=now() WHERE workspace_id IN
+          (SELECT workspace_id FROM cloud_workspace_provider_operations WHERE org_id=$1)`,[organizationId]);
+        await pool.query("UPDATE cloud_workspace_provider_operations SET create_closed_at=now() WHERE org_id=$1",[organizationId]);
+      } else if (kind === "provider") {
         await pool.query(
           "UPDATE cloud_workspace_provider_operations SET deleted_at = now() WHERE org_id = $1",
           [organizationId],

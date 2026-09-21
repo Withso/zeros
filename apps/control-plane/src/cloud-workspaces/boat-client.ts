@@ -1,4 +1,5 @@
 import { CloudProviderError } from "./provider.js";
+import type { CloudProviderCreateRejectionCode } from "./provider-operation-store.js";
 
 export type BoatApiClientOptions = {
   apiKey: string;
@@ -6,6 +7,77 @@ export type BoatApiClientOptions = {
   fetch?: typeof fetch;
 };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+const REJECTION_FIELDS = new Set(["ok", "type", "status", "code", "message", "error", "requestId"]);
+const REJECTION_ERROR_FIELDS = new Set(["code", "message", "status", "details"]);
+// This is the account-limit document observed with the qualified trial refusal.
+// Unknown diagnostic fields leave the dispatch uncertain, rather than allowing
+// a newly introduced allocation/operation receipt to masquerade as a refusal.
+const REJECTION_LIMIT_FIELDS = new Set([
+  "accessTier", "accountPlan", "activeSandboxes", "activeStates", "billingStatus", "billingUrl",
+  "blockedReason", "canCreate", "canStart", "checkoutRequired", "contactMessage",
+  "creationRatePerMinute", "creationRequestsPerDay", "creationRequestsPerHour",
+  "creditBalanceHours", "creditBalanceSeconds", "creditPurchasedSeconds", "creditSecondsPerDollar",
+  "creditUsedSeconds", "currentLimits", "displayPrice", "dollars", "endTrialOrFirstPayment",
+  "error", "giftLimit", "hasPaymentHistory", "hasSeatPlan", "hasSubscription", "includedSeconds",
+  "key", "last24hUsageSeconds", "liveUsageSeconds", "maxActiveSandboxes", "maxCreationRequestsPerDay",
+  "maxCreationRequestsPerMinute", "message", "note", "pack", "packBalanceDollars", "packBalanceHours",
+  "packBalanceSeconds", "package", "perDay", "perHour", "perMinute", "persistsAcrossMonths",
+  "plan", "planName", "purchasable", "sandboxPlanDollars", "sandboxPlanKey", "sandboxPlanTiers",
+  "seconds", "secondsPerDollar", "serviceAccount", "standardLimits", "startBlockedReason",
+  "startLimits", "startTrial", "startsPerDay", "startsPerHour", "startsPerMinute", "status",
+  "subscriptionCancelAtPeriodEnd", "subscriptionCurrentPeriodEnd", "subscriptionQuotaSeconds",
+  "subscriptionRemainingSeconds", "subscriptionStatus", "subscriptionTrialEndsAt",
+  "trialComputeCapSeconds", "trialLimits", "trialLine", "unlimited", "upgradeEffects",
+]);
+
+function qualifiedLimitDetails(details: unknown): boolean {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return false;
+  const pending: Array<{ value: unknown; depth: number }> = [{ value: details, depth: 0 }];
+  let nodes = 0;
+  while (pending.length) {
+    const { value, depth } = pending.pop()!;
+    if (++nodes > 2048 || depth > 8) return false;
+    if (value && typeof value === "object") {
+      if (!Array.isArray(value) && Object.keys(value).some(key => !REJECTION_LIMIT_FIELDS.has(key))) return false;
+      for (const child of Object.values(value)) pending.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return true;
+}
+
+/** Only qualified admission rejections, never arbitrary vendor error text. */
+export class BoatCreateRejectedError extends CloudProviderError {
+  constructor(
+    code: string, retryable: boolean,
+    readonly createRejectionCode: CloudProviderCreateRejectionCode,
+    options: { retryAfterMs?: number },
+  ) {
+    super(code, "Boat API request did not succeed", retryable, options);
+  }
+}
+
+function createRejection(value: Record<string, unknown> | null): CloudProviderCreateRejectionCode | null {
+  const nested = value?.error;
+  if (value?.ok !== false || value.type !== "sandbox.error" || value.status !== 429 ||
+      Object.keys(value).some(key => !REJECTION_FIELDS.has(key)) ||
+      ("message" in value && typeof value.message !== "string") ||
+      typeof value.requestId !== "string" || !/^req_[a-zA-Z0-9_-]{1,124}$/.test(value.requestId) ||
+      !nested || typeof nested !== "object" || Array.isArray(nested)) return null;
+  const error = nested as Record<string, unknown>;
+  if (error.status !== 429 || error.code !== value.code ||
+      Object.keys(error).some(key => !REJECTION_ERROR_FIELDS.has(key)) ||
+      ("message" in error && typeof error.message !== "string") ||
+      ("details" in error && !qualifiedLimitDetails(error.details))) return null;
+  // Concurrent-allocation refusals are documented by the create endpoint.
+  // The trial cap's exact error envelope is additionally live-qualified; a
+  // generic 429, budget error, malformed envelope or later retry is not proof.
+  switch (value.code) {
+    case "limit_reached":
+    case "member_limit_reached":
+    case "trial_compute_limit_reached": return value.code;
+    default: return null;
+  }
+}
 
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
  * response bodies and vendor error text never enter coordinator diagnostics. */
@@ -120,15 +192,16 @@ export class BoatApiClient {
                   ? "provider_rate_limited"
                   : "provider_request_failed";
         const retrySeconds = Number(response.headers.get("retry-after"));
+        const retryOptions = Number.isFinite(retrySeconds) && retrySeconds > 0
+          ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {};
+        const rejected = path === "/sandboxes" && input.method === "POST" && input.idempotencyKey && response.status === 429
+          ? createRejection(value) : null;
+        if (rejected) throw new BoatCreateRejectedError(code, retryable, rejected, retryOptions);
         throw new CloudProviderError(
           code,
           "Boat API request did not succeed",
           retryable,
-          {
-            ...(Number.isFinite(retrySeconds) && retrySeconds > 0
-              ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) }
-              : {}),
-          },
+          retryOptions,
         );
       }
       if (!value || value.ok !== true)

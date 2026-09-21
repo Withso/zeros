@@ -3006,6 +3006,19 @@ export function createCloudWorkspaceRoutes(
       }
       if (operation === "wake") {
         await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
+        const closedAllocation = await tx.query(
+          `SELECT 1 FROM cloud_workspace_provider_operations
+           WHERE workspace_id=$1 AND generation=$2 AND org_id=$3
+             AND create_closed_at IS NOT NULL`,
+          [workspaceId, workspace.current_generation, orgId],
+        );
+        if (closedAllocation.rowCount) {
+          throw new HttpError(
+            409,
+            "cloud_workspace_recreate_required",
+            "Create a new cloud workspace to retry, or recover this workspace from a saved checkpoint",
+          );
+        }
         const authorization = await authorizeCloudWorkspaceOperation(tx, {
           organizationId: orgId,
           teamId: workspace.team_id,
