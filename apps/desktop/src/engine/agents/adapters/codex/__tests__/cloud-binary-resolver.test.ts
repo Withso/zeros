@@ -70,8 +70,10 @@ it.skipIf(process.platform !== "linux" || process.arch !== "x64")(
   "refuses a wrapper script at the native binary path",
   async () => {
     const f = await image();
+    await rm(f.binary);
     await writeFile(f.binary, "#!/bin/sh\nexec unrelated-codex\n", {
       mode: 0o555,
+      flag: "wx",
     });
     await expect(resolveCloudCodexBinaryFromImage(f.root)).rejects.toThrow(
       "pinned native",

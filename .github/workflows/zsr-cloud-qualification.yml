@@ -203,7 +203,7 @@ jobs:
               exit 1
             fi
           done
-          pnpm tsx -e 'import { assertRegistryImageDigest } from "./scripts/cloud-workspace-validation/lib/snapshot-placement.ts"; assertRegistryImageDigest(`${process.env.ZEROS_CLOUD_VM_REGISTRY_REPOSITORY}@sha256:${"a".repeat(64)}`)'
+          pnpm tsx -e 'import { assertRegistryImageDigest } from "./scripts/cloud-workspace-validation/lib/snapshot-placement.ts"; assertRegistryImageDigest(process.env.ZEROS_CLOUD_VM_REGISTRY_REPOSITORY + "@sha256:" + "a".repeat(64))'
           docker buildx version
           export DOCKER_CONFIG
           DOCKER_CONFIG="$(mktemp -d "$RUNNER_TEMP/zeros-registry.XXXXXXXX")"

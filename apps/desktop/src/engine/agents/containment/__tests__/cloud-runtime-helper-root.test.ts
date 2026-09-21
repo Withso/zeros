@@ -5,7 +5,10 @@ import type { BoundaryRequest } from "../types";
 const fixture = vi.hoisted(() => ({ missingLauncher: false, inspected: [] as string[] }));
 vi.mock("node:fs", async (importOriginal) => {
   const fs = await importOriginal<typeof import("node:fs")>();
-  const virtual = (value: unknown) => String(value).startsWith("/opt/qualified-runtime") || String(value) === "/usr/bin/podman";
+  // The image owns the entire ancestor chain. Hosted CI's /opt permissions
+  // belong to its tool cache and must not determine this synthetic image.
+  const directories = new Set(["/", "/opt", "/opt/qualified-runtime", "/usr", "/usr/bin"]);
+  const virtual = (value: unknown) => directories.has(String(value)) || String(value).startsWith("/opt/qualified-runtime/") || String(value) === "/usr/bin/podman";
   const realpathSync = Object.assign((value: Parameters<typeof fs.realpathSync>[0]) => virtual(value) ? String(value) : fs.realpathSync(value), { native: fs.realpathSync.native });
   return { ...fs, realpathSync,
     existsSync: (value: Parameters<typeof fs.existsSync>[0]) => virtual(value) || fs.existsSync(value),
@@ -13,7 +16,7 @@ vi.mock("node:fs", async (importOriginal) => {
       fixture.inspected.push(String(value));
       if (!virtual(value)) return fs.lstatSync(value);
       if (fixture.missingLauncher && String(value).endsWith("cloud-container-worker.mjs")) throw new Error("missing image helper");
-      const directory = String(value) === "/opt/qualified-runtime";
+      const directory = directories.has(String(value));
       return { uid: 0, mode: 0o555, nlink: 1, isFile: () => !directory, isDirectory: () => directory, isSymbolicLink: () => false };
     },
   };

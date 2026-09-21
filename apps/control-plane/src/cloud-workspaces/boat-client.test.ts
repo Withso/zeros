@@ -101,4 +101,11 @@ describe("Boat API boundary", () => {
       retryAfterMs: 300_000,
     });
   });
+  it("treats the trial's total compute cap as exhausted budget even when HTTP reports 429", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ok:false,code:"trial_compute_limit_reached",message:"private provider account details"},{status:429}));
+    const error = await f.client.request("/sandboxes").catch((error: unknown) => error);
+    expect(error).toMatchObject({code:"provider_budget_exhausted",retryable:false});
+    expect(String(error)).not.toContain("private provider account details");
+  });
 });

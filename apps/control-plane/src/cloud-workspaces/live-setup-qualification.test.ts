@@ -1,7 +1,24 @@
-import { describe, expect, it } from "vitest";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { chmodSync, linkSync, mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+const race = vi.hoisted(() => ({ target: "", replace: null as (() => void) | null }));
+vi.mock("node:fs", async (original) => {
+  const fs = await original<typeof import("node:fs")>();
+  const beforeUse = (file: unknown) => {
+    if (file === race.target && race.replace) {
+      const replace = race.replace;
+      race.replace = null;
+      replace();
+    }
+  };
+  return { ...fs,
+    openSync: (...args: Parameters<typeof fs.openSync>) => { beforeUse(args[0]); return fs.openSync(...args); },
+    readFileSync: (...args: Parameters<typeof fs.readFileSync>) => { beforeUse(args[0]); return fs.readFileSync(...args); },
+  };
+});
+afterEach(() => { race.target = ""; race.replace = null; });
 
 import {
   CLOUD_WORKSPACE_QUALIFICATION_ENGINE_PROTOCOL_VERSION,
@@ -12,6 +29,32 @@ import {
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 describe("live setup qualification safety gate", () => {
+  it.each(["symlink", "hardlink", "oversized", "shared-parent"])("rejects a %s substituted before reading private state", (kind) => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zeros-qualification-race-"));
+    const token = "signed-engine-preview-token";
+    const state = { sandboxId: "sandbox-qualification", previewUrl: `https://39393-${token}.proxy.daytona.work/`, previewToken: token,
+      snapshotId: "snapshot-id", snapshotImageName: "snapshot-image", runtimeAttestationSha256: "a".repeat(64), region: "eu",
+      engineIngress: { port: 39393, token, url: `https://39393-${token}.proxy.daytona.work/` } };
+    const snapshot = { version: 2, snapshotId: state.snapshotId, snapshotImageName: state.snapshotImageName, sourceCommit: "a".repeat(40),
+      imageContractSha256: "b".repeat(64), sandboxClass: "linux-vm", region: "eu", resources: { cpu: 2, memory: 4, disk: 20 },
+      registryImage: `registry.example.test/zeros/engine@sha256:${"c".repeat(64)}` };
+    try {
+      race.target = path.join(directory, "state.json");
+      const outside = path.join(directory, "other.json");
+      writeFileSync(race.target, JSON.stringify(state), { mode: 0o600 });
+      writeFileSync(outside, JSON.stringify(state), { mode: 0o600 });
+      writeFileSync(path.join(directory, "snapshot-attestation.json"), JSON.stringify(snapshot), { mode: 0o600 });
+      race.replace = () => {
+        rmSync(race.target);
+        if (kind === "symlink") symlinkSync(outside, race.target);
+        else if (kind === "hardlink") linkSync(outside, race.target);
+        else if (kind === "oversized") writeFileSync(race.target, JSON.stringify(state) + " ".repeat(2 * 1024 * 1024), { mode: 0o600 });
+        else { writeFileSync(race.target, JSON.stringify(state), { mode: 0o600 }); chmodSync(directory, 0o777); }
+      };
+      expect(() => privateValidationState(directory)).toThrow();
+      expect(race.replace).toBeNull();
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
   it("accepts the exact VM snapshot placement and refuses a different region", () => {
     const directory=mkdtempSync(path.join(tmpdir(),"zeros-qualification-"));
     const token="signed-engine-preview-token";

@@ -30,6 +30,7 @@ import {
   vi,
 } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -857,9 +858,11 @@ d("migration ladder", () => {
 
   it("verifies the ledger through zeros_app using a NOINHERIT runtime login", async () => {
     await runMigrations(pool);
-    await pool.query("CREATE ROLE zeros_runtime_verifier LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS");
+    const password = randomBytes(24).toString("hex");
+    await pool.query(`CREATE ROLE zeros_runtime_verifier LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`);
     await pool.query("GRANT zeros_app TO zeros_runtime_verifier");
     const runtimeUrl = new URL(url!); runtimeUrl.username = "zeros_runtime_verifier";
+    runtimeUrl.password = password;
     const runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
     try {
       await expect(runtime.query("SELECT name FROM public.schema_migrations")).rejects.toMatchObject({ code: "42501" });

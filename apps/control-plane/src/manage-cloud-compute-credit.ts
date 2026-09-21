@@ -1,7 +1,7 @@
 import {parseDatabaseTarget} from "./database-target.js";
 import {createPool} from "./db.js";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readBoundedJsonFile } from "./bounded-json-file.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
@@ -125,11 +125,9 @@ async function run() {
     databaseUrl = process.env.DATABASE_URL;
   if (!file || !databaseUrl)
     throw new Error("CLOUD_COMPUTE_GRANT_FILE and DATABASE_URL are required");
-  if ((await stat(file)).size > 16_384)
-    throw new Error("Compute grant document is too large");
   const plan = planCloudComputeGrant(
     databaseUrl,
-    JSON.parse(await readFile(file, "utf8")),
+    readBoundedJsonFile(file, 16_384),
     process.env.RAILWAY_ENVIRONMENT_NAME,
   );
   if (!execute) {

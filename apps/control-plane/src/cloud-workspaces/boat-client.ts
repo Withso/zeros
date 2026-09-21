@@ -97,8 +97,12 @@ export class BoatApiClient {
           ? (body as Record<string, unknown>)
           : null;
       if (!response.ok || value?.ok === false) {
+        // Boat may report the nonrenewable trial compute allowance as HTTP
+        // 429 even while /limits says canStart. Waiting cannot replenish it.
+        const trialBudgetExhausted = response.status === 429 &&
+          value?.code === "trial_compute_limit_reached";
         const retryable =
-          response.status === 429 ||
+          (response.status === 429 && !trialBudgetExhausted) ||
           response.status === 408 ||
           response.status >= 500 ||
           (response.status === 409 &&
@@ -110,7 +114,7 @@ export class BoatApiClient {
             ? "provider_not_found"
             : response.status === 401 || response.status === 403
               ? "provider_credential_rejected"
-              : response.status === 402
+              : response.status === 402 || trialBudgetExhausted
                 ? "provider_budget_exhausted"
                 : response.status === 429
                   ? "provider_rate_limited"

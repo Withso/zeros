@@ -2,3 +2,8 @@
 4e913b09c7e1612b6670bf12c2414b1e7d2656ae:apps/desktop/src/engine/agents/containment/claude-oauth-authority.ts:generic-api-key:11
 # Adjacent WorkOS authentication method names; this exact historical finding is not a LinkedIn client identifier.
 8bf0f9e959046859c835fc2938b07e7c7afb7c7a:apps/desktop/electron/workos-desktop-client.ts:linkedin-client-id:30
+# Synthetic idempotency receipts, not authentication credentials.
+c7807fd9b0dfba0a90c5ba7f6b98dff6a090a6af:apps/control-plane/src/manage-cloud-compute-credit.test.ts:generic-api-key:18
+c7807fd9b0dfba0a90c5ba7f6b98dff6a090a6af:docs/cloud-workspace/compute-credits.md:generic-api-key:121
+# RFC 6455's public WebSocket handshake nonce in a rejection regression.
+c7807fd9b0dfba0a90c5ba7f6b98dff6a090a6af:apps/desktop/src/engine/agents/adapters/codex/__tests__/cloud-exec-server.test.ts:generic-api-key:72

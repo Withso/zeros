@@ -6,7 +6,7 @@
 //   TEST_DATABASE_URL=postgres://postgres:t@localhost:5433/postgres pnpm test
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import pg from "pg";
 import { runMigrations } from "./migrate.js";
 import { ensureUser, resolveAuthenticatedUser } from "./auth.js";
@@ -268,10 +268,12 @@ d("schema + signup transaction", () => {
 
   it("authenticates WorkOS through a NOINHERIT runtime login without leaking role or identity", async () => {
     const role = `zeros_auth_${randomUUID().replaceAll("-", "")}`;
-    await pool.query(`CREATE ROLE ${role} LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS`);
+    const password = randomBytes(24).toString("hex");
+    await pool.query(`CREATE ROLE ${role} LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`);
     await pool.query(`GRANT zeros_app TO ${role}`);
     const runtimeUrl = new URL(url!);
     runtimeUrl.username = role;
+    runtimeUrl.password = password;
     const runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
     const identity = {
       provider: "workos" as const,

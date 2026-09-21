@@ -54,9 +54,17 @@ export async function acquireCloudNativeHistory(input:{root:string;conversationI
         if(++entries>25000)throw new Error("Cloud native history exceeds its limit");
         const item=`/proc/self/fd/${handle.fd}/${name}`,stat=await lstat(item);
         if(stat.isSymbolicLink()||(!stat.isDirectory()&&!stat.isFile())||(stat.isFile()&&stat.nlink!==1))throw new Error("Cloud native history contains an unsafe entry");
-        if(stat.isFile()&&(stat.size>128*1024*1024||(bytes+=stat.size)>2*1024*1024*1024))throw new Error("Cloud native history exceeds its limit");
         const child=await open(item,constants.O_RDONLY|constants.O_NOFOLLOW|constants.O_NONBLOCK|(stat.isDirectory()?constants.O_DIRECTORY:0));
-        try{if(stat.isDirectory())await adopt(child);await child.chown(input.uid,input.gid);}finally{await child.close();}
+        try{
+          const actual=await child.stat();
+          if(actual.dev!==stat.dev||actual.ino!==stat.ino||actual.isDirectory()!==stat.isDirectory()||
+            (!actual.isDirectory()&&(!actual.isFile()||actual.nlink!==1)))
+            throw new Error("Cloud native history contains an unsafe entry");
+          if(actual.isFile()&&(actual.size>128*1024*1024||(bytes+=actual.size)>2*1024*1024*1024))
+            throw new Error("Cloud native history exceeds its limit");
+          if(actual.isDirectory())await adopt(child);
+          await child.chown(input.uid,input.gid);
+        }finally{await child.close();}
       }
       await handle.chown(input.uid,input.gid);
     }

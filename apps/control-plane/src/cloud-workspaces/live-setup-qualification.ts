@@ -5,7 +5,6 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -16,6 +15,7 @@ import type { JWK } from "jose";
 import pg from "pg";
 
 import { withSystemTx } from "../db.js";
+import { readBoundedJsonFile } from "../bounded-json-file.js";
 import { runMigrations } from "../migrate.js";
 import { DaytonaSandboxCommandRunner } from "./daytona-command-runner.js";
 import { DaytonaCloudWorkspaceSetupExecutor } from "./daytona-setup-executor.js";
@@ -264,21 +264,10 @@ export function validateQualificationPrivateState(
 }
 
 function readOwnerFile(file: string, maximumBytes: number): unknown {
-  const stat = lstatSync(file);
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    stat.size < 2 ||
-    stat.size > maximumBytes ||
-    (uid !== null && stat.uid !== uid) ||
-    (stat.mode & 0o077) !== 0 ||
-    realpathSync(file) !== file
-  ) {
+  try { return readBoundedJsonFile(file, maximumBytes, true); }
+  catch {
     throw new Error("qualification private state file is unsafe");
   }
-  return JSON.parse(readFileSync(file, "utf8")) as unknown;
 }
 
 export function privateValidationState(directory: string): {

@@ -4,6 +4,11 @@ import {
   applyCloudComputeGrant,
 } from "./manage-cloud-compute-credit.js";
 import type pg from "pg";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 const document = {
   channel: "development",
   fundingScope: "organization",
@@ -19,6 +24,23 @@ const document = {
   reason: "Fixture monthly seat credit grant",
 };
 describe("compute credit operator plan", () => {
+  it.skipIf(process.platform === "win32")("refuses a FIFO grant document without waiting for a writer", () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "zeros-grant-fifo-"));
+    const file = path.join(directory, "grant.json");
+    try {
+      expect(spawnSync("mkfifo", [file]).status).toBe(0);
+      const result = spawnSync(process.execPath, ["--import", "tsx", fileURLToPath(new URL("./manage-cloud-compute-credit.ts", import.meta.url))], {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        env: { PATH: process.env.PATH, CLOUD_COMPUTE_GRANT_FILE: file, DATABASE_URL: "postgres://operator@127.0.0.1/fixture" },
+        timeout: 3_000, encoding: "utf8", maxBuffer: 8_192,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("[cloud-compute-credit] request failed");
+      expect(result.stdout).toBe("");
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
   it("requires an explicit funding scope for a new operator plan", () => {
     const { fundingScope: _scope, ...ambiguous } = document;
     expect(() => planCloudComputeGrant("postgres://operator@127.0.0.1/a", ambiguous)).toThrow();

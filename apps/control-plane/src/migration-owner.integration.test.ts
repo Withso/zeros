@@ -13,6 +13,10 @@ database("stable migration owner with rotating NOINHERIT logins", () => {
       first = "migrator_a_" + suffix,
       second = "migrator_b_" + suffix;
     const roles = [first, second, owner];
+    const passwords = new Map([
+      [first, randomBytes(24).toString("hex")],
+      [second, randomBytes(24).toString("hex")],
+    ]);
     const pools: pg.Pool[] = [];
     try {
       await admin.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");
@@ -28,7 +32,7 @@ database("stable migration owner with rotating NOINHERIT logins", () => {
       ).toBeNull();
       await admin.query(`CREATE ROLE ${owner} NOLOGIN NOINHERIT NOBYPASSRLS`);
       await admin.query(
-        `CREATE ROLE ${first} LOGIN NOINHERIT NOBYPASSRLS;CREATE ROLE ${second} LOGIN NOINHERIT NOBYPASSRLS; GRANT ${owner} TO ${first},${second}`,
+        `CREATE ROLE ${first} LOGIN NOINHERIT NOBYPASSRLS PASSWORD '${passwords.get(first)}';CREATE ROLE ${second} LOGIN NOINHERIT NOBYPASSRLS PASSWORD '${passwords.get(second)}'; GRANT ${owner} TO ${first},${second}`,
       );
       await admin.query(
         `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='zeros_app') THEN CREATE ROLE zeros_app NOLOGIN NOBYPASSRLS; END IF; END $$; GRANT zeros_app TO ${owner} WITH ADMIN OPTION`,
@@ -43,6 +47,7 @@ database("stable migration owner with rotating NOINHERIT logins", () => {
       const routed = (login: string) => {
         const result = new URL(url);
         result.username = login;
+        result.password = passwords.get(login)!;
         return result.toString();
       };
       const raw = createPool(routed(first), { maxConnections: 1 });

@@ -831,10 +831,8 @@ export const qualificationAllocationStore: QualificationAllocationStore = {
       requireEnv("DAYTONA_API_KEY")])).digest("hex");
   },
   read() {
-    if (!fs.existsSync(ALLOCATION_INTENT_FILE)) return null;
-    assertPrivateStateFile(ALLOCATION_INTENT_FILE);
-    if (fs.statSync(ALLOCATION_INTENT_FILE).size > 4096) throw new Error("Allocation intent exceeds its size limit");
-    return parseQualificationAllocation(JSON.parse(fs.readFileSync(ALLOCATION_INTENT_FILE, "utf8")));
+    if (!privateStatePathExists(ALLOCATION_INTENT_FILE)) return null;
+    return parseQualificationAllocation(readPrivateStateJson(ALLOCATION_INTENT_FILE, 4096));
   },
   write(intent) {
     fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
@@ -850,7 +848,7 @@ export const qualificationAllocationStore: QualificationAllocationStore = {
     } finally { fs.rmSync(temporary, { force: true }); }
   },
   clear() {
-    if (fs.existsSync(ALLOCATION_INTENT_FILE)) {
+    if (privateStatePathExists(ALLOCATION_INTENT_FILE)) {
       assertPrivateStateFile(ALLOCATION_INTENT_FILE);
       fs.unlinkSync(ALLOCATION_INTENT_FILE);
     }
@@ -860,10 +858,8 @@ const SNAPSHOT_ALLOCATION_FILE=path.join(STATE_DIR,"snapshot-allocation.json");
 export const snapshotAllocationStore:SnapshotAllocationStore={
   get providerScope(){return qualificationAllocationStore.providerScope;},
   read(){
-    if(!fs.existsSync(SNAPSHOT_ALLOCATION_FILE))return null;
-    assertPrivateStateFile(SNAPSHOT_ALLOCATION_FILE);
-    if(fs.statSync(SNAPSHOT_ALLOCATION_FILE).size>4096)throw new Error("Snapshot receipt exceeds its bound");
-    return parseSnapshotAllocation(JSON.parse(fs.readFileSync(SNAPSHOT_ALLOCATION_FILE,"utf8")));
+    if(!privateStatePathExists(SNAPSHOT_ALLOCATION_FILE))return null;
+    return parseSnapshotAllocation(readPrivateStateJson(SNAPSHOT_ALLOCATION_FILE, 4096));
   },
   write(value){
     fs.mkdirSync(STATE_DIR,{recursive:true,mode:0o700});assertPrivateStateDirectory(STATE_DIR);
@@ -875,7 +871,7 @@ export const snapshotAllocationStore:SnapshotAllocationStore={
       const directory=fs.openSync(STATE_DIR,"r");try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
     }finally{fs.rmSync(temporary,{force:true});}
   },
-  clear(){if(fs.existsSync(SNAPSHOT_ALLOCATION_FILE)){assertPrivateStateFile(SNAPSHOT_ALLOCATION_FILE);fs.unlinkSync(SNAPSHOT_ALLOCATION_FILE);}},
+  clear(){if(privateStatePathExists(SNAPSHOT_ALLOCATION_FILE)){assertPrivateStateFile(SNAPSHOT_ALLOCATION_FILE);fs.unlinkSync(SNAPSHOT_ALLOCATION_FILE);}},
 };
 const SNAPSHOT_ATTESTATION_FILE = path.join(
   STATE_DIR,
@@ -997,13 +993,14 @@ const LEGACY_STATE_FILES = [
 /** Even an old, malformed or dangling state path may be the only allocation
  * reference. Provisioning must never replace it with a second sandbox. */
 export function hasExistingCloudValidationState(): boolean {
-  return [STATE_FILE, ...LEGACY_STATE_FILES].some(file => {
-    try { fs.lstatSync(file); return true; }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
-  });
+  return [STATE_FILE, ...LEGACY_STATE_FILES].some(privateStatePathExists);
+}
+function privateStatePathExists(file: string): boolean {
+  try { fs.lstatSync(file); return true; }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 const LEGACY_SNAPSHOT_ATTESTATION_FILES = [
   path.join(
@@ -1041,7 +1038,7 @@ export function saveState(
   console.log(`  ↳ wrote ${path.relative(repoRoot, stateFile)} (owner-only)`);
 }
 
-function assertPrivateStateDirectory(directory: string): void {
+function assertPrivateStateDirectory(directory: string): fs.Stats {
   const resolved = path.resolve(directory);
   const stat = fs.lstatSync(resolved);
   const uid = typeof process.getuid === "function" ? process.getuid() : null;
@@ -1054,6 +1051,7 @@ function assertPrivateStateDirectory(directory: string): void {
   ) {
     throw new Error("cloud private state directory is unsafe");
   }
+  return stat;
 }
 
 function assertPrivateStateFile(file: string): void {
@@ -1071,6 +1069,47 @@ function assertPrivateStateFile(file: string): void {
   ) {
     throw new Error("cloud validation state file is unsafe");
   }
+}
+
+/** A receipt remains cleanup authority even when malformed. Read it once from
+ * the checked inode, bound growth, and never repair permissions while reading. */
+function readPrivateStateJson(file: string, maximumBytes: number): unknown {
+  const resolved = path.resolve(file);
+  const parentBefore = assertPrivateStateDirectory(path.dirname(resolved));
+  const descriptor = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+  let buffer: Buffer | undefined;
+  const invalid = () => new Error("cloud validation state file is unsafe or changed while reading");
+  try {
+    const before = fs.fstatSync(descriptor, { bigint: true });
+    if (!before.isFile() || before.nlink !== 1n || before.size < 2n || before.size > BigInt(maximumBytes) ||
+        (process.getuid && before.uid !== BigInt(process.getuid())) ||
+        (process.platform !== "win32" && (before.mode & 0o077n) !== 0n) ||
+        fs.realpathSync(resolved) !== resolved ||
+        (process.platform === "linux" && fs.realpathSync(`/proc/self/fd/${descriptor}`) !== resolved)) throw invalid();
+    const assertNamedFile = () => {
+      const named = fs.lstatSync(resolved, { bigint: true });
+      if (!named.isFile() || named.dev !== before.dev || named.ino !== before.ino) throw invalid();
+    };
+    assertNamedFile();
+    buffer = Buffer.alloc(Number(before.size) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const read = fs.readSync(descriptor, buffer, length, buffer.length - length, length);
+      if (!read) break;
+      length += read;
+    }
+    const after = fs.fstatSync(descriptor, { bigint: true });
+    if (BigInt(length) !== before.size || before.dev !== after.dev || before.ino !== after.ino ||
+        before.size !== after.size || before.mode !== after.mode || before.uid !== after.uid ||
+        before.gid !== after.gid || before.nlink !== after.nlink ||
+        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw invalid();
+    const parentAfter = assertPrivateStateDirectory(path.dirname(resolved));
+    if (parentBefore.dev !== parentAfter.dev || parentBefore.ino !== parentAfter.ino ||
+        parentBefore.uid !== parentAfter.uid || parentBefore.gid !== parentAfter.gid || parentBefore.mode !== parentAfter.mode) throw invalid();
+    assertNamedFile();
+    try { return JSON.parse(buffer.toString("utf8", 0, length)) as unknown; }
+    catch { throw new Error("cloud validation state is invalid JSON"); }
+  } finally { buffer?.fill(0); fs.closeSync(descriptor); }
 }
 
 function sha256(value: string | Buffer): string {
@@ -1156,28 +1195,22 @@ export function saveSnapshotAttestation(
 export function loadSnapshotAttestation(
   file: string = SNAPSHOT_ATTESTATION_FILE,
 ): CloudSnapshotAttestation {
-  if (file === SNAPSHOT_ATTESTATION_FILE && !fs.existsSync(file)) {
+  if (file === SNAPSHOT_ATTESTATION_FILE && !privateStatePathExists(file)) {
     const legacy = LEGACY_SNAPSHOT_ATTESTATION_FILES.find((candidate) =>
-      fs.existsSync(candidate),
+      privateStatePathExists(candidate),
     );
     if (legacy) {
-      const value = JSON.parse(
-        fs.readFileSync(legacy, "utf8"),
-      ) as CloudSnapshotAttestation;
+      const value = readPrivateStateJson(legacy, 16384) as CloudSnapshotAttestation;
       saveSnapshotAttestation(value, file);
       fs.rmSync(legacy, { force: true });
     }
   }
-  if (!fs.existsSync(file)) {
+  if (!privateStatePathExists(file)) {
     throw new Error(
       "snapshot attestation is missing; bake the current snapshot before provisioning",
     );
   }
-  assertPrivateStateFile(file);
-  fs.chmodSync(path.dirname(file), 0o700);
-  fs.chmodSync(file, 0o600);
-  if(fs.statSync(file).size>16384)throw new Error("Snapshot attestation exceeds its size limit");
-  const value=JSON.parse(fs.readFileSync(file, "utf8")) as CloudSnapshotAttestation;
+  const value = readPrivateStateJson(file, 16384) as CloudSnapshotAttestation;
   assertSnapshotPlacement(value);
   return value;
 }
@@ -1186,10 +1219,10 @@ export function snapshotAttestationExists(
   file: string = SNAPSHOT_ATTESTATION_FILE,
 ): boolean {
   return (
-    fs.existsSync(file) ||
+    privateStatePathExists(file) ||
     (file === SNAPSHOT_ATTESTATION_FILE &&
       LEGACY_SNAPSHOT_ATTESTATION_FILES.some((candidate) =>
-        fs.existsSync(candidate),
+        privateStatePathExists(candidate),
       ))
   );
 }
@@ -1197,7 +1230,7 @@ export function snapshotAttestationExists(
 export function clearSnapshotAttestation(
   file: string = SNAPSHOT_ATTESTATION_FILE,
 ): void {
-  if (!fs.existsSync(file)) return;
+  if (!privateStatePathExists(file)) return;
   fs.rmSync(file, { force: true });
   try {
     fs.rmdirSync(path.dirname(file));
@@ -1218,13 +1251,13 @@ export function saveRuntimeAttestation(report: unknown): string {
 }
 
 export function clearRuntimeAttestation(): void {
-  if (fs.existsSync(RUNTIME_ATTESTATION_FILE)) {
+  if (privateStatePathExists(RUNTIME_ATTESTATION_FILE)) {
     fs.rmSync(RUNTIME_ATTESTATION_FILE, { force: true });
   }
 }
 
 export function clearState(stateFile: string = STATE_FILE): void {
-  if (!fs.existsSync(stateFile)) return;
+  if (!privateStatePathExists(stateFile)) return;
   fs.rmSync(stateFile, { force: true });
   try {
     fs.rmdirSync(path.dirname(stateFile));
@@ -1238,36 +1271,25 @@ export function clearState(stateFile: string = STATE_FILE): void {
 export function loadState(
   stateFile: string = STATE_FILE,
 ): CloudValidationState {
-  if (stateFile === STATE_FILE && !fs.existsSync(stateFile)) {
+  if (stateFile === STATE_FILE && !privateStatePathExists(stateFile)) {
     const legacyStateFile = LEGACY_STATE_FILES.find((file) =>
-      fs.existsSync(file),
+      privateStatePathExists(file),
     );
     if (legacyStateFile) {
-      const legacy = JSON.parse(
-        fs.readFileSync(legacyStateFile, "utf8"),
-      ) as CloudValidationState;
+      const legacy = readPrivateStateJson(legacyStateFile, 2 * 1024 * 1024) as CloudValidationState;
       saveState(legacy, STATE_FILE);
       clearState(legacyStateFile);
     }
   }
 
-  if (!fs.existsSync(stateFile)) {
+  if (!privateStatePathExists(stateFile)) {
     console.error(
       `\n  ✗ No validation state at ${path.relative(repoRoot, stateFile)}.\n` +
         `    Run \`pnpm tsx scripts/cloud-workspace-validation/provision.ts\` first.\n`,
     );
     process.exit(1);
   }
-  assertPrivateStateFile(stateFile);
-  fs.chmodSync(path.dirname(stateFile), 0o700);
-  fs.chmodSync(stateFile, 0o600);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-  } catch {
-    throw new Error("cloud validation state is invalid JSON");
-  }
-  return parseCloudValidationState(parsed);
+  return parseCloudValidationState(readPrivateStateJson(stateFile, 2 * 1024 * 1024));
 }
 
 /** Build the ws(s):// bridge URL from a preview URL.
