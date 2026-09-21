@@ -55,6 +55,35 @@ not discard the allocation's cleanup identity. An expired provider retry window
 with an unknown outcome requires reconciliation; never allocate again under a
 fresh key merely because the response was lost.
 
+Migration 0093 records each Boat create dispatch before network I/O. A qualified
+HTTP 429 rejection records only its allowlisted code, never the provider body.
+The exact error envelope must agree on status and code and contain no allocation.
+`limit_reached` and `member_limit_reached` are documented allocation refusals;
+the strict `trial_compute_limit_reached` envelope is an observed live contract,
+not an explicit preallocation guarantee in the public provider documentation.
+Other 4xx responses, malformed replies, transport failures and timeouts retain
+an unknown outcome. A later rejected retry cannot clear an earlier unknown or
+in-flight dispatch.
+
+An unallocated generation can close only after every dispatch has a confirmed
+rejection and no create/wake intent remains active. Closure is atomic with
+dispatch admission, permanent, and separate from physical deletion evidence.
+It releases unallocated reservations and permits eventual organization purge.
+Wake returns `cloud_workspace_recreate_required` for a closed generation before
+changing billing or creating an intent. A failed first allocation has no engine
+or checkpoint for the ordinary rebuild flow: create a new workspace to retry.
+If a durable checkpoint exists, the existing recovery API can restore it to a
+fresh generation. Neither action reopens the closed journal. Attempt rows cannot be deleted independently of an authorized
+terminal journal purge.
+
+Historical journals remain untracked and cannot infer absence from new receipts.
+New journals use a versioned local request digest; an older writer's digest
+cannot match them, so it fails before dispatch. The provider HTTP body and
+original idempotency key stay unchanged. If an older writer wins an insert race,
+the newer writer preserves that row's legacy digest and uncertainty. This fence
+also protects rolling deployments; do not backfill the tracking flag or erase
+old unknown attempts to make cleanup pass.
+
 Before asynchronous deletion, drain issued access and persist deletion intent.
 Retain the exact provider operation receipt across restarts. Verify its account,
 target, kind and terminal status. A sandbox disappearing from listings or

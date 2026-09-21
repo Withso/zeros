@@ -12,8 +12,10 @@ Organization creation's staff gate does not by itself prove cloud admission is
 staff-only; server admission and staff-revocation tests remain exit requirements.
 
 PlanetScale Postgres is the selected target for hosted database qualification;
-the control-plane application remains on Railway. This is a planned deployment
-change, not evidence of a completed migration. See
+the control-plane application remains on Railway. Alpha's main writer has been
+cut over with source fencing, row comparison, migration and public API checks.
+Beta's source profile and encrypted archive have been independently verified;
+Beta and Production writer cutovers remain pending. See
 [database qualification](database-qualification.md).
 
 ## Current eight-step execution
@@ -27,7 +29,7 @@ change, not evidence of a completed migration. See
 | 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat | Fleet/region load qualification and later native client release tests |
 | 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; active-turn loss leaves an uncertain command and paused queue | Literal provider-host destruction, target PlanetScale database plus offsite object-store recovery and reviewed RPO/RTO |
 | 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes | Linux-VM snapshot/region/quota preflight implemented; available test account lacks eligible Linux-VM quota. Full parity remains open |
-| 8. Spend and operations | Credit grants, reservations, cumulative meter, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, isolated deployed WorkOS identity, PlanetScale restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence | Main writer cutover, exact deployed runtime requalification, deletion completion, operational alerts and sustained load/soak; customer billing deferred |
+| 8. Spend and operations | Credit grants, reservations, cumulative meter, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha main PlanetScale cutover, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence | Beta/Production writer cutover, exact deployed runtime requalification, rejected-create cleanup qualification, deletion completion, operational alerts and sustained load/soak; customer billing deferred |
 
 The eight steps are not all complete. Local tests and a successful Boat runtime
 do not clear Daytona or production operations gates.
@@ -60,17 +62,27 @@ do not clear Daytona or production operations gates.
   revocation through the public API. GitHub App repository-scoped token issue,
   resolution and revocation were tested separately. Main deployment and private
   repository qualification remain distinct exit conditions.
-- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. Main writer cutover, end-to-end recovery of the main dataset from R2 and regional recovery remain open; these are not production migration claims.
+- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. Alpha's main cutover preserves the original dataset and passes authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remains disabled there. Beta/Production migration, end-to-end recovery of the main dataset from R2 and regional recovery remain open.
 - Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
   connection fencing, dropped-column and enum restore compatibility, sequence
   ownership, role drift, cancellation and uncertain fence acknowledgements.
   A real R2 round trip verifies encrypted evidence by downloading and decrypting
-  it. Main cutover still requires a fresh fenced copy and target comparison;
+  it. Each remaining channel cutover requires a fresh fenced copy and target comparison;
   source and target collation-library versions must be explicitly qualified.
-- Exhausted Boat trial compute and unavailable Daytona Linux-VM quota currently
-  prevent final provider requalification. Earlier immutable-image evidence does
-  not qualify subsequent engine changes. Provider admission, registry publication
-  and exact-image public API recovery must pass before activation.
+- The merged backend's Boat image has passed native build/attestation and actual
+  Claude, Cursor and Codex turn/resume/Stop canaries. Its named snapshot is ready
+  and the isolated API is deployed. Boat allowed an existing image builder to
+  resume but rejected the fresh public-API recovery allocation as exhausted
+  trial compute; the recovered-generation test has not passed. The rolled-back
+  workspace and builder were stopped. Daytona Linux-VM quota remains unavailable.
+  Native image tests do not substitute for normal public admission or qualify
+  subsequent runtime changes. Registry publication and exact-image public API
+  recovery remain activation gates.
+- The rejected-create audit found that unbound journals could indefinitely
+  retain cleanup and compute reservations. Migration 0093 adds per-dispatch
+  rejection evidence and permanent unallocated closure; historical requests
+  with incomplete evidence remain unresolved. This repair needs live deployment
+  qualification and cannot be used to infer old resources were erased.
 - Provider DELETE acceptance and a subsequent 404 are not data-erasure evidence.
   Storage and cleanup records remain until a matching terminal receipt exists.
 
