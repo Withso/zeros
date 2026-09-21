@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "root": "/srv/zeros",
+  "engine": "/opt/zeros",
+  "repository": "/srv/zeros/workspace",
+  "seedBackup": "/srv/zeros/.zeros-image-seed",
+  "data": "/srv/zeros/state",
+  "agentHome": "/srv/zeros/home/agent",
+  "captureHome": "/srv/zeros/home/capture",
+  "log": "/srv/zeros/log/engine.log"
+}

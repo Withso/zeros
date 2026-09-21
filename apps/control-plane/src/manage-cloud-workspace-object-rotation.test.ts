@@ -8,7 +8,7 @@ import {
   validateCloudWorkspaceObjectRotationRetry,
 } from "./manage-cloud-workspace-object-rotation.js";
 
-const databaseUrl = "postgres://db.example.test:5432/zeros_alpha";
+const databaseUrl = "postgres://operator@db.example.test:5432/zeros_alpha";
 const key1 = randomBytes(32).toString("base64url");
 const key2 = randomBytes(32).toString("base64url");
 

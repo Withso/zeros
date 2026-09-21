@@ -24,6 +24,7 @@ type CloudWorkspaceGrantPurposeInput =
   | {
       purpose: "engine-connect";
       engineInstanceId: string;
+      device?: { id: string; keyVersion: number };
       setup?: never;
     }
   | {
@@ -195,6 +196,27 @@ export async function issueCloudWorkspaceGrant(
   if (engineInstanceId !== null) {
     assertUuid(engineInstanceId, "engineInstanceId");
   }
+  const device = input.purpose === "engine-connect" ? input.device : undefined;
+  if (device) {
+    assertUuid(device.id, "deviceId");
+    if (!Number.isSafeInteger(device.keyVersion) || device.keyVersion < 1) {
+      throw new CloudWorkspaceGrantError(
+        "grant_input_invalid",
+        "Device key version is invalid",
+      );
+    }
+    const trusted = await tx.query(
+      `SELECT 1 FROM devices WHERE id = $1 AND user_id = $2
+         AND key_version = $3 AND trust_state = 'trusted' AND revoked_at IS NULL`,
+      [device.id, input.accountUserId, device.keyVersion],
+    );
+    if (trusted.rowCount !== 1) {
+      throw new CloudWorkspaceGrantError(
+        "grant_subject_not_authorized",
+        "Device is not trusted",
+      );
+    }
+  }
   if (!Number.isSafeInteger(input.generation) || input.generation < 1) {
     throw new CloudWorkspaceGrantError(
       "grant_input_invalid",
@@ -303,13 +325,14 @@ export async function issueCloudWorkspaceGrant(
     }
   }
 
-  // Keep at most one unconsumed grant for the same account and purpose. The
+  // Keep at most one unconsumed grant for the same device and purpose. The
   // workspace row lock serializes concurrent issuers across replicas.
   await tx.query(
     `UPDATE cloud_workspace_endpoint_grants
      SET revoked_at = coalesce(revoked_at, now())
      WHERE workspace_id = $1 AND generation = $2 AND org_id = $3
        AND account_user_id = $4 AND purpose = $5
+       AND device_id IS NOT DISTINCT FROM $6::uuid
        AND revoked_at IS NULL AND consumed_at IS NULL`,
     [
       input.workspaceId,
@@ -317,6 +340,7 @@ export async function issueCloudWorkspaceGrant(
       input.organizationId,
       input.accountUserId,
       input.purpose,
+      device?.id ?? null,
     ],
   );
 
@@ -357,10 +381,10 @@ export async function issueCloudWorkspaceGrant(
        workspace_id, generation, org_id, account_user_id, purpose,
        audience, token_hash, account_revision, authorization_revision,
        expires_at, setup_run_id, setup_execution_fence, authority_epoch,
-       engine_instance_id
+       engine_instance_id, device_id, device_key_version
      ) VALUES (
        $1, $2, $3, $4, $5, $6, $7, $8, $9,
-       now() + ($10::integer * interval '1 second'), $11, $12, $13, $14
+       now() + ($10::integer * interval '1 second'), $11, $12, $13, $14, $15, $16
      ) RETURNING id, expires_at, setup_run_id, setup_execution_fence,
                  authority_epoch, engine_instance_id`,
     [
@@ -378,6 +402,8 @@ export async function issueCloudWorkspaceGrant(
       binding?.executionFence ?? null,
       authorityEpoch,
       engineInstanceId,
+      device?.id ?? null,
+      device?.keyVersion ?? null,
     ],
   );
   const row = inserted.rows[0]!;
@@ -429,10 +455,14 @@ export async function consumeCloudWorkspaceGrant(
     accountUserId: string;
     audience: string;
     workosEnabled?: boolean;
+    renew?: boolean;
+    requireDevice?: boolean;
   } & CloudWorkspaceGrantPurposeInput,
 ): Promise<ConsumedCloudWorkspaceGrant | null> {
   await assertSystemTransaction(tx);
   if (!TOKEN_PATTERN.test(input.token)) return null;
+  const renew = input.renew === true;
+  if (renew && input.purpose !== "engine-connect") return null;
   assertUuid(input.workspaceId, "workspaceId");
   assertUuid(input.organizationId, "organizationId");
   assertUuid(input.accountUserId, "accountUserId");
@@ -483,6 +513,15 @@ export async function consumeCloudWorkspaceGrant(
          AND eg.purpose = $6 AND eg.audience = $7
          AND ($11::uuid IS NULL OR eg.engine_instance_id = $11)
          AND (
+           (NOT $13::boolean AND eg.device_id IS NULL)
+           OR EXISTS (
+             SELECT 1 FROM devices device
+             WHERE device.id = eg.device_id AND device.user_id = eg.account_user_id
+               AND device.key_version = eg.device_key_version
+               AND device.trust_state = 'trusted' AND device.revoked_at IS NULL
+           )
+         )
+         AND (
            (
              $6 <> 'setup'
              AND eg.setup_run_id IS NULL
@@ -504,8 +543,10 @@ export async function consumeCloudWorkspaceGrant(
              )
            )
          )
-         AND eg.revoked_at IS NULL AND eg.consumed_at IS NULL
-         AND eg.expires_at > now() AND cw.deleted_at IS NULL
+         AND eg.revoked_at IS NULL
+         AND ((NOT $12::boolean AND eg.consumed_at IS NULL AND eg.expires_at > now())
+              OR ($12::boolean AND eg.consumed_at IS NOT NULL))
+         AND cw.deleted_at IS NULL
          AND cw.current_generation = eg.generation
          AND eg.authority_epoch = cw.authority_epoch
          AND cw.desired_state = 'running'
@@ -521,15 +562,22 @@ export async function consumeCloudWorkspaceGrant(
            OR (eg.purpose IN ('repository-read', 'repository-write')
                AND cw.status IN ('setting_up', 'ready', 'busy'))
          )
-       FOR UPDATE OF eg
+       ${renew ? "" : "FOR UPDATE OF eg"}
      )
-     UPDATE cloud_workspace_endpoint_grants eg
+     ${
+       renew
+         ? `SELECT eg.id, eg.expires_at, eg.consumed_at,
+               eg.setup_run_id, eg.setup_execution_fence,
+               eg.authority_epoch, eg.engine_instance_id
+       FROM cloud_workspace_endpoint_grants eg JOIN eligible ON eligible.id = eg.id`
+         : `UPDATE cloud_workspace_endpoint_grants eg
      SET consumed_at = now()
      FROM eligible
      WHERE eg.id = eligible.id
      RETURNING eg.id, eg.expires_at, eg.consumed_at,
                eg.setup_run_id, eg.setup_execution_fence,
-               eg.authority_epoch, eg.engine_instance_id`,
+               eg.authority_epoch, eg.engine_instance_id`
+     }`,
     [
       tokenHash(input.token),
       input.workspaceId,
@@ -542,29 +590,32 @@ export async function consumeCloudWorkspaceGrant(
       binding?.executionFence ?? null,
       input.workosEnabled === true,
       input.purpose === "engine-connect" ? input.engineInstanceId : null,
+      renew,
+      input.requireDevice === true,
     ],
   );
   const row = consumed.rows[0];
   if (!row) return null;
-  await audit(
-    tx,
-    input.organizationId,
-    input.accountUserId,
-    "cloud_workspace.grant_consumed",
-    {
-      grantId: row.id,
-      workspaceId: input.workspaceId,
-      generation: input.generation,
-      purpose: input.purpose,
-      ...(binding
-        ? {
-            setupRunId: binding.setupRunId,
-            executionFence: binding.executionFence,
-          }
-        : {}),
-      audience,
-    },
-  );
+  if (!renew)
+    await audit(
+      tx,
+      input.organizationId,
+      input.accountUserId,
+      "cloud_workspace.grant_consumed",
+      {
+        grantId: row.id,
+        workspaceId: input.workspaceId,
+        generation: input.generation,
+        purpose: input.purpose,
+        ...(binding
+          ? {
+              setupRunId: binding.setupRunId,
+              executionFence: binding.executionFence,
+            }
+          : {}),
+        audience,
+      },
+    );
   return {
     id: row.id,
     workspaceId: input.workspaceId,
@@ -595,6 +646,8 @@ export async function consumeCloudWorkspaceEngineConnectGrant(
     engineInstanceId: string;
     audience: string;
     workosEnabled?: boolean;
+    renew?: boolean;
+    requireDevice?: boolean;
   },
 ): Promise<ConsumedCloudWorkspaceGrant | null> {
   await assertSystemTransaction(tx);
@@ -632,6 +685,8 @@ export async function consumeCloudWorkspaceEngineConnectGrant(
     purpose: "engine-connect",
     engineInstanceId: input.engineInstanceId,
     audience,
+    renew: input.renew === true,
+    requireDevice: input.requireDevice === true,
     ...(input.workosEnabled === undefined
       ? {}
       : { workosEnabled: input.workosEnabled }),

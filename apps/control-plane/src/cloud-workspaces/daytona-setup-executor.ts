@@ -1,4 +1,8 @@
-import { CloudProviderError } from "./provider.js";
+import {
+  CloudProviderError,
+  isCloudWorkspaceProviderName,
+  type CloudWorkspaceCommandRunner,
+} from "./provider.js";
 import {
   CloudWorkspaceSetupError,
   cloudWorkspaceSetupReadinessMatches,
@@ -8,8 +12,11 @@ import {
   type CloudWorkspaceSetupResult,
 } from "./setup-worker.js";
 
+export const CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND =
+  "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs";
+/** Compatibility export; the image-owned helper contract is provider neutral. */
 export const DAYTONA_SETUP_HELPER_COMMAND =
-  "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /usr/local/bin/node /usr/local/lib/zeros/setup-cloud-workspace.mjs";
+  CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND;
 const SETUP_REQUEST_ENV = "ZEROS_CLOUD_WORKSPACE_SETUP_B64";
 const SETUP_REQUEST_AUDIENCE = "zeros-cloud-workspace-setup-v1";
 const SETUP_RESULT_AUDIENCE = "zeros-cloud-workspace-setup-result-v1";
@@ -50,24 +57,10 @@ export interface CloudWorkspaceSetupAdmissionBroker {
   ): Promise<void>;
 }
 
-export interface DaytonaSetupCommandRunner {
-  execute(
-    input: {
-      resourceId: string;
-      command: string;
-      cwd?: string;
-      env?: Readonly<Record<string, string>>;
-      timeoutSeconds: number;
-    },
-    signal: AbortSignal,
-  ): Promise<{
-    exitCode: number;
-    output: string;
-    outputTruncated: boolean;
-  }>;
-}
+/** Compatibility alias for the original Daytona bootstrap API. */
+export type DaytonaSetupCommandRunner = CloudWorkspaceCommandRunner;
 
-export type DaytonaCloudWorkspaceSetupExecutorOptions = {
+export type CloudWorkspaceLinuxSetupExecutorOptions = {
   admissionBroker: CloudWorkspaceSetupAdmissionBroker;
   commandRunner?: DaytonaSetupCommandRunner;
   commandRunnerResolver?: (
@@ -77,6 +70,8 @@ export type DaytonaCloudWorkspaceSetupExecutorOptions = {
   timeoutSeconds: number;
   now?: () => number;
 };
+export type DaytonaCloudWorkspaceSetupExecutorOptions =
+  CloudWorkspaceLinuxSetupExecutorOptions;
 
 type SetupHelperReady = {
   version: 1;
@@ -95,6 +90,14 @@ const HELPER_FAILURES: Readonly<
   },
   engine_readiness_failed: {
     code: "setup_engine_readiness_failed",
+    retryable: true,
+  },
+  checkpoint_restore_invalid: {
+    code: "setup_checkpoint_restore_invalid",
+    retryable: false,
+  },
+  checkpoint_restore_unavailable: {
+    code: "setup_checkpoint_restore_unavailable",
     retryable: true,
   },
   image_contract_invalid: {
@@ -153,7 +156,7 @@ function validateExecution(execution: CloudWorkspaceSetupExecution): void {
     execution.attempt < 1 ||
     !Number.isSafeInteger(execution.executionFence) ||
     execution.executionFence < 1 ||
-    execution.provider.name !== "daytona" ||
+    !isCloudWorkspaceProviderName(execution.provider.name) ||
     !safeString(execution.provider.resourceId, 512) ||
     !safeString(execution.image.ref, 1024) ||
     execution.image.sourceCommit === null ||
@@ -398,20 +401,22 @@ function normalizeExecutionError(error: unknown): CloudWorkspaceSetupError {
   );
 }
 
-export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupExecutor {
+export class CloudWorkspaceLinuxSetupExecutor implements CloudWorkspaceSetupExecutor {
   private readonly admissionBroker: CloudWorkspaceSetupAdmissionBroker;
   private readonly commandRunner: DaytonaSetupCommandRunner | null;
   private readonly commandRunnerResolver:
-    | ((execution: CloudWorkspaceSetupExecution) => Promise<DaytonaSetupCommandRunner>)
+    | ((
+        execution: CloudWorkspaceSetupExecution,
+      ) => Promise<DaytonaSetupCommandRunner>)
     | null;
   private readonly engineProtocolVersion: number;
   private readonly timeoutSeconds: number;
   private readonly now: () => number;
 
-  constructor(options: DaytonaCloudWorkspaceSetupExecutorOptions) {
+  constructor(options: CloudWorkspaceLinuxSetupExecutorOptions) {
     if (
       (options.commandRunner ? 1 : 0) +
-          (options.commandRunnerResolver ? 1 : 0) !==
+        (options.commandRunnerResolver ? 1 : 0) !==
         1 ||
       !Number.isSafeInteger(options.engineProtocolVersion) ||
       options.engineProtocolVersion < 1 ||
@@ -481,7 +486,7 @@ export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupEx
       const response = await commandRunner.execute(
         {
           resourceId: execution.provider.resourceId,
-          command: DAYTONA_SETUP_HELPER_COMMAND,
+          command: CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND,
           cwd: "/",
           env: { [SETUP_REQUEST_ENV]: request },
           timeoutSeconds: this.timeoutSeconds,
@@ -527,3 +532,5 @@ export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupEx
     return result!;
   }
 }
+
+export { CloudWorkspaceLinuxSetupExecutor as DaytonaCloudWorkspaceSetupExecutor };

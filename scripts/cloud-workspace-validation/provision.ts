@@ -15,6 +15,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { randomBytes } from "node:crypto";
+import {assertSnapshotPlacement} from "./lib/snapshot-placement";
+import {makeQualifiedControlPlaneProvider} from "./control-plane-provider";
 import {
   makeDaytona,
   saveState,
@@ -23,7 +25,8 @@ import {
   SANDBOX_REPO_DIR,
   SANDBOX_DATA_DIR,
   DAYTONA_TARGET,
-  collectAgentCredEnv,
+  DAYTONA_SANDBOX_CLASS,
+  RESOURCES,
   collectCloudAccountBindingEnv,
   imageContractSha256,
   loadSnapshotAttestation,
@@ -31,6 +34,10 @@ import {
   repositoryUrlSha256,
   ZEROS_REPO_REF,
   VALIDATION_AUTO_DELETE_MINUTES,
+  VALIDATION_TTL_MINUTES,
+  qualificationAllocationStore,
+  withCloudValidationMutationLock,
+  hasExistingCloudValidationState,
 } from "./config";
 import { resolveQualifiedCloudGithubCredential } from "./github-coordinator";
 import {
@@ -43,6 +50,7 @@ import {
   waitForCloudHealth,
 } from "./runtime";
 import { verifySandboxAbsent } from "./lib/provider-cleanup";
+import { createQualificationSandbox, withQualificationAllocationRun, type QualificationAllocationStore } from "./lib/qualification-allocation";
 
 /** A few days, in minutes — a cheap janitor archives idle boxes (max 30 days). */
 const AUTO_ARCHIVE_MIN = 3 * 24 * 60;
@@ -71,12 +79,13 @@ async function deleteRejectedSandbox(
   // inventory independently proves that the exact sandbox is gone.
 }
 
-async function main() {
+async function main(allocationStore: QualificationAllocationStore) {
   const daytona = makeDaytona();
   const cloudToken = randomBytes(32).toString("hex");
   const expectedSnapshot = loadSnapshotAttestation();
+  assertSnapshotPlacement(expectedSnapshot,{sandboxClass:DAYTONA_SANDBOX_CLASS,region:DAYTONA_TARGET,resources:RESOURCES});
   if (
-    expectedSnapshot.version !== 1 ||
+    ![1,2].includes(expectedSnapshot.version) ||
     expectedSnapshot.snapshotName !== SNAPSHOT_NAME ||
     expectedSnapshot.baseImage !== NODE_BASE_IMAGE ||
     expectedSnapshot.repositoryUrlSha256 !== repositoryUrlSha256() ||
@@ -87,8 +96,10 @@ async function main() {
       "snapshot attestation does not match the current image contract; rebake it",
     );
   }
+  await makeQualifiedControlPlaneProvider().preflightAllocation();
   const registeredSnapshot = await daytona.snapshot.get(SNAPSHOT_NAME);
   if (
+    (expectedSnapshot.version===2&&(registeredSnapshot.sandboxClass!==expectedSnapshot.sandboxClass||!registeredSnapshot.regionIds?.includes(DAYTONA_TARGET)||registeredSnapshot.cpu!==RESOURCES.cpu||registeredSnapshot.mem!==RESOURCES.memory||registeredSnapshot.disk!==RESOURCES.disk)) ||
     registeredSnapshot.id !== expectedSnapshot.snapshotId ||
     registeredSnapshot.name !== expectedSnapshot.snapshotName ||
     registeredSnapshot.imageName !== expectedSnapshot.snapshotImageName ||
@@ -97,25 +108,15 @@ async function main() {
     throw new Error("registered snapshot identity changed after attestation");
   }
 
-  // Agent CLI credentials for headless/bootstrap use in the in-sandbox engine.
-  // An authenticated renderer also couriers its bounded provider/session env,
-  // but create-time injection keeps direct validation and post-restart sessions
-  // usable before a renderer reconnects. Log which landed — a silent empty set
-  // is exactly the "cloud agent boots then dies unauthenticated" trap.
-  const agentCreds = collectAgentCredEnv();
+  // Provider-only probes carry no model credentials. Agent qualification uses
+  // the normal control-plane execution lease and explicit delegation path.
   const accountBinding = collectCloudAccountBindingEnv();
   const githubCredential = await resolveQualifiedCloudGithubCredential();
-  const credNames = Object.keys(agentCreds);
-  console.log(
-    credNames.length > 0
-      ? `  ↳ injecting agent creds: ${credNames.join(", ")}`
-      : `  ⚠ no agent creds in env (ANTHROPIC_API_KEY / OPENAI_API_KEY / CURSOR_API_KEY …) —\n    in-sandbox agents will FAIL to authenticate. Export them before provisioning.`,
-  );
 
   console.log(
     `\n  Creating sandbox from "${SNAPSHOT_NAME}" (target=${DAYTONA_TARGET})…`,
   );
-  const sandbox = await daytona.create(
+  const sandbox = await createQualificationSandbox(daytona, allocationStore,
     {
       // Resources are baked into the snapshot (see bake-snapshot.ts); a
       // create-from-snapshot does not re-specify them.
@@ -123,8 +124,9 @@ async function main() {
       // The engine owns sleep policy. Native auto-stop must be disabled because
       // a running background agent does not reset the provider's activity timer.
       autoStopInterval: 0,
-      autoArchiveInterval: AUTO_ARCHIVE_MIN,
+      ...(DAYTONA_SANDBOX_CLASS==="linux-vm"?{autoPauseInterval:0}:{autoArchiveInterval:AUTO_ARCHIVE_MIN}),
       autoDeleteInterval: VALIDATION_AUTO_DELETE_MINUTES,
+      ttlMinutes: VALIDATION_TTL_MINUTES,
       envVars: {
         ZEROS_CLOUD_PORT: String(ENGINE_CLOUD_PORT),
         ZEROS_CLOUD_TOKEN: cloudToken,
@@ -134,13 +136,10 @@ async function main() {
         // material and the immutable owner subject enter the worker; the
         // client's access JWT stays with the connecting UI.
         ...accountBinding,
-        // Agent CLI creds injected at create() (never baked — image.ts). Without
-        // these the sandbox agent has NO keys and every turn dies unauthenticated.
-        ...agentCreds,
+
       },
       labels: { app: "zeros", role: "engine-validation" },
     },
-    { timeout: 180 },
   );
 
   console.log(
@@ -206,7 +205,7 @@ async function main() {
     const session = "zeros-engine";
     await sandbox.process.createSession(session);
     await sandbox.process.executeSessionCommand(session, {
-      command: "/usr/local/bin/start-engine.sh",
+      command: "/opt/zeros-runtime/bin/start-engine.sh",
       runAsync: true,
     });
 
@@ -285,7 +284,11 @@ async function main() {
   console.log("");
 }
 
-main().catch((err) => {
-  console.error("\n  ✗ provision failed:\n", err);
-  process.exit(1);
+withCloudValidationMutationLock(() =>
+  withQualificationAllocationRun(makeDaytona(), qualificationAllocationStore, main,
+    { hasExistingState: hasExistingCloudValidationState() }),
+).catch(() => {
+  // SDK errors can carry request headers and create-time agent credentials.
+  console.error("Cloud qualification provisioning failed. Any unresolved allocation retains its private recovery intent; no previous run was deleted.");
+  process.exitCode = 1;
 });

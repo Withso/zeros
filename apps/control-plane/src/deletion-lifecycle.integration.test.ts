@@ -1943,88 +1943,114 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({ rows: [{ lease_owner: null }] });
   });
 
-  it("does not purge an Organization until detached object keys are durably fenced", async () => {
-    const owner = await signup("OrgFencePurge");
-    const organizationId = await createOrganization(owner, "Fence Company");
-    const blobId = randomUUID();
-    await pool.query(
-      `INSERT INTO workspace_blob_object_deletions (
+  it.each(["object", "provider"])(
+    "does not purge an Organization until %s deletion is durably confirmed",
+    async (kind) => {
+      const owner = await signup("OrgFencePurge");
+      const organizationId = await createOrganization(owner, "Fence Company");
+      const blobId = randomUUID();
+      if (kind === "provider") {
+        await pool.query(
+          `INSERT INTO cloud_workspace_provider_operations
+          (provider, account_scope, workspace_id, generation, org_id, idempotency_key,
+           request_sha256, resource_id, deletion_requested_at, deletion_operation_id)
+         VALUES ('boat', 'test-account', $1, 1, $2, $3, $4, 'bx_23456789', now(), 'operation-1')`,
+          [randomUUID(), organizationId, randomUUID(), "a".repeat(64)],
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO workspace_blob_object_deletions (
          object_key, org_id, blob_id, reserved_bytes
        ) VALUES ($1, $2, $3, 128)`,
-      [`workspace/v2/${organizationId}/${blobId}/k1`, organizationId, blobId],
-    );
+          [
+            `workspace/v2/${organizationId}/${blobId}/k1`,
+            organizationId,
+            blobId,
+          ],
+        );
+      }
 
-    asActor(owner);
-    const scheduled = await request(`/v1/organizations/${organizationId}`, {
-      method: "DELETE",
-      body: { confirmation: "Fence Company" },
-    });
-    expect(scheduled.status).toBe(202);
-    const body = (await scheduled.json()) as DeletionResponse;
-    await makeDue(body.deletion.id);
-    const processor = new DeletionLifecycleProcessor(pool, {
-      workerId: "test-organization-fence-purge",
-      logger: { warn: () => undefined, error: () => undefined },
-    });
+      asActor(owner);
+      const scheduled = await request(`/v1/organizations/${organizationId}`, {
+        method: "DELETE",
+        body: { confirmation: "Fence Company" },
+      });
+      expect(scheduled.status).toBe(202);
+      const body = (await scheduled.json()) as DeletionResponse;
+      await makeDue(body.deletion.id);
+      const processor = new DeletionLifecycleProcessor(pool, {
+        workerId: "test-organization-fence-purge",
+        logger: { warn: () => undefined, error: () => undefined },
+      });
 
-    for (let poll = 0; poll < 25; poll += 1) {
+      for (let poll = 0; poll < 25; poll += 1) {
+        await pool.query(
+          `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+          [body.deletion.id],
+        );
+        expect(await processor.tick(1)).toBe(1);
+      }
+      await expect(
+        pool.query(
+          `SELECT state, attempt_count, last_error_code
+         FROM deletion_requests WHERE id = $1`,
+          [body.deletion.id],
+        ),
+      ).resolves.toMatchObject({
+        rows: [
+          {
+            state: "purging",
+            attempt_count: 1,
+            last_error_code: null,
+          },
+        ],
+      });
+      await expect(
+        pool.query(`SELECT id FROM organizations WHERE id = $1`, [
+          organizationId,
+        ]),
+      ).resolves.toMatchObject({ rows: [{ id: organizationId }] });
+
+      if (kind === "provider") {
+        await pool.query(
+          "UPDATE cloud_workspace_provider_operations SET deleted_at = now() WHERE org_id = $1",
+          [organizationId],
+        );
+      } else {
+        await pool.query(
+          `UPDATE workspace_blob_object_deletions
+       SET reserved_bytes = 0, fenced_at = now(), last_error_code = NULL
+       WHERE org_id = $1`,
+          [organizationId],
+        );
+      }
       await pool.query(
         `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
         [body.deletion.id],
       );
       expect(await processor.tick(1)).toBe(1);
-    }
-    await expect(
-      pool.query(
-        `SELECT state, attempt_count, last_error_code
-         FROM deletion_requests WHERE id = $1`,
+      await pool.query(
+        `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
         [body.deletion.id],
-      ),
-    ).resolves.toMatchObject({
-      rows: [
-        {
-          state: "purging",
-          attempt_count: 1,
-          last_error_code: null,
-        },
-      ],
-    });
-    await expect(
-      pool.query(`SELECT id FROM organizations WHERE id = $1`, [
-        organizationId,
-      ]),
-    ).resolves.toMatchObject({ rows: [{ id: organizationId }] });
-
-    await pool.query(
-      `UPDATE workspace_blob_object_deletions
-       SET reserved_bytes = 0, fenced_at = now(), last_error_code = NULL
-       WHERE org_id = $1`,
-      [organizationId],
-    );
-    await pool.query(
-      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
-      [body.deletion.id],
-    );
-    expect(await processor.tick(1)).toBe(1);
-    await pool.query(
-      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
-      [body.deletion.id],
-    );
-    expect(await processor.tick(1)).toBe(1);
-    await expect(
-      pool.query(`SELECT 1 FROM organizations WHERE id = $1`, [organizationId]),
-    ).resolves.toMatchObject({ rows: [] });
-    await expect(
-      pool.query(
-        `SELECT disposition
+      );
+      expect(await processor.tick(1)).toBe(1);
+      await expect(
+        pool.query(`SELECT 1 FROM organizations WHERE id = $1`, [
+          organizationId,
+        ]),
+      ).resolves.toMatchObject({ rows: [] });
+      await expect(
+        pool.query(
+          `SELECT disposition
          FROM workos_provider_erasure_reconciliations
          WHERE deletion_request_id = $1`,
-        [body.deletion.id],
-      ),
-    ).resolves.toMatchObject({
-      rows: [{ disposition: "no_workos_subject" }],
-    });
-  });
+          [body.deletion.id],
+        ),
+      ).resolves.toMatchObject({
+        rows: [{ disposition: "no_workos_subject" }],
+      });
+    },
+  );
 
   it("requires exact-case owner grants and two people for Business recovery and forced purge", async () => {
     const customer = await signup("OpsCustomer");

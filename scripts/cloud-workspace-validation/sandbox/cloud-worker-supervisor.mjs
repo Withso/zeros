@@ -3,14 +3,20 @@
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   realpathSync,
   unlinkSync,
 } from "node:fs";
 import net from "node:net";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { CloudEngineCgroup } from "./cloud-engine-cgroup.mjs";
+import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -19,7 +25,7 @@ export const CLOUD_WORKER_SUPERVISOR_SOCKET =
 export const CLOUD_WORKER_SUPERVISOR_AUDIENCE =
   "zeros-cloud-worker-supervisor-v1";
 
-const LAUNCHER = "/usr/local/bin/start-engine.sh";
+const LAUNCHER = "/opt/zeros-runtime/bin/start-engine.sh";
 const MAX_REQUEST_BYTES = 128 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 const STOP_GRACE_MS = 10_000;
@@ -195,16 +201,16 @@ export function parseCloudWorkerSupervisorRequest(value) {
     !isRecord(value) ||
     value.version !== 1 ||
     value.audience !== CLOUD_WORKER_SUPERVISOR_AUDIENCE ||
-    !["prepare", "start"].includes(value.operation)
+    !["status", "prepare", "start"].includes(value.operation)
   ) {
     return null;
   }
-  if (value.operation === "prepare") {
+  if (value.operation === "prepare" || value.operation === "status") {
     return exactKeys(value, ["audience", "operation", "version"])
       ? {
           version: 1,
           audience: CLOUD_WORKER_SUPERVISOR_AUDIENCE,
-          operation: "prepare",
+          operation: value.operation,
         }
       : null;
   }
@@ -241,17 +247,20 @@ function supervisorResponse(outcome, extra = {}) {
   };
 }
 
-function delay(milliseconds) {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, milliseconds);
-    timer.unref?.();
-  });
-}
-
-function childExit(child) {
+function childExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null)
-    return Promise.resolve();
-  return new Promise((resolve) => child.once("exit", resolve));
+    return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (exited) => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    child.once("exit", onExit);
+  });
 }
 
 export class CloudWorkerSupervisor {
@@ -259,36 +268,59 @@ export class CloudWorkerSupervisor {
     socketPath = CLOUD_WORKER_SUPERVISOR_SOCKET,
     launcher = LAUNCHER,
     spawnProcess = spawn,
+    engineScope = null,
+    setupScope = null,
   } = {}) {
     this.socketPath = socketPath;
     this.launcher = launcher;
     this.spawnProcess = spawnProcess;
+    this.engineScope = engineScope;
+    this.setupScope = setupScope;
     this.server = null;
     this.child = null;
     this.session = null;
     this.operation = Promise.resolve();
     this.stopping = false;
+    this.lock = null;
   }
 
   async stopChild() {
     const child = this.child;
-    this.child = null;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
+    let failure;
     try {
-      process.kill(-child.pid, "SIGTERM");
-    } catch (error) {
-      if (error?.code !== "ESRCH") throw error;
-      return;
-    }
-    await Promise.race([childExit(child), delay(STOP_GRACE_MS)]);
-    if (child.exitCode === null && child.signalCode === null) {
-      try {
-        process.kill(-child.pid, "SIGKILL");
-      } catch (error) {
-        if (error?.code !== "ESRCH") throw error;
+      if (child && child.exitCode === null && child.signalCode === null) {
+        const signalGroup = (signal) => {
+          try {
+            process.kill(-child.pid, signal);
+          } catch (error) {
+            if (error?.code !== "ESRCH") throw error;
+          }
+        };
+        signalGroup("SIGTERM");
+        if (!(await childExit(child, STOP_GRACE_MS))) {
+          signalGroup("SIGKILL");
+          if (!(await childExit(child, 5000)))
+            throw new Error("Cloud engine launcher retirement is unconfirmed");
+        }
       }
-      await childExit(child);
+    } catch (error) {
+      failure = error;
     }
+    // A launcher exit is not evidence that a double-forked workload exited.
+    // Version-2 images retain and drain the kernel scope even after a broker
+    // restart loses its ChildProcess object. Failure cannot mint a new session.
+    try {
+      await this.engineScope?.retire();
+    } catch (error) {
+      failure ??= error;
+    }
+    try {
+      await this.setupScope?.retire();
+    } catch (error) {
+      failure ??= error;
+    }
+    if (failure) throw failure;
+    if (this.child === child) this.child = null;
   }
 
   async launch(environment) {
@@ -299,7 +331,7 @@ export class CloudWorkerSupervisor {
       env: {
         HOME: "/root",
         LANG: "C.UTF-8",
-        PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin:/usr/sbin:/sbin",
         ZEROS_ACCOUNT_JWT_AUD: environment.accountAudience,
         ...(environment.accountContract
           ? {
@@ -338,6 +370,8 @@ export class CloudWorkerSupervisor {
   }
 
   async apply(request) {
+    if (this.stopping) return supervisorResponse("rejected");
+    if (request.operation === "status") return supervisorResponse("ready");
     if (request.operation === "prepare") {
       this.session = null;
       await this.stopChild();
@@ -425,6 +459,48 @@ export class CloudWorkerSupervisor {
       throw new Error("cloud worker supervisor directory is unsafe");
     }
     chmodSync(directory, 0o700);
+    // Keep ownership for the complete broker lifetime. A competing resume
+    // helper must never unlink a live socket, retire its engine, or take over
+    // its one-use launch session. flock is released automatically on crash.
+    const lock = openSync(
+      `${this.socketPath}.lock`,
+      constants.O_RDWR |
+        constants.O_CREAT |
+        constants.O_NOFOLLOW |
+        constants.O_NONBLOCK,
+      0o600,
+    );
+    try {
+      const metadata = fstatSync(lock);
+      if (
+        !metadata.isFile() ||
+        metadata.nlink !== 1 ||
+        metadata.uid !== 0 ||
+        metadata.mode & 0o077
+      )
+        throw new Error("cloud worker supervisor lock is unsafe");
+      const acquired = spawnSync(
+        "/usr/bin/flock",
+        ["--exclusive", "--nonblock", "3"],
+        {
+          stdio: ["ignore", "ignore", "pipe", lock],
+          env: { PATH: "/usr/bin:/bin", LANG: "C" },
+          timeout: 5000,
+          maxBuffer: 4096,
+        },
+      );
+      if (acquired.status !== 0 || acquired.signal || acquired.error)
+        throw new Error("cloud worker supervisor is already owned");
+      this.lock = lock;
+      await this.listen();
+    } catch (error) {
+      this.lock = null;
+      closeSync(lock);
+      throw error;
+    }
+  }
+
+  async listen() {
     if (existsSync(this.socketPath)) {
       const existing = lstatSync(this.socketPath);
       if (
@@ -436,13 +512,14 @@ export class CloudWorkerSupervisor {
       }
       unlinkSync(this.socketPath);
     }
-    this.server = net.createServer((socket) => this.handle(socket));
-    this.server.maxConnections = 8;
+    const server = net.createServer((socket) => this.handle(socket));
+    server.maxConnections = 8;
     await new Promise((resolve, reject) => {
       const onError = (error) => reject(error);
-      this.server.once("error", onError);
-      this.server.listen(this.socketPath, () => {
-        this.server.off("error", onError);
+      server.once("error", onError);
+      server.listen(this.socketPath, () => {
+        server.off("error", onError);
+        this.server = server;
         resolve();
       });
     });
@@ -460,10 +537,13 @@ export class CloudWorkerSupervisor {
     }
     await this.operation.catch(() => undefined);
     await this.stopChild();
-    try {
-      if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
-    } catch {
-      // The container is already shutting down; do not mask termination.
+    if (this.lock !== null) {
+      try {
+        if (existsSync(this.socketPath)) unlinkSync(this.socketPath);
+      } finally {
+        closeSync(this.lock);
+        this.lock = null;
+      }
     }
   }
 }
@@ -473,7 +553,16 @@ async function main() {
     throw new Error("cloud worker supervisor requires a root Linux runtime");
   }
   process.umask(0o077);
-  const supervisor = new CloudWorkerSupervisor();
+  const profile = readCloudHostRuntimeProfile();
+  const supervisor = new CloudWorkerSupervisor({
+    engineScope: profile.version >= 2 ? new CloudEngineCgroup() : null,
+    setupScope:
+      profile.version >= 2
+        ? new CloudEngineCgroup({
+            directory: "/sys/fs/cgroup/zeros-cloud-setup",
+          })
+        : null,
+  });
   await supervisor.start();
   const shutdown = () => {
     supervisor.stop().then(

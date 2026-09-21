@@ -71,6 +71,9 @@ export type AuthedUser = {
   identity: {
     provider: IdentityProvider;
     subject: string;
+    /** Verified claim from this authentication, not the historical link email
+     * or canonical display email (which can retain an old collision value). */
+    verifiedEmail?: string;
   };
   email: string;
   displayName: string | null;
@@ -434,6 +437,7 @@ function activePrincipal(
     identity: {
       provider: input.provider,
       subject: input.providerSubject,
+      verifiedEmail: input.email,
     },
     email: row.email,
     displayName: row.display_name,
@@ -479,7 +483,7 @@ type WorkOSAuthenticationTarget = {
 };
 
 async function workOSAuthenticationTargets(
-  database: pg.Pool | Tx,
+  database: Tx,
   input: AuthenticatedIdentityInput,
 ): Promise<WorkOSAuthenticationTarget[]> {
   const sessionId = input.session?.id ?? null;
@@ -634,21 +638,11 @@ async function withWorkOSAuthenticationTx<T>(
     kind: "user",
     id: input.providerSubject,
   });
-  const knownTargets = new Map(
-    (await workOSAuthenticationTargets(pool, input)).map((target) => [
-      target.user_id,
-      target,
-    ]),
-  );
+  const knownTargets = new Map<string, WorkOSAuthenticationTarget>();
+  let discovered = false;
   const deadline = Date.now() + WORKOS_AUTH_LOCK_TIMEOUT_MS;
   let retryDelayMs = 5;
   for (;;) {
-    const keys = Array.from(
-      new Set([
-        subjectKey,
-        ...Array.from(knownTargets.keys(), workOSUserProviderLockKey),
-      ]),
-    ).sort();
     const result = await withSystemTx<
       | { kind: "acquired"; value: T }
       | { kind: "account_deleted" }
@@ -656,15 +650,24 @@ async function withWorkOSAuthenticationTx<T>(
       | { kind: "contended" }
       | { kind: "expanded"; targets: WorkOSAuthenticationTarget[] }
     >(pool, async (tx) => {
-      for (const key of keys) {
-        const lock = await tx.query<{ acquired: boolean }>(
-          `SELECT pg_try_advisory_xact_lock(
-             hashtextextended($1::text, 0)
-           ) AS acquired`,
-          [key],
-        );
-        if (!lock.rows[0]?.acquired) return { kind: "contended" };
+      if (!discovered) {
+        for (const target of await workOSAuthenticationTargets(tx, input)) {
+          knownTargets.set(target.user_id, target);
+        }
+        discovered = true;
       }
+      const keys = [...new Set([subjectKey, ...Array.from(knownTargets.keys(), workOSUserProviderLockKey)])].sort();
+      const locks = await tx.query<{ acquired: boolean }>(
+        `SELECT pg_try_advisory_xact_lock(hashtextextended(lock_key, 0)) AS acquired
+         FROM unnest($1::text[]) WITH ORDINALITY AS locks(lock_key, position)
+         ORDER BY position`,
+        [keys],
+      );
+      if (locks.rows.length !== keys.length || locks.rows.some(row => !row.acquired)) {
+        return { kind: "contended" };
+      }
+      // This must remain a separate READ COMMITTED statement after all locks
+      // are acquired. Combining discovery with locking can use a stale snapshot.
       const currentTargets = await workOSAuthenticationTargets(tx, input);
       if (
         currentTargets.some(
@@ -733,18 +736,29 @@ async function registerAuthenticatedSession(
   const session = input.provider === "workos" ? input.session : undefined;
   if (!session) return;
 
-  let current = await tx.query<{
+  const loadCurrent = () => tx.query<{
     provider_sub: string;
     user_id: string | null;
     client_kind: AuthClientKind | "unknown";
     status: "active" | "revoked" | "expired";
+    needs_update: boolean;
+    browser_needs_binding: boolean;
   }>(
-    `SELECT provider_sub, user_id, client_kind, status
+    `SELECT provider_sub, user_id, client_kind, status,
+       (user_id IS NULL OR client_kind = 'unknown'
+        OR last_token_expires_at IS NULL OR last_token_expires_at < to_timestamp($3)
+        OR last_seen_at < now() - interval '15 minutes') AS needs_update,
+       EXISTS (SELECT 1 FROM workos_browser_sessions browser
+         WHERE browser.kind = 'session' AND browser.provider_session_id = $1
+           AND (browser.account_user_id IS NULL OR browser.account_user_id = $2)
+           AND (browser.account_user_id IS DISTINCT FROM $2::uuid
+                OR browser.account_revision IS DISTINCT FROM $4::bigint)) AS browser_needs_binding
      FROM auth_sessions
      WHERE provider = 'workos' AND provider_session_id = $1
      FOR UPDATE`,
-    [session.id],
+    [session.id, user.id, session.tokenExpiresAt, user.accountRevision],
   );
+  let current = await loadCurrent();
   if (!current.rows[0]) {
     await tx.query(
       `INSERT INTO auth_sessions (
@@ -760,13 +774,7 @@ async function registerAuthenticatedSession(
         session.tokenExpiresAt,
       ],
     );
-    current = await tx.query(
-      `SELECT provider_sub, user_id, client_kind, status
-       FROM auth_sessions
-       WHERE provider = 'workos' AND provider_session_id = $1
-       FOR UPDATE`,
-      [session.id],
-    );
+    current = await loadCurrent();
   }
   const observed = current.rows[0];
   if (!observed || observed.status !== "active") {
@@ -784,7 +792,7 @@ async function registerAuthenticatedSession(
       "This session does not belong to the authenticated account.",
     );
   }
-  await tx.query(
+  if (observed.needs_update) await tx.query(
     `UPDATE auth_sessions
      SET user_id = COALESCE(user_id, $2),
          client_kind = CASE
@@ -806,11 +814,13 @@ async function registerAuthenticatedSession(
   // Browser credentials are independently opaque. Binding the provider sid to
   // the stable account lets a global account event remove every browser shell
   // without ever storing its bearer token.
-  await tx.query(
+  if (observed.browser_needs_binding) await tx.query(
     `UPDATE workos_browser_sessions
      SET account_user_id = $2, account_revision = $3
      WHERE kind = 'session' AND provider_session_id = $1
-       AND (account_user_id IS NULL OR account_user_id = $2)`,
+       AND (account_user_id IS NULL OR account_user_id = $2)
+       AND (account_user_id IS DISTINCT FROM $2::uuid
+            OR account_revision IS DISTINCT FROM $3::bigint)`,
     [session.id, user.id, user.accountRevision],
   );
 }
@@ -1124,6 +1134,7 @@ async function ensureUserWithoutProviderLock(
         identity: {
           provider: input.provider,
           subject: input.providerSubject,
+          verifiedEmail: input.email,
         },
         email: row.email,
         displayName: row.display_name,

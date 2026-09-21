@@ -1,6 +1,7 @@
 import { TurnUsageLedger } from "../shared/turn-usage";
 import type { SteerOutcome } from "@zeros/protocol/messages";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
+import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
 import {
   AccountModelDiscovery,
   type AccountModelState,
@@ -75,6 +76,8 @@ import {
   type UserDialogResult,
 } from "@anthropic-ai/claude-agent-sdk";
 import { isClaudeParentProgress } from "../claude/event-feedback";
+import {cloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudClaudeTools} from "./cloud-tools";
 
 import type {
   AdvertisedModel,
@@ -652,6 +655,7 @@ function safeChromePermissionHost(value: string): string | null {
 }
 
 interface SdkSession {
+  exactModelFailure?: Error;
   readonly modelState: AccountModelState;
   /** Zeros-side ephemeral routing id (returned to the renderer; never durable). */
   readonly zerosSessionId: string;
@@ -1395,6 +1399,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         emit: (n) => {
           const update = n.update;
           const state = this.sessions.get(zerosSessionId);
+          if (state && update.sessionUpdate === "model_fallback") {
+            if (this.stopUnexpectedExactModel(state, update.toModel)) {
+              this.ctx.emit.onSessionUpdate(this.agentId, n);
+              return;
+            }
+          }
           if (state && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId) {
             const adopted = state.modelSelection.adopt(update.toModel, update.fromModel, update.turnStartedAt);
             if (adopted) {
@@ -1590,6 +1600,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     prompt: ContentBlock[];
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     let state = this.mustState(opts.sessionId);
+    if (state.exactModelFailure) throw state.exactModelFailure;
     if (state.turn || state.pendingModelControlStop) {
       throw new AgentFailureError({
         kind: "protocol-error",
@@ -2116,6 +2127,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         const m = msg as unknown as {
           type?: string;
           subtype?: string;
+          model?: string;
           session_id?: string;
           skills?: unknown;
           plugins?: unknown;
@@ -2129,6 +2141,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         };
 
         if (m.type === "system" && m.subtype === "init") {
+          if (typeof m.model === "string" && this.stopUnexpectedExactModel(state, m.model)) break;
           if (Array.isArray(m.capabilities)) state.queryCapabilities = new Set(m.capabilities.filter((v): v is string => typeof v === "string"));
           this.queryPlugins.set(q, claudeSessionPluginGroup(m.plugins));
           if (
@@ -2615,6 +2628,17 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   // ── cancel / setMode ──────────────────────────────────
 
+  private stopUnexpectedExactModel(state: SdkSession, model: string): boolean {
+    const failure = exactModelFallbackError(state.env, "ANTHROPIC_MODEL", model);
+    if (!failure) return false;
+    state.exactModelFailure ??= failure;
+    state.turn?.reject(state.exactModelFailure);
+    state.abort.abort();
+    state.input.end();
+    void this.cancel({ sessionId: state.zerosSessionId }).catch(() => undefined);
+    return true;
+  }
+
   async cancel(opts: { sessionId: string }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
@@ -2985,6 +3009,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   async setModel(opts: { sessionId: string; model: string }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state || !opts.model.trim()) return;
+    const cloud=cloudProviderExecution(state.executionBoundary);
+    if(cloud&&opts.model.trim()!==cloud.lease.admission.model)throw new Error("Cloud model changes require a new credential admission");
     state.model = opts.model.trim();
     state.modelSelection.select(state.model);
     state.pendingModelReapply = { model: state.model };
@@ -3012,6 +3038,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }): Promise<void> {
     const state = this.sessions.get(opts.sessionId);
     if (!state) return;
+    const cloud=cloudProviderExecution(state.executionBoundary);
+    if(cloud){
+      cloud.lease.assertLive();
+      if(Object.keys(opts.env).some(name=>!["ANTHROPIC_MODEL","ZEROS_THINKING_EFFORT","ZEROS_FAST_MODE","CLAUDE_MAX_TURNS"].includes(name))||
+        (opts.env.ANTHROPIC_MODEL!==undefined&&opts.env.ANTHROPIC_MODEL!==cloud.lease.admission.model))
+        throw new Error("Cloud provider configuration requires a new credential admission");
+    }
     const prevEnv = state.env ?? {};
     const incomingModel = opts.env.ANTHROPIC_MODEL?.trim() || undefined;
     const currentModel =
@@ -3089,14 +3122,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   respondToPermission(opts: {
     permissionId: string;
     response: RequestPermissionResponse;
-  }): void {
+  }): boolean {
     for (const state of this.sessions.values()) {
       const resolver = state.pendingPermissions.get(opts.permissionId);
       if (!resolver) continue;
       state.pendingPermissions.delete(opts.permissionId);
       resolver(opts.response);
-      return;
+      return true;
     }
+    return false;
   }
 
   /** The SDK calls this before running any tool that isn't auto-allowed.
@@ -4164,6 +4198,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  so it is NOT represented here. */
   private buildFlagSettings(state: SdkSession): Partial<Settings> {
     const env = state.env;
+    const cloud=cloudProviderExecution(state.executionBoundary);
     const effortEnv = env?.ZEROS_THINKING_EFFORT?.trim();
     const fast = env?.ZEROS_FAST_MODE === "1";
     const ultracode = effortEnv === "ultracode";
@@ -4196,22 +4231,31 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       ultracode,
       // Claude auto-memory is repo-scoped and live-mutable. Keep an explicit
       // boolean so turning it off (or back on) clears the prior query value.
-      autoMemoryEnabled: env?.[CLAUDE_AUTO_MEMORY_ENV_VAR] !== "0",
+      autoMemoryEnabled: !cloud&&env?.[CLAUDE_AUTO_MEMORY_ENV_VAR] !== "0",
+      ...(cloud?{disableAllHooks:true}:{}),
       permissions: {
-        additionalDirectories,
-        allow,
-        deny: [...new Set(deny)],
+        additionalDirectories:cloud?[]:additionalDirectories,
+        allow:cloud?[]:allow,
+        deny: cloud?[]:[...new Set(deny)],
       },
     };
   }
 
   private buildOptions(state: SdkSession): Options {
     const env = state.env;
+    const cloud=cloudProviderExecution(state.executionBoundary);
+    cloud?.lease.assertLive();
+    if(cloud&&(state.model??env?.ANTHROPIC_MODEL)!==cloud.lease.admission.model)
+      throw new Error("Cloud provider model authority changed");
+    const exact = requireExplicitModel(env, "ANTHROPIC_MODEL");
     const queryAbort = state.abort;
     const ownsActivity = () => !state.disposed && !state.cancelRequested &&
       !state.input.closed && state.abort === queryAbort && !queryAbort.signal.aborted;
     // A live setModel() override wins over the creation-time env model.
     const model = state.model ?? env?.ANTHROPIC_MODEL?.trim();
+    if (exact !== null && model !== exact) {
+      throw new Error("The exact requested Claude model changed; qualification cannot continue");
+    }
     // The live-mutable knobs (effort ≤ xhigh, fast, ultracode, permissions)
     // ride the flag-settings layer so updateConfig can mutate them mid-session
     // via applyFlagSettings — buildFlagSettings is the shared derivation.
@@ -4246,7 +4290,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Per-session registry (gateway-resolved for this cwd: user + repo +
     // workspace layers, RCE-gated) wins; fall back to the global view.
     const sessionMcp = materializeMcpServerRegistrations(
-      state.mcpServers ?? this.ctx.mcpServers,
+      cloud?[]:state.mcpServers ?? this.ctx.mcpServers,
       state.env ?? {},
     );
     const mcpServers: Options["mcpServers"] =
@@ -4270,7 +4314,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // node_modules sits next to sdk.mjs, which is true in dev and false in every
     // packaged build. Failing HERE (before query()) turns an opaque
     // "AGENT RESPONSE FAILURE" into a message that names the fix.
-    const cli = resolveClaudeCli({ override: state.cliBinary });
+    const cli = resolveClaudeCli({ override: cloud?undefined:state.cliBinary });
+    if(cloud&&(cli.source!=="bundled"||!cli.path?.startsWith("/opt/zeros/")))
+      throw new Error("Cloud Claude requires the immutable bundled runtime");
     if (!cli.path) {
       throw new AgentFailureError({
         kind: "auth-required",
@@ -4331,7 +4377,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
               ),
           }
         : {}),
-      ...(this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env) &&
+      ...(!cloud&&this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env) &&
         (!state.env?.CLAUDE_CONFIG_DIR || state.env.CLAUDE_CONFIG_DIR === process.env.CLAUDE_CONFIG_DIR)
         ? {
             // The pinned CLI emits this control request only when it needs an
@@ -4478,6 +4524,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // order (user override → staged Contents/Resources/claude → bundled
       // package → the user's own install).
       pathToClaudeCodeExecutable: cliPath,
+      ...(cloud?cloudClaudeTools(cloud,state.abort.signal):{}),
     };
     // Verification breadcrumb: one line per query (re)creation echoing the
     // composer knobs actually sent to the SDK. Tail the engine log (main.log /

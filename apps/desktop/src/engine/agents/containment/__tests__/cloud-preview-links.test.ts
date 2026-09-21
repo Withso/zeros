@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CloudPreviewGatewayFactory,
@@ -40,6 +40,18 @@ function fixture(port: number, now = Date.now()): CloudPreviewLinks {
 }
 
 describe("cloud preview link contract", () => {
+  it("admits engine startup without a legacy link pool and denies opening an unconfigured preview", async () => {
+    const loadLinks = vi.fn(() => {
+      throw new Error("cloud preview link state is unavailable");
+    });
+    const factory = new CloudPreviewGatewayFactory({ loadLinks });
+    expect(loadLinks).not.toHaveBeenCalled();
+    await expect(factory.open({
+      targetHost: "127.0.0.1", targetPort: 5173, displayPort: 5173,
+    })).rejects.toThrow("cloud preview link state is unavailable");
+    expect(loadLinks).toHaveBeenCalledOnce();
+  });
+
   it("accepts only bounded, unique, HTTPS signed ingress links", async () => {
     const port = await freePort();
     const value = fixture(port);

@@ -1,4 +1,5 @@
 import { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 export { nextFrameGeometry, readFrameMeta } from "./frame-metadata";
 import { DESIGN_MANIFEST_FILE, parseDesignManifest } from "./manifest";
 import { DESIGN_CANVAS_FILE, decodeCanvasFile } from "./canvas-file";
@@ -428,6 +429,7 @@ export async function atomicWriteDesignSource(
   try {
     handle = await open(temporary, "wx", 0o600);
     await handle.writeFile(source, "utf8");
+    publishCloudWorkspacePath(temporary, handle.fd);
     await handle.sync();
     await handle.close();
     handle = null;

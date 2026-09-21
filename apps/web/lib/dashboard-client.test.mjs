@@ -19,6 +19,11 @@ import {
   tryWriteClipboard,
 } from "../public/dashboard.js";
 
+test("a truncated workspace repair snapshot forces discovery refresh even when its bounded prefix is unchanged",()=>{
+  const before={account:{id:"account",revision:1},session:{id:"session"},organizations:[],workspaces:[{id:"workspace",role:"viewer",accessRevision:1}],workspacesTruncated:true,cursor:1};
+  assert.equal(securitySnapshotChanged(before,{...before,cursor:2}),true);
+});
+
 test("organization creation fails closed without an explicit server capability", () => {
   assert.equal(organizationCreationAllowed(undefined), false);
   assert.equal(organizationCreationAllowed({}), false);

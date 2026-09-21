@@ -33,15 +33,13 @@ d("cloud workspace setup admission broker", () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
     const userId = randomUUID();
+    await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
+      VALUES ($1,$2,'Setup Admission Owner','developer')`, [userId, `setup-admission-${userId}@example.test`]);
     setup = await withSystemTx(pool, async (tx) => {
       const organizationId = randomUUID();
       const teamId = randomUUID();
       const workspaceId = randomUUID();
-      await tx.query(
-        `INSERT INTO users (id, email, display_name)
-         VALUES ($1, $2, 'Setup Admission Owner')`,
-        [userId, `setup-admission-${userId}@example.test`],
-      );
+
       await tx.query(
         `INSERT INTO organizations (
            id, slug, name, created_by, is_personal, cloud_workspaces_allowed

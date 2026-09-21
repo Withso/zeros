@@ -64,6 +64,7 @@ import type {
   TerritoryGeneration,
 } from "./types";
 import { stripEngineAuthorityEnv } from "../adapters/shared/config-isolation";
+import { isCloudDeploymentOwner } from "./cloud-deployment-authority.mjs";
 import {
   ensureSessionDir,
   removeSessionDir,
@@ -142,7 +143,7 @@ function isRootControlledCloudPath(
       const leaf = cursor === candidate;
       if (
         metadata.isSymbolicLink() ||
-        metadata.uid !== 0 ||
+        !isCloudDeploymentOwner(cursor, metadata.uid) ||
         (metadata.mode & 0o022) !== 0 ||
         (leaf
           ? !metadata.isFile() ||
@@ -1063,7 +1064,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
     const containerWorker =
       this.cloudContainerEngine && this.policy.paths.containerState
         ? {
-            version: 1 as const,
+            version: 2 as const,
             runtime: "podman" as const,
             node: realpathSync(this.runtime),
             engine: this.cloudContainerEngine,
@@ -1072,7 +1073,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
               CLOUD_CONTAINER_WORKER_FILENAME,
             ),
             state: this.policy.paths.containerState,
-            socket: path.join(this.policy.paths.containerState, "podman.sock"),
+            socket: path.join(this.policy.paths.scratch, "podman.sock"),
           }
         : undefined;
     if (containerWorker) {
@@ -1732,8 +1733,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     );
     this.cloudContainerWorkerSource = options.cloudWorker
       ? path.join(
-          options.projectRoot,
-          "apps/desktop/src/engine/agents/containment",
+          // The checkout contains customer code. Cloud helpers belong beside
+          // the immutable deployment-selected supervisor, never in that repo.
+          path.dirname(this.supervisorScript),
           CLOUD_CONTAINER_WORKER_FILENAME,
         )
       : null;

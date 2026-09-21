@@ -11,6 +11,13 @@ name: ZSR cloud qualification
 on:
   workflow_dispatch:
     inputs:
+      sandbox_class:
+        description: Qualified isolation class (requires Linux VM quota)
+        required: true
+        default: linux-vm
+        type: choice
+        options:
+          - linux-vm
       region:
         description: Daytona region
         required: true
@@ -59,7 +66,7 @@ jobs:
     environment: zsr-cloud-qualification
     services:
       postgres:
-        image: postgres:16
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -120,6 +127,9 @@ jobs:
             scripts/__tests__/cloud-egress-probe.test.ts \
             scripts/__tests__/cloud-github-coordinator.test.ts \
             scripts/__tests__/cloud-provider-cleanup.test.ts \
+            scripts/__tests__/cloud-vm-workflow.test.ts \
+            scripts/__tests__/cloud-vm-snapshot.test.ts \
+            scripts/__tests__/cloud-snapshot-registration.test.ts \
             scripts/__tests__/cloud-qualification-attestation.test.ts \
             scripts/__tests__/cloud-validation-identity.test.ts \
             scripts/__tests__/cloud-workspace-qualification-gates.test.ts \
@@ -162,16 +172,60 @@ jobs:
               ;;
           esac
           state_dir="${RUNNER_TEMP}/zeros-zsr-cloud-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          umask 077
+          mkdir -p -- "$state_dir"
           {
             echo "ZEROS_CLOUD_QUALIFICATION_DISPOSITION=$QUALIFICATION_DISPOSITION"
             echo "ZEROS_SNAPSHOT_NAME=$snapshot_name"
             echo "ZEROS_CLOUD_VALIDATION_STATE_DIR=$state_dir"
+            echo "ZEROS_CLOUD_VM_IMAGE_RECEIPT=$state_dir/vm-image-receipt.json"
             echo "ZEROS_CLOUD_QUALIFICATION_ATTESTATION_FILE=$state_dir/qualification-attestation.json"
           } >> "$GITHUB_ENV"
+
+      - name: Publish immutable Linux VM image
+        # Only this trusted step can read the registry writer. The short-lived
+        # Docker store and build receipt are never uploaded as artifacts.
+        env:
+          ZEROS_CLOUD_VM_REGISTRY_REPOSITORY: ${{ vars.ZSR_CLOUD_VM_REGISTRY_REPOSITORY }}
+          ZEROS_CLOUD_VM_REGISTRY_USERNAME: ${{ secrets.ZSR_CLOUD_VM_REGISTRY_USERNAME }}
+          ZEROS_CLOUD_VM_REGISTRY_PASSWORD: ${{ secrets.ZSR_CLOUD_VM_REGISTRY_PASSWORD }}
+          DAYTONA_SANDBOX_CLASS: ${{ inputs.sandbox_class }}
+          DAYTONA_TARGET: ${{ inputs.region }}
+          ZEROS_REPO_URL: https://github.com/${{ github.repository }}.git
+          ZEROS_REPO_REF: main
+          ZEROS_REPO_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          for required in ZEROS_CLOUD_VM_REGISTRY_REPOSITORY ZEROS_CLOUD_VM_REGISTRY_USERNAME ZEROS_CLOUD_VM_REGISTRY_PASSWORD ZEROS_CLOUD_VM_IMAGE_RECEIPT; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::Missing protected VM image value: $required"
+              exit 1
+            fi
+          done
+          pnpm tsx -e 'import { assertRegistryImageDigest } from "./scripts/cloud-workspace-validation/lib/snapshot-placement.ts"; assertRegistryImageDigest(process.env.ZEROS_CLOUD_VM_REGISTRY_REPOSITORY + "@sha256:" + "a".repeat(64))'
+          docker buildx version
+          export DOCKER_CONFIG
+          DOCKER_CONFIG="$(mktemp -d "$RUNNER_TEMP/zeros-registry.XXXXXXXX")"
+          cleanup_registry() {
+            status=$?
+            trap - EXIT INT TERM
+            rm -rf -- "$DOCKER_CONFIG"
+            exit "$status"
+          }
+          trap cleanup_registry EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+          registry_host="${ZEROS_CLOUD_VM_REGISTRY_REPOSITORY%%/*}"
+          printf '%s' "$ZEROS_CLOUD_VM_REGISTRY_PASSWORD" | docker login "$registry_host" \
+            --username "$ZEROS_CLOUD_VM_REGISTRY_USERNAME" --password-stdin
+          unset ZEROS_CLOUD_VM_REGISTRY_PASSWORD ZEROS_CLOUD_VM_REGISTRY_USERNAME
+          pnpm tsx scripts/cloud-workspace-validation/publish-vm-image.ts
 
       - name: Qualify exact cloud image and clean all paid resources
         env:
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          DAYTONA_SANDBOX_CLASS: ${{ inputs.sandbox_class }}
           DAYTONA_TARGET: ${{ inputs.region }}
           ANTHROPIC_API_KEY: ${{ secrets.ZSR_CLOUD_ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.ZSR_CLOUD_OPENAI_API_KEY }}
@@ -189,6 +243,7 @@ jobs:
           CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false"
           DAYTONA_API_URL: https://app.daytona.io/api
           ZEROS_CLOUD_REQUIRED_AGENTS: claude,codex,cursor
+          ZEROS_CLOUD_AGENT_SELECTIONS: ${{ vars.ZSR_CLOUD_AGENT_SELECTIONS }}
           ZEROS_SOAK_HOURS: ${{ inputs.soak_hours }}
           ZEROS_SOAK_MAX_DROPS: "0"
           ZEROS_REPO_URL: https://github.com/${{ github.repository }}.git
@@ -197,16 +252,20 @@ jobs:
           # Backstop for a runner VM that is killed before bash can execute its
           # EXIT trap. A later run also reaps CI snapshots older than 24h.
           ZEROS_CLOUD_VALIDATION_AUTO_DELETE_MINUTES: "720"
+          ZEROS_CLOUD_VALIDATION_TTL_MINUTES: "720"
           ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE: "1"
         run: |
           set -euo pipefail
 
-          for required in DAYTONA_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY CURSOR_API_KEY ZEROS_ACCOUNT_ACCESS_TOKEN ZEROS_ACCOUNT_JWT_PUBLIC_KEY ZEROS_ACCOUNT_JWT_KID ZEROS_CLOUD_GITHUB_APP_ID ZEROS_CLOUD_GITHUB_APP_PRIVATE_KEY ZEROS_CLOUD_GITHUB_INSTALLATION_ID ZEROS_CLOUD_GITHUB_REPOSITORY ZEROS_CLOUD_GITHUB_REPOSITORY_COMMIT ZEROS_CLOUD_QUALIFICATION_TOOLBOX_ORIGINS ZEROS_CLOUD_QUALIFICATION_TUNNEL_TOKEN ZEROS_CLOUD_QUALIFICATION_TUNNEL_ORIGIN ZEROS_CLOUDFLARED_BIN; do
+          for required in DAYTONA_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY CURSOR_API_KEY ZEROS_CLOUD_AGENT_SELECTIONS ZEROS_ACCOUNT_ACCESS_TOKEN ZEROS_ACCOUNT_JWT_PUBLIC_KEY ZEROS_ACCOUNT_JWT_KID ZEROS_CLOUD_GITHUB_APP_ID ZEROS_CLOUD_GITHUB_APP_PRIVATE_KEY ZEROS_CLOUD_GITHUB_INSTALLATION_ID ZEROS_CLOUD_GITHUB_REPOSITORY ZEROS_CLOUD_GITHUB_REPOSITORY_COMMIT ZEROS_CLOUD_QUALIFICATION_TOOLBOX_ORIGINS ZEROS_CLOUD_QUALIFICATION_TUNNEL_TOKEN ZEROS_CLOUD_QUALIFICATION_TUNNEL_ORIGIN ZEROS_CLOUDFLARED_BIN; do
             if [ -z "${!required:-}" ]; then
               echo "::error::Missing protected cloud-qualification value: $required"
               exit 1
             fi
           done
+          # Validate selections before allocating paid compute, not at the
+          # later agent-smoke step after the image has already been baked.
+          pnpm tsx -e 'import { parseRequiredCloudAgents, parseCloudAgentSelections } from "./scripts/cloud-workspace-validation/lib/qualification-gates.ts"; parseCloudAgentSelections(parseRequiredCloudAgents(process.env.ZEROS_CLOUD_REQUIRED_AGENTS), process.env.ZEROS_CLOUD_AGENT_SELECTIONS)'
 
           snapshot_baked=0
           provisioned=0
@@ -233,6 +292,9 @@ jobs:
             if [ "$provisioned" -eq 1 ]; then
               pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts --delete || cleanup_failed=1
             fi
+            # Intent is persisted before create, including when its response
+            # is lost and provisioned never became 1.
+            pnpm tsx scripts/cloud-workspace-validation/cleanup-allocation.ts || cleanup_failed=1
             # A candidate is retained only when every check and the sanitized
             # identity write completed. Failure and rehearsal paths delete it.
             retain_candidate=0
@@ -348,8 +410,16 @@ jobs:
         if: (failure() || cancelled()) && inputs.artifact_disposition == 'release-candidate'
         env:
           DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          DAYTONA_SANDBOX_CLASS: ${{ inputs.sandbox_class }}
           DAYTONA_TARGET: ${{ inputs.region }}
           ZEROS_SNAPSHOT_NAME: zeros-zsr-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           ZEROS_CLOUD_VALIDATION_STATE_DIR: ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}
           ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE: "1"
         run: pnpm tsx scripts/cloud-workspace-validation/delete-ephemeral-snapshot.ts
+
+      - name: Remove private VM publication receipt
+        if: always()
+        run: |
+          if [ -n "${ZEROS_CLOUD_VM_IMAGE_RECEIPT:-}" ]; then
+            rm -f -- "$ZEROS_CLOUD_VM_IMAGE_RECEIPT"
+          fi

@@ -149,12 +149,10 @@ d("cloud workspace setup material redemption", () => {
       secretRefs: [{ id: secretId, name: "SETUP_REGISTRY_TOKEN" }],
       setupCommands: [{ command: "node --version", timeoutSeconds: 30 }],
     };
+    await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
+      VALUES ($1,$2,'Setup Materials Owner','developer')`, [accountUserId, accountEmail]);
     const setup = await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO users (id, email, display_name)
-         VALUES ($1, $2, 'Setup Materials Owner')`,
-        [accountUserId, accountEmail],
-      );
+
       await tx.query(
         `INSERT INTO user_identities (
            user_id, provider, provider_sub, email_at_link,
@@ -418,6 +416,30 @@ d("cloud workspace setup material redemption", () => {
     };
   }
 
+  it("returns generation-pinned resources only to version-2 material consumers", async () => {
+    const materials = await service.redeem({
+      ...redemptionInput(),
+      materialVersion: 2,
+    });
+    const row = (
+      await pool.query(
+        "SELECT architecture, cpu_millicores, memory_mib, storage_mib FROM cloud_workspace_generations WHERE workspace_id = $1 AND generation = $2",
+        [seed.execution.workspaceId, seed.execution.generation],
+      )
+    ).rows[0];
+    expect(materials).toMatchObject({
+      version: 2,
+      image: {
+        resources: {
+          architecture: row.architecture,
+          cpuMillicores: row.cpu_millicores,
+          memoryMiB: row.memory_mib,
+          storageMiB: row.storage_mib,
+        },
+      },
+    });
+  });
+
   it("redeems once into exact scoped materials and stores only engine credential digests", async () => {
     const materials = await service.redeem(redemptionInput());
 
@@ -613,6 +635,31 @@ d("cloud workspace setup material redemption", () => {
     expect(github.revoke).toHaveBeenCalledWith(
       "ghs_authority_recheck_unknown_credential",
     );
+  });
+
+  it("never revives an expired engine with a late heartbeat", async () => {
+    const materials = await service.redeem(redemptionInput());
+    const registration = await service.registerEngine({
+      token: materials.engine.registration.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      setupRunId: seed.execution.setupRunId,
+      executionFence: seed.execution.executionFence,
+      engineInstanceId: materials.engine.instanceId,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+    });
+    await pool.query(`UPDATE cloud_workspace_engine_instances
+      SET registered_at=now()-interval '2 minutes',last_heartbeat_at=now()-interval '2 minutes',
+          lease_expires_at=now()-interval '1 second' WHERE id=$1`, [materials.engine.instanceId]);
+    await expect(service.heartbeat({
+      token: registration.heartbeat.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      engineInstanceId: materials.engine.instanceId,
+    })).rejects.toMatchObject({ code: "engine_heartbeat_rejected" });
+    expect((await pool.query("SELECT lease_expires_at<now() AS expired FROM cloud_workspace_engine_instances WHERE id=$1", [materials.engine.instanceId])).rows[0].expired).toBe(true);
   });
 
   it("registers the exact engine once, persists its heartbeat lease, and retires it with runtime access", async () => {
@@ -860,7 +907,7 @@ d("cloud workspace setup material redemption", () => {
                   target.query as (...queryArgs: unknown[]) => Promise<unknown>
                 ).apply(target, args);
                 const sql = typeof args[0] === "string" ? args[0] : "";
-                if (sql === "BEGIN") {
+                if (/^BEGIN(?:;|$)/.test(sql)) {
                   await target.query("SET LOCAL statement_timeout = '750ms'");
                 }
                 if (

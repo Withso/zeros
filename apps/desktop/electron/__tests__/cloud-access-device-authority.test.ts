@@ -46,6 +46,16 @@ function memoryStore(): CloudReplicaDeviceSecretStore {
 }
 
 describe("main cloud access device authority", () => {
+  it("signs admission only for the exact current account access token",async()=>{
+    const accountId=randomUUID(),deviceId=randomUUID(),store=memoryStore(),target={organizationId:randomUUID(),workspaceId:randomUUID()};
+    const pending=store.ensure(accountId);store.bindRegistration({accountUserId:accountId,deviceId,keyVersion:1,publicKey:pending.active.publicKey});
+    const authority=new CloudAccessDeviceAuthority({capabilityEnabled:()=>true,store,
+      getSession:async()=>({provider:"workos",accountId,accessToken:"current-token",sub:"user_test",email:"test@example.test",name:null,clientKind:"desktop"}),
+      register:vi.fn()});
+    await expect(authority.signEngineAdmission("current-token",target)).resolves.toMatchObject({deviceId,keyVersion:1});
+    await expect(authority.signEngineAdmission("old-or-another-account-token",target)).rejects.toThrow(/session changed/);
+  });
+
   it("coalesces enrollment and binds the exact server device to safeStorage", async () => {
     const accountId = randomUUID();
     const deviceId = randomUUID();

@@ -20,9 +20,11 @@ vi.mock("../cloud-workspace-validation/config", () => ({
   DAYTONA_PREVIEW_HOST_SUFFIXES: ["preview.example.test"],
   DAYTONA_SSH_HOSTS: ["ssh.example.test"],
   DAYTONA_TARGET: "eu",
+  DAYTONA_SANDBOX_CLASS: "container",
   RESOURCES: { cpu: 4, memory: 8, disk: 20 },
   VALIDATION_AUTO_DELETE_MINUTES: 720,
-  loadSnapshotAttestation: () => ({ snapshotId: "snapshot-id" }),
+  VALIDATION_TTL_MINUTES: 60,
+  loadSnapshotAttestation: () => ({ version: 1, snapshotId: "snapshot-id" }),
   requireEnv: () => "test-api-key",
 }));
 

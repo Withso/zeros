@@ -65,7 +65,8 @@ export function securityEventAction(kind) {
     kind === "account.authorization_changed" ||
     kind === "organization.access_revoked" ||
     kind === "organization.authorization_changed" ||
-    kind === "organization.data_changed"
+    kind === "organization.data_changed" ||
+    kind === "workspace.authorization_changed"
   ) {
     return { signOut: false, refreshOrganizations: true };
   }
@@ -92,11 +93,16 @@ function securitySnapshotSignature(snapshot) {
     snapshot.session?.id,
     snapshot.session?.status,
     organizations,
+    Array.isArray(snapshot.workspaces) ? snapshot.workspaces.map(workspace=>[
+      workspace.id,workspace.organizationId,workspace.role,workspace.accessRevision,workspace.dataRevision??1,
+    ]).sort((left,right)=>String(left[0]).localeCompare(String(right[0]))) : [],
+    snapshot.workspacesTruncated===true,
   ]);
 }
 
 export function securitySnapshotChanged(previous, next) {
   return (
+    next?.workspacesTruncated===true ||
     securitySnapshotSignature(previous) !== securitySnapshotSignature(next)
   );
 }
@@ -830,6 +836,7 @@ function bootDashboard() {
       "organization.access_revoked",
       "organization.authorization_changed",
       "organization.data_changed",
+      "workspace.authorization_changed",
     ]) {
       source.addEventListener(kind, (event) =>
         handleSecurityEvent(kind, event),

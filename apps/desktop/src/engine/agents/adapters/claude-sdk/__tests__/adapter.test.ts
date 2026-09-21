@@ -13,6 +13,8 @@ import * as path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { ClaudeSdkAdapter } from "../adapter";
+import * as cloudExecutions from "../../../cloud-provider-execution";
+import * as claudeRuntime from "../binary-resolver";
 import {
   AgentFailureError,
   type AgentAdapterContext,
@@ -33,6 +35,34 @@ afterAll(() => {
 });
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
+
+describe("Claude private cloud coordinator policy",()=>{
+  it("keeps repository tools and caller MCP outside the credential view and fences model/config changes",async()=>{
+    const boundary={status:{actor:"agent-code",backend:"zeros-srt"}} as never;
+    const lease=new AbortController(),assertLive=vi.fn();
+    const execution={lease:{signal:lease.signal,assertLive,admission:{model:"claude-haiku-4-5"}},tools:{call:vi.fn()},
+      productServers:[{name:"zeros_design",transport:"http",url:"http://127.0.0.1:42000/mcp",headers:{Authorization:"Bearer synthetic-scoped-tool"}}]} as unknown as cloudExecutions.CloudProviderExecution;
+    const original=cloudExecutions.cloudProviderExecution;
+    const authority=vi.spyOn(cloudExecutions,"cloudProviderExecution").mockImplementation(value=>value===boundary?execution:original(value));
+    const runtime=vi.spyOn(claudeRuntime,"resolveClaudeCli").mockReturnValue({path:"/opt/zeros/node_modules/native/claude",source:"bundled"});
+    const {queryFn,captured}=makeScriptedQuery([[initMsg("cloud-session"),resultOk("cloud-session")]]);
+    const adapter=new ClaudeSdkAdapter(makeCtx([],[]),{queryFn});
+    try{
+      const {session}=await adapter.newSession({cwd:"/srv/zeros/workspace",executionBoundary:boundary,
+        env:{ANTHROPIC_MODEL:"claude-haiku-4-5",ANTHROPIC_API_KEY:"synthetic-provider-key"},
+        cliBinary:"/untrusted/claude",mcpServers:[{name:"untrusted",transport:"stdio",command:"/untrusted/program"}],browserUse:{kind:"claude-agent-sdk"} as never});
+      await adapter.prompt({sessionId:session.executionId,prompt:[{type:"text",text:"Continue"}]});
+      expect(captured[0]).toMatchObject({tools:["AskUserQuestion","TodoWrite"],strictMcpConfig:true,settingSources:[],plugins:[],
+        settings:{disableAllHooks:true,autoMemoryEnabled:false,permissions:{additionalDirectories:[],allow:[],deny:[]}},pathToClaudeCodeExecutable:"/opt/zeros/node_modules/native/claude"});
+      expect(Object.keys(captured[0].mcpServers as object).sort()).toEqual(["zeros_design","zeros_workspace"]);
+      expect(captured[0].hooks).toBeUndefined();expect(captured[0].getOAuthToken).toBeUndefined();
+      expect(captured[0].extraArgs).toEqual({"thinking-display":"summarized"});
+      await expect(adapter.setModel({sessionId:session.executionId,model:"unadmitted-model"})).rejects.toThrow(/admission/);
+      await expect(adapter.updateConfig({sessionId:session.executionId,env:{ANTHROPIC_API_KEY:"replaced"}})).rejects.toThrow(/admission/);
+      expect(assertLive).toHaveBeenCalled();
+    }finally{await adapter.dispose();runtime.mockRestore();authority.mockRestore();}
+  });
+});
 
 describe("Claude explicit approval hints", () => {
   const hints = [
@@ -186,6 +216,38 @@ describe("Claude user-turn accounting", () => {
 });
 
 describe("Claude fallback model persistence", () => {
+  it("rejects a different model reported at native initialization", async () => {
+    const mock = makeScriptedQuery([[{ type: "system", subtype: "init", model: "claude-sonnet-5", session_id: "native-exact" },
+      { type: "result", subtype: "success", result: "unexpected", uuid: "exact-init-end" }]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: mock.queryFn as never });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: {
+        ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_REQUIRE_EXACT_MODEL: "1",
+      } });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "qualification" }] })).rejects.toThrow(/exact model/i);
+      expect((mock.captured[0]?.abortController as AbortController | undefined)?.signal.aborted).toBe(true);
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["session", "local"])("stops an exact-model qualification after a native %s fallback", async (scope) => {
+    const emitted: SessionNotification[] = [];
+    const mock = makeScriptedQuery([[{ type: "system", subtype: "model_refusal_fallback", uuid: "exact-fallback", scope,
+      original_model: "claude-haiku-4-5", fallback_model: "claude-sonnet-5" },
+      { type: "result", subtype: "success", result: "unexpected", uuid: "exact-end" }]]);
+    const adapter = new ClaudeSdkAdapter(makeCtx(emitted, []), { queryFn: mock.queryFn as never });
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp", env: {
+        ANTHROPIC_MODEL: "claude-haiku-4-5", ZEROS_REQUIRE_EXACT_MODEL: "1",
+      } });
+      const send = () => adapter.prompt({ sessionId: session.sessionId, prompt: [{ type: "text", text: "qualification" }] });
+      await expect(send()).rejects.toThrow(/exact model/i);
+      await expect(send()).rejects.toThrow(/exact model/i);
+      expect(mock.captured).toHaveLength(1);
+      expect((mock.captured[0]?.abortController as AbortController | undefined)?.signal.aborted).toBe(true);
+      expect(emitted.some(n => n.update.sessionUpdate === "current_model_update")).toBe(false);
+    } finally { await adapter.dispose(); }
+  });
+
   it("ignores retired app fallback and budget settings, including legacy config updates", async () => {
     const mock = makePushableQuery();
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn: mock.queryFn });

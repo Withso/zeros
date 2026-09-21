@@ -10,8 +10,8 @@ boundaries.
 1. The client authenticates to the control plane.
 2. Every workspace API authorizes the actor against the workspace's current
    tenant, Organization membership and role when applicable, workspace role,
-   and any narrower Team grant. Personal permits only its sole owner, requires
-   exactly one tenant member, and requires a current Pro entitlement.
+   and any narrower Team grant. Personal is local-only and cannot own a cloud
+   workspace; paid account membership alone does not enable Personal cloud.
 3. Provisioning credentials remain server-side and are never returned to a
    renderer or placed in a sandbox.
 4. A remote engine connection uses a short-lived grant bound to account,
@@ -83,13 +83,42 @@ work whose completion must be observed.
 - Treat snapshots and caches as sensitive copies subject to encryption,
   retention, and deletion policy.
 
-The current image uses a narrowly scoped root coordinator for the supervisor,
-attestation/credential files, and engine process. Repository Git operations,
-declared setup commands, and agent work run as UID/GID 10001. This is an
-explicit pre-production exception, not completion of the non-root requirement;
-the threat model and live provider qualification must approve or eliminate it.
-The current review and unapproved residual risks are recorded in
+Legacy image profile 1 runs the general engine as VM root and remains an
+unapproved pre-production exception. New profile 2 runs the engine in a fixed
+user namespace: namespace root maps to VM UID/GID 10003; only worker 10001 and
+capture 10002 are also mapped. VM root and the provider login identity are
+unmapped. The image uses a fixed native launcher, read-only deployment mounts,
+explicit workspace/state mounts, no supplementary groups, `NoNewPrivs`, and a
+seccomp filter. Its namespace capabilities support ownership-preserving edits
+and sandbox construction without VM-root authority.
+
+The root broker retains only fixed setup, attestation and engine lifecycle
+operations. Its socket and setup journals are absent from the engine view.
+Broker ownership uses a lifetime kernel file lock; cgroup retirement drains all
+engine descendants before another setup session is admitted. The runtime and
+complete helper path chain live under root-controlled `/opt/zeros-runtime`,
+independently of provider-owned tools or login homes. Admission verifies the
+engine's own seccomp and no-new-privileges evidence; a provider filter on the
+outer VM broker cannot substitute for those checks.
+
+The root exception is eliminated only after both exact provider images pass
+the full behavior and security qualification, including setup, readiness,
+agent/Design work, PTY, access and recovery. The production gate stays closed
+while those gates remain incomplete. See
 [`root-coordinator-threat-model.md`](./root-coordinator-threat-model.md).
+
+Boat bootstrap uses the provider API only for public SSH material and fixed
+image-owned operations. The setup admission crosses host-key-pinned OpenSSH on
+stdin. The runner installs its temporary key with the fixed setup command,
+short server-side expiry, and forwarding/PTY restrictions in the same append;
+there is no intermediate unrestricted login key. Directory-relative descriptors,
+file locks and inode checks protect installation/revocation from aliases and
+concurrent replacement. Cleanup requires an explicit revocation result and
+destroys the local private key. Uncertain execution or cleanup never becomes
+successful setup. The SSH destination must be a literal public address, excluding
+special-purpose and transition-tunnel ranges, and the host key is pinned from the
+authenticated provider channel. Transport tests alone do not enable the Boat
+provider in production startup.
 
 ## Repository and agent credentials
 

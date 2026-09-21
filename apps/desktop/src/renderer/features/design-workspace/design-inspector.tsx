@@ -274,7 +274,9 @@ function InspectorEditField({
     return whole ? roundDesignLayoutValue(resolved) : resolved;
   };
 
-  useEffect(() => {
+  // Finish an unfocused incoming value in this commit. A passive state update
+  // can land after the next focus/select-all and overwrite that user's draft.
+  useLayoutEffect(() => {
     if (document.activeElement === inputRef.current || scrubRef.current) return;
     const next = String(value);
     baselineRef.current = next;

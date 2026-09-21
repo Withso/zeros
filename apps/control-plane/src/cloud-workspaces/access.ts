@@ -6,16 +6,20 @@ import {
 } from "node:crypto";
 import type pg from "pg";
 
+import { PreviewRequestLease } from "./preview-request-lease.js";
+import type { CloudPreviewSocketGrant } from "./preview-websocket-relay.js";
+
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import {
-  authorizeCloudWorkspaceOperation,
-  CloudWorkspaceAuthorizationError,
+  lockCloudWorkspaceScope,
 } from "./authorization.js";
+import {authorizeCloudWorkspaceActor} from "./actors.js";
 import {
   CloudProviderError,
   type CloudProviderPreviewEndpoint,
+  assertProviderPreviewEndpoint,
   type CloudProviderSshAccess,
   type CloudWorkspaceAccessProvider,
 } from "./provider.js";
@@ -23,6 +27,17 @@ import type {
   CloudWorkspaceProviderPurpose,
   CloudWorkspaceProviderResolver,
 } from "./provider-resolver.js";
+
+/** Railway terminates public TLS before Hono's Node adapter. Preserve only the
+ * explicit HTTPS scheme assertion; forwarded hosts/ports never select a tenant.
+ * The edge must overwrite this header and own public ingress. This function is
+ * preview routing normalization, never an authorization or origin decision. */
+export function previewRequestFromEdge(request: Request): Request {
+  const url = new URL(request.url);
+  if (url.protocol !== "http:" || request.headers.get("x-forwarded-proto") !== "https") return request;
+  url.protocol = "https:";
+  return new Request(url, request);
+}
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -115,9 +130,12 @@ export type CloudWorkspaceAccessService = {
 };
 
 type AuthorizedWorkspace = {
+  actorFingerprint:string;
+  single_member_mode:boolean;
   team_id: string;
   owner_user_id: string;
   generation: number;
+  authority_epoch: string | number;
   status: string;
   desired_state: string;
   provider_resource_id: string;
@@ -196,108 +214,39 @@ function providerHttpError(error: unknown, operation: string): HttpError {
   );
 }
 
-async function authorizedWorkspace(
-  tx: Tx,
-  input: {
-    organizationId: string;
-    workspaceId: string;
-    accountUserId: string;
-    workosEnabled: boolean;
-  },
-): Promise<AuthorizedWorkspace> {
-  const scope = await tx.query<{ team_id: string; owner_user_id: string }>(
-    `SELECT cw.team_id, cw.owner_user_id
-     FROM cloud_workspaces cw
-     WHERE cw.org_id = $1 AND cw.id = $2 AND cw.deleted_at IS NULL`,
-    [input.organizationId, input.workspaceId],
-  );
-  const identity = scope.rows[0];
-  if (!identity) {
-    throw new HttpError(404, "not_found", "Cloud workspace not found");
-  }
-  try {
-    await authorizeCloudWorkspaceOperation(tx, {
-      organizationId: input.organizationId,
-      teamId: identity.team_id,
-      actorUserId: input.accountUserId,
-      billingOwnerUserId: identity.owner_user_id,
-      workosEnabled: input.workosEnabled,
-      requireWorkspaceOwner: true,
-    });
-  } catch (error) {
-    if (
-      error instanceof CloudWorkspaceAuthorizationError &&
-      error.status === 404
-    ) {
-      throw new HttpError(404, "not_found", "Cloud workspace not found");
-    }
-    throw error;
-  }
-  const selected = await tx.query<AuthorizedWorkspace>(
-    `SELECT cw.team_id, cw.owner_user_id,
-            cw.current_generation AS generation, cw.status, cw.desired_state,
-            pb.provider_resource_id, pb.updated_at AS provider_binding_updated_at
-     FROM cloud_workspaces cw
-     JOIN organizations organization
-       ON organization.id = cw.org_id AND organization.deleted_at IS NULL
-     JOIN teams team
-       ON team.id = cw.team_id AND team.org_id = cw.org_id
-      AND team.deleted_at IS NULL
-     JOIN organization_members om
-       ON om.org_id = cw.org_id AND om.user_id = $3
-     JOIN team_members tm
-       ON tm.team_id = cw.team_id AND tm.org_id = cw.org_id
-      AND tm.user_id = $3
-     JOIN users account
-       ON account.id = $3 AND account.deleted_at IS NULL
-      AND account.auth_status = 'active'
-     JOIN cloud_workspace_generations generation
-       ON generation.workspace_id = cw.id
-      AND generation.generation = cw.current_generation
-      AND generation.org_id = cw.org_id
-     JOIN provider_connections provider_connection
-       ON provider_connection.id = generation.provider_connection_id
-      AND provider_connection.org_id = generation.org_id
-      AND provider_connection.state = 'active'
-     JOIN cloud_workspace_provider_bindings pb
-       ON pb.workspace_id = cw.id AND pb.org_id = cw.org_id
-      AND pb.generation = cw.current_generation
-     WHERE cw.org_id = $1 AND cw.id = $2 AND cw.deleted_at IS NULL
-       AND cw.owner_user_id = $3 AND cw.single_member_mode
-       AND pb.provider_resource_id IS NOT NULL
-       AND pb.observed_state = 'running'
-       AND cloud_workspace_generation_policy_current(
-         cw.id, cw.current_generation, cw.org_id
-       )
-       AND NOT EXISTS (
-         SELECT 1
-         FROM cloud_workspace_generation_secret_bindings secret_link
-         JOIN secret_bindings secret
-           ON secret.id = secret_link.binding_id
-          AND secret.org_id = secret_link.org_id
-         WHERE secret_link.workspace_id = cw.id
-           AND secret_link.generation = cw.current_generation
-           AND secret_link.org_id = cw.org_id
-           AND secret.state <> 'active'
-       )
-     FOR UPDATE OF cw`,
-    [input.organizationId, input.workspaceId, input.accountUserId],
-  );
-  const workspace = selected.rows[0];
-  if (!workspace) {
-    throw new HttpError(404, "not_found", "Cloud workspace not found");
-  }
-  if (
-    workspace.desired_state !== "running" ||
-    !["ready", "busy"].includes(workspace.status)
-  ) {
-    throw new HttpError(
-      409,
-      "cloud_workspace_access_unavailable",
-      "Cloud workspace access is available only while the current generation is ready",
-    );
-  }
-  return workspace;
+/** Human actor and compute sponsor have independent authority. Frequent stream
+ * checks take shared scope locks; grant issuance serializes its workspace. */
+export async function authorizeReadyCloudWorkspaceAccess(tx:Tx,input:{
+  organizationId:string;workspaceId:string;accountUserId:string;workosEnabled:boolean;
+  workspaceLock?:"share"|"update";legacyProviderAccess?:boolean;
+}):Promise<AuthorizedWorkspace>{
+  const absent=()=>new HttpError(404,"not_found","Cloud workspace not found");
+  if(!await lockCloudWorkspaceScope(tx,{...input,workspaceLock:input.workspaceLock??"update"}))throw absent();
+  let actor;
+  try{actor=await authorizeCloudWorkspaceActor(tx,{...input,actorUserId:input.accountUserId,capability:"edit"});}
+  catch(error){if(error instanceof HttpError&&error.status===404)throw absent();throw error;}
+  const selected=await tx.query<AuthorizedWorkspace>(`SELECT cw.team_id,cw.owner_user_id,cw.single_member_mode,
+      cw.current_generation AS generation,cw.authority_epoch,cw.status,cw.desired_state,
+      binding.provider_resource_id,binding.updated_at AS provider_binding_updated_at
+    FROM cloud_workspaces cw JOIN cloud_workspace_provider_bindings binding
+      ON binding.workspace_id=cw.id AND binding.org_id=cw.org_id AND binding.generation=cw.current_generation
+    WHERE cw.id=$1 AND cw.org_id=$2 AND cw.deleted_at IS NULL
+      AND binding.provider_resource_id IS NOT NULL AND binding.observed_state='running'
+      AND (NOT $5::boolean OR (cw.single_member_mode AND cw.owner_user_id=$3))
+      AND (cw.single_member_mode OR EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
+        WHERE engine.workspace_id=cw.id AND engine.org_id=cw.org_id AND engine.generation=cw.current_generation
+          AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>now() AND engine.actor_protocol_version=2))
+      AND cloud_workspace_generation_policy_current(cw.id,cw.current_generation,cw.org_id)
+      AND NOT EXISTS(SELECT 1 FROM cloud_workspace_generation_secret_bindings secret_link
+        JOIN secret_bindings secret ON secret.id=secret_link.binding_id AND secret.org_id=secret_link.org_id
+        WHERE secret_link.workspace_id=cw.id AND secret_link.generation=cw.current_generation
+          AND secret_link.org_id=cw.org_id AND secret.state<>'active')
+      AND cloud_workspace_runtime_authority_live(cw.id,cw.current_generation,cw.owner_user_id,$4)`,
+    [input.workspaceId,input.organizationId,input.accountUserId,input.workosEnabled,input.legacyProviderAccess===true]);
+  const workspace=selected.rows[0];if(!workspace)throw absent();
+  if(workspace.desired_state!=="running"||!["ready","busy"].includes(workspace.status))
+    throw new HttpError(409,"cloud_workspace_access_unavailable","Cloud workspace access is available only while the current generation is ready");
+  return {...workspace,actorFingerprint:actor.fingerprint};
 }
 
 function normalizedPort(
@@ -309,7 +258,9 @@ function normalizedPort(
 ): number | null {
   if (
     purpose === "engine-runtime" &&
-    (kind !== "tunnel" || runtimeEnginePort === null || value !== runtimeEnginePort)
+    (kind !== "tunnel" ||
+      runtimeEnginePort === null ||
+      value !== runtimeEnginePort)
   ) {
     throw new HttpError(
       422,
@@ -572,7 +523,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       (input.kind === "tunnel" &&
         (typeof deviceId !== "string" || !UUID_PATTERN.test(deviceId))) ||
       (input.kind !== "tunnel" &&
-        (input.deviceId !== undefined || input.requestedLocalPort !== undefined))
+        (input.deviceId !== undefined ||
+          input.requestedLocalPort !== undefined))
     ) {
       throw new HttpError(
         422,
@@ -616,9 +568,10 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       input.kind === "preview" ? randomBytes(16).toString("hex") : null;
 
     const prepared = await withSystemTx(this.pool, async (tx) => {
-      const workspace = await authorizedWorkspace(tx, {
+      const workspace = await authorizeReadyCloudWorkspaceAccess(tx, {
         ...input,
         workosEnabled: this.workosEnabled,
+        legacyProviderAccess:input.kind!=="preview"||purpose==="engine-runtime",
       });
       if (
         input.expectedGeneration !== undefined &&
@@ -644,8 +597,8 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         `INSERT INTO cloud_workspace_client_access_grants (
            id, workspace_id, generation, org_id, account_user_id, kind,
            remote_port, provider_resource_id, preview_proxy_label,
-           idempotency_key, request_sha256, requested_expires_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           idempotency_key, request_sha256, requested_expires_at,actor_fingerprint
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,$13)
          ON CONFLICT (org_id, account_user_id, idempotency_key) DO NOTHING
          RETURNING id`,
         [
@@ -661,6 +614,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           input.idempotencyKey,
           digest,
           requestedExpiresAt,
+          workspace.actorFingerprint,
         ],
       );
       if ((inserted.rowCount ?? 0) !== 1) {
@@ -737,9 +691,12 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         // Prove the exact private provider endpoint now; the raw provider
         // token is intentionally discarded and resolved again only in proxy
         // memory while a request is authorized.
-        await provider.getPreviewEndpoint(
-          prepared.provider_resource_id,
-          remotePort!,
+        assertProviderPreviewEndpoint(
+          await provider.getPreviewEndpoint(
+            prepared.provider_resource_id,
+            remotePort!,
+            { grantId, credential },
+          ),
         );
       } else {
         ssh = await provider.createSshAccess(
@@ -803,9 +760,10 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     let published = false;
     try {
       published = await withSystemTx(this.pool, async (tx) => {
-        const current = await authorizedWorkspace(tx, {
+        const current = await authorizeReadyCloudWorkspaceAccess(tx, {
           ...input,
           workosEnabled: this.workosEnabled,
+          legacyProviderAccess:input.kind!=="preview"||purpose==="engine-runtime",
         });
         const grant = await tx.query<{ state: string }>(
           `SELECT state FROM cloud_workspace_client_access_grants
@@ -814,6 +772,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         );
         if (
           grant.rows[0]?.state !== "issuing" ||
+          current.actorFingerprint!==prepared.actorFingerprint ||
           current.generation !== prepared.generation ||
           current.provider_resource_id !== prepared.provider_resource_id
         ) {
@@ -824,12 +783,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
            SET state = 'active', token_hash = $2, provider_access_id = $3,
                expires_at = $4, issued_at = now(), updated_at = now()
            WHERE id = $1 AND state = 'issuing'`,
-          [
-            grantId,
-            hashToken(credential),
-            providerAccessId,
-            expiresAt,
-          ],
+          [grantId, hashToken(credential), providerAccessId, expiresAt],
         );
         if ((updated.rowCount ?? 0) !== 1) return false;
         if (deviceId && forwardSessionId) {
@@ -972,11 +926,11 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     assertUuid(input.deviceId, "Device");
     const observedLocalPort = normalizedRequiredPort(input.observedLocalPort);
     return withSystemTx(this.pool, async (tx) => {
-      const workspace = await authorizedWorkspace(tx, {
+      const workspace = await authorizeReadyCloudWorkspaceAccess(tx, {
         organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         accountUserId: input.accountUserId,
-        workosEnabled: this.workosEnabled,
+        workosEnabled: this.workosEnabled,legacyProviderAccess:true,
       });
       await assertActiveDevice(tx, {
         deviceId: input.deviceId,
@@ -996,6 +950,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
            AND access.generation = session.generation
            AND access.org_id = session.org_id
            AND access.kind = 'tunnel' AND access.state = 'active'
+           AND access.actor_fingerprint=$8
            AND access.expires_at > now()
          RETURNING session.id`,
         [
@@ -1006,6 +961,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           input.deviceId,
           observedLocalPort,
           workspace.generation,
+          workspace.actorFingerprint,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
@@ -1131,11 +1087,6 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
          FROM cloud_workspace_client_access_grants access
          JOIN cloud_workspaces cw
            ON cw.id = access.workspace_id AND cw.org_id = access.org_id
-         JOIN organization_members om
-           ON om.org_id = cw.org_id AND om.user_id = $3
-         JOIN team_members tm
-           ON tm.team_id = cw.team_id AND tm.org_id = cw.org_id
-          AND tm.user_id = $3
          WHERE access.id = $4 AND access.workspace_id = $2
            AND access.org_id = $1 AND access.account_user_id = $3
          FOR UPDATE OF access`,
@@ -1227,22 +1178,16 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     });
   }
 
-  async handlePreviewRequest(request: Request): Promise<Response | null> {
+  private async authorizePreviewRequest(request: Request) {
     const identity = this.previewIdentity(request.url);
     if (!identity) return null;
-    if (request.headers.get("upgrade")) {
-      return new Response("Use Forward to this Mac for WebSocket previews", {
-        status: 426,
-        headers: { "cache-control": "no-store" },
-      });
-    }
     const capability = request.headers.get("x-zeros-preview-capability");
     if (!capability || !PREVIEW_CAPABILITY_PATTERN.test(capability)) {
-      return this.previewDenied();
+      return null;
     }
     const grant = await withSystemTx(this.pool, async (tx) => {
       const result = await tx.query<
-        GrantRow & { provider_binding_updated_at: Date | string }
+        GrantRow & { provider_binding_updated_at: Date | string; expires_at: Date | string }
       >(
         `SELECT access.id, access.workspace_id, access.generation,
                 access.org_id, access.account_user_id, access.kind,
@@ -1260,11 +1205,6 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
          JOIN teams team
            ON team.id = cw.team_id AND team.org_id = cw.org_id
           AND team.deleted_at IS NULL
-         JOIN organization_members om
-           ON om.org_id = cw.org_id AND om.user_id = access.account_user_id
-         JOIN team_members tm
-           ON tm.team_id = cw.team_id AND tm.org_id = cw.org_id
-          AND tm.user_id = access.account_user_id
          JOIN users account
            ON account.id = access.account_user_id
           AND account.deleted_at IS NULL AND account.auth_status = 'active'
@@ -1283,8 +1223,11 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
          WHERE access.preview_proxy_label = $1 AND access.kind = 'preview'
            AND access.state = 'active' AND access.expires_at > now()
            AND cw.deleted_at IS NULL AND cw.desired_state = 'running'
-           AND cw.single_member_mode
-           AND cw.owner_user_id = access.account_user_id
+           AND access.actor_fingerprint=cloud_workspace_actor_fingerprint(cw.id,access.account_user_id)
+           AND cloud_workspace_actor_role(cw.id,access.account_user_id) IN ('developer','manager','owner')
+           AND (cw.single_member_mode OR EXISTS(SELECT 1 FROM cloud_workspace_engine_instances engine
+             WHERE engine.workspace_id=cw.id AND engine.org_id=cw.org_id AND engine.generation=cw.current_generation
+               AND engine.state='ready' AND engine.revoked_at IS NULL AND engine.lease_expires_at>now() AND engine.actor_protocol_version=2))
            AND cw.status IN ('ready', 'busy')
            AND pb.observed_state = 'running'
            AND cloud_workspace_generation_policy_current(
@@ -1302,15 +1245,29 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
                AND secret.state <> 'active'
            )
            AND cloud_workspace_runtime_authority_live(
-             cw.id, access.generation, access.account_user_id, $2
+             cw.id, access.generation, cw.owner_user_id, $2
            )`,
         [identity.label, this.workosEnabled],
       );
       return result.rows[0] ?? null;
     });
     if (!grant || !sameHash(grant.token_hash, hashToken(capability))) {
-      return this.previewDenied();
+      return null;
     }
+
+    return { grant, capability };
+  }
+
+  async handlePreviewRequest(request: Request): Promise<Response | null> {
+    if (!this.previewIdentity(request.url)) return null;
+    if (request.headers.get("upgrade")) {
+      return new Response("Preview WebSocket upgrade requires the socket transport", {
+        status: 426, headers: { "cache-control": "no-store" },
+      });
+    }
+    const authorized = await this.authorizePreviewRequest(request);
+    if (!authorized) return this.previewDenied();
+    const { grant, capability } = authorized;
 
     const releasePreviewRequest = this.acquirePreviewRequest(grant.id);
     if (!releasePreviewRequest) {
@@ -1320,18 +1277,29 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       });
     }
 
+    const lease = new PreviewRequestLease(new Date(grant.expires_at).getTime(), request.signal, async () => {
+      const current = (await this.authorizePreviewRequest(request))?.grant;
+      if (!current || current.id !== grant.id || current.workspace_id !== grant.workspace_id ||
+        current.org_id !== grant.org_id || current.generation !== grant.generation ||
+        current.provider_resource_id !== grant.provider_resource_id || current.remote_port !== grant.remote_port ||
+        iso(current.provider_binding_updated_at) !== iso(grant.provider_binding_updated_at)) return null;
+      return new Date(current.expires_at).getTime();
+    });
+    const finish = () => { lease.close(); releasePreviewRequest(); };
     let responseOwnsRelease = false;
     try {
       const inputUrl = new URL(request.url);
-      const endpoint = await this.cachedPreviewEndpoint(
+      const endpoint = await lease.wait(() => this.cachedPreviewEndpoint(
         grant.workspace_id,
         grant.org_id,
         grant.generation,
         grant.provider_resource_id,
         grant.remote_port!,
         iso(grant.provider_binding_updated_at),
-      ).catch(() => null);
+        { grantId: grant.id, credential: capability },
+      )).catch(() => null);
       if (!endpoint) {
+        if (lease.signal.aborted) return this.previewDenied();
         return new Response("Preview is temporarily unavailable", {
           status: 503,
           headers: { "cache-control": "no-store" },
@@ -1344,24 +1312,29 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       headers.set(endpoint.headerName, endpoint.headerValue);
       let body: Buffer | undefined;
       try {
-        body = await this.boundedRequestBody(request);
+        body = await this.boundedRequestBody(request, lease);
       } catch {
+        if (lease.signal.aborted) return this.previewDenied();
         return new Response("Preview request body is too large", {
           status: 413,
           headers: { "cache-control": "no-store" },
         });
       }
+      // Endpoint lookup and body upload can finish after revoke/regrant. Never
+      // forward a mutation under the authority captured before those waits.
+      try { await lease.revalidate(); } catch { return this.previewDenied(); }
       const init: RequestInit = {
         method: request.method,
         headers,
         redirect: "manual",
-        signal: AbortSignal.timeout(60_000),
+        signal: lease.signal,
         ...(body ? { body } : {}),
       };
       let response: Response;
       try {
-        response = await this.fetcher(upstreamUrl.toString(), init);
+        response = await lease.wait(() => this.fetcher(upstreamUrl.toString(), init));
       } catch {
+        if (lease.signal.aborted) return this.previewDenied();
         return new Response("Preview is temporarily unavailable", {
           status: 502,
           headers: { "cache-control": "no-store" },
@@ -1371,13 +1344,46 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         response,
         inputUrl.origin,
         endpoint.url,
-        releasePreviewRequest,
+        finish,
+        lease,
       );
       responseOwnsRelease = true;
       return proxied;
     } finally {
-      if (!responseOwnsRelease) releasePreviewRequest();
+      if (!responseOwnsRelease) finish();
     }
+  }
+
+  async resolvePreviewWebSocket(request: Request): Promise<CloudPreviewSocketGrant | null> {
+    const authorized = await this.authorizePreviewRequest(request);
+    if (!authorized) return null;
+    const { grant, capability } = authorized;
+    const release = this.acquirePreviewRequest(grant.id);
+    if (!release) return null;
+    try {
+      const endpoint = await this.cachedPreviewEndpoint(grant.workspace_id, grant.org_id, grant.generation,
+        grant.provider_resource_id, grant.remote_port!, iso(grant.provider_binding_updated_at), { grantId: grant.id, credential: capability });
+      const result: CloudPreviewSocketGrant = {
+        grantId: grant.id, workspaceId: grant.workspace_id, organizationId: grant.org_id,
+        generation: grant.generation, resourceId: grant.provider_resource_id, remotePort: grant.remote_port!,
+        expiresAtMs: Math.min(new Date(grant.expires_at).getTime(), Date.now() + 10_000), endpoint,
+        headers: Object.fromEntries(this.proxyRequestHeaders(request.headers, new URL(request.url).host)), release,
+      };
+      // Provider resolution may finish after a revoke or generation change.
+      const expiry = await this.revalidatePreviewWebSocket(request, result);
+      if (expiry === null) { release(); return null; }
+      result.expiresAtMs = expiry;
+      return result;
+    } catch (error) { release(); throw error; }
+  }
+
+  async revalidatePreviewWebSocket(request: Request, expected: CloudPreviewSocketGrant): Promise<number | null> {
+    const authorized = await this.authorizePreviewRequest(request);
+    const grant = authorized?.grant;
+    if (!grant || grant.id !== expected.grantId || grant.workspace_id !== expected.workspaceId ||
+      grant.org_id !== expected.organizationId || grant.generation !== expected.generation ||
+      grant.provider_resource_id !== expected.resourceId || grant.remote_port !== expected.remotePort) return null;
+    return Math.min(new Date(grant.expires_at).getTime(), Date.now() + 10_000);
   }
 
   recognizesPreviewRequest(request: Request): boolean {
@@ -1448,8 +1454,11 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     resourceId: string,
     port: number,
     bindingVersion: string,
+    access?: { grantId: string; credential: string },
   ): Promise<CloudProviderPreviewEndpoint> {
-    const key = `${workspaceId}\0${organizationId}\0${generation}\0${resourceId}\0${port}\0${bindingVersion}`;
+    // Some runtimes forward a caller-bound Zeros grant rather than a shared
+    // provider header. Never reuse that credential across preview grants.
+    const key = `${workspaceId}\0${organizationId}\0${generation}\0${resourceId}\0${port}\0${bindingVersion}\0${access?.grantId ?? ""}`;
     const now = Date.now();
     const cached = this.previewEndpoints.get(key);
     if (cached && cached.expiresAt > now) return cached.endpoint;
@@ -1466,7 +1475,12 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         generation,
         purpose: "preview",
       });
-      const endpoint = await provider.getPreviewEndpoint(resourceId, port);
+      const endpoint = await provider.getPreviewEndpoint(
+        resourceId,
+        port,
+        access,
+      );
+      assertProviderPreviewEndpoint(endpoint);
       this.previewEndpoints.set(key, {
         endpoint,
         expiresAt: Date.now() + PREVIEW_ENDPOINT_CACHE_MS,
@@ -1517,6 +1531,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
 
   private async boundedRequestBody(
     request: Request,
+    lease: PreviewRequestLease,
   ): Promise<Buffer | undefined> {
     if (["GET", "HEAD"].includes(request.method.toUpperCase()))
       return undefined;
@@ -1528,18 +1543,20 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     const reader = request.body.getReader();
     const chunks: Buffer[] = [];
     let total = 0;
-    while (true) {
-      const item = await reader.read();
-      if (item.done) break;
-      const chunk = Buffer.from(item.value);
-      total += chunk.length;
-      if (total > MAX_PROXY_REQUEST_BYTES) {
-        await reader.cancel().catch(() => undefined);
-        throw new Error("body too large");
+    try {
+      while (true) {
+        const item = await lease.wait(() => reader.read());
+        if (item.done) break;
+        const chunk = Buffer.from(item.value);
+        total += chunk.length;
+        if (total > MAX_PROXY_REQUEST_BYTES) throw new Error("body too large");
+        chunks.push(chunk);
       }
-      chunks.push(chunk);
-    }
-    return Buffer.concat(chunks, total);
+      return Buffer.concat(chunks, total);
+    } catch (error) {
+      void reader.cancel().catch(() => undefined);
+      throw error;
+    } finally { reader.releaseLock(); }
   }
 
   private proxyResponse(
@@ -1547,6 +1564,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     publicOrigin: string,
     endpointUrl: string,
     release: () => void,
+    lease: PreviewRequestLease,
   ): Response {
     const headers = new Headers();
     const blocked = new Set([
@@ -1592,7 +1610,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     }
     headers.set("cache-control", "no-store");
     headers.set("referrer-policy", "no-referrer");
-    const body = this.releaseTrackedBody(upstream.body, release);
+    const body = this.releaseTrackedBody(upstream.body, release, lease);
     try {
       return new Response(body, {
         status: upstream.status,
@@ -1608,42 +1626,49 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
   private releaseTrackedBody(
     source: ReadableStream<Uint8Array> | null,
     release: () => void,
+    lease: PreviewRequestLease,
   ): ReadableStream<Uint8Array> | null {
-    if (!source) {
-      release();
-      return null;
-    }
+    if (!source) { release(); return null; }
     const reader = source.getReader();
     let finished = false;
+    let abort: (() => void) | undefined;
     const finish = () => {
       if (finished) return;
       finished = true;
+      if (abort) lease.signal.removeEventListener("abort", abort);
       release();
     };
     return new ReadableStream<Uint8Array>({
-      async pull(controller) {
-        try {
-          const item = await reader.read();
-          if (item.done) {
-            finish();
-            controller.close();
-          } else {
-            controller.enqueue(item.value);
-          }
-        } catch (error) {
+      start(controller) {
+        abort = () => {
+          if (finished) return;
           finish();
-          controller.error(error);
+          controller.error(new Error("Preview authority expired"));
+          void reader.cancel().catch(() => undefined);
+        };
+        lease.signal.addEventListener("abort", abort, {once: true});
+        if (lease.signal.aborted) abort();
+      },
+      async pull(controller) {
+        if (finished) return;
+        try {
+          const item = await lease.wait(() => reader.read());
+          if (finished) return;
+          if (item.done) { finish(); controller.close(); }
+          else controller.enqueue(item.value);
+        } catch {
+          if (finished) return;
+          finish(); controller.error(new Error("Preview authority expired"));
+          void reader.cancel().catch(() => undefined);
         }
       },
-      async cancel(reason) {
-        try {
-          await reader.cancel(reason);
-        } finally {
-          finish();
-        }
+      cancel() {
+        finish();
+        void reader.cancel().catch(() => undefined);
       },
     });
   }
+
 }
 
 type RevocationClaim = {

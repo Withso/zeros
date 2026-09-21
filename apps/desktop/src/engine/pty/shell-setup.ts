@@ -283,9 +283,9 @@ const DESKTOP_AUTH_SELECTOR_ENV_NAMES = [
 
 /** The child env for a PTY: truecolor, Apple-Terminal session noise off, and
  *  ZDOTDIR pointed at the Zeros wrapper. When `scrub` is set (an explicitly
- *  untrusted relay surface), the env is rebuilt from the allowlist so NO host
- *  secret can leak. Qualified in-workspace cloud terminals use the full normal
- *  worker env, just like local human terminals. Engine authority is removed in
+ *  remote/cloud surface), the env is rebuilt from the allowlist so host and
+ *  provider credentials are not inherited. Local human terminals retain the
+ *  normal host environment. Engine authority is removed in
  *  both modes. `cwd` scopes the shell's location env to THIS worktree. */
 export function buildPtyEnv(opts?: {
   scrub?: boolean;

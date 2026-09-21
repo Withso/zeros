@@ -3,11 +3,41 @@
 // Public API and database identity use the stable Zeros workspace id. Provider
 // resource ids stay behind this interface and may change on a new generation.
 
+export const CLOUD_WORKSPACE_PROVIDER_NAMES = ["daytona", "boat"] as const;
+export type CloudWorkspaceProviderName =
+  (typeof CLOUD_WORKSPACE_PROVIDER_NAMES)[number];
+
+export function isCloudWorkspaceProviderName(
+  value: unknown,
+): value is CloudWorkspaceProviderName {
+  return value === "daytona" || value === "boat";
+}
+
+/** Fixed image-owned bootstrap commands. Credentials are data in the bounded
+ * environment document, never interpolated into the command. */
+export interface CloudWorkspaceCommandRunner {
+  execute(
+    input: {
+      resourceId: string;
+      command: string;
+      cwd?: string;
+      env?: Readonly<Record<string, string>>;
+      timeoutSeconds: number;
+    },
+    signal: AbortSignal,
+  ): Promise<{
+    exitCode: number;
+    output: string;
+    outputTruncated: boolean;
+  }>;
+}
+
 export type CloudProviderObservedState =
   | "provisioning"
   | "running"
   | "stopping"
   | "stopped"
+  | "paused"
   | "archiving"
   | "archived"
   | "deleting"
@@ -21,6 +51,12 @@ export type CloudProviderResource = {
   target: string | null;
   workspaceId: string;
   generation: number;
+  /** Independent provider evidence that allocated compute has ceased. Storage
+   * archival may still be pending or failed; this never proves durability. */
+  computeStopped?: boolean;
+  /** Provider proves a cold-stopped filesystem is offloaded. It may satisfy
+   * portable archive; preserved VM memory never does. Storage can still bill. */
+  storageOffloaded?: boolean;
   /** Non-secret, bounded operational metadata only. */
   metadata: Readonly<Record<string, string | number | boolean | null>>;
 };
@@ -43,8 +79,11 @@ export type CloudProviderCreateInput = CloudProviderIdentity & {
 export interface CloudWorkspaceProvider {
   readonly name: string;
 
-  /** Find resources by Zeros-owned immutable labels after an unknown create. */
+  /** Find resources using provider labels or durable coordinator ownership. */
   find(identity: CloudProviderIdentity): Promise<CloudProviderResource[]>;
+  /** Providers with finite idempotency windows or hidden asynchronous deletes
+   * must reject absence while an allocation/deletion outcome remains unknown. */
+  verifyAbsence?(identity: CloudProviderIdentity): Promise<boolean>;
   create(input: CloudProviderCreateInput): Promise<CloudProviderResource>;
   inspect(resourceId: string): Promise<CloudProviderResource | null>;
   start(resourceId: string): Promise<CloudProviderResource>;
@@ -56,6 +95,10 @@ export interface CloudWorkspaceProvider {
   delete(resourceId: string): Promise<void>;
   /** Only resources bearing the provider adapter's managed marker. */
   listManaged(): AsyncIterable<CloudProviderResource>;
+  /** Exact durable allocation receipt, independent of mutable provider labels.
+   * Without this proof, unbound inventory is quarantined, never adopted or
+   * deleted by the orphan sweep. Normal bound lifecycle operations are separate. */
+  verifyManagedResourceOwnership?(resource: CloudProviderResource): Promise<boolean>;
 }
 
 export type CloudProviderSshAccess = {
@@ -69,15 +112,73 @@ export type CloudProviderSshAccess = {
 };
 
 export type CloudProviderPreviewEndpoint = {
+  /** Provider-validated HTTPS origin; paths and client query strings are proxied. */
   url: string;
-  headerName: "x-daytona-preview-token";
+  headerName: `x-${string}`;
   /** Coordinator-only credential. It must never be returned to a client. */
   headerValue: string;
 };
 
+export type CloudProviderPreviewAccess = {
+  /** Existing Zeros grant, already authorized by the access coordinator. */
+  grantId: string;
+  credential: string;
+};
+export type CloudProviderEngineEndpoint =
+  | CloudProviderPreviewEndpoint
+  | {
+      url: string;
+      headerName?: never;
+      headerValue?: never;
+    };
+
+/** Provider adapters own the hostname allowlist. This common boundary also
+ * rejects credential-bearing URLs and header/forwarding overrides before any
+ * endpoint can enter the preview proxy cache. */
+export function assertProviderPreviewEndpoint(
+  endpoint: CloudProviderPreviewEndpoint,
+): void {
+  let url: URL;
+  try {
+    url = new URL(endpoint.url);
+  } catch {
+    throw new CloudProviderError(
+      "provider_access_response_invalid",
+      "Provider returned an invalid preview endpoint",
+      false,
+    );
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash ||
+    url.pathname !== "/" ||
+    (url.port !== "" && url.port !== "443") ||
+    !/^x-[a-z0-9][a-z0-9-]{0,95}$/.test(endpoint.headerName) ||
+    endpoint.headerName.startsWith("x-forwarded-") ||
+    ["x-real-ip", "x-zeros-preview-capability"].includes(endpoint.headerName) ||
+    typeof endpoint.headerValue !== "string" ||
+    !/^[\x21-\x7e]{1,4096}$/.test(endpoint.headerValue)
+  ) {
+    throw new CloudProviderError(
+      "provider_access_response_invalid",
+      "Provider returned an invalid preview endpoint",
+      false,
+    );
+  }
+}
+
 /** Optional provider surface used by the access coordinator. Keeping it
  * separate lets lifecycle-only test providers remain intentionally small. */
 export interface CloudWorkspaceAccessProvider {
+  /** Provider routing for the authenticated engine bridge. Credentials, when
+   * needed by an outer provider proxy, remain on the control-plane relay. */
+  getEngineEndpoint?(
+    resourceId: string,
+    port: number,
+  ): Promise<CloudProviderEngineEndpoint>;
   createSshAccess(
     resourceId: string,
     expiresInMinutes: number,
@@ -88,6 +189,7 @@ export interface CloudWorkspaceAccessProvider {
   getPreviewEndpoint(
     resourceId: string,
     port: number,
+    access?: CloudProviderPreviewAccess,
   ): Promise<CloudProviderPreviewEndpoint>;
 }
 
@@ -118,6 +220,19 @@ export function assertProviderResourceIdentity(
       "provider_identity_mismatch",
       "Provider resource identity does not match the requested workspace generation",
       false,
+    );
+  }
+}
+
+export async function assertProviderAbsence(
+  provider: CloudWorkspaceProvider,
+  identity: CloudProviderIdentity,
+): Promise<void> {
+  if (provider.verifyAbsence && !(await provider.verifyAbsence(identity))) {
+    throw new CloudProviderError(
+      "provider_absence_unconfirmed",
+      "An allocation or deletion outcome still requires reconciliation",
+      true,
     );
   }
 }

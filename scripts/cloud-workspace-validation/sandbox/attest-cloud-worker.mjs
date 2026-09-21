@@ -15,12 +15,26 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statfsSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { availableParallelism } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import runtimeLayout from "./runtime-layout.json" with { type: "json" };
+import { effectiveCloudResourceLimits } from "./cgroup-resources.mjs";
+import { cloudAllocationCapacity } from "./cloud-resource-admission.mjs";
+import {
+  cloudImageBuildMatchesInstallation,
+  cloudImageBaseOrigin,
+  readCloudImageNativeInventory,
+} from "./image-build-contract.mjs";
+import {
+  cloudRuntimeProcessSecurityQualified,
+  readCloudHostRuntimeProfile,
+} from "./cloud-runtime-profile.mjs";
 
 const MARKER = "/etc/zeros/cloud-worker.json";
 const BUILD = "/etc/zeros/image-build.json";
@@ -235,7 +249,7 @@ if (process.argv[2] !== LOCKED_ARGUMENT) {
       // headroom that it cannot preempt a valid inner timeout at the boundary.
       timeout: 300_000,
       maxBuffer: MAX_OUTPUT,
-      env: { PATH: "/usr/local/bin:/usr/bin:/bin", HOME: "/root" },
+      env: { PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin", HOME: "/root" },
     },
   );
   rmSync(tokenPath, { force: true });
@@ -293,6 +307,26 @@ try {
   process.exit(1);
 }
 
+const runtimeProfile = readCloudHostRuntimeProfile();
+const isolated = runtimeProfile.version >= 2;
+let originMatches = build.version === 1;
+if (build.version === 2) {
+  try {
+    const origin = cloudImageBaseOrigin(
+      build.baseOrigin?.kind === "native-linux"
+        ? "native-linux"
+        : build.baseOrigin?.reference,
+      build.baseOrigin?.kind === "native-linux"
+        ? readCloudImageNativeInventory()
+        : undefined,
+    );
+    originMatches =
+      origin.baseImage === build.baseImage &&
+      JSON.stringify(origin.baseOrigin) === JSON.stringify(build.baseOrigin);
+  } catch {
+    /* Unverifiable provenance cannot qualify. */
+  }
+}
 const helperTrust = Object.fromEntries(
   Object.entries(marker.toolchain ?? {}).map(([name, file]) => [
     name,
@@ -300,74 +334,124 @@ const helperTrust = Object.fromEntries(
   ]),
 );
 const deploymentTrust = {
+  runtimeProfile: rootControlled(
+    "/opt/zeros-runtime/lib/zeros/cloud-runtime-profile.mjs",
+  ),
+  ...(isolated
+    ? {
+        engineLauncher: rootControlled(
+          "/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs",
+        ),
+        engineView: rootControlled(
+          "/opt/zeros-runtime/lib/zeros/cloud-engine-view.mjs",
+        ),
+        engineCgroup: rootControlled(
+          "/opt/zeros-runtime/lib/zeros/cloud-engine-cgroup.mjs",
+        ),
+        engineNamespace: rootControlled(
+          "/opt/zeros-runtime/cloud-engine-namespace",
+          true,
+        ),
+        engineAppArmor: rootControlled(
+          "/opt/zeros-runtime/lib/zeros/zeros-cloud-engine.apparmor",
+        ),
+        runtimeTree: rootControlledTree("/opt/zeros-runtime"),
+        engineQualification: rootControlled(
+          "/opt/zeros/scripts/cloud-workspace-validation/sandbox/qualify-cloud-engine.mjs",
+        ),
+      }
+    : {}),
+  supervisorRecovery: rootControlled(
+    "/opt/zeros-runtime/lib/zeros/ensure-cloud-worker-supervisor.mjs",
+  ),
+  runtimeLayout:
+    rootControlled("/opt/zeros-runtime/lib/zeros/runtime-layout.json") &&
+    JSON.stringify(build.runtimeLayout) === JSON.stringify(runtimeLayout),
+  resourceInspector: rootControlled(
+    "/opt/zeros-runtime/lib/zeros/cgroup-resources.mjs",
+  ),
+  resourceAdmission: rootControlled(
+    "/opt/zeros-runtime/lib/zeros/cloud-resource-admission.mjs",
+  ),
+  imageContract: rootControlled(
+    "/opt/zeros-runtime/lib/zeros/image-build-contract.mjs",
+  ),
+  setupProcess: rootControlled(
+    "/opt/zeros-runtime/lib/zeros/cloud-setup-process.mjs",
+  ),
+  sourceIntegrity:
+    originMatches &&
+    (build.version === 1 || cloudImageBuildMatchesInstallation(build, ENGINE)),
   marker: rootControlled(MARKER),
   build: rootControlled(BUILD),
   engine: rootControlled(ENGINE, false, true),
   engineTree: rootControlledTree(ENGINE),
-  launcher: rootControlled("/usr/local/bin/start-engine.sh", true),
+  launcher: rootControlled("/opt/zeros-runtime/bin/start-engine.sh", true),
   admissionConsumer: rootControlled(
-    "/usr/local/lib/zeros/consume-cloud-admission.mjs",
+    "/opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs",
     true,
   ),
   previewLinkInstaller: rootControlled(
-    "/usr/local/lib/zeros/install-cloud-preview-links.mjs",
+    "/opt/zeros-runtime/lib/zeros/install-cloud-preview-links.mjs",
     true,
   ),
   githubCredentialInstaller: rootControlled(
-    "/usr/local/lib/zeros/install-cloud-github-credential.mjs",
+    "/opt/zeros-runtime/lib/zeros/install-cloud-github-credential.mjs",
     true,
   ),
   githubRefreshRequestHelper: rootControlled(
-    "/usr/local/lib/zeros/cloud-github-refresh-request.mjs",
+    "/opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs",
     true,
   ),
   gitAskpass: rootControlled(
-    "/usr/local/lib/zeros/cloud-git-askpass.mjs",
+    "/opt/zeros-runtime/lib/zeros/cloud-git-askpass.mjs",
     true,
   ),
   workerSupervisor: rootControlled(
-    "/usr/local/lib/zeros/cloud-worker-supervisor.mjs",
+    "/opt/zeros-runtime/lib/zeros/cloud-worker-supervisor.mjs",
     true,
   ),
   setupHelper: rootControlled(
-    "/usr/local/lib/zeros/setup-cloud-workspace.mjs",
+    "/opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs",
     true,
   ),
   attester: rootControlled(
-    "/usr/local/lib/zeros/attest-cloud-worker.mjs",
+    "/opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs",
     true,
   ),
   admissionDirectory: prepareAdmissionDirectory(),
 };
-const cgroupRelative =
-  readOptional("/proc/self/cgroup")
-    ?.split("\n")
-    .find((line) => line.startsWith("0::"))
-    ?.slice(3) ?? "/";
-const safeCgroupRelative = path
-  .normalize(`/${cgroupRelative}`)
-  .replace(/^\/+/, "");
-const cgroupRoot = path.join("/sys/fs/cgroup", safeCgroupRelative);
-const resources = {
-  memoryMax: readOptional(path.join(cgroupRoot, "memory.max")),
-  cpuMax: readOptional(path.join(cgroupRoot, "cpu.max")),
-  pidsMax: readOptional(path.join(cgroupRoot, "pids.max")),
-};
-const finiteResources =
-  resources.memoryMax !== null &&
-  resources.memoryMax !== "max" &&
-  resources.cpuMax !== null &&
-  !resources.cpuMax.startsWith("max ") &&
-  resources.pidsMax !== null &&
-  resources.pidsMax !== "max";
+let resources = effectiveCloudResourceLimits(
+  readOptional("/proc/self/cgroup"),
+  readOptional,
+);
+let storageBytes = 0;
+try {
+  const fs = statfsSync(runtimeLayout.repository, { bigint: true });
+  const total = fs.blocks * fs.bsize;
+  if (total > 0n && total <= BigInt(Number.MAX_SAFE_INTEGER))
+    storageBytes = Number(total);
+} catch {
+  /* Missing or unmeasurable storage fails admission. */
+}
+const allocation = cloudAllocationCapacity({
+  isolated,
+  membership: readOptional("/proc/self/cgroup"),
+  read: readOptional,
+  architecture: process.arch,
+  availableCPUs: availableParallelism(),
+  storageBytes,
+});
 
 const qualificationResult = run(
-  "/usr/local/bin/node",
-  [
-    path.join(ENGINE, "scripts/zsr-qualification/run.mjs"),
-    "--cloud-worker",
-    "--require-secure",
-  ],
+  marker.toolchain.node,
+  isolated
+    ? ["/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs", "--qualify"]
+    : [
+        path.join(ENGINE, "scripts/zsr-qualification/run.mjs"),
+        "--cloud-worker",
+        "--require-secure",
+      ],
   180_000,
 );
 let qualification = null;
@@ -375,6 +459,23 @@ try {
   qualification = JSON.parse(qualificationResult.stdout);
 } catch {
   // Preserve only bounded infrastructure diagnostics below.
+}
+if (isolated)
+  resources = qualification?.identity?.resources ?? { finite: false };
+const finiteResources = resources.finite === true;
+const setupQualificationResult = isolated
+  ? run(
+      marker.toolchain.node,
+      ["/opt/zeros-runtime/lib/zeros/cloud-setup-process.mjs", "--qualify"],
+      30000,
+    )
+  : null;
+let setupQualification = null;
+try {
+  if (setupQualificationResult)
+    setupQualification = JSON.parse(setupQualificationResult.stdout);
+} catch {
+  /* Fail closed below. */
 }
 
 const status = readFileSync("/proc/self/status", "utf8");
@@ -384,23 +485,31 @@ const report = {
   version: 1,
   profile: marker.profile,
   qualified:
-    marker.version === 1 &&
+    marker.version === runtimeProfile.version &&
     marker.backend === "cloud-worker" &&
     marker.uid === 10001 &&
     marker.gid === 10001 &&
-    build.version === 1 &&
+    [1, 2].includes(build.version) &&
     build.profile === marker.profile &&
     ["x64", "arm64"].includes(process.arch) &&
     Object.values(helperTrust).length === 4 &&
     Object.values(helperTrust).every(Boolean) &&
     Object.values(deploymentTrust).every(Boolean) &&
     finiteResources &&
-    statusField("Seccomp") === "2" &&
+    (!isolated ||
+      (setupQualificationResult.status === 0 &&
+        setupQualification?.secure === true)) &&
+    cloudRuntimeProcessSecurityQualified(
+      runtimeProfile.version,
+      statusField("Seccomp"),
+      qualification?.identity,
+    ) &&
     ["mnt", "pid", "net", "ipc", "uts", "cgroup", "user"].every(
       (name) => namespace(name) !== null,
     ) &&
     containerInitStartTicks() !== null &&
     qualificationResult.status === 0 &&
+    (!isolated || qualification?.identity?.secure === true) &&
     qualification?.secure === true,
   metadata: {
     markerSha256: sha256File(MARKER),
@@ -443,16 +552,18 @@ const report = {
     [
       "/",
       "/opt/zeros",
-      "/workspace/zeros",
-      "/var/lib/zeros",
+      runtimeLayout.repository,
+      runtimeLayout.data,
       "/sys/fs/cgroup",
     ].map((target) => [target, mountFor(target)]),
   ),
   resources: {
     ...resources,
+    allocation,
     finite: finiteResources,
   },
   qualification,
+  setupQualification,
   qualificationError:
     qualificationResult.status === 0
       ? null

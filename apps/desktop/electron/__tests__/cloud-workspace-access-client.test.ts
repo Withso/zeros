@@ -35,6 +35,24 @@ function grant(kind: "ssh" | "tunnel" | "preview", remotePort: number | null) {
 }
 
 describe("CloudWorkspaceAccessClient", () => {
+  it("requests actor v2 with an exact device proof and accepts only its control-plane bridge",async()=>{
+    const proof={deviceId:DEVICE_ID,keyVersion:1,timestampMs:NOW,nonce:"n".repeat(32),signature:"s".repeat(86)};
+    const signEngineAdmission=vi.fn(async()=>proof);
+    const response={version:2,audience:"zeros-cloud-workspace-engine-client-admission-v2",workspaceId:WORKSPACE_ID,
+      organizationId:ORGANIZATION_ID,generation:7,authorityEpoch:11,engineInstanceId:ENGINE_INSTANCE_ID,remotePort:47891,
+      grantToken:`zwa_${"a".repeat(43)}`,expiresAt:new Date(NOW+120000).toISOString(),bridgeUrl:"wss://api.zeros.test/v1/cloud-workspaces/bridge"};
+    const fetchImpl=vi.fn(async()=>json(response,201));
+    const client=new CloudWorkspaceAccessClient({baseUrl:"https://api.zeros.test",fetch:fetchImpl,now:()=>NOW,...{signEngineAdmission}});
+    await expect(client.issueEngineAdmission("account-access-token",{organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID})).resolves.toEqual(response);
+    expect(signEngineAdmission).toHaveBeenCalledWith("account-access-token",{organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID});
+    expect(fetchImpl).toHaveBeenCalledWith(expect.stringContaining("/runtime/admission"),expect.objectContaining({body:JSON.stringify({actorProtocolVersion:2}),
+      headers:expect.objectContaining({"x-zeros-device-id":DEVICE_ID,"x-zeros-device-signature":proof.signature})}));
+    for(const bridgeUrl of ["wss://attacker.test/v1/cloud-workspaces/bridge","ws://api.zeros.test/v1/cloud-workspaces/bridge",response.bridgeUrl+"?token=x"]){
+      fetchImpl.mockResolvedValueOnce(json({...response,bridgeUrl},201));
+      await expect(client.issueEngineAdmission("account-access-token",{organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID})).rejects.toMatchObject({code:"bad_response"});
+    }
+  });
+
   it("issues SSH access with main-owned auth and validates the exact hosted endpoint", async () => {
     const fetchImpl = vi.fn(async () =>
       json(
@@ -267,7 +285,7 @@ describe("CloudWorkspaceAccessClient", () => {
     });
 
     await expect(
-      client.issueEngineAdmission("account-access-token", {
+      client.issueLegacyEngineAdmission("account-access-token", {
         organizationId: ORGANIZATION_ID,
         workspaceId: WORKSPACE_ID,
       }),
@@ -314,7 +332,7 @@ describe("CloudWorkspaceAccessClient", () => {
     });
 
     await expect(
-      client.issueEngineAdmission("account-access-token", {
+      client.issueLegacyEngineAdmission("account-access-token", {
         organizationId: ORGANIZATION_ID,
         workspaceId: WORKSPACE_ID,
       }),

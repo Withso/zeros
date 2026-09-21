@@ -2,20 +2,27 @@
 // workflow. The ordinary reusable operator snapshot is intentionally outside
 // this command's accepted namespace.
 
+import path from "node:path";
+import {fileURLToPath} from "node:url";
+
 import {
   clearSnapshotAttestation,
   loadSnapshotAttestation,
   makeDaytona,
+  snapshotAllocationStore,
+  withCloudValidationMutationLock,
   SNAPSHOT_NAME,
   snapshotAttestationExists,
 } from "./config";
+import {cleanupOwnedSnapshot} from "./lib/snapshot-allocation";
+import {snapshotInventory} from "./lib/snapshot-registration";
 import { validateDeletableQualificationSnapshotName } from "./lib/qualification-gates";
 import {
   runBoundedProviderOperation,
   verifySnapshotNameAbsent,
 } from "./lib/provider-cleanup";
 
-async function main(): Promise<void> {
+export async function deleteEphemeralSnapshot(): Promise<void> {
   if (process.env.ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE !== "1") {
     throw new Error(
       "ephemeral snapshot deletion requires ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE=1",
@@ -23,6 +30,15 @@ async function main(): Promise<void> {
   }
   validateDeletableQualificationSnapshotName(SNAPSHOT_NAME);
   const daytona = makeDaytona();
+  const allocation=snapshotAllocationStore.read();
+  if(allocation){
+    if(allocation.name!==SNAPSHOT_NAME)throw new Error("Snapshot cleanup name differs from its receipt");
+    await cleanupOwnedSnapshot(snapshotInventory(daytona.snapshot),snapshotAllocationStore);
+    clearSnapshotAttestation();
+    console.log("Verified exact snapshot cleanup from its private receipt.");
+    return;
+  }
+  if(!snapshotAttestationExists())throw new Error("No acknowledged snapshot ownership; refusing deletion by name");
   const candidates = [];
   for (let page = 1; page <= 1_000; page++) {
     const result = await daytona.snapshot.list(page, 100);
@@ -34,11 +50,9 @@ async function main(): Promise<void> {
       throw new Error("snapshot inventory exceeded 1000 pages");
   }
   if (candidates.length === 0) {
-    clearSnapshotAttestation();
-    console.log(
-      `\n  ✓ ephemeral snapshot ${SNAPSHOT_NAME} is already absent.\n`,
-    );
-    return;
+    // Old attestations did not record the provider account. An empty list
+    // under a different key cannot prove deletion in the original account.
+    throw new Error("Legacy snapshot absence cannot prove the original provider scope; retain its attestation for reconciliation");
   }
   if (candidates.length !== 1) {
     throw new Error("snapshot inventory contains a duplicate cleanup target");
@@ -47,7 +61,8 @@ async function main(): Promise<void> {
   if (snapshotAttestationExists()) {
     const attestation = loadSnapshotAttestation();
     if (
-      attestation.version !== 1 ||
+      ![1,2].includes(attestation.version) ||
+      (attestation.version===2&&snapshot.sandboxClass!==attestation.sandboxClass) ||
       attestation.snapshotName !== SNAPSHOT_NAME ||
       snapshot.id !== attestation.snapshotId ||
       snapshot.name !== attestation.snapshotName ||
@@ -82,7 +97,8 @@ async function main(): Promise<void> {
   console.log(`\n  ✓ deleted ephemeral snapshot ${SNAPSHOT_NAME}.\n`);
 }
 
-main().catch((error) => {
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1]))
+withCloudValidationMutationLock(deleteEphemeralSnapshot).catch((error) => {
   console.error(
     "\n  ✗ ephemeral snapshot cleanup failed:\n",
     error instanceof Error ? error.message : "unknown failure",

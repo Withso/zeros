@@ -11,9 +11,11 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
+import {lockWorkspaceObjectStorage} from "./storage-lock.js";
+import {authorizeCloudWorkspaceActor} from "./actors.js";
 import {
-  authorizeCloudWorkspaceDataAccess,
   authorizeCloudWorkspaceOperation,
+  lockCloudWorkspaceScope,
 } from "./authorization.js";
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import {
@@ -26,6 +28,7 @@ import {
 } from "./object-store.js";
 import {
   consumeCloudWorkspaceDeviceProof,
+  recheckCloudWorkspaceDevice,
   type CloudWorkspaceDeviceProof,
   WorkspaceReplicaError,
 } from "./replicas.js";
@@ -317,6 +320,9 @@ type ImportAuthority = {
 };
 
 type ExportGrantAuthority = {
+  actor_fingerprint: string | null;
+  single_member_mode: boolean;
+  sharing_mode: "private" | "organization";
   grant_id: string;
   device_id: string;
   device_key_version: string | number;
@@ -354,6 +360,7 @@ async function lockImportAuthority(
     workosEnabled: boolean;
   },
 ): Promise<ImportAuthority> {
+  await lockCloudWorkspaceScope(tx, input);
   const row = (
     await tx.query<ImportAuthority>(
       `SELECT fork.org_id, fork.requested_by,
@@ -387,10 +394,12 @@ async function lockImportAuthority(
     billingOwnerUserId: row.owner_user_id,
     workosEnabled: input.workosEnabled,
     requireWorkspaceOwner: true,
+    organizationLock: "share",
   });
   if (!input.allowedStates.includes(row.state)) {
     throw new WorkspaceForkError("not_ready", "Fork import is not writable");
   }
+  await lockWorkspaceObjectStorage(tx, input.organizationId);
   return row;
 }
 
@@ -405,6 +414,7 @@ async function addReferences(
   },
 ): Promise<void> {
   if (input.blobIds.length < 1) return;
+  await lockWorkspaceObjectStorage(tx, input.organizationId);
   await tx.query(
     `WITH inserted AS (
        INSERT INTO workspace_blob_references (
@@ -445,6 +455,7 @@ async function releaseForkImportStaging(
     workspaceId: string;
   },
 ): Promise<void> {
+  await lockWorkspaceObjectStorage(tx, input.organizationId);
   const removed = await tx.query<{ blob_id: string; org_id: string }>(
     `DELETE FROM workspace_blob_references
      WHERE workspace_id = $1 AND org_id = $2
@@ -1734,6 +1745,7 @@ export class DatabaseCloudWorkspaceForkService {
       await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, [
         `cloud-to-local-fork:${input.organizationId}:${input.accountUserId}:${input.idempotencyKey}`,
       ]);
+      await lockCloudWorkspaceScope(tx, input);
       const workspace = await tx.query<{
         team_id: string;
         owner_user_id: string;
@@ -1750,13 +1762,9 @@ export class DatabaseCloudWorkspaceForkService {
       const row = workspace.rows[0];
       if (!row)
         throw new WorkspaceForkError("not_found", "Cloud workspace not found");
-      await authorizeCloudWorkspaceDataAccess(tx, {
-        organizationId: input.organizationId,
-        teamId: row.team_id,
-        actorUserId: input.accountUserId,
-        ownerUserId: row.owner_user_id,
-        requireWorkspaceOwner: true,
-      });
+      await authorizeCloudWorkspaceActor(tx, {organizationId: input.organizationId,
+        workspaceId: input.workspaceId, actorUserId: input.accountUserId,
+        capability: "read", allowOwnerDataRecovery: true});
       const existing = await tx.query<{
         id: string;
         request_sha256: Buffer;
@@ -1940,6 +1948,8 @@ export class DatabaseCloudWorkspaceForkService {
     secret.fill(0);
     try {
       return await withSystemTx(this.pool, async (tx) => {
+        await lockCloudWorkspaceScope(tx, input);
+        const device = await this.consumeExportDeviceProof(tx, {...input, action: "fork.export.grant", payload});
         const authority = (
           await tx.query<{
             export_id: string;
@@ -1980,31 +1990,9 @@ export class DatabaseCloudWorkspaceForkService {
             "Workspace export is not ready",
           );
         }
-        await authorizeCloudWorkspaceDataAccess(tx, {
-          organizationId: input.organizationId,
-          teamId: authority.team_id,
-          actorUserId: input.accountUserId,
-          ownerUserId: authority.owner_user_id,
-          requireWorkspaceOwner: true,
-        });
-        let device;
-        try {
-          device = await consumeCloudWorkspaceDeviceProof(tx, {
-            accountUserId: input.accountUserId,
-            action: "fork.export.grant",
-            payload,
-            proof: input.proof,
-          });
-        } catch (error) {
-          if (
-            error instanceof WorkspaceReplicaError &&
-            (error.code === "device_proof_rejected" ||
-              error.code === "device_proof_replayed")
-          ) {
-            throw new WorkspaceForkError(error.code, error.message);
-          }
-          throw error;
-        }
+        await authorizeCloudWorkspaceActor(tx, {organizationId: input.organizationId,
+          workspaceId: input.workspaceId, actorUserId: input.accountUserId,
+          capability: "read", allowOwnerDataRecovery: true});
         await tx.query(
           `UPDATE workspace_export_grants
            SET revoked_at = now()
@@ -2015,10 +2003,10 @@ export class DatabaseCloudWorkspaceForkService {
         const inserted = await tx.query<{ expires_at: Date }>(
           `INSERT INTO workspace_export_grants (
              export_id, fork_intent_id, workspace_id, org_id, user_id,
-             device_id, device_key_version, token_sha256, expires_at
+             device_id, device_key_version, token_sha256, expires_at, actor_fingerprint
            ) VALUES (
              $1, $2, $3, $4, $5, $6, $7, $8,
-             least($9::timestamptz, now() + interval '5 minutes')
+             least($9::timestamptz, now() + interval '5 minutes'), cloud_workspace_actor_fingerprint($3,$5)
            ) RETURNING expires_at`,
           [
             authority.export_id,
@@ -2057,6 +2045,23 @@ export class DatabaseCloudWorkspaceForkService {
     }
   }
 
+  private async consumeExportDeviceProof(tx: Tx, input: {
+    accountUserId: string; action: string; payload: unknown; proof: CloudWorkspaceDeviceProof;
+  }, recheckDevice = false) {
+    try {
+      return recheckDevice
+        ? await recheckCloudWorkspaceDevice(tx, {accountUserId: input.accountUserId,
+          deviceId: input.proof.deviceId, keyVersion: input.proof.keyVersion})
+        : await consumeCloudWorkspaceDeviceProof(tx, input);
+    }
+    catch (error) {
+      if (error instanceof WorkspaceReplicaError &&
+          (error.code === "device_proof_rejected" || error.code === "device_proof_replayed"))
+        throw new WorkspaceForkError(error.code, error.message);
+      throw error;
+    }
+  }
+
   private async authorizeExportGrant(
     tx: Tx,
     input: {
@@ -2069,6 +2074,7 @@ export class DatabaseCloudWorkspaceForkService {
       payload: unknown;
       proof: CloudWorkspaceDeviceProof;
     },
+    recheckDevice = false,
   ): Promise<ExportGrantAuthority> {
     if (
       !/^zwe_[A-Za-z0-9_-]{43}$/.test(input.grantToken) ||
@@ -2083,9 +2089,12 @@ export class DatabaseCloudWorkspaceForkService {
       .update(input.grantToken, "utf8")
       .digest();
     try {
+      await lockCloudWorkspaceScope(tx, {...input, workspaceLock: "share"});
+      const device = await this.consumeExportDeviceProof(tx, input, recheckDevice);
       const authority = (
         await tx.query<ExportGrantAuthority>(
-          `SELECT export_grant.id AS grant_id, export_grant.device_id,
+          `SELECT export_grant.id AS grant_id, export_grant.device_id, export_grant.actor_fingerprint,
+                  workspace.single_member_mode, workspace.sharing_mode,
                   export_grant.device_key_version, export.id AS export_id,
                   export.export_blob_id AS export_manifest_blob_id,
                   export_blob.plaintext_sha256 AS export_manifest_sha256,
@@ -2131,7 +2140,7 @@ export class DatabaseCloudWorkspaceForkService {
              AND export.checkpoint_id = fork.source_checkpoint_id
              AND checkpoint.state = 'durable'
              AND workspace.deleted_at IS NULL
-           FOR UPDATE OF export_grant, workspace`,
+           FOR UPDATE OF export_grant`,
           [
             input.forkIntentId,
             input.organizationId,
@@ -2147,31 +2156,13 @@ export class DatabaseCloudWorkspaceForkService {
           "Export grant is invalid",
         );
       }
-      await authorizeCloudWorkspaceDataAccess(tx, {
-        organizationId: input.organizationId,
-        teamId: authority.team_id,
-        actorUserId: input.accountUserId,
-        ownerUserId: authority.owner_user_id,
-        requireWorkspaceOwner: true,
-      });
-      let device;
-      try {
-        device = await consumeCloudWorkspaceDeviceProof(tx, {
-          accountUserId: input.accountUserId,
-          action: input.action,
-          payload: input.payload,
-          proof: input.proof,
-        });
-      } catch (error) {
-        if (
-          error instanceof WorkspaceReplicaError &&
-          (error.code === "device_proof_rejected" ||
-            error.code === "device_proof_replayed")
-        ) {
-          throw new WorkspaceForkError(error.code, error.message);
-        }
-        throw error;
-      }
+      const actor = await authorizeCloudWorkspaceActor(tx, {organizationId: input.organizationId,
+        workspaceId: input.workspaceId, actorUserId: input.accountUserId,
+        capability: "read", allowOwnerDataRecovery: true});
+      const legacyOwner = authority.actor_fingerprint === null && authority.owner_user_id === input.accountUserId &&
+        authority.single_member_mode && authority.sharing_mode === "private";
+      if (authority.actor_fingerprint !== actor.fingerprint && !legacyOwner)
+        throw new WorkspaceForkError("grant_rejected", "Export actor authority changed");
       if (
         device.id !== authority.device_id ||
         Number(device.key_version) !== Number(authority.device_key_version)
@@ -2381,12 +2372,12 @@ export class DatabaseCloudWorkspaceForkService {
       forkIntentId: input.forkIntentId,
       blobId: input.blobId,
     };
-    const authorized = await withSystemTx(this.pool, async (tx) => {
+    const authorize = async (tx: Tx, recheck = false) => {
       const authority = await this.authorizeExportGrant(tx, {
         ...input,
         action: "fork.export.blob.read",
         payload,
-      });
+      }, recheck);
       const result = await tx.query(
         `SELECT 1 FROM workspace_checkpoint_entries entry
          WHERE entry.checkpoint_id = $1
@@ -2410,20 +2401,20 @@ export class DatabaseCloudWorkspaceForkService {
           authority.export_id,
         ],
       );
-      return (result.rowCount ?? 0) === 1;
-    });
-    if (!authorized) {
-      throw new WorkspaceForkError(
-        "not_found",
-        "Workspace export blob not found",
-      );
-    }
+      if ((result.rowCount ?? 0) !== 1)
+        throw new WorkspaceForkError("not_found", "Workspace export blob not found");
+    };
+    await withSystemTx(this.pool, tx => authorize(tx));
+    let bytes: Buffer | undefined;
     try {
-      return await this.blobs.getSystem({
+      bytes = await this.blobs.getSystem({
         blobId: input.blobId,
         organizationId: input.organizationId,
       });
+      await withSystemTx(this.pool, tx => authorize(tx, true));
+      return bytes;
     } catch (error) {
+      bytes?.fill(0);
       if (error instanceof WorkspaceBlobError) {
         throw new WorkspaceForkError(
           "export_unavailable",
@@ -2450,9 +2441,18 @@ async function expireWorkspaceForkIntents(tx: Tx): Promise<number> {
      WHERE state NOT IN ('succeeded', 'failed', 'cancelled')
        AND deadline_at <= now()
      ORDER BY deadline_at, id
-     FOR UPDATE SKIP LOCKED LIMIT 100`,
+     LIMIT 100`,
   );
+  let expired = 0;
   for (const fork of candidates.rows) {
+    const workspaceId = fork.target_cloud_workspace_id ?? fork.source_cloud_workspace_id;
+    if (!workspaceId || !await lockCloudWorkspaceScope(tx, {
+      organizationId: fork.org_id, workspaceId, skipLocked: true,
+    })) continue;
+    const current = await tx.query(`SELECT id FROM workspace_fork_intents
+      WHERE id=$1 AND state NOT IN ('succeeded','failed','cancelled') AND deadline_at<=now()
+      FOR UPDATE SKIP LOCKED`, [fork.id]);
+    if (current.rowCount !== 1) continue;
     if (fork.operation === "local_to_cloud" && fork.target_cloud_workspace_id) {
       await releaseForkImportStaging(tx, {
         forkIntentId: fork.id,
@@ -2513,8 +2513,9 @@ async function expireWorkspaceForkIntents(tx: Tx): Promise<number> {
         targetCloudWorkspaceId: fork.target_cloud_workspace_id,
       },
     );
+    expired += 1;
   }
-  return candidates.rows.length;
+  return expired;
 }
 
 export class CloudWorkspaceForkWorker {
@@ -2674,6 +2675,9 @@ export class CloudWorkspaceForkWorker {
       });
       manifest = uploadedManifest;
       published = await withSystemTx(this.pool, async (tx) => {
+        if (!await lockCloudWorkspaceScope(tx, {
+          organizationId: row.org_id, workspaceId: row.source_cloud_workspace_id,
+        })) return false;
         // Uploading happens outside a database transaction. Serialize the
         // publish point with expiry and lease takeover so an old worker cannot
         // make an already-stale fork available.

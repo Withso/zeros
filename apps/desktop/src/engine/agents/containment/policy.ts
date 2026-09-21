@@ -670,8 +670,10 @@ export async function prepareZsrPolicy(
       : [paths.providerState, paths.scratch],
   );
   const containerSocket = paths.containerState
-    ? path.join(paths.containerState, "podman.sock")
+    ? path.join(paths.scratch, "podman.sock")
     : null;
+  if (containerSocket && Buffer.byteLength(containerSocket) >= 108)
+    throw new Error("cloud container-worker endpoint exceeds Unix socket limits");
   const allowedUnixSockets = await Promise.all(
     [
       ...(options.allowedUnixSockets ?? []),

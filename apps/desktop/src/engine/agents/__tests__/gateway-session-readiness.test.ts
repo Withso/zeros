@@ -1,3 +1,4 @@
+import {randomUUID} from "node:crypto";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -17,6 +18,7 @@ function gateway(
   return new AgentGateway({
     projectRoot: "/tmp/zeros-session-readiness-test",
     executionBoundary,
+    ...(executionBoundary.backend==="cloud-worker"?{cloudAgentExecutionFactory:{prepare:async(input:{workload:import("../containment/types").PreparedBoundary})=>({boundary:input.workload,env:{},authorityId:"a".repeat(64)})}}:{}),
     events: {
       onSessionUpdate: () => {},
       onPermissionRequest: () => {},
@@ -50,6 +52,59 @@ afterEach(async () => {
 });
 
 describe("gateway session readiness", () => {
+  it.each(["newSession", "loadSession"] as const)(
+    "finishes cloud admission before %s can acquire the private container service",
+    async (operation) => {
+      const root = await fixture();
+      const previousWarmSetting = process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
+      process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = "0";
+      let release!: () => void;
+      const attestation = new Promise<void>((resolve) => { release = resolve; });
+      const controls: Array<AdmissionControl | undefined> = [];
+      const base = testExecutionBoundary({ attestation });
+      const executionBoundary: ExecutionBoundary = {
+        ...base,
+        backend: "cloud-worker",
+        prepare: async (request, control) => {
+          controls.push(control);
+          const prepared = await base.prepare(request, control);
+          if (control?.attestation !== "background") await attestation;
+          return prepared;
+        },
+      };
+      const start = vi.fn(async (opts: { executionId?: string }) => ({
+        executionId: opts.executionId!,
+        session: { executionId: opts.executionId!, sessionId: opts.executionId! },
+        initialize: {},
+        providerBinding: { version: 1, providerId: "claude", kind: "native", resumeId: "thread" },
+      }));
+      const adapter = {
+        agentId: "claude", newSession: start, loadSession: start,
+        disposeSession: vi.fn(async () => {}), dispose: vi.fn(async () => {}),
+      } as unknown as AgentAdapter;
+      const gw = gateway(executionBoundary);
+      installAdapter(gw, adapter);
+      const options={cwd:root,conversationId:"conversation",cloudExecution:{delegationId:randomUUID(),model:"qualified-model",source:{kind:"session" as const,actorSessionId:randomUUID()}}};
+      const pending = operation === "newSession"
+        ? gw.newSession("claude", options)
+        : gw.loadSession("claude", { version: 1, providerId: "claude", kind: "native", resumeId: "thread" }, options);
+      try {
+        await vi.waitFor(() => expect(controls).toHaveLength(1));
+        expect(controls[0]).toMatchObject({ attestation: "blocking" });
+        expect(start).not.toHaveBeenCalled();
+        release();
+        await pending;
+        expect(start).toHaveBeenCalledOnce();
+      } finally {
+        release();
+        await pending.catch(() => undefined);
+        await gw.dispose();
+        if (previousWarmSetting === undefined) delete process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
+        else process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = previousWarmSetting;
+      }
+    },
+  );
+
   it("starts the provider while post-install territory revalidation continues", async () => {
     const root = await fixture();
     const previousWarmSetting = process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;

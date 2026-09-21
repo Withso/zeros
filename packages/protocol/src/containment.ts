@@ -28,8 +28,8 @@ export type ExecutionBoundaryState =
   | "revoked"
   | "unavailable";
 
-/** Temporary compatibility differences are explicit and machine-readable.
- * A backend/provider cannot graduate while any restriction remains. */
+/** Compatibility differences are explicit and machine-readable. Full native
+ * provider parity cannot graduate while any restriction remains. */
 export type ExecutionBoundaryRestriction =
   | "additional-directories-disabled"
   | "local-mcp-disabled"
@@ -38,9 +38,23 @@ export type ExecutionBoundaryRestriction =
   | "shadow-git-unavailable"
   | "local-services-unavailable"
   | "container-workflows-unavailable"
+  | "user-mcp-disabled"
+  | "provider-native-extensions-restricted"
+  | "native-session-fork-disabled"
   /** Retained for v1 wire compatibility. Current ZSR sessions use native Git
    * plus a narrow trusted broker for whole-tree integrations. */
   | "additional-repository-git-read-only";
+
+export const CLOUD_CORE_EXECUTION_PROFILE = "zeros-cloud-core-v1" as const;
+export type CloudCoreProvider = "claude" | "cursor" | "codex";
+/** Versioned compatibility manifest, not a tool qualification or authority
+ * grant. Changing these exclusions requires a new core profile. The detailed
+ * native extension exclusions live in the cloud agent-tool contract. */
+export const CLOUD_CORE_PROVIDER_RESTRICTIONS: Readonly<Record<CloudCoreProvider, readonly ExecutionBoundaryRestriction[]>> = {
+  claude: ["additional-directories-disabled", "native-session-fork-disabled", "plugins-disabled", "provider-native-extensions-restricted", "user-mcp-disabled"],
+  cursor: ["additional-directories-disabled", "native-session-fork-disabled", "provider-native-extensions-restricted", "user-mcp-disabled"],
+  codex: ["additional-directories-disabled", "native-session-fork-disabled", "provider-native-extensions-restricted", "user-mcp-disabled"],
+};
 
 export interface ExecutionBoundaryStatus {
   version: typeof EXECUTION_BOUNDARY_STATUS_VERSION;
@@ -58,6 +72,16 @@ export interface ExecutionBoundaryStatus {
   parity: {
     level: "full" | "restricted";
     restrictions: ExecutionBoundaryRestriction[];
+  };
+  /** Installed execution contract minted after private coordinator admission.
+   * This does not certify tools or replace immutable runtime qualification.
+   * Design API admission is distinct from filesystem Design protection. */
+  cloudExecution?: {
+    version: 1;
+    profile: typeof CLOUD_CORE_EXECUTION_PROFILE;
+    runtimeProfile: "zeros-cloud-worker-v3";
+    provider: CloudCoreProvider;
+    designApi: "admitted" | "unavailable";
   };
   /** Session-scoped service façades that were successfully established at
    * admission. Counts and stable categories only: endpoints, socket paths,

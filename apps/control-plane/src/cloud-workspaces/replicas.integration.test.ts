@@ -9,7 +9,9 @@ import {
 
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {withSystemTx} from "../db.js";
 
+import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
 import { runMigrations } from "../migrate.js";
 import { DatabaseCloudWorkspaceContentService } from "./content-record.js";
 import {
@@ -51,6 +53,7 @@ d("cloud workspace receive-only replicas", () => {
   let replicas: DatabaseCloudWorkspaceReplicaService;
   let firstBlobId: string;
   let firstBytes: Buffer;
+  let objectStore: MemoryCloudWorkspaceObjectStore;
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: databaseUrl, max: 8 });
@@ -64,9 +67,10 @@ d("cloud workspace receive-only replicas", () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
     fixture = await seedReadyCloudWorkspace(pool);
+    objectStore = new MemoryCloudWorkspaceObjectStore();
     blobs = new DatabaseCloudWorkspaceBlobService({
       pool,
-      objectStore: new MemoryCloudWorkspaceObjectStore(),
+      objectStore,
       encryptionKeyV1: randomBytes(32).toString("base64url"),
       workosEnabled: false,
     });
@@ -185,6 +189,99 @@ d("cloud workspace receive-only replicas", () => {
       proof: proof(signer, "replica.create", payload),
     });
   }
+
+  it('locks organization before workspace while creating a replica', async () => {
+    const device = await register('Concurrent device');
+    const payload = { organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
+      pathLabel: null, ignorePolicySha256: 'b'.repeat(64), idempotencyKey: `replica-${randomUUID()}` };
+    await assertDatabaseLockOrder(pool,{ parentSql: 'SELECT id FROM organizations WHERE id=$1 FOR UPDATE', parentId: fixture.organizationId,
+      childSql: 'SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE', childId: fixture.workspaceId,
+      parentQuery: /FROM organizations[\s\S]*FOR (?:UPDATE|SHARE)/,
+      action: controlled => new DatabaseCloudWorkspaceReplicaService(controlled, blobs, false).createReplica({ ...payload, accountUserId: fixture.userId, proof: proof(device, 'replica.create', payload) }) });
+  });
+
+  it('locks the device before its grant while reading a replica', async () => {
+    const device = await register('Concurrent device');
+    const created = await createReplica(device, `replica-${randomUUID()}`);
+    const payload = { afterPath: null, limit: 100 };
+    await assertDatabaseLockOrder(pool,{ parentSql: 'SELECT id FROM devices WHERE id=$1 FOR UPDATE', parentId: device.deviceId,
+      childSql: 'SELECT id FROM workspace_replica_grants WHERE replica_id=$1 FOR UPDATE', childId: created.replica.id,
+      parentQuery: /FROM devices[\s\S]*FOR UPDATE/,
+      action: controlled => new DatabaseCloudWorkspaceReplicaService(controlled, blobs, false).readBootstrap({ organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
+        replicaId: created.replica.id, accountUserId: fixture.userId, grantToken: created.grant!.token, ...payload,
+        proof: proof(device, 'replica.bootstrap.read', payload) }) });
+  });
+
+  it('rejects another device replaying a replica creation without rotating the original grant', async () => {
+    const first = await register('First device'), second = await register('Second device');
+    const key = `replica-${randomUUID()}`;
+    const created = await createReplica(first, key);
+    await expect(createReplica(second, key)).rejects.toMatchObject({code: 'idempotency_conflict'});
+    const grants = await pool.query('SELECT device_id FROM workspace_replica_grants WHERE replica_id=$1 AND revoked_at IS NULL', [created.replica.id]);
+    expect(grants.rows).toEqual([{device_id: first.deviceId}]);
+    const payload = {afterPath: null, limit: 100};
+    await expect(replicas.readBootstrap({organizationId: fixture.organizationId, workspaceId: fixture.workspaceId,
+      accountUserId: fixture.userId, replicaId: created.replica.id, grantToken: created.grant!.token, ...payload,
+      proof: proof(first, 'replica.bootstrap.read', payload)})).resolves.toMatchObject({manifestRevision: 1});
+  });
+
+  it.each([false,true])('does not revive an owner replica grant after restoring team membership (legacy=%s)', async legacy => {
+    const device=await register('Team-bound device');
+    const created=await createReplica(device,`replica-${randomUUID()}`);
+    if(legacy) await pool.query('UPDATE workspace_replica_grants SET actor_fingerprint=NULL WHERE replica_id=$1',[created.replica.id]);
+    await withSystemTx(pool,async tx=>{
+      await tx.query('DELETE FROM team_members WHERE team_id=$1 AND user_id=$2',[fixture.teamId,fixture.userId]);
+      await tx.query('INSERT INTO team_members(team_id,org_id,user_id) VALUES ($1,$2,$3)',[fixture.teamId,fixture.organizationId,fixture.userId]);
+    });
+    const payload={afterPath:null,limit:100};
+    await expect(replicas.readBootstrap({organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,
+      accountUserId:fixture.userId,replicaId:created.replica.id,grantToken:created.grant!.token,...payload,
+      proof:proof(device,'replica.bootstrap.read',payload)})).rejects.toMatchObject({code:'grant_rejected'});
+  });
+
+  it('binds guest replica access to the exact grant, including revoke and reinvite', async () => {
+    const guest = await seedReadyCloudWorkspace(pool);
+    await pool.query("UPDATE cloud_workspaces SET single_member_mode=false,sharing_mode='organization' WHERE id=$1", [fixture.workspaceId]);
+    const grantId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+      VALUES ($1,$2,$3,$4,'developer',now()+interval '1 day')`, [grantId,fixture.workspaceId,fixture.organizationId,guest.userId]);
+    // Device helpers now sign as the invited guest; the workspace's persisted
+    // owner and billing epoch remain the original sponsor.
+    fixture = {...fixture, userId: guest.userId};
+    const device = await register('Guest device');
+    const created = await createReplica(device, `replica-${randomUUID()}`);
+    const read = () => {const payload={afterPath:null,limit:100};return replicas.readBootstrap({
+      organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,accountUserId:guest.userId,
+      replicaId:created.replica.id,grantToken:created.grant!.token,...payload,proof:proof(device,'replica.bootstrap.read',payload)});};
+    await expect(read()).resolves.toMatchObject({manifestRevision:1});
+    await pool.query('UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE id=$1',[grantId]);
+    await expect(read()).rejects.toBeDefined();
+    await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+      VALUES ($1,$2,$3,$4,'developer',now()+interval '1 day')`, [randomUUID(),fixture.workspaceId,fixture.organizationId,guest.userId]);
+    await expect(read()).rejects.toMatchObject({code:'grant_rejected'});
+  });
+
+  it('does not hold device locks during a slow download and rejects revocation before releasing bytes', async () => {
+    const device=await register('Download device'),created=await createReplica(device,`replica-${randomUUID()}`);
+    let started!:()=>void,resume!:()=>void;
+    const downloading=new Promise<void>(resolve=>{started=resolve;});
+    const released=new Promise<void>(resolve=>{resume=resolve;});
+    const get=objectStore.get.bind(objectStore);
+    objectStore.get=async key=>{started();await released;return get(key);};
+    const payload={blobId:firstBlobId};
+    const reading=replicas.readBlob({organizationId:fixture.organizationId,workspaceId:fixture.workspaceId,
+      accountUserId:fixture.userId,replicaId:created.replica.id,grantToken:created.grant!.token,...payload,
+      proof:proof(device,'replica.blob.read',payload)});
+    const settled=Promise.allSettled([reading]);
+    try{
+      await downloading;
+      await withSystemTx(pool,async tx=>{
+        await tx.query("SET LOCAL lock_timeout='250ms'");
+        await tx.query("UPDATE devices SET trust_state='revoked',revoked_at=now() WHERE id=$1",[device.deviceId]);
+      });
+    }finally{resume();await settled;}
+    await expect(reading).rejects.toBeDefined();
+  });
 
   it("bootstraps, catches up, and pauses one device without affecting another", async () => {
     const deviceA = await register("Mac A");

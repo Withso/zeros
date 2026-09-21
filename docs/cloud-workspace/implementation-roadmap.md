@@ -6,11 +6,12 @@ and database tests exist.
 
 ## Scope and release boundary
 
-Phases 0–5 cover the single-owner cloud-workspace foundation for Organization
-tenants. Personal workspaces remain device-local. This execution deliberately
-excludes cloud creation, catalog, details, onboarding, and management UI wiring.
-It also excludes Organization multiplayer, presence, active ownership transfer,
-mobile clients, and collaborative source or Design editing.
+Phases 0–5 below record the earlier single-owner foundation. The current eight-step
+backend milestone includes individually funded Pro accounts, organization-shared
+workspaces and exact-workspace guests, with a staff-only pilot. Personal remains
+device-local. Desktop cloud creation/catalog/onboarding/management UI, native
+mobile clients, active ownership transfer and collaborative text editing remain
+separate deliveries. Current rules are in the [product contract](product-contract.md).
 
 Local-to-cloud and cloud-to-local are immutable copy/fork operations:
 
@@ -22,8 +23,46 @@ Local-to-cloud and cloud-to-local are immutable copy/fork operations:
 - continuous local sync is a receive-only per-user/per-device replica whose
   source of truth remains cloud.
 
-The repository foundations through Phase 5 are implemented. Production release
-remains blocked on the external qualifications listed below, and both
+The numbered Phase 0–5 sections below describe the earlier repository foundation.
+They do not represent completion of the current eight-step provider/runtime
+implementation. The current order is:
+
+1. Reconcile product, client, command, security and recovery contracts.
+2. Implement the portable provider registry and versioned connections.
+3. Qualify secure Linux execution and managed Boat provisioning/lifecycle.
+4. Complete native engine tools and one Code/Design conversation over the API.
+5. Complete durable commands, decisions and live streams across devices.
+6. Qualify all declared durable state through allocation loss and fresh restore.
+7. Run the same complete matrix using a customer Daytona connection.
+8. Qualify internal admission, spend enforcement, operations, cleanup, load and release.
+
+The current milestone serves standing Zeros `platform_owner` and `developer`
+roles only. Customer billing integration is deferred; operator-funded finite
+allowances and the existing tenant/entitlement/compute safety boundaries remain.
+Staff-only cloud admission and revocation need explicit server-side verification,
+independently of the existing organization-creation gate.
+
+Qualify the hosted control plane against PlanetScale Postgres before closing
+steps 5, 6 and 8. Preserve the existing workspace/provider/client contracts.
+Use separate Alpha and Beta clusters for normal use and disposable database
+branches for destructive integration suites. A temporary production-equivalent
+HA target must prove failover and capacity; a small single-node Beta only proves
+the behavior exercised there. The [database qualification plan](database-qualification.md)
+defines this deployment work without claiming the migration has happened.
+
+The registry, runtime, transport, persistence, managed credit ledger and operations
+workers have local regression coverage. Boat has live headless evidence for
+native agents, Code/Design, human access, concurrent devices, fresh-generation
+checkpoint recovery, interrupted-command fencing and funded compute shutdown.
+That evidence uses a qualification identity issuer and repository broker. It
+does not qualify production identity, deployment, disaster recovery or every
+feature exposed by a compute vendor. The current capability and release matrix
+is in [qualification status](qualification-status.md).
+
+Daytona's tested container host rejects the nested worker namespace required by
+the shared runtime. Its complete matrix remains blocked until a compatible host
+is available. Unconfirmed provider deletion, production agent-account admission,
+and deployment/backup/load qualification also remain open. Both
 `CLOUD_WORKSPACES_ENABLED` and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
 remain false until they pass.
 
@@ -66,9 +105,9 @@ and 0053–0062, plus their control-plane services and tests.
   append-only change records. Neither enables a cloud feature gate.
 - Personal is permanently device-local and is rejected as a cloud-workspace
   owner by both authorization and database constraints.
-- A Pro Organization supports at most five collaborators and requires every
-  collaborator to have current Pro. Business and Enterprise require active
-  seats within the purchased limit.
+- Pro admission belongs to each participating account, across organizations.
+  Unrelated members do not share a subscription or disable one another. Business
+  and Enterprise require active seats within the purchased limit.
 - Every paid operation binds current account, Organization, membership,
   entitlement, owner, provider-connection version, generation, and authority
   revisions. Revocation stops new work and queues runtime retirement.
@@ -91,7 +130,8 @@ their safe data model now does not enable those workflows.
 
 ## Phase 2 — Secure cloud execution and access
 
-Repository status: implementation complete; live qualification open.
+Repository status: implementation complete for the declared runtime; Boat has
+live evidence and Daytona's runtime qualification is blocked by host capability.
 
 - Creation records immutable generation inputs and a leased setup run before
   provider dispatch.
@@ -108,7 +148,9 @@ Repository status: implementation complete; live qualification open.
   generation, resource limits, and engine readiness.
 - The engine registers and heartbeats with a verifier-only lease. Runtime
   admission is account/workspace/generation bound and stale generations fail
-  closed.
+  closed. An expired engine lease cannot revive through a late heartbeat. A lost
+  ready engine causes an audited compute Stop, preserves the last durable
+  checkpoint, and never triggers automatic prompt replay.
 - Stop, wake, archive, delete, drain-first generation replacement, candidate
   rollback, provider inspection, unknown-result reconciliation, and durable
   cleanup queues are implemented.
@@ -230,6 +272,15 @@ release approval open.
 - Health and reconciliation cover provider drift, stale setup/lifecycle work,
   access revocation, paid-authority checks, checkpoints, object maintenance,
   outbox delivery, forks, replicas, retention, and deletion.
+- Managed Boat compute is funded through explicit period grants, atomic credit
+  reservations, finite provider leases, cumulative metering, settlement and
+  bounded checkpoint/Stop. Entitlement does not mint credits. Customer Daytona
+  billing remains with the customer provider account. See
+  [compute credits](compute-credits.md).
+- Drift checks resolve each generation's provider independently of the managed
+  default. Leased scheduling and bounded error backoff prevent one failing
+  allocation from monopolizing checks or a stale observer from committing over
+  its successor.
 - PostgreSQL, identity/JWKS, provider, object store, encryption keys, and
   public/private endpoints are configuration boundaries. The hosted object
   adapter can use a private Railway volume; alternate/customer stores implement

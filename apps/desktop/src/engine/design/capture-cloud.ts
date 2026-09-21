@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { lstatSync } from "node:fs";
 import path from "node:path";
+import { isCloudDeploymentOwner } from "../agents/containment/cloud-deployment-authority.mjs";
 import {
   DESIGN_CAPTURE_PNG_BYTES,
   DESIGN_CAPTURE_TIMEOUT_MS,
@@ -18,7 +19,12 @@ const CAPTURE_UID = 10002;
 function rootControlled(file: string): boolean {
   for (let current = file; ; current = path.dirname(current)) {
     const info = lstatSync(current, { throwIfNoEntry: false });
-    if (!info || info.isSymbolicLink() || info.uid !== 0 || info.mode & 0o022)
+    if (
+      !info ||
+      info.isSymbolicLink() ||
+      !isCloudDeploymentOwner(current, info.uid) ||
+      info.mode & 0o022
+    )
       return false;
     if (current === "/") return true;
   }
@@ -48,7 +54,7 @@ export function createCloudDesignCaptureHost(): DesignCaptureHost {
           env: {
             PATH: "/usr/local/bin:/usr/bin:/bin",
             LANG: "C.UTF-8",
-            HOME: "/home/zeros-capture",
+            HOME: "/srv/zeros/home/capture",
             PLAYWRIGHT_BROWSERS_PATH: BROWSERS,
           },
         },

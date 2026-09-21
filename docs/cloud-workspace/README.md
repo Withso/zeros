@@ -5,11 +5,13 @@ It describes the product contract, target boundaries, security model, operating
 requirements, and implementation sequence without depending on a particular
 sandbox vendor.
 
-Cloud workspaces are **pre-production** in this repository. The non-UI
-foundations through Phase 5 are implemented behind release gates:
+Cloud workspaces are **pre-production** in this repository. The original non-UI
+foundation roadmap through Phase 5 is implemented behind release gates. The
+provider and multi-device expansion described in the client/runtime contract
+has separate implementation and qualification work remaining:
 
 - WorkOS proves account and Organization identity. Zeros remains authoritative
-  for Personal Pro eligibility, Pro Organization collaborator limits,
+  for Personal's local-only boundary, individual Pro account authority,
   Business/Enterprise seats, Team and repository scope, workspace ownership,
   billing epochs, quotas, and every paid-runtime admission.
 - The control plane owns immutable workspace/generation identity, idempotent
@@ -31,25 +33,40 @@ foundations through Phase 5 are implemented behind release gates:
   do not enter renderer state.
 
 `CLOUD_WORKSPACES_ENABLED` and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
-remain `false` until the exact Daytona image, lifecycle/rollback/delete paths,
+remain `false` until the exact images for each enabled provider, lifecycle/rollback/delete paths,
 root-coordinator exception, and signed macOS SSH/preview/tunnel flow have passed
 their protected qualification. Repository tests are not substitutes for that
 evidence.
 
 End-user cloud creation/catalog/details UI is deliberately not wired yet.
-Organization multiplayer, presence, ownership transfer execution, mobile apps,
-and a published customer-managed Railway template are later work. Documents in
+Organization sharing and individually entitled external collaborators have backend contracts and regression coverage; deployed qualification remains open. Presence UI, ownership transfer execution, mobile apps, and a published customer-managed Railway template are later work. Documents in
 this folder distinguish implemented repository behavior from release
 qualification and deferred product surfaces.
 
 ## Documents
 
+- [Agent authentication and language tools](agent-authentication-and-language-tools.md) defines personal consent, native subscription renewal and bounded language services.
+
+- [Qualification status](qualification-status.md) separates the current eight
+  backend steps, native tool coverage, live evidence and remaining release gates.
+- [Managed compute credits](compute-credits.md) defines explicit grants,
+  reservations, finite provider leases, settlement and operator rollout.
+- [Database qualification](database-qualification.md) defines the selected
+  PlanetScale Postgres target, migration prerequisites and recovery acceptance.
 - [Product contract](product-contract.md) defines what users may rely on.
 - [Architecture](architecture.md) defines runtime and repository ownership.
+- [Provider contract](provider-contract.md) defines generation-bound selection,
+  operation evidence, asynchronous deletion and the current integration gates.
+- [Client and runtime contract](client-runtime-contract.md) defines the backend
+  expansion for independent provider connections, shared Code/Design sessions,
+  live access from multiple devices, and complete recovery. Its acceptance
+  requirements are not claims of completed implementation or qualification.
 - [Data, copies, and local sync](data-and-sync.md)
   defines sources of truth, recovery, conflict rules, Personal/Organization
   placement, repository settings, immutable forks, per-device replicas, SSH,
   forwarded ports, and the target data model.
+- [Native checkpoint recovery](checkpoint-native-format.md) defines chunked Git,
+  harness, Design and attachment recovery, its bounds and format compatibility.
 - [Security](security.md) defines trust boundaries and release blockers.
 - [Root coordinator exception review](root-coordinator-threat-model.md)
   records the unresolved privileged-engine decision and required evidence.

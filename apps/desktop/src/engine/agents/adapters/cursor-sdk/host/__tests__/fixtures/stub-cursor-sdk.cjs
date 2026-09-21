@@ -57,8 +57,15 @@ function lifecycleAgent(agentId) {
   return { agentId, close() { closed = true; }, getUsage: async () => ({ closed }) };
 }
 
+async function cloudFixture(opts){
+  const response=await opts.local.customTools.workspace.execute({request:{operation:"read",path:"README.md"}},{toolCallId:"native-call"});
+  return {agentId:JSON.stringify({tools:opts.tools,settingSources:opts.local.settingSources,customToolNames:Object.keys(opts.local.customTools),
+    dirs:opts.local.dirs,agents:opts.agents,response})};
+}
+
 const Agent = {
   create: async (opts) => {
+    if(opts.cloudFixture)return cloudFixture(opts);
     if (opts.handleFixture) return lifecycleAgent("same-conversation");
     if (process.env.ZEROS_CURSOR_STUB_REPORT_SCAN_TTL === "1") {
       return { agentId: `scanTtl:${configuredScanTtlMs}` };
@@ -104,7 +111,7 @@ const Agent = {
       agentId: `create:${describe(opts && opts.local && opts.local.store)}`,
     };
   },
-  resume: async (_agentId, opts) => opts.handleFixture ? lifecycleAgent(_agentId) : ({
+  resume: async (_agentId, opts) => opts.cloudFixture ? cloudFixture(opts) : opts.handleFixture ? lifecycleAgent(_agentId) : ({
     agentId: `resume:${describe(opts && opts.local && opts.local.store)}`,
   }),
   list: async (opts) => ({

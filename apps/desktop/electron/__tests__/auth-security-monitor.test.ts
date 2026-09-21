@@ -17,6 +17,17 @@ function stream(chunks: string[]): ReadableStream<Uint8Array> {
 }
 
 describe("desktop WorkOS security lifecycle", () => {
+  it("invalidates discovery after a truncated reconnect snapshot even with an unchanged prefix",async()=>{
+    let cursor=1;
+    const emit=vi.fn(),monitor=new WorkOSDesktopSecurityMonitor({baseUrl:"https://api.example.test",connectStreams:false,
+      getSession:async()=>({provider:"workos",accessToken:"test-access",accountId:"account",sessionId:"session"}),clearSession:()=>false,emit,
+      fetch:async()=>Response.json({account:{id:"account",status:"active",revision:1},session:{id:"session",status:"active"},organizations:[],
+        workspaces:[{id:"workspace",organizationId:"org",role:"viewer",accessRevision:1}],workspacesTruncated:true,cursor})});
+    expect(await monitor.revalidate("launch",true)).toBe("active");cursor=2;
+    expect(await monitor.revalidate("reconnect",true)).toBe("active");
+    expect(emit).toHaveBeenCalledWith("auth-security-event",expect.objectContaining({kind:"snapshot.changed"}));
+    await monitor.stop();
+  });
   it("parses bounded SSE frames across arbitrary transport chunks", async () => {
     const frames: Array<{ event: string; id: string | null; data: string }> = [];
     await consumeSecurityEventStream(

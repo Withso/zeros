@@ -9,7 +9,10 @@ import {
   requireOrganizationMembership,
   requireOrganizationRole,
 } from "../authz.js";
-import type { CloudWorkspaceBackendConfig } from "../config.js";
+import type {
+  CloudWorkspaceBackendConfig,
+  CloudWorkspaceProvisioningProfile,
+} from "../config.js";
 import { withSystemTx, withUserTx, type Tx } from "../db.js";
 import { rateLimit } from "../ratelimit.js";
 import type {
@@ -44,12 +47,20 @@ import type {
   CloudWorkspaceRepositoryResolver,
 } from "./github-repositories.js";
 import { createCloudWorkspaceManagementRoutes } from "./management-routes.js";
+import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
+import {DatabaseComputeUserFunding} from "./compute-funding.js";
+import { authorizeCloudWorkspaceCleanup, authorizeCloudWorkspaceActor, DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
+import type { CloudWorkspaceProviderName } from "./provider.js";
 import type { DaytonaProviderConnectionQualifier } from "./provider-qualification.js";
 import {
   ensureHostedCloudProviderConnection,
   loadGenerationCloudProviderConnection,
   selectCloudProviderConnectionForNewGeneration,
 } from "./provider-connections.js";
+import {
+  configuredCloudWorkspaceProviders,
+  cloudWorkspaceProvisioningProfile,
+} from "./provisioning-profile.js";
 import { refreshCloudWorkspaceBillingEpoch } from "./paid-authority.js";
 import {
   retireCloudWorkspaceRuntimeAccess,
@@ -142,6 +153,7 @@ const CreateWorkspaceSchema = z
 
 const GenerationTransitionSchema = z.discriminatedUnion("operation", [
   z.object({ operation: z.literal("upgrade") }).strict(),
+  z.object({ operation: z.literal("recover"), sourceGeneration: z.number().int().positive(), checkpointId: z.string().uuid() }).strict(),
   z
     .object({
       operation: z.literal("rollback"),
@@ -174,7 +186,7 @@ const PreviewAccessSchema = z
     expiresInMinutes: AccessTtlSchema,
   })
   .strict();
-const EngineClientAdmissionSchema = z.object({}).strict();
+const EngineClientAdmissionSchema = z.object({actorProtocolVersion:z.literal(2).optional()}).strict();
 const ForkEntrySchema = z.discriminatedUnion("operation", [
   z
     .object({
@@ -230,7 +242,7 @@ const CloudToLocalForkSchema = z
 const DeviceRegistrationSchema = z
   .object({
     label: z.string().trim().min(1).max(120),
-    platform: z.enum(["macos", "windows", "linux"]),
+    platform: z.enum(["macos", "windows", "linux", "ios", "ipados", "android", "web"]),
     publicKey: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   })
   .strict();
@@ -260,6 +272,9 @@ const ReplicaReceiptSchema = z
   .strict();
 
 type LifecycleOperation = "stop" | "wake" | "archive" | "delete";
+const DeleteWorkspaceSchema = z.object({
+  discardUncheckpointed: z.boolean().default(false),
+}).strict();
 
 async function ensureWorkspaceDeletionJob(
   tx: Tx,
@@ -313,6 +328,8 @@ type WorkspaceRow = {
   team_id: string;
   created_by: string;
   owner_user_id: string;
+  sharing_mode: "private" | "organization";
+  access_revision: string | number;
   display_name: string;
   repository_forge: string;
   repository_owner: string;
@@ -344,6 +361,7 @@ type WorkspaceRow = {
 
 type IntentRow = {
   id: string;
+  requested_by: string | null;
   workspace_id: string;
   operation: "create" | LifecycleOperation;
   request_sha256: Buffer;
@@ -355,7 +373,7 @@ type IntentRow = {
 
 type GenerationTransitionRow = {
   id: string;
-  operation: "upgrade" | "rollback";
+  operation: "upgrade" | "rollback" | "recover";
   source_generation: number;
   template_generation: number;
   candidate_generation: number;
@@ -395,7 +413,7 @@ const WORKSPACE_SELECT = `
          cw.repository_revision, cw.status, cw.desired_state,
          cw.current_generation, cw.version, cw.last_error_code,
          cw.last_error_message, cw.last_observed_at, cw.created_at,
-         cw.updated_at, cw.deleted_at, cw.repository_id,
+         cw.updated_at, cw.deleted_at, cw.repository_id, cw.sharing_mode, cw.access_revision,
          g.provider, g.provider_connection_id, g.image_ref,
          g.architecture, g.cpu_millicores, g.memory_mib, g.storage_mib,
          g.source_commit, pb.observed_state, pb.provider_target,
@@ -452,6 +470,8 @@ function workspaceDocument(row: WorkspaceRow) {
     teamId: row.team_id,
     createdBy: row.created_by,
     ownerUserId: row.owner_user_id,
+    sharingMode: row.sharing_mode,
+    accessRevision: Number(row.access_revision),
     name: row.display_name,
     placement: "cloud" as const,
     status: row.status,
@@ -566,6 +586,18 @@ function sameDigest(left: Buffer, right: Buffer): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+async function loadWorkspaceRow(tx:Tx,orgId:string,workspaceId:string,lock=false):Promise<WorkspaceRow>{
+  const result = await tx.query<WorkspaceRow>(
+    `${WORKSPACE_SELECT}
+     WHERE cw.org_id = $1 AND cw.id = $2
+     ${lock ? "FOR UPDATE OF cw" : ""}`,
+    [orgId, workspaceId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new HttpError(404, "not_found", "Cloud workspace not found");
+  return row;
+}
+
 async function loadWorkspace(
   tx: Tx,
   orgId: string,
@@ -573,24 +605,15 @@ async function loadWorkspace(
   userId: string,
   options: { lock?: boolean; ownerOnly?: boolean } = {},
 ): Promise<WorkspaceRow> {
-  await requireOrganizationMembership(tx, orgId, userId);
-  const result = await tx.query<WorkspaceRow>(
-    `${WORKSPACE_SELECT}
-     JOIN team_members actor_team
-       ON actor_team.team_id = cw.team_id
-      AND actor_team.org_id = cw.org_id
-      AND actor_team.user_id = $3
-     WHERE cw.org_id = $1 AND cw.id = $2
-     ${
-       options.ownerOnly
-         ? "AND cw.owner_user_id = $3 AND cw.single_member_mode"
-         : ""
-     }
-     ${options.lock ? "FOR UPDATE OF cw" : ""}`,
-    [orgId, workspaceId, userId],
-  );
-  const row = result.rows[0];
-  if (!row) throw new HttpError(404, "not_found", "Cloud workspace not found");
+  const row=await loadWorkspaceRow(tx,orgId,workspaceId,options.lock);
+  if (row.owner_user_id===userId) {
+    await authorizeCloudWorkspaceDataAccess(tx,{organizationId:orgId,teamId:row.team_id,
+      actorUserId:userId,ownerUserId:row.owner_user_id,requireWorkspaceOwner:true});
+  } else {
+    if(options.ownerOnly)throw new HttpError(404,"not_found","Cloud workspace not found");
+    try { await authorizeCloudWorkspaceActor(tx,{workspaceId,organizationId:orgId,actorUserId:userId,capability:"read"}); }
+    catch(error) { if(error instanceof HttpError)throw new HttpError(404,"not_found","Cloud workspace not found");throw error; }
+  }
   return row;
 }
 
@@ -600,7 +623,7 @@ async function loadIntentByKey(
   key: string,
 ): Promise<IntentRow | null> {
   const result = await tx.query<IntentRow>(
-    `SELECT id, workspace_id, operation, request_sha256, state,
+    `SELECT id, workspace_id, requested_by, operation, request_sha256, state,
             attempt_count, created_at, updated_at
      FROM cloud_workspace_lifecycle_intents
      WHERE org_id = $1 AND idempotency_key = $2`,
@@ -631,7 +654,9 @@ function assertIdempotencyMatch(
   existing: IntentRow,
   expectedWorkspaceId: string | null,
   digest: Buffer,
+  actorUserId: string,
 ): void {
+  if(existing.requested_by!==actorUserId)throw new HttpError(404,"not_found","Cloud workspace request not found");
   if (
     (expectedWorkspaceId !== null &&
       existing.workspace_id !== expectedWorkspaceId) ||
@@ -926,7 +951,10 @@ async function loadUsage(tx: Tx, orgId: string): Promise<UsageRow> {
 function assertCreateQuota(
   quota: QuotaRow,
   usage: UsageRow,
-  config: CloudWorkspaceBackendConfig,
+  config: Pick<
+    CloudWorkspaceProvisioningProfile,
+    "cpuMillicores" | "memoryMiB" | "storageMiB"
+  >,
 ): void {
   const exceeded =
     Number(usage.workspaces) + 1 > quota.max_workspaces ||
@@ -1084,6 +1112,17 @@ export function createCloudWorkspaceRoutes(
   const engineClientAdmissionService =
     options.engineClientAdmissionService ?? null;
   const base = "/v1/organizations/:organization/cloud-workspaces";
+  app.get('/v1/cloud-compute-credits',async c=>{
+    c.header('Cache-Control','no-store');
+    return c.json({currency:'USD',unit:'micro_usd',scope:'user',periods:await new DatabaseComputeUserFunding(pool).balanceForUser(c.get('user').id)});
+  });
+  app.get('/v1/organizations/:organization/cloud-compute-credits',async c=>{
+    if(!config)throw new HttpError(503,'cloud_workspaces_not_configured','Cloud workspaces are not configured');
+    c.header('Cache-Control','no-store');
+    const periods=await new DatabaseManagedComputeCreditLedger({pool,workosEnabled:options.workosEnabled===true}).balanceForUser({
+      organizationId:uuidParam(c.req.param('organization')),userId:c.get('user').id});
+    return c.json({currency:'USD',unit:'micro_usd',periods});
+  });
 
   app.use(
     `${base}/:workspace/access/*`,
@@ -1192,9 +1231,9 @@ export function createCloudWorkspaceRoutes(
     );
   });
 
-  app.get(base, async (c) => {
+  const listWorkspaces = async (c: Context, orgId: string | null) => {
     const user = c.get("user");
-    const orgId = uuidParam(c.req.param("organization"));
+    c.header("Cache-Control","no-store");
     const cursor = decodeCursor(c.req.query("cursor"));
     const limitRaw = c.req.query("limit") ?? "50";
     if (!/^[1-9][0-9]{0,2}$/.test(limitRaw)) {
@@ -1206,8 +1245,8 @@ export function createCloudWorkspaceRoutes(
     }
     const includeDeleted = c.req.query("includeDeleted") === "true";
 
-    const rows = await withUserTx(pool, user.id, async (tx) => {
-      await requireOrganizationMembership(tx, orgId, user.id);
+    const rows = await withSystemTx(pool, async (tx) => {
+      if(orgId!==null)await requireOrganizationMembership(tx, orgId, user.id);
       const parameters: unknown[] = [orgId, user.id, limit + 1];
       let cursorSql = "";
       if (cursor) {
@@ -1217,13 +1256,17 @@ export function createCloudWorkspaceRoutes(
       return (
         await tx.query<WorkspaceRow>(
           `${WORKSPACE_SELECT}
-           JOIN team_members actor_team
-             ON actor_team.team_id = cw.team_id
-            AND actor_team.org_id = cw.org_id
-            AND actor_team.user_id = $2
-           WHERE cw.org_id = $1
-             AND cw.owner_user_id = $2
-             AND cw.single_member_mode
+           WHERE ($1::uuid IS NULL OR cw.org_id = $1)
+             AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
+               OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
+             AND (cloud_workspace_actor_role(cw.id,$2) IS NOT NULL OR (
+               cw.owner_user_id=$2
+               AND EXISTS (SELECT 1 FROM organizations org JOIN organization_members member ON member.org_id=org.id
+                 JOIN users account ON account.id=member.user_id
+                 WHERE org.id=cw.org_id AND member.user_id=$2 AND org.deleted_at IS NULL AND NOT org.is_personal
+                   AND account.auth_status='active' AND account.deleted_at IS NULL)
+               AND EXISTS (SELECT 1 FROM teams team JOIN team_members member ON member.team_id=team.id AND member.org_id=team.org_id
+                 WHERE team.id=cw.team_id AND team.org_id=cw.org_id AND team.deleted_at IS NULL AND member.user_id=$2)))
              ${includeDeleted ? "" : "AND cw.status <> 'deleted'"}
              ${cursorSql}
            ORDER BY cw.created_at DESC, cw.id DESC
@@ -1238,14 +1281,29 @@ export function createCloudWorkspaceRoutes(
       workspaces: page.map(workspaceDocument),
       nextCursor: hasMore ? encodeCursor(page[page.length - 1]!) : null,
     });
+  };
+  app.get(base,c=>listWorkspaces(c,uuidParam(c.req.param("organization"))));
+  app.get("/v1/cloud-workspaces",c=>listWorkspaces(c,null));
+  app.get("/v1/cloud-workspaces/:workspace",async c=>{
+    c.header("Cache-Control","no-store");
+    const workspaceId=uuidParam(c.req.param("workspace")),userId=c.get("user").id;
+    const result=await withSystemTx(pool,async tx=>{
+      const scope=(await tx.query<{org_id:string}>("SELECT org_id FROM cloud_workspaces WHERE id=$1",[workspaceId])).rows[0];
+      if(!scope)throw new HttpError(404,"not_found","Cloud workspace not found");
+      const row=await loadWorkspace(tx,scope.org_id,workspaceId,userId);
+      const live=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!;
+      return {workspace:workspaceDocument(row),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`};
+    });
+    return c.json(result);
   });
 
   app.get(`${base}/:workspace`, async (c) => {
     const user = c.get("user");
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
-    const row = await withUserTx(pool, user.id, (tx) =>
-      loadWorkspace(tx, orgId, workspaceId, user.id, { ownerOnly: true }),
+    c.header("Cache-Control","no-store");
+    const row = await withSystemTx(pool, (tx) =>
+      loadWorkspace(tx, orgId, workspaceId, user.id),
     );
     return c.json({ workspace: workspaceDocument(row) });
   });
@@ -1260,16 +1318,18 @@ export function createCloudWorkspaceRoutes(
         "Cloud workspace runtime admission is not configured",
       );
     }
-    parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
+    const body = parse(EngineClientAdmissionSchema, await c.req.json().catch(() => ({})));
     try {
-      return c.json(
-        await engineClientAdmissionService.issue({
+      const input={
           organizationId: uuidParam(c.req.param("organization")),
           workspaceId: uuidParam(c.req.param("workspace")),
           actorUserId: c.get("user").id,
-        }),
-        201,
-      );
+          ...(c.req.header("x-zeros-device-id") ? { proof: deviceProof(c) } : {}),
+      };
+      const admission=body.actorProtocolVersion===2
+        ?await engineClientAdmissionService.issueActor({...input,authenticatedUser:c.get("user")})
+        :await engineClientAdmissionService.issue(input);
+      return c.json(admission,201);
     } catch (error) {
       if (!(error instanceof CloudWorkspaceEngineClientAdmissionError)) {
         throw error;
@@ -1280,6 +1340,14 @@ export function createCloudWorkspaceRoutes(
         error.message,
       );
     }
+  });
+
+  app.delete(`${base}/:workspace/runtime/admission`,async c=>{
+    c.header("Cache-Control","no-store");
+    if(!engineClientAdmissionService)throw new HttpError(503,"cloud_workspace_runtime_not_configured","Cloud workspace runtime admission is not configured");
+    await engineClientAdmissionService.revokeActor({organizationId:uuidParam(c.req.param("organization")),workspaceId:uuidParam(c.req.param("workspace")),
+      actorUserId:c.get("user").id,token:c.req.header("x-zeros-runtime-admission")??""});
+    return c.body(null,204);
   });
 
   const issueAccess = async (
@@ -1869,24 +1937,48 @@ export function createCloudWorkspaceRoutes(
         "A cloud copy must have a new workspace identity",
       );
     }
-    const normalized = {
+    const normalize = (profile: CloudWorkspaceProvisioningProfile) => ({
       operation: "create" as const,
       organizationId: orgId,
       name: body.name ?? body.repository.name,
       teamId: body.teamId ?? null,
       repository: body.repository,
-      provider: config.provider,
-      imageRef: config.imageRef,
-      architecture: config.architecture,
+      provider: profile.provider,
+      imageRef: profile.imageRef,
+      ...(profile.sandboxClass?{sandboxClass:profile.sandboxClass}:{}),
+      architecture: profile.architecture,
       resources: {
-        cpuMillicores: config.cpuMillicores,
-        memoryMiB: config.memoryMiB,
-        storageMiB: config.storageMiB,
+        cpuMillicores: profile.cpuMillicores,
+        memoryMiB: profile.memoryMiB,
+        storageMiB: profile.storageMiB,
       },
       providerConnectionId: body.providerConnectionId ?? null,
       forkFromLocal: body.forkFromLocal ?? null,
+    });
+    const assertCreateReplay = async (tx: Tx, existing: IntentRow) => {
+      // Preserve the original request digest format, using its accepted immutable
+      // generation rather than today's deployment defaults.
+      const accepted = await tx.query<CloudWorkspaceProvisioningProfile>(
+        `SELECT g.provider, g.image_ref AS "imageRef", g.sandbox_class AS "sandboxClass", g.architecture,
+                g.cpu_millicores AS "cpuMillicores", g.memory_mib AS "memoryMiB",
+                g.storage_mib AS "storageMiB", g.source_commit AS "sourceCommit"
+         FROM cloud_workspace_lifecycle_intents intent
+         JOIN cloud_workspace_generations g
+           ON g.workspace_id = intent.workspace_id
+          AND g.generation = intent.generation AND g.org_id = intent.org_id
+         WHERE intent.id = $1 AND intent.org_id = $2 AND intent.operation = 'create'`,
+        [existing.id, orgId],
+      );
+      const profile = accepted.rows[0];
+      if (!profile) {
+        throw new HttpError(
+          409,
+          "idempotency_key_reused",
+          "Idempotency-Key was already used with different parameters",
+        );
+      }
+      assertIdempotencyMatch(existing, null, requestDigest(normalize(profile)),user.id);
     };
-    const digest = requestDigest(normalized);
 
     // Resolve current Zeros authority and the provider-owned installation id
     // before making a network request. The GitHub call intentionally runs
@@ -1896,7 +1988,7 @@ export function createCloudWorkspaceRoutes(
       await requireOrganizationRole(tx, orgId, user.id, "admin");
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
-        assertIdempotencyMatch(existing, null, digest);
+        await assertCreateReplay(tx, existing);
         const workspace = await loadWorkspace(
           tx,
           orgId,
@@ -1930,23 +2022,26 @@ export function createCloudWorkspaceRoutes(
         workosEnabled: options.workosEnabled === true,
         requireWorkspaceOwner: true,
       });
-      if (body.providerConnectionId) {
-        const providerConnection =
-          await selectCloudProviderConnectionForNewGeneration(tx, {
+      const providerConnection = body.providerConnectionId
+        ? await selectCloudProviderConnectionForNewGeneration(tx, {
             connectionId: body.providerConnectionId,
             organizationId: orgId,
             ownerUserId: authorization.billingOwnerUserId,
             isPersonal: authorization.isPersonal,
-            provider: config.provider,
-          });
-        if (!providerConnection) {
-          throw new HttpError(
-            404,
-            "cloud_provider_connection_not_found",
-            "Cloud provider connection not found",
-          );
-        }
+            providers: configuredCloudWorkspaceProviders(config),
+          })
+        : null;
+      if (body.providerConnectionId && !providerConnection) {
+        throw new HttpError(
+          404,
+          "cloud_provider_connection_not_found",
+          "Cloud provider connection not found",
+        );
       }
+      const profile = cloudWorkspaceProvisioningProfile(
+        config,
+        providerConnection?.provider ?? config.provider,
+      );
       if (body.forkFromLocal) {
         const collision = await tx.query(
           `SELECT 1 FROM cloud_workspaces WHERE id = $1`,
@@ -1966,7 +2061,13 @@ export function createCloudWorkspaceRoutes(
         actorUserId: user.id,
         repositoryOwner: body.repository.owner,
       });
-      return { replayed: false as const, teamId, installation };
+      return {
+        replayed: false as const,
+        teamId,
+        installation,
+        profile,
+        providerConnection,
+      };
     });
 
     if (preflight.replayed) {
@@ -1982,6 +2083,9 @@ export function createCloudWorkspaceRoutes(
       );
     }
 
+    const profile = preflight.profile;
+    const normalized = normalize(profile);
+    const digest = requestDigest(normalized);
     let resolvedRepository: CloudWorkspaceRepositoryIdentity;
     try {
       resolvedRepository = await repositoryResolver.resolve({
@@ -2004,7 +2108,7 @@ export function createCloudWorkspaceRoutes(
       await lockCloudOrganization(tx, orgId);
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
-        assertIdempotencyMatch(existing, null, digest);
+        await assertCreateReplay(tx, existing);
         const workspace = await loadWorkspace(
           tx,
           orgId,
@@ -2057,7 +2161,7 @@ export function createCloudWorkspaceRoutes(
       }
 
       const quota = await loadQuota(tx, orgId);
-      assertCreateQuota(quota, await loadUsage(tx, orgId), config);
+      assertCreateQuota(quota, await loadUsage(tx, orgId), profile);
 
       const repositoryId = await upsertCanonicalRepository(tx, {
         organizationId: orgId,
@@ -2086,9 +2190,9 @@ export function createCloudWorkspaceRoutes(
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
            repository_revision, github_installation_id, repository_id,
-           owner_user_id, assignee_user_id
+           owner_user_id, assignee_user_id, sharing_mode, single_member_mode
          ) VALUES (
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $4, $4
+           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $4, $4, 'organization', false
          )`,
         [
           workspaceId,
@@ -2136,16 +2240,23 @@ export function createCloudWorkspaceRoutes(
             organizationId: orgId,
             ownerUserId: authorization.billingOwnerUserId,
             isPersonal: authorization.isPersonal,
-            provider: config.provider,
+            providers: configuredCloudWorkspaceProviders(config),
           })
         : await ensureHostedCloudProviderConnection(tx, {
             organizationId: orgId,
             ownerUserId: authorization.billingOwnerUserId,
             isPersonal: authorization.isPersonal,
-            provider: config.provider,
+            provider: profile.provider,
             actorUserId: user.id,
           });
-      if (!providerConnection) {
+      if (
+        !providerConnection ||
+        providerConnection.provider !== profile.provider ||
+        (preflight.providerConnection !== null &&
+          (providerConnection.id !== preflight.providerConnection.id ||
+            providerConnection.credentialVersion !==
+              preflight.providerConnection.credentialVersion))
+      ) {
         throw new HttpError(
           409,
           "cloud_provider_connection_changed",
@@ -2156,20 +2267,21 @@ export function createCloudWorkspaceRoutes(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by, provider_connection_id
-         ) VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+           source_commit, created_by, provider_connection_id, sandbox_class
+         ) VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
         [
           workspaceId,
           orgId,
-          config.provider,
-          config.imageRef,
-          config.architecture,
-          config.cpuMillicores,
-          config.memoryMiB,
-          config.storageMiB,
-          config.sourceCommit,
+          profile.provider,
+          profile.imageRef,
+          profile.architecture,
+          profile.cpuMillicores,
+          profile.memoryMiB,
+          profile.storageMiB,
+          profile.sourceCommit,
           user.id,
           providerConnection.id,
+          profile.sandboxClass??null,
         ],
       );
       const resolvedSettings = await resolveDatabaseCloudWorkspaceSettings(tx, {
@@ -2231,7 +2343,7 @@ export function createCloudWorkspaceRoutes(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider
          ) VALUES ($1, 1, $2, $3)`,
-        [workspaceId, orgId, config.provider],
+        [workspaceId, orgId, profile.provider],
       );
       await tx.query(
         `INSERT INTO workspace_executions (
@@ -2358,44 +2470,33 @@ export function createCloudWorkspaceRoutes(
       GenerationTransitionSchema,
       await c.req.json().catch(() => ({})),
     );
-    const normalized = {
+    const normalize = (profile: CloudWorkspaceProvisioningProfile | null) => ({
       operation: "replace-generation" as const,
       transitionOperation: body.operation,
       organizationId: orgId,
       workspaceId,
       templateGeneration:
         body.operation === "rollback" ? body.sourceGeneration : null,
-      upgradeTarget:
-        body.operation === "upgrade"
-          ? {
-              provider: config.provider,
-              imageRef: config.imageRef,
-              architecture: config.architecture,
-              cpuMillicores: config.cpuMillicores,
-              memoryMiB: config.memoryMiB,
-              storageMiB: config.storageMiB,
-              sourceCommit: config.sourceCommit,
-            }
-          : null,
-    };
-    const digest = requestDigest(normalized);
+      upgradeTarget: body.operation !== "rollback" && profile ? {
+        provider: profile.provider,
+        ...(profile.sandboxClass ? {sandboxClass: profile.sandboxClass} : {}),
+        imageRef: profile.imageRef,
+        architecture: profile.architecture,
+        cpuMillicores: profile.cpuMillicores,
+        memoryMiB: profile.memoryMiB,
+        storageMiB: profile.storageMiB,
+        sourceCommit: profile.sourceCommit,
+      } : null,
+      ...(body.operation === "recover" ? { recoveryCheckpointId: body.checkpointId, sourceGeneration: body.sourceGeneration } : {}),
+    });
 
     const result = await withSystemTx(pool, async (tx) => {
       await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
-      const workspace = await loadWorkspace(tx, orgId, workspaceId, user.id, {
-        lock: true,
-      });
-      await authorizeCloudWorkspaceDataAccess(tx, {
-        organizationId: orgId,
-        teamId: workspace.team_id,
-        actorUserId: user.id,
-        ownerUserId: workspace.owner_user_id,
-        requireWorkspaceOwner: true,
-      });
+      const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true);
+      await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
-        assertIdempotencyMatch(existing, workspaceId, digest);
         const transition = await loadTransitionByRequestIntent(
           tx,
           orgId,
@@ -2409,13 +2510,39 @@ export function createCloudWorkspaceRoutes(
             "Idempotency-Key was already used for another operation",
           );
         }
+        // Replays use the accepted immutable target, even after deployment
+        // configuration or the managed default has changed.
+        const accepted = await tx.query<CloudWorkspaceProvisioningProfile>(
+          `SELECT provider, image_ref AS "imageRef", architecture,
+                  cpu_millicores AS "cpuMillicores", memory_mib AS "memoryMiB",
+                  storage_mib AS "storageMiB", source_commit AS "sourceCommit",
+                  sandbox_class AS "sandboxClass"
+           FROM cloud_workspace_generations
+           WHERE workspace_id = $1 AND org_id = $2 AND generation = $3`,
+          [workspaceId, orgId, transition.candidate_generation],
+        );
+        const profile = accepted.rows[0];
+        if (!profile) {
+          throw new HttpError(
+            409,
+            "idempotency_key_reused",
+            "Accepted generation is unavailable",
+          );
+        }
+        assertIdempotencyMatch(
+          existing,
+          workspaceId,
+          requestDigest(normalize(profile)),
+          user.id,
+        );
         return { workspace, intent: existing, transition, replayed: true };
       }
 
+      await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
       const authorization = await authorizeCloudWorkspaceOperation(tx, {
         organizationId: orgId,
         teamId: workspace.team_id,
-        actorUserId: user.id,
+        actorUserId: workspace.owner_user_id,
         billingOwnerUserId: workspace.owner_user_id,
         workosEnabled: options.workosEnabled === true,
         requireWorkspaceOwner: true,
@@ -2425,16 +2552,51 @@ export function createCloudWorkspaceRoutes(
         organizationId: orgId,
         authorization,
       });
-      if (
-        workspace.desired_state !== "running" ||
-        workspace.status !== "ready" ||
-        workspace.deleted_at !== null
-      ) {
+      const recovering = body.operation === "recover";
+      let expiredEngine = false;
+      if (recovering && ["ready", "busy"].includes(workspace.status)) {
+        // A crashed process can leave its last published status behind. The
+        // workspace lock orders this check with heartbeat and registration;
+        // a live replacement instance still prevents recovery from old state.
+        const leases = await tx.query<{ expired: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM cloud_workspace_engine_instances
+             WHERE workspace_id = $1 AND org_id = $2 AND generation = $3
+               AND lease_expires_at <= now()
+           ) AND NOT EXISTS (
+             SELECT 1 FROM cloud_workspace_engine_instances
+             WHERE workspace_id = $1 AND org_id = $2 AND generation = $3
+               AND state IN ('starting', 'ready') AND revoked_at IS NULL
+               AND lease_expires_at > now()
+           ) AS expired`,
+          [workspaceId, orgId, workspace.current_generation],
+        );
+        expiredEngine = leases.rows[0]?.expired === true;
+      }
+      if (workspace.deleted_at !== null || workspace.desired_state === "deleted" ||
+        (recovering ? !expiredEngine && !["failed", "stopped", "archived"].includes(workspace.status) :
+          workspace.desired_state !== "running" || workspace.status !== "ready")) {
         throw new HttpError(
           409,
           "cloud_workspace_not_stable",
-          "Cloud workspace must be ready before replacing its generation",
+          recovering ? "Recovery requires a failed or stopped workspace, or an expired engine lease" : "Cloud workspace must be ready before replacing its generation",
         );
+      }
+      let recoveryCheckpointId: string | null = null;
+      if (body.operation === "recover") {
+        if (workspace.current_generation !== body.sourceGeneration) {
+          throw new HttpError(409, "cloud_generation_changed", "Cloud workspace generation changed before recovery");
+        }
+        const checkpoint = await tx.query<{ id: string }>(
+          `SELECT checkpoint.id FROM workspace_checkpoints checkpoint
+           JOIN workspace_content_heads head ON head.workspace_id = checkpoint.workspace_id
+             AND head.org_id = checkpoint.org_id AND head.current_checkpoint_id = checkpoint.id
+           WHERE checkpoint.id = $1 AND checkpoint.workspace_id = $2 AND checkpoint.org_id = $3
+             AND checkpoint.state = 'durable' FOR SHARE OF checkpoint`,
+          [body.checkpointId, workspaceId, orgId],
+        );
+        if (!checkpoint.rows[0]) throw new HttpError(404, "cloud_recovery_checkpoint_unavailable", "The current durable checkpoint is unavailable");
+        recoveryCheckpointId = checkpoint.rows[0].id;
       }
       const active = await tx.query(
         `SELECT 1
@@ -2479,8 +2641,9 @@ export function createCloudWorkspaceRoutes(
         );
       }
       const template = await tx.query<{
-        provider: string;
+        provider: CloudWorkspaceProviderName;
         image_ref: string;
+        sandbox_class: "container" | "linux-vm" | null;
         architecture: "linux/amd64" | "linux/arm64";
         cpu_millicores: number;
         memory_mib: number;
@@ -2495,7 +2658,7 @@ export function createCloudWorkspaceRoutes(
         settings_snapshot: unknown;
         settings_snapshot_sha256: Buffer;
       }>(
-        `SELECT g.provider, g.image_ref, g.architecture, g.cpu_millicores,
+        `SELECT g.provider, g.image_ref, g.sandbox_class, g.architecture, g.cpu_millicores,
                 g.memory_mib, g.storage_mib, g.source_commit,
                 ss.repository_forge, ss.repository_owner, ss.repository_name,
                 ss.repository_revision, ss.github_installation_id,
@@ -2539,22 +2702,24 @@ export function createCloudWorkspaceRoutes(
           );
         }
       }
-      const generationResources =
-        body.operation === "upgrade"
-          ? {
-              cpuMillicores: config.cpuMillicores,
-              memoryMiB: config.memoryMiB,
-              storageMiB: config.storageMiB,
-            }
+      const candidate: CloudWorkspaceProvisioningProfile =
+        body.operation !== "rollback"
+          ? cloudWorkspaceProvisioningProfile(config, source.provider)
           : {
+              provider: source.provider,
+              imageRef: source.image_ref,
+              ...(source.sandbox_class?{sandboxClass:source.sandbox_class}:{}),
+              architecture: source.architecture,
               cpuMillicores: source.cpu_millicores,
               memoryMiB: source.memory_mib,
               storageMiB: source.storage_mib,
+              sourceCommit: source.source_commit,
             };
+      const digest = requestDigest(normalize(candidate));
       assertGenerationReplacementQuota(
         await loadQuota(tx, orgId),
         await loadUsage(tx, orgId),
-        generationResources,
+        candidate,
       );
 
       const nextGeneration = await tx.query<{ generation: number }>(
@@ -2566,26 +2731,6 @@ export function createCloudWorkspaceRoutes(
       const candidateGeneration = nextGeneration.rows[0]!.generation;
       const transitionId = randomUUID();
       const intentId = randomUUID();
-      const candidate =
-        body.operation === "upgrade"
-          ? {
-              provider: config.provider,
-              imageRef: config.imageRef,
-              architecture: config.architecture,
-              cpuMillicores: config.cpuMillicores,
-              memoryMiB: config.memoryMiB,
-              storageMiB: config.storageMiB,
-              sourceCommit: config.sourceCommit,
-            }
-          : {
-              provider: source.provider,
-              imageRef: source.image_ref,
-              architecture: source.architecture,
-              cpuMillicores: source.cpu_millicores,
-              memoryMiB: source.memory_mib,
-              storageMiB: source.storage_mib,
-              sourceCommit: source.source_commit,
-            };
 
       const providerConnection = await loadGenerationCloudProviderConnection(
         tx,
@@ -2610,8 +2755,8 @@ export function createCloudWorkspaceRoutes(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by, provider_connection_id
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+           source_commit, created_by, provider_connection_id, sandbox_class
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         [
           workspaceId,
           candidateGeneration,
@@ -2625,6 +2770,7 @@ export function createCloudWorkspaceRoutes(
           candidate.sourceCommit,
           user.id,
           providerConnection.id,
+          candidate.sandboxClass??null,
         ],
       );
       const resolvedSettings =
@@ -2652,7 +2798,7 @@ export function createCloudWorkspaceRoutes(
               repositoryId: workspace.repository_id,
               workspaceId,
               generation: candidateGeneration,
-              actorUserId: user.id,
+              actorUserId: workspace.owner_user_id,
               isPersonal: authorization.isPersonal,
               secretEncryptionKeys:
                 options.setupSecretKeyV1 !== undefined
@@ -2704,6 +2850,15 @@ export function createCloudWorkspaceRoutes(
         generation: candidateGeneration,
         secrets: resolvedSettings.setupSecrets,
       });
+      if (recoveryCheckpointId) {
+        await tx.query(`UPDATE cloud_workspace_generations SET recovery_checkpoint_id = $4
+          WHERE workspace_id = $1 AND org_id = $2 AND generation = $3`,
+        [workspaceId, orgId, candidateGeneration, recoveryCheckpointId]);
+        await retireCloudWorkspaceRuntimeAccess(tx, { workspaceId, organizationId: orgId, generation: workspace.current_generation, reason: "generation_replacement_requested" });
+        await tx.query(`UPDATE cloud_workspaces SET desired_state = 'running', status = 'stopping',
+          authority_epoch = authority_epoch + 1, version = version + 1, updated_at = now(), last_error_code = NULL, last_error_message = NULL
+          WHERE id = $1 AND org_id = $2`, [workspaceId, orgId]);
+      }
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider
@@ -2754,7 +2909,7 @@ export function createCloudWorkspaceRoutes(
          WHERE id = $1`,
         [intentId, transitionId],
       );
-      const checkpointRequest = await enqueueWorkspaceCheckpointRequest(tx, {
+      const checkpointRequest = recoveryCheckpointId ? null : await enqueueWorkspaceCheckpointRequest(tx, {
         workspaceId,
         organizationId: orgId,
         generation: workspace.current_generation,
@@ -2775,8 +2930,9 @@ export function createCloudWorkspaceRoutes(
           sourceGeneration: workspace.current_generation,
           templateGeneration,
           candidateGeneration,
-          checkpointRequestId: checkpointRequest.id,
-          checkpointDeadlineAt: checkpointRequest.deadlineAt.toISOString(),
+          checkpointRequestId: checkpointRequest?.id ?? null,
+          checkpointDeadlineAt: checkpointRequest?.deadlineAt.toISOString() ?? null,
+          ...(recoveryCheckpointId ? { recoveryCheckpointId } : {}),
         },
       );
       return {
@@ -2803,28 +2959,34 @@ export function createCloudWorkspaceRoutes(
     const orgId = uuidParam(c.req.param("organization"));
     const workspaceId = uuidParam(c.req.param("workspace"));
     const key = idempotencyKey(c.req.header("Idempotency-Key"));
+    let discardUncheckpointed = false;
+    if (operation === "delete") {
+      const source = await c.req.text();
+      let body: unknown = {};
+      try {
+        if (Buffer.byteLength(source, "utf8") > 4_096) throw new Error("oversized");
+        if (source.trim()) body = JSON.parse(source);
+      } catch {
+        throw new HttpError(422, "invalid_input", "Invalid workspace deletion options");
+      }
+      discardUncheckpointed = parse(DeleteWorkspaceSchema, body).discardUncheckpointed;
+    }
     const digest = requestDigest({
       operation,
       organizationId: orgId,
       workspaceId,
+      // Retain the historical digest for ordinary empty-body DELETE retries.
+      ...(discardUncheckpointed ? { discardUncheckpointed: true } : {}),
     });
 
     const result = await withSystemTx(pool, async (tx) => {
       await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
-      let workspace = await loadWorkspace(tx, orgId, workspaceId, user.id, {
-        lock: true,
-      });
-      await authorizeCloudWorkspaceDataAccess(tx, {
-        organizationId: orgId,
-        teamId: workspace.team_id,
-        actorUserId: user.id,
-        ownerUserId: workspace.owner_user_id,
-        requireWorkspaceOwner: true,
-      });
+      let workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true);
+      await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
-        assertIdempotencyMatch(existing, workspaceId, digest);
+        assertIdempotencyMatch(existing, workspaceId, digest,user.id);
         if (operation === "delete") {
           await ensureWorkspaceDeletionJob(tx, {
             workspaceId,
@@ -2843,10 +3005,11 @@ export function createCloudWorkspaceRoutes(
         );
       }
       if (operation === "wake") {
+        await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
         const authorization = await authorizeCloudWorkspaceOperation(tx, {
           organizationId: orgId,
           teamId: workspace.team_id,
-          actorUserId: user.id,
+          actorUserId: workspace.owner_user_id,
           billingOwnerUserId: workspace.owner_user_id,
           workosEnabled: options.workosEnabled === true,
           requireWorkspaceOwner: true,
@@ -2897,9 +3060,7 @@ export function createCloudWorkspaceRoutes(
             reason,
           });
         if (restoredGeneration !== null) {
-          workspace = await loadWorkspace(tx, orgId, workspaceId, user.id, {
-            lock: true,
-          });
+          workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true);
         }
       }
 
@@ -2985,6 +3146,7 @@ export function createCloudWorkspaceRoutes(
 
       const requiresFinalCheckpoint =
         !alreadySatisfied &&
+        !discardUncheckpointed &&
         operation !== "wake" &&
         ["ready", "busy"].includes(workspace.status);
       const checkpointRequest = requiresFinalCheckpoint
@@ -3044,6 +3206,7 @@ export function createCloudWorkspaceRoutes(
           workspaceId,
           intentId,
           alreadySatisfied,
+          ...(discardUncheckpointed ? { discardUncheckpointed: true } : {}),
           checkpointRequestId: checkpointRequest?.id ?? null,
           checkpointDeadlineAt:
             checkpointRequest?.deadlineAt.toISOString() ?? null,
@@ -3055,7 +3218,7 @@ export function createCloudWorkspaceRoutes(
         },
       );
       return {
-        workspace: await loadWorkspace(tx, orgId, workspaceId, user.id),
+        workspace: await loadWorkspaceRow(tx, orgId, workspaceId),
         intent: inserted.rows[0]!,
         replayed: false,
       };

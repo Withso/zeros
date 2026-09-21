@@ -2,6 +2,15 @@ import { z } from "zod";
 export const DESIGN_CAPTURE_HTML_BYTES = 16 * 1024 * 1024;
 export const DESIGN_CAPTURE_PNG_BYTES = 1024 * 1024;
 export const DESIGN_CAPTURE_TIMEOUT_MS = 20_000;
+/** Authenticated workspace operation. Renderer coordinates are never accepted
+ * from a client; the engine resolves its qualified local capture host. */
+export const designWorkspaceCaptureSchema = z.object({
+  workspaceId: z.string().min(1).max(128),
+  frame: z.string().min(1).max(255),
+  expectedRevision: z.string().min(1).max(128),
+  width: z.number().int().min(1).max(2048),
+  height: z.number().int().min(1).max(2048),
+}).strict();
 export const designCaptureRequestSchema = z
   .object({
     version: z.literal(1),

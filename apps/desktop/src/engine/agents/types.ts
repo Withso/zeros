@@ -235,6 +235,8 @@ export interface AgentGatewayOptions {
   previewGatewayFactory?: BoundaryPreviewGatewayFactory;
   /** Engine-owned product tools, scoped to one native Code execution. */
   sessionToolFactory?: import("./session-tools").AgentSessionToolFactory;
+  /** Trusted control-plane admission for private cloud provider processes. */
+  cloudAgentExecutionFactory?: import("./cloud-provider-execution").CloudAgentExecutionFactory;
 }
 
 // ── AgentAdapter — the per-CLI contract ──────────────────
@@ -363,7 +365,7 @@ export interface AgentInteractionCapabilityPort {
   respondToPermission?(opts: {
     permissionId: string;
     response: RequestPermissionResponse;
-  }): void;
+  }): boolean | void;
   respondToQuestion?(opts: {
     questionId: string;
     response: QuestionResponse;
@@ -701,7 +703,7 @@ export interface AgentAdapter {
   respondToPermission?(opts: {
     permissionId: string;
     response: RequestPermissionResponse;
-  }): void;
+  }): boolean | void;
 
   /** Answer a blocking user-input question the adapter previously raised.
    *  Optional — only adapters with a blocking question channel implement it

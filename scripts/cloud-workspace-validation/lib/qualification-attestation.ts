@@ -1,3 +1,4 @@
+import {assertSnapshotPlacement,type SnapshotPlacement} from "./snapshot-placement";
 export const CLOUD_QUALIFICATION_CHECKS = Object.freeze([
   "image-contract",
   "runtime-attestation",
@@ -24,8 +25,7 @@ export type CloudQualificationDisposition =
   | "rehearsal"
   | "release-candidate";
 
-type SnapshotIdentity = {
-  readonly version: 1;
+type SnapshotIdentity = SnapshotPlacement & {
   readonly snapshotId: string;
   readonly snapshotName: string;
   readonly snapshotImageName: string;
@@ -78,6 +78,8 @@ export function createCloudQualificationAttestation(input: {
   readonly workflow: WorkflowIdentity;
   readonly qualifiedAt: string;
 }) {
+  assertSnapshotPlacement(input.snapshot);
+  if(input.snapshot.version===2&&input.snapshot.region!==input.runtime.region)throw new Error("Qualification region changed after snapshot attestation");
   const qualifiedAtMs = Date.parse(input.qualifiedAt);
   const bakedAtMs = Date.parse(input.snapshot.bakedAt);
   const expectedSnapshotName = `zeros-zsr-${
@@ -85,7 +87,7 @@ export function createCloudQualificationAttestation(input: {
   }-${input.workflow.runId}-${input.workflow.runAttempt}`;
   if (
     !["rehearsal", "release-candidate"].includes(input.disposition) ||
-    input.snapshot.version !== 1 ||
+    ![1,2].includes(input.snapshot.version) ||
     !safeString(input.snapshot.snapshotId, 512) ||
     !safeString(input.snapshot.snapshotName, 256) ||
     input.snapshot.snapshotName !== expectedSnapshotName ||

@@ -172,6 +172,16 @@ export class CloudAccessDeviceAuthority {
     private readonly dependencies: CloudAccessDeviceAuthorityDependencies,
   ) {}
 
+  async signEngineAdmission(accessToken:string, target:{organizationId:string;workspaceId:string}) {
+    const device=await this.ensure();
+    const session=workosAccountSession(await this.dependencies.getSession());
+    if(!this.dependencies.capabilityEnabled() || !session || session.accountId!==device.accountUserId || session.accessToken!==accessToken)
+      throw new Error("Cloud device admission session changed");
+    const envelope=this.dependencies.store.load(session.accountId);
+    if(!envelope || envelope.active.deviceId!==device.deviceId)throw new Error("Cloud device admission identity changed");
+    return new CloudReplicaDeviceSigner(envelope.active).proof("engine.connect",target);
+  }
+
   async ensure(): Promise<{ accountUserId: string; deviceId: string }> {
     if (!this.dependencies.capabilityEnabled()) {
       throw new Error("Cloud workspaces are not enabled in this desktop build");
@@ -277,6 +287,11 @@ export function ensureCloudAccessDeviceForMain(): Promise<{
     },
   });
   return accessDeviceAuthority.ensure();
+}
+
+export async function signCloudEngineAdmissionForMain(accessToken:string,target:{organizationId:string;workspaceId:string}) {
+  await ensureCloudAccessDeviceForMain();
+  return accessDeviceAuthority!.signEngineAdmission(accessToken,target);
 }
 
 /** Build the private stdin seed. Auth0 compatibility sessions deliberately

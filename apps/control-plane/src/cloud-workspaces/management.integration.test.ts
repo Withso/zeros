@@ -1,9 +1,19 @@
+import {withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import pg from "pg";
 
-import { ensureUser, type AuthedUser } from "../auth.js";
+import type { AuthedUser } from "../auth.js";
+import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
@@ -14,7 +24,10 @@ import {
   persistDatabaseCloudWorkspaceSettings,
   resolveDatabaseCloudWorkspaceSettings,
 } from "./settings.js";
-import { seedHostedCloudWorkspaceProviderConnection } from "./test-fixtures.js";
+import { seedCanonicalWorkspaceSettingsVersion,seedHostedCloudWorkspaceProviderConnection,seedReadyCloudWorkspace } from "./test-fixtures.js";
+import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
+import {CloudWorkspaceCheckpointRequestWorker,enqueueWorkspaceCheckpointRequest} from "./checkpoint-requests.js";
+import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -131,10 +144,13 @@ d("cloud workspace Phase 5 management", () => {
         [organizationId, randomUUID(), actor.id],
       );
       const childRepositoryId = repository.rows[0]!.id;
-      const connectionId = await seedHostedCloudWorkspaceProviderConnection(tx, {
-        organizationId,
-        createdBy: actor.id,
-      });
+      const connectionId = await seedHostedCloudWorkspaceProviderConnection(
+        tx,
+        {
+          organizationId,
+          createdBy: actor.id,
+        },
+      );
       const workspace = await tx.query<{ id: string }>(
         `INSERT INTO cloud_workspaces (
            org_id, team_id, created_by, display_name, repository_forge,
@@ -194,6 +210,110 @@ d("cloud workspace Phase 5 management", () => {
         clientFactory: () => ({ currentApiKey }),
       }),
     });
+  });
+
+  it("expires final checkpoints without reversing lifecycle request locks",async()=>{
+    const intentId=randomUUID();
+    const request=await withSystemTx(pool,async tx=>{
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256)
+        VALUES($1,$2,1,$3,$4,'stop',$5,$6)`,[intentId,workspaceId,orgId,actor.id,randomUUID(),Buffer.alloc(32,0x61)]);
+      const queued=await enqueueWorkspaceCheckpointRequest(tx,{workspaceId,organizationId:orgId,generation:1,requestedBy:actor.id,lifecycleIntentId:intentId,reason:"before_stop",idempotencyKey:randomUUID()});
+      await tx.query("UPDATE workspace_checkpoint_requests SET created_at=now()-interval '10 minutes',deadline_at=now()-interval '1 second' WHERE id=$1",[queued.id]);
+      return queued;
+    });
+    await assertDatabaseLockOrder(pool,{
+      parentSql:"SELECT id FROM cloud_workspace_lifecycle_intents WHERE id=$1 FOR UPDATE",parentId:intentId,
+      childSql:"SELECT id FROM workspace_checkpoint_requests WHERE id=$1 FOR UPDATE",childId:request.id,
+      parentQuery:/FROM organizations|UPDATE cloud_workspace_lifecycle_intents/,
+      action:controlled=>new CloudWorkspaceCheckpointRequestWorker(controlled).expireOnce(),
+    });
+    expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE id=$1",[request.id])).rows[0]).toEqual({state:"expired"});
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1",[intentId])).rows[0]).toEqual({state:"failed"});
+  });
+
+  it.each(["organizations","cloud_workspaces"])("expires another workspace while %s is locked",async(table)=>{
+    const other=await seedReadyCloudWorkspace(pool);
+    const original=await withSystemTx(pool,async tx=>{
+      const ids=[];
+      for(const scope of [{workspaceId,organizationId:orgId,userId:actor.id},other]){
+        const request=await enqueueWorkspaceCheckpointRequest(tx,{workspaceId:scope.workspaceId,organizationId:scope.organizationId,generation:1,requestedBy:scope.userId,reason:"manual",idempotencyKey:randomUUID()});
+        await tx.query("UPDATE workspace_checkpoint_requests SET created_at=now()-interval '10 minutes',deadline_at=now()-interval '1 second' WHERE id=$1",[request.id]);ids.push(request.id);
+      }return ids[0]!;
+    });
+    const blocker=await pool.connect();
+    try{
+      await blocker.query("BEGIN");await blocker.query(`SELECT id FROM ${table} WHERE id=$1 FOR UPDATE`,[table==="organizations"?orgId:workspaceId]);
+      expect(await new CloudWorkspaceCheckpointRequestWorker(pool).expireOnce()).toBe(1);
+      expect((await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE id=$1",[original])).rows[0].state).toBe("queued");
+    }finally{await blocker.query("ROLLBACK");blocker.release();}
+    expect(await new CloudWorkspaceCheckpointRequestWorker(pool).expireOnce()).toBe(1);
+  });
+
+  it("shares bounded runtime metadata without exposing sponsor settings or organization quota",async()=>{
+    const collaborator=await ensureUser(pool,{provider:"auth0",providerSubject:randomUUID(),email:`reader-${randomUUID()}@example.test`,displayName:"Workspace Reader"});
+    await withSystemTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET sharing_mode='organization',single_member_mode=false WHERE id=$1",[workspaceId]);
+      await tx.query("UPDATE organization_entitlements SET seat_limit=2 WHERE org_id=$1",[orgId]);
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')",[orgId,collaborator.id]);
+      await tx.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')",[orgId,collaborator.id]);
+    });
+    const queries=vi.spyOn(pg.Client.prototype,"query");
+    let result:Awaited<ReturnType<typeof management.workspaceOverview>>;
+    try {
+      result=await management.workspaceOverview({organizationId:orgId,workspaceId,actorUserId:collaborator.id});
+      expect(queries.mock.calls.some(call=>typeof call[0]==="string"&&call[0].includes("FROM cloud_workspace_usage_events"))).toBe(false);
+    } finally {queries.mockRestore();}
+    expect(result.workspace).toMatchObject({id:workspaceId});
+    expect(result.settings).toBeNull();expect(result.provider).toBeNull();expect(result.quota).toBeNull();
+    expect(result.usage).toEqual([]);expect(result.checkpoints).toEqual([]);
+    await expect(management.updateRetention({organizationId:orgId,workspaceId,actorUserId:collaborator.id,expectedVersion:1,
+      recordEventDays:30,contentEventDays:7,checkpointDays:30,exportDays:7})).rejects.toMatchObject({status:404});
+  });
+
+  it("lets a shared administrator manage retention after sponsor disablement",async()=>{
+    const admin=await ensureUser(pool,{provider:"auth0",providerSubject:randomUUID(),email:`admin-${randomUUID()}@example.test`,displayName:"Workspace Administrator"});
+    await withSystemTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET sharing_mode='organization',single_member_mode=false WHERE id=$1",[workspaceId]);
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[orgId,admin.id]);
+      await tx.query("UPDATE users SET auth_status='identity_disabled' WHERE id=$1",[actor.id]);
+    });
+    await expect(management.updateRetention({organizationId:orgId,workspaceId,actorUserId:admin.id,expectedVersion:1,
+      recordEventDays:30,contentEventDays:7,checkpointDays:30,exportDays:7})).resolves.toHaveProperty("retention");
+  });
+
+  it("redacts populated sponsor settings and compute metadata from an exact-workspace guest",async()=>{
+    const guest=await ensureUser(pool,{provider:'workos',providerSubject:`user_${randomUUID()}`,email:`guest-${randomUUID()}@example.test`,displayName:'External Guest'});
+    const sentinel='private-sponsor-setting-and-provider';
+    await withCloudFixtureOwnerTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET sharing_mode='organization',single_member_mode=false WHERE id=$1",[workspaceId]);
+      await tx.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[guest.id]);
+      await seedCanonicalWorkspaceSettingsVersion(tx,{workspaceId,organizationId:orgId,generation:1,createdBy:actor.id,
+        effectiveDocument:{schemaVersion:1,values:{PRIVATE_SETTING:sentinel},setupCommands:[sentinel],secretRefs:[{name:sentinel}]}});
+      await tx.query("UPDATE provider_connections SET display_name=$2 WHERE org_id=$1",[orgId,sentinel]);
+    });
+    const scope={workspaceId,organizationId:orgId,actorUserId:actor.id},collaboration=new DatabaseCloudWorkspaceCollaborationService(pool);
+    const invitation=await collaboration.invite({...scope,email:guest.email,role:'viewer'});
+    await collaboration.accept({actorUserId:guest.id,identity:guest.identity,token:invitation.token});
+    const ownerOverview=await management.workspaceOverview(scope);expect(JSON.stringify(ownerOverview)).toContain(sentinel);
+    const guestOverview=await management.workspaceOverview({...scope,actorUserId:guest.id});
+    expect(guestOverview).toMatchObject({workspace:{id:workspaceId},settings:null,provider:null,quota:null,usage:[],exports:[],replicas:[],forwards:[]});
+    expect(JSON.stringify(guestOverview)).not.toContain(sentinel);
+    expect((await pool.query('SELECT 1 FROM organization_members WHERE org_id=$1 AND user_id=$2',[orgId,guest.id])).rowCount).toBe(0);
+    await collaboration.revokeGuest({...scope,guestUserId:guest.id});
+    await expect(management.workspaceOverview({...scope,actorUserId:guest.id})).rejects.toMatchObject({status:404});
+  });
+
+  it("does not lend a manual checkpoint receipt to another collaborator",async()=>{
+    const collaborator=await ensureUser(pool,{provider:"auth0",providerSubject:randomUUID(),email:`checkpoint-${randomUUID()}@example.test`,displayName:"Checkpoint Collaborator"});
+    await withSystemTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET sharing_mode='organization',single_member_mode=false WHERE id=$1",[workspaceId]);
+      await tx.query("UPDATE organization_entitlements SET seat_limit=2 WHERE org_id=$1",[orgId]);
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')",[orgId,collaborator.id]);
+      await tx.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')",[orgId,collaborator.id]);
+    });
+    const idempotencyKey=randomUUID(),input={organizationId:orgId,workspaceId,idempotencyKey};
+    await management.requestCheckpoint({...input,actorUserId:actor.id});
+    await expect(management.requestCheckpoint({...input,actorUserId:collaborator.id})).rejects.toMatchObject({status:409,code:"idempotency_key_reused"});
   });
 
   it("reports retired provider storage until its deletion is verified", async () => {
@@ -369,7 +489,9 @@ d("cloud workspace Phase 5 management", () => {
               nested: { allowed: true, blocked: true },
             },
             secretRefs: [{ id: randomUUID(), name: "PERSONAL_TOKEN" }],
-            setupCommands: [{ command: "echo must-not-cross", timeoutSeconds: 10 }],
+            setupCommands: [
+              { command: "echo must-not-cross", timeoutSeconds: 10 },
+            ],
           }),
           actor.id,
         ],
@@ -414,7 +536,10 @@ d("cloud workspace Phase 5 management", () => {
         organizationId: orgId,
         actorUserId: actor.id,
       }),
-    ).resolves.toMatchObject({ consent: { state: "revoked" }, replayed: false });
+    ).resolves.toMatchObject({
+      consent: { state: "revoked" },
+      replayed: false,
+    });
     const afterRevocation = await withSystemTx(pool, (tx) =>
       resolveDatabaseCloudWorkspaceSettings(tx, {
         organizationId: orgId,
@@ -750,7 +875,10 @@ d("cloud workspace Phase 5 management", () => {
       management.createProviderConnection(input),
       management.createProviderConnection(input),
     ]);
-    expect(results.map((result) => result.replayed).sort()).toEqual([false, true]);
+    expect(results.map((result) => result.replayed).sort()).toEqual([
+      false,
+      true,
+    ]);
     expect(JSON.stringify(results)).not.toContain(apiKey);
     const stored = await withSystemTx(pool, (tx) =>
       tx.query<{ count: string }>(
@@ -762,6 +890,130 @@ d("cloud workspace Phase 5 management", () => {
     );
     expect(Number(stored.rows[0]!.count)).toBe(1);
   });
+
+  it("qualifies customer Daytona against its own endpoint while Boat is managed", async () => {
+    const clientFactory = vi.fn(() => ({ currentApiKey }));
+    const separate = new DatabaseCloudWorkspaceManagementService(
+      pool,
+      {
+        ...config,
+        provider: "boat",
+        apiUrl: "https://boat.dev/api/v1",
+        target: "managed-linux",
+        daytonaConnection: { apiUrl: config.apiUrl, target: config.target },
+      },
+      {
+        workosEnabled: false,
+        qualifier: new DaytonaProviderConnectionQualifier({ clientFactory }),
+      },
+    );
+    const id = randomUUID();
+    await separate.createProviderConnection({
+      id,
+      organizationId: orgId,
+      actorUserId: actor.id,
+      ownerKind: "organization",
+      displayName: "Customer Daytona",
+      apiKey: "daytona-separate-customer-key-abcdefghijklmnopqrstuvwxyz",
+    });
+    expect(clientFactory).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        apiUrl: config.apiUrl,
+      }),
+    );
+    const stored = await withSystemTx(pool, (tx) =>
+      tx.query(
+        `SELECT version.endpoint, connection.region, version.capabilities
+       FROM provider_connection_versions version
+       JOIN provider_connections connection ON connection.id = version.connection_id
+       WHERE connection.id = $1`,
+        [id],
+      ),
+    );
+    expect(stored.rows).toEqual([
+      expect.objectContaining({
+        endpoint: config.apiUrl,
+        region: config.target,
+        capabilities: expect.objectContaining({ daytonaTarget: config.target }),
+      }),
+    ]);
+  });
+
+  it("rejects an unconfigured customer provider before exposing a key to the managed API", async () => {
+    const clientFactory = vi.fn(() => ({ currentApiKey }));
+    const separate = new DatabaseCloudWorkspaceManagementService(
+      pool,
+      { ...config, provider: "boat", apiUrl: "https://boat.dev/api/v1" },
+      {
+        workosEnabled: false,
+        qualifier: new DaytonaProviderConnectionQualifier({ clientFactory }),
+      },
+    );
+    await expect(
+      separate.createProviderConnection({
+        id: randomUUID(),
+        organizationId: orgId,
+        actorUserId: actor.id,
+        ownerKind: "organization",
+        displayName: "Customer Daytona",
+        apiKey: "daytona-separate-customer-key-abcdefghijklmnopqrstuvwxyz",
+      }),
+    ).rejects.toMatchObject({ code: "cloud_provider_not_configured" });
+    expect(clientFactory).not.toHaveBeenCalled();
+  });
+
+  it.each(["daytona", "boat"] as const)(
+    "keeps the accepted Daytona endpoint and target when rotating after a %s default change",
+    async (provider) => {
+      const id = randomUUID();
+      await management.createProviderConnection({
+        id,
+        organizationId: orgId,
+        actorUserId: actor.id,
+        ownerKind: "organization",
+        displayName: "Original Daytona",
+        apiKey: "daytona-original-before-change-abcdefghijklmnopqrstuvwxyz",
+      });
+      const clientFactory = vi.fn(() => ({ currentApiKey }));
+      const changed = new DatabaseCloudWorkspaceManagementService(
+        pool,
+        {
+          ...config,
+          provider,
+          apiUrl: "https://changed.example.test/api",
+          target: "us",
+        },
+        {
+          workosEnabled: false,
+          qualifier: new DaytonaProviderConnectionQualifier({ clientFactory }),
+        },
+      );
+      const result = await changed.rotateProviderConnection({
+        id,
+        organizationId: orgId,
+        actorUserId: actor.id,
+        expectedVersion: 1,
+        apiKey: "daytona-rotated-after-change-abcdefghijklmnopqrstuvwxyz",
+      });
+      expect(result.connection).toMatchObject({ region: config.target });
+      expect(clientFactory).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          apiUrl: config.apiUrl,
+        }),
+      );
+      const versions = await withSystemTx(pool, (tx) =>
+        tx.query(
+          `SELECT endpoint, capabilities ->> 'daytonaTarget' AS target
+         FROM provider_connection_versions WHERE connection_id = $1 ORDER BY version`,
+          [id],
+        ),
+      );
+      expect(versions.rows).toEqual([
+        { endpoint: config.apiUrl, target: config.target },
+        { endpoint: config.apiUrl, target: config.target },
+      ]);
+    },
+  );
 
   it("returns the committed provider qualification when concurrent rotations converge", async () => {
     const id = randomUUID();
@@ -810,7 +1062,10 @@ d("cloud workspace Phase 5 management", () => {
       concurrentManagement.rotateProviderConnection(input),
       concurrentManagement.rotateProviderConnection(input),
     ]);
-    expect(results.map((result) => result.replayed).sort()).toEqual([false, true]);
+    expect(results.map((result) => result.replayed).sort()).toEqual([
+      false,
+      true,
+    ]);
 
     const stored = await withSystemTx(pool, (tx) =>
       tx.query<{ expires_at: string | null }>(
@@ -841,7 +1096,12 @@ d("cloud workspace Phase 5 management", () => {
       apiKey: firstKey,
     });
     expect(created).toMatchObject({
-      connection: { id, credentialSource: "delegated", version: 1, state: "active" },
+      connection: {
+        id,
+        credentialSource: "delegated",
+        version: 1,
+        state: "active",
+      },
       replayed: false,
     });
     expect(JSON.stringify(created)).not.toContain(firstKey);
@@ -864,12 +1124,13 @@ d("cloud workspace Phase 5 management", () => {
         organizationId: orgId,
         ownerUserId: actor.id,
         isPersonal: false,
-        provider: "daytona",
+        providers: ["daytona"],
       }),
     );
     expect(selected).toMatchObject({ id, credentialVersion: 1 });
 
-    const secondKey = "daytona-delegated-key-rotated-abcdefghijklmnopqrstuvwxyz";
+    const secondKey =
+      "daytona-delegated-key-rotated-abcdefghijklmnopqrstuvwxyz";
     await expect(
       management.rotateProviderConnection({
         id,
@@ -885,7 +1146,9 @@ d("cloud workspace Phase 5 management", () => {
       actorUserId: actor.id,
       expectedVersion: 2,
     });
-    expect(revoked).toMatchObject({ connection: { state: "revoked", version: 2 } });
+    expect(revoked).toMatchObject({
+      connection: { state: "revoked", version: 2 },
+    });
     await expect(
       withSystemTx(pool, (tx) =>
         selectCloudProviderConnectionForNewGeneration(tx, {
@@ -893,7 +1156,7 @@ d("cloud workspace Phase 5 management", () => {
           organizationId: orgId,
           ownerUserId: actor.id,
           isPersonal: false,
-          provider: "daytona",
+          providers: ["daytona"],
         }),
       ),
     ).resolves.toBeNull();

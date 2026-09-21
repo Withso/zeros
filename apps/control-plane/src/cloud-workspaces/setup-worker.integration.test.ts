@@ -121,12 +121,10 @@ d("cloud workspace setup worker", () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
     ownerId = randomUUID();
+    await pool.query(`INSERT INTO users(id,email,display_name,staff_role)
+      VALUES ($1,$2,'Setup Owner','developer')`, [ownerId, `setup-${ownerId}@example.test`]);
     const seeded = await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO users (id, email, display_name)
-         VALUES ($1, $2, 'Setup Owner')`,
-        [ownerId, `setup-${ownerId}@example.test`],
-      );
+
       const organization = await tx.query<{ id: string }>(
         `INSERT INTO organizations (
            slug, name, created_by, is_personal, cloud_workspaces_allowed
@@ -453,6 +451,28 @@ d("cloud workspace setup worker", () => {
     });
     return result;
   };
+
+  it("retries a failed setup after an engine identity was already issued", async () => {
+    const seeded = await seedSetup();
+    const executor = new FakeExecutor([
+      async execution => {
+        await registeredSuccessfulSetup(execution, "not yet published");
+        throw new CloudWorkspaceSetupError("setup_repository_unavailable", "retry fixture", true);
+      },
+      async execution => registeredSuccessfulSetup(execution, "retried"),
+    ]);
+    const instance = worker(executor);
+    await instance.runOnce();
+    await pool.query(`UPDATE cloud_workspace_setup_runs SET next_attempt_at=now() WHERE id=$1`, [seeded.setupRunId]);
+    await expect(instance.runOnce()).resolves.toBe(true);
+    const engines = await pool.query(`SELECT id,state,setup_execution_fence FROM cloud_workspace_engine_instances
+      WHERE workspace_id=$1 ORDER BY setup_execution_fence`, [seeded.workspaceId]);
+    expect(engines.rows.map(({ state, setup_execution_fence }) => ({ state, setup_execution_fence }))).toEqual([
+      { state: "revoked", setup_execution_fence: "1" }, { state: "ready", setup_execution_fence: "2" },
+    ]);
+    await expect(pool.query(`UPDATE cloud_workspace_engine_instances SET state='ready',revoked_at=NULL,
+      last_heartbeat_at=now(),lease_expires_at=now()+interval '1 minute' WHERE id=$1`, [engines.rows[0].id])).rejects.toMatchObject({ code: "23514" });
+  });
 
   it("stops even when an executor ignores its abort signal", async () => {
     await seedSetup();
@@ -831,7 +851,7 @@ d("cloud workspace setup worker", () => {
                   target.query as (...queryArgs: unknown[]) => Promise<unknown>
                 ).apply(target, args);
                 const sql = typeof args[0] === "string" ? args[0] : "";
-                if (sql === "BEGIN") {
+                if (/^BEGIN(?:;|$)/.test(sql)) {
                   await target.query("SET LOCAL statement_timeout = '750ms'");
                 }
                 if (

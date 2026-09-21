@@ -1,3 +1,4 @@
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { TOKENS_SEED } from "./document-seeds";
 import { MAX_DESIGN_TEXT_BYTES, utf8Bytes } from "./render-budget";
 import { elementRecords } from "./source";
@@ -114,6 +115,7 @@ export async function ensureSafeDesignRoot(workspacePath: string): Promise<strin
   const workspaceRoot = await realpath(path.resolve(workspacePath));
   const directory = designDirectory(workspacePath);
   await mkdir(directory, { recursive: true });
+  publishCloudWorkspacePath(directory);
   const canonicalDirectory = await realpath(directory);
   // realpath the WORKSPACE root only; every design-dir segment below it must
   // be a real directory (no symlink hop), or the canonical spelling differs
@@ -156,6 +158,7 @@ export async function assertSafeDesignWriteTarget(
       const candidate = path.join(canonicalParent, segment);
       try {
         await mkdir(candidate);
+        publishCloudWorkspacePath(candidate);
       } catch (error: unknown) {
         const code =
           error && typeof error === "object" && "code" in error
@@ -185,6 +188,7 @@ export async function writeIfMissing(
   let wrote = false;
   try {
     await writeFile(file, content, { encoding: "utf8", flag: "wx" });
+    publishCloudWorkspacePath(file);
     wrote = true;
   } catch (error: unknown) {
     const code =
@@ -207,6 +211,8 @@ export async function initializeDesignDocumentUnlocked(
     mkdir(path.join(directory, "assets"), { recursive: true }),
     mkdir(path.join(directory, "components"), { recursive: true }),
   ]);
+  publishCloudWorkspacePath(path.join(directory, "assets"));
+  publishCloudWorkspacePath(path.join(directory, "components"));
   const ignored: string[] = [];
   await writeIfMissing(
     path.join(directory, DESIGN_TOKENS_FILE),

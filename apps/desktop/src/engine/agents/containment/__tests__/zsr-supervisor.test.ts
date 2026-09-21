@@ -239,6 +239,63 @@ describe.skipIf(process.platform !== "linux")(
     }
 
     it.each([false, true])(
+      "uses one directory mask for overlapping absent authority roots (reverse: %s)",
+      async (reverse) => {
+        const absent = path.join(root, ".zeros");
+        const denied = [
+          absent,
+          path.join(absent, "cloud-workspace-validation"),
+          path.join(absent, "state"),
+        ];
+        const args = await argumentsFor({
+          hostParity: true,
+          readConfig: { denyOnly: denied, allowWithinDeny: [] },
+          writeConfig: {
+            allowOnly: [root],
+            denyWithinAllow: reverse ? [...denied].reverse() : denied,
+          },
+        });
+        const sources = args.flatMap((arg, index) =>
+          arg === "--ro-bind" && args[index + 2] === absent
+            ? [args[index + 1]]
+            : [],
+        );
+        expect(sources).toHaveLength(1);
+        expect(sources[0]).not.toBe("/dev/null");
+      },
+    );
+
+    it("makes only synthetic deny-mask ancestors traversable before rebinding a worker island", async () => {
+      const denied = path.join(root, "engine");
+      const parent = path.join(denied, "sessions", "one");
+      const island = path.join(parent, "container-worker");
+      await mkdir(island, { recursive: true, mode: 0o700 });
+      const args = await argumentsFor({
+        hostParity: true,
+        readConfig: { denyOnly: [denied], allowWithinDeny: [island] },
+        writeConfig: { allowOnly: [root, island], denyWithinAllow: [] },
+      });
+      const mask = args.indexOf("--tmpfs");
+      expect(args.slice(mask, mask + 5)).toEqual([
+        "--tmpfs",
+        denied,
+        "--chmod",
+        "0711",
+        denied,
+      ]);
+      const create = args.findIndex(
+        (arg, index) => arg === "--dir" && args[index + 1] === parent,
+      );
+      expect(create).toBeGreaterThan(mask);
+      expect(args.slice(create - 2, create)).toEqual(["--perms", "0711"]);
+      const rebind = args.findIndex(
+        (arg, index) =>
+          index > mask && arg === "--bind" && args[index + 1] === island,
+      );
+      expect(create).toBeLessThan(rebind);
+    });
+
+    it.each([false, true])(
       "drops root capabilities in upstream isolation (weaker nesting: %s)",
       async (enableWeakerNestedSandbox) => {
         vi.spyOn(process, "geteuid").mockReturnValue(0);
@@ -266,6 +323,14 @@ describe.skipIf(process.platform !== "linux")(
       expect(args).not.toContain("--cap-add");
     });
 
+    it("rejects unqualified privileged-worker network proxy composition", async () => {
+      vi.spyOn(process, "geteuid").mockReturnValue(0);
+      await expect(argumentsFor({hostParity:true,needsNetworkRestriction:true,
+        httpSocketPath:"/tmp/zeros-proxy-test.sock",socksSocketPath:"/tmp/zeros-socks-test.sock",
+        linuxPrivilegedWorker:{uid:1000,gid:1000,setprivPath:await realpath("/usr/bin/setpriv")},
+      })).rejects.toThrow(/proxy composition/);
+    });
+
     it("retains only worker identity-transition capabilities until setpriv drops them", async () => {
       vi.spyOn(process, "geteuid").mockReturnValue(0);
       const args = await argumentsFor({
@@ -277,7 +342,8 @@ describe.skipIf(process.platform !== "linux")(
         },
       });
       expect(args).not.toContain("--unshare-user");
-      expect(args).not.toContain("--unshare-pid");
+      expect(args).toContain("--unshare-pid");
+      expect(args.slice(args.indexOf("--proc"),args.indexOf("--proc")+2)).toEqual(["--proc","/proc"]);
       expect(
         args.filter((_, index) => args[index - 1] === "--cap-add"),
       ).toEqual(["CAP_SETUID", "CAP_SETGID", "CAP_SETPCAP"]);
@@ -405,7 +471,10 @@ describe("ZSR supervisor launch contract", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  async function rejectCommand(extra: Record<string, unknown>) {
+  async function rejectCommand(
+    extra: Record<string, unknown>,
+    bootstrap: Record<string, string> = {},
+  ) {
     await writeFile(
       commandPath,
       `${JSON.stringify({
@@ -431,11 +500,60 @@ describe("ZSR supervisor launch contract", () => {
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           ZEROS_ZSR_RIPGREP_PATH: rgPath,
+          ...bootstrap,
         },
         encoding: "utf8",
       },
     );
   }
+
+  it.runIf(process.platform === "linux")(
+    "restores the requested working directory after namespace entry changes it",
+    async () => {
+      const nested = path.join(workspace, "private ' $(printf injected)");
+      await mkdir(nested, { mode: 0o700 });
+      const launcher = path.join(root, "namespace-cwd-fallback");
+      // Model bubblewrap's fallback when its intermediate identity cannot
+      // traverse a worker-owned 0700 cwd. The final worker can enter it.
+      await writeFile(
+        launcher,
+        '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\ncd /\nexec "$@"\n',
+        { mode: 0o700 },
+      );
+      const result = await rejectCommand(
+        {
+          cwd: nested,
+          args: ["-e", "process.stdout.write(process.cwd())"],
+        },
+        { ZEROS_ZSR_BWRAP_PATH: launcher },
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(nested);
+    },
+  );
+
+  it.runIf(process.platform === "linux")(
+    "does not execute in a fallback directory when the requested cwd disappears",
+    async () => {
+      const nested = path.join(workspace, "disappearing");
+      await mkdir(nested, { mode: 0o700 });
+      const launcher = path.join(root, "namespace-cwd-disappears");
+      await writeFile(
+        launcher,
+        '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nrmdir "$PWD"\ncd /\nexec "$@"\n',
+        { mode: 0o700 },
+      );
+      const result = await rejectCommand(
+        {
+          cwd: nested,
+          args: ["-e", "process.stdout.write('incorrectly-executed')"],
+        },
+        { ZEROS_ZSR_BWRAP_PATH: launcher },
+      );
+      expect(result.status).not.toBe(0);
+      expect(result.stdout).not.toContain("incorrectly-executed");
+    },
+  );
 
   it.each([
     ["credentialCapabilities", []],

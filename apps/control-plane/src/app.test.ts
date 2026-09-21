@@ -78,6 +78,50 @@ function workosConfig(): Config {
   };
 }
 
+describe("unexpected error privacy", () => {
+  it.each([true, false])("omits driver details from logs and HTTP responses (production=%s)", async (isProduction) => {
+    const app = createApp({ ...config(null), isProduction }, pool, emailConfig as never);
+    const sentinel = "private-value-that-must-never-be-logged";
+    app.get("/test-error", () => {
+      throw Object.assign(new Error(sentinel), {
+        code: "23505", detail: sentinel, query: sentinel, where: sentinel,
+        schema: sentinel, table: sentinel, constraint: sentinel,
+      });
+    });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await app.request("/test-error");
+      expect(response.status).toBe(500);
+      expect(await response.json()).toEqual({ error: { code: "internal", message: "Internal error" } });
+      expect(log).toHaveBeenCalledExactlyOnceWith("[error]", { code: "internal", sqlState: "23505" });
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    } finally { log.mockRestore(); }
+  });
+});
+
+describe("database cutover maintenance", () => {
+  it("rejects every application surface before auth, provider calls or writes", async () => {
+    const query = vi.fn(async () => ({ rows: [{ value: 1 }] }));
+    const maintenance = { ...workosConfig(), databaseMaintenanceMode: true };
+    const app = createApp(maintenance, { query } as unknown as pg.Pool, emailConfig as never);
+    for (const [method, path] of [
+      ["GET", "/v1/me"], ["POST", "/auth/workos-webhook"], ["GET", "/auth/start"],
+      ["POST", "/v1/organizations"], ["POST", "/internal/v2/cloud-workspaces/engine/register"],
+      ["GET", "/healthz/extra"], ["POST", "/healthz"], ["GET", "/preview/"],
+    ]) {
+      const response = await app.request(path!, { method });
+      expect(response.status, `${method} ${path}`).toBe(503);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("retry-after")).toBe("30");
+    }
+    expect(query).not.toHaveBeenCalled();
+    const health = await app.request("/healthz");
+    expect(health.status).toBe(200);
+    expect(await health.json()).toEqual({ ok: true, maintenance: true });
+    expect(query).toHaveBeenCalledExactlyOnceWith("SELECT 1");
+  });
+});
+
 describe("app assembly — Railway WorkOS boundary", () => {
   const app = createApp(workosConfig(), pool, emailConfig as never);
 
@@ -347,6 +391,14 @@ describe("app assembly — healthz", () => {
       "/v1/devices",
       "/v1/devices/33333333-3333-4333-8333-333333333333",
       "/internal/v1/cloud-workspaces/engine/heartbeat",
+      "/internal/v2/cloud-workspaces/engine/client-admission",
+      "/v1/cloud-workspaces",
+      "/v1/cloud-workspaces/22222222-2222-4222-8222-222222222222/invitations",
+      "/v1/cloud-workspace-invitations/accept",
+      "/v1/cloud-compute-credits",
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-compute-credits",
+      "/v1/auth/snapshot",
+      "/v1/auth/events",
     ];
 
     for (const requestPath of paths) {
@@ -451,9 +503,55 @@ describe("app assembly — cloud workspace internal capabilities", () => {
     expect(response?.status).toBe(429);
     expect(serviceCalls).toBe(0);
   });
+
+  it.each(["client-admission", "agent-execution"])("throttles valid-shape v2 %s guesses before service work", async (endpoint) => {
+    const invoke = vi.fn(async () => ({ version: 1 }));
+    const service = {
+      redeem: invoke, registerEngine: invoke, heartbeat: invoke,
+      admitActorClient: invoke, agentExecutions: { validate: invoke },
+    };
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceInternalSetupService: service as never,
+    });
+    const scope = { workspaceId: "11111111-1111-4111-8111-111111111111", organizationId: "22222222-2222-4222-8222-222222222222", generation: 1, engineInstanceId: "33333333-3333-4333-8333-333333333333" };
+    const body = endpoint === "client-admission"
+      ? { ...scope, grantToken: `zwa_${"a".repeat(43)}` }
+      : { ...scope, request: { kind: "validate", leaseId: "44444444-4444-4444-8444-444444444444" } };
+    const request = () => app.request(`/internal/v2/cloud-workspaces/engine/${endpoint}`, {
+      method: "POST", headers: { "content-type": "application/json", authorization: `Bearer zwh_${"b".repeat(43)}`, "x-real-ip": endpoint === "client-admission" ? "203.0.113.92" : "203.0.113.93" }, body: JSON.stringify(body),
+    });
+    for (let attempt = 0; attempt < 600; attempt += 1) expect((await request()).status).toBe(200);
+    expect(invoke).toHaveBeenCalledTimes(600);
+    const limited = await request();
+    expect(limited.status).toBe(429);
+    expect(invoke).toHaveBeenCalledTimes(600);
+    expect(limited.headers.get("cache-control")).toBe("no-store");
+    expect(limited.headers.get("x-content-type-options")).toBe("nosniff");
+  });
 });
 
 describe("app assembly — isolated cloud preview proxy", () => {
+  it("preserves HTTPS preview identity behind the TLS-terminating edge without trusting a forwarded host", async () => {
+    const host = "0123456789abcdef0123456789abcdef.cloud-preview.example.test";
+    const handlePreviewRequest = vi.fn(async (request: Request) => new Response(await request.text()));
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceAccessService: {
+        issue: async () => { throw new Error("unused"); }, revoke: async () => { throw new Error("unused"); },
+        recognizesPreviewRequest: request => new URL(request.url).origin === `https://${host}`,
+        handlePreviewRequest,
+      },
+    });
+    const response = await app.request(`http://${host}/submit?x=1`, { method: "POST", headers: { "x-forwarded-proto": "https" }, body: "exact-body" });
+    expect(response.status).toBe(200); expect(await response.text()).toBe("exact-body");
+    expect(handlePreviewRequest.mock.calls[0]![0].url).toBe(`https://${host}/submit?x=1`);
+    const unrelated = await app.request("http://api.example.test/v1/me", { headers: { "x-forwarded-proto": "https", "x-forwarded-host": host } });
+    expect(unrelated.status).toBe(401); expect(handlePreviewRequest).toHaveBeenCalledOnce();
+    for (const proto of ["http", "https,http", ""]) {
+      await app.request(`http://${host}/submit`, { headers: { "x-forwarded-proto": proto } });
+    }
+    expect(handlePreviewRequest).toHaveBeenCalledOnce();
+  });
+
   it("does not enter the preview database path while a controlled migration is pending", async () => {
     const handlePreviewRequest = vi.fn(async () => new Response("proxied"));
     const app = createApp(config(null), pool, emailConfig as never, {
@@ -586,7 +684,7 @@ describe("app assembly — isolated cloud preview proxy", () => {
           origin: "app://zeros",
           "access-control-request-method": "DELETE",
           "access-control-request-headers":
-            "authorization,x-zeros-access-credential",
+            "authorization,x-zeros-access-credential,x-zeros-runtime-admission",
         },
       },
     );
@@ -594,6 +692,7 @@ describe("app assembly — isolated cloud preview proxy", () => {
     expect(response.headers.get("access-control-allow-headers")).toContain(
       "x-zeros-access-credential",
     );
+    expect(response.headers.get("access-control-allow-headers")).toContain("x-zeros-runtime-admission");
   });
 });
 

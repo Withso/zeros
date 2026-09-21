@@ -252,9 +252,19 @@ async function withPromotionLock<T>(
   }
 }
 
+/** Cloud provider history is writable by the worker, outside engine authority.
+ * Return the destination without creating anything as the privileged engine;
+ * cursor-host initializes it after crossing the admitted identity boundary. */
+export function cloudCursorStateRoot(cwd: string, providerHome: string | undefined): string {
+  if (!path.isAbsolute(cwd) || typeof providerHome !== "string" || !path.isAbsolute(providerHome) ||
+    cwd.includes("\0") || providerHome.includes("\0"))
+    throw new Error("Cloud Cursor state requires an admitted provider home");
+  return path.join(providerHome, ".cursor", "zeros-workspaces", workspaceKey(cwd));
+}
+
 /** The durable per-workspace store itself, ready to be written directly.
  *
- * This is the host-parity path for local and cloud: no per-execution overlay,
+ * This is the local host-parity path: no per-execution overlay,
  * merge baseline, or crash-recovery hold, because there is nothing transient
  * to reconcile. Every session in a workspace shares this on-disk agent store,
  * and its existing location keeps prior chats attached to their history.

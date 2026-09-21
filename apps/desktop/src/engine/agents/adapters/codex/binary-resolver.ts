@@ -114,6 +114,50 @@ async function resolveNpmSandboxRuntimeRoot(
   }
 }
 
+/** Cloud never consumes a desktop override, npm wrapper or login-shell PATH.
+ * Resolve the exact image dependency to its native ELF in both bundled CJS and
+ * source ESM. The immutable image admission owns the package tree. */
+export async function resolveCloudCodexBinaryFromImage(
+  imageRoot = "/opt/zeros",
+): Promise<CodexBinarySource> {
+  const invalid = () => new Error("Cloud Codex requires the pinned native executable");
+  const target = platformRuntimeTarget();
+  if (process.platform !== "linux" || !target) throw invalid();
+  const root = await fsp.realpath(imageRoot);
+  const inside = (file: string) => file.startsWith(root + path.sep);
+  const readPackage = async (file: string) => {
+    const physical = await fsp.realpath(file);
+    if (!inside(physical)) throw invalid();
+    return JSON.parse(await fsp.readFile(physical, "utf8")) as {
+      version?: string; dependencies?: Record<string, string>;
+    };
+  };
+  const manifest = path.join(root, "package.json");
+  const image = await readPackage(manifest);
+  const pin = image.dependencies?.["@openai/codex"];
+  if (!pin || !/^\d+\.\d+\.\d+$/.test(pin)) throw invalid();
+  const fromImage = createRequire(manifest);
+  const wrapperPath = fromImage.resolve("@openai/codex/package.json");
+  if ((await readPackage(wrapperPath)).version !== pin) throw invalid();
+  const fromWrapper = createRequire(wrapperPath);
+  const platformPath = fromWrapper.resolve(`${target.packageName}/package.json`);
+  if ((await readPackage(platformPath)).version !== `${pin}-linux-${process.arch}`)
+    throw invalid();
+  const nativePath = path.join(path.dirname(platformPath), "vendor", target.triple, "bin", "codex");
+  const binary = await fsp.realpath(nativePath);
+  if (!inside(binary)) throw invalid();
+  await fsp.access(binary, fsConstants.X_OK);
+  const file = await fsp.open(binary, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  try {
+    const stat = await file.stat();
+    const magic = Buffer.alloc(4);
+    const read = await file.read(magic, 0, 4, 0);
+    if (!stat.isFile() || read.bytesRead !== 4 || !magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])))
+      throw invalid();
+  } finally { await file.close(); }
+  return {path: binary, source: "bundled", sandboxRuntimeRoot: path.dirname(path.dirname(binary))};
+}
+
 /** Resolve one executable from a trusted PATH snapshot and return its physical
  * absolute path. ZSR intentionally refuses relative commands: resolving here
  * preserves the normal global-CLI fallback without letting the sandbox choose

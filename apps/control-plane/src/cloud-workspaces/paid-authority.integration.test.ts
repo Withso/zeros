@@ -1,9 +1,10 @@
+import {withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
-import { ensureUser } from "../auth.js";
+import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import { applyWorkOSIdentityEvent } from "../workos-events.js";
@@ -116,7 +117,7 @@ d("cloud workspace paid-authority reconciliation", () => {
     expect(authority.rows[0]).toEqual({ paid: false, runtime: false });
   });
 
-  it("denies Pro runtime authority for a future-dated collaborator entitlement", async () => {
+  it("keeps sponsor authority when an unrelated collaborator's Pro has not activated", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);
     await withSystemTx(pool, (tx) =>
       tx.query(
@@ -142,7 +143,7 @@ d("cloud workspace paid-authority reconciliation", () => {
       email: `future-collaborator-${randomUUID()}@example.test`,
       displayName: "Future Pro Collaborator",
     });
-    await withSystemTx(pool, async (tx) => {
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
         `INSERT INTO organization_members (org_id, user_id, role)
          VALUES ($1, $2, 'member')`,
@@ -170,7 +171,7 @@ d("cloud workspace paid-authority reconciliation", () => {
                 AS runtime`,
       [fixture.workspaceId, fixture.userId],
     );
-    expect(authority.rows[0]).toEqual({ paid: false, runtime: false });
+    expect(authority.rows[0]).toEqual({ paid: true, runtime: true });
   });
 
   it("fails closed and queues cleanup for every generation when the owner seat is released", async () => {
@@ -427,7 +428,7 @@ d("cloud workspace paid-authority reconciliation", () => {
     });
   });
 
-  it("stops Pro organization work when any collaborator loses Pro", async () => {
+  it("keeps owner-funded work running when another collaborator loses Pro", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);
     const collaborator = await ensureUser(pool, {
       provider: "workos",
@@ -435,7 +436,7 @@ d("cloud workspace paid-authority reconciliation", () => {
       email: `collaborator-${randomUUID()}@example.test`,
       displayName: "Collaborator",
     });
-    await withSystemTx(pool, async (tx) => {
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
         `INSERT INTO organization_members (org_id, user_id, role)
          VALUES ($1, $2, 'member')`,
@@ -467,7 +468,7 @@ d("cloud workspace paid-authority reconciliation", () => {
       action: "billing_rebound",
     });
 
-    await withSystemTx(pool, (tx) =>
+    await withCloudFixtureOwnerTx(pool, (tx) =>
       tx.query(
         `UPDATE account_entitlements
          SET status = 'cancelled', revision = revision + 1, updated_at = now()
@@ -477,7 +478,16 @@ d("cloud workspace paid-authority reconciliation", () => {
     );
     await expect(reconciler.runOnce()).resolves.toMatchObject({
       workspaceId: fixture.workspaceId,
-      action: "stopped",
+      action: "unchanged",
     });
+  });
+
+  it("revokes live engine authority and schedules cleanup when a pilot sponsor loses staff access", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [fixture.userId]);
+    const authority = await pool.query(`SELECT cloud_workspace_runtime_authority_live($1,1,$2,false) AS live`, [fixture.workspaceId, fixture.userId]);
+    expect(authority.rows[0].live).toBe(false);
+    const reconciler = new DatabaseCloudWorkspacePaidAuthorityReconciler(pool, {workosEnabled:false});
+    await expect(reconciler.runOnce()).resolves.toMatchObject({ workspaceId: fixture.workspaceId, action:"stopped", reason:"paid_authority_revoked" });
   });
 });

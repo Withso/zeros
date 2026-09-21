@@ -16,8 +16,14 @@ import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worke
 import type { CloudReplicaHostSession } from "../cloud-replica-host-control";
 import { NODE_DESIGN_WATCH_GUARD_FILENAME } from "../agents/containment/design-watch-isolation";
 import * as gitState from "../git/state";
+import type { CloudCheckpointDirective, CloudDurabilityAuthority } from "../cloud-durability-runtime";
 
 interface ReaperInternals {
+  cloudRuntimeCheckpointQuiescing: boolean;
+  cloudWorkspaceMutations: Set<Promise<unknown>>;
+  cloudDurabilityRuntime: { checkpoint: ReturnType<typeof vi.fn> } | null;
+  cloudRecordRuntime: { synchronize: ReturnType<typeof vi.fn> } | null;
+  handleCloudCheckpointRequest(directive: CloudCheckpointDirective, authority: CloudDurabilityAuthority): Promise<void>;
   cloudReplicaRuntime: {
     updateSession(session: CloudReplicaHostSession | null): Promise<void>;
   } | null;
@@ -1064,15 +1070,15 @@ describe("workspace terminal start barrier", () => {
       remote,
     );
 
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ resolvedCwd: authCwd, scrubEnv: false }),
-    );
+    const created=create.mock.calls[0]?.[0] as {resolvedCwd?:string;scrubEnv?:boolean}|undefined;
+    expect(created?.resolvedCwd).toBe(authCwd);
+    expect(created?.scrubEnv).toBe(true);
     expect(remote.send).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "PTY_EXIT" }),
     );
   });
 
-  it("gives a qualified cloud terminal normal worker env without coordinator authority", async () => {
+  it("keeps provider credentials and arbitrary ambient variables out of qualified human terminals", async () => {
     const state = internals(
       new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_901 }),
     );
@@ -1115,17 +1121,11 @@ describe("workspace terminal start barrier", () => {
       delete process.env.ZEROS_CLOUD_TOKEN;
     }
 
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        scrubEnv: false,
-        env: expect.objectContaining({
-          ANTHROPIC_API_KEY: "cloud-provider-key",
-          CLOUD_NORMAL_VAR: "normal-worker-value",
-        }),
-      }),
-    );
+    expect((create.mock.calls[0]?.[0] as {scrubEnv?:boolean}|undefined)?.scrubEnv).toBe(true);
     const env = create.mock.calls[0]?.[0] as { env?: Record<string, string> };
     expect(env.env?.ZEROS_CLOUD_TOKEN).toBeUndefined();
+    expect(env.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(env.env?.CLOUD_NORMAL_VAR).toBeUndefined();
   });
 
   it("registers a terminal start before remote authorization yields", async () => {
@@ -1207,6 +1207,44 @@ describe("workspace terminal start barrier", () => {
 });
 
 describe("qualified cloud workspace authority", () => {
+  it("blocks new cloud workspace edits during a final checkpoint while retaining reads", async () => {
+    const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_914 }));
+    state.cloudWorker = qualifiedCloudWorker();state.cloudRuntimeCheckpointQuiescing = true;
+    vi.spyOn(state.workspace,"lifecycleMutationWorkspaceId").mockReturnValue(null);
+    const service=vi.spyOn(state.workspace,"handle").mockResolvedValue({});
+    const remote=client("cloud");
+    for(const op of ["design.initialize","design.frame.create","file.write","chats.upsert"]){
+      await state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:op,source:"browser",timestamp:1,op,params:{workspaceId:"local-main"}},remote);
+      expect(remote.send).toHaveBeenLastCalledWith(expect.objectContaining({type:"WORKSPACE_ERROR",code:"CLOUD_WORKSPACE_CHECKPOINTING"}));
+    }
+    expect(service).not.toHaveBeenCalled();
+    await state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:"read",source:"browser",timestamp:1,op:"design.frames",params:{workspaceId:"local-main"}},remote);
+    expect(service).toHaveBeenCalledOnce();
+  });
+
+  it("drains edits admitted before the checkpoint and existing workspace starts before capture", async () => {
+    const state = internals(new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_915 }));
+    state.cloudWorker=qualifiedCloudWorker();
+    vi.spyOn(state.workspace,"lifecycleMutationWorkspaceId").mockReturnValue(null);
+    let releaseEdit!:()=>void,releaseStart!:()=>void;
+    const edit=new Promise<void>(resolve=>{releaseEdit=resolve;});
+    const start=new Promise<void>(resolve=>{releaseStart=resolve;});
+    vi.spyOn(state.workspace,"handle").mockReturnValue(edit);
+    state.workspaceProcessStarts.set("local-main",new Set([start]));
+    vi.spyOn(state.setup,"stopAllAndProve").mockResolvedValue();
+    vi.spyOn(state.runs,"stopAllAndProve").mockResolvedValue();
+    const checkpoint=vi.fn(async()=>{}),synchronize=vi.fn(async()=>{});
+    state.cloudDurabilityRuntime={checkpoint};state.cloudRecordRuntime={synchronize};
+    const writing=state.handleWorkspaceMessage({type:"WORKSPACE_REQUEST",id:"edit",source:"browser",timestamp:1,op:"design.frame.create",params:{workspaceId:"local-main"}},client("cloud"));
+    const capture=state.handleCloudCheckpointRequest({id:"fixture",reason:"before_stop",deadlineAtMs:Date.now()+30000},{heartbeatEndpoint:"https://example.test/heartbeat",heartbeatToken:"fixture",workspaceId:"workspace",organizationId:"org",generation:1,engineInstanceId:"engine"});
+    try{
+      await new Promise(resolve=>setTimeout(resolve,10));expect(checkpoint).not.toHaveBeenCalled();
+      releaseStart();await new Promise(resolve=>setTimeout(resolve,10));expect(checkpoint).not.toHaveBeenCalled();
+      releaseEdit();await writing;await capture;
+      expect(synchronize).toHaveBeenCalledOnce();expect(checkpoint).toHaveBeenCalledOnce();
+      expect(state.cloudRuntimeCheckpointQuiescing).toBe(true);expect(state.cloudWorkspaceMutations.size).toBe(0);
+    }finally{releaseStart();releaseEdit();await Promise.allSettled([writing,capture]);}
+  });
   it("routes secret-free credential invalidation to the qualified cloud owner only", () => {
     const qualified = internals(
       new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_904 }),
@@ -1276,7 +1314,7 @@ describe("qualified cloud workspace authority", () => {
     expect(handle).toHaveBeenCalledWith(
       "design.frames",
       { workspaceId: "ws_outer" },
-      { hostLocalResources: false, remote: false },
+      { hostLocalResources: false, remote: false, cloudWorker: true },
     );
     expect(remote.send).toHaveBeenCalledWith(
       expect.objectContaining({

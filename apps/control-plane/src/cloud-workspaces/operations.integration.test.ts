@@ -10,6 +10,9 @@ import {
 } from "./object-store.js";
 import { CloudWorkspaceOperationsWorker } from "./operations.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
+import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
+import { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -41,6 +44,49 @@ d("cloud workspace production operations", () => {
       }),
     };
   }
+
+  it.each(["commands", "events", "actions"] as const)(
+    "purges %s before retiring engine records, preserving another workspace and the billing tombstone",
+    async kind => {
+      const fixture = await seedReadyCloudWorkspace(pool);
+      const other = await seedReadyCloudWorkspace(pool);
+      for (const f of [fixture, other]) {
+        const scope = { workspaceId: f.workspaceId, organizationId: f.organizationId,
+          generation: 1, engineInstanceId: f.engineInstanceId, heartbeatToken: f.heartbeatToken };
+        if (kind === "commands") {
+          const commands = new DatabaseCloudWorkspaceCommandService({ pool });
+          await commands.mutate(scope, { conversationId: "delete-fixture", operationId: randomUUID(), expectedRevision: 0,
+            action: { kind: "enqueue", commandId: randomUUID(), payload: { agentId: "claude", modeRevision: 0,
+              userMessageId: randomUUID(), prompt: [{ type: "text", text: "private command fixture" }] } } });
+          await commands.claim(scope, "delete-fixture", "execution");
+        } else if (kind === "events") {
+          await new DatabaseCloudWorkspaceEventService({ pool }).request(scope, { kind: "append", batchId: randomUUID(),
+            events: [{ sequence: 1, frame: { id: randomUUID(), source: "engine", timestamp: 0,
+              type: "AGENT_SESSION_UPDATE", content: "private stream fixture",
+              cloudStream: { streamId: f.engineInstanceId, sequence: 1 } } }] });
+        } else {
+          await new DatabaseCloudWorkspaceActionService({ pool }).request(scope, { kind: "begin", admissible: true,
+            action: { operationId: randomUUID(), conversationId: "delete-fixture", executionId: "execution",
+              kind: "permission", requestId: randomUUID(), payload: { response: { outcome: "cancelled" } } } });
+        }
+      }
+      await pool.query(`UPDATE cloud_workspaces SET status='deleted', desired_state='deleted', deleted_at=now() WHERE id=$1`, [fixture.workspaceId]);
+      await pool.query(`UPDATE cloud_workspace_provider_bindings SET observed_state='deleted', deletion_verified_at=now() WHERE workspace_id=$1`, [fixture.workspaceId]);
+      await new CloudWorkspaceOperationsWorker(pool, blobs().service, { workerId: "operations-runtime-history-test" }).runOnce();
+      expect((await pool.query(`SELECT job.state, workspace.data_deleted_at IS NOT NULL AS erased
+        FROM workspace_deletion_jobs job JOIN cloud_workspaces workspace ON workspace.id=job.workspace_id
+        WHERE workspace.id=$1`, [fixture.workspaceId])).rows[0]).toEqual({ state: "succeeded", erased: true });
+      const tables = kind === "commands"
+        ? ["cloud_workspace_conversation_controls", "cloud_workspace_commands", "cloud_workspace_command_operations"]
+        : kind === "events" ? ["cloud_workspace_event_streams", "cloud_workspace_stream_events"] : ["cloud_workspace_action_receipts"];
+      for (const table of tables) {
+        expect((await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id=$1`, [fixture.workspaceId])).rows[0].count).toBe(0);
+        expect((await pool.query(`SELECT count(*)::int AS count FROM ${table} WHERE workspace_id=$1`, [other.workspaceId])).rows[0].count).toBe(1);
+      }
+      expect((await pool.query(`SELECT count(*)::int AS count FROM workspace_billing_epochs WHERE workspace_id=$1`, [fixture.workspaceId])).rows[0].count).toBe(1);
+      expect((await pool.query(`SELECT count(*)::int AS count FROM cloud_workspace_engine_instances WHERE workspace_id=$1`, [fixture.workspaceId])).rows[0].count).toBe(0);
+    },
+  );
 
   it("expires export capabilities atomically and releases their checkpoint/object pins", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);

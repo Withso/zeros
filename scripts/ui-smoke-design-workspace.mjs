@@ -1397,15 +1397,18 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   // the fixture without leaving a 0px of its own behind.
   await untouchedPaddingInput.fill("");
   await page.keyboard.press("Enter");
-  await waitFor(
-    () =>
-      homeRuntime
-        .locator('[data-oid="home-heading"]')
-        .evaluate(
-          (element) => element.style.getPropertyValue("word-spacing") === "",
-        )
-        .catch(() => false),
-    "design-neutral-style-removal",
+  check(
+    "clearing a numeric field removes the authored declaration",
+    await waitFor(
+      () =>
+        homeRuntime
+          .locator('[data-oid="home-heading"]')
+          .evaluate(
+            (element) => element.style.getPropertyValue("word-spacing") === "",
+          )
+          .catch(() => false),
+      "design-neutral-style-removal",
+    ),
   );
   await untouchedPaddingInput.fill("12");
   await page.keyboard.press("Escape");

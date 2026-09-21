@@ -12,7 +12,7 @@ const MAX_PAGE_SIZE = 500;
 
 export class CloudWorkspaceSetupRecoveryError extends Error {
   constructor(
-    public readonly code: "recovery_capability_rejected" | "recovery_blob_unavailable",
+    public readonly code: "recovery_capability_rejected" | "recovery_blob_unavailable" | "recovery_format_unsupported",
   ) {
     super("Cloud workspace recovery request was not accepted");
     this.name = "CloudWorkspaceSetupRecoveryError";
@@ -81,8 +81,15 @@ export async function issueWorkspaceSetupRecoveryGrant(
      LEFT JOIN workspace_content_heads head
        ON head.workspace_id = generation.workspace_id
       AND head.org_id = generation.org_id
+     LEFT JOIN workspace_checkpoints latest
+       ON latest.id = head.current_checkpoint_id
+      AND latest.workspace_id = generation.workspace_id
+      AND latest.org_id = generation.org_id
+      AND latest.generation = generation.generation
+      AND latest.state = 'durable'
      JOIN workspace_checkpoints checkpoint
        ON checkpoint.id = coalesce(
+         latest.id,
          generation.recovery_checkpoint_id,
          head.current_checkpoint_id
        )
@@ -99,7 +106,7 @@ export async function issueWorkspaceSetupRecoveryGrant(
 
   await tx.query(
     `UPDATE cloud_workspace_generations
-     SET recovery_checkpoint_id = coalesce(recovery_checkpoint_id, $4)
+     SET recovery_checkpoint_id = $4
      WHERE workspace_id = $1 AND generation = $2 AND org_id = $3`,
     [
       input.workspaceId,
@@ -167,6 +174,7 @@ type RecoveryGrant = {
 async function consumeRecoveryGrantUse(
   tx: Tx,
   token: string,
+  consumeUse = true,
 ): Promise<RecoveryGrant> {
   if (!RECOVERY_TOKEN_PATTERN.test(token)) {
     throw new CloudWorkspaceSetupRecoveryError("recovery_capability_rejected");
@@ -178,12 +186,15 @@ async function consumeRecoveryGrantUse(
     workspace_id: string;
     org_id: string;
   }>(
-    `UPDATE workspace_setup_recovery_grants recovery
+    `${consumeUse ? `UPDATE workspace_setup_recovery_grants recovery
      SET last_used_at = now(), use_count = use_count + 1
-     FROM cloud_workspace_setup_runs setup, cloud_workspaces workspace
+     FROM` : `SELECT recovery.token_sha256, recovery.checkpoint_id,
+               recovery.workspace_id, recovery.org_id
+     FROM workspace_setup_recovery_grants recovery,`}
+     cloud_workspace_setup_runs setup, cloud_workspaces workspace
      WHERE recovery.token_sha256 = $1
        AND recovery.revoked_at IS NULL AND recovery.expires_at > now()
-       AND recovery.use_count < 1000000
+       AND ($2::boolean IS FALSE OR recovery.use_count < 1000000)
        AND setup.id = recovery.setup_run_id
        AND setup.workspace_id = recovery.workspace_id
        AND setup.generation = recovery.generation
@@ -196,9 +207,9 @@ async function consumeRecoveryGrantUse(
        AND workspace.desired_state = 'running'
        AND workspace.status = 'setting_up'
        AND workspace.deleted_at IS NULL
-     RETURNING recovery.token_sha256, recovery.checkpoint_id,
-               recovery.workspace_id, recovery.org_id`,
-    [hash],
+     ${consumeUse ? `RETURNING recovery.token_sha256, recovery.checkpoint_id,
+               recovery.workspace_id, recovery.org_id` : ""}`,
+    [hash, consumeUse],
   );
   const row = grant.rows[0];
   if (!row || !sameHash(row.token_sha256, hash)) {
@@ -221,9 +232,12 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
     token: string;
     afterPath: string | null;
     limit?: number;
+    version?: 1 | 2;
   }): Promise<{
-    version: 1;
-    audience: "zeros-cloud-workspace-recovery-manifest-v1";
+    version: 1 | 2;
+    audience: "zeros-cloud-workspace-recovery-manifest-v1" | "zeros-cloud-workspace-recovery-manifest-v2";
+    manifest?: { blobId: string; contentSha256: string; sizeBytes: number };
+    artifacts?: Array<{ blobId: string; contentSha256: string; sizeBytes: number }>;
     checkpointId: string;
     contentRevision: number;
     gitBaseCommit: string | null;
@@ -246,6 +260,7 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
   }> {
     const limit = input.limit ?? MAX_PAGE_SIZE;
     if (
+      (input.version !== undefined && input.version !== 1 && input.version !== 2) ||
       !Number.isSafeInteger(limit) ||
       limit < 1 ||
       limit > MAX_PAGE_SIZE ||
@@ -264,17 +279,40 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
         git_head_ref: string | null;
         file_count: number;
         total_bytes: string | number;
+        manifest_blob_id: string;
+        manifest_sha256: Buffer;
+        manifest_bytes: string | number;
       }>(
-        `SELECT content_revision, git_base_commit, git_head_ref,
-                file_count, total_bytes
-         FROM workspace_checkpoints
-         WHERE id = $1 AND workspace_id = $2 AND org_id = $3
-           AND state = 'durable'`,
+        `SELECT checkpoint.content_revision, checkpoint.git_base_commit, checkpoint.git_head_ref,
+                checkpoint.file_count, checkpoint.total_bytes, checkpoint.manifest_blob_id,
+                blob.plaintext_sha256 AS manifest_sha256, blob.plaintext_bytes AS manifest_bytes
+         FROM workspace_checkpoints checkpoint
+         JOIN workspace_blobs blob ON blob.id = checkpoint.manifest_blob_id
+           AND blob.org_id = checkpoint.org_id AND blob.state = 'available'
+         WHERE checkpoint.id = $1 AND checkpoint.workspace_id = $2 AND checkpoint.org_id = $3
+           AND checkpoint.state = 'durable'`,
         [grant.checkpointId, grant.workspaceId, grant.organizationId],
       );
       const metadata = checkpoint.rows[0];
       if (!metadata) {
         throw new CloudWorkspaceSetupRecoveryError("recovery_capability_rejected");
+      }
+      const artifacts = await tx.query<{
+        id: string; plaintext_sha256: Buffer; plaintext_bytes: string | number; state: string;
+      }>(
+        `SELECT blob.id, blob.plaintext_sha256, blob.plaintext_bytes, blob.state
+         FROM workspace_blob_references reference
+         JOIN workspace_blobs blob ON blob.id = reference.blob_id AND blob.org_id = reference.org_id
+         WHERE reference.org_id = $1 AND reference.workspace_id = $2
+           AND reference.reference_kind = 'checkpoint_artifact' AND reference.reference_id = $3
+         ORDER BY blob.id`,
+        [grant.organizationId, grant.workspaceId, `${grant.checkpointId}:v2`],
+      );
+      if (artifacts.rows.length && input.version !== 2) {
+        throw new CloudWorkspaceSetupRecoveryError("recovery_format_unsupported");
+      }
+      if (artifacts.rows.some((blob) => blob.state !== "available")) {
+        throw new CloudWorkspaceSetupRecoveryError("recovery_blob_unavailable");
       }
       const entries = await tx.query<{
         normalized_path: string;
@@ -298,8 +336,12 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
       const hasMore = entries.rows.length > limit;
       const page = entries.rows.slice(0, limit);
       return {
-        version: 1,
-        audience: "zeros-cloud-workspace-recovery-manifest-v1",
+        version: input.version ?? 1,
+        audience: input.version === 2 ? "zeros-cloud-workspace-recovery-manifest-v2" : "zeros-cloud-workspace-recovery-manifest-v1",
+        ...(input.version === 2 ? {
+          manifest: { blobId: metadata.manifest_blob_id, contentSha256: metadata.manifest_sha256.toString("hex"), sizeBytes: Number(metadata.manifest_bytes) },
+          artifacts: artifacts.rows.map((blob) => ({ blobId: blob.id, contentSha256: blob.plaintext_sha256.toString("hex"), sizeBytes: Number(blob.plaintext_bytes) })),
+        } : {}),
         checkpointId: grant.checkpointId,
         contentRevision: Number(metadata.content_revision),
         gitBaseCommit: metadata.git_base_commit,
@@ -346,6 +388,12 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
                  AND (checkpoint.manifest_blob_id = blob.id
                       OR checkpoint.artifact_blob_id = blob.id)
              )
+             OR EXISTS (
+               SELECT 1 FROM workspace_blob_references reference
+               WHERE reference.blob_id = blob.id AND reference.org_id = $2
+                 AND reference.workspace_id = $4 AND reference.reference_kind = 'checkpoint_artifact'
+                 AND reference.reference_id = $3::text || ':v2'
+             )
            )`,
         [
           input.blobId,
@@ -358,7 +406,7 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
       if (!hash) {
         throw new CloudWorkspaceSetupRecoveryError("recovery_capability_rejected");
       }
-      return { organizationId: grant.organizationId, hash };
+      return { ...grant, hash };
     });
     let bytes: Buffer;
     try {
@@ -369,10 +417,21 @@ export class DatabaseCloudWorkspaceSetupRecoveryService {
     } catch {
       throw new CloudWorkspaceSetupRecoveryError("recovery_blob_unavailable");
     }
-    if (!sameHash(createHash("sha256").update(bytes).digest(), scope.hash)) {
+    try {
+      if (!sameHash(createHash("sha256").update(bytes).digest(), scope.hash))
+        throw new CloudWorkspaceSetupRecoveryError("recovery_blob_unavailable");
+      // Object I/O cannot retain a DB lock. Recheck the exact live setup grant
+      // after it completes, without consuming a second use or serializing all
+      // downloads on a second update of the capability row.
+      const current = await withSystemTx(this.pool,
+        tx => consumeRecoveryGrantUse(tx, input.token, false), { consistentRead: true });
+      if (current.organizationId !== scope.organizationId || current.workspaceId !== scope.workspaceId || current.checkpointId !== scope.checkpointId)
+        throw new CloudWorkspaceSetupRecoveryError("recovery_capability_rejected");
+      return bytes;
+    } catch (error) {
       bytes.fill(0);
-      throw new CloudWorkspaceSetupRecoveryError("recovery_blob_unavailable");
+      throw error instanceof CloudWorkspaceSetupRecoveryError ? error
+        : new CloudWorkspaceSetupRecoveryError("recovery_blob_unavailable");
     }
-    return bytes;
   }
 }

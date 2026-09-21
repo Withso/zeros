@@ -1,3 +1,13 @@
+import type { CloudAgentRuntimeAttestation } from "./cloud-runtime-attestation";
+import type { CloudCommandEngineRequest } from "@zeros/protocol/cloud-commands";
+import { CloudActorAdmissionResponseSchema, type CloudActorContext } from "@zeros/protocol/cloud-actors";
+import type { CloudEventEngineRequest } from "@zeros/protocol/cloud-events";
+import type { CloudActionEngineRequest } from "@zeros/protocol/cloud-actions";
+import type {CloudAgentExecutionRequest} from "@zeros/protocol/cloud-agent-execution";
+import {requestCloudAgentExecution,CloudAgentExecutionError} from "./cloud-agent-execution-client";
+import { requestCloudEvent, CloudEventRuntimeError } from "./cloud-event-client";
+import { CloudCommandRuntimeError, requestCloudCommand, requestCloudAction } from "./cloud-command-client";
+
 const RUNTIME_AUDIENCE = "zeros-cloud-engine-runtime-v1" as const;
 const REGISTRATION_AUDIENCE =
   "zeros-cloud-workspace-engine-registration-v1" as const;
@@ -71,6 +81,19 @@ export type CloudRuntimeReadiness = {
 export type CloudRuntimeClientAdmission = {
   accountUserId: string;
   authorityEpoch: number;
+  actor?: CloudActorContext;
+};
+
+export type CloudRuntimeServiceAccess = {
+  version: 1;
+  audience: "zeros-cloud-runtime-access-admission-v1";
+  admitted: true;
+  grantId: string;
+  accountUserId: string;
+  authorityEpoch: number;
+  kind: "preview" | "ssh" | "tunnel";
+  remotePort: number | null;
+  expiresAtMs: number;
 };
 
 export type CloudDurableRecordSyncContext = {
@@ -80,6 +103,7 @@ export type CloudDurableRecordSyncContext = {
 type FetchLike = typeof fetch;
 
 export type CloudRuntimeRegistrationDependencies = {
+  agentRuntime: CloudAgentRuntimeAttestation;
   fetch?: FetchLike;
   now?: () => number;
   onAuthorityLost: () => void;
@@ -87,6 +111,7 @@ export type CloudRuntimeRegistrationDependencies = {
     authority: CloudRuntimeAuthority,
     context: CloudDurableRecordSyncContext,
   ) => Promise<void>;
+  onDurableRecordConnected?: () => void;
   readRepositoryCredentialRefresh?: () => {
     version: 1;
     audience: "zeros-cloud-github-refresh-v1";
@@ -325,6 +350,7 @@ export class CloudRuntimeRegistration {
   private readonly now: () => number;
   private readonly onAuthorityLost: () => void;
   private readonly onDurableRecordSync: CloudRuntimeRegistrationDependencies["onDurableRecordSync"];
+  private readonly onDurableRecordConnected: CloudRuntimeRegistrationDependencies["onDurableRecordConnected"];
   private readonly readRepositoryCredentialRefresh:
     | NonNullable<
         CloudRuntimeRegistrationDependencies["readRepositoryCredentialRefresh"]
@@ -346,6 +372,7 @@ export class CloudRuntimeRegistration {
   private readonly readObservedPorts:
     | NonNullable<CloudRuntimeRegistrationDependencies["readObservedPorts"]>
     | undefined;
+  private readonly agentRuntime: CloudAgentRuntimeAttestation;
   private readonly abortController = new AbortController();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private document: RegistrationDocument | null = null;
@@ -353,6 +380,7 @@ export class CloudRuntimeRegistration {
   private stopped = false;
   private authorityLost = false;
   private durableRecordConnected = false;
+  private initialRecordConnected = false;
   private durableRecordSyncInFlight: Promise<void> | null = null;
   private checkpointInFlight: string | null = null;
 
@@ -360,10 +388,15 @@ export class CloudRuntimeRegistration {
     readonly config: CloudRuntimeConfig,
     dependencies: CloudRuntimeRegistrationDependencies,
   ) {
+    if (dependencies.agentRuntime?.profile !== "zeros-cloud-worker-v3" || !/^[a-f0-9]{64}$/.test(dependencies.agentRuntime.contractSha256)) {
+      throw new Error("cloud engine runtime attestation is required");
+    }
+    this.agentRuntime = Object.freeze({ ...dependencies.agentRuntime });
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.now = dependencies.now ?? Date.now;
     this.onAuthorityLost = dependencies.onAuthorityLost;
     this.onDurableRecordSync = dependencies.onDurableRecordSync;
+    this.onDurableRecordConnected = dependencies.onDurableRecordConnected;
     this.readRepositoryCredentialRefresh =
       dependencies.readRepositoryCredentialRefresh;
     this.installRepositoryCredential = dependencies.installRepositoryCredential;
@@ -410,6 +443,8 @@ export class CloudRuntimeRegistration {
         executionFence: this.config.execution.executionFence,
         engineInstanceId: this.config.engine.instanceId,
         protocolVersion: this.config.engine.protocolVersion,
+        actorProtocolVersion: 2,
+        agentRuntime: this.agentRuntime,
       },
     );
     const document = this.parseRegistration(raw);
@@ -417,6 +452,7 @@ export class CloudRuntimeRegistration {
     this.scheduleHeartbeat(document.heartbeat.intervalMs);
     try {
       await this.synchronizeDurableRecord(document, { initial: true });
+      this.initialRecordConnected = this.document === document && !this.authorityLost && !this.stopped;
     } catch (error) {
       if (this.timer) clearTimeout(this.timer);
       this.timer = null;
@@ -426,9 +462,60 @@ export class CloudRuntimeRegistration {
     }
   }
 
+  async commandRequest(request: CloudCommandEngineRequest,actorSessionId?:string): Promise<unknown> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document))
+      throw new CloudCommandRuntimeError("engine_authority_rejected");
+    if (request.kind === "claim" && !this.durableRecordConnected)
+      throw new CloudCommandRuntimeError("command_durability_unavailable");
+    if (request.kind === "settle") {
+      // An older heartbeat sync may have captured state before this turn
+      // completed. Wait for it, then capture again before acknowledging the
+      // terminal receipt. A failed flush retains the receipt for retry only.
+      await this.durableRecordSyncInFlight;
+      if (this.document !== document || this.stopped || this.authorityLost)
+        throw new CloudCommandRuntimeError("engine_authority_rejected");
+      await this.synchronizeDurableRecord(document, { initial: false });
+      if (!this.hasControlAuthority(document))
+        throw new CloudCommandRuntimeError("engine_authority_rejected");
+    }
+    const result = await requestCloudCommand(this.authority(document), request, this.abortController.signal, this.fetch,actorSessionId);
+    if (!this.hasControlAuthority(document))
+      throw new CloudCommandRuntimeError("engine_authority_rejected");
+    return result;
+  }
+
+  async eventRequest(request: CloudEventEngineRequest): Promise<unknown> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document))
+      throw new CloudEventRuntimeError("engine_authority_rejected");
+    const result = await requestCloudEvent(this.authority(document), request, this.abortController.signal, this.fetch);
+    if (!this.hasControlAuthority(document))
+      throw new CloudEventRuntimeError("engine_authority_rejected");
+    return result;
+  }
+
+  async actionRequest(request: CloudActionEngineRequest,actorSessionId?:string): Promise<unknown> {
+    const document = this.document;
+    if (!document || !this.hasControlAuthority(document))
+      throw new CloudCommandRuntimeError("engine_authority_rejected");
+    const result = await requestCloudAction(this.authority(document), request, this.abortController.signal, this.fetch,actorSessionId);
+    if (!this.hasControlAuthority(document)) throw new CloudCommandRuntimeError("engine_authority_rejected");
+    return result;
+  }
+
+  async agentExecutionRequest(request:CloudAgentExecutionRequest,signal:AbortSignal):Promise<unknown>{
+    const document=this.document;
+    if(!document||!this.hasControlAuthority(document))throw new CloudAgentExecutionError();
+    const result=await requestCloudAgentExecution(this.authority(document),request,AbortSignal.any([signal,this.abortController.signal]),this.fetch);
+    if(!this.hasControlAuthority(document))throw new CloudAgentExecutionError();
+    return result;
+  }
+
   async stop(): Promise<void> {
     this.stopped = true;
     this.durableRecordConnected = false;
+    this.initialRecordConnected = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.abortController.abort();
@@ -442,19 +529,18 @@ export class CloudRuntimeRegistration {
    * lease or disclose why a bearer was rejected. */
   async verifyClientAdmission(
     grantToken: string,
+    renew = false,
   ): Promise<CloudRuntimeClientAdmission | null> {
     const document = this.document;
     if (
-      !SETUP_TOKEN_PATTERN.test(grantToken) ||
+      !/^zw[sa]_[A-Za-z0-9_-]{43}$/.test(grantToken) ||
       !document ||
-      !this.durableRecordConnected ||
-      this.stopped ||
-      this.authorityLost
+      !this.hasControlAuthority(document)
     ) {
       return null;
     }
     const endpoint = new URL(
-      ENGINE_CLIENT_ADMISSION_PATH,
+      grantToken.startsWith("zwa_") ? "/internal/v2/cloud-workspaces/engine/client-admission" : ENGINE_CLIENT_ADMISSION_PATH,
       document.heartbeat.endpoint,
     ).toString();
     try {
@@ -464,7 +550,22 @@ export class CloudRuntimeRegistration {
         generation: this.config.execution.generation,
         engineInstanceId: this.config.engine.instanceId,
         grantToken,
+        ...(renew ? { renew: true } : {}),
       });
+      if (
+        this.stopped ||
+        this.authorityLost ||
+        this.document !== document ||
+        !this.hasControlAuthority(document)
+      )
+        return null;
+      if (grantToken.startsWith("zwa_")) {
+        const parsed = CloudActorAdmissionResponseSchema.safeParse(raw);
+        if (!parsed.success) return null;
+        const admitted = parsed.data;
+        return {accountUserId:admitted.accountUserId,authorityEpoch:admitted.authorityEpoch,
+          actor:{sessionId:admitted.actorSessionId,deviceId:admitted.deviceId,role:admitted.role,fingerprint:admitted.fingerprint}};
+      }
       if (
         isRecord(raw) &&
         exactKeys(raw, [
@@ -487,6 +588,84 @@ export class CloudRuntimeRegistration {
         };
       }
       return null;
+    } catch {
+      return null;
+    }
+  }
+
+  async verifyServiceAccess(
+    token: string,
+  ): Promise<CloudRuntimeServiceAccess | null> {
+    const document = this.document;
+    if (
+      !/^(?:zwp|zsh)_[A-Za-z0-9_-]{43}$/.test(token) ||
+      !document ||
+      !this.hasControlAuthority(document)
+    )
+      return null;
+    const requestedAtMs = this.now();
+    try {
+      const raw = await this.post(
+        new URL(
+          "/internal/v1/cloud-workspaces/engine/access-admission",
+          document.heartbeat.endpoint,
+        ).toString(),
+        document.heartbeat.token,
+        {
+          workspaceId: this.config.execution.workspaceId,
+          organizationId: this.config.execution.organizationId,
+          generation: this.config.execution.generation,
+          engineInstanceId: this.config.engine.instanceId,
+          grantToken: token,
+          relativeLease: true,
+        },
+      );
+      const relativeLease = isRecord(raw) && raw.leaseDurationMs !== undefined;
+      const expiresAtMs = isRecord(raw)
+        ? relativeLease ? requestedAtMs + Number(raw.leaseDurationMs) : Number(raw.expiresAtMs)
+        : 0;
+      // Authority can be lost while the request is in flight. A late successful
+      // HTTP response never revives access to a retired or disconnected engine.
+      if (
+        this.document !== document ||
+        !this.hasControlAuthority(document) ||
+        this.stopped ||
+        this.authorityLost ||
+        !isRecord(raw) ||
+        !exactKeys(raw, [
+          "version",
+          "audience",
+          "admitted",
+          "grantId",
+          "accountUserId",
+          "authorityEpoch",
+          "kind",
+          "remotePort",
+          "expiresAtMs",
+          ...(relativeLease ? ["leaseDurationMs"] : []),
+        ]) ||
+        raw.version !== 1 ||
+        raw.audience !== "zeros-cloud-runtime-access-admission-v1" ||
+        raw.admitted !== true ||
+        !UUID_PATTERN.test(String(raw.grantId ?? "")) ||
+        !UUID_PATTERN.test(String(raw.accountUserId ?? "")) ||
+        !positiveInteger(raw.authorityEpoch) ||
+        !["preview", "ssh", "tunnel"].includes(String(raw.kind)) ||
+        (raw.kind === "preview") !== token.startsWith("zwp_") ||
+        (raw.kind === "ssh"
+          ? raw.remotePort !== null
+          : !positiveInteger(raw.remotePort, 65535) ||
+            Number(raw.remotePort) < 1024 ||
+            raw.remotePort === 22222) ||
+        !Number.isSafeInteger(raw.expiresAtMs) ||
+        (relativeLease && (!positiveInteger(raw.leaseDurationMs, 10_000))) ||
+        expiresAtMs <= this.now() ||
+        expiresAtMs > this.now() + 10_000
+      )
+        return null;
+      if (!relativeLease) return raw as CloudRuntimeServiceAccess;
+      const { leaseDurationMs: _duration, ...access } = raw;
+      return { ...access, expiresAtMs } as CloudRuntimeServiceAccess;
     } catch {
       return null;
     }
@@ -810,6 +989,13 @@ export class CloudRuntimeRegistration {
     this.onAuthorityLost();
   }
 
+  /** Durability lag pauses new dispatch; it must not masquerade as account or
+   * device revocation and remove the user's ability to inspect or Stop work. */
+  private hasControlAuthority(document: RegistrationDocument): boolean {
+    return this.document === document && this.initialRecordConnected && !this.stopped && !this.authorityLost &&
+      this.now() < document.leaseExpiresAtMs - 1000;
+  }
+
   private authority(document: RegistrationDocument): CloudRuntimeAuthority {
     return {
       heartbeatEndpoint: document.heartbeat.endpoint,
@@ -835,6 +1021,7 @@ export class CloudRuntimeRegistration {
           !this.authorityLost
         ) {
           this.durableRecordConnected = true;
+          this.onDurableRecordConnected?.();
         }
       })
       .catch((error) => {

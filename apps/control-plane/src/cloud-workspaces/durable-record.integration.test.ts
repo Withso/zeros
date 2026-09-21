@@ -11,8 +11,10 @@ import {
 } from "./durable-record.js";
 import {
   seedReadyCloudWorkspace,
+  ensureCloudPilotUser,
   type ReadyCloudWorkspaceFixture,
 } from "./test-fixtures.js";
+import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -69,6 +71,64 @@ d("cloud workspace durable record", () => {
       ],
     };
   }
+
+  it("shares durable history with an invited Pro viewer and fences revocation", async () => {
+    await service.append(appendInput());
+    const guest = await ensureCloudPilotUser(pool, { provider: "workos", providerSubject: `user_${randomUUID()}`,
+      email: `reader-${randomUUID()}@example.test`, displayName: "Guest reader" });
+    await pool.query(`INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source)
+      VALUES ($1,'pro','active',true,'operator')`, [guest.id]);
+    const collaboration = new DatabaseCloudWorkspaceCollaborationService(pool);
+    const owner = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, actorUserId: fixture.userId };
+    await collaboration.setSharing({ ...owner, sharingMode: "organization", expectedRevision: 1 });
+    const invitation = await collaboration.invite({ ...owner, email: guest.email, role: "viewer" });
+    await collaboration.accept({ actorUserId: guest.id, token: invitation.token, identity: guest.identity });
+    const input = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, accountUserId: guest.id, afterRevision: 0 };
+    await expect(service.read(input)).resolves.toMatchObject({ currentRevision: 2, events: [
+      { entityId: "chat-1" }, { entityId: "message-1" },
+    ] });
+    expect((await pool.query("SELECT 1 FROM organization_members WHERE org_id=$1 AND user_id=$2", [fixture.organizationId, guest.id])).rowCount).toBe(0);
+    await collaboration.revokeGuest({ ...owner, guestUserId: guest.id });
+    await expect(service.read(input)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("reads records concurrently with other readers holding shared scope locks", async () => {
+    await service.append(appendInput());
+    const held = await pool.connect();
+    const readPool = new pg.Pool({ connectionString: databaseUrl, max: 1, options: "-c lock_timeout=250ms" });
+    try {
+      await held.query("BEGIN");
+      await held.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [fixture.organizationId]);
+      await held.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR SHARE", [fixture.workspaceId]);
+      await expect(new DatabaseCloudWorkspaceDurableRecordService({ pool: readPool, workosEnabled: false }).read({
+        workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, accountUserId: fixture.userId, afterRevision: 0,
+      })).resolves.toMatchObject({ currentRevision: 2 });
+    } finally { await held.query("ROLLBACK"); held.release(); await readPool.end(); }
+  });
+
+  it("reads the authoritative engine projection with shared scope locks", async () => {
+    await service.append(appendInput());
+    const held = await pool.connect();
+    const readPool = new pg.Pool({ connectionString: databaseUrl, max: 1, options: "-c lock_timeout=250ms" });
+    try {
+      await held.query("BEGIN");
+      await held.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR SHARE", [fixture.workspaceId]);
+      await held.query("SELECT id FROM cloud_workspace_engine_instances WHERE id=$1 FOR SHARE", [fixture.engineInstanceId]);
+      await expect(new DatabaseCloudWorkspaceDurableRecordService({ pool: readPool, workosEnabled: false }).headForEngine({
+        ...appendInput(), afterEntityKind: null, afterEntityId: null,
+      })).resolves.toMatchObject({ currentRevision: 2 });
+    } finally { await held.query("ROLLBACK"); held.release(); await readPool.end(); }
+  });
+
+  it("lets an active owner recover history after entitlement cancellation but rejects lost membership", async () => {
+    await service.append(appendInput());
+    await pool.query("UPDATE organization_entitlements SET status='cancelled' WHERE org_id=$1", [fixture.organizationId]);
+    const input = { workspaceId: fixture.workspaceId, organizationId: fixture.organizationId,
+      accountUserId: fixture.userId, afterRevision: 0 };
+    await expect(service.read(input)).resolves.toMatchObject({ currentRevision: 2 });
+    await pool.query("DELETE FROM team_members WHERE team_id=$1 AND user_id=$2", [fixture.teamId, fixture.userId]);
+    await expect(service.read(input)).rejects.toMatchObject({ status: 404 });
+  });
 
   it("appends a consecutive batch, projects entities, and replays exactly once", async () => {
     const input = appendInput();

@@ -2,20 +2,20 @@
 
 import { randomBytes } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   constants as fsConstants,
   fstatSync,
   linkSync,
   lstatSync,
   openSync,
-  readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   unlinkSync,
 } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 
 const REQUEST_FILE = "/run/zeros/github-credential-refresh.json";
 const MAX_DOCUMENT_BYTES = 8 * 1024;
@@ -80,7 +80,7 @@ function parseRequest(value) {
 function readPhysicalRequest(file, expectedUid) {
   const descriptor = openSync(
     file,
-    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
   );
   try {
     const metadata = fstatSync(descriptor);
@@ -101,7 +101,23 @@ function readPhysicalRequest(file, expectedUid) {
     }
     let parsed;
     try {
-      parsed = JSON.parse(readFileSync(descriptor, "utf8"));
+      const bytes = Buffer.alloc(MAX_DOCUMENT_BYTES + 1);
+      let length = 0;
+      while (length < bytes.length) {
+        const count = readSync(
+          descriptor,
+          bytes,
+          length,
+          bytes.length - length,
+          length,
+        );
+        if (count === 0) break;
+        length += count;
+      }
+      if (length !== metadata.size || length > MAX_DOCUMENT_BYTES) {
+        throw new Error("cloud GitHub refresh request changed during read");
+      }
+      parsed = JSON.parse(bytes.subarray(0, length).toString("utf8"));
     } catch {
       throw new Error("cloud GitHub refresh request is invalid");
     }
@@ -158,7 +174,6 @@ export function acknowledgeCloudGithubRefreshRequest(
   }
   let acknowledged = false;
   try {
-    chmodSync(quarantine, 0o600);
     const current = readPhysicalRequest(quarantine, expectedUid);
     acknowledged = current.generation === generation;
     if (!acknowledged) {
@@ -183,18 +198,26 @@ function main() {
     throw new Error("cloud GitHub refresh helper requires root");
   }
   const operation = process.argv[2];
+  const profile = readCloudHostRuntimeProfile();
+  const file = path.join(
+    profile.runtimeDirectory,
+    "github-credential-refresh.json",
+  );
+  const options = { expectedUid: profile.engineUid };
   if (operation === "read" && process.argv.length === 3) {
     process.stdout.write(
-      `${JSON.stringify(readCloudGithubRefreshRequest(REQUEST_FILE))}\n`,
+      `${JSON.stringify(readCloudGithubRefreshRequest(file, options))}\n`,
     );
     return;
   }
   if (operation === "ack" && process.argv.length === 3) {
     const generation = process.env.ZEROS_CLOUD_GITHUB_REFRESH_GENERATION;
-    if (!generation) throw new Error("cloud GitHub refresh generation is missing");
+    if (!generation)
+      throw new Error("cloud GitHub refresh generation is missing");
     const acknowledged = acknowledgeCloudGithubRefreshRequest(
-      REQUEST_FILE,
+      file,
       generation,
+      options,
     );
     process.stdout.write(acknowledged ? "acknowledged\n" : "stale\n");
     return;

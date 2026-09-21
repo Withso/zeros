@@ -1,0 +1,18 @@
+import {describe,expect,it,vi} from "vitest";
+import {createOwnedSnapshot,cleanupOwnedSnapshot,type SnapshotAllocation,type SnapshotAllocationStore} from "../cloud-workspace-validation/lib/snapshot-allocation";
+function fixture(){
+ let receipt:SnapshotAllocation|null=null;const rows=new Map<string,{id:string;name:string;state:string}>();
+ const store:SnapshotAllocationStore={providerScope:"a".repeat(64),read:()=>receipt,write:value=>{receipt=value;},clear:()=>{receipt=null;}};
+ const client={async *list(){yield* rows.values();},async get(id:string){return rows.get(id)??null;},delete:vi.fn(async(s:{id:string})=>{rows.delete(s.id);})};
+ const create=vi.fn(async()=>{expect(store.read()?.snapshotId).toBeUndefined();expect(store.read()?.name).toBe('qualified-snapshot');const s={id:'owned-id',name:'qualified-snapshot',state:'active'};rows.set(s.id,s);return s;});
+ return {store,client,rows,input:{store,client,name:'qualified-snapshot',create,validate:vi.fn()}};
+}
+describe('snapshot allocation ownership',()=>{
+ it('persists request and acknowledged ID before placement validation',async()=>{const f=fixture();f.input.validate=vi.fn(()=>expect(f.store.read()?.snapshotId).toBe('owned-id'));await createOwnedSnapshot(f.input);expect(f.store.read()?.snapshotId).toBe('owned-id');await cleanupOwnedSnapshot(f.client,f.store);expect(f.store.read()).toBeNull();});
+ it('cleans the acknowledged resource when placement validation fails',async()=>{const f=fixture();f.input.validate=vi.fn(()=>{throw Error('wrong class');});await expect(createOwnedSnapshot(f.input)).rejects.toThrow('wrong class');expect(f.client.delete).toHaveBeenCalledOnce();expect(f.store.read()).toBeNull();});
+ it('never creates or adopts a pre-existing snapshot by name',async()=>{const f=fixture();f.rows.set('foreign',{id:'foreign',name:'qualified-snapshot',state:'active'});await expect(createOwnedSnapshot(f.input)).rejects.toThrow('already exists');expect(f.input.create).not.toHaveBeenCalled();expect(f.store.read()).toBeNull();});
+ it('retains an uncertain create and refuses cleanup even if a same-name resource appears',async()=>{const f=fixture();await expect(createOwnedSnapshot({...f.input,create:async()=>{throw Error('lost response');}})).rejects.toThrow('lost response');f.rows.set('foreign',{id:'foreign',name:'qualified-snapshot',state:'active'});await expect(cleanupOwnedSnapshot(f.client,f.store)).rejects.toThrow('uncertain');expect(f.client.delete).not.toHaveBeenCalled();expect(f.store.read()).not.toBeNull();});
+ it('aborts timed-out creation but retains its unacknowledged receipt',async()=>{const f=fixture();let signal:AbortSignal|undefined;await expect(createOwnedSnapshot({...f.input,createTimeoutMs:5,create:async s=>{signal=s;return new Promise(()=>{});}})).rejects.toThrow('timed out');expect(signal?.aborted).toBe(true);expect(f.store.read()).not.toBeNull();});
+ it('retains exact cleanup ownership through failed builds',async()=>{const f=fixture();await expect(createOwnedSnapshot({...f.input,create:async()=>{const s={id:'owned-id',name:'qualified-snapshot',state:'build_failed'};f.rows.set(s.id,s);return s;}})).rejects.toThrow('build failed');expect(f.client.delete).toHaveBeenCalledOnce();expect(f.store.read()).toBeNull();});
+ it('does not delete after account scope or acknowledged identity changes',async()=>{const f=fixture();await createOwnedSnapshot(f.input);await expect(cleanupOwnedSnapshot(f.client,{...f.store,providerScope:'b'.repeat(64)})).rejects.toThrow('scope changed');f.client.get=async()=>({id:'foreign',name:'qualified-snapshot',state:'active'});await expect(cleanupOwnedSnapshot(f.client,f.store)).rejects.toThrow('identity changed');expect(f.client.delete).not.toHaveBeenCalled();});
+});

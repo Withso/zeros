@@ -5,7 +5,6 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -16,6 +15,7 @@ import type { JWK } from "jose";
 import pg from "pg";
 
 import { withSystemTx } from "../db.js";
+import { readBoundedJsonFile } from "../bounded-json-file.js";
 import { runMigrations } from "../migrate.js";
 import { DaytonaSandboxCommandRunner } from "./daytona-command-runner.js";
 import { DaytonaCloudWorkspaceSetupExecutor } from "./daytona-setup-executor.js";
@@ -64,11 +64,15 @@ export type PrivateValidationState = {
 };
 
 type PrivateSnapshotAttestation = {
-  version: 1;
+  version: 1 | 2;
   snapshotId: string;
   snapshotImageName: string;
   sourceCommit: string;
   imageContractSha256: string;
+  sandboxClass?: "container" | "linux-vm";
+  region?: string;
+  resources?: { cpu: number; memory: number; disk: number };
+  registryImage?: string;
 };
 
 type QualificationSeed = {
@@ -260,24 +264,13 @@ export function validateQualificationPrivateState(
 }
 
 function readOwnerFile(file: string, maximumBytes: number): unknown {
-  const stat = lstatSync(file);
-  const uid = typeof process.getuid === "function" ? process.getuid() : null;
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    stat.size < 2 ||
-    stat.size > maximumBytes ||
-    (uid !== null && stat.uid !== uid) ||
-    (stat.mode & 0o077) !== 0 ||
-    realpathSync(file) !== file
-  ) {
+  try { return readBoundedJsonFile(file, maximumBytes, true); }
+  catch {
     throw new Error("qualification private state file is unsafe");
   }
-  return JSON.parse(readFileSync(file, "utf8")) as unknown;
 }
 
-function privateValidationState(directory: string): {
+export function privateValidationState(directory: string): {
   state: PrivateValidationState;
   snapshot: PrivateSnapshotAttestation;
 } {
@@ -292,7 +285,7 @@ function privateValidationState(directory: string): {
     256 * 1024,
   ) as Partial<PrivateSnapshotAttestation>;
   if (
-    snapshot.version !== 1 ||
+    ![1,2].includes(snapshot.version ?? 0) ||
     snapshot.snapshotId !== state.snapshotId ||
     snapshot.snapshotImageName !== state.snapshotImageName ||
     typeof snapshot.sourceCommit !== "string" ||
@@ -302,6 +295,16 @@ function privateValidationState(directory: string): {
   ) {
     throw new Error("qualification private state is invalid");
   }
+  if (snapshot.version === 2 && (
+    !["container","linux-vm"].includes(snapshot.sandboxClass ?? "") ||
+    snapshot.region !== state.region || !snapshot.resources ||
+    ![snapshot.resources.cpu,snapshot.resources.memory,snapshot.resources.disk].every(value=>Number.isSafeInteger(value)&&value>0&&value<=2048) ||
+    (snapshot.sandboxClass === "linux-vm" && (
+      typeof snapshot.registryImage !== "string" || snapshot.registryImage.length>1024 ||
+      !/^[a-z0-9][a-z0-9.-]*(?::[0-9]{1,5})?\/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$/.test(snapshot.registryImage) ||
+      snapshot.registryImage.includes("..") || snapshot.registryImage.includes("//")
+    ))
+  )) throw new Error("qualification private state is invalid");
   return {
     state,
     snapshot: snapshot as PrivateSnapshotAttestation,
@@ -494,15 +497,19 @@ async function seedQualification(input: {
       `INSERT INTO cloud_workspace_generations (
          workspace_id, generation, org_id, provider, image_ref,
          architecture, cpu_millicores, memory_mib, storage_mib,
-         source_commit, created_by
+         source_commit, created_by, sandbox_class
        ) VALUES ($1, 1, $2, 'daytona', $3, 'linux/amd64',
-                 2000, 4096, 20480, $4, $5)`,
+                 $6, $7, $8, $4, $5, $9)`,
       [
         workspaceId,
         organizationId,
         input.snapshot.snapshotId,
         input.snapshot.sourceCommit,
         accountUserId,
+        (input.snapshot.resources?.cpu ?? 2) * 1000,
+        (input.snapshot.resources?.memory ?? 4) * 1024,
+        (input.snapshot.resources?.disk ?? 20) * 1024,
+        input.snapshot.version === 2 ? input.snapshot.sandboxClass : null,
       ],
     );
     await tx.query(

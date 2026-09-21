@@ -30,16 +30,17 @@ import {
   vi,
 } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { createApp } from "./app.js";
-import type { Config } from "./config.js";
+import {withSystemTx} from "./db.js";
 import {
   migrationChecksum,
   renamedMigrationAliasesFor,
   runMigrations,
   runServiceBootMigrations,
+  verifyMigrations,
 } from "./migrate.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -336,6 +337,15 @@ d("migration ladder", () => {
     ).rows.map((r) => r.name);
 
   beforeEach(reset);
+
+  it("lets the runtime verify but never rewrite the migration ledger",async()=>{
+    await runMigrations(pool);
+    expect((await withSystemTx(pool,tx=>tx.query("SELECT name FROM schema_migrations"))).rowCount).toBe(LADDER.length);
+    for(const sql of ["UPDATE schema_migrations SET checksum=checksum WHERE false","DELETE FROM schema_migrations WHERE false",
+      "INSERT INTO schema_migrations(name,checksum) VALUES('forged.sql','forged')","TRUNCATE schema_migrations"])
+      await expect(withSystemTx(pool,tx=>tx.query(sql))).rejects.toMatchObject({code:"42501"});
+    expect(await ledger()).toEqual(LADDER);
+  });
 
   it("applies cleanly to an empty database (the fresh-install path)", async () => {
     const ran = await runMigrations(pool);
@@ -838,7 +848,46 @@ d("migration ladder", () => {
     );
   });
 
-  it("leaves a controlled boundary and every suffix pending at safe service boot", async () => {
+  it("verifies a migrated database with a read-only connection", async () => {
+    await runMigrations(pool);
+    const readOnly = new pg.Pool({ connectionString: url, max: 1, options: "-c default_transaction_read_only=on" });
+    try {
+      await expect(verifyMigrations(readOnly)).resolves.toEqual({ ran: [], status: { state: "current" } });
+    } finally { await readOnly.end(); }
+  });
+
+  it("verifies the ledger through zeros_app using a NOINHERIT runtime login", async () => {
+    await runMigrations(pool);
+    const password = randomBytes(24).toString("hex");
+    await pool.query(`CREATE ROLE zeros_runtime_verifier LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS PASSWORD '${password}'`);
+    await pool.query("GRANT zeros_app TO zeros_runtime_verifier");
+    const runtimeUrl = new URL(url!); runtimeUrl.username = "zeros_runtime_verifier";
+    runtimeUrl.password = password;
+    const runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+    try {
+      await expect(runtime.query("SELECT name FROM public.schema_migrations")).rejects.toMatchObject({ code: "42501" });
+      await expect(verifyMigrations(runtime)).resolves.toEqual({ ran: [], status: { state: "current" } });
+    } finally { await runtime.end(); await pool.query("DROP ROLE zeros_runtime_verifier"); }
+  });
+
+  it("rejects a missing or mismatched ledger before read-only service boot", async () => {
+    await runMigrations(pool);
+    await pool.query("DELETE FROM schema_migrations WHERE name = $1", [LADDER.at(-1)]);
+    await expect(verifyMigrations(pool)).rejects.toThrow(/pending/);
+    await pool.query("INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)", [LADDER.at(-1), migrationChecksum(migrationSource(LADDER.at(-1)!))]);
+    await pool.query("UPDATE schema_migrations SET checksum = $1 WHERE name = $2", ["sha256:changed", LADDER[0]]);
+    await expect(verifyMigrations(pool)).rejects.toThrow(/checksum mismatch/);
+  });
+
+  it("refuses an older runtime when the database contains an unknown migration", async () => {
+    await runMigrations(pool);
+    await pool.query("INSERT INTO schema_migrations (name, checksum) VALUES ($1, $2)",
+      ["9999_future_authority.sql", migrationChecksum("-- future release")]);
+    await expect(verifyMigrations(pool)).rejects.toThrow(/unknown.*migration|migration.*unknown/i);
+    await expect(runMigrations(pool)).rejects.toThrow(/unknown.*migration|migration.*unknown/i);
+  });
+
+  it("requires migration before boot when a controlled cloud suffix includes core-security changes", async () => {
     const boundary = "0025_cloud_workspace_engine_authority.sql";
     const boundaryIndex = LADDER.indexOf(boundary);
     expect(boundaryIndex).toBeGreaterThan(0);
@@ -853,19 +902,10 @@ d("migration ladder", () => {
       rows: [{ relation: null }],
     });
 
-    const result = await runServiceBootMigrations(pool, {
+    await expect(runServiceBootMigrations(pool, {
       cloudWorkspacesEnabled: false,
       env: { NODE_ENV: "production" },
-    });
-
-    expect(result).toEqual({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: boundary,
-        dependentRuntime: "cloud_workspaces",
-      },
-    });
+    })).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
     expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
     expect(
       (
@@ -874,45 +914,6 @@ d("migration ladder", () => {
         )
       ).rows[0]?.relation,
     ).toBeNull();
-
-    const bootConfig: Config = {
-      databaseUrl: url!,
-      auth: {
-        provider: "auth0",
-        issuers: ["https://tenant.example.test/"],
-        jwksUrl: "https://tenant.example.test/.well-known/jwks.json",
-        audience: "https://api.example.test",
-      },
-      workos: null,
-      inviteLinkBase: "https://app.example.test/invite",
-      port: 8080,
-      isProduction: true,
-      deploymentChannel: "alpha",
-      github: null,
-      feedback: null,
-      cloudWorkspaces: null,
-    };
-    const app = createApp(
-      bootConfig,
-      pool,
-      { from: null, token: null, apiUrl: "", inviteLinkBase: "" },
-      { migrationStatus: result.status },
-    );
-    const health = await app.request("/healthz");
-    expect(health.status).toBe(200);
-    expect(await health.json()).toMatchObject({
-      ok: true,
-      migrations: {
-        state: "controlled_migration_pending",
-        migration: boundary,
-      },
-    });
-    const cloud = await app.request("/v1/devices");
-    expect(cloud.status).toBe(503);
-    expect(await cloud.json()).toMatchObject({
-      error: { code: "controlled_migration_pending", migration: boundary },
-    });
-    expect((await app.request("/v1/me")).status).toBe(401);
 
     await expect(
       runMigrations(pool, { env: { NODE_ENV: "production" } }),
@@ -938,12 +939,12 @@ d("migration ladder", () => {
         env: { NODE_ENV: "production" },
       }),
     ).rejects.toThrow(
-      /cannot defer.*0025_cloud_workspace_engine_authority\.sql.*cloud_workspace_provider_orphans/i,
+      /cannot defer.*0025_cloud_workspace_engine_authority\.sql.*0075_security_event_commit_order/i,
     );
     expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
   });
 
-  it("pauses safely at 0060 from a populated 0059 ledger and requires its exact approval", async () => {
+  it("requires explicit approval for the full security upgrade from a populated 0059 ledger", async () => {
     const boundary = "0060_cloud_workspace_pending_blob_deletions.sql";
     const boundaryIndex = LADDER.indexOf(boundary);
     expect(boundaryIndex).toBeGreaterThan(0);
@@ -954,21 +955,10 @@ d("migration ladder", () => {
        ) VALUES ('daytona', 'sandbox-retained-at-0059')`,
     );
 
-    const result = await runServiceBootMigrations(pool, {
+    await expect(runServiceBootMigrations(pool, {
       cloudWorkspacesEnabled: false,
-      env: {
-        NODE_ENV: "production",
-        CONTROL_PLANE_MIGRATION_APPROVALS: boundary,
-      },
-    });
-    expect(result).toEqual({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: boundary,
-        dependentRuntime: "cloud_workspaces",
-      },
-    });
+      env: { NODE_ENV: "production", CONTROL_PLANE_MIGRATION_APPROVALS: boundary },
+    })).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
     expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
 
     await expect(
@@ -985,6 +975,8 @@ d("migration ladder", () => {
           CONTROL_PLANE_MIGRATION_APPROVALS: [
             boundary,
             "0061_workos_provider_erasure_fences.sql",
+            "0073_cloud_workspace_compute_leases.sql",
+            ...LADDER.filter(file => file >= "0075_" && migrationSource(file).includes("-- zeros:requires-controlled-downtime")),
           ].join(","),
         },
       }),
@@ -1127,6 +1119,19 @@ d("migration ladder", () => {
       "0060_cloud_workspace_pending_blob_deletions.sql",
       "0061_workos_provider_erasure_fences.sql",
       "0062_cloud_workspace_entitlement_operations.sql",
+      "0063_cloud_workspace_compute_providers.sql",
+      "0064_cloud_workspace_provider_operations.sql",
+      "0065_cloud_workspace_engine_devices.sql",
+      "0066_cloud_workspace_commands.sql",
+      "0067_cloud_workspace_event_streams.sql",
+      "0068_cloud_workspace_setup_retry_fences.sql",
+      "0069_cloud_workspace_action_receipts.sql",
+      "0070_cloud_workspace_checkpoint_recovery.sql",
+      "0071_cloud_workspace_runtime_services.sql",
+      "0072_cloud_workspace_compute_credits.sql",
+      "0073_cloud_workspace_compute_leases.sql",
+      "0074_cloud_workspace_drift_scheduling.sql",
+      ...LADDER.slice(LADDER.indexOf("0075_security_event_commit_order.sql")),
     ]);
     await expect(
       pool.query(
@@ -1149,6 +1154,14 @@ d("migration ladder", () => {
     await applyThrough(LADDER.length - 1);
     const ran = await runMigrations(pool);
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
+  });
+
+  it("preserves issued security cursors even after every historical event was erased", async () => {
+    await applyThrough(LADDER.indexOf("0075_security_event_commit_order.sql"));
+    await pool.query("SELECT setval('security_events_sequence_seq', 200, true)");
+    await runMigrations(pool);
+    const next = await pool.query("SELECT nextval('security_event_delivery_sequence') AS cursor");
+    expect(Number(next.rows[0].cursor)).toBe(201);
   });
 
   it("adds owner-only append-only Organization entitlement activation evidence", async () => {
@@ -1208,6 +1221,19 @@ d("migration ladder", () => {
     await expect(runMigrations(pool)).resolves.toEqual([
       fenceMigration,
       "0062_cloud_workspace_entitlement_operations.sql",
+      "0063_cloud_workspace_compute_providers.sql",
+      "0064_cloud_workspace_provider_operations.sql",
+      "0065_cloud_workspace_engine_devices.sql",
+      "0066_cloud_workspace_commands.sql",
+      "0067_cloud_workspace_event_streams.sql",
+      "0068_cloud_workspace_setup_retry_fences.sql",
+      "0069_cloud_workspace_action_receipts.sql",
+      "0070_cloud_workspace_checkpoint_recovery.sql",
+      "0071_cloud_workspace_runtime_services.sql",
+      "0072_cloud_workspace_compute_credits.sql",
+      "0073_cloud_workspace_compute_leases.sql",
+      "0074_cloud_workspace_drift_scheduling.sql",
+      ...LADDER.slice(LADDER.indexOf("0075_security_event_commit_order.sql")),
     ]);
     await expect(
       pool.query(
@@ -1340,6 +1366,19 @@ d("migration ladder", () => {
       fenceMigration,
       "0061_workos_provider_erasure_fences.sql",
       "0062_cloud_workspace_entitlement_operations.sql",
+      "0063_cloud_workspace_compute_providers.sql",
+      "0064_cloud_workspace_provider_operations.sql",
+      "0065_cloud_workspace_engine_devices.sql",
+      "0066_cloud_workspace_commands.sql",
+      "0067_cloud_workspace_event_streams.sql",
+      "0068_cloud_workspace_setup_retry_fences.sql",
+      "0069_cloud_workspace_action_receipts.sql",
+      "0070_cloud_workspace_checkpoint_recovery.sql",
+      "0071_cloud_workspace_runtime_services.sql",
+      "0072_cloud_workspace_compute_credits.sql",
+      "0073_cloud_workspace_compute_leases.sql",
+      "0074_cloud_workspace_drift_scheduling.sql",
+      ...LADDER.slice(LADDER.indexOf("0075_security_event_commit_order.sql")),
     ]);
     await expect(
       pool.query(

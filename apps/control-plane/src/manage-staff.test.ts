@@ -6,7 +6,7 @@ import {
   validateStaffRoleRequest,
 } from "./manage-staff.js";
 
-const databaseUrl = "postgres://db.example.test:5432/zeros_alpha";
+const databaseUrl = "postgres://operator@db.example.test:5432/zeros_alpha";
 const subjectUserId = "00000000-0000-4000-8000-000000000001";
 const actorUserId = "00000000-0000-4000-8000-000000000002";
 

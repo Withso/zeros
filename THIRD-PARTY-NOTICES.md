@@ -35,7 +35,33 @@ runtimes and resolves the matching Cursor runtime during packaging. Codex is
 Apache-2.0 and therefore not release-blocking, but it is redistributed and is
 inventoried accordingly.
 
+## Native cloud SSH transport
+
+- **Component:** [`ssh2`](https://github.com/mscdex/ssh2), pinned to `1.17.0` in
+  the root production dependency graph.
+- **License:** MIT, Copyright Brian White. Its license and dependency notices
+  are retained in `THIRD-PARTY-LICENSES.txt`.
+- **Use:** SSH protocol handling in the unprivileged cloud workload process.
+  Zeros owns workspace admission, short access leases and runtime placement.
+  This dependency does not supply provider or Unix administrator access.
+
+The reviewed `patches/ssh2@1.17.0.patch` preserves leading zero bytes in
+fixed-width Ed25519 public keys during OpenSSH encoding. A deterministic
+regression test covers that dependency change.
+
 ## Generated and vendored code
+
+### Cloud language servers
+
+- **Components:** `typescript-language-server` 5.1.3 (Apache-2.0), the locked
+  TypeScript 5.9.3 compiler/server (Apache-2.0), and `pyright` 1.1.414 (MIT).
+- **Use:** immutable JavaScript/TypeScript and Python analysis executables in
+  the Linux cloud image. Zeros owns typed requests, actor admission and process
+  retirement; project-supplied executables are never selected as the server.
+- **Sources:** [TypeScript Language Server](https://github.com/typescript-language-server/typescript-language-server),
+  [TypeScript](https://github.com/microsoft/TypeScript), and
+  [Pyright](https://github.com/microsoft/pyright). Their published license and
+  NOTICE files are retained in `THIRD-PARTY-LICENSES.txt`.
 
 ### Zeros Sandbox Runtime dependency
 
@@ -46,7 +72,9 @@ inventoried accordingly.
 - **Modifications:** Zeros' versioned patch in `patches/` adds explicit host-parity
   policy, nested writable exceptions and privileged worker identity transitions.
   The 0.0.76 rebase retains upstream capability dropping in both Linux isolation
-  modes and its read-only bind deduplication. Local Code execution remains native.
+  modes and its read-only bind deduplication. The Linux patch also consolidates
+  overlapping absent-path masks and creates traversable synthetic ancestors
+  before restoring an allowed worker directory. Local Code execution remains native.
 - **Qualification:** Rebase the patch for each upgrade, regenerate the license
   inventory and run `check:runtime-pins`, `check:zsr` and
   `check:zsr-preview-browser` on supported hosts before release.
@@ -157,3 +185,11 @@ add target-specific packaging assertions in the same change.
 This file is an engineering inventory, not legal advice. The project owner is
 responsible for confirming trademark, service terms, privacy obligations,
 export controls, and binary redistribution rights before each public release.
+
+### Control-plane Codex authentication keeper
+
+The control plane installs the exact `@openai/codex` 0.154.0 native runtime for
+authentication-only managed-cache renewal. It is Apache-2.0 licensed by OpenAI;
+its platform artifact and bundled notices remain in the installed package.
+This is separate from the desktop protocol/type-generation and packaging paths
+documented above.

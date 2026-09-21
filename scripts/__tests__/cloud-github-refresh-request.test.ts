@@ -4,10 +4,13 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -37,6 +40,52 @@ function request(generation: string) {
 }
 
 describe("immutable cloud GitHub refresh request helper", () => {
+  it("does not change a symlink target's permissions while rejecting an acknowledgement", () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "zeros-github-refresh-"));
+    roots.push(root);
+    const target = path.join(root, "canary");
+    const file = path.join(root, "request.json");
+    writeFileSync(target, "unchanged", { mode: 0o644 });
+    chmodSync(target, 0o644);
+    symlinkSync(target, file);
+    expect(() =>
+      acknowledgeCloudGithubRefreshRequest(file, "a".repeat(32), {
+        expectedUid: statSync(root).uid,
+      }),
+    ).toThrow();
+    expect(statSync(target).mode & 0o777).toBe(0o644);
+    expect(readFileSync(target, "utf8")).toBe("unchanged");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "rejects a FIFO without waiting for a writer",
+    () => {
+      const root = mkdtempSync(path.join(os.tmpdir(), "zeros-github-refresh-"));
+      roots.push(root);
+      const file = path.join(root, "request.json");
+      expect(spawnSync("mkfifo", ["-m", "600", file]).status).toBe(0);
+      const module = pathToFileURL(
+        path.resolve(
+          "scripts/cloud-workspace-validation/sandbox/cloud-github-refresh-request.mjs",
+        ),
+      ).href;
+      const script = `import {readCloudGithubRefreshRequest} from ${JSON.stringify(module)};
+      try {readCloudGithubRefreshRequest(${JSON.stringify(file)}, {expectedUid:${statSync(root).uid}}); process.exitCode=1;}
+      catch {process.exitCode=0;}`;
+      const result = spawnSync(
+        process.execPath,
+        ["--input-type=module", "-e", script],
+        {
+          encoding: "utf8",
+          timeout: 1000,
+          maxBuffer: 4096,
+        },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+    },
+  );
+
   it("reads only a physical owner-only request", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "zeros-github-refresh-"));
     roots.push(root);
@@ -50,9 +99,9 @@ describe("immutable cloud GitHub refresh request helper", () => {
       expected,
     );
     chmodSync(file, 0o644);
-    expect(() =>
-      readCloudGithubRefreshRequest(file, { expectedUid }),
-    ).toThrow(/unsafe/i);
+    expect(() => readCloudGithubRefreshRequest(file, { expectedUid })).toThrow(
+      /unsafe/i,
+    );
   });
 
   it("acknowledges only the exact generation and preserves a newer request", () => {

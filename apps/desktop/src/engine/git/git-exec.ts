@@ -30,6 +30,8 @@ import {
 } from "./credential-broker";
 // Pure leaf module (node:path only) — no cycle back into git/.
 import { pruneLauncherScriptEnv } from "../env/launcher-env";
+import { gitExecutionIdentity, gitProcessOptions } from "./git-execution-identity";
+export { gitExecutionIdentity } from "./git-execution-identity";
 
 const execFileAsync = promisify(execFile);
 
@@ -136,6 +138,14 @@ export async function runFile(
   args: string[],
   opts: RunFileOptions = {},
 ): Promise<RunFileResult> {
+  if (path.basename(command) === "git") {
+    const { uid, gid, env } = gitProcessOptions(opts.env, opts.identity);
+    opts = {
+      ...opts,
+      ...(uid !== undefined && gid !== undefined ? { identity: { uid, gid } } : {}),
+      env,
+    };
+  }
   if (opts.signal?.aborted) {
     throw opts.signal.reason instanceof Error
       ? opts.signal.reason
@@ -1664,6 +1674,8 @@ export async function runGit(
   args: string[],
   opts: RunGitOptions = {},
 ): Promise<RunGitResult> {
+  const identity = gitExecutionIdentity(opts.identity);
+  if (identity) opts = { ...opts, identity };
   // Never run Git with an empty cwd: execFile would silently
   // fall back to process.cwd() (the engine's own root / main repo), so a
   // git op meant for a workspace could mutate the wrong repository.

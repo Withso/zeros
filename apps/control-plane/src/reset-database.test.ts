@@ -1,4 +1,4 @@
-import { readdirSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -168,7 +168,7 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
     vi.unstubAllEnvs();
   });
 
-  it("uses strict mode and requires all four controlled approvals", async () => {
+  it("uses strict mode and requires all controlled migration approvals", async () => {
     await pool.query(
       "DROP SCHEMA public CASCADE; CREATE SCHEMA public; CREATE TABLE reset_preflight_sentinel (id integer);",
     );
@@ -238,6 +238,13 @@ databaseDescribe("resetPublicSchema controlled migration replay", () => {
       "CONTROL_PLANE_MIGRATION_APPROVALS",
       "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql",
     );
+    await expect(resetPublicSchema(pool)).rejects.toThrow(/0073_cloud_workspace_compute_leases\.sql.*not approved/i);
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_APPROVALS",
+      "0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql");
+    await expect(resetPublicSchema(pool)).rejects.toThrow(/0075_security_event_commit_order\.sql.*not approved/i);
+    vi.stubEnv("CONTROL_PLANE_MIGRATION_APPROVALS", LADDER.filter(file =>
+      readFileSync(path.join(MIGRATIONS_DIR, file), "utf8").includes("-- zeros:requires-controlled-downtime"),
+    ).join(","));
     await expect(resetPublicSchema(pool)).resolves.toEqual(LADDER);
   });
 });

@@ -97,7 +97,8 @@ export function spawnContainedClaudeProcess(
         stdio: "pipe",
       })
     : undefined;
-  const child = spawn(
+  let child:ChildProcessWithoutNullStreams;
+  try{child = spawn(
     launch?.command ?? options.command,
     launch?.args ?? options.args,
     {
@@ -107,9 +108,11 @@ export function spawnContainedClaudeProcess(
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     },
-  );
+  );}catch(error){if(launch)executionBoundary?.cancelUnstartedLaunch?.(launch);throw error;}
+  child.on("error",()=>{});
   const processGroupId = child.pid;
   if (!processGroupId || processGroupId === process.pid) {
+    if(!processGroupId&&launch)executionBoundary?.cancelUnstartedLaunch?.(launch);
     child.kill("SIGKILL");
     throw new Error("Claude process did not receive a dedicated process group");
   }
@@ -144,6 +147,20 @@ export function spawnContainedClaudeProcess(
     { once: true },
   );
 
+  if(boundaryProcess?.requiresOwnedSignals){
+    // The SDK owns transport only. Its TERM/KILL ladder must not destroy the
+    // outer reaper before it can prove every private descendant has exited.
+    return {
+      stdin:child.stdin,stdout:child.stdout,
+      get killed(){return tracked.termination!==null;},
+      get exitCode(){return child.exitCode;},
+      get signalCode(){return child.signalCode;},
+      kill:()=>{void terminateContainedClaudeProcess(tracked,{graceMs:0}).catch(()=>{});return true;},
+      on:(event,listener)=>{child.on(event,listener);},
+      once:(event,listener)=>{child.once(event,listener);},
+      off:(event,listener)=>{child.off(event,listener);},
+    };
+  }
   return child;
 }
 

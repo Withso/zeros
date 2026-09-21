@@ -41,6 +41,7 @@ class Host {
       ripgrepBoundaryProbe?: boolean;
       reportScanTtl?: boolean;
       ripwalkCacheTtlMs?: string;
+      onCloudTool?: (request:unknown)=>unknown;
     } = {},
   ) {
     this.child = spawn(process.execPath, [HOST], {
@@ -95,13 +96,17 @@ class Host {
         if (!line.trim()) continue;
         const msg = JSON.parse(line) as {
           k: string;
-          id?: number;
+          id?: number | string;
+          request?: unknown;
           ok?: boolean;
           result?: unknown;
           error?: { message?: string };
         };
         if (msg.k === "ready") signalReady();
-        if (msg.k !== "res" || msg.id === undefined) continue;
+        if(msg.k==="tool"){
+          this.child.stdin?.write(JSON.stringify({k:"tool_result",id:msg.id,result:options.onCloudTool?.(msg.request)??{ok:false,error:"unavailable"}})+"\n");
+        }
+        if (msg.k !== "res" || typeof msg.id !== "number") continue;
         const p = this.pending.get(msg.id);
         if (!p) continue;
         this.pending.delete(msg.id);
@@ -148,6 +153,21 @@ afterEach(() => {
 });
 
 describe("cursor host — native handle lifetime", () => {
+  it.each(["agent.create","agent.resume"])("installs the workload callback over real stdio for %s",async operation=>{
+    const temporary=await mkdtemp(path.join(os.tmpdir(),"zeros-cursor-cloud-host-"));
+    const calls:unknown[]=[];
+    try{
+      const h=startHost({stateRoot:temporary,onCloudTool:request=>{calls.push(request);return {ok:true,data:{text:"from-workload"}};}});await h.ready();
+      const opts={cwd:"/w/alpha",cloudFixture:true,tools:["shell","task"],agents:[{name:"untrusted"}],
+        local:{settingSources:["project"],dirs:["/private"],customTools:{injected:{}}},zerosWorkloadTools:{inputSchema:{type:"object"}}};
+      const result=await h.req<{agentId:string}>(operation,operation==="agent.resume"?{agentId:"persisted",opts}:opts);
+      const policy=JSON.parse(result.agentId);
+      expect(policy).toMatchObject({tools:["mcp","askQuestion","updateTodos","readTodos"],settingSources:[],customToolNames:["workspace"],
+        response:{isError:false,content:[{type:"text",text:JSON.stringify({ok:true,data:{text:"from-workload"}})}]}});
+      expect(policy.dirs).toBeUndefined();expect(policy.agents).toEqual({});
+      expect(calls).toEqual([{operation:"read",path:"README.md"}]);
+    }finally{host?.dispose();host=null;await rm(temporary,{recursive:true,force:true});}
+  });
   it("rejects a previous host generation's handle after the same conversation resumes", async () => {
     const opts = { cwd: "/w/alpha", handleFixture: true };
     const first = startHost(); await first.ready();

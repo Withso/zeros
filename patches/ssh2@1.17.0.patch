@@ -1,0 +1,17 @@
+--- a/lib/keygen.js
++++ b/lib/keygen.js
+@@ -290,8 +290,6 @@
+-      let pubBin = reader.readString(Ber.BitString, true);
+-      {
+-        // Remove leading zero bytes
+-        let i = 0;
+-        for (; i < pubBin.length && pubBin[i] === 0x00; ++i);
+-        if (i > 0)
+-          pubBin = pubBin.slice(i);
+-      }
++      // DER BIT STRING prefixes the fixed-width point with one unused-bits
++      // byte. Zero bytes in the point itself must be retained.
++      const encodedPub = reader.readString(Ber.BitString, true);
++      if (encodedPub.length !== 33 || encodedPub[0] !== 0)
++        throw new Error('Bad ED25519 public key length');
++      const pubBin = encodedPub.slice(1);

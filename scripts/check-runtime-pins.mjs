@@ -183,6 +183,17 @@ function checkPins() {
   return resolved;
 }
 
+// The cloud image launches these exact native language tools. A lockfile
+// refresh must not silently change their protocol or compiler behavior.
+function checkCloudLanguagePins(){
+  const manifest=JSON.parse(readFileSync(join(ROOT,"package.json"),"utf8"));
+  for(const name of ["typescript-language-server","pyright","typescript"]){
+    const declared=manifest.dependencies?.[name]??manifest.devDependencies?.[name],installed=installedManifest(name);
+    if(!EXACT.test(declared??"")||installed?.version!==declared)fail(`${name}: cloud language runtime requires an exact installed pin`);
+  }
+}
+checkCloudLanguagePins();
+
 // ── 3 + 4 + 5. Claude: the artifact, and its self-agreement ──
 
 function checkClaudeArtifact(installedWrapperVersion) {

@@ -1,3 +1,5 @@
+import {parseDatabaseTarget} from "./database-target.js";
+import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for activating Organization cloud-workspace
 // billing authority and its exact active seat set. The default mode is a
 // read-only plan. Execution is target-bound, refuses external billing sources,
@@ -132,7 +134,7 @@ export class CloudWorkspaceEntitlementManagementError extends Error {
 function databaseTarget(databaseUrl: string): URL {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = parseDatabaseTarget(databaseUrl);
   } catch {
     throw new CloudWorkspaceEntitlementManagementError(
       "Invalid entitlement configuration: DATABASE_URL must be a PostgreSQL URL",
@@ -160,6 +162,7 @@ function targetFingerprint(databaseUrl: string, channel: string): string {
         parsed.hostname.toLowerCase(),
         parsed.port || "5432",
         parsed.pathname,
+    decodeURIComponent(parsed.username),
       ].join("\0"),
       "utf8",
     )
@@ -462,42 +465,6 @@ export function cloudWorkspaceEntitlementApprovalText(
   ].join(":");
 }
 
-async function assertProCollaboratorsEligible(
-  client: pg.PoolClient,
-  organizationId: string,
-  members: readonly OrganizationMemberRow[],
-): Promise<void> {
-  if (members.length === 0 || members.length > 5) {
-    throw new CloudWorkspaceEntitlementManagementError(
-      "A Pro Organization activation requires one to five collaborators",
-    );
-  }
-  const entitlements = await client.query<{ user_id: string }>(
-    `SELECT entitlement.user_id
-     FROM account_entitlements entitlement
-     JOIN users account ON account.id = entitlement.user_id
-     WHERE entitlement.user_id = ANY($1::uuid[])
-       AND entitlement.plan = 'pro'
-       AND entitlement.status IN ('active', 'trialing')
-       AND entitlement.cloud_workspaces_allowed
-       AND entitlement.valid_from <= clock_timestamp()
-       AND (
-         entitlement.valid_until IS NULL
-         OR entitlement.valid_until > clock_timestamp()
-       )
-       AND account.auth_status = 'active'
-       AND account.deleted_at IS NULL
-     ORDER BY entitlement.user_id
-     FOR SHARE OF entitlement, account`,
-    [members.map((member) => member.user_id)],
-  );
-  if (entitlements.rows.length !== members.length) {
-    throw new CloudWorkspaceEntitlementManagementError(
-      `Pro Organization ${organizationId} requires every collaborator to have current Pro account authority`,
-    );
-  }
-}
-
 export async function manageCloudWorkspaceEntitlement(
   pool: pg.Pool,
   request: ValidatedCloudWorkspaceEntitlementRequest,
@@ -665,13 +632,9 @@ export async function manageCloudWorkspaceEntitlement(
       );
     }
 
-    if (request.next.plan === "pro") {
-      await assertProCollaboratorsEligible(
-        client,
-        request.organizationId,
-        members,
-      );
-    } else {
+    // A legacy Pro organization row is compatibility metadata. Paid admission
+    // belongs to each account; another member's plan never disables its peers.
+    if (request.next.plan !== "pro") {
       const invalidSeat = request.next.activeSeatUserIds.find((userId) => {
         const account = users.get(userId);
         return (
@@ -936,7 +899,7 @@ async function runCli(): Promise<void> {
       process.env.CONTROL_PLANE_CLOUD_ENTITLEMENT_ACTIVE_SEAT_USER_IDS,
     reason: process.env.CONTROL_PLANE_CLOUD_ENTITLEMENT_REASON,
   });
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = createMigrationPool(databaseUrl, {maxConnections: 1});
   try {
     const result = await manageCloudWorkspaceEntitlement(pool, request);
     console.log(

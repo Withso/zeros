@@ -209,11 +209,12 @@ async function localHostParityMain(cloudWorker = false) {
             code.ambientContainerSelectorsPreserved === true,
       ],
       [
-        "cloud-private-container-workflow",
+        "cloud-private-container-service",
         !cloudWorker ||
           (observed.cloudContainerBoundary === true &&
             code.privateContainerReady === true),
       ],
+      ["cloud-private-container-execution", !cloudWorker || code.privateContainerExecution === true],
       ["direct-local-service", code.directService === true],
       ["direct-agent-port", code.directPort === true],
       ["direct-requested-port", observed.directRequestedPort === true],
@@ -297,6 +298,10 @@ async function localHostParityMain(cloudWorker = false) {
       ],
     ];
     const detailFor = (name) => {
+      if (name === "cloud-private-container-service" && cloudWorker && code.privateContainerReady !== true)
+        return safeError(code.privateContainerError || "container service unavailable");
+      if (name === "cloud-private-container-execution" && cloudWorker && code.privateContainerExecution !== true)
+        return safeError(code.privateContainerError || "container execution failed");
       if (name === "local-admission-fast-path") {
         return `code=${observed.codeAdmissionMs}ms design=${observed.designAdmissionMs}ms`;
       }

@@ -1,6 +1,15 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+} from "node:crypto";
 
 import type { Tx } from "../db.js";
+import {
+  isCloudWorkspaceProviderName,
+  type CloudWorkspaceProviderName,
+} from "./provider.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -9,7 +18,7 @@ const MAX_CREDENTIAL_BYTES = 64 * 1024;
 export type CloudProviderConnection = {
   id: string;
   organizationId: string;
-  provider: "daytona";
+  provider: CloudWorkspaceProviderName;
   credentialSource: "hosted" | "delegated";
   endpoint: string;
   region: string | null;
@@ -19,7 +28,7 @@ export type CloudProviderConnection = {
 type StoredProviderConnection = {
   id: string;
   org_id: string;
-  provider: "daytona";
+  provider: CloudWorkspaceProviderName;
   credential_source: "hosted" | "delegated";
   endpoint: string;
   region: string | null;
@@ -51,7 +60,7 @@ function credentialAad(input: {
   connectionId: string;
   organizationId: string;
   version: number;
-  provider: "daytona";
+  provider: CloudWorkspaceProviderName;
   endpoint: string;
 }): Buffer {
   return Buffer.from(
@@ -71,14 +80,15 @@ function validCredentialBinding(input: {
   connectionId: string;
   organizationId: string;
   version: number;
-  provider: "daytona";
+  provider: CloudWorkspaceProviderName;
   endpoint: string;
 }): boolean {
   if (
     !UUID_PATTERN.test(input.connectionId) ||
     !UUID_PATTERN.test(input.organizationId) ||
     !Number.isSafeInteger(input.version) ||
-    input.version < 1
+    input.version < 1 ||
+    !isCloudWorkspaceProviderName(input.provider)
   ) {
     return false;
   }
@@ -104,7 +114,7 @@ export function sealCloudProviderCredential(
     connectionId: string;
     organizationId: string;
     version: number;
-    provider: "daytona";
+    provider: CloudWorkspaceProviderName;
     endpoint: string;
   },
   encodedKey: string,
@@ -156,7 +166,7 @@ export function openCloudProviderCredential(
     connectionId: string;
     organizationId: string;
     version: number;
-    provider: "daytona";
+    provider: CloudWorkspaceProviderName;
     endpoint: string;
   },
   encodedKey: string,
@@ -223,7 +233,7 @@ export async function ensureHostedCloudProviderConnection(
     organizationId: string;
     ownerUserId: string;
     isPersonal: boolean;
-    provider: "daytona";
+    provider: CloudWorkspaceProviderName;
     actorUserId: string;
   },
 ): Promise<CloudProviderConnection> {
@@ -303,7 +313,7 @@ export async function selectCloudProviderConnectionForNewGeneration(
     organizationId: string;
     ownerUserId: string;
     isPersonal: boolean;
-    provider: "daytona";
+    providers: readonly CloudWorkspaceProviderName[];
   },
 ): Promise<CloudProviderConnection | null> {
   if (!UUID_PATTERN.test(input.connectionId)) return null;
@@ -320,7 +330,7 @@ export async function selectCloudProviderConnectionForNewGeneration(
       AND version.org_id = connection.org_id
       AND version.version = connection.current_version
      WHERE connection.id = $1 AND connection.org_id = $2
-       AND connection.provider = $3 AND connection.state = 'active'
+       AND connection.provider = ANY($3::text[]) AND connection.state = 'active'
        AND version.retired_at IS NULL
        AND (
          (connection.owner_kind = 'user' AND connection.owner_user_id = $4)
@@ -333,7 +343,7 @@ export async function selectCloudProviderConnectionForNewGeneration(
     [
       input.connectionId,
       input.organizationId,
-      input.provider,
+      input.providers,
       input.ownerUserId,
       input.isPersonal,
     ],
@@ -346,7 +356,8 @@ export async function selectCloudProviderConnectionForNewGeneration(
       row.capabilities.lifecycle !== true ||
       row.capabilities.commandExecution !== true ||
       (row.credential_expires_at !== null &&
-        new Date(row.credential_expires_at).getTime() <= Date.now() + 5 * 60_000))
+        new Date(row.credential_expires_at).getTime() <=
+          Date.now() + 5 * 60_000))
   ) {
     return null;
   }

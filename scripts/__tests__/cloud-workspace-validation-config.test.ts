@@ -235,8 +235,10 @@ describe("cloud worker image contract", () => {
   it("separates immutable coordinator bytes from the writable checkout", () => {
     expect(NODE_BASE_IMAGE).toMatch(/@sha256:[a-f0-9]{64}$/);
     expect(SANDBOX_ENGINE_DIR).toBe("/opt/zeros");
-    expect(SANDBOX_REPO_DIR).toBe("/workspace/zeros");
-    expect(SANDBOX_DATA_DIR).toBe("/var/lib/zeros");
+    // Boat stop/resume does not retain /workspace or arbitrary /home roots.
+    // New images use the same durable physical layout on both providers.
+    expect(SANDBOX_REPO_DIR).toBe("/srv/zeros/workspace");
+    expect(SANDBOX_DATA_DIR).toBe("/srv/zeros/state");
     expect(SANDBOX_ENGINE_DIR).not.toBe(SANDBOX_REPO_DIR);
   });
 
@@ -278,13 +280,13 @@ describe("cloud worker image contract", () => {
       ),
     ) as Record<string, unknown>;
     expect(marker).toEqual({
-      version: 1,
+      version: 3,
       backend: "cloud-worker",
-      profile: "zeros-cloud-worker-v1",
+      profile: "zeros-cloud-worker-v3",
       uid: SANDBOX_AGENT_UID,
       gid: SANDBOX_AGENT_GID,
       toolchain: {
-        node: "/usr/local/bin/node",
+        node: "/opt/zeros-runtime/bin/node",
         supervisor:
           "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
         bwrap: "/usr/bin/bwrap",

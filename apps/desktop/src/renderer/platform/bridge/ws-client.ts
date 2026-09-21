@@ -222,11 +222,11 @@ export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
 const CLOUD_RUNTIME_UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const CLOUD_RUNTIME_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
+const CLOUD_RUNTIME_TOKEN_PATTERN = /^zw[sa]_[A-Za-z0-9_-]{43}$/;
 
 export type CloudRuntimeConnectionTarget = {
   readonly kind: "cloud";
-  readonly channel: "electron-ssh-tunnel";
+  readonly channel: "electron-ssh-tunnel" | "control-plane-websocket";
   readonly runtimeId: string;
   readonly organizationId: string;
   readonly workspaceId: string;
@@ -234,7 +234,7 @@ export type CloudRuntimeConnectionTarget = {
   readonly authorityEpoch: number;
   readonly engineInstanceId: string;
   readonly connectionSequence: number;
-  /** Exact desktop-owned loopback proxy; never a public or provider URL. */
+  /** Exact desktop loopback proxy or the configured control-plane relay. */
   readonly url: string;
   /** One-use, generation-bound engine admission. Never persisted. */
   readonly cloudToken: string;
@@ -327,7 +327,7 @@ export function parseRuntimeConnectionTarget(
       ]
         .sort()
         .join("\0") ||
-    value.channel !== "electron-ssh-tunnel" ||
+    !["electron-ssh-tunnel","control-plane-websocket"].includes(String(value.channel)) ||
     typeof value.runtimeId !== "string" ||
     !CLOUD_RUNTIME_UUID_PATTERN.test(value.runtimeId) ||
     typeof value.organizationId !== "string" ||
@@ -358,7 +358,7 @@ export function parseRuntimeConnectionTarget(
   } catch {
     throw new Error("cloud runtime connection URL is invalid");
   }
-  if (
+  if (value.channel === "electron-ssh-tunnel" && (
     url.protocol !== "ws:" ||
     url.hostname !== "127.0.0.1" ||
     !url.port ||
@@ -368,13 +368,21 @@ export function parseRuntimeConnectionTarget(
     url.password ||
     url.pathname !== "/ws" ||
     url.search ||
-    url.hash
-  ) {
+    url.hash || !value.cloudToken.startsWith("zws_")
+  )) {
     throw new Error("cloud runtime connection URL is invalid");
+  }
+  if(value.channel === "control-plane-websocket") {
+    const base=new URL((import.meta.env.VITE_CONTROL_PLANE_URL as string|undefined)||"https://api.zeros.build");
+    if(base.username||base.password||base.search||base.hash||base.pathname!=="/"||
+      (base.protocol!=="https:"&&!(import.meta.env.DEV&&base.protocol==="http:"&&["127.0.0.1","localhost"].includes(base.hostname))))
+      throw new Error("cloud control-plane origin is invalid");
+    const expected=new URL("/v1/cloud-workspaces/bridge",base);expected.protocol=base.protocol==="https:"?"wss:":"ws:";
+    if(url.toString()!==expected.toString()||!value.cloudToken.startsWith("zwa_"))throw new Error("cloud runtime connection URL is invalid");
   }
   return {
     kind: "cloud",
-    channel: "electron-ssh-tunnel",
+    channel: value.channel as CloudRuntimeConnectionTarget["channel"],
     runtimeId: value.runtimeId,
     organizationId: value.organizationId,
     workspaceId: value.workspaceId,
@@ -548,6 +556,18 @@ function clearPendingRequest(pending: PendingRequest): void {
   }
 }
 
+// Renderer-process retirement memory also covers a late IPC result delivered
+// after BridgeProvider was replaced. A descriptor lives at most sixteen minutes.
+const retiredCloudRuntimes = new Map<string, number>();
+let cloudRetirementOverflowUntil = 0;
+function assertCloudRuntimeNotRetired(target: RuntimeConnectionTarget): void {
+  const now = Date.now();
+  for (const [id, deadline] of retiredCloudRuntimes) if (deadline <= now) retiredCloudRuntimes.delete(id);
+  if (target.kind === "cloud" && (retiredCloudRuntimes.has(target.runtimeId) || cloudRetirementOverflowUntil > now)) {
+    throw new Error("Cloud runtime connection has been retired");
+  }
+}
+
 export class RuntimeClient {
   private ws: WebSocket | null = null;
   /** A WebSocket that's been created but hasn't fired onopen yet.
@@ -594,7 +614,9 @@ export class RuntimeClient {
       refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
     } = {},
   ) {
-    this.connectionTarget = parseRuntimeConnectionTarget(target);
+    const parsedTarget = parseRuntimeConnectionTarget(target);
+    assertCloudRuntimeNotRetired(parsedTarget);
+    this.connectionTarget = parsedTarget;
     this.refreshCloudConnectionTarget = options.refreshCloudConnectionTarget;
     this.armConnectionTargetExpiry();
   }
@@ -642,6 +664,7 @@ export class RuntimeClient {
       }
     }
 
+    const targetEpoch = this.connectionTargetEpoch;
     let wsUrl: string;
     let protocols: string[] | undefined;
     if (this.connectionTarget.kind === "cloud") {
@@ -671,7 +694,7 @@ export class RuntimeClient {
         ? `ws://localhost:${port}/ws?token=${encodeURIComponent(token)}`
         : `ws://localhost:${port}/ws`;
     }
-    if (this._disposed) return;
+    if (this._disposed || targetEpoch !== this.connectionTargetEpoch) return;
     // Re-check after the async hop — another connect() could have won
     // the race and we'd duplicate.
     if (this.ws?.readyState === WebSocket.OPEN) return;
@@ -692,7 +715,7 @@ export class RuntimeClient {
     ws.onopen = () => {
       // If we were disposed (or another socket beat us to it) while
       // pending, drop this one rather than promoting it.
-      if (this._disposed || this.pendingWs !== ws) {
+      if (this._disposed || this.pendingWs !== ws || targetEpoch !== this.connectionTargetEpoch) {
         try {
           ws.close();
         } catch {
@@ -702,10 +725,19 @@ export class RuntimeClient {
       }
       this.pendingWs = null;
       this.ws = ws;
+      // Actor admission expires before use. Once admitted, the server's live
+      // actor lease governs the stream; ordinary reconnect always mints anew.
+      if (this.connectionTarget.kind === "cloud" &&
+          this.connectionTarget.channel === "control-plane-websocket" &&
+          this.connectionTargetExpiryTimer) {
+        clearTimeout(this.connectionTargetExpiryTimer);
+        this.connectionTargetExpiryTimer = null;
+      }
       this.onTransportOpen();
     };
 
     ws.onmessage = (event) => {
+      if (this._disposed || this.ws !== ws || targetEpoch !== this.connectionTargetEpoch) return;
       const msg = parseInboundBridgeWebSocketFrame(event.data);
       if (msg) this.handleIncoming(msg);
     };
@@ -714,9 +746,11 @@ export class RuntimeClient {
       // Clear whichever slot held this socket; an orphan that lost the
       // race could close after the winner promoted itself, and we
       // don't want to null out the live this.ws.
-      if (this.pendingWs === ws) this.pendingWs = null;
-      if (this.ws !== ws) return;
-      this.ws = null;
+      if (this._disposed || targetEpoch !== this.connectionTargetEpoch) return;
+      const wasPending = this.pendingWs === ws;
+      if (wasPending) this.pendingWs = null;
+      if (this.ws !== ws && !wasPending) return;
+      if (this.ws === ws) this.ws = null;
       this.afterDisconnect();
     };
 
@@ -752,15 +786,34 @@ export class RuntimeClient {
    * minted cloud descriptor. The descriptor remains memory-only. */
   async setConnectionTarget(target: RuntimeConnectionTarget): Promise<void> {
     const previousKey = runtimeExecutionKey(this.executionIdentity);
-    this.connectionTarget = parseRuntimeConnectionTarget(target);
+    const parsedTarget = parseRuntimeConnectionTarget(target);
+    assertCloudRuntimeNotRetired(parsedTarget);
+    this.connectionTarget = parsedTarget;
     this.cloudTargetNeedsRefresh = false;
     this.armConnectionTargetExpiry();
     this._rejected = false;
     this.lastRejection = null;
+    // Retire old slots and queued RPCs synchronously before identity listeners
+    // can start reads against the replacement target.
+    const connecting = this.forceReconnect({ refreshCloudTarget: false });
     if (runtimeExecutionKey(this.executionIdentity) !== previousKey) {
       this.notifyExecutionIdentityChanged();
     }
-    await this.forceReconnect({ refreshCloudTarget: false });
+    await connecting;
+  }
+
+  /** Native retirement is exact-handle scoped and never waits for network revoke. */
+  retireCloudRuntime(runtimeId: string): void {
+    if (!CLOUD_RUNTIME_UUID_PATTERN.test(runtimeId)) return;
+    const deadline = Date.now() + 16 * 60_000;
+    assertCloudRuntimeNotRetired({ kind: "local" }); // prune expired tombstones
+    if (retiredCloudRuntimes.size >= 512 && !retiredCloudRuntimes.has(runtimeId)) {
+      // A storm cannot evict a still-valid retirement proof. Fail closed for
+      // the maximum remaining descriptor lifetime using bounded memory.
+      cloudRetirementOverflowUntil = deadline;
+    } else retiredCloudRuntimes.set(runtimeId, deadline);
+    if (this.connectionTarget.kind !== "cloud" || this.connectionTarget.runtimeId !== runtimeId) return;
+    void this.setConnectionTarget({ kind: "local" }).catch(() => undefined);
   }
 
   onExecutionIdentityChange(
@@ -996,18 +1049,11 @@ export class RuntimeClient {
     // Close any live or pending socket. Closing flips us to
     // "disconnected" via onclose, but we set it explicitly here to
     // cover the (rare) case where neither socket fires the event.
-    try {
-      this.ws?.close();
-    } catch {
-      /* already dead */
-    }
-    try {
-      this.pendingWs?.close();
-    } catch {
-      /* already dead */
-    }
+    const retiredSocket = this.ws, retiredPending = this.pendingWs;
     this.ws = null;
     this.pendingWs = null;
+    try { retiredSocket?.close(); } catch { /* already dead */ }
+    try { retiredPending?.close(); } catch { /* already dead */ }
     this._engineConnected = false;
     this.setStatus("disconnected");
     invalidateEnginePort();
@@ -1419,6 +1465,7 @@ export class RuntimeClient {
     this.cloudTargetRefreshPromise = (async () => {
       try {
         const candidate = parseRuntimeConnectionTarget(await refresh(current));
+        assertCloudRuntimeNotRetired(candidate);
         if (
           candidate.kind !== "cloud" ||
           candidate.runtimeId !== current.runtimeId ||

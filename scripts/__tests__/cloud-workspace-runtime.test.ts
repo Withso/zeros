@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import {
   assertCloudStateMatchesSnapshot,
@@ -58,7 +60,7 @@ function report() {
   return {
     version: 1,
     qualified: true,
-    profile: "zeros-cloud-worker-v1",
+    profile: "zeros-cloud-worker-v3",
     metadata: {
       build: {
         baseImage: NODE_BASE_IMAGE,
@@ -78,6 +80,25 @@ function report() {
 }
 
 describe("cloud workspace runtime admission", () => {
+  it.each([2, 3])("routes profile %i through the isolated engine launcher", (version) => {
+    const source=readFileSync("scripts/cloud-workspace-validation/sandbox/start-engine.sh","utf8");
+    const select=source.slice(source.indexOf('case "$PROFILE_VERSION" in'),source.indexOf("esac")+4);
+    const launch=source.slice(source.lastIndexOf('if [[ "$PROFILE_VERSION"'));
+    const temporary=mkdtempSync(join(tmpdir(),"zeros-launch-regression-"));
+    const log=join(temporary,"launch.log");
+    try {
+    const result=spawnSync("bash",["-c",`set -euo pipefail
+PROFILE_VERSION=${version}
+${select}
+RUNTIME=/bin/echo
+LOG="$1"
+ENGINE_DIR=/opt/zeros
+${launch}`,"test",log],{encoding:"utf8",env:{PATH:"/usr/bin:/bin"}});
+    expect(result.status,result.stderr).toBe(0);
+    expect(readFileSync(log,"utf8").trim()).toBe("/opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs");
+    } finally { rmSync(temporary,{recursive:true,force:true}); }
+  });
+
   it("rejects a malformed engine listener port before touching the worker", () => {
     const result = spawnSync(
       "bash",
@@ -198,7 +219,7 @@ describe("cloud workspace runtime admission", () => {
     });
     expect(installed).toHaveLength(1);
     expect(installed[0].command).toBe(
-      "/usr/local/bin/node /usr/local/lib/zeros/install-cloud-preview-links.mjs",
+      "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/install-cloud-preview-links.mjs",
     );
     expect(installed[0].command).not.toContain("signed-preview-token");
     expect(Object.keys(installed[0].env ?? {})).toEqual([
@@ -211,11 +232,13 @@ describe("cloud workspace runtime admission", () => {
     expect(document.links).toEqual([
       {
         port: 41_000,
-        signedUrl: "https://41000-signed-preview-token-41000.proxy.daytona.work/",
+        signedUrl:
+          "https://41000-signed-preview-token-41000.proxy.daytona.work/",
       },
       {
         port: 41_001,
-        signedUrl: "https://41001-signed-preview-token-41001.proxy.daytona.work/",
+        signedUrl:
+          "https://41001-signed-preview-token-41001.proxy.daytona.work/",
       },
     ]);
 
@@ -352,7 +375,7 @@ describe("cloud workspace runtime admission", () => {
     });
     expect(calls).toHaveLength(1);
     expect(calls[0].command).toBe(
-      "/usr/local/bin/node /usr/local/lib/zeros/install-cloud-github-credential.mjs",
+      "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/install-cloud-github-credential.mjs",
     );
     expect(calls[0].command).not.toContain("github_pat");
     expect(Object.keys(calls[0].env ?? {})).toEqual([
@@ -418,11 +441,11 @@ describe("cloud workspace runtime admission", () => {
     ).resolves.toBe(true);
     expect(calls[0]).toEqual({
       command:
-        "/usr/local/bin/node /usr/local/lib/zeros/cloud-github-refresh-request.mjs read",
+        "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs read",
       env: undefined,
     });
     expect(calls[1]?.command).toBe(
-      "/usr/local/bin/node /usr/local/lib/zeros/cloud-github-refresh-request.mjs ack",
+      "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs ack",
     );
     expect(calls[1]?.env).toEqual({
       ZEROS_CLOUD_GITHUB_REFRESH_GENERATION: request.generation,

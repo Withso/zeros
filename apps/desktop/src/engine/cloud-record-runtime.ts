@@ -6,6 +6,7 @@ import {
   restoreChatComposerModes,
   coerceChatRow,
   listChats,
+  wasChatDeleted,
   type ChatRow,
 } from "./db/chats";
 import { openZerosDb } from "./db";
@@ -14,7 +15,7 @@ import {
   upsertChatMessagesBulk,
   type PersistedMessageRow,
 } from "./db/messages";
-import { headRev } from "./db/sync";
+import { headRev, recordTombstone, tombstonesSince } from "./db/sync";
 import { reinsertTurns, type TurnDbRow } from "./db/turns";
 import type { CloudDurabilityAuthority } from "./cloud-durability-runtime";
 
@@ -451,9 +452,12 @@ export class CloudWorkspaceRecordRuntime {
     remote: Map<string, RecordEntry>,
     mode: "replace" | "missing",
     settleImportedRunningAt: number | null,
+    state: SyncState | null,
   ): void {
     const db = openZerosDb();
     const existing = this.localProjection();
+    const locallyDeletedChatIds = new Set(tombstonesSince("chat", 0));
+    const locallyResetChatIds = new Set(tombstonesSince("msgreset", state?.localHeadRevision ?? 0));
     const localChats = listChats();
     const projectedChatIds = new Set(
       [...existing.values()]
@@ -483,6 +487,7 @@ export class CloudWorkspaceRecordRuntime {
         (entry) =>
           entry.entityKind === "chat" &&
           entry.tombstonedAt === null &&
+          !locallyDeletedChatIds.has(entry.entityId) &&
           (mode === "replace" || !existing.has(entityKey("chat", entry.entityId))),
       )
       .map((entry) => {
@@ -528,6 +533,8 @@ export class CloudWorkspaceRecordRuntime {
         throw new Error("cloud message schema is unsupported");
       }
       const document = entry.document;
+      if (typeof document.chatId === "string" && locallyDeletedChatIds.has(document.chatId)) continue;
+      if (mode === "missing" && typeof document.chatId === "string" && locallyResetChatIds.has(document.chatId)) continue;
       if (
         document.version !== 1 ||
         typeof document.chatId !== "string" ||
@@ -577,6 +584,8 @@ export class CloudWorkspaceRecordRuntime {
         throw new Error("cloud turn schema is unsupported");
       }
       const row = entry.document.row;
+      if (typeof row.chat_id === "string" && locallyDeletedChatIds.has(row.chat_id)) continue;
+      if (mode === "missing" && typeof row.chat_id === "string" && locallyResetChatIds.has(row.chat_id)) continue;
       if (
         typeof row.chat_id !== "string" ||
         typeof row.turn_id !== "string" ||
@@ -656,10 +665,35 @@ export class CloudWorkspaceRecordRuntime {
           deleteTurns.run(chatId);
           deleteMessages.run(chatId);
           deleteChat.run(chatId);
-          deleteTombstone.run("chat", chatId);
           deleteTombstone.run("msgreset", chatId);
         }
       }
+      // Deletion wins even when another local row is dirty. Keep this fence
+      // through restore so delayed devices cannot re-create a deleted identity.
+      for (const chatId of remoteTombstonedChatIds) {
+        db.prepare("DELETE FROM turns WHERE chat_id = ?").run(chatId);
+        db.prepare("DELETE FROM chat_messages WHERE chat_id = ?").run(chatId);
+        db.prepare("DELETE FROM chats WHERE id = ?").run(chatId);
+        if (!wasChatDeleted(chatId)) recordTombstone("chat", chatId);
+      }
+      // A newly observed remote deletion wins over a stale local child even
+      // while unrelated rows are dirty. Older, already acknowledged child
+      // tombstones may be deliberately undone; only chat deletion is permanent.
+      const resetChats = new Set<string>();
+      for (const [key, entry] of existing) {
+        const deleted = remote.get(key);
+        if (!deleted?.tombstonedAt || (state && deleted.revision <= state.remoteRevision)) continue;
+        if (entry.entityKind === "message") {
+          const { chatId, msgId } = entry.document;
+          db.prepare("DELETE FROM chat_messages WHERE chat_id = ? AND msg_id = ?").run(chatId, msgId);
+          resetChats.add(String(chatId));
+        } else if (entry.entityKind === "turn") {
+          const row = entry.document.row as Record<string, unknown>;
+          db.prepare("DELETE FROM turns WHERE chat_id = ? AND turn_id = ?").run(row.chat_id, row.turn_id);
+          resetChats.add(String(row.chat_id));
+        }
+      }
+      for (const chatId of resetChats) recordTombstone("msgreset", chatId);
       if (chatDocuments.length > 0) {
         bulkUpsertChats(chatDocuments);
         restoreChatComposerModes(chatDocuments);
@@ -822,9 +856,11 @@ export class CloudWorkspaceRecordRuntime {
           remote.entries,
           clean ? "replace" : "missing",
           settleImportedRunningAt,
+          state,
         );
       }
       const local = this.localProjection();
+      const capturedHead = headRev();
       const pending = this.mutations(local, remote.entries);
       let revision = remote.currentRevision;
       try {
@@ -835,14 +871,15 @@ export class CloudWorkspaceRecordRuntime {
         if (error instanceof Error && error.name === "revision_conflict") continue;
         throw error;
       }
-      const settled = this.localProjection();
-      const settledHead = headRev();
-      if (this.manifest(local) !== this.manifest(settled)) continue;
+      // A streaming provider may change SQLite throughout the upload. This
+      // captured revision is now durable; newer local changes stay dirty for
+      // the next sync. Requiring a silent interval falsely drops readiness and
+      // repeats full projections while an otherwise healthy agent is working.
       this.writeState(
         authority.workspaceId,
         revision,
-        settledHead,
-        this.manifest(settled),
+        capturedHead,
+        this.manifest(local),
       );
       return;
     }

@@ -21,6 +21,19 @@ describe("remote agent spawn env authority clamp", () => {
   const scrub = (ZerosEngine.prototype as unknown as RelayScrubber)
     .scrubRemoteAgentSpawnEnv;
 
+  it("preserves exact-model qualification through the remote spawn boundary", () => {
+    expect(scrub.call({ pty: { isWithinAllowed: () => false } }, {
+      CURSOR_MODEL: "grok-4.6",
+      ZEROS_THINKING_EFFORT: "xhigh",
+      ZEROS_REQUIRE_EXACT_MODEL: "1",
+      ZEROS_ZSR_SUPERVISOR_RUNTIME: "/attacker/runtime",
+    })).toEqual({
+      CURSOR_MODEL: "grok-4.6",
+      ZEROS_THINKING_EFFORT: "xhigh",
+      ZEROS_REQUIRE_EXACT_MODEL: "1",
+    });
+  });
+
   it("preserves contained credentials, MCP secrets, app env, and composer settings", () => {
     const result = scrub.call(
       { pty: { isWithinAllowed: (path) => path === "/managed/context" } },

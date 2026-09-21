@@ -1,3 +1,5 @@
+import {parseDatabaseTarget} from "./database-target.js";
+import {createMigrationPool} from "./db.js";
 // Guarded clean-reset utility for pre-production authentication cutovers.
 //
 // The default mode is read-only. Destructive execution is target-bound by a
@@ -84,7 +86,7 @@ export class DatabaseResetError extends Error {
 function parsedDatabaseUrl(databaseUrl: string): URL {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = parseDatabaseTarget(databaseUrl);
   } catch {
     throw new DatabaseResetError(
       "Invalid reset configuration: DATABASE_URL must be a PostgreSQL URL",
@@ -113,6 +115,7 @@ export function resetTargetFingerprint(
     parsed.hostname.toLowerCase(),
     parsed.port || "5432",
     parsed.pathname,
+    decodeURIComponent(parsed.username),
   ].join("\0");
   return createHash("sha256").update(target, "utf8").digest("hex").slice(0, 16);
 }
@@ -244,7 +247,7 @@ async function runCli(): Promise<void> {
     backupConfirmed: process.env.CONTROL_PLANE_RESET_BACKUP_CONFIRMED,
     approval: process.env.CONTROL_PLANE_RESET_APPROVAL,
   });
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
+  const pool = createMigrationPool(databaseUrl, {maxConnections: 2});
   try {
     const counts = await inspectRowCounts(pool);
     console.log(

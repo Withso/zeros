@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -29,16 +34,6 @@ function absolute(value, label) {
     throw new Error(`${label} must be absolute`);
   }
   return path.normalize(value);
-}
-
-function inside(candidate, parent) {
-  const relative = path.relative(parent, candidate);
-  return (
-    relative === "" ||
-    (relative !== ".." &&
-      !relative.startsWith(`..${path.sep}`) &&
-      !path.isAbsolute(relative))
-  );
 }
 
 function physicalDirectory(directory, label) {
@@ -75,9 +70,12 @@ function parseArguments() {
   const engine = absolute(options[1], "container engine");
   const state = absolute(options[3], "container state");
   const socket = absolute(options[5], "container socket");
-  if (!inside(socket, state) || socket !== path.join(state, "podman.sock")) {
+  if (path.basename(socket) !== "podman.sock" || Buffer.byteLength(socket) >= 108) {
     throw new Error("container socket is outside its exact private endpoint");
   }
+  // The root supervisor admits the exact generation scratch endpoint. This
+  // unprivileged launcher additionally refuses aliases or a shared directory.
+  physicalDirectory(path.dirname(socket), "container endpoint directory");
   const engineStat = lstatSync(engine);
   if (
     !engineStat.isFile() ||
@@ -98,13 +96,13 @@ function tomlString(value) {
   return JSON.stringify(value);
 }
 
-function prepareState(state, socket) {
-  const runtime = path.join(state, "runtime");
+function prepareState(state, socket, runtime) {
   const graph = path.join(state, "storage");
   const temporary = path.join(state, "tmp");
   const configuration = path.join(state, "config");
   const data = path.join(state, "data");
-  for (const directory of [runtime, temporary, configuration, data]) {
+  physicalDirectory(runtime, "container runtime");
+  for (const directory of [temporary, configuration, data]) {
     rmSync(directory, { recursive: true, force: true });
     mkdirSync(directory, { recursive: false, mode: 0o700 });
     physicalDirectory(directory, "container worker directory");
@@ -132,9 +130,13 @@ function prepareState(state, socket) {
     [
       "[containers]",
       'cgroups = "disabled"',
+      // The engine blocks kernel keyring syscalls for every descendant.
+      // Container startup must not request an unnecessary new keyring.
+      "keyring = false",
       "pids_limit = 1024",
       "",
       "[engine]",
+      'runtime = "crun"',
       'cgroup_manager = "cgroupfs"',
       'events_logger = "file"',
       "service_timeout = 0",
@@ -177,10 +179,17 @@ async function ping(socket) {
 
 async function waitForExit(child, timeoutMs) {
   if (child.exitCode !== null || child.signalCode !== null) return true;
-  return Promise.race([
-    new Promise((resolve) => child.once("exit", () => resolve(true))),
-    delay(timeoutMs).then(() => false),
-  ]);
+  return new Promise((resolve) => {
+    const finish = (exited) => {
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref();
+    child.once("exit", onExit);
+  });
 }
 
 async function stop(child) {
@@ -196,7 +205,45 @@ async function main() {
     throw new Error("cloud container workers require Linux");
   }
   const request = parseArguments();
-  const state = prepareState(request.state, request.socket);
+  // Linux flock attaches to the open file description: the short-lived helper
+  // acquires it on inherited fd 3, and this process retains it until close.
+  // Never wipe shared runtime/configuration while another admitted command is
+  // using the same OCI database. Crash recovery reacquires the released lock.
+  const lock = openSync(path.join(request.state, "service.lock"),
+    constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+  const metadata = fstatSync(lock);
+  if (!metadata.isFile() || metadata.nlink !== 1 || metadata.uid !== process.getuid() || (metadata.mode & 0o077)) {
+    closeSync(lock);
+    throw new Error("container service lock is unsafe");
+  }
+  // Podman caps runroot at 50 bytes because it creates additional Unix
+  // sockets below it. Session paths and an inherited TMPDIR are unbounded;
+  // its database also requires the location to survive service restarts.
+  const runtime = `/tmp/zeros-cr-${createHash("sha256").update(request.state).digest("hex").slice(0, 24)}`;
+  let locked = false;
+  try {
+    const result = spawnSync("/usr/bin/flock", ["--exclusive", "--nonblock", "3"], {
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
+      stdio: ["ignore", "ignore", "pipe", lock], timeout: 5000, maxBuffer: 4096,
+    });
+    if (result.status !== 0 || result.signal || result.error)
+      throw new Error("container service is busy or its lock is unavailable");
+    locked = true;
+    if (existsSync(runtime)) {
+      physicalDirectory(runtime, "container runtime");
+      rmSync(runtime, { recursive: true });
+    }
+    mkdirSync(runtime, { mode: 0o700 });
+    await runWorker(request, runtime);
+  } finally {
+    try {
+      if (locked) rmSync(runtime, { recursive: true, force: true });
+    } finally { closeSync(lock); }
+  }
+}
+
+async function runWorker(request, runtime) {
+  const state = prepareState(request.state, request.socket, runtime);
   const runtimeIdentity = userInfo();
   const engineEnvironment = {
     ...process.env,
@@ -213,6 +260,13 @@ async function main() {
     CONTAINERS_STORAGE_CONF: state.storageConfig,
     CONTAINERS_CONF: state.containersConfig,
   };
+  // These selectors belong to the workload's client. Inheriting its private
+  // CONTAINER_HOST would turn the service itself into a remote client and
+  // reject local-only flags before any socket can be created.
+  for (const name of [
+    "CONTAINER_HOST", "CONTAINER_CONNECTION", "PODMAN_HOST",
+    "DOCKER_HOST", "DOCKER_CONTEXT",
+  ]) delete engineEnvironment[name];
   const worker = spawn(
     request.engine,
     [

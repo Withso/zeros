@@ -1,3 +1,4 @@
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import { readDirectoryDesignManifest } from "./metadata";
 import { TOKENS_SEED } from "./document-seeds";
 import { escapeText, escapeAttribute } from "./source";
@@ -171,6 +172,8 @@ export async function initializeDesignDocument(
       mkdir(path.join(directory, "assets"), { recursive: true }),
       mkdir(path.join(directory, "components"), { recursive: true }),
     ]);
+    publishCloudWorkspacePath(path.join(directory, "assets"));
+    publishCloudWorkspacePath(path.join(directory, "components"));
     const created: string[] = [];
     await writeIfMissing(
       path.join(directory, DESIGN_TOKENS_FILE),

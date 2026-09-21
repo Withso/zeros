@@ -6,9 +6,15 @@
 // ──────────────────────────────────────────────────────────
 
 import { serve } from "@hono/node-server";
+import {cloudAgentCredentialKeys} from "./cloud-workspaces/agent-credentials.js";
+import {DatabaseCloudAgentExecutionService} from "./cloud-workspaces/agent-executions.js";
+import { S3Client } from "@aws-sdk/client-s3";
+import { Agent as HttpsAgent } from "node:https";
+import { S3CloudWorkspaceObjectStore } from "./cloud-workspaces/s3-object-store.js";
+import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-receipts.js";
 import { loadConfig } from "./config.js";
-import { createPool } from "./db.js";
-import { runServiceBootMigrations } from "./migrate.js";
+import { createPool, createMigrationPool } from "./db.js";
+import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
 import { loadEmailConfig } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
@@ -19,28 +25,54 @@ import {
   CLOUD_WORKSPACE_SETUP_RECOVERY_PATH,
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
-import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import type { DatabaseCloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
 import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
 import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
 import type { DatabaseCloudWorkspaceHealthService } from "./cloud-workspaces/health.js";
 import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
-import { PostgresSecurityEventBroker } from "./security-events.js";
+import { DatabaseCloudRuntimeAccessAdmissionService } from "./cloud-workspaces/runtime-access-admission.js";
+import { CloudRuntimeBridgeRelay } from "./cloud-workspaces/runtime-bridge.js";
+import { CloudPreviewWebSocketRelay } from "./cloud-workspaces/preview-websocket-relay.js";
+import { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
+import { createCloudRuntimeServiceRelay } from "./cloud-workspaces/runtime-service-relay.js";
+import { DatabaseCloudWorkspaceCommandService } from "./cloud-workspaces/commands.js";
+import { DatabaseCloudWorkspaceEventService } from "./cloud-workspaces/event-streams.js";
+import { PostgresSecurityEventBroker,startSecurityEventPublisher } from "./security-events.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
+import {CloudWorkspaceInvitationDeliveryWorker,workspaceInvitationDeliveryConfig,workspaceInvitationSender} from "./cloud-workspaces/invitation-delivery.js";
 
 const config = loadConfig();
-const pool = createPool(config.databaseUrl);
+const pool = createPool(config.databaseUrl, { maxConnections: config.databasePoolMax ?? 10 });
 const emailConfig = loadEmailConfig();
 
-const securityEventBroker = new PostgresSecurityEventBroker(pool);
+// LISTEN is session-scoped and must bypass transaction poolers. The optional
+// dedicated connection uses runtime privileges, never migration credentials.
+const listenerPool = config.databaseListenUrl
+  ? createPool(config.databaseListenUrl, {maxConnections: 1, applicationName: "zeros-security-listener"})
+  : pool;
+const securityEventBroker = new PostgresSecurityEventBroker(listenerPool);
 const workosProvider =
   config.auth.provider === "workos" && config.workos
     ? new RailwayWorkOSProvider(config.auth, config.workos)
     : undefined;
-const migrationResult = await runServiceBootMigrations(pool, {
-  cloudWorkspacesEnabled: config.cloudWorkspaces !== null,
-});
+const migrationResult = await (async (): Promise<ServiceBootMigrationResult> => {
+  // Maintenance deliberately works against both sides of a schema cutover.
+  // It does no DDL or ledger repair and never claims the schema is current.
+  if (config.databaseMaintenanceMode) return { ran: [], status: { state: "maintenance" } };
+  if (config.databaseMigrationsOnBoot === false) return verifyMigrations(pool);
+  const migrationPool = createMigrationPool(config.databaseMigrationUrl ?? config.databaseUrl, {
+    maxConnections: 1,
+    applicationName: "zeros-migrator",
+    ...(config.databaseMigrationRole ? {role: config.databaseMigrationRole} : {}),
+  });
+  try {
+    return await runServiceBootMigrations(migrationPool, {
+      cloudWorkspacesEnabled: config.cloudWorkspaces !== null,
+    });
+  } finally { await migrationPool.end(); }
+})();
 if (migrationResult.status.state === "controlled_migration_pending") {
   console.warn(
     `[migrate] service boot stopped before ${migrationResult.status.migration}; ` +
@@ -49,8 +81,8 @@ if (migrationResult.status.state === "controlled_migration_pending") {
       "during a drained window before enabling it.",
   );
 }
-if (config.github) startGithubOauthCleanup(pool);
-const workosSync = workosProvider
+if (config.github && !config.databaseMaintenanceMode) startGithubOauthCleanup(pool);
+const workosSync = workosProvider && !config.databaseMaintenanceMode
   ? startWorkOSSyncRuntime({
       pool,
       provider: workosProvider,
@@ -74,11 +106,17 @@ let stopCloudForkWorker = async () => {};
 let stopCloudObjectMaintenanceWorker = async () => {};
 let stopCloudOperationsWorker = async () => {};
 let stopCloudOutboxWorker = async () => {};
+let stopCloudInvitationWorker = async () => {};
 let startCloudBackground = () => {};
+let stopSecurityEventPublisher=async()=>{};
+let cloudRuntimeBridge: CloudRuntimeBridgeRelay | null = null;
+let cloudPreviewWebSocketRelay: CloudPreviewWebSocketRelay | null = null;
+let cloudRuntimeServiceRelay: CloudPreviewWebSocketRelay | null = null;
+let cloudRuntimeServiceAccess: DatabaseCloudRuntimeServiceAccess | undefined;
 let cloudWorkspaceInternalSetupService:
   | CloudWorkspaceInternalSetupService
   | undefined;
-let cloudWorkspaceAccessService: CloudWorkspaceAccessService | undefined;
+let cloudWorkspaceAccessService: DatabaseCloudWorkspaceAccessService | undefined;
 let cloudWorkspaceRepositoryResolver:
   | CloudWorkspaceRepositoryResolver
   | undefined;
@@ -92,13 +130,12 @@ let cloudWorkspaceHealthService:
 let cloudWorkspaceEngineClientAdmissionService:
   | DatabaseCloudWorkspaceEngineClientAdmissionService
   | undefined;
-if (config.cloudWorkspaces) {
+if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const [
-    { DaytonaWorkspaceProvider },
-    { DatabaseDaytonaProviderResolver },
+    { createCloudProviderDeployment },
+    { DatabaseCloudWorkspaceProviderResolver },
     { startCloudWorkspaceReconciler },
-    { DaytonaSandboxCommandRunner },
-    { DaytonaCloudWorkspaceSetupExecutor },
+    { CloudWorkspaceLinuxSetupExecutor },
     { DatabaseCloudWorkspaceSetupAdmissionBroker },
     {
       CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
@@ -126,10 +163,9 @@ if (config.cloudWorkspaces) {
     { DatabaseCloudWorkspaceHealthService },
     { CloudWorkspaceOutboxWorker, HttpCloudWorkspaceOutboxSink },
   ] = await Promise.all([
-    import("./cloud-workspaces/daytona-provider.js"),
+    import("./cloud-workspaces/provider-deployment.js"),
     import("./cloud-workspaces/provider-resolver.js"),
     import("./cloud-workspaces/reconciler.js"),
-    import("./cloud-workspaces/daytona-command-runner.js"),
     import("./cloud-workspaces/daytona-setup-executor.js"),
     import("./cloud-workspaces/setup-admission-broker.js"),
     import("./cloud-workspaces/engine-client-admission.js"),
@@ -153,6 +189,8 @@ if (config.cloudWorkspaces) {
     import("./cloud-workspaces/outbox.js"),
   ]);
   const cloud = config.cloudWorkspaces;
+  const invitationConfig=workspaceInvitationDeliveryConfig(cloud,config.inviteLinkBase,emailConfig);
+  const invitationWorker=invitationConfig?new CloudWorkspaceInvitationDeliveryWorker(pool,invitationConfig,workspaceInvitationSender(emailConfig)):null;
   cloudWorkspaceHealthService = new DatabaseCloudWorkspaceHealthService(pool, {
     setupExecutionEnabled: cloud.setupExecution !== null,
     durabilityEnabled: cloud.durability !== null,
@@ -162,57 +200,14 @@ if (config.cloudWorkspaces) {
   cloudWorkspaceRepositoryResolver = new GithubCloudWorkspaceRepositoryResolver(
     { credential: github },
   );
-  const providerConfig = {
-    apiKey: cloud.apiKey,
-    apiUrl: cloud.apiUrl,
-    target: cloud.target,
-    snapshotId: cloud.snapshotId,
-    architecture: cloud.architecture,
-    cpuMillicores: cloud.cpuMillicores,
-    memoryMiB: cloud.memoryMiB,
-    storageMiB: cloud.storageMiB,
-    operationTimeoutSeconds: cloud.operationTimeoutSeconds,
-    autoStopMinutes: 0,
-    autoArchiveMinutes: cloud.autoArchiveMinutes,
-    autoDeleteMinutes: -1,
-    allowedSshHosts: cloud.access.allowedSshHosts,
-    allowedPreviewHostSuffixes: cloud.access.allowedPreviewHostSuffixes,
-  } as const;
-  const provider = new DaytonaWorkspaceProvider(providerConfig);
-  const hostedCommandRunner = cloud.setupExecution
-    ? new DaytonaSandboxCommandRunner({
-        apiKey: cloud.apiKey,
-        apiUrl: cloud.apiUrl,
-        allowedToolboxOrigins: cloud.setupExecution.allowedToolboxOrigins,
-        lookupTimeoutMs: 15_000,
-        maxCommandTimeoutSeconds: cloud.setupExecution.timeoutSeconds,
-        maxOutputBytes: 256 * 1024,
-      })
-    : undefined;
-  const providerResolver = new DatabaseDaytonaProviderResolver({
+  const { provider, registry } = createCloudProviderDeployment(pool, cloud);
+  const providerResolver = new DatabaseCloudWorkspaceProviderResolver({
     pool,
-    hostedProvider: provider,
-    hostedConfig: providerConfig,
     credentialKeys: cloud.providerCredentialKeys,
     workosEnabled: config.auth.provider === "workos",
-    ...(hostedCommandRunner ? { hostedCommandRunner } : {}),
-    ...(cloud.setupExecution
-      ? {
-          commandRunnerFactory: (connection: {
-            apiKey: string;
-            apiUrl: string;
-          }) =>
-            new DaytonaSandboxCommandRunner({
-              ...connection,
-              allowedToolboxOrigins:
-                cloud.setupExecution!.allowedToolboxOrigins,
-              lookupTimeoutMs: 15_000,
-              maxCommandTimeoutSeconds: cloud.setupExecution!.timeoutSeconds,
-              maxOutputBytes: 256 * 1024,
-            }),
-        }
-      : {}),
+    registry,
   });
+
   cloudWorkspaceAccessService = new DatabaseCloudWorkspaceAccessService({
     pool,
     providerResolver,
@@ -223,6 +218,13 @@ if (config.cloudWorkspaces) {
       ? { runtimeEnginePort: cloud.setupExecution.enginePort }
       : {}),
   });
+  if (cloud.setupExecution) {
+    cloudRuntimeServiceAccess = new DatabaseCloudRuntimeServiceAccess({
+      pool, providerResolver, workosEnabled: config.auth.provider === "workos",
+      publicOrigin: cloud.setupExecution.controlPlaneOrigin, enginePort: cloud.setupExecution.enginePort,
+    });
+    cloudRuntimeServiceRelay = createCloudRuntimeServiceRelay(cloudRuntimeServiceAccess);
+  }
   const accessRevocationWorker = new CloudWorkspaceAccessRevocationWorker({
     pool,
     providerResolver,
@@ -259,9 +261,17 @@ if (config.cloudWorkspaces) {
     const durability = cloud.durability;
     blobService = new DatabaseCloudWorkspaceBlobService({
       pool,
-      objectStore: new FileCloudWorkspaceObjectStore(
-        durability.objectStoreDirectory,
-      ),
+      objectStore: durability.s3
+        ? new S3CloudWorkspaceObjectStore(new S3Client({
+            endpoint: durability.s3.endpoint,
+            region: durability.s3.region,
+            credentials: { accessKeyId: durability.s3.accessKeyId, secretAccessKey: durability.s3.secretAccessKey },
+            forcePathStyle: true,
+            maxAttempts: 3,
+            requestChecksumCalculation: "WHEN_REQUIRED",
+            requestHandler: { connectionTimeout: 10_000, requestTimeout: 60_000, httpsAgent: new HttpsAgent({ keepAlive: true, maxSockets: 16 }) },
+          }), durability.s3.bucket)
+        : new FileCloudWorkspaceObjectStore(durability.objectStoreDirectory),
       encryptionKeys: durability.objectEncryptionKeys,
       keyVersion: durability.currentObjectEncryptionKeyVersion,
       workosEnabled: config.auth.provider === "workos",
@@ -317,7 +327,53 @@ if (config.cloudWorkspaces) {
         endpoint: endpoint(CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH),
         enginePort: setup.enginePort,
         workosEnabled: config.auth.provider === "workos",
+        relayEnabled: true,
       });
+    const clientAdmission = cloudWorkspaceEngineClientAdmissionService;
+    const sameRelayAuthority = (
+      left: Awaited<ReturnType<typeof clientAdmission.authorizeRelay>>,
+      right: NonNullable<typeof left>,
+    ) =>
+      left !== null &&
+      left.workspaceId === right.workspaceId &&
+      left.organizationId === right.organizationId &&
+      left.generation === right.generation &&
+      left.authorityEpoch === right.authorityEpoch &&
+      left.engineInstanceId === right.engineInstanceId &&
+      left.resourceId === right.resourceId;
+    cloudRuntimeBridge = new CloudRuntimeBridgeRelay({
+      resolve: async (token) => {
+        const grant = await clientAdmission.authorizeRelay(token);
+        if (!grant) return null;
+        const { provider } = await providerResolver.resolve({
+          workspaceId: grant.workspaceId,
+          organizationId: grant.organizationId,
+          generation: grant.generation,
+          purpose: "preview",
+        });
+        const destination = provider.getEngineEndpoint
+          ? await provider.getEngineEndpoint(grant.resourceId, setup.enginePort)
+          : await provider.getPreviewEndpoint(
+              grant.resourceId,
+              setup.enginePort,
+            );
+        // Provider lookup can outlive a revoke/stop. Never open a relay using
+        // authority observed only before that asynchronous boundary.
+        if (
+          !sameRelayAuthority(
+            await clientAdmission.authorizeRelay(token),
+            grant,
+          )
+        )
+          return null;
+        return { ...grant, endpoint: destination };
+      },
+      revalidate: async (token, grant) =>
+        sameRelayAuthority(
+          await clientAdmission.authorizeRelay(token, { connected: true }),
+          grant,
+        ),
+    });
     const materials = new DatabaseCloudWorkspaceSetupMaterialService({
       pool,
       setupAudience: endpoint(CLOUD_WORKSPACE_SETUP_ADMISSION_PATH),
@@ -358,18 +414,30 @@ if (config.cloudWorkspaces) {
       pool,
       blobs,
     );
+    const runtimeAccess = new DatabaseCloudRuntimeAccessAdmissionService({
+      pool,
+      workosEnabled: config.auth.provider === "workos",
+    });
     cloudWorkspaceInternalSetupService = {
+      ...(cloudAgentCredentialKeys(cloud)?{agentExecutions:new DatabaseCloudAgentExecutionService(pool,cloudAgentCredentialKeys(cloud)!,config.auth.provider==="workos")}:{}),
+      commands: new DatabaseCloudWorkspaceCommandService({ pool, workosEnabled: config.auth.provider === "workos" }),
+      events: new DatabaseCloudWorkspaceEventService({ pool, workosEnabled: config.auth.provider === "workos" }),
+      actions: new DatabaseCloudWorkspaceActionService({ pool, workosEnabled: config.auth.provider === "workos" }),
       redeem: (input) => materials.redeem(input),
       registerEngine: (input) => materials.registerEngine(input),
       heartbeat: (input) => materials.heartbeat(input),
       admitEngineClient: (input) =>
         cloudWorkspaceEngineClientAdmissionService!.consume(input),
+      admitActorClient: (input) => cloudWorkspaceEngineClientAdmissionService!.consumeActor(input),
+      admitRuntimeAccess: (input) => runtimeAccess.admit(input),
       appendRecord: (input) => recordService.append(input),
       readRecordHead: (input) => recordService.headForEngine(input),
       appendContent: (input) => contentService.append(input),
       readContentHead: (input) => contentService.headForEngine(input),
       commitCheckpoint: (input) => contentService.commitCheckpoint(input),
+      authorizeBlobUpload: (token) => blobs.authorizeUpload(token),
       putBlob: (input) => blobs.put(input),
+      putBlobBatch: (input) => blobs.putBatch(input),
       getBlob: (input) => blobs.getForEngine(input),
       ingestUsage: (input) => usageService.ingestEngine(input),
       readRecoveryManifest: (input) => recoveryService.manifestPage(input),
@@ -381,7 +449,7 @@ if (config.cloudWorkspaces) {
       ttlSeconds: setup.admissionTtlSeconds,
       workosEnabled: config.auth.provider === "workos",
     });
-    const executor = new DaytonaCloudWorkspaceSetupExecutor({
+    const executor = new CloudWorkspaceLinuxSetupExecutor({
       admissionBroker: admission,
       commandRunnerResolver: async (execution) => {
         const resolved = await providerResolver.resolve({
@@ -414,6 +482,7 @@ if (config.cloudWorkspaces) {
       pool,
       provider,
       providerResolver,
+      ...(cloud.computePolicy?{computePolicy:cloud.computePolicy}:{}),
       workosEnabled: config.auth.provider === "workos",
       intervalMs: cloud.reconcileIntervalMs,
       leaseMs: Math.max(10 * 60_000, cloud.operationTimeoutSeconds * 2_000),
@@ -428,6 +497,7 @@ if (config.cloudWorkspaces) {
       stopCloudOperationsWorker = operationsWorker.start();
     }
     if (outboxWorker) stopCloudOutboxWorker = outboxWorker.start();
+    if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
     if (setupWorker) stopCloudSetupWorker = setupWorker.start();
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
@@ -443,6 +513,7 @@ const app = createApp(config, pool, emailConfig, {
     ? { cloudWorkspaceInternalSetupService }
     : {}),
   ...(cloudWorkspaceAccessService ? { cloudWorkspaceAccessService } : {}),
+  ...(cloudRuntimeServiceAccess ? { cloudRuntimeServiceAccess } : {}),
   ...(cloudWorkspaceRepositoryResolver
     ? { cloudWorkspaceRepositoryResolver }
     : {}),
@@ -457,13 +528,33 @@ const app = createApp(config, pool, emailConfig, {
 let shuttingDown = false;
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   if (shuttingDown) return;
-  startCloudBackground();
+  if(migrationResult.status.state==="current"){
+    startCloudBackground();
+    stopSecurityEventPublisher=startSecurityEventPublisher(pool);
+  }
   console.log(`[control-plane] listening on :${info.port}`);
+});
+if (cloudWorkspaceAccessService && migrationResult.status.state !== "controlled_migration_pending") {
+  const access = cloudWorkspaceAccessService;
+  cloudPreviewWebSocketRelay = new CloudPreviewWebSocketRelay({
+    recognizes: request => access.recognizesPreviewRequest(request),
+    resolve: request => access.resolvePreviewWebSocket(request),
+    revalidate: (request, grant) => access.revalidatePreviewWebSocket(request, grant),
+  });
+}
+server.on("upgrade", (request, socket, head) => {
+  if (shuttingDown || migrationResult.status.state !== "current") { socket.destroy(); return; }
+  if (cloudRuntimeServiceRelay?.handleUpgrade(request, socket, head)) return;
+  if (cloudPreviewWebSocketRelay?.handleUpgrade(request, socket, head)) return;
+  if (!cloudRuntimeBridge?.handleUpgrade(request, socket, head)) socket.destroy();
 });
 
 function shutdown(signal: string): void {
   if (shuttingDown) return;
   shuttingDown = true;
+  cloudRuntimeBridge?.close();
+  cloudPreviewWebSocketRelay?.close();
+  cloudRuntimeServiceRelay?.close();
   console.log(`[control-plane] ${signal}; draining`);
   const backgroundStopped = Promise.allSettled([
     stopCloudSetupWorker(),
@@ -473,15 +564,17 @@ function shutdown(signal: string): void {
     stopCloudObjectMaintenanceWorker(),
     stopCloudOperationsWorker(),
     stopCloudOutboxWorker(),
+    stopCloudInvitationWorker(),
     stopCloudReconciler(),
     workosSync?.stop() ?? Promise.resolve(),
     securityEventBroker.stop(),
+    stopSecurityEventPublisher(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000);
   deadline.unref();
   server.close(() => {
     void backgroundStopped
-      .then(() => pool.end())
+      .then(async () => { await pool.end(); if (listenerPool !== pool) await listenerPool.end(); })
       .finally(() => {
         clearTimeout(deadline);
         process.exit(0);

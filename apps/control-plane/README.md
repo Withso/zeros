@@ -117,9 +117,12 @@ approved in `NODE_ENV=production` only for the explicit strict migrator, by
 putting its exact filename in `CONTROL_PLANE_MIGRATION_APPROVALS`. Production
 service boot never consumes that variable. Migration `0009` uses the guard
 because the prior and new server binaries require incompatible core schemas;
-an unapproved `0009` always fails startup. Cloud-era migrations `0025`, `0060`,
-and `0061` also use it because old and new workers must not overlap their
-authority, object-lifecycle, or provider-erasure transitions. Follow the `0009`
+an unapproved `0009` always fails startup. Seven cloud-era migrations (`0025`,
+`0060`, `0061`, `0073`, `0075`, `0076`, and `0079`) also require explicit approval
+because old and new workers must not overlap their authority, object-lifecycle,
+provider-erasure, funding, or security-event transitions. The service-boot pause
+policies for `0025`, `0060`, and `0061` are separate from the strict migrator's
+complete eight-file approval set. Follow the `0009`
 procedure in
 [`docs/deployment-environments.md`](../../docs/deployment-environments.md) and
 the cloud procedures in
@@ -228,14 +231,14 @@ does not print the database URL.
    complete a restore drill before continuing.
 3. Copy the non-secret approval value printed by the plan. Because the empty
    schema replays the full migration ladder through the strict operator runner,
-   include the exact four currently required controlled-downtime approvals as
+   include the exact eight currently required controlled-downtime approvals as
    one comma-separated value, then execute:
 
    ```bash
    CONTROL_PLANE_RESET_CHANNEL=alpha \
    CONTROL_PLANE_RESET_BACKUP_CONFIRMED=true \
    CONTROL_PLANE_RESET_APPROVAL='reset:alpha:<target-fingerprint>' \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql \
    pnpm reset:database -- --execute
    ```
 
@@ -777,3 +780,7 @@ For a release candidate, also run the database-backed suites with
 `TEST_DATABASE_URL` and exercise authentication, invitations, optional GitHub
 flows, health checks, and migration startup in a disposable staging
 environment.
+
+Individual Pro grants and revocations during the staff pilot use the explicit
+[`account-pro:manage` operator](../../docs/cloud-workspace/account-pro-operations.md).
+They are independent of staff roles, organization activation, and compute credits.

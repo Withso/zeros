@@ -752,6 +752,16 @@ export class CloudWorkspaceOperationsWorker {
       }
       const scope = [job.workspaceId, job.organizationId];
       for (const statement of [
+        // Source-bearing replay and queued commands belong to the deleted
+        // workspace, not its billing tombstone. Their engine references are
+        // intentionally restrictive during normal operation; remove these
+        // owners before setup deletion cascades into the engine records.
+        `DELETE FROM cloud_workspace_event_streams
+         WHERE workspace_id = $1 AND org_id = $2`,
+        `DELETE FROM cloud_workspace_conversation_controls
+         WHERE workspace_id = $1 AND org_id = $2`,
+        `DELETE FROM cloud_workspace_action_receipts
+         WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_export_grants
          WHERE workspace_id = $1 AND org_id = $2`,
         `DELETE FROM workspace_replica_grants

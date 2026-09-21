@@ -144,7 +144,7 @@ per-directory editor history. Existing app-wide panel width preferences remain.
 At most two visited Design canvases are retained. Inactive tabs/owners and a
 collapsed workbench are inert, hidden and inactive, with stable iframe DOM order.
 
-`design.initialize` is an explicit local managed-workspace operation. It creates
+`design.initialize` is an explicit managed-workspace operation. It creates
 or adopts metadata without changing workspace kind, HEAD or the index. Directory
 selection waits for pending edits, changes only the workspace-local pointer and
 invalidates exact-owner reads. Mutations carrying an old directory ID are
@@ -153,6 +153,13 @@ Missing, ambiguous, conflicted or unsupported manifests show recovery
 feedback instead of silently creating a replacement document. Repository Settings
 rename remains an explicit main-checkout rename commit: live checkouts keep their
 own paths through a compatible stable ID; legacy/incompatible pointers block it.
+
+An admitted cloud actor uses the same lifecycle and document API against the
+opaque primary checkout ID. Read, edit and directory-management roles are
+checked separately. The deployed cloud worker resolves the checkout; remote
+paths and repository-root substitution cannot select another owner. Cloud
+snapshots contain no host-local `zeros-design:` capability. Desktop relay
+restrictions and ordinary remote file/credential filtering remain independent.
 
 #### Source, metadata and personal state
 
@@ -1807,6 +1814,16 @@ managed Git and PR creation preserve uncommitted work. Published-PR comparisons,
 expanded proposal UI and semantic Design conflict resolution remain follow-ups.
 The original Phase 1 requirements below describe the foundation, not extra v1
 composer UI or automatic access to proposal/result tools:
+
+The portable cloud backend also exposes the human `design.capture` operation.
+It holds an exact workspace/revision read lease, uses the qualified sandboxed
+capture worker and returns a bounded PNG without host paths. Dimensions are
+limited to 2048 × 2048 and the inline PNG to 1 MiB; capture times out after
+20 seconds. It uses the same source authority as agent capture. These backend
+contracts do not establish desktop UI or deployed-image qualification. Cloud
+recovery preserves private Design storage, transaction recovery, the selected
+directory and legacy metadata through the
+[native checkpoint format](cloud-workspace/checkpoint-native-format.md).
 
 - Register the existing capability/MCP path into the shared native session. Resolve exact workspace/directory authority
   independently of the visible tab. Test local and cloud admission separately.

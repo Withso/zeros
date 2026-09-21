@@ -1,0 +1,8 @@
+# Applies only to the root-owned, non-setuid namespace launcher. Namespace,
+# mount, identity, syscall and cgroup enforcement is performed by that launcher.
+# This grants the nested user namespaces needed by Podman and Chromium while
+# retaining the host's restriction for unrelated applications.
+abi <abi/4.0>,
+profile zeros-cloud-engine /opt/zeros-runtime/cloud-engine-namespace flags=(unconfined) {
+  userns,
+}

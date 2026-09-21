@@ -15,6 +15,60 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("database authority configuration", () => {
+  it("supports a dedicated direct event listener using runtime privileges", () => {
+    const config = loadConfig({...baseEnv(), DATABASE_URL: "postgres://app@primary.test:5432/zeros",
+      DATABASE_LISTEN_URL: "postgres://app@primary.test:5432/zeros"});
+    expect(config.databaseListenUrl).toBe("postgres://app@primary.test:5432/zeros");
+    expect(config.databaseUrl).toBe("postgres://app@primary.test:5432/zeros");
+  });
+  it("preserves legacy boot while allowing a separate migration connection", () => {
+    expect(loadConfig(baseEnv())).toMatchObject({
+      databaseMigrationUrl: baseEnv().DATABASE_URL,
+      databaseMigrationsOnBoot: true,
+      databasePoolMax: 10,
+    });
+    expect(loadConfig({ ...baseEnv(), DATABASE_MIGRATION_URL: "postgres://migrator@database.test/zeros", DATABASE_MIGRATIONS_ON_BOOT: "false", DATABASE_POOL_MAX: "6" })).toMatchObject({
+      databaseMigrationUrl: "postgres://migrator@database.test:5432/zeros",
+      databaseMigrationsOnBoot: false,
+      databasePoolMax: 6,
+    });
+  });
+
+  it.each(["0", "-1", "2.5", "101", "bad"])("rejects unbounded or invalid pool size %s", (max) => {
+    expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow();
+  });
+
+  it.each(["1", "2"])("reserves both lock and callback capacity alongside shared LISTEN (max %s)", max => {
+    expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow(/DATABASE_POOL_MAX/);
+  });
+  it("permits two runtime connections when the listener has its own pool", () => {
+    expect(loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: "2", DATABASE_LISTEN_URL: baseEnv().DATABASE_URL }).databasePoolMax).toBe(2);
+  });
+  const psFixture = new URL("postgres://region.horizon.psdb.cloud:5432/zeros?sslmode=verify-full");
+  psFixture.username = "app.branchtest";
+  psFixture.password = "private-pass";
+  const ps = psFixture.href;
+  it.each([
+    ps.replace(":5432", ":6432"), ps.replace("app.branchtest", "app.branchtest%7Creplica"),
+    ps.replace("?sslmode=verify-full", ""), ps.replace("verify-full", "no-verify"),
+    ps + "&sslrootcert=system", ps + "&host=other.test", ps + "&sslmode=disable", ps + "&ssl=false",
+    "https://database.test/zeros", "not-a-database-url",
+  ])("rejects unsafe database connection profile %# without exposing credentials", databaseUrl => {
+    let error: unknown;
+    try { loadConfig({ ...baseEnv(), DATABASE_URL: databaseUrl }); } catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain("DATABASE_URL");
+    expect(String(error)).not.toContain("private-pass");
+  });
+  it.each(["DATABASE_LISTEN_URL", "DATABASE_MIGRATION_URL"])("requires %s to target the same PlanetScale branch and database", key => {
+    const env = { ...baseEnv(), DATABASE_URL: ps };
+    expect(() => loadConfig({ ...env, [key]: ps.replace("app.branchtest", "migrator.otherbranch") })).toThrow(new RegExp(key));
+    expect(() => loadConfig({ ...env, [key]: ps.replace("/zeros?", "/other?") })).toThrow(new RegExp(key));
+    expect(loadConfig({ ...env, [key]: ps.replace("app.branchtest", "migrator.branchtest") }).databaseUrl).toBe(ps);
+  });
+});
+
 function validEnv(): NodeJS.ProcessEnv {
   return {
     ...baseEnv(),
@@ -490,6 +544,132 @@ describe("feedback backend configuration", () => {
 });
 
 describe("cloud workspace backend configuration", () => {
+  function boatEnv(): NodeJS.ProcessEnv {
+    return {
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_PROVIDER: "boat",
+      DAYTONA_API_KEY: undefined,
+      DAYTONA_SNAPSHOT_ID: undefined,
+      BOAT_API_KEY: "boat-api-key-for-control-plane-tests",
+      BOAT_ACCOUNT_SCOPE: "qualification-account",
+      BOAT_SNAPSHOT_ID: "zeros-qualified-immutable-v1",
+      BOAT_IMAGE_BUILD_SHA256: "c".repeat(64),
+      BOAT_TTL_SECONDS: "3600",
+      BOAT_COMPUTE_POLICY_ID: "boat-price-v1",
+      BOAT_SECONDS_PER_DOLLAR: "100000",
+      CLOUD_WORKSPACE_STORAGE_MIB: "40960",
+    };
+  }
+
+  it("configures managed Boat without a managed Daytona credential", () => {
+    const cloud = loadConfig(boatEnv()).cloudWorkspaces!;
+    expect(cloud).toMatchObject({
+      provider: "boat",
+      apiKey: "boat-api-key-for-control-plane-tests",
+      apiUrl: "https://boat.dev/api/v1",
+      imageRef: `boat:zeros-qualified-immutable-v1@sha256:${"c".repeat(64)}`,
+      architecture: "linux/amd64",
+      cpuMillicores: 4000,
+      memoryMiB: 8192,
+      storageMiB: 40960,
+      boat: { accountScope: "qualification-account", ttlSeconds: 3600 },
+      computePolicy: {provider:"boat",policyId:"boat-price-v1",secondsPerDollar:100000,minimumTtlSeconds:600,maximumTtlSeconds:3600,requestMarginSeconds:185},
+    });
+    expect(cloud.providerProfiles).toBeUndefined();
+    expect(cloud.daytonaConnection).toBeUndefined();
+  });
+
+  it("requires explicit Boat account, snapshot, TTL and measured capacity", () => {
+    const env = boatEnv();
+    for (const name of [
+      "BOAT_API_KEY",
+      "BOAT_ACCOUNT_SCOPE",
+      "BOAT_SNAPSHOT_ID",
+      "BOAT_IMAGE_BUILD_SHA256",
+      "BOAT_TTL_SECONDS",
+      "BOAT_COMPUTE_POLICY_ID",
+      "BOAT_SECONDS_PER_DOLLAR",
+      "CLOUD_WORKSPACE_STORAGE_MIB",
+    ]) {
+      expect(() => loadConfig({ ...env, [name]: undefined })).toThrow(
+        new RegExp(name),
+      );
+    }
+    for (const overrides of [
+      { BOAT_TTL_SECONDS: "0" },
+      { BOAT_TTL_SECONDS: "3600junk" },
+      { BOAT_TTL_SECONDS: "2592001" },
+      { BOAT_TTL_SECONDS: "none" },
+      { BOAT_TTL_SECONDS: "59" },
+      { BOAT_TTL_SECONDS: "3601" },
+      { BOAT_SECONDS_PER_DOLLAR: "0" },
+      { BOAT_ACCOUNT_SCOPE: "key\nvalue" },
+      { BOAT_SNAPSHOT_ID: "mutable/latest" },
+      { ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/arm64" },
+      { CLOUD_WORKSPACE_CPU_MILLICORES: "2000" },
+    ])
+      expect(() => loadConfig({ ...env, ...overrides })).toThrow(
+        /cloud workspace/i,
+      );
+  });
+
+  it("gives Daytona BYO an independent complete image profile beside managed Boat", () => {
+    const env = {
+      ...boatEnv(),
+      DAYTONA_BYO_ENABLED: "true",
+      DAYTONA_BYO_SNAPSHOT_ID: "daytona-qualified-image",
+      DAYTONA_BYO_SOURCE_COMMIT: "b".repeat(40),
+      DAYTONA_BYO_CPU_MILLICORES: "2000",
+      DAYTONA_BYO_MEMORY_MIB: "4096",
+      DAYTONA_BYO_STORAGE_MIB: "10240",
+      DAYTONA_TARGET: "us",
+    };
+    const cloud = loadConfig(env).cloudWorkspaces!;
+    expect(cloud.provider).toBe("boat");
+    expect(cloud.daytonaConnection).toEqual({
+      apiUrl: "https://app.daytona.io/api",
+      target: "us",
+    });
+    expect(cloud.providerProfiles?.daytona).toEqual({
+      provider: "daytona",
+      imageRef: "daytona-qualified-image",
+      sourceCommit: "b".repeat(40),
+      architecture: "linux/amd64",
+      cpuMillicores: 2000,
+      memoryMiB: 4096,
+      storageMiB: 10240,
+    });
+    for (const name of [
+      "DAYTONA_BYO_SNAPSHOT_ID",
+      "DAYTONA_BYO_SOURCE_COMMIT",
+      "DAYTONA_BYO_CPU_MILLICORES",
+      "DAYTONA_BYO_MEMORY_MIB",
+      "DAYTONA_BYO_STORAGE_MIB",
+    ]) {
+      expect(() => loadConfig({ ...env, [name]: undefined })).toThrow(
+        new RegExp(name),
+      );
+    }
+    expect(() => loadConfig({ ...env, DAYTONA_BYO_ENABLED: "yes" })).toThrow(
+      /DAYTONA_BYO_ENABLED/,
+    );
+  });
+
+  it("runs Boat setup without requiring Daytona toolbox access", () => {
+    const cloud = loadConfig({
+      ...cloudSetupEnv(),
+      ...boatEnv(),
+      DAYTONA_TOOLBOX_ORIGINS: undefined,
+    }).cloudWorkspaces!;
+    expect(cloud.setupExecution?.allowedToolboxOrigins).toEqual([]);
+    expect(() =>
+      loadConfig({
+        ...cloudSetupEnv(),
+        DAYTONA_TOOLBOX_ORIGINS: undefined,
+      }),
+    ).toThrow(/DAYTONA_TOOLBOX_ORIGINS/);
+  });
+
   it("stays disabled unless the paid-resource gate is explicit", () => {
     expect(
       loadConfig({
@@ -746,6 +926,25 @@ describe("cloud workspace backend configuration", () => {
           "/var/lib/zeros/workspace-objects",
       }),
     ).toThrow(/current object key version/i);
+  });
+
+  it("configures shared encrypted objects without a local volume", () => {
+    const env = cloudSetupEnv();
+    delete env.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY;
+    Object.assign(env, {
+      CLOUD_WORKSPACE_OBJECT_STORE_KIND: "s3",
+      CLOUD_WORKSPACE_S3_ENDPOINT: "https://objects.example.test",
+      CLOUD_WORKSPACE_S3_BUCKET: "workspace-objects",
+      CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: "access-for-tests",
+      CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: "secret-for-tests",
+    });
+    expect(loadConfig(env).cloudWorkspaces?.durability).toMatchObject({ s3: { bucket: "workspace-objects", region: "auto" } });
+    for (const endpoint of ["http://objects.example.test", "https://objects.example.test/bucket", "https://name:password@objects.example.test", "https://objects.example.test/?signature=secret"]) {
+      expect(() => loadConfig({ ...env, CLOUD_WORKSPACE_S3_ENDPOINT: endpoint })).toThrow();
+    }
+    expect(() => loadConfig({ ...env, CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: "" })).toThrow();
+    expect(() => loadConfig({ ...env, CLOUD_WORKSPACE_OBJECT_STORE_KIND: "filesystem" })).toThrow();
+    expect(() => loadConfig({ ...env, CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/data/objects" })).toThrow();
   });
 
   it("rejects partial or unsafe setup execution configuration", () => {

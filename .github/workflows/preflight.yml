@@ -148,6 +148,12 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install control-plane contract dependencies
+        # The engine checkpoint contract exercises the real HTTP validators
+        # across both independent package graphs.
+        working-directory: apps/control-plane
+        run: pnpm install --frozen-lockfile
+
       - name: Install contained-execution runtime
         uses: ./.github/actions/contained-execution-runtime
 
@@ -613,7 +619,8 @@ jobs:
     # control plane. Ephemeral per job, so the tests are free to DROP SCHEMA.
     services:
       postgres:
-        image: postgres:16
+        # Match the managed database's qualified major version.
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: postgres
         ports:
@@ -654,6 +661,11 @@ jobs:
         # transport message can never mask a real advisory in the same output.
         working-directory: apps/control-plane
         run: node ../../scripts/check-audit.mjs
+      - name: Install runtime contract dependencies
+        # Admission tests import the actual desktop registration/client and
+        # protocol schemas. Keep the service's standalone type/audit checks
+        # above independent of this separate workspace graph.
+        run: pnpm install --frozen-lockfile
       - name: Control-plane tests (migrations + auth/invite contracts)
         working-directory: apps/control-plane
         env:

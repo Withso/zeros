@@ -5,6 +5,7 @@ import tls from "node:tls";
 import {
   chmod,
   chown,
+  copyFile,
   lchown,
   lstat,
   mkdir,
@@ -229,7 +230,10 @@ async function run(): Promise<void> {
   const workerScratch = path.join(root, "worker-scratch");
   const outsideCache = path.join(workerScratch, "outside-cache.txt");
   const remote = path.join(root, "remote.git");
-  const hookMarker = path.join(root, "pre-push-ran.txt");
+  // Hook execution must write worker-owned scratch. The fixture's parent is
+  // deliberately engine-owned so a cloud worker cannot alter test authority.
+  const hookMarker = path.join(workerScratch, "pre-push-ran.txt");
+  const containerArchive = path.join(workerScratch, "container-rootfs.tar");
   const codeFile = path.join(workspace, "code.txt");
   const primaryFile = path.join(primaryDesign, "canvas.json");
   const primaryMarker = path.join(primaryDesign, ".zeros-canvas.json");
@@ -314,7 +318,18 @@ async function run(): Promise<void> {
     );
     await chmod(path.join(workspace, ".git", "hooks", "pre-push"), 0o700);
     if (cloudConfiguration) {
+      const rootfs = path.join(workerScratch, "container-rootfs");
+      await mkdir(path.join(rootfs, "bin"), { recursive: true });
+      await copyFile("/usr/bin/busybox", path.join(rootfs, "bin", "busybox"));
+      await chmod(path.join(rootfs, "bin", "busybox"), 0o755);
+      const archive = spawnSync("tar", ["--format=ustar", "--owner=0", "--group=0",
+        "-cf", containerArchive, "-C", rootfs, "."], { encoding: "utf8", timeout: 5000 });
+      if (archive.status !== 0) throw new Error("container execution fixture could not be created");
       await chmod(root, 0o711);
+      // This is deliberately public host data, unlike the engine-authority
+      // fixtures. An inherited bootstrap umask must not turn its read canary
+      // into an unrelated UNIX-permission denial.
+      await chmod(hostLog, 0o644);
       await Promise.all([
         grantWorkerTree(workspace, cloudConfiguration),
         grantWorkerTree(remote, cloudConfiguration),
@@ -324,7 +339,9 @@ async function run(): Promise<void> {
     }
 
     const sandboxBoundary = new ZsrExecutionBoundary({
-      projectRoot,
+      // A deployed engine opens a customer's checkout, which has no Zeros
+      // source tree. Only the immutable marker may locate cloud helpers.
+      projectRoot: cloudConfiguration ? workspace : projectRoot,
       supervisorScript: path.join(projectRoot, "binaries/zsr-supervisor.mjs"),
       macosProcessDomainHelper: path.join(
         projectRoot,
@@ -351,6 +368,7 @@ async function run(): Promise<void> {
     // that the names the host left unset must stay unset. The supervisor sits in
     // between; under host parity it must rewrite none of them.
     await writeFile(hostCaBundle, `${tls.rootCertificates[0] ?? ""}\n`);
+    await chmod(hostCaBundle, 0o644);
     const sentinelEnv = {
       HOME: hostHome,
       GH_TOKEN: "zsr-qualification-gh-token",
@@ -494,7 +512,7 @@ const privateContainerEndpoint = process.env.DOCKER_HOST;
 const ambientContainerSelectorsScrubbed = expectsPrivateContainer
   ? privateContainerEndpoint === process.env.CONTAINER_HOST &&
     privateContainerEndpoint?.startsWith("unix://") === true &&
-    privateContainerEndpoint.endsWith("/container-worker/podman.sock") &&
+    privateContainerEndpoint.endsWith("/scratch/podman.sock") &&
     ["DOCKER_CONTEXT", "CONTAINER_CONNECTION", "PODMAN_HOST"].every(
       (name) => process.env[name] === undefined,
     )
@@ -519,6 +537,25 @@ const privateContainerProbe = expectsPrivateContainer
   : { status: 0 };
 const privateContainerReady =
   !expectsPrivateContainer || privateContainerProbe.status === 0;
+let privateContainerExecution = !expectsPrivateContainer;
+let privateContainerError = expectsPrivateContainer && !privateContainerReady
+  ? String(privateContainerProbe.stderr || privateContainerProbe.error?.message || "container service unavailable").slice(-1000) : "";
+if (expectsPrivateContainer && privateContainerReady) {
+  const tag = "localhost/zeros-qualification:" + process.pid;
+  try {
+    const imported = spawnSync("podman", ["import", ${JSON.stringify(containerArchive)}, tag], {
+      encoding: "utf8", timeout: 15000, maxBuffer: 65536,
+    });
+    const executed = imported.status === 0 ? spawnSync("podman", ["run", "--rm", "--network=none",
+      "--cgroups=disabled", "--read-only", "--entrypoint=/bin/busybox", tag, "echo", "zeros-container-ok"], {
+      encoding: "utf8", timeout: 15000, maxBuffer: 65536,
+    }) : imported;
+    privateContainerExecution = executed.status === 0 && executed.stdout.trim() === "zeros-container-ok";
+    privateContainerError = privateContainerExecution ? "" : String(executed.stderr || executed.error?.message || "container execution failed").slice(-1000);
+  } finally {
+    spawnSync("podman", ["image", "rm", "--force", tag], { encoding: "utf8", timeout: 5000, maxBuffer: 4096 });
+  }
+}
 const connection = net.connect({ host: "127.0.0.1", port: Number(servicePort) });
 let service = "";
 connection.setEncoding("utf8");
@@ -559,6 +596,8 @@ connection.once("end", () => {
           ambientContainerSelectorsScrubbed,
           ambientContainerSelectorsPreserved,
           privateContainerReady,
+          privateContainerExecution,
+          privateContainerError,
           directService: service === "host-service\n",
           directPort: selfReply === "agent-port\n",
           proxyUnchanged: process.env.HTTP_PROXY === ${JSON.stringify(process.env.HTTP_PROXY)},

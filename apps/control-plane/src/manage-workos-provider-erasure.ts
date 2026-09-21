@@ -1,3 +1,5 @@
+import {parseDatabaseTarget} from "./database-target.js";
+import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for reconciling WorkOS provider subjects that
 // may have been purged before durable subject fences existed. Raw provider ids
 // are hashed in process and are never logged or persisted.
@@ -8,6 +10,7 @@ import path from "node:path";
 
 import pg from "pg";
 import { z } from "zod";
+import {assertWorkOSProviderLockHeld} from "./workos-provider-lock-context.js";
 
 import {
   workOSProviderSubjectHash,
@@ -85,7 +88,7 @@ export class WorkOSProviderErasureManagementError extends Error {
 function parseDatabaseUrl(databaseUrl: string): URL {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = parseDatabaseTarget(databaseUrl);
   } catch {
     throw new WorkOSProviderErasureManagementError(
       "Invalid provider-erasure configuration: DATABASE_URL must be a PostgreSQL URL",
@@ -113,6 +116,7 @@ function targetFingerprint(databaseUrl: string, channel: string): string {
         parsed.hostname.toLowerCase(),
         parsed.port || "5432",
         parsed.pathname,
+    decodeURIComponent(parsed.username),
       ].join("\0"),
       "utf8",
     )
@@ -503,6 +507,7 @@ async function manageWorkOSProviderErasureEvidenceUnlocked(
         }),
       ],
     );
+    assertWorkOSProviderLockHeld();
     await client.query("COMMIT");
     return {
       state: "reconciled",
@@ -527,7 +532,7 @@ async function runCli(): Promise<void> {
   }
   // Execution holds a session-level provider lock while the database work uses
   // a separate connection.
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
+  const pool = createMigrationPool(databaseUrl, {maxConnections: 2});
   try {
     if (process.argv.includes("--status")) {
       const status = await inspectWorkOSProviderErasureReadiness(pool);

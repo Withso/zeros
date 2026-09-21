@@ -1,5 +1,6 @@
 import { WorkOS, type Event, type EventName, type User } from "@workos-inc/node";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
+import {fetchWithHeldWorkOSProviderLock} from "./workos-provider-lock-context.js";
 
 import type { AuthBackendConfig, WorkOSBackendConfig } from "./config.js";
 
@@ -213,6 +214,7 @@ export class RailwayWorkOSProvider
         ...(apiUrl.port ? { port: Number(apiUrl.port) } : {}),
         timeout: 8_000,
         maxRetries: 2,
+        fetchFn:fetchWithHeldWorkOSProviderLock,
       });
     this.desktopJwks = createRemoteJWKSet(new URL(auth.jwksUrl), {
       cooldownDuration: 5 * 60_000,

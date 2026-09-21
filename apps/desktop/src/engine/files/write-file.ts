@@ -19,6 +19,7 @@
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { publishCloudWorkspacePath } from "./cloud-workspace-ownership";
 import path from "node:path";
 import { isSensitiveRepoPath } from "./read-file";
 
@@ -143,6 +144,7 @@ export function writeWorkspaceFile(
       } catch {
         /* new file — no prior mode to preserve */
       }
+      publishCloudWorkspacePath(tmp);
       fs.renameSync(tmp, target);
     } catch (err) {
       try {

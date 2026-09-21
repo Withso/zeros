@@ -217,6 +217,8 @@ export interface BaseMessage {
   id: string;
   source: MessageSource;
   timestamp: number;
+  /** Ordered cloud stream epoch; absent on local and ephemeral terminal frames. */
+  cloudStream?: { streamId: string; sequence: number; requiresSnapshot?: true };
 }
 
 // ── Engine → Browser ─────────────────────────────────────
@@ -231,6 +233,8 @@ export interface EngineReadyMessage extends BaseMessage {
    *  back-compat; the engine always sets both so clients can negotiate. */
   protocolVersion?: number;
   minProtocolVersion?: number;
+  /** Additive cloud backend contracts available over the workspace bridge. */
+  capabilities?: string[];
 }
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients

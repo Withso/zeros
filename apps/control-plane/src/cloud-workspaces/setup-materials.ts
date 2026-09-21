@@ -111,6 +111,8 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
 };
 
 export type CloudWorkspaceSetupRedemptionInput = {
+  /** Omitted by legacy images. Version 2 requires measured resource admission. */
+  materialVersion?: 2 | undefined;
   token: string;
   workspaceId: string;
   organizationId: string;
@@ -135,6 +137,8 @@ export type CloudWorkspaceEngineRegistrationInput = {
   executionFence: number;
   engineInstanceId: string;
   protocolVersion: number;
+  actorProtocolVersion?: 2;
+  agentRuntime?: {profile:"zeros-cloud-worker-v3";contractSha256:string};
 };
 
 export type CloudWorkspaceEngineHeartbeatInput = {
@@ -166,6 +170,12 @@ type RedemptionContract = {
   ownerSubject: string;
   imageRef: string;
   imageSourceCommit: string;
+  resources: {
+    architecture: "linux/amd64" | "linux/arm64";
+    cpuMillicores: number;
+    memoryMiB: number;
+    storageMiB: number;
+  };
   repository: {
     forge: "github.com";
     owner: string;
@@ -871,6 +881,10 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       const loaded = await tx.query<{
         image_ref: string;
         image_source_commit: string | null;
+        architecture: "linux/amd64" | "linux/arm64";
+        cpu_millicores: number;
+        memory_mib: number;
+        storage_mib: number;
         repository_forge: string;
         repository_owner: string;
         repository_name: string;
@@ -888,6 +902,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         owner_subject: string | null;
       }>(
         `SELECT g.image_ref, g.source_commit AS image_source_commit,
+                g.architecture, g.cpu_millicores, g.memory_mib, g.storage_mib,
                 ss.repository_forge, ss.repository_owner,
                 ss.repository_name, ss.repository_revision,
                 ss.github_installation_id, ss.spec_version AS settings_version,
@@ -1042,6 +1057,12 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         ownerSubject: row.owner_subject,
         imageRef: row.image_ref,
         imageSourceCommit: row.image_source_commit!,
+        resources: {
+          architecture: row.architecture,
+          cpuMillicores: row.cpu_millicores,
+          memoryMiB: row.memory_mib,
+          storageMiB: row.storage_mib,
+        },
         repository: {
           forge: "github.com",
           owner: row.repository_owner,
@@ -1232,7 +1253,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       "utf8",
     );
     return {
-      version: 1 as const,
+      version: input.materialVersion === 2 ? (2 as const) : (1 as const),
       audience: SETUP_MATERIALS_AUDIENCE,
       execution: {
         workspaceId: input.workspaceId,
@@ -1244,6 +1265,9 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       image: {
         ref: contract.imageRef,
         sourceCommit: contract.imageSourceCommit,
+        ...(input.materialVersion === 2
+          ? { resources: contract.resources }
+          : {}),
       },
       repository: {
         forge: contract.repository.forge,
@@ -1294,7 +1318,10 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       !UUID_PATTERN.test(input.engineInstanceId) ||
       !validPositiveInteger(input.generation) ||
       !validPositiveInteger(input.executionFence, Number.MAX_SAFE_INTEGER) ||
-      input.protocolVersion !== this.engineProtocolVersion
+      input.protocolVersion !== this.engineProtocolVersion ||
+      (input.actorProtocolVersion !== undefined && input.actorProtocolVersion !== 2) ||
+      (input.agentRuntime!==undefined && (input.actorProtocolVersion!==2 || input.agentRuntime.profile!=="zeros-cloud-worker-v3" ||
+        !/^[a-f0-9]{64}$/.test(input.agentRuntime.contractSha256)))
     ) {
       throw materialError("engine_registration_rejected", false);
     }
@@ -1364,13 +1391,17 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
          SET state = 'ready', heartbeat_token_hash = $2,
              registered_at = now(), last_heartbeat_at = now(),
              lease_expires_at = now() + ($3::bigint * interval '1 millisecond'),
-             updated_at = now()
+             updated_at = now(), actor_protocol_version = $4,
+             agent_runtime_profile=$5, agent_runtime_contract_sha256=$6
          WHERE id = $1 AND state = 'starting'
          RETURNING lease_expires_at`,
         [
           input.engineInstanceId,
           tokenHash(heartbeatToken),
           ENGINE_HEARTBEAT_LEASE_MS,
+          input.actorProtocolVersion ?? 1,
+          input.agentRuntime?.profile??null,
+          input.agentRuntime?.contractSha256??null,
         ],
       );
       if ((updated.rowCount ?? 0) !== 1) {
@@ -1428,19 +1459,27 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       throw materialError("engine_heartbeat_rejected", false);
     }
     const renewed = await withSystemTx(this.pool, async (tx) => {
+      // Lifecycle and liveness retirement hold workspace -> grants -> engine.
+      // Serialize heartbeat renewal with that same workspace authority before
+      // touching the engine row. An expired token never creates a fresh lease.
+      await tx.query(
+        "SELECT 1 FROM cloud_workspaces WHERE id=$1 AND org_id=$2 FOR UPDATE",
+        [input.workspaceId, input.organizationId],
+      );
       const renewed = await tx.query<{
         lease_expires_at: Date;
         account_user_id: string;
       }>(
         `UPDATE cloud_workspace_engine_instances ei
-         SET last_heartbeat_at = now(),
-             lease_expires_at = now() + ($6::bigint * interval '1 millisecond'),
+         SET last_heartbeat_at = clock_timestamp(),
+             lease_expires_at = clock_timestamp() + ($6::bigint * interval '1 millisecond'),
              updated_at = now()
          FROM cloud_workspaces cw, organizations organization, teams team,
               organization_members om, team_members tm, users account
          WHERE ei.id = $1 AND ei.workspace_id = $2 AND ei.generation = $3
            AND ei.org_id = $4 AND ei.heartbeat_token_hash = $5
            AND ei.state = 'ready' AND ei.revoked_at IS NULL
+           AND ei.lease_expires_at > clock_timestamp()
            AND cw.id = ei.workspace_id AND cw.org_id = ei.org_id
            AND organization.id = cw.org_id
            AND organization.deleted_at IS NULL

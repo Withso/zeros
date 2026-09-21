@@ -1,4 +1,5 @@
 import crypto, { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { syncBuiltinESMExports } from "node:module";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -2030,11 +2031,14 @@ d("WorkOS command outbox", () => {
     let earlyAcceptance:
       | ReturnType<typeof ingestWorkOSManagementEvent>
       | undefined;
+    // A webhook arrives in its own HTTP request context, independently of the
+    // outbound request that caused it. Do not inherit that request's lock lease.
+    const runWebhookRequest = AsyncLocalStorage.snapshot();
     provider.onInvitationCreated = async (invitation) => {
       const acceptedAt = new Date(Date.now() + 1_000).toISOString();
       invitation.state = "accepted";
       invitation.updatedAt = acceptedAt;
-      earlyAcceptance = ingestWorkOSManagementEvent(
+      earlyAcceptance = runWebhookRequest(ingestWorkOSManagementEvent,
         pool,
         {
           id: `event_${randomUUID().replaceAll("-", "")}`,

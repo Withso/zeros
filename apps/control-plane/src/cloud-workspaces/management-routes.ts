@@ -151,6 +151,9 @@ export function createCloudWorkspaceManagementRoutes(
   const root = "/v1/organizations/:organization/cloud-workspace-management";
   const workspaceRoot = "/v1/organizations/:organization/cloud-workspaces/:workspace";
 
+  app.use(`${root}/*`, async (c,next) => {c.header("Cache-Control","no-store");await next();});
+  app.use(`${workspaceRoot}/management`, async (c,next) => {c.header("Cache-Control","no-store");await next();});
+  app.use(`${workspaceRoot}/management/*`, async (c,next) => {c.header("Cache-Control","no-store");await next();});
   app.use(`${root}/*`, rateLimit("cloud-workspace-management", 120, 60_000));
   app.use(
     `${workspaceRoot}/management/*`,

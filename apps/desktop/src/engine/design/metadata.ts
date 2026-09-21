@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { assertDesignWriteAuthorized } from "./write-authority";
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
   closeSync,
   constants,
@@ -622,6 +623,7 @@ function atomicWrite(root: string, relative: string, source: string): void {
   );
   try {
     writeFileSync(fd, source, "utf8");
+    publishCloudWorkspacePath(temporary, fd);
     fsyncSync(fd);
   } finally {
     closeSync(fd);

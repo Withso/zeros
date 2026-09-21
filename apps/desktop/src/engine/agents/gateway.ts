@@ -1369,6 +1369,9 @@ async function withTargetBranchEnv(
   return { ...env, ZEROS_TARGET_BRANCH: targetRef };
 }
 
+import {cloudProviderExecution,type CloudAgentExecutionFactory,type CloudAgentSelection} from "./cloud-provider-execution";
+import {CloudAgentExecutionAdmissionSchema} from "@zeros/protocol/cloud-agent-execution";
+
 export interface NewAgentSessionOptions {
   cwd?: string;
   env?: Record<string, string>;
@@ -1382,6 +1385,10 @@ export interface NewAgentSessionOptions {
   onExecutionCreated?: (executionId: string) => void;
   /** Cancel queued admission when its owning conversation disappears. */
   admissionSignal?: AbortSignal;
+  /** Engine-minted from the authenticated device or durable command claim. */
+  cloudExecution?:CloudAgentSelection;
+  /** A durable command reserves its execution before claiming dispatch. */
+  cloudExecutionId?:string;
 }
 
 export class AgentGateway {
@@ -1390,6 +1397,7 @@ export class AgentGateway {
   private readonly executionBoundary: ExecutionBoundary;
   private readonly previewGatewayFactory: BoundaryPreviewGatewayFactory;
   private readonly sessionTools: AgentSessionToolRegistry;
+  private readonly cloudAgentExecutionFactory?:CloudAgentExecutionFactory;
 
   /** The raw MCP registry (may hold dupes; deduped into the view below). */
   private readonly mcpServers: McpServerRegistration[] = [];
@@ -2668,6 +2676,7 @@ export class AgentGateway {
       // spare for them would only drain the pool a real session could use.
       const warmSession =
         (stage === "newSession" || stage === "loadSession") &&
+        this.executionBoundary.backend !== "cloud-worker" &&
         warmSessionBoundariesEnabled()
           ? options.warmSession
           : undefined;
@@ -2696,12 +2705,14 @@ export class AgentGateway {
           ...(options.admissionSignal
             ? { signal: options.admissionSignal }
             : {}),
-          // Only the live behavioral canary moves off the critical path. The
-          // immutable kernel policy/resources are already established when
-          // prepare returns. Forks, utilities, Run/Setup, and warm-spare
-          // admission retain the blocking default.
+          // Cloud's canary and provider use the same generation-private OCI
+          // service. Finish the canary before the long-lived provider takes
+          // its exclusive service lock. Local sessions can attest in the
+          // background after establishing their immutable kernel policy.
+          // Forks, utilities, Run/Setup, and warm spares also remain blocking.
           attestation:
-            stage === "newSession" || stage === "loadSession"
+            this.executionBoundary.backend !== "cloud-worker" &&
+            (stage === "newSession" || stage === "loadSession")
               ? "background"
               : "blocking",
         });
@@ -3745,6 +3756,7 @@ export class AgentGateway {
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;
     this.sessionTools = new AgentSessionToolRegistry(opts.sessionToolFactory);
+    this.cloudAgentExecutionFactory=opts.cloudAgentExecutionFactory;
   }
 
   /** Replace the MCP server registry. The engine boot-loads this from the
@@ -4485,6 +4497,7 @@ export class AgentGateway {
       executionBoundary: PreparedBoundary;
     }) => Promise<T>;
   }): Promise<T> {
+    if(this.executionBoundary.backend==="cloud-worker")throw new Error("Cloud provider utilities require an admitted conversation");
     const adapter = await this.adapterFor(opts.agentId);
     const cwd = resolveAgentCwd(
       opts.cwd ?? this.projectRoot,
@@ -4623,6 +4636,7 @@ export class AgentGateway {
       env?: Record<string, string>;
     },
   ): Promise<{ title: string | null; error?: string }> {
+    if(this.executionBoundary.backend==="cloud-worker")return {title:null,error:"Cloud titles require separate credential admission"};
     try {
       this.assertSelectedAccountConnected(agentId);
       const adapter = await this.adapterFor(agentId);
@@ -4706,6 +4720,25 @@ export class AgentGateway {
     return;
   }
 
+  private cloudAdmission(agentId:string,opts:NewAgentSessionOptions):CloudAgentSelection|null{
+    if(this.executionBoundary.backend!=="cloud-worker"){
+      if(opts.cloudExecution||opts.cloudExecutionId)throw new Error("Cloud agent admission requires a cloud worker");
+      return null;
+    }
+    if(!this.cloudAgentExecutionFactory||!opts.cloudExecution||!opts.conversationId)
+      throw new Error("Cloud agent credential admission is required");
+    const parsed=CloudAgentExecutionAdmissionSchema.safeParse({...opts.cloudExecution,provider:agentId,executionId:opts.cloudExecutionId??randomUUID()});
+    if(!parsed.success)throw new Error("Cloud agent credential admission is invalid");
+    const {executionId:_executionId,provider:_provider,...selection}=parsed.data;return selection;
+  }
+
+  private cloudProviderSettings(env:Record<string,string>|undefined):Record<string,string>{
+    const settings:Record<string,string>={};
+    if(env?.ZEROS_THINKING_EFFORT&&["low","medium","high","xhigh"].includes(env.ZEROS_THINKING_EFFORT))settings.ZEROS_THINKING_EFFORT=env.ZEROS_THINKING_EFFORT;
+    if(env?.ZEROS_FAST_MODE==="1"||env?.ZEROS_FAST_MODE==="0")settings.ZEROS_FAST_MODE=env.ZEROS_FAST_MODE;
+    return settings;
+  }
+
   async newSession(
     agentId: string,
     opts: NewAgentSessionOptions = {},
@@ -4726,9 +4759,10 @@ export class AgentGateway {
     agentId: string,
     opts: NewAgentSessionOptions,
   ): Promise<NewSessionResponse> {
-    this.assertSelectedAccountConnected(agentId);
+    const cloudAdmission=this.cloudAdmission(agentId,opts);
+    if(!cloudAdmission)this.assertSelectedAccountConnected(agentId);
     const sessionStartedAt = Date.now();
-    const authFingerprint = this.providerAuthConfigFingerprint(agentId);
+    let authFingerprint = cloudAdmission ? "" : this.providerAuthConfigFingerprint(agentId);
     const actor = "agent-code";
     const adapter = await this.adapterFor(agentId);
     // The prior silent fallback
@@ -4764,14 +4798,14 @@ export class AgentGateway {
       : null;
     const mainRepoRoot = managedWorkspace?.repoRoot;
     const canonicalWorkspaceRoot = managedWorkspace?.path;
-    const merged = await withTargetBranchEnv(
+    const merged = cloudAdmission ? {} : await withTargetBranchEnv(
       withWorktreeEnv(
         mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
         cwd,
       ),
       opts.workspaceId,
     );
-    const spawn = normalizeProviderSpawn(
+    const spawn = cloudAdmission ? {env:this.cloudProviderSettings(opts.env),cliBinary:undefined} : normalizeProviderSpawn(
       applyUserProviderConfig(
         cwd,
         agentId,
@@ -4805,7 +4839,7 @@ export class AgentGateway {
     );
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
-    const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
+    let providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
     // Native-instruction adapters (Codex and Claude) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
@@ -4822,13 +4856,13 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const executionId = randomUUID();
+    const executionId = cloudAdmission && opts.cloudExecutionId ? opts.cloudExecutionId : randomUUID();
     const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
         territorySet.contributions,
         async () => {
-          let mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
+          let mcpServers = cloudAdmission ? [] : await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
           if (actor === "agent-code") {
             mcpServers = await this.sessionTools.admit(
               {
@@ -4842,18 +4876,19 @@ export class AgentGateway {
               providerEnv,
             );
           }
-          const preparedBoundary = await this.prepareExecutionBoundary(
+          let preparedBoundary = await this.prepareExecutionBoundary(
             executionId,
             cwd,
             canonicalWorkspaceRoot,
             adapter,
             territory,
-            providerEnv,
-            mcpServers,
+            cloudAdmission ? {} : providerEnv,
+            cloudAdmission ? [] : mcpServers,
             "newSession",
             territorySet.additionalRoots,
             territorySet.additionalGitWorkspaceRoots,
             {
+              ...(cloudAdmission ? {includeSessionCapabilities:false} : {}),
               ...(opts.admissionSignal
                 ? { admissionSignal: opts.admissionSignal }
                 : {}),
@@ -4874,6 +4909,18 @@ export class AgentGateway {
           // immediately, but do not hold provider startup on this second full
           // filesystem scan. Any drift joins the exact execution's attestation
           // failure path and stops that run before the failure is published.
+          if(cloudAdmission){
+            const privateExecution=await this.cloudAgentExecutionFactory!.prepare({
+              admission:{...cloudAdmission,executionId,provider:agentId as "claude"|"cursor"|"codex"},
+              conversationId:opts.conversationId!,workload:preparedBoundary,cwd,
+              signal:opts.admissionSignal??new AbortController().signal,
+              productTools:{servers:mcpServers,env:providerEnv},
+              providerSettings:spawn.env,
+            });
+            preparedBoundary=privateExecution.boundary;providerEnv=privateExecution.env;authFingerprint=privateExecution.authorityId;
+            this.attachBoundaryAuthority(preparedBoundary,{contributions:territorySet.contributions,
+              registeredDesignAuthorityIdentity:territorySet.registeredDesignAuthorityIdentity});
+          }
           const territoryRevalidation = Promise.resolve().then(() =>
             this.assertAdditionalTerritorySetStillCurrent(
               territorySet,
@@ -4908,7 +4955,7 @@ export class AgentGateway {
       );
     const boundary = preparedBoundary.status;
     const browserUse =
-      await this.resolveBrowserUse(
+      cloudAdmission ? undefined : await this.resolveBrowserUse(
             agentId,
             cwd,
             opts.workspaceId,
@@ -5048,11 +5095,14 @@ export class AgentGateway {
       /** Aborted when the owning conversation is closed or superseded, so an
        * admission that is still queued is cancelled instead of burned. */
       admissionSignal?: AbortSignal;
+      cloudExecution?:CloudAgentSelection;
+      cloudExecutionId?:string;
     } = {},
   ): Promise<LoadSessionResponse> {
-    this.assertSelectedAccountConnected(agentId);
+    const cloudAdmission=this.cloudAdmission(agentId,opts);
+    if(!cloudAdmission)this.assertSelectedAccountConnected(agentId);
     const sessionStartedAt = Date.now();
-    const authFingerprint = this.providerAuthConfigFingerprint(agentId);
+    let authFingerprint = cloudAdmission ? "" : this.providerAuthConfigFingerprint(agentId);
     const providerBinding =
       typeof bindingOrLegacyId === "string"
         ? legacyProviderBinding(agentId, bindingOrLegacyId)
@@ -5068,7 +5118,7 @@ export class AgentGateway {
     // Validate ownership before constructing an adapter or touching provider
     // credentials/storage. A foreign binding must fail at the Zeros boundary.
     const adapter = await this.adapterFor(agentId);
-    const executionId = randomUUID();
+    const executionId = cloudAdmission && opts.cloudExecutionId ? opts.cloudExecutionId : randomUUID();
     const cwd = resolveAgentCwd(opts.cwd, "loadSession", opts.workspaceId);
     // Apply the same settings-env overlay + user-provider fallback as newSession,
     // so a resumed session gets the repo `env` table, `env_files`,
@@ -5080,14 +5130,14 @@ export class AgentGateway {
       : null;
     const mainRepoRoot = managedWorkspace?.repoRoot;
     const canonicalWorkspaceRoot = managedWorkspace?.path;
-    const merged = await withTargetBranchEnv(
+    const merged = cloudAdmission ? {} : await withTargetBranchEnv(
       withWorktreeEnv(
         mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
         cwd,
       ),
       opts.workspaceId,
     );
-    const spawn = normalizeProviderSpawn(
+    const spawn = cloudAdmission ? {env:this.cloudProviderSettings(opts.env),cliBinary:undefined} : normalizeProviderSpawn(
       applyUserProviderConfig(
         cwd,
         agentId,
@@ -5116,7 +5166,7 @@ export class AgentGateway {
     );
     this.reportNativeContextDiagnostics(adapter, territorySet);
     const territory = territorySet.territory;
-    const providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
+    let providerEnv = this.sanitizeProviderEnv(sessionEnv) ?? {};
     const instructionCtx = this.parseInstructionCtx(
       providerEnv,
       territory?.designDirectory,
@@ -5132,7 +5182,7 @@ export class AgentGateway {
         executionId,
         territorySet.contributions,
         async () => {
-          const configuredMcpServers = await this.resolveSessionMcp(
+          const configuredMcpServers = cloudAdmission ? [] : await this.resolveSessionMcp(
             agentId,
             cwd,
             mainRepoRoot,
@@ -5148,18 +5198,19 @@ export class AgentGateway {
             configuredMcpServers,
             providerEnv,
           );
-          const preparedBoundary = await this.prepareExecutionBoundary(
+          let preparedBoundary = await this.prepareExecutionBoundary(
             executionId,
             cwd,
             canonicalWorkspaceRoot,
             adapter,
             territory,
-            providerEnv,
-            mcpServers,
+            cloudAdmission ? {} : providerEnv,
+            cloudAdmission ? [] : mcpServers,
             "loadSession",
             territorySet.additionalRoots,
             territorySet.additionalGitWorkspaceRoots,
             {
+              ...(cloudAdmission ? {includeSessionCapabilities:false} : {}),
               ...(opts.admissionSignal
                 ? { admissionSignal: opts.admissionSignal }
                 : {}),
@@ -5171,6 +5222,18 @@ export class AgentGateway {
               contextTerritories: territorySet.contextTerritories,
             },
           );
+          if(cloudAdmission){
+            const privateExecution=await this.cloudAgentExecutionFactory!.prepare({
+              admission:{...cloudAdmission,executionId,provider:agentId as "claude"|"cursor"|"codex"},
+              conversationId:opts.conversationId!,workload:preparedBoundary,cwd,
+              signal:opts.admissionSignal??new AbortController().signal,
+              productTools:{servers:mcpServers,env:providerEnv},
+              providerSettings:spawn.env,
+            });
+            preparedBoundary=privateExecution.boundary;providerEnv=privateExecution.env;authFingerprint=privateExecution.authorityId;
+            this.attachBoundaryAuthority(preparedBoundary,{contributions:territorySet.contributions,
+              registeredDesignAuthorityIdentity:territorySet.registeredDesignAuthorityIdentity});
+          }
           const territoryRevalidation = Promise.resolve().then(() =>
             this.assertAdditionalTerritorySetStillCurrent(
               territorySet,
@@ -5202,7 +5265,7 @@ export class AgentGateway {
         },
       );
     const boundary = preparedBoundary.status;
-    const browserUse = await this.resolveBrowserUse(
+    const browserUse = cloudAdmission ? undefined : await this.resolveBrowserUse(
       agentId,
       cwd,
       opts.workspaceId,
@@ -5365,6 +5428,7 @@ export class AgentGateway {
       admissionSignal?: AbortSignal;
     },
   ): Promise<ProviderBinding> {
+    if(this.executionBoundary.backend==="cloud-worker")throw new Error("Cloud native fork requires separate credential admission and qualification");
     const providerBinding = coerceProviderBinding(binding);
     if (!providerBinding || providerBinding.providerId !== agentId) {
       throw new AgentFailureError({
@@ -5939,22 +6003,25 @@ export class AgentGateway {
   ): Promise<PromptResponse> {
     this.sessionTools.beginPrompt(sessionId);
     await this.awaitAdapterStartupSettled(sessionId);
+    const cloud=cloudProviderExecution(this.executionBoundaries.get(sessionId));
+    if(this.executionBoundary.backend==="cloud-worker"&&!cloud)throw new Error("Cloud agent credential admission is required");
+    if(cloud)await cloud.lease.validate();
     const authFingerprint = this.executionAuthFingerprint.get(sessionId);
-    if (authFingerprint && authFingerprint !== this.providerAuthConfigFingerprint(agentId)) {
+    if (!cloud && authFingerprint && authFingerprint !== this.providerAuthConfigFingerprint(agentId)) {
       await this.endSession(agentId, sessionId, { failClosed: true });
       throw new AgentFailureError({
         kind: "session-expired", stage: "prompt",
         message: "The provider connection changed. Reconnect this session before sending.",
       });
     }
-    this.assertSelectedAccountConnected(agentId);
+    if(!cloud)this.assertSelectedAccountConnected(agentId);
     this.assertBoundaryAttestationHealthy(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
     });
     const updateBrowserUse =
       resolveAgentCapabilityPorts(adapter).browser?.updateUse;
-    if (updateBrowserUse) {
+    if (updateBrowserUse && !cloud) {
       const cwd = this.executionToCwd.get(sessionId);
       if (cwd) {
         let enabled = false;
@@ -6010,7 +6077,7 @@ export class AgentGateway {
       // A completed provider response confirms usable credentials. A Stop can
       // settle before dispatch and provides no new authentication evidence.
       if (
-        response.stopReason !== "cancelled" &&
+        !cloud && response.stopReason !== "cancelled" &&
         (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId))
       ) this.markAuthOk(adapter.agentId);
       return response;
@@ -6037,7 +6104,7 @@ export class AgentGateway {
           failure?: { kind?: string; stage?: string };
         }
       ).failure;
-      if (failure?.kind === "auth-required" && (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId))) {
+      if (!cloud && failure?.kind === "auth-required" && (!authFingerprint || authFingerprint === this.providerAuthConfigFingerprint(agentId))) {
         this.markAuthFailed(adapter.agentId);
       }
       throw err;
@@ -6047,6 +6114,17 @@ export class AgentGateway {
   async cancel(agentId: string, sessionId: string): Promise<void> {
     this.sessionTools.cancel(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId);
+    const cloud=cloudProviderExecution(this.executionBoundaries.get(sessionId));
+    if(cloud){
+      // Retiring authority is synchronous. No late native tool call can race
+      // Stop, and already-returned background jobs belong to the same lease.
+      const retirement=cloud.lease.close();
+      void Promise.resolve().then(()=>adapter.cancel({sessionId})).catch(()=>{});
+      await retirement;
+      // Native cancellation may report its process already gone. The complete
+      // lease's proven retirement is the authoritative cloud Stop receipt.
+      return;
+    }
     await adapter.cancel({ sessionId });
   }
 
@@ -6443,23 +6521,26 @@ export class AgentGateway {
   answerPermission(
     permissionId: string,
     response: RequestPermissionResponse,
-  ): void {
+  ): boolean {
     // Permission IDs are uuids; at most one adapter will have it
     // pending. Fan out rather than tracking a permissionId→agent map
     // — simpler and avoids a second source of truth.
+    let handled = false;
     for (const adapter of this.adapters.values()) {
-      resolveAgentCapabilityPorts(adapter).interaction?.respondToPermission?.({
+      const delivered = resolveAgentCapabilityPorts(adapter).interaction?.respondToPermission?.({
         permissionId,
         response,
       });
+      if (delivered === true) handled = true;
     }
+    return handled;
   }
 
   answerQuestion(
     questionId: string,
     response: QuestionResponse,
     nativeRequestId?: string,
-  ): void {
+  ): boolean {
     // Twin of answerPermission — questionIds are uuids; fan out to whichever
     // adapter has it parked. Adapters without a blocking question channel
     // (Cursor) omit respondToQuestion → skipped. `nativeRequestId` is the
@@ -6485,6 +6566,7 @@ export class AgentGateway {
         `[agents] answerQuestion: no adapter had ${questionId} pending (native ${nativeRequestId ?? "-"}) — answer dropped`,
       );
     }
+    return handled;
   }
 
   async dispose(): Promise<void> {

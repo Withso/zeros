@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
+import { stopUnavailableCloudEngine } from "./engine-health.js";
 import type pg from "pg";
 
 import { audit } from "../audit.js";
 import { withSystemTx } from "../db.js";
 import {
   assertProviderResourceIdentity,
+  assertProviderAbsence,
   assertSingleProviderResource,
   CloudProviderError,
   type CloudProviderResource,
@@ -24,6 +26,7 @@ import {
   retireCloudWorkspaceRuntimeAccess,
 } from "./runtime-access.js";
 import { DatabaseCloudWorkspacePaidAuthorityReconciler } from "./paid-authority.js";
+import { CloudWorkspaceComputeLeaseCoordinator, type ManagedComputePolicy } from "./compute-leases.js";
 
 type LifecycleOperation = "create" | "stop" | "wake" | "archive" | "delete";
 type DesiredState = "running" | "stopped" | "archived" | "deleted";
@@ -57,6 +60,7 @@ type DriftCandidate = {
   generation: number;
   provider: string;
   providerResourceId: string | null;
+  driftLeaseUntil: Date;
 };
 
 type ReconcileLogger = Pick<Console, "info" | "warn" | "error">;
@@ -65,6 +69,7 @@ export type CloudWorkspaceReconcilerOptions = {
   pool: pg.Pool;
   provider: CloudWorkspaceProvider;
   providerResolver?: CloudWorkspaceProviderResolver;
+  computePolicy?: ManagedComputePolicy;
   intervalMs: number;
   leaseMs?: number;
   orphanGraceMs?: number;
@@ -119,6 +124,7 @@ function operationSatisfied(
     case "stop":
       return (
         resource === null ||
+        resource.computeStopped === true ||
         resource.state === "stopped" ||
         resource.state === "archived" ||
         resource.state === "deleted"
@@ -126,6 +132,7 @@ function operationSatisfied(
     case "archive":
       return (
         resource === null ||
+        (resource.state === "stopped" && resource.storageOffloaded === true) ||
         resource.state === "archived" ||
         resource.state === "deleted"
       );
@@ -153,7 +160,7 @@ function statusForObserved(
       : "deleting";
   }
   if (desired === "archived") {
-    return resource === null || resource.state === "archived"
+    return operationSatisfied("archive", resource)
       ? "archived"
       : "archiving";
   }
@@ -240,9 +247,11 @@ export class CloudWorkspaceReconciler {
   private readonly leaseMs: number;
   private readonly orphanGraceMs: number;
   private readonly maxManagedResourcesPerSweep: number;
+  private cleanupScopeOffset = 0;
   private readonly workerId: string;
   private readonly logger: ReconcileLogger;
   private readonly paidAuthority: DatabaseCloudWorkspacePaidAuthorityReconciler;
+  private readonly computeLeases: CloudWorkspaceComputeLeaseCoordinator;
   private timer: NodeJS.Timeout | null = null;
   private activeTick: Promise<void> | null = null;
   private started = false;
@@ -254,6 +263,9 @@ export class CloudWorkspaceReconciler {
     this.pool = options.pool;
     this.provider = options.provider;
     this.providerResolver = options.providerResolver ?? null;
+    this.computeLeases = new CloudWorkspaceComputeLeaseCoordinator({pool:options.pool,provider:options.provider,
+      ...(options.providerResolver?{providerResolver:options.providerResolver}:{}),workosEnabled:options.workosEnabled===true,
+      ...(options.computePolicy?{policy:options.computePolicy}:{}),logger:options.logger??console});
     this.intervalMs = options.intervalMs;
     this.leaseMs = options.leaseMs ?? 10 * 60_000;
     this.orphanGraceMs = options.orphanGraceMs ?? 60 * 60_000;
@@ -337,6 +349,12 @@ export class CloudWorkspaceReconciler {
         authorityProcessed += 1;
       }
       let processed = 0;
+      let unavailableEngines = 0;
+      while (!this.stopped && unavailableEngines < 20 && await stopUnavailableCloudEngine(this.pool, this.providerResolver ? null : this.provider.name)) {
+        unavailableEngines += 1;
+      }
+      let computeProcessed = 0;
+      while (!this.stopped && computeProcessed < 20 && await this.computeLeases.runOnce()) computeProcessed += 1;
       while (!this.stopped && processed < 20 && (await this.runOnce())) {
         processed += 1;
       }
@@ -526,6 +544,8 @@ export class CloudWorkspaceReconciler {
 
     try {
       let current = await this.observe(provider, intent);
+      if(current?.state==='running'&&['create','wake'].includes(intent.operation))
+        await this.computeLeases.observeRunning({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current);
       let providerAccessRevocationProven =
         current === null || current.state === "deleted";
 
@@ -551,7 +571,7 @@ export class CloudWorkspaceReconciler {
       if (
         (!operationSatisfied(intent.operation, current) ||
           forceProviderAccessDrain) &&
-        !isTransitional(current)
+        (!isTransitional(current) || current?.computeStopped === true)
       ) {
         current = await this.dispatch(provider, intent, current);
         if (["stop", "archive", "delete"].includes(intent.operation)) {
@@ -569,8 +589,8 @@ export class CloudWorkspaceReconciler {
         await this.recordFailure(
           intent,
           new CloudProviderError(
-            "provider_resource_failed",
-            "Provider resource entered a failed state",
+            current.computeStopped === true ? "provider_snapshot_failed" : "provider_resource_failed",
+            current.computeStopped === true ? "Compute stopped but its provider snapshot failed; recover the durable checkpoint into a new generation" : "Provider resource entered a failed state",
             false,
           ),
         );
@@ -590,6 +610,7 @@ export class CloudWorkspaceReconciler {
     if (intent.providerResourceId) {
       const resource = await provider.inspect(intent.providerResourceId);
       if (resource) assertProviderResourceIdentity(resource, intent);
+      else await assertProviderAbsence(provider, intent);
       return resource;
     }
     const found = assertSingleProviderResource(
@@ -600,6 +621,11 @@ export class CloudWorkspaceReconciler {
       { workspaceId: intent.workspaceId, generation: intent.generation },
     );
     if (found) assertProviderResourceIdentity(found, intent);
+    // Candidate cleanup is generation-scoped; the restored current workspace
+    // may still desire running. Its state cannot prove this allocation absent.
+    else if (intent.desiredState !== "running" ||
+             !["create", "wake"].includes(intent.operation))
+      await assertProviderAbsence(provider, intent);
     return found;
   }
 
@@ -611,10 +637,17 @@ export class CloudWorkspaceReconciler {
     switch (intent.operation) {
       case "create":
       case "wake": {
-        const next = current
-          ? await provider.start(current.resourceId)
-          : await provider.create({
+        if (!current && intent.providerResourceId) {
+          // An admitted generation already had an allocation. Reusing its
+          // identity would hide allocation loss and native-history recovery
+          // from clients. The owner can select its durable checkpoint through
+          // the fenced recovery-generation API.
+          throw new CloudProviderError("provider_resource_lost", "The allocation is unavailable; recover the durable checkpoint into a new generation", false);
+        }
+        const next = await this.computeLeases.allocate({
               workspaceId: intent.workspaceId,
+              organizationId:intent.orgId,
+              intentId:intent.id,
               generation: intent.generation,
               imageRef: intent.imageRef,
               architecture: intent.architecture,
@@ -622,7 +655,7 @@ export class CloudWorkspaceReconciler {
               memoryMiB: intent.memoryMiB,
               storageMiB: intent.storageMiB,
               idempotencyKey: intent.id,
-            });
+            },provider,current);
         assertProviderResourceIdentity(next, intent);
         return next;
       }
@@ -640,12 +673,15 @@ export class CloudWorkspaceReconciler {
       }
       case "delete": {
         if (!current) return null;
+        if(!await this.computeLeases.beforeDelete({workspaceId:intent.workspaceId,organizationId:intent.orgId,generation:intent.generation},provider,current))
+          return (await provider.inspect(current.resourceId))??current;
         await provider.delete(current.resourceId);
         // A successful dispatch proves only that the provider accepted the
         // request. Inspect independently before publishing durable deletion;
         // providers may apply deletion asynchronously.
         const remaining = await provider.inspect(current.resourceId);
         if (remaining) assertProviderResourceIdentity(remaining, intent);
+        else await assertProviderAbsence(provider, intent);
         return remaining;
       }
     }
@@ -1036,22 +1072,30 @@ export class CloudWorkspaceReconciler {
            ON pb.workspace_id = cw.id
           AND pb.generation = cw.current_generation
          WHERE cw.status <> 'deleted'
-           AND pb.provider = $1
+           AND ($1::text IS NULL OR pb.provider = $1)
+           AND pb.next_drift_check_at <= clock_timestamp()
            AND (pb.last_observed_at IS NULL OR
                 pb.last_observed_at < now() - ($2::bigint * interval '1 millisecond'))
            AND NOT EXISTS (
              SELECT 1 FROM cloud_workspace_lifecycle_intents i
              WHERE i.workspace_id = cw.id
+               AND (i.generation = cw.current_generation OR i.affects_workspace)
                AND i.state IN ('queued', 'dispatching', 'observing')
            )
-         ORDER BY pb.last_observed_at NULLS FIRST, cw.updated_at, cw.id
-         FOR UPDATE OF cw SKIP LOCKED
+         ORDER BY pb.next_drift_check_at, pb.last_observed_at NULLS FIRST, cw.updated_at, cw.id
+         FOR UPDATE OF cw, pb SKIP LOCKED
          LIMIT 1`,
-        [this.provider.name, this.intervalMs],
+        [this.providerResolver ? null : this.provider.name, this.intervalMs],
       );
       const row = result.rows[0];
-      return row
-        ? {
+      if (!row) return null;
+      const claim = await tx.query<{ next_drift_check_at: Date }>(
+        `UPDATE cloud_workspace_provider_bindings
+         SET next_drift_check_at = date_trunc('milliseconds', clock_timestamp()) + ($3::bigint * interval '1 millisecond')
+         WHERE workspace_id=$1 AND generation=$2 RETURNING next_drift_check_at`,
+        [row.workspace_id, row.current_generation, this.leaseMs],
+      );
+      return {
             workspaceId: row.workspace_id,
             orgId: row.org_id,
             desiredState: row.desired_state,
@@ -1060,14 +1104,29 @@ export class CloudWorkspaceReconciler {
             generation: row.current_generation,
             provider: row.provider,
             providerResourceId: row.provider_resource_id,
-          }
-        : null;
+            driftLeaseUntil: claim.rows[0]!.next_drift_check_at,
+          };
     });
   }
 
   async reconcileDriftOnce(): Promise<boolean> {
     const candidate = await this.driftCandidate();
     if (!candidate) return false;
+    try {
+      return await this.observeDriftCandidate(candidate);
+    } finally {
+      // Release only our exact claim. A failed attempt may already have
+      // installed a longer provider backoff; a stale worker cannot shorten it.
+      await withSystemTx(this.pool, tx => tx.query(
+        `UPDATE cloud_workspace_provider_bindings
+         SET next_drift_check_at=clock_timestamp()+($4::bigint * interval '1 millisecond')
+         WHERE workspace_id=$1 AND generation=$2 AND next_drift_check_at=$3`,
+        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,this.intervalMs],
+      ));
+    }
+  }
+
+  private async observeDriftCandidate(candidate: DriftCandidate): Promise<boolean> {
     let resource: CloudProviderResource | null;
     try {
       const provider = this.providerResolver
@@ -1094,8 +1153,19 @@ export class CloudWorkspaceReconciler {
             },
           );
       if (resource) assertProviderResourceIdentity(resource, candidate);
+      else if (candidate.providerResourceId || candidate.desiredState !== "running")
+        await assertProviderAbsence(provider, candidate);
+      if(resource?.state==='running'&&candidate.desiredState==='running')
+        await this.computeLeases.observeRunning({workspaceId:candidate.workspaceId,organizationId:candidate.orgId,generation:candidate.generation},provider,resource);
     } catch (error) {
       const failure = safeFailure(error);
+      await withSystemTx(this.pool, tx => tx.query(
+        `UPDATE cloud_workspace_provider_bindings
+         SET next_drift_check_at=clock_timestamp()+($4::bigint * interval '1 millisecond')
+         WHERE workspace_id=$1 AND generation=$2 AND next_drift_check_at=$3`,
+        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil,
+          Math.max(this.intervalMs,30_000,retryDelayMs(1,failure.retryAfterMs))],
+      ));
       this.logger.warn(
         `[cloud-workspace] drift observation failed (${failure.code})`,
       );
@@ -1106,10 +1176,11 @@ export class CloudWorkspaceReconciler {
       const current = await tx.query<{
         desired_state: DesiredState;
         status: string;
+        last_error_code: string | null;
         version: string | number;
         current_generation: number;
       }>(
-        `SELECT desired_state, status, version, current_generation
+        `SELECT desired_state, status, last_error_code, version, current_generation
          FROM cloud_workspaces
          WHERE id = $1 FOR UPDATE`,
         [candidate.workspaceId],
@@ -1122,6 +1193,11 @@ export class CloudWorkspaceReconciler {
       ) {
         return;
       }
+      if (!(await tx.query(
+        `SELECT 1 FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2
+         AND next_drift_check_at=$3 FOR UPDATE`,
+        [candidate.workspaceId,candidate.generation,candidate.driftLeaseUntil],
+      )).rowCount) return;
       const observedState =
         resource?.state ??
         (workspace.desired_state === "deleted" ? "deleted" : "absent");
@@ -1157,7 +1233,36 @@ export class CloudWorkspaceReconciler {
         });
       }
 
+      if (workspace.desired_state === "running" && !resource && candidate.providerResourceId) {
+        if (workspace.status === "failed" && workspace.last_error_code === "provider_resource_lost") return;
+        await tx.query(`UPDATE cloud_workspaces SET status = 'failed',
+          last_error_code = 'provider_resource_lost',
+          last_error_message = 'The allocation is unavailable; recover the durable checkpoint into a new generation',
+          last_observed_at = now(), updated_at = now(), version = version + 1
+          WHERE id = $1`, [candidate.workspaceId]);
+        await audit(tx, candidate.orgId, null, "cloud_workspace.allocation_lost", {
+          workspaceId: candidate.workspaceId, generation: candidate.generation,
+        });
+        return;
+      }
+
       const operation = correctiveOperation(workspace.desired_state);
+      if (workspace.desired_state === "running" && resource?.state === "paused") {
+        if (workspace.status === "failed" && workspace.last_error_code === "provider_paused_requires_stop") return;
+        await tx.query(`UPDATE cloud_workspaces SET status='failed',last_error_code='provider_paused_requires_stop',
+          last_error_message='Cold-stop the paused VM before starting a fresh runtime',
+          last_observed_at=now(),updated_at=now(),version=version+1 WHERE id=$1`,[candidate.workspaceId]);
+        await audit(tx,candidate.orgId,null,'cloud_workspace.provider_paused',{workspaceId:candidate.workspaceId,generation:candidate.generation});
+        return;
+      }
+      if(resource?.state==='failed'&&resource.computeStopped===true&&workspace.desired_state!=='deleted'){
+        if(workspace.status==='failed'&&workspace.last_error_code==='provider_snapshot_failed')return;
+        await tx.query(`UPDATE cloud_workspaces SET status='failed',last_error_code='provider_snapshot_failed',
+          last_error_message='Compute stopped but its provider snapshot failed; recover the durable checkpoint into a new generation',
+          last_observed_at=now(),updated_at=now(),version=version+1 WHERE id=$1`,[candidate.workspaceId]);
+        await audit(tx,candidate.orgId,null,'cloud_workspace.snapshot_failed',{workspaceId:candidate.workspaceId,generation:candidate.generation});
+        return;
+      }
       if (operationSatisfied(operation, resource)) {
         const status = statusForReconciledObservation(
           workspace.desired_state,
@@ -1247,7 +1352,13 @@ export class CloudWorkspaceReconciler {
       );
     }
     let observed = 0;
-    for (const scope of resolved.scopes) {
+    // A large account or a permanently revoked historic key must not starve
+    // later accounts on every run. Failed inventories are never absence proof.
+    const offset = this.cleanupScopeOffset % Math.max(1, resolved.scopes.length);
+    this.cleanupScopeOffset = (offset + 1) % Math.max(1, resolved.scopes.length);
+    const scopes = [...resolved.scopes.slice(offset), ...resolved.scopes.slice(0, offset)];
+    for (const scope of scopes) {
+      try {
       for await (const resource of scope.provider.listManaged()) {
         if (observed >= this.maxManagedResourcesPerSweep) {
           this.logger.warn(
@@ -1256,58 +1367,42 @@ export class CloudWorkspaceReconciler {
           return observed;
         }
         observed += 1;
+        const durableOwnership = await scope.provider.verifyManagedResourceOwnership?.(resource) === true;
         const decision = await withSystemTx(this.pool, async (tx) => {
           const binding = await tx.query(
             `SELECT 1
              FROM cloud_workspace_provider_bindings binding
-             JOIN provider_connections connection
-               ON connection.id = binding.provider_connection_id
-              AND connection.org_id = binding.org_id
-             WHERE binding.provider = $1 AND binding.provider_resource_id = $2
-               AND (
-                 ($3 = 'hosted' AND connection.credential_source = 'hosted')
-                 OR
-                 ($3 = 'delegated'
-                   AND binding.org_id = $4::uuid
-                   AND binding.provider_connection_id = $5::uuid
-                   AND binding.provider_connection_version = $6::bigint)
-               )`,
+             WHERE binding.provider = $1 AND binding.provider_resource_id = $2`,
             [
               scope.provider.name,
               resource.resourceId,
-              scope.credentialSource,
-              scope.organizationId,
-              scope.connectionId,
-              scope.connectionVersion,
             ],
           );
-        if ((binding.rowCount ?? 0) > 0) {
-          await tx.query(
-            `DELETE FROM cloud_workspace_provider_orphans
+          if ((binding.rowCount ?? 0) > 0) {
+            await tx.query(
+              `DELETE FROM cloud_workspace_provider_orphans
              WHERE provider = $1 AND provider_resource_id = $2
                AND org_id IS NOT DISTINCT FROM $3::uuid
                AND provider_connection_id IS NOT DISTINCT FROM $4::uuid
                AND provider_connection_version IS NOT DISTINCT FROM $5::bigint`,
-            [
-              scope.provider.name,
-              resource.resourceId,
-              scope.organizationId,
-              scope.connectionId,
-              scope.connectionVersion,
-            ],
-          );
-          return false;
-        }
+              [
+                scope.provider.name,
+                resource.resourceId,
+                scope.organizationId,
+                scope.connectionId,
+                scope.connectionVersion,
+              ],
+            );
+            return false;
+          }
 
-        // A create response can be lost after the provider committed but before
-        // its binding transaction. The immutable labels still point at a real
-        // database generation, so recover that binding instead of classifying
-        // the resource as an orphan. Record-before-dispatch guarantees a valid
-        // provider create always has this row first.
-        const generation = await tx.query<{
-          provider_resource_id: string | null;
-        }>(
-          `SELECT pb.provider_resource_id
+          // A create response can be lost after the provider committed but before
+          // its binding transaction. Only a durable allocation receipt can
+          // recover that identity: provider labels are editable and copyable.
+          const generation = durableOwnership ? await tx.query<{
+            provider_resource_id: string | null;
+          }>(
+            `SELECT pb.provider_resource_id
            FROM cloud_workspace_generations g
            JOIN cloud_workspace_provider_bindings pb
              ON pb.workspace_id = g.workspace_id
@@ -1327,54 +1422,54 @@ export class CloudWorkspaceReconciler {
                  AND pb.provider_connection_version = $7::bigint)
              )
            FOR UPDATE OF pb`,
-          [
-            resource.workspaceId,
-            resource.generation,
-            scope.provider.name,
-            scope.credentialSource,
-            scope.organizationId,
-            scope.connectionId,
-            scope.connectionVersion,
-          ],
-        );
-        const recoverable = generation.rows[0];
-        if (recoverable) {
-          if (recoverable.provider_resource_id === null) {
-            await tx.query(
-              `UPDATE cloud_workspace_provider_bindings
+            [
+              resource.workspaceId,
+              resource.generation,
+              scope.provider.name,
+              scope.credentialSource,
+              scope.organizationId,
+              scope.connectionId,
+              scope.connectionVersion,
+            ],
+          ) : { rows: [] };
+          const recoverable = generation.rows[0];
+          if (recoverable) {
+            if (recoverable.provider_resource_id === null) {
+              await tx.query(
+                `UPDATE cloud_workspace_provider_bindings
                SET provider_resource_id = $3, provider_target = $4,
                    observed_state = $5, observed_metadata = $6::jsonb,
                    last_observed_at = now(), updated_at = now()
                WHERE workspace_id = $1 AND generation = $2`,
-              [
-                resource.workspaceId,
-                resource.generation,
-                resource.resourceId,
-                resource.target,
-                resource.state,
-                boundedMetadata(resource.metadata),
-              ],
-            );
-            await tx.query(
-              `DELETE FROM cloud_workspace_provider_orphans
+                [
+                  resource.workspaceId,
+                  resource.generation,
+                  resource.resourceId,
+                  resource.target,
+                  resource.state,
+                  boundedMetadata(resource.metadata),
+                ],
+              );
+              await tx.query(
+                `DELETE FROM cloud_workspace_provider_orphans
                WHERE provider = $1 AND provider_resource_id = $2
                  AND org_id IS NOT DISTINCT FROM $3::uuid
                  AND provider_connection_id IS NOT DISTINCT FROM $4::uuid
                  AND provider_connection_version IS NOT DISTINCT FROM $5::bigint`,
-              [
-                scope.provider.name,
-                resource.resourceId,
-                scope.organizationId,
-                scope.connectionId,
-                scope.connectionVersion,
-              ],
-            );
-          } else {
-            // If another resource is already bound, retain the duplicate for
-            // operator review. Automatic deletion is intentionally limited to
-            // a label identity that no durable generation recognizes.
-            await tx.query(
-              `INSERT INTO cloud_workspace_provider_orphans (
+                [
+                  scope.provider.name,
+                  resource.resourceId,
+                  scope.organizationId,
+                  scope.connectionId,
+                  scope.connectionVersion,
+                ],
+              );
+            } else {
+              // If another resource is already bound, retain the duplicate for
+              // operator review. Automatic deletion is intentionally limited to
+              // a label identity that no durable generation recognizes.
+              await tx.query(
+                `INSERT INTO cloud_workspace_provider_orphans (
                  provider, provider_resource_id, workspace_id_hint,
                  generation_hint, org_id, provider_connection_id,
                  provider_connection_version
@@ -1384,27 +1479,27 @@ export class CloudWorkspaceReconciler {
                  DO UPDATE
                  SET last_seen_at = now(),
                      observation_count = cloud_workspace_provider_orphans.observation_count + 1`,
-              [
-                scope.provider.name,
-                resource.resourceId,
-                resource.workspaceId,
-                resource.generation,
-                scope.organizationId,
-                scope.connectionId,
-                scope.connectionVersion,
-              ],
-            );
+                [
+                  scope.provider.name,
+                  resource.resourceId,
+                  resource.workspaceId,
+                  resource.generation,
+                  scope.organizationId,
+                  scope.connectionId,
+                  scope.connectionVersion,
+                ],
+              );
+            }
+            return false;
           }
-          return false;
-        }
 
-        const result = await tx.query<{
-          first_seen_at: Date;
-          observation_count: number;
-          deletion_verified_at: Date | null;
-          eligible: boolean;
-        }>(
-          `INSERT INTO cloud_workspace_provider_orphans (
+          const result = await tx.query<{
+            first_seen_at: Date;
+            observation_count: number;
+            deletion_verified_at: Date | null;
+            eligible: boolean;
+          }>(
+            `INSERT INTO cloud_workspace_provider_orphans (
              provider, provider_resource_id, workspace_id_hint,
              generation_hint, org_id, provider_connection_id,
              provider_connection_version
@@ -1417,35 +1512,36 @@ export class CloudWorkspaceReconciler {
            RETURNING first_seen_at, observation_count, deletion_verified_at,
                      first_seen_at <= now() -
                        ($8::bigint * interval '1 millisecond') AS eligible`,
-          [
-            scope.provider.name,
-            resource.resourceId,
-            resource.workspaceId,
-            resource.generation,
-            scope.organizationId,
-            scope.connectionId,
-            scope.connectionVersion,
-            this.orphanGraceMs,
-          ],
-        );
-        const orphan = result.rows[0]!;
-        return (
-          !orphan.deletion_verified_at &&
-          orphan.observation_count >= 2 &&
-          orphan.eligible
-        );
+            [
+              scope.provider.name,
+              resource.resourceId,
+              resource.workspaceId,
+              resource.generation,
+              scope.organizationId,
+              scope.connectionId,
+              scope.connectionVersion,
+              this.orphanGraceMs,
+            ],
+          );
+          const orphan = result.rows[0]!;
+          return (
+            durableOwnership && !orphan.deletion_verified_at &&
+            orphan.observation_count >= 2 &&
+            orphan.eligible
+          );
         });
         if (!decision) continue;
 
         try {
-        await scope.provider.delete(resource.resourceId);
-        const remaining = await scope.provider.inspect(resource.resourceId);
-        if (remaining) assertProviderResourceIdentity(remaining, resource);
-        const deletionVerified =
-          remaining === null || remaining.state === "deleted";
-        await withSystemTx(this.pool, (tx) =>
-          tx.query(
-            `UPDATE cloud_workspace_provider_orphans
+          await scope.provider.delete(resource.resourceId);
+          const remaining = await scope.provider.inspect(resource.resourceId);
+          if (remaining) assertProviderResourceIdentity(remaining, resource);
+          else await assertProviderAbsence(scope.provider, resource);
+          const deletionVerified =
+            remaining === null || remaining.state === "deleted";
+          await withSystemTx(this.pool, (tx) =>
+            tx.query(
+              `UPDATE cloud_workspace_provider_orphans
              SET delete_attempted_at = now(),
                  deletion_verified_at = CASE WHEN $3 THEN now() ELSE NULL END,
                  last_seen_at = now()
@@ -1453,39 +1549,42 @@ export class CloudWorkspaceReconciler {
                AND org_id IS NOT DISTINCT FROM $4::uuid
                AND provider_connection_id IS NOT DISTINCT FROM $5::uuid
                AND provider_connection_version IS NOT DISTINCT FROM $6::bigint`,
-            [
-              scope.provider.name,
-              resource.resourceId,
-              deletionVerified,
-              scope.organizationId,
-              scope.connectionId,
-              scope.connectionVersion,
-            ],
-          ),
-        );
-      } catch (error) {
-        const failure = safeFailure(error);
-        this.logger.warn(
-          `[cloud-workspace] orphan cleanup failed (${failure.code})`,
-        );
-        await withSystemTx(this.pool, (tx) =>
-          tx.query(
-            `UPDATE cloud_workspace_provider_orphans
+              [
+                scope.provider.name,
+                resource.resourceId,
+                deletionVerified,
+                scope.organizationId,
+                scope.connectionId,
+                scope.connectionVersion,
+              ],
+            ),
+          );
+        } catch (error) {
+          const failure = safeFailure(error);
+          this.logger.warn(
+            `[cloud-workspace] orphan cleanup failed (${failure.code})`,
+          );
+          await withSystemTx(this.pool, (tx) =>
+            tx.query(
+              `UPDATE cloud_workspace_provider_orphans
              SET delete_attempted_at = now()
              WHERE provider = $1 AND provider_resource_id = $2
                AND org_id IS NOT DISTINCT FROM $3::uuid
                AND provider_connection_id IS NOT DISTINCT FROM $4::uuid
                AND provider_connection_version IS NOT DISTINCT FROM $5::bigint`,
-            [
-              scope.provider.name,
-              resource.resourceId,
-              scope.organizationId,
-              scope.connectionId,
-              scope.connectionVersion,
-            ],
-          ),
-        );
+              [
+                scope.provider.name,
+                resource.resourceId,
+                scope.organizationId,
+                scope.connectionId,
+                scope.connectionVersion,
+              ],
+            ),
+          );
         }
+      }
+      } catch (error) {
+        this.logger.warn(`[cloud-workspace] inventory scope failed (${safeFailure(error).code})`);
       }
     }
     return observed;

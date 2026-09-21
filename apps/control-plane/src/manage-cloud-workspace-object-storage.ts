@@ -1,3 +1,5 @@
+import {parseDatabaseTarget} from "./database-target.js";
+import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for the encrypted durable object volume.
 // These byte limits are deliberately independent from provider sandbox disk
 // quotas. The default is a read-only plan; execution requires exact approval
@@ -74,7 +76,7 @@ export class CloudWorkspaceObjectStorageManagementError extends Error {
 function databaseTarget(databaseUrl: string): URL {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = parseDatabaseTarget(databaseUrl);
   } catch {
     throw new CloudWorkspaceObjectStorageManagementError(
       "Invalid object-storage configuration: DATABASE_URL must be a PostgreSQL URL",
@@ -102,6 +104,7 @@ function targetFingerprint(databaseUrl: string, channel: string): string {
         parsed.hostname.toLowerCase(),
         parsed.port || "5432",
         parsed.pathname,
+    decodeURIComponent(parsed.username),
       ].join("\0"),
       "utf8",
     )
@@ -522,7 +525,7 @@ async function runCli(): Promise<void> {
       process.env.CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_WORKSPACE_BYTES,
     reason: process.env.CONTROL_PLANE_CLOUD_OBJECT_STORAGE_REASON,
   });
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = createMigrationPool(databaseUrl, {maxConnections: 1});
   try {
     const result = await manageCloudWorkspaceObjectStorage(pool, request);
     console.log(

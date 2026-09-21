@@ -3,9 +3,14 @@
   "version": "0.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Shared Zeros bridge protocol — wire types, Zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives consumed across desktop renderer, Electron, and engine process boundaries.",
+  "description": "Shared Zeros bridge protocol \u2014 wire types, Zod schemas, protocol versioning, crypto seams, and transport-agnostic runtime primitives consumed across desktop renderer, Electron, and engine process boundaries.",
   "type": "module",
   "exports": {
+    "./cloud-agent-execution": "./src/cloud-agent-execution.ts",
+    "./cloud-actors": "./src/cloud-actors.ts",
+    "./cloud-actions": "./src/cloud-actions.ts",
+    "./cloud-events": "./src/cloud-events.ts",
+    "./cloud-commands": "./src/cloud-commands.ts",
     "./composer-mode": "./src/composer-mode.ts",
     "./attachment-policy": "./src/attachment-policy.ts",
     "./tool-artwork": "./src/tool-artwork.ts",
@@ -36,7 +41,9 @@
     "./run-actions": "./src/run-actions.ts",
     "./scrub": "./src/scrub.ts",
     "./crypto": "./src/crypto/index.ts",
-    "./reliable": "./src/reliable.ts"
+    "./reliable": "./src/reliable.ts",
+    "./cloud-agent-tools": "./src/cloud-agent-tools.ts",
+    "./cloud-lsp": "./src/cloud-lsp.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"

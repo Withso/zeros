@@ -29,6 +29,10 @@ import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
+import {createCloudWorkspaceCollaborationRoutes} from "./cloud-workspaces/collaboration-routes.js";
+import {createCloudAgentCredentialRoutes} from "./cloud-workspaces/agent-credential-routes.js";
+import {cloudAgentCredentialKeys,DatabaseCloudAgentCredentialService} from "./cloud-workspaces/agent-credentials.js";
+import {workspaceInvitationDeliveryConfig} from "./cloud-workspaces/invitation-delivery.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
 import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
@@ -479,6 +483,10 @@ export function createRoutes(
       workosEnabled: options.workosEnabled === true,
     }),
   );
+  if(cloudWorkspaces) app.route("/",createCloudWorkspaceCollaborationRoutes(pool,
+    workspaceInvitationDeliveryConfig(cloudWorkspaces,options.inviteLinkBase??DEFAULT_INVITE_LINK_BASE,email)));
+  const agentCredentialKeys=cloudAgentCredentialKeys(cloudWorkspaces);
+  if(agentCredentialKeys) app.route("/",createCloudAgentCredentialRoutes(new DatabaseCloudAgentCredentialService(pool,agentCredentialKeys)));
 
   app.post(
     "/v1/invitations/accept",

@@ -2,13 +2,13 @@
 
 import { createHash, randomBytes } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   existsSync,
+  fchmodSync,
+  fchownSync,
   fsyncSync,
   lstatSync,
   openSync,
-  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -16,6 +16,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ensureCloudHostRuntimeDirectory,
+  readCloudHostRuntimeProfile,
+} from "./cloud-runtime-profile.mjs";
 
 const OUTPUT = "/run/zeros/github-credential.json";
 const MAX_ENCODED_BYTES = 32 * 1024;
@@ -62,11 +66,7 @@ function parseCredential(value, method, now, documentExpiresAt) {
   if (!exactKeys(value, expected) || value.method !== method) return null;
   const accessToken = optionalString(value.accessToken, MAX_TOKEN_BYTES);
   const login = optionalString(value.login, 100, /^[A-Za-z0-9-]+$/);
-  const variantKey = optionalString(
-    value.variantKey,
-    253,
-    /^[A-Za-z0-9.-]+$/,
-  );
+  const variantKey = optionalString(value.variantKey, 253, /^[A-Za-z0-9.-]+$/);
   if (
     accessToken === null ||
     accessToken === undefined ||
@@ -187,7 +187,9 @@ export function parseCloudGithubCredentialPayload(
 
 function assertPrivateDirectory(directory, expectedUid) {
   if (!path.isAbsolute(directory) || realpathSync(directory) !== directory) {
-    throw new Error("cloud GitHub credential runtime directory is not canonical");
+    throw new Error(
+      "cloud GitHub credential runtime directory is not canonical",
+    );
   }
   const stat = lstatSync(directory);
   if (
@@ -220,6 +222,7 @@ export function installCloudGithubCredentialPayload(
   {
     output = OUTPUT,
     expectedUid = 0,
+    expectedGid = -1,
     expectedOwnerSubjectSha256,
     now = Date.now(),
   } = {},
@@ -227,7 +230,9 @@ export function installCloudGithubCredentialPayload(
   if (
     !path.isAbsolute(output) ||
     !Number.isInteger(expectedUid) ||
-    expectedUid < 0
+    expectedUid < 0 ||
+    !Number.isInteger(expectedGid) ||
+    expectedGid < -1
   ) {
     throw new Error("cloud GitHub credential installer options are invalid");
   }
@@ -247,10 +252,11 @@ export function installCloudGithubCredentialPayload(
   try {
     descriptor = openSync(temporary, "wx", 0o600);
     writeFileSync(descriptor, serialized, { encoding: "utf8" });
+    fchownSync(descriptor, expectedUid, expectedGid);
+    fchmodSync(descriptor, 0o600);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    chmodSync(temporary, 0o600);
     renameSync(temporary, output);
     const directoryDescriptor = openSync(directory, "r");
     try {
@@ -267,7 +273,8 @@ export function installCloudGithubCredentialPayload(
 
 const direct =
   process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  path.resolve(process.argv[1]) ===
+    path.resolve(fileURLToPath(import.meta.url));
 if (direct) {
   const encoded = process.env.ZEROS_CLOUD_GITHUB_CREDENTIAL_B64 ?? "";
   const ownerSubject = process.env.ZEROS_CLOUD_OWNER_SUB ?? "";
@@ -276,7 +283,13 @@ if (direct) {
     if (process.platform !== "linux" || process.geteuid?.() !== 0) {
       throw new Error("root Linux coordinator required");
     }
+    const profile = ensureCloudHostRuntimeDirectory(
+      readCloudHostRuntimeProfile(),
+    );
     installCloudGithubCredentialPayload(encoded, {
+      output: path.join(profile.runtimeDirectory, "github-credential.json"),
+      expectedUid: profile.engineUid,
+      expectedGid: profile.engineGid,
       expectedOwnerSubjectSha256: cloudOwnerSubjectSha256(ownerSubject),
     });
     process.stdout.write("installed cloud GitHub credential\n");

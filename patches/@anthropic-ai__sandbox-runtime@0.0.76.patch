@@ -2,7 +2,7 @@ diff --git a/dist/cli.js b/dist/cli.js
 old mode 100644
 new mode 100755
 diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
-index 88cc67f..d6e34e4 100644
+index 88cc67f6cdb6ed2cb4d019bcbbf077e4d081706b..d6e34e4c9bfa82e157e53de14c75ee9bb94ffd89 100644
 --- a/dist/sandbox/linux-sandbox-utils.d.ts
 +++ b/dist/sandbox/linux-sandbox-utils.d.ts
 @@ -45,6 +45,14 @@ export interface LinuxSandboxParams {
@@ -30,7 +30,7 @@ index 88cc67f..d6e34e4 100644
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
 diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
-index 2a2d53c..a56a567 100644
+index 2a2d53cab6d985a02487a10b224659cb31114c4a..7c864c159e0982786d7746a3b840d7d745a7fd9f 100644
 --- a/dist/sandbox/linux-sandbox-utils.js
 +++ b/dist/sandbox/linux-sandbox-utils.js
 @@ -30,7 +30,7 @@ function findSymlinkInPath(targetPath, allowedWritePaths) {
@@ -79,7 +79,33 @@ index 2a2d53c..a56a567 100644
  /**
   * Build the command that runs inside the sandbox.
   * Sets up HTTP proxy on port 3128 and SOCKS proxy on port 1080
-@@ -708,7 +729,7 @@ function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllo
+@@ -674,7 +695,24 @@ function resolveSymlinkDenyDest(normalizedPath) {
+  */
+ function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllowPaths) {
+     const denySep = normalizedPath === '/' ? '/' : normalizedPath + '/';
+-    args.push('--tmpfs', normalizedPath);
++    args.push('--tmpfs', normalizedPath, '--chmod', '0711', normalizedPath);
++    // A distinct worker UID cannot traverse root-private host ancestors. These
++    // are new directories in the empty deny mask, never chmods of host state.
++    // Create ALL ancestors before restoring ANY bind: after a restoration a
++    // chmod or --dir could reach an intentionally exposed host directory.
++    const syntheticParents = new Set();
++    for (const allowedPath of [...allowedWritePaths, ...readAllowPaths]) {
++        if (!allowedPath.startsWith(denySep) || allowedPath === normalizedPath)
++            continue;
++        let parent = path.dirname(allowedPath);
++        while (parent !== normalizedPath && parent.startsWith(denySep)) {
++            syntheticParents.add(parent);
++            parent = path.dirname(parent);
++        }
++    }
++    for (const parent of [...syntheticParents].sort((a, b) => a.split('/').length - b.split('/').length)) {
++        args.push('--perms', '0711', '--dir', parent);
++    }
+     // tmpfs wiped any earlier write binds under this path — restore them.
+     for (const writePath of allowedWritePaths) {
+         if (writePath.startsWith(denySep) || writePath === normalizedPath) {
+@@ -708,7 +746,7 @@ function pushReadDenyDirMounts(args, normalizedPath, allowedWritePaths, readAllo
  /**
   * Generate filesystem bind mount arguments for bwrap
   */
@@ -88,7 +114,15 @@ index 2a2d53c..a56a567 100644
      const args = [];
      // fs already imported
      // Collect normalized allowed write paths. Populated in the writeConfig
-@@ -896,12 +917,12 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -717,6 +755,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+     // denyWrite binds are buffered and emitted after denyRead processing so that
+     // a denyRead tmpfs over an ancestor directory doesn't wipe them out.
+     const denyWriteArgs = [];
++    const missingWriteMounts = new Map();
+     // Directories that a deny entry re-binds read-only inside the sandbox
+     // (--ro-bind <dir> <dir>), keyed by resolved dest, with every raw
+     // (pre-resolution) spelling each was reached through. A non-existent deny
+@@ -896,12 +935,12 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
          // directory missing from the record only costs an abort). No spelling
          // handling is needed here: allowedWritePaths entries are recorded with
          // trailing slashes stripped, and candidates are resolved deny dests.
@@ -103,7 +137,37 @@ index 2a2d53c..a56a567 100644
          ];
          // Duplicate deny entries must be collapsed: a duplicate
          // --ro-bind /dev/null <dest> hits a char device on the second pass and
-@@ -1333,6 +1354,31 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -1144,6 +1183,21 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+                 const ancestorIsWithinReadOnlyDeny = coveredBySafeReadOnlyDenyDir(normalizedPath);
+                 if (ancestorIsWithinAllowedPath && !ancestorIsWithinReadOnlyDeny) {
+                     const firstNonExistent = findFirstNonExistentComponent(normalizedPath);
++                    // Absent private roots can appear both directly and through
++                    // multiple children. Emit one mount per missing component;
++                    // a directory requirement dominates a file placeholder in
++                    // either input order. Stacking a directory over /dev/null
++                    // makes bwrap fail with ENOTDIR before the actor can start.
++                    const previous = missingWriteMounts.get(firstNonExistent);
++                    if (previous !== undefined) {
++                        if (firstNonExistent !== normalizedPath && denyWriteArgs[previous + 1] === '/dev/null') {
++                            const emptyDir = fs.mkdtempSync(path.join(tmpdir(), 'claude-empty-'));
++                            denyWriteArgs[previous + 1] = emptyDir;
++                            bwrapMountPoints.add(emptyDir);
++                        }
++                        continue;
++                    }
++                    missingWriteMounts.set(firstNonExistent, denyWriteArgs.length);
+                     // Fix 2: If firstNonExistent is an intermediate component (not the
+                     // leaf deny path itself), mount a read-only empty directory instead
+                     // of /dev/null. This prevents the component from appearing as a file
+@@ -1151,6 +1205,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+                     if (firstNonExistent !== normalizedPath) {
+                         const emptyDir = fs.mkdtempSync(path.join(tmpdir(), 'claude-empty-'));
+                         denyWriteArgs.push('--ro-bind', emptyDir, firstNonExistent);
++                        bwrapMountPoints.add(emptyDir);
+                         denyWriteRawDests.set(firstNonExistent, rawPath);
+                         bwrapMountPoints.add(firstNonExistent);
+                         registerExitCleanupHandler();
+@@ -1333,6 +1388,31 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
          if (rawDest !== dest)
              emittedDenyWriteDests.push(rawDest);
      }
@@ -135,7 +199,7 @@ index 2a2d53c..a56a567 100644
      // The inverse stacking problem: a denyWrite ro-bind whose dest strictly
      // contains a read-denied dir re-exposes that dir's real contents (the bind
      // landed after the tmpfs). Re-apply the tmpfs on top, with the same write
-@@ -1422,7 +1468,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -1422,7 +1502,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
   * Dependencies are checked by checkLinuxDependencies() before enabling the sandbox.
   */
  export async function wrapCommandWithSandboxLinux(params) {
@@ -144,7 +208,7 @@ index 2a2d53c..a56a567 100644
      // Determine if we have restrictions to apply
      // Read: denyOnly pattern - empty array means no restrictions
      // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
-@@ -1437,9 +1483,29 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1437,9 +1517,32 @@ export async function wrapCommandWithSandboxLinux(params) {
          !hasReadRestrictions &&
          !hasWriteRestrictions &&
          !hasEnvRestrictions &&
@@ -154,6 +218,9 @@ index 2a2d53c..a56a567 100644
          return command;
      }
 +    if (linuxPrivilegedWorker) {
++        if (needsNetworkRestriction || httpSocketPath || socksSocketPath) {
++            throw new Error('Privileged cloud-worker proxy composition is not qualified');
++        }
 +        if (!hostParity || enableWeakerNestedSandbox) {
 +            throw new Error('Privileged cloud-worker mode requires host parity without weaker nesting');
 +        }
@@ -175,7 +242,7 @@ index 2a2d53c..a56a567 100644
      // Mark this sandbox invocation as active. cleanupBwrapMountPoints() will
      // defer file deletion until this (and every other concurrent) invocation
      // has been cleaned up. The matching decrement happens in
-@@ -1575,10 +1641,12 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1575,10 +1675,12 @@ export async function wrapCommandWithSandboxLinux(params) {
              // If no sockets provided, network is completely blocked (--unshare-net without proxy)
          }
          // ========== FILESYSTEM RESTRICTIONS ==========
@@ -191,7 +258,7 @@ index 2a2d53c..a56a567 100644
          // ========== PID NAMESPACE ISOLATION ==========
          // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
          // By default, always unshare PID namespace and mount fresh /proc.
-@@ -1586,27 +1654,32 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1586,27 +1688,33 @@ export async function wrapCommandWithSandboxLinux(params) {
          // If we don't have --proc, it is possible to read host /proc and leak information about code running
          // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
          // so we support running without it if explicitly requested.
@@ -210,6 +277,7 @@ index 2a2d53c..a56a567 100644
 -            // Mount fresh /proc if PID namespace is isolated (secure mode).
 -            bwrapArgs.push('--proc', '/proc');
 +        if (linuxPrivilegedWorker) {
++            bwrapArgs.push('--unshare-pid', '--proc', '/proc');
 +            // The trusted cloud supervisor needs only these capabilities to
 +            // enter the exact worker uid/gid. setpriv then clears all sets and
 +            // locks securebits before running the workload.
@@ -243,7 +311,7 @@ index 2a2d53c..a56a567 100644
          }
          // apply-seccomp obtains CAP_SYS_ADMIN for its nested PID+mount unshare
          // by creating a nested user namespace. This requires the host to permit
-@@ -1630,11 +1703,12 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1630,11 +1738,12 @@ export async function wrapCommandWithSandboxLinux(params) {
              bwrapArgs.push(sandboxCommand);
          }
          else if (applySeccompPrefix) {
@@ -258,7 +326,7 @@ index 2a2d53c..a56a567 100644
          }
          const wrappedCommand = quote([bwrapPath ?? 'bwrap', ...bwrapArgs]);
          const restrictions = [];
-@@ -1646,6 +1720,8 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1646,6 +1755,8 @@ export async function wrapCommandWithSandboxLinux(params) {
              restrictions.push('env');
          if (applySeccompPrefix)
              restrictions.push('seccomp(unix-block)');
@@ -268,7 +336,7 @@ index 2a2d53c..a56a567 100644
          return wrappedCommand;
      }
 diff --git a/dist/sandbox/macos-sandbox-utils.d.ts b/dist/sandbox/macos-sandbox-utils.d.ts
-index 93b1106..ac95e3b 100644
+index 93b1106305aa7ffb37f04867cd343f94ff411350..ac95e3be1c8bf8f4b749a72b439414742bf9e601 100644
 --- a/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/dist/sandbox/macos-sandbox-utils.d.ts
 @@ -42,6 +42,7 @@ export interface MacOSSandboxParams {
@@ -296,7 +364,7 @@ index 93b1106..ac95e3b 100644
      line: string;
      command?: string;
 diff --git a/dist/sandbox/macos-sandbox-utils.js b/dist/sandbox/macos-sandbox-utils.js
-index 70de07c..17303c9 100644
+index 70de07c6837687fdec53f8db60225f4df5ea8776..17303c904d34cbd92dbb27249f4c7579755d5b4a 100644
 --- a/dist/sandbox/macos-sandbox-utils.js
 +++ b/dist/sandbox/macos-sandbox-utils.js
 @@ -10,7 +10,9 @@ import { shouldIgnoreViolation } from './sandbox-violation-store.js';
@@ -484,7 +552,7 @@ index 70de07c..17303c9 100644
      });
      // Generate proxy environment variables using shared utility
 diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
-index 42b8e0c..6e591ac 100644
+index 42b8e0c2678fc2219c1305b1dd4319c3b94415e9..6e591ac65919e709b67f5861341d1539277c6707 100644
 --- a/dist/sandbox/sandbox-config.d.ts
 +++ b/dist/sandbox/sandbox-config.d.ts
 @@ -721,21 +721,27 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
@@ -583,7 +651,7 @@ index 42b8e0c..6e591ac 100644
  //# sourceMappingURL=sandbox-config.d.ts.map
 \ No newline at end of file
 diff --git a/dist/sandbox/sandbox-config.js b/dist/sandbox/sandbox-config.js
-index f5f3f04..c08107f 100644
+index f5f3f045aa5b65f9efe34492e29bcc122a92bc1f..c08107ffb88803db3bad5539d5b9913b5736529b 100644
 --- a/dist/sandbox/sandbox-config.js
 +++ b/dist/sandbox/sandbox-config.js
 @@ -776,10 +776,18 @@ export const FilesystemConfigSchema = z.object({
@@ -654,7 +722,7 @@ index f5f3f04..c08107f 100644
      if (!creds)
          return;
 diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
-index 753c754..371416f 100644
+index 753c7545c8080796feaa23d2c91ff6cb9f794de8..371416f76216e8c318ecb4303e6bd1997c7f9faf 100644
 --- a/dist/sandbox/sandbox-manager.js
 +++ b/dist/sandbox/sandbox-manager.js
 @@ -677,6 +677,15 @@ async function initialize(runtimeConfig, sandboxAskCallback, enableLogMonitor =
@@ -772,7 +840,7 @@ index 753c754..371416f 100644
              await waitForNetworkInitialization();
          }
 diff --git a/dist/sandbox/sandbox-schemas.d.ts b/dist/sandbox/sandbox-schemas.d.ts
-index d753a3a..743e2cb 100644
+index d753a3a3a500be8c485f511ec5a94d5921094b91..743e2cb71b1ce5d15aa70553abd18ddab23dd01c 100644
 --- a/dist/sandbox/sandbox-schemas.d.ts
 +++ b/dist/sandbox/sandbox-schemas.d.ts
 @@ -34,6 +34,7 @@ export interface FsReadRestrictionConfig {

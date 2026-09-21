@@ -14,6 +14,7 @@ import {
   rmSync,
 } from "node:fs";
 import path from "node:path";
+import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
 
 const DIRECTORY = "/run/zeros";
 const PROOF = path.join(DIRECTORY, "cloud-worker-admission.json");
@@ -151,7 +152,7 @@ try {
     ]) ||
     !exactKeys(proof.namespaces, ["cgroup", "mnt", "pid"]) ||
     proof.version !== 1 ||
-    proof.profile !== "zeros-cloud-worker-v1" ||
+    proof.profile !== readCloudHostRuntimeProfile().profile ||
     !Number.isSafeInteger(proof.qualifiedAtMs) ||
     Date.now() - proof.qualifiedAtMs < -5_000 ||
     Date.now() - proof.qualifiedAtMs > MAX_PROOF_AGE_MS ||

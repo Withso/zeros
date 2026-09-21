@@ -23,6 +23,9 @@ type HealthSignals = {
   object_deletion_stalled: boolean;
   provider_orphans_stalled: boolean;
   durability_stalled: boolean;
+  compute_settlement_stalled: boolean;
+  compute_lease_expired: boolean;
+  compute_platform_exposure: boolean;
 };
 
 /** Aggregate-only health: no workspace, Organization, user, provider, or
@@ -116,7 +119,14 @@ export class DatabaseCloudWorkspaceHealthService {
                    (content.current_revision > content.durable_revision)
                    OR (record.current_revision > 0 AND record.last_durable_at IS NULL)
                  )
-             ) ELSE false END AS durability_stalled`,
+             ) ELSE false END AS durability_stalled,
+             EXISTS (SELECT 1 FROM managed_compute_allocation_leases WHERE state<>'settled' AND
+               ((last_error_code IS NOT NULL AND first_error_at < now()-interval '5 minutes') OR
+                next_check_at < now()-interval '5 minutes')) AS compute_settlement_stalled,
+             EXISTS (SELECT 1 FROM managed_compute_allocation_leases WHERE state IN ('active','draining')
+               AND provider_expires_at < now()-interval '5 minutes') AS compute_lease_expired,
+             EXISTS (SELECT 1 FROM managed_compute_credit_periods WHERE exposure_micro_usd>0
+               AND updated_at>now()-interval '24 hours') AS compute_platform_exposure`,
           [
             this.posture.outboxDeliveryEnabled,
             this.posture.durabilityEnabled,
