@@ -89,6 +89,13 @@ if (!generatedLicense.includes("Apache License") || !generatedNotice.includes("O
   process.exit(1);
 }
 
+const keeperDeclared=JSON.parse(readOrDie("apps/control-plane/package.json","control-plane manifest","restore the control-plane package manifest")).dependencies?.["@openai/codex"];
+const keeperPin=/CODEX_AUTH_RUNTIME_VERSION\s*=\s*"([^"]+)"/.exec(readOrDie("apps/control-plane/src/cloud-workspaces/codex-auth-cache.ts","native auth keeper pin","restore the qualified native auth keeper"))?.[1];
+if(keeperDeclared!==pinned||keeperPin!==pinned){
+  console.error("✖ check:codex-pin — control-plane native keeper declaration/runtime must match the qualified protocol pin");
+  process.exit(1);
+}
+
 if (installed === pinned && pinned === generated) {
   console.log(`✓ check:codex-pin — installed = pin = bindings = ${installed}`);
   process.exit(0);

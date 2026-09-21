@@ -103,6 +103,7 @@ export function isAppOnlyPath(pathname: string): boolean {
   return (
     pathname === "/launch" ||
     pathname === "/invite" ||
+    pathname.startsWith("/workspace/") ||
     pathname === "/github/connected" ||
     pathname === "/api" ||
     pathname.startsWith("/api/") ||

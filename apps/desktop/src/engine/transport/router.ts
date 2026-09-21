@@ -24,6 +24,10 @@ import type { TransportClient } from "./types";
 export class MessageRouter {
   private readonly clients = new Map<string, TransportClient>();
   private readonly sessionOwner = new Map<string, string>(); // sessionId → clientId
+  private capture: ((message: EngineMessage) => EngineMessage) | null = null;
+
+  /** A cloud workspace owns one journal, independent of its subscriber count. */
+  setCapture(capture: (message: EngineMessage) => EngineMessage): void { this.capture = capture; }
 
   register(client: TransportClient): void {
     this.clients.set(client.id, client);
@@ -70,12 +74,14 @@ export class MessageRouter {
   }
 
   broadcast(msg: EngineMessage): void {
+    msg = this.capture?.(msg) ?? msg;
     for (const client of this.clients.values()) client.send(msg);
   }
 
   /** Broadcast to every client EXCEPT the originator — used for DB_CHANGED, where
    *  the client that made the write already has the change locally. */
   broadcastExcept(exceptClientId: string, msg: EngineMessage): void {
+    msg = this.capture?.(msg) ?? msg;
     for (const client of this.clients.values()) {
       if (client.id !== exceptClientId) client.send(msg);
     }

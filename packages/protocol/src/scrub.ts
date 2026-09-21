@@ -21,6 +21,8 @@ const GITHUB_CREDENTIAL_RE =
   /\b(?:ghs_\d+_[A-Za-z0-9._-]{40,}|ghs_[A-Za-z0-9_-]{4,}(?:\.[A-Za-z0-9_-]{8,})+|(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{16,})\b/g;
 const GITHUB_REFRESH_BINDING_RE =
   /\bzghrb_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
+const CLOUD_CAPABILITY_RE = /\b(?:zws|zwh|zwb|zwp|zsh)_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])/g;
+const CLOUD_PROTOCOL_CREDENTIAL_RE = /\bzeros-cloud-token\.[A-Za-z0-9_-]{63}(?![A-Za-z0-9_-])/g;
 
 /** Redact absolute filesystem paths and obvious secrets from a free-form
  *  string. Conservative by design — when in doubt, redact. The output is safe
@@ -56,6 +58,10 @@ export function redactSensitive(input: string): string {
  *  user Views is exactly what is shared. */
 export function redactLogSecrets(input: string): string {
   let s = input;
+  // Cloud service headers and WebSocket subprotocols do not necessarily use
+  // an Authorization or JSON token field. Scrub their explicit wire shapes.
+  s = s.replace(CLOUD_CAPABILITY_RE, "[redacted]");
+  s = s.replace(CLOUD_PROTOCOL_CREDENTIAL_RE, "[redacted]");
   // Emails → [email] (same rationale as redactSensitive — logs are shared
   // with support/issue trackers; the feedback form has its own email field).
   s = s.replace(/\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g, "[email]");

@@ -133,80 +133,87 @@ function harness(input = execution()) {
 describe("DaytonaCloudWorkspaceSetupExecutor", () => {
   it("serializes image setup so a reclaimed remote command cannot overlap its successor", () => {
     expect(DAYTONA_SETUP_HELPER_COMMAND).toBe(
-      "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /usr/local/bin/node /usr/local/lib/zeros/setup-cloud-workspace.mjs",
+      "/usr/bin/flock --exclusive --nonblock /run/zeros/setup.lock /opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs",
     );
   });
 
-  it("invokes only the fixed image helper with a compact, fence-bound admission", async () => {
-    const target = execution({
-      settings: {
-        version: 1,
-        snapshot: {
-          schemaVersion: 1,
-          values: { largeValue: "x".repeat(100_000) },
+  it.each(["daytona", "boat"])(
+    "invokes only the fixed Linux helper with a fence-bound admission for %s",
+    async (providerName) => {
+      const target = execution({
+        provider: { name: providerName, resourceId: "sandbox-exact-id" },
+        settings: {
+          version: 1,
+          snapshot: {
+            schemaVersion: 1,
+            values: { largeValue: "x".repeat(100_000) },
+          },
+          sha256: "b".repeat(64),
         },
-        sha256: "b".repeat(64),
-      },
-    });
-    const { broker, executor, grant, runner } = harness(target);
+      });
+      const { broker, executor, grant, runner } = harness(target);
 
-    await expect(
-      executor.execute(target, new AbortController().signal),
-    ).resolves.toEqual({
-      readiness: readiness(target),
-      logExcerpt: "setup complete",
-      logTruncated: false,
-    });
+      await expect(
+        executor.execute(target, new AbortController().signal),
+      ).resolves.toEqual({
+        readiness: readiness(target),
+        logExcerpt: "setup complete",
+        logTruncated: false,
+      });
 
-    expect(broker.issue).toHaveBeenCalledWith(target, expect.any(AbortSignal));
-    expect(runner.execute).toHaveBeenCalledTimes(1);
-    const command = vi.mocked(runner.execute).mock.calls[0]![0];
-    expect(command).toMatchObject({
-      resourceId: target.provider.resourceId,
-      command: DAYTONA_SETUP_HELPER_COMMAND,
-      cwd: "/",
-      timeoutSeconds: 300,
-    });
-    expect(Object.keys(command.env ?? {})).toEqual([
-      "ZEROS_CLOUD_WORKSPACE_SETUP_B64",
-    ]);
-    expect(command.command).not.toContain(target.repository.owner);
-    expect(command.command).not.toContain(grant.token);
+      expect(broker.issue).toHaveBeenCalledWith(
+        target,
+        expect.any(AbortSignal),
+      );
+      expect(runner.execute).toHaveBeenCalledTimes(1);
+      const command = vi.mocked(runner.execute).mock.calls[0]![0];
+      expect(command).toMatchObject({
+        resourceId: target.provider.resourceId,
+        command: DAYTONA_SETUP_HELPER_COMMAND,
+        cwd: "/",
+        timeoutSeconds: 300,
+      });
+      expect(Object.keys(command.env ?? {})).toEqual([
+        "ZEROS_CLOUD_WORKSPACE_SETUP_B64",
+      ]);
+      expect(command.command).not.toContain(target.repository.owner);
+      expect(command.command).not.toContain(grant.token);
 
-    const encoded = command.env?.ZEROS_CLOUD_WORKSPACE_SETUP_B64 ?? "";
-    expect(Buffer.byteLength(encoded, "utf8")).toBeLessThan(8 * 1024);
-    const request = JSON.parse(
-      Buffer.from(encoded, "base64url").toString("utf8"),
-    ) as Record<string, unknown>;
-    expect(request).toMatchObject({
-      audience: "zeros-cloud-workspace-setup-v1",
-      version: 1,
-      admission: {
-        endpoint: grant.endpoint,
-        expiresAtMs: grant.expiresAt.getTime(),
-        token: grant.token,
-      },
-      execution: {
-        executionFence: target.executionFence,
-        generation: target.generation,
-        organizationId: target.organizationId,
-        setupRunId: target.setupRunId,
-        workspaceId: target.workspaceId,
-      },
-      expected: {
-        imageRef: target.image.ref,
-        imageSourceCommit: target.image.sourceCommit,
-        repositoryRevision: target.repository.revision,
-        settingsSha256: target.settings.sha256,
-        settingsVersion: target.settings.version,
-      },
-    });
-    expect(JSON.stringify(request)).not.toContain("largeValue");
-    expect(JSON.stringify(request)).not.toContain(
-      target.repository.githubInstallationId,
-    );
-    expect(broker.revoke).toHaveBeenCalledWith(grant, "completed");
-  });
+      const encoded = command.env?.ZEROS_CLOUD_WORKSPACE_SETUP_B64 ?? "";
+      expect(Buffer.byteLength(encoded, "utf8")).toBeLessThan(8 * 1024);
+      const request = JSON.parse(
+        Buffer.from(encoded, "base64url").toString("utf8"),
+      ) as Record<string, unknown>;
+      expect(request).toMatchObject({
+        audience: "zeros-cloud-workspace-setup-v1",
+        version: 1,
+        admission: {
+          endpoint: grant.endpoint,
+          expiresAtMs: grant.expiresAt.getTime(),
+          token: grant.token,
+        },
+        execution: {
+          executionFence: target.executionFence,
+          generation: target.generation,
+          organizationId: target.organizationId,
+          setupRunId: target.setupRunId,
+          workspaceId: target.workspaceId,
+        },
+        expected: {
+          imageRef: target.image.ref,
+          imageSourceCommit: target.image.sourceCommit,
+          repositoryRevision: target.repository.revision,
+          settingsSha256: target.settings.sha256,
+          settingsVersion: target.settings.version,
+        },
+      });
+      expect(JSON.stringify(request)).not.toContain("largeValue");
+      expect(JSON.stringify(request)).not.toContain(
+        target.repository.githubInstallationId,
+      );
+      expect(broker.revoke).toHaveBeenCalledWith(grant, "completed");
+    },
+  );
 
   it("does no broker or provider I/O when already aborted", async () => {
     const { broker, executor, input, runner } = harness();
@@ -333,6 +340,20 @@ describe("DaytonaCloudWorkspaceSetupExecutor", () => {
       retryable: true,
     });
     expect(String(error)).not.toContain("secret-bearing");
+    expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
+  });
+
+  it.each([
+    ["checkpoint_restore_invalid", "setup_checkpoint_restore_invalid", false],
+    ["checkpoint_restore_unavailable", "setup_checkpoint_restore_unavailable", true],
+  ])("classifies %s without losing its retry policy", async (failure, code, retryable) => {
+    const { broker, executor, grant, input, runner } = harness();
+    vi.mocked(runner.execute).mockResolvedValue({
+      exitCode: 1,
+      output: JSON.stringify({ version: 1, audience: "zeros-cloud-workspace-setup-result-v1", outcome: "error", code: failure }),
+      outputTruncated: false,
+    });
+    await expect(executor.execute(input, new AbortController().signal)).rejects.toMatchObject({ code, retryable });
     expect(broker.revoke).toHaveBeenCalledWith(grant, "failed");
   });
 

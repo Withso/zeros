@@ -87,6 +87,33 @@ describe("cloud worker deployment configuration", () => {
     ).toBeNull();
   });
 
+  it("keeps the isolated namespace profile distinct from legacy root images", () => {
+    const marker = {
+      version: 2,
+      backend: "cloud-worker",
+      profile: "zeros-cloud-worker-v2",
+      uid: 10001,
+      gid: 10001,
+      toolchain,
+    };
+    expect(parseCloudWorkerConfiguration(JSON.stringify(marker))).toEqual(
+      marker,
+    );
+    const privateProvider={...marker,version:3,profile:"zeros-cloud-worker-v3"};
+    expect(parseCloudWorkerConfiguration(JSON.stringify(privateProvider))).toEqual(privateProvider);
+    for (const changed of [
+      { version: 1 },
+      { profile: "zeros-cloud-worker-v1" },
+      { uid: 10003 },
+      { gid: 10002 },
+    ])
+      expect(() =>
+        parseCloudWorkerConfiguration(
+          JSON.stringify({ ...marker, ...changed }),
+        ),
+      ).toThrow(/unsupported contract/);
+  });
+
   it("rejects a marker reachable through an untrusted writable ancestor", async () => {
     if (process.platform !== "linux") return;
     const root = await mkdtemp(

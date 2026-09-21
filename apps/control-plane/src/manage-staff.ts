@@ -1,3 +1,5 @@
+import {parseDatabaseTarget} from "./database-target.js";
+import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for granting and revoking product-wide staff
 // roles. The default mode is read-only. Execution is bound to one database,
 // deployment channel, subject, actor, current role, next role, and audit reason.
@@ -67,7 +69,7 @@ export class StaffManagementError extends Error {
 function parseDatabaseUrl(databaseUrl: string): URL {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = parseDatabaseTarget(databaseUrl);
   } catch {
     throw new StaffManagementError(
       "Invalid staff configuration: DATABASE_URL must be a PostgreSQL URL",
@@ -93,6 +95,7 @@ function targetFingerprint(databaseUrl: string, channel: string): string {
     parsed.hostname.toLowerCase(),
     parsed.port || "5432",
     parsed.pathname,
+    decodeURIComponent(parsed.username),
   ].join("\0");
   return createHash("sha256").update(target, "utf8").digest("hex").slice(0, 16);
 }
@@ -395,7 +398,7 @@ async function runCli(): Promise<void> {
     nextRole: process.env.CONTROL_PLANE_STAFF_ROLE,
     reason: process.env.CONTROL_PLANE_STAFF_REASON,
   });
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = createMigrationPool(databaseUrl, {maxConnections: 1});
   try {
     const result = await manageStaffRole(pool, request);
     console.log(

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
-import { ensureUser } from "../auth.js";
+import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import {

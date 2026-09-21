@@ -583,6 +583,7 @@ const WRITE_OPS = new Set<string>([
  * WRITE_OPS is a remote-security allowlist, and widening it would accidentally
  * expose local-only Git controls to relay clients. */
 const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
+  "design.capture",
   "design.initialize",
   "file.write",
   "attachment.write",
@@ -1286,7 +1287,10 @@ export class WorkspaceService {
       ) => Promise<unknown>)
     | null = null;
 
-  constructor(private readonly root: string) {
+  constructor(
+    private readonly root: string,
+    private readonly options: { primaryDesignWorkspace?: boolean } = {},
+  ) {
     // v11: hand the chats DB layer an authoritative folder→workspaceId resolver
     // so every chat upsert caches its owning workspace (db/chats.ts stays free of
     // a workspace-service import). Bound to this instance to read the live
@@ -1365,8 +1369,9 @@ export class WorkspaceService {
   private designHistoryState(
     workspacePath: string,
     create = false,
+    actorId?: string,
   ): WorkspaceDesignHistoryState | undefined {
-    const key = nodePath.resolve(workspacePath);
+    const key = nodePath.resolve(workspacePath) + (actorId ? `\u0000${actorId}` : "");
     let state = this.designHistoryByWorkspace.get(key);
     if (!state && create) {
       state = { undo: [], redo: [], bytes: 0 };
@@ -1388,8 +1393,9 @@ export class WorkspaceService {
   private recordDesignHistory(
     workspacePath: string,
     entry: WorkspaceDesignHistoryEntry,
+    actorId?: string,
   ): void {
-    const state = this.designHistoryState(workspacePath, true)!;
+    const state = this.designHistoryState(workspacePath, true, actorId)!;
     for (const redo of state.redo) state.bytes -= redo.bytes;
     state.redo = [];
     const previous = state.undo.at(-1);
@@ -1411,7 +1417,10 @@ export class WorkspaceService {
   }
 
   private forgetDesignHistory(workspacePath: string): void {
-    this.designHistoryByWorkspace.delete(nodePath.resolve(workspacePath));
+    const root = nodePath.resolve(workspacePath);
+    for (const key of this.designHistoryByWorkspace.keys()) {
+      if (key === root || key.startsWith(`${root}\u0000`)) this.designHistoryByWorkspace.delete(key);
+    }
   }
   setDesignProtocolCapabilityProvider(
     fn: (workspaceId: string) => string,
@@ -1852,7 +1861,13 @@ export class WorkspaceService {
       });
     }
     const cwd = this.resolveReadCwd(workspaceId, remote);
-    const workspace = getWorkspaceById(workspaceId);
+    // A qualified cloud allocation owns one primary checkout. It has no local
+    // worktree row, but is the same opaque, server-resolved owner used by Git,
+    // files and agent sessions. Only the immutable engine deployment enables
+    // this; client parameters cannot turn a desktop root into a Design owner.
+    const workspace = workspaceId === LOCAL_MAIN_WORKSPACE_ID && this.options.primaryDesignWorkspace
+      ? this.localMainEntry()
+      : getWorkspaceById(workspaceId);
     if (!workspace || workspace.path !== cwd) {
       throw new GitError({
         code: "VALIDATION_FAILED",
@@ -2267,12 +2282,35 @@ export class WorkspaceService {
     params: Params = {},
     opts: {
       remote?: boolean;
+      cloudWorker?: boolean;
+      cloudActorIdentity?: { userId: string; deviceId: string };
       hostLocalResources?: boolean;
       gitMutationAdmitted?: boolean;
       designDirectoryResolved?: boolean;
     } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
+    // Cloud actors are role-admitted by the engine, independently of the
+    // trusted-device relay policy. Only an immutable cloud deployment may
+    // expose Design, and only for its opaque primary checkout. Keep `remote`
+    // for all ordinary file/secret/path restrictions.
+    const cloudDesign = remote && opts.cloudWorker === true &&
+      this.options.primaryDesignWorkspace === true && op.startsWith("design.");
+    const humanActor = cloudDesign && opts.cloudActorIdentity
+      ? { kind: "human" as const, id: `cloud:${opts.cloudActorIdentity.userId}:${opts.cloudActorIdentity.deviceId}` }
+      : undefined;
+    if (cloudDesign) {
+      if (!humanActor || params.workspaceId !== LOCAL_MAIN_WORKSPACE_ID ||
+          (params.repoRoot !== undefined && params.repoRoot !== this.root)) {
+        throw new GitError({ code: "REMOTE_RESTRICTED", message: "Cloud Design requires the admitted primary workspace." });
+      }
+      // Only directory lifecycle operations accept a repository-root field.
+      // Other Design operations retain their strict portable request schemas.
+      if (["design.previewExistingDirectory", "design.adoptDirectory", "design.removeDirectory", "design.renameDirectory"].includes(op)) {
+        params = { ...params, repoRoot: this.root };
+      }
+    }
+    const designRemote = remote && !cloudDesign;
     // A qualified cloud worker grants its authenticated desktop client normal
     // workspace authority, but its files do not live behind that Mac's local
     // `zeros-design:` protocol handler. Keep those independent: remote relay
@@ -2369,36 +2407,41 @@ export class WorkspaceService {
     if (!opts.designDirectoryResolved && DESIGN_DOCUMENT_MUTATIONS.has(op)) {
       return this.withDesignReadWorkspace(
         reqStr(params, "workspaceId"),
-        remote,
+        designRemote,
         () =>
           this.handle(op, params, { ...opts, designDirectoryResolved: true }),
       );
     }
     if (opts.designDirectoryResolved && DESIGN_DOCUMENT_MUTATIONS.has(op) && typeof params.directoryId === "string") {
-      const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), remote);
+      const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), designRemote);
       if (designDirectoryEntry(workspace.path, designDirectoryNameFor(workspace.path))?.id !== params.directoryId) {
         throw new GitError({ code: "VALIDATION_FAILED", message: "The active Design directory changed. Refresh before editing." });
       }
     }
     if (isDesignWorkspaceRoute(op)) {
-      return handleDesignWorkspaceRoute(this.designRouteHost, op, params, {
-        remote,
+      const host = humanActor ? { ...this.designRouteHost,
+        designHistoryState: (workspacePath: string, create?: boolean) => this.designHistoryState(workspacePath, create, humanActor.id),
+        recordDesignHistory: (workspacePath: string, entry: WorkspaceDesignHistoryEntry) => this.recordDesignHistory(workspacePath, entry, humanActor.id),
+      } : this.designRouteHost;
+      return handleDesignWorkspaceRoute(host, op, params, {
+        remote: designRemote,
         hostLocalResources,
+        ...(humanActor ? { actor: humanActor, primaryRepositoryRoot: this.root } : {}),
       });
     }
     switch (op) {
       case "design.status": {
-        const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), remote);
+        const workspace = this.resolveDesignWorkspaceRecord(reqStr(params, "workspaceId"), designRemote);
         return readDesignCheckoutStatus(workspace.path);
       }
       case "design.initialize": {
         const workspace = this.resolveDesignWorkspaceRecord(
-          reqStr(params, "workspaceId"), remote,
+          reqStr(params, "workspaceId"), designRemote,
         );
         await assertDesignCheckoutReadable(workspace.path);
         return withDesignWorkspaceMutation(workspace.path, () =>
           initializeWorkspaceDesign(workspace, async () => ({
-            snapshot: await this.readDesignSnapshot(workspace, remote, {
+            snapshot: await this.readDesignSnapshot(workspace, designRemote, {
               hostLocalResources,
             }),
           })),
@@ -3674,6 +3717,7 @@ export class WorkspaceService {
       case "chats.upsert": {
         const c = coerceChatRow(params.chat);
         if (c) {
+          if (opts.cloudWorker && wasChatDeleted(c.id)) throw new Error("Cloud conversation was deleted");
           upsertChat(
             remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
           );
@@ -3684,9 +3728,15 @@ export class WorkspaceService {
         const mode = reqStr(params, "mode");
         if (mode !== "code" && mode !== "design")
           throw new Error("Composer mode must be code or design.");
+        const expectedRevision = params.expectedRevision;
+        if (expectedRevision !== undefined &&
+          (typeof expectedRevision !== "number" || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0))
+          throw new Error("Composer mode revision must be a nonnegative safe integer.");
         const chatId = reqStr(params, "chatId");
         let chat = getChat(chatId);
         if (!chat && !wasChatDeleted(chatId)) {
+          if (expectedRevision !== undefined && expectedRevision !== 0)
+            throw new Error("Composer mode changed. Reload the conversation.");
           const initial = coerceChatRow(params.initialChat);
           if (initial?.id === chatId && initial.folder === reqStr(params, "folder") && !initial.archived && initial.kind !== "terminal") {
             upsertChat(remote ? preserveHostOnlyFields(initial) : preserveProviderIdentity(initial));
@@ -3695,7 +3745,7 @@ export class WorkspaceService {
         }
         if (!chat || chat.folder !== reqStr(params, "folder"))
           throw new Error("The conversation workspace changed.");
-        return setChatComposerMode(chatId, mode);
+        return setChatComposerMode(chatId, mode, expectedRevision as number | undefined);
       }
       case "chats.delete": {
         const id = reqStr(params, "id");
@@ -3729,6 +3779,7 @@ export class WorkspaceService {
           .map((c) =>
             remote ? preserveHostOnlyFields(c) : preserveProviderIdentity(c),
           );
+        if (opts.cloudWorker && rows.some(c => wasChatDeleted(c.id))) throw new Error("Cloud conversation was deleted");
         bulkUpsertChats(rows);
         return { ok: true };
       }

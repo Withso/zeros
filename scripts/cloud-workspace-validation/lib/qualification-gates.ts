@@ -1,6 +1,7 @@
 /** Pure fail-closed gates shared by the paid/provider qualification commands.
  * Keeping verdict logic here makes it unit-testable without creating or
  * deleting a real sandbox. */
+import {CLOUD_CORE_EXECUTION_PROFILE,CLOUD_CORE_PROVIDER_RESTRICTIONS,type CloudCoreProvider} from "../../../packages/protocol/src/containment";
 
 export function assertCommandExitCode(
   label: string,
@@ -124,6 +125,135 @@ export function parseRequiredCloudAgents(raw: string | undefined): string[] {
   return agents;
 }
 
+export type CloudAgentSelection = {
+  agentId: string;
+  model: string;
+  env: Record<string, string>;
+  agentCredentialGrantId?: string;
+};
+
+/** A successful response on a substituted model is not a successful paid
+ * qualification. Claude may resolve an undated model ID to its dated version. */
+export function assertCloudAgentModel(
+  selection: CloudAgentSelection,
+  response: Record<string, unknown> | null,
+): void {
+  const matches = (model: unknown) =>
+    typeof model === "string" &&
+    (model === selection.model ||
+      (selection.agentId === "claude" &&
+        model.startsWith(`${selection.model}-`) &&
+        /^\d{8}$/.test(model.slice(selection.model.length + 1))));
+  if (!matches(response?.effectiveModel))
+    throw new Error(`${selection.agentId} did not confirm the selected model`);
+  const usage = response?.usage;
+  if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+    const perModel = (usage as Record<string, unknown>).perModel;
+    if (
+      perModel !== undefined &&
+      (!Array.isArray(perModel) ||
+        perModel.some(
+          (entry) =>
+            !entry || typeof entry !== "object" || !matches(entry.model),
+        ))
+    ) {
+      throw new Error(
+        `${selection.agentId} reported usage outside the selected model`,
+      );
+    }
+  }
+}
+
+/** No account/model defaults in paid qualification. This data contains only
+ * public selection controls; credentials remain in the trusted projection. */
+export function parseCloudAgentSelections(
+  agents: readonly string[],
+  raw: string | undefined,
+): CloudAgentSelection[] {
+  const invalid = () =>
+    new Error(
+      "Cloud agent selection is invalid or missing (ZEROS_CLOUD_AGENT_SELECTIONS)",
+    );
+  if (!raw || raw.length > 4096 || agents.length < 1) throw invalid();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw invalid();
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    throw invalid();
+  const plans = parsed as Record<string, unknown>;
+  const variables: Readonly<Record<string, string>> = {
+    claude: "ANTHROPIC_MODEL",
+    codex: "OPENAI_MODEL",
+    cursor: "CURSOR_MODEL",
+  };
+  if (Object.keys(plans).some((key) => !agents.includes(key))) throw invalid();
+  return agents.map((agentId) => {
+    const plan = plans[agentId];
+    if (
+      !Object.hasOwn(variables, agentId) ||
+      !plan ||
+      typeof plan !== "object" ||
+      Array.isArray(plan)
+    )
+      throw invalid();
+    const value = plan as Record<string, unknown>;
+    if (
+      Object.keys(value).some(
+        (key) =>
+          !["model", "effort", "fast", "agentCredentialGrantId"].includes(key),
+      ) ||
+      typeof value.model !== "string" ||
+      !/^[a-zA-Z0-9][a-zA-Z0-9._/[\]-]{0,255}$/.test(value.model) ||
+      /^(auto|default)$/i.test(value.model) ||
+      (value.fast !== undefined && typeof value.fast !== "boolean") ||
+      (value.agentCredentialGrantId !== undefined &&
+        (typeof value.agentCredentialGrantId !== "string" ||
+          !/^[a-f\d]{8}-[a-f\d]{4}-[1-8][a-f\d]{3}-[89ab][a-f\d]{3}-[a-f\d]{12}$/iu.test(
+            value.agentCredentialGrantId,
+          )))
+    )
+      throw invalid();
+    if (
+      (agentId !== "claude" && value.effort === undefined) ||
+      (value.effort !== undefined &&
+        (typeof value.effort !== "string" ||
+          ![
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra",
+          ].includes(value.effort)))
+    )
+      throw new Error(
+        "Cloud agent selection requires a supported explicit effort",
+      );
+    return {
+      agentId,
+      model: value.model,
+      ...(typeof value.agentCredentialGrantId === "string"
+        ? { agentCredentialGrantId: value.agentCredentialGrantId }
+        : {}),
+      env: {
+        [variables[agentId]]: value.model,
+        ...(agentId === "claude"
+          ? { CLAUDE_CODE_SUBAGENT_MODEL: value.model }
+          : {}),
+        ...(typeof value.effort === "string"
+          ? { ZEROS_THINKING_EFFORT: value.effort }
+          : {}),
+        ZEROS_REQUIRE_EXACT_MODEL: "1",
+        ZEROS_FAST_MODE: value.fast === true ? "1" : "0",
+      },
+    };
+  });
+}
+
 export function assertFullCloudBoundary(agentId: string, raw: unknown): void {
   const boundary =
     raw && typeof raw === "object" && !Array.isArray(raw)
@@ -160,6 +290,27 @@ export function assertFullCloudBoundary(agentId: string, raw: unknown): void {
   }
 }
 
+/** Checks the installed core contract only. Live tool effects, Design behavior,
+ * image identity and credential qualification remain independent requirements.
+ * Never use this as a fallback when the full-native gate fails. */
+export function assertCloudCoreBoundary(agentId: string, raw: unknown): void {
+  const record = (value:unknown):Record<string,unknown>|null => value&&typeof value==="object"&&!Array.isArray(value)?value as Record<string,unknown>:null;
+  const boundary = record(raw),profile=record(boundary?.cloudExecution),design=record(boundary?.designProtection),parity=record(boundary?.parity);
+  const expected = Object.hasOwn(CLOUD_CORE_PROVIDER_RESTRICTIONS, agentId)
+    ? CLOUD_CORE_PROVIDER_RESTRICTIONS[agentId as CloudCoreProvider] : null;
+  const restrictions = parity?.restrictions;
+  if (!expected || boundary?.version !== 1 || boundary.actor !== "agent-code" || boundary.state !== "ready" ||
+      boundary.backend !== "cloud-worker" || design?.required !== true ||
+      design.enforced !== true || !Number.isSafeInteger(design.protectedDirectoryCount) ||
+      Number(design.protectedDirectoryCount) < 1 || parity?.level !== "restricted" ||
+      !Array.isArray(restrictions) || restrictions.length !== expected.length ||
+      restrictions.some((value: unknown, index: number) => value !== expected[index]) ||
+      profile?.version !== 1 || profile.profile !== CLOUD_CORE_EXECUTION_PROFILE ||
+      profile.runtimeProfile !== "zeros-cloud-worker-v3" || profile.provider !== agentId || profile.designApi !== "admitted") {
+    throw new Error(`${agentId} did not receive the declared cloud core and admitted Design API contract`);
+  }
+}
+
 export function assertLiveAgentChallengeResponse(
   agentId: string,
   responseText: string,
@@ -178,13 +329,9 @@ export function validateEphemeralSnapshotName(name: string): void {
   }
 }
 
-export function validateDeletableQualificationSnapshotName(
-  name: string,
-): void {
+export function validateDeletableQualificationSnapshotName(name: string): void {
   if (
-    !/^zeros-zsr-(?:ci|candidate)-[1-9][0-9]{0,19}-[1-9][0-9]{0,9}$/.test(
-      name,
-    )
+    !/^zeros-zsr-(?:ci|candidate)-[1-9][0-9]{0,19}-[1-9][0-9]{0,9}$/.test(name)
   ) {
     throw new Error(
       "automated snapshot deletion requires a run-scoped zeros-zsr-ci or zeros-zsr-candidate name",

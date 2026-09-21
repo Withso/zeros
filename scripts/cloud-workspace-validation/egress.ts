@@ -28,7 +28,7 @@ async function main() {
     `\n  Running egress-probe.sh in sandbox ${state.sandboxId} (region ${state.region})…`,
   );
   const res = await sandbox.process.executeCommand(
-    "bash /usr/local/bin/egress-probe.sh",
+    "bash /opt/zeros-runtime/bin/egress-probe.sh",
     undefined,
     undefined,
     120,

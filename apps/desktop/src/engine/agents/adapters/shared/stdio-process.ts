@@ -129,11 +129,12 @@ export function spawnStdioAgent(
     // process.kill on Windows goes through the job object equivalent.
     detached: true,
   };
-  const child = spawn(
+  let child:ReturnType<typeof spawn>;
+  try{child = spawn(
     launch?.command ?? opts.command,
     launch?.args ?? opts.args,
     spawnOpts,
-  );
+  );}catch(error){if(launch)opts.executionBoundary?.cancelUnstartedLaunch?.(launch);throw error;}
 
   // On POSIX, child.pid IS the new process-group id (because the child
   // is the group leader). On Windows there is no group id, just a pid.
@@ -171,8 +172,9 @@ export function spawnStdioAgent(
   // Registration may reject a pid-less child synchronously. Keep the Node
   // error event owned before crossing that boundary so the asynchronous
   // ENOENT/EACCES that explains the missing pid can never become process-fatal.
-  const boundaryProcess: BoundaryProcess | undefined =
-    opts.executionBoundary?.trackProcess(child);
+  if(!child.pid&&launch)opts.executionBoundary?.cancelUnstartedLaunch?.(launch);
+  const boundaryProcess: BoundaryProcess | undefined = child.pid?
+    opts.executionBoundary?.trackProcess(child):undefined;
 
   let stopPromise: Promise<void> | null = null;
   const stop = (

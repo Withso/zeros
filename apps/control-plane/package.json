@@ -12,7 +12,9 @@
   "scripts": {
     "auth:probe": "tsx src/auth-contract-probe.ts",
     "cloud-entitlement:manage": "tsx src/manage-cloud-workspace-entitlement.ts",
+    "account-pro:manage": "tsx src/manage-account-pro.ts",
     "cloud-quota:manage": "tsx src/manage-cloud-workspace-quota.ts",
+    "cloud-compute:grant": "tsx src/manage-cloud-compute-credit.ts",
     "cloud-object-storage:manage": "tsx src/manage-cloud-workspace-object-storage.ts",
     "cloud-object-rotation:retry": "tsx src/manage-cloud-workspace-object-rotation.ts",
     "workos-erasure:manage": "tsx src/manage-workos-provider-erasure.ts",
@@ -25,21 +27,27 @@
     "audit:prod": "pnpm audit --prod --audit-level=high",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "cloud-runtime:manage": "tsx src/manage-cloud-agent-runtime.ts"
   },
   "dependencies": {
-    "@daytona/api-client": "0.190.1",
-    "@daytona/toolbox-api-client": "0.190.1",
+    "@aws-sdk/client-s3": "3.1136.0",
+    "@aws-sdk/s3-request-presigner": "3.1136.0",
+    "@daytona/api-client": "0.214.0",
+    "@daytona/toolbox-api-client": "0.214.0",
     "@hono/node-server": "^2.1.0",
+    "@openai/codex": "0.154.0",
     "@workos-inc/node": "10.12.0",
     "hono": "^4.13.7",
     "jose": "^6.0.0",
     "pg": "^8.16.0",
+    "ws": "8.21.2",
     "zod": "^3.24.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
     "@types/pg": "^8.11.0",
+    "@types/ws": "8.18.1",
     "@workos/emulate": "0.9.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",

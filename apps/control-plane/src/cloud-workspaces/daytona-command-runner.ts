@@ -304,8 +304,8 @@ class GeneratedDaytonaCommandClient implements DaytonaCommandClientLike {
       baseOptions: {
         headers: {
           "X-Daytona-Source": "zeros-control-plane",
-          "X-Daytona-SDK-Version": "0.190.1",
-          "User-Agent": "zeros-control-plane/daytona-command-client-0.190.1",
+          "X-Daytona-SDK-Version": "0.214.0",
+          "User-Agent": "zeros-control-plane/daytona-command-client-0.214.0",
         },
       },
     });
@@ -336,8 +336,8 @@ class GeneratedDaytonaCommandClient implements DaytonaCommandClientLike {
         baseOptions: {
           headers: {
             "X-Daytona-Source": "zeros-control-plane",
-            "X-Daytona-SDK-Version": "0.190.1",
-            "User-Agent": "zeros-control-plane/daytona-command-client-0.190.1",
+            "X-Daytona-SDK-Version": "0.214.0",
+            "User-Agent": "zeros-control-plane/daytona-command-client-0.214.0",
           },
         },
       }),

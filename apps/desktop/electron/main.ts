@@ -1,3 +1,4 @@
+import { handleSharedCloudAccessSessionChange } from "./cloud-workspace-access-runtime";
 import { startElectronDesignCapture } from "./design-capture";
 import { setDesignCaptureEnvironment } from "./sidecar";
 import type { DesignCaptureService } from "../src/engine/design/capture-service";
@@ -1623,7 +1624,7 @@ app.whenReady().then(async () => {
         void pushProviderCredentialsToEngine().catch(() => {});
       }
       if (changedAccounts.includes("auth-session:tokens")) {
-        emitEvent("auth-store-changed", {});
+        handleSharedCloudAccessSessionChange(() => emitEvent("auth-store-changed", {}));
         void pushCloudReplicaSessionToEngine();
         void pushGithubCredentialToEngine();
         void scheduleGithubAppRefresh();

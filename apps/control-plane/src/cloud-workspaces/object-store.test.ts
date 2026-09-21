@@ -122,6 +122,18 @@ describe("encrypted workspace object storage", () => {
     await expect(store.get(fileObjectKey)).resolves.toBeNull();
   });
 
+  it("enforces the caller's exact read budget for memory and filesystem objects", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-objects-"));
+    temporaryDirectories.push(root);
+    for (const store of [new MemoryCloudWorkspaceObjectStore(), new FileCloudWorkspaceObjectStore(root)]) {
+      await store.putIfAbsent(fileObjectKey, Buffer.from("three"));
+      await expect(store.get(fileObjectKey, { expectedBytes: 1 })).rejects.toThrow(/length/i);
+      await expect(store.get(fileObjectKey, { expectedBytes: 6 })).rejects.toThrow(/length/i);
+      expect(Buffer.from((await store.get(fileObjectKey, { expectedBytes: 5 }))!)).toEqual(Buffer.from("three"));
+      await expect(store.get(fileObjectKey, { signal: AbortSignal.abort() })).rejects.toThrow();
+    }
+  });
+
   it("does not follow a directory symlink outside the configured object root", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-objects-"));
     const outside = await mkdtemp(

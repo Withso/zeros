@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync } from "node:fs";
 import path from "node:path";
+import { gitProcessOptions } from "../git/git-execution-identity";
 
 const START = "# Zeros Design metadata (managed by Zeros)";
 const END = "# End Zeros Design metadata";
@@ -96,7 +97,7 @@ export function assertDesignFilesNotIgnored(
   try {
     ignored = execFileSync(
       "git",
-      ["check-ignore", "--no-index", "-z", "--stdin"],
+      ["-c", "core.fsmonitor=false", "check-ignore", "--no-index", "-z", "--stdin"],
       {
         cwd: workspace,
         input: files.join("\0") + "\0",
@@ -104,6 +105,7 @@ export function assertDesignFilesNotIgnored(
         stdio: ["pipe", "pipe", "pipe"],
         timeout: 10_000,
         maxBuffer: 1024 * 1024,
+        ...gitProcessOptions(),
       },
     );
   } catch (error) {

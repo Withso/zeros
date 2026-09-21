@@ -7,7 +7,7 @@ import {
   type CloudWorkspaceEntitlementSnapshot,
 } from "./manage-cloud-workspace-entitlement.js";
 
-const databaseUrl = "postgres://db.example.test:5432/zeros_alpha";
+const databaseUrl = "postgres://operator@db.example.test:5432/zeros_alpha";
 const organizationId = "00000000-0000-4000-8000-000000000001";
 const actorUserId = "00000000-0000-4000-8000-000000000002";
 const ownerUserId = "00000000-0000-4000-8000-000000000003";
@@ -91,7 +91,7 @@ describe("cloud-workspace Organization entitlement owner command", () => {
     expect(
       cloudWorkspaceEntitlementApprovalText(
         request({
-          databaseUrl: "postgres://other.example.test:5432/zeros_alpha",
+          databaseUrl: "postgres://operator@other.example.test:5432/zeros_alpha",
         }),
         null,
       ),

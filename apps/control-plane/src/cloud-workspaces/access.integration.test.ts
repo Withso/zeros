@@ -10,7 +10,8 @@ import {
 } from "vitest";
 import pg from "pg";
 
-import { ensureUser, type AuthedUser } from "../auth.js";
+import type { AuthedUser } from "../auth.js";
+import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import type {
@@ -69,6 +70,51 @@ function fakeAccessProvider() {
 }
 
 describe("cloud preview endpoint cache", () => {
+  it("keeps caller-bound runtime preview capabilities out of another grant's cache entry", async () => {
+    const { provider } = fakeAccessProvider();
+    vi.mocked(provider.getPreviewEndpoint).mockImplementation(
+      async (_resource, _port, access) => ({
+        url: "https://workspace-39393.on.boat.dev/",
+        headerName: "x-zeros-runtime-access",
+        headerValue: access!.credential,
+      }),
+    );
+    const service = new DatabaseCloudWorkspaceAccessService({
+      pool: {} as pg.Pool,
+      provider,
+    });
+    const cache = service as unknown as {
+      cachedPreviewEndpoint(
+        ...args: unknown[]
+      ): Promise<CloudProviderPreviewEndpoint>;
+    };
+    const identity = [
+      randomUUID(),
+      randomUUID(),
+      1,
+      "sandbox-1",
+      3000,
+      "binding-v1",
+    ];
+    const first = {
+      grantId: randomUUID(),
+      credential: `zwp_${"A".repeat(43)}`,
+    };
+    const second = {
+      grantId: randomUUID(),
+      credential: `zwp_${"B".repeat(43)}`,
+    };
+    const results = await Promise.all([
+      cache.cachedPreviewEndpoint(...identity, first),
+      cache.cachedPreviewEndpoint(...identity, second),
+    ]);
+    expect(results.map((entry) => entry.headerValue)).toEqual([
+      first.credential,
+      second.credential,
+    ]);
+    expect(provider.getPreviewEndpoint).toHaveBeenCalledTimes(2);
+  });
+
   it("coalesces concurrent exact-key provider lookups", async () => {
     const { provider } = fakeAccessProvider();
     let release!: () => void;
@@ -740,121 +786,133 @@ d("cloud workspace client access", () => {
     expect(provider.getPreviewEndpoint).not.toHaveBeenCalled();
   });
 
-  it("proxies preview HTTP with a Zeros verifier and keeps Daytona's token server-side", async () => {
-    const { provider } = fakeAccessProvider();
-    const upstream = vi.fn(
-      async (_input: string | URL | Request, init?: RequestInit) => {
-        expect(new Headers(init?.headers).get("x-daytona-preview-token")).toBe(
-          "preview-token-abcdefghijklmnopqrstuvwxyz",
-        );
-        return new Response("preview-ok", {
-          status: 200,
-          headers: { "content-type": "text/plain" },
-        });
-      },
-    );
-    const service = new DatabaseCloudWorkspaceAccessService({
-      pool,
-      provider,
-      previewBaseDomain: "cloud-preview.example.test",
-      fetcher: upstream,
-    });
-    const issued = await service.issue({
-      organizationId: orgId,
-      workspaceId,
-      accountUserId: actor.id,
-      kind: "preview",
-      remotePort: 3_000,
-      expiresInMinutes: 15,
-      idempotencyKey: randomUUID(),
-    });
-    expect(issued).toMatchObject({
-      grant: { kind: "preview", remotePort: 3_000 },
-      preview: {
-        logicalUrl: "http://localhost:3000/",
-        headerName: "x-zeros-preview-capability",
-      },
-    });
-    expect(issued.preview?.origin).toMatch(
-      /^https:\/\/[a-f0-9]{32}\.cloud-preview\.example\.test$/,
-    );
-    expect(
-      service.recognizesPreviewRequest(
-        new Request(`${issued.preview!.origin}/app`),
-      ),
-    ).toBe(true);
-    expect(
-      service.recognizesPreviewRequest(
-        new Request(`${issued.preview!.origin}.evil.test/app`),
-      ),
-    ).toBe(false);
-
-    const websocket = await service.handlePreviewRequest(
-      new Request(`${issued.preview!.origin}/socket`, {
-        headers: { upgrade: "websocket" },
-      }),
-    );
-    expect(websocket?.status).toBe(426);
-    expect(upstream).not.toHaveBeenCalled();
-
-    const [proxied, concurrent] = await Promise.all([
-      service.handlePreviewRequest(
-        new Request(`${issued.preview!.origin}/nested?q=1`, {
-          headers: {
-            "x-zeros-preview-capability": issued.preview!.capability,
-          },
+  it.each(["x-daytona-preview-token", "x-zeros-runtime-preview"] as const)(
+    "proxies private preview HTTP with %s while retaining provider tokens server-side",
+    async (headerName) => {
+      const { provider } = fakeAccessProvider();
+      const originalEndpoint = vi
+        .mocked(provider.getPreviewEndpoint)
+        .getMockImplementation()!;
+      vi.mocked(provider.getPreviewEndpoint).mockImplementation(
+        async (...args) => ({
+          ...(await originalEndpoint(...args)),
+          headerName,
         }),
-      ),
-      service.handlePreviewRequest(
-        new Request(`${issued.preview!.origin}/asset.js`, {
-          headers: {
-            "x-zeros-preview-capability": issued.preview!.capability,
-          },
-        }),
-      ),
-    ]);
-    expect(proxied).not.toBeNull();
-    expect(concurrent).not.toBeNull();
-    await expect(proxied!.text()).resolves.toBe("preview-ok");
-    await expect(concurrent!.text()).resolves.toBe("preview-ok");
-    // One qualification lookup during issuance plus one shared proxy refresh.
-    expect(provider.getPreviewEndpoint).toHaveBeenCalledTimes(2);
-    expect(upstream).toHaveBeenCalledWith(
-      `https://3000-${providerResourceId}.proxy.daytona.work/nested?q=1`,
-      expect.objectContaining({ redirect: "manual" }),
-    );
-    const stored = await withSystemTx(pool, (tx) =>
-      tx.query(
-        `SELECT token_hash = $2 AS token_matches
-         FROM cloud_workspace_client_access_grants WHERE id = $1`,
-        [
-          issued.grant.id,
-          createHash("sha256").update(issued.preview!.capability).digest(),
-        ],
-      ),
-    );
-    expect(stored.rows[0]).toEqual({ token_matches: true });
-    expect(JSON.stringify(stored.rows[0])).not.toContain(
-      issued.preview!.capability,
-    );
-
-    await service.revoke({
-      organizationId: orgId,
-      workspaceId,
-      accountUserId: actor.id,
-      grantId: issued.grant.id,
-      credential: issued.preview!.capability,
-    });
-    expect(provider.revokeSshAccess).not.toHaveBeenCalled();
-    const denied = await service.handlePreviewRequest(
-      new Request(`${issued.preview!.origin}/nested`, {
-        headers: {
-          "x-zeros-preview-capability": issued.preview!.capability,
+      );
+      const upstream = vi.fn(
+        async (_input: string | URL | Request, init?: RequestInit) => {
+          expect(new Headers(init?.headers).get(headerName)).toBe(
+            "preview-token-abcdefghijklmnopqrstuvwxyz",
+          );
+          return new Response("preview-ok", {
+            status: 200,
+            headers: { "content-type": "text/plain" },
+          });
         },
-      }),
-    );
-    expect(denied?.status).toBe(401);
-  });
+      );
+      const service = new DatabaseCloudWorkspaceAccessService({
+        pool,
+        provider,
+        previewBaseDomain: "cloud-preview.example.test",
+        fetcher: upstream,
+      });
+      const issued = await service.issue({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        kind: "preview",
+        remotePort: 3_000,
+        expiresInMinutes: 15,
+        idempotencyKey: randomUUID(),
+      });
+      expect(issued).toMatchObject({
+        grant: { kind: "preview", remotePort: 3_000 },
+        preview: {
+          logicalUrl: "http://localhost:3000/",
+          headerName: "x-zeros-preview-capability",
+        },
+      });
+      expect(issued.preview?.origin).toMatch(
+        /^https:\/\/[a-f0-9]{32}\.cloud-preview\.example\.test$/,
+      );
+      expect(
+        service.recognizesPreviewRequest(
+          new Request(`${issued.preview!.origin}/app`),
+        ),
+      ).toBe(true);
+      expect(
+        service.recognizesPreviewRequest(
+          new Request(`${issued.preview!.origin}.evil.test/app`),
+        ),
+      ).toBe(false);
+
+      const websocket = await service.handlePreviewRequest(
+        new Request(`${issued.preview!.origin}/socket`, {
+          headers: { upgrade: "websocket" },
+        }),
+      );
+      expect(websocket?.status).toBe(426);
+      expect(upstream).not.toHaveBeenCalled();
+
+      const [proxied, concurrent] = await Promise.all([
+        service.handlePreviewRequest(
+          new Request(`${issued.preview!.origin}/nested?q=1`, {
+            headers: {
+              "x-zeros-preview-capability": issued.preview!.capability,
+            },
+          }),
+        ),
+        service.handlePreviewRequest(
+          new Request(`${issued.preview!.origin}/asset.js`, {
+            headers: {
+              "x-zeros-preview-capability": issued.preview!.capability,
+            },
+          }),
+        ),
+      ]);
+      expect(proxied).not.toBeNull();
+      expect(concurrent).not.toBeNull();
+      await expect(proxied!.text()).resolves.toBe("preview-ok");
+      await expect(concurrent!.text()).resolves.toBe("preview-ok");
+      // One qualification lookup during issuance plus one shared proxy refresh.
+      expect(provider.getPreviewEndpoint).toHaveBeenCalledTimes(2);
+      expect(upstream).toHaveBeenCalledWith(
+        `https://3000-${providerResourceId}.proxy.daytona.work/nested?q=1`,
+        expect.objectContaining({ redirect: "manual" }),
+      );
+      const stored = await withSystemTx(pool, (tx) =>
+        tx.query(
+          `SELECT token_hash = $2 AS token_matches
+         FROM cloud_workspace_client_access_grants WHERE id = $1`,
+          [
+            issued.grant.id,
+            createHash("sha256").update(issued.preview!.capability).digest(),
+          ],
+        ),
+      );
+      expect(stored.rows[0]).toEqual({ token_matches: true });
+      expect(JSON.stringify(stored.rows[0])).not.toContain(
+        issued.preview!.capability,
+      );
+
+      await service.revoke({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        grantId: issued.grant.id,
+        credential: issued.preview!.capability,
+      });
+      expect(provider.revokeSshAccess).not.toHaveBeenCalled();
+      const denied = await service.handlePreviewRequest(
+        new Request(`${issued.preview!.origin}/nested`, {
+          headers: {
+            "x-zeros-preview-capability": issued.preview!.capability,
+          },
+        }),
+      );
+      expect(denied?.status).toBe(401);
+    },
+  );
 
   it("stops an already-issued preview when paid account authority is suspended", async () => {
     const { provider } = fakeAccessProvider();
@@ -947,6 +1005,70 @@ d("cloud workspace client access", () => {
     expect(retried?.status).toBe(200);
     await retried?.body?.cancel();
   });
+
+  it("authorizes preview WebSocket destinations and rechecks live authority before renewal", async () => {
+    const { provider } = fakeAccessProvider();
+    const service = new DatabaseCloudWorkspaceAccessService({ pool, provider, previewBaseDomain: "cloud-preview.example.test" });
+    const issued = await service.issue({ organizationId: orgId, workspaceId, accountUserId: actor.id,
+      kind: "preview", remotePort: 3000, expiresInMinutes: 15, idempotencyKey: randomUUID() });
+    const request = new Request(`${issued.preview!.origin}/hmr?q=1`, { headers: {
+      "x-zeros-preview-capability": issued.preview!.capability,
+      "x-zeros-cloud-token": "must-not-forward", authorization: "Bearer application-login",
+    } });
+    await expect(service.resolvePreviewWebSocket(new Request(request.url))).resolves.toBeNull();
+    const resolved = await service.resolvePreviewWebSocket(request);
+    expect(resolved).toMatchObject({ grantId: issued.grant.id, workspaceId, generation: 1, remotePort: 3000 });
+    expect(resolved!.headers.authorization).toBe("Bearer application-login");
+    expect(resolved!.headers["x-zeros-cloud-token"]).toBeUndefined();
+    expect(resolved!.headers["x-zeros-preview-capability"]).toBeUndefined();
+    expect(resolved!.expiresAtMs).toBeLessThanOrEqual(Date.now() + 10_000);
+    expect(await service.revalidatePreviewWebSocket(request, resolved!)).toBeGreaterThan(Date.now());
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked', revoked_at=now() WHERE id=$1`, [issued.grant.id]));
+    await expect(service.revalidatePreviewWebSocket(request, resolved!)).resolves.toBeNull();
+    resolved!.release(); resolved!.release();
+  });
+
+  it("does not admit a preview socket revoked during its provider lookup", async () => {
+    const { provider } = fakeAccessProvider();
+    const service = new DatabaseCloudWorkspaceAccessService({ pool, provider, previewBaseDomain: "cloud-preview.example.test" });
+    const issued = await service.issue({ organizationId: orgId, workspaceId, accountUserId: actor.id,
+      kind: "preview", remotePort: 3000, expiresInMinutes: 15, idempotencyKey: randomUUID() });
+    let finish!: (endpoint: CloudProviderPreviewEndpoint) => void;
+    vi.mocked(provider.getPreviewEndpoint).mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
+    const request = new Request(`${issued.preview!.origin}/hmr`, { headers: { "x-zeros-preview-capability": issued.preview!.capability } });
+    const resolving = service.resolvePreviewWebSocket(request);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await withSystemTx(pool, tx => tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked', revoked_at=now() WHERE id=$1`, [issued.grant.id]));
+    finish({ url: "https://3000-workspace.proxy.daytona.work/", headerName: "x-daytona-preview-token", headerValue: "preview-token-fixture" });
+    await expect(resolving).resolves.toBeNull();
+  });
+
+  it("does not dispatch a preview POST revoked during provider lookup", async () => {
+    const {provider}=fakeAccessProvider(),upstream=vi.fn(async()=>new Response("must-not-run"));
+    const service=new DatabaseCloudWorkspaceAccessService({pool,provider,previewBaseDomain:"cloud-preview.example.test",fetcher:upstream});
+    const issued=await service.issue({organizationId:orgId,workspaceId,accountUserId:actor.id,kind:"preview",remotePort:3000,expiresInMinutes:15,idempotencyKey:randomUUID()});
+    let finish!:(endpoint:CloudProviderPreviewEndpoint)=>void;
+    vi.mocked(provider.getPreviewEndpoint).mockImplementationOnce(()=>new Promise(resolve=>{finish=resolve;}));
+    const pending=service.handlePreviewRequest(new Request(`${issued.preview!.origin}/mutate`,{method:"POST",body:"side-effect",headers:{"x-zeros-preview-capability":issued.preview!.capability}}));
+    await vi.waitFor(()=>expect(finish).toBeTypeOf("function"));
+    await withSystemTx(pool,tx=>tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked',revoked_at=now() WHERE id=$1`,[issued.grant.id]));
+    finish({url:"https://3000-workspace.proxy.daytona.work/",headerName:"x-daytona-preview-token",headerValue:"preview-token-fixture"});
+    expect((await pending)?.status).toBe(401);expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("cancels an open direct-provider response after its authority is revoked", async () => {
+    const {provider}=fakeAccessProvider(),cancel=vi.fn();let upstreamSignal:AbortSignal|null|undefined;
+    const upstream=vi.fn(async(_url:unknown,init?:RequestInit)=>{
+      upstreamSignal=init?.signal;
+      return new Response(new ReadableStream<Uint8Array>({start(controller){controller.enqueue(new TextEncoder().encode("first"));},cancel}));
+    });
+    const service=new DatabaseCloudWorkspaceAccessService({pool,provider,previewBaseDomain:"cloud-preview.example.test",fetcher:upstream});
+    const issued=await service.issue({organizationId:orgId,workspaceId,accountUserId:actor.id,kind:"preview",remotePort:3000,expiresInMinutes:15,idempotencyKey:randomUUID()});
+    const response=await service.handlePreviewRequest(new Request(`${issued.preview!.origin}/stream`,{headers:{"x-zeros-preview-capability":issued.preview!.capability}}));
+    const reader=response!.body!.getReader();expect(new TextDecoder().decode((await reader.read()).value)).toBe("first");
+    await withSystemTx(pool,tx=>tx.query(`UPDATE cloud_workspace_client_access_grants SET state='revoked',revoked_at=now() WHERE id=$1`,[issued.grant.id]));
+    await expect(reader.read()).rejects.toThrow(/authority expired/);expect(upstreamSignal?.aborted).toBe(true);expect(cancel).toHaveBeenCalledOnce();
+  },15_000);
 
   it("forwards preview mutation bodies byte-for-byte", async () => {
     const { provider } = fakeAccessProvider();
@@ -1310,7 +1432,8 @@ d("cloud workspace client access", () => {
     vi.mocked(provider.createSshAccess).mockImplementation(
       async (_resourceId, expiresInMinutes) => {
         await providerGate;
-        const credential = "ssh-token-membership-race-abcdefghijklmnopqrstuvwxyz";
+        const credential =
+          "ssh-token-membership-race-abcdefghijklmnopqrstuvwxyz";
         return {
           providerAccessId: randomUUID(),
           credential,
@@ -1455,10 +1578,11 @@ d("cloud workspace client access", () => {
         );
         await vi.waitFor(
           async () => {
-            const waiting = await pool.query<{ wait_event_type: string | null }>(
-              `SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`,
-              [backend.rows[0]!.pid],
-            );
+            const waiting = await pool.query<{
+              wait_event_type: string | null;
+            }>(`SELECT wait_event_type FROM pg_stat_activity WHERE pid = $1`, [
+              backend.rows[0]!.pid,
+            ]);
             expect(waiting.rows[0]?.wait_event_type).toBe("Lock");
           },
           { timeout: 2_000, interval: 20 },
@@ -1542,7 +1666,7 @@ d("cloud workspace client access", () => {
                   target.query as (...queryArgs: unknown[]) => Promise<unknown>
                 ).apply(target, args);
                 const sql = typeof args[0] === "string" ? args[0] : "";
-                if (sql === "BEGIN") {
+                if (/^BEGIN(?:;|$)/.test(sql)) {
                   await target.query("SET LOCAL statement_timeout = '750ms'");
                 }
                 if (

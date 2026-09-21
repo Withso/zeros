@@ -23,10 +23,73 @@ import path from "node:path";
 import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
-import { authorizeCloudWorkspaceOperation } from "./authorization.js";
+import { authorizeCloudWorkspaceOperation, lockCloudWorkspaceScope } from "./authorization.js";
 import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 
+type WorkspaceObjectDescriptor = {
+  object_key: string; encryption_key_version: number; nonce: Buffer; auth_tag: Buffer;
+  plaintext_sha256: Buffer; ciphertext_sha256: Buffer; plaintext_bytes: string | number;
+};
+
 const MAX_INLINE_BLOB_BYTES = 64 * 1024 * 1024;
+export const MAX_WORKSPACE_BLOB_BATCH_ENTRIES = 64;
+export const MAX_WORKSPACE_BLOB_BATCH_BYTES = 4 * 1024 * 1024;
+// Small immutable objects are network-latency bound. Independent I/O can fan
+// out without increasing the active/queued byte budgets or retaining more
+// batches. A single batch cannot occupy all permits. Multiple batches share
+// bounded FIFO admission; overload is rejected, not a per-workspace guarantee.
+const MAX_CONCURRENT_OBJECT_IO = 32;
+const MAX_BATCH_OBJECT_IO = 16;
+let activeBlobBatches = 0;
+let activeObjectIo = 0, activeObjectBytes = 0, queuedObjectBytes = 0;
+const objectIoWaiters: Array<{ size: number; admit: () => void }> = [];
+function drainObjectIo(): void {
+  while (objectIoWaiters.length && activeObjectIo < MAX_CONCURRENT_OBJECT_IO && activeObjectBytes + objectIoWaiters[0]!.size <= MAX_INLINE_BLOB_BYTES) {
+    const next = objectIoWaiters.shift()!;
+    queuedObjectBytes -= next.size; activeObjectIo += 1; activeObjectBytes += next.size;
+    next.admit();
+  }
+}
+async function withWorkspaceObjectIo<T>(signal: AbortSignal, byteLength: number, action: () => Promise<T>): Promise<T> {
+  signal.throwIfAborted();
+  const size = Math.max(1, byteLength);
+  if (!objectIoWaiters.length && activeObjectIo < MAX_CONCURRENT_OBJECT_IO && activeObjectBytes + size <= MAX_INLINE_BLOB_BYTES) {
+    activeObjectIo += 1; activeObjectBytes += size;
+  } else {
+    if (objectIoWaiters.length >= 32 || queuedObjectBytes + size > MAX_INLINE_BLOB_BYTES) {
+      throw new WorkspaceBlobError("object_store_unavailable", "Workspace object I/O capacity is busy");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const entry = { size, admit: () => { signal.removeEventListener("abort", aborted); resolve(); } };
+      const aborted = () => {
+        const index = objectIoWaiters.indexOf(entry);
+        if (index >= 0) { objectIoWaiters.splice(index, 1); queuedObjectBytes -= size; }
+        reject(new Error("workspace object upload admission expired")); drainObjectIo();
+      };
+      objectIoWaiters.push(entry); queuedObjectBytes += size;
+      signal.addEventListener("abort", aborted, { once: true });
+      if (signal.aborted) aborted();
+    });
+  }
+  try { signal.throwIfAborted(); return await action(); }
+  finally { activeObjectIo -= 1; activeObjectBytes -= size; drainObjectIo(); }
+}
+export const MAX_WORKSPACE_CIPHERTEXT_BYTES = MAX_INLINE_BLOB_BYTES + 16;
+export type WorkspaceObjectReadOptions = {
+  signal?: AbortSignal;
+  /** Ciphertext length from trusted metadata, checked before reading a body.
+   * AES-GCM stores its tag separately, so this equals the plaintext length. */
+  expectedBytes?: number;
+};
+
+export function assertWorkspaceObjectReadOptions(options?: WorkspaceObjectReadOptions): void {
+  options?.signal?.throwIfAborted();
+  if (options?.expectedBytes !== undefined &&
+      (!Number.isSafeInteger(options.expectedBytes) || options.expectedBytes < 0 ||
+       options.expectedBytes > MAX_WORKSPACE_CIPHERTEXT_BYTES)) {
+    throw new Error("workspace object expected length is invalid");
+  }
+}
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -53,8 +116,9 @@ export interface CloudWorkspaceObjectStore {
   putIfAbsent(
     key: string,
     bytes: Uint8Array,
+    options?: { signal?: AbortSignal },
   ): Promise<"created" | "already_exists">;
-  get(key: string): Promise<Uint8Array | null>;
+  get(key: string, options?: WorkspaceObjectReadOptions): Promise<Uint8Array | null>;
   delete(key: string): Promise<void>;
   /** Permanently retire an immutable key. Once this resolves, the durable
    * final state is fenced and every subsequent put for the key must fail. */
@@ -81,9 +145,12 @@ export class MemoryCloudWorkspaceObjectStore implements CloudWorkspaceObjectStor
     return "created";
   }
 
-  async get(key: string): Promise<Uint8Array | null> {
+  async get(key: string, options?: WorkspaceObjectReadOptions): Promise<Uint8Array | null> {
+    assertWorkspaceObjectReadOptions(options);
     if (this.fencedKeys.has(key)) return null;
     const value = this.objects.get(key);
+    if (value && options?.expectedBytes !== undefined && value.byteLength !== options.expectedBytes)
+      throw new Error("workspace object length differs from metadata");
     return value ? Uint8Array.from(value) : null;
   }
 
@@ -104,6 +171,14 @@ export class MemoryCloudWorkspaceObjectStore implements CloudWorkspaceObjectStor
 
 const OBJECT_KEY_PATTERN =
   /^workspace\/v2\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\/k([1-9][0-9]{0,9})(?:-retry-[0-9a-f]{32})?$/i;
+
+export function assertCloudWorkspaceObjectKey(key: string): void {
+  const match = OBJECT_KEY_PATTERN.exec(key);
+  const version = Number(match?.[1]);
+  if (!match || !Number.isSafeInteger(version) || version < 1 || version > 2_147_483_647) {
+    throw new Error("workspace object key is invalid");
+  }
+}
 const OBJECT_DELETION_FENCE_MARKER = ".zeros-object-deletion-fence-v1";
 const OBJECT_DELETION_FENCE_BYTES = Buffer.from(
   "zeros-object-deletion-fence-v1\n",
@@ -152,16 +227,7 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
   }
 
   private validatedComponents(key: string): string[] {
-    const match = OBJECT_KEY_PATTERN.exec(key);
-    const version = Number(match?.[1]);
-    if (
-      !match ||
-      !Number.isSafeInteger(version) ||
-      version < 1 ||
-      version > 2_147_483_647
-    ) {
-      throw new Error("workspace object key is invalid");
-    }
+    assertCloudWorkspaceObjectKey(key);
     return key.split("/");
   }
 
@@ -637,7 +703,8 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
     }
   }
 
-  async get(key: string): Promise<Uint8Array | null> {
+  async get(key: string, options?: WorkspaceObjectReadOptions): Promise<Uint8Array | null> {
+    assertWorkspaceObjectReadOptions(options);
     const target = await this.target(key, false);
     if (!target) return null;
     let handle;
@@ -652,6 +719,7 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
+    let bytes: Buffer | undefined;
     try {
       const before = await handle.stat();
       if (
@@ -670,20 +738,37 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
       ) {
         throw new Error("workspace object store object is unsafe");
       }
-      const bytes = await handle.readFile();
+      if (options?.expectedBytes !== undefined && before.size !== options.expectedBytes)
+        throw new Error("workspace object length differs from metadata");
+      options?.signal?.throwIfAborted();
+      // readFile can grow its allocation as a concurrently modified file grows.
+      // Fix the allocation to the admitted size, then verify the inode again.
+      bytes = Buffer.alloc(before.size);
+      let offset = 0;
+      while (offset < bytes.byteLength) {
+        options?.signal?.throwIfAborted();
+        const read = await handle.read(bytes, offset, Math.min(64 * 1024, bytes.byteLength - offset), offset);
+        if (read.bytesRead === 0) throw new Error("workspace object changed during read");
+        offset += read.bytesRead;
+      }
       const after = await handle.stat();
+      options?.signal?.throwIfAborted();
       if (
         after.dev !== before.dev ||
         after.ino !== before.ino ||
         after.nlink < 1 ||
         after.nlink > 2 ||
         after.size !== before.size ||
-        after.mtimeMs !== before.mtimeMs
+        after.mtimeMs !== before.mtimeMs ||
+        after.ctimeMs !== before.ctimeMs
       ) {
         bytes.fill(0);
         throw new Error("workspace object changed during read");
       }
       return bytes;
+    } catch (error) {
+      bytes?.fill(0);
+      throw error;
     } finally {
       await handle.close();
     }
@@ -1010,8 +1095,8 @@ function blobAad(input: {
   return Buffer.from(
     [
       "zeros-workspace-object-v1",
-      input.organizationId,
-      input.blobId,
+      input.organizationId.toLowerCase(),
+      input.blobId.toLowerCase(),
       String(input.keyVersion),
       input.plaintextSha256.toString("hex"),
       String(input.plaintextBytes),
@@ -1278,6 +1363,7 @@ export class DatabaseCloudWorkspaceBlobService {
     workspaceId: string;
     organizationId: string;
     bytes: Uint8Array;
+    signal?: AbortSignal;
     assertAuthority: (tx: Tx) => Promise<void>;
     reserve?: (
       tx: Tx,
@@ -1299,8 +1385,16 @@ export class DatabaseCloudWorkspaceBlobService {
         "Workspace object input is invalid",
       );
     }
+    input = { ...input, organizationId: input.organizationId.toLowerCase(), workspaceId: input.workspaceId.toLowerCase() };
+    const deadline = AbortSignal.timeout(25_000);
+    const signal = input.signal ? AbortSignal.any([deadline, input.signal]) : deadline;
+    const assertLive = () => { if (signal.aborted) throw new WorkspaceBlobError("object_store_unavailable", "Workspace object deadline expired"); };
+    assertLive();
     const plaintextSha256 = createHash("sha256").update(input.bytes).digest();
     const reservation = await withSystemTx(this.pool, async (tx) => {
+      if (!await lockCloudWorkspaceScope(tx, input))
+        throw new WorkspaceBlobError("engine_authority_rejected", "Workspace object scope is unavailable");
+      assertLive();
       await input.assertAuthority(tx);
       // Acquire the Organization boundary before looking up or inserting the
       // physical blob row. Besides making the cumulative sum deterministic,
@@ -1381,7 +1475,13 @@ export class DatabaseCloudWorkspaceBlobService {
         row.state === "pending_upload" &&
         row.encryption_key_version !== this.keyVersion
       ) {
-        const objectKey = `workspace/v2/${input.organizationId}/${row.id}/k${this.keyVersion}`;
+        if (row.encryption_key_version > this.keyVersion) {
+          throw new WorkspaceBlobError("object_unavailable", "Workspace object key version would downgrade data");
+        }
+        await this.recordDetachedObject(tx, { blobId: row.id, organizationId: input.organizationId,
+          objectKey: row.object_key, reservedBytes: Number(row.plaintext_bytes) });
+        reservePhysical = true;
+        const objectKey = `workspace/v2/${input.organizationId}/${row.id}/k${this.keyVersion}-retry-${randomBytes(16).toString("hex")}`;
         const nonce = randomBytes(12);
         const reclaimed = await tx.query(
           `UPDATE workspace_blobs
@@ -1439,52 +1539,35 @@ export class DatabaseCloudWorkspaceBlobService {
       };
     }
 
-    const sealed = sealWorkspaceObject(
-      input.bytes,
-      {
-        blobId: reservation.blobId,
-        organizationId: input.organizationId,
-        keyVersion: reservation.keyVersion,
-      },
-      this.key(reservation.keyVersion),
-      reservation.nonce,
-    );
+    let sealed!: ReturnType<typeof sealWorkspaceObject>;
     let putResult: "created" | "already_exists";
     try {
-      putResult = await this.objectStore.putIfAbsent(
-        reservation.objectKey,
-        sealed.ciphertext,
-      );
-    } catch (error) {
-      throw new WorkspaceBlobError(
-        "object_store_unavailable",
-        "Workspace object upload did not complete",
-        { cause: error },
-      );
-    }
-    const storedCiphertext = await this.objectStore
-      .get(reservation.objectKey)
-      .catch((error: unknown) => {
-        throw new WorkspaceBlobError(
-          "object_store_unavailable",
-          "Workspace object verification did not complete",
-          { cause: error },
-        );
+      putResult = await withWorkspaceObjectIo(signal, input.bytes.byteLength, async () => {
+        assertLive();
+        sealed = sealWorkspaceObject(input.bytes, { blobId: reservation.blobId,
+          organizationId: input.organizationId, keyVersion: reservation.keyVersion },
+          this.key(reservation.keyVersion), reservation.nonce);
+        try {
+          const result = await this.objectStore.putIfAbsent(reservation.objectKey, sealed.ciphertext, { signal });
+          assertLive();
+          const stored = await this.objectStore.get(reservation.objectKey, { signal, expectedBytes: sealed.ciphertext.byteLength });
+          try {
+            if (!stored || stored.byteLength !== sealed.ciphertext.byteLength ||
+                !timingSafeEqual(createHash("sha256").update(stored).digest(), sealed.ciphertextSha256)) {
+              throw new WorkspaceBlobError("object_integrity_failed", "Workspace object upload integrity check failed");
+            }
+          } finally { stored?.fill(0); }
+          assertLive(); return result;
+        } finally { sealed.ciphertext.fill(0); }
       });
-    if (
-      !storedCiphertext ||
-      storedCiphertext.byteLength !== sealed.ciphertext.byteLength ||
-      !timingSafeEqual(
-        createHash("sha256").update(storedCiphertext).digest(),
-        sealed.ciphertextSha256,
-      )
-    ) {
-      throw new WorkspaceBlobError(
-        "object_integrity_failed",
-        "Workspace object upload integrity check failed",
-      );
+    } catch (error) {
+      if (error instanceof WorkspaceBlobError) throw error;
+      throw new WorkspaceBlobError("object_store_unavailable", "Workspace object upload did not complete");
     }
     const finalization = await withSystemTx(this.pool, async (tx) => {
+      if (!await lockCloudWorkspaceScope(tx, input))
+        throw new WorkspaceBlobError("engine_authority_rejected", "Workspace object scope is unavailable");
+      assertLive();
       await input.assertAuthority(tx);
       // Match admission's Organization-before-blob lock order. Renewing the
       // upload lease while the pending row is locked prevents a long-running
@@ -1584,6 +1667,223 @@ export class DatabaseCloudWorkspaceBlobService {
     };
   }
 
+  /** Authenticate before an HTTP reader consumes shared ingress capacity.
+   * Token lookup uses the existing unique hash index, with no request-body
+   * dependency. This does not replace either publication authority check. */
+  async authorizeUpload(heartbeatToken: string): Promise<void> {
+    if (!/^zwh_[A-Za-z0-9_-]{43}$/.test(heartbeatToken)) {
+      throw new WorkspaceBlobError("engine_authority_rejected", "Workspace object authority is not current");
+    }
+    try {
+      await withSystemTx(this.pool, async tx => {
+        await tx.query("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '500ms'");
+        const engine = (await tx.query<{
+          workspace_id: string; org_id: string; generation: number; id: string;
+        }>(`SELECT id, workspace_id, org_id, generation
+            FROM cloud_workspace_engine_instances
+            WHERE heartbeat_token_hash = $1 AND state = 'ready' AND lease_expires_at > now()`,
+        [createHash("sha256").update(heartbeatToken).digest()])).rows[0];
+        if (!engine) throw new WorkspaceBlobError("engine_authority_rejected", "Workspace object authority is not current");
+        await assertCurrentCloudEngineAuthority(tx, {
+          workspaceId: engine.workspace_id, organizationId: engine.org_id,
+          generation: engine.generation, engineInstanceId: engine.id,
+          heartbeatToken, workosEnabled: this.workosEnabled, lock: "share",
+        });
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "CloudWorkspaceEngineAuthorityError") {
+        throw new WorkspaceBlobError("engine_authority_rejected", "Workspace object authority is not current");
+      }
+      if ((error as { code?: string })?.code === "57014" || (error as { code?: string })?.code === "55P03") {
+        throw new WorkspaceBlobError("object_store_unavailable", "Workspace upload admission is busy");
+      }
+      throw error;
+    }
+  }
+
+  /** Small-file checkpoint admission is engine-only. Every batch retains the
+   * scalar object's encryption, quota, authority and immutable-key contracts. */
+  async putBatch(input: {
+    workspaceId: string; organizationId: string; generation: number;
+    engineInstanceId: string; heartbeatToken: string;
+    entries: readonly Uint8Array[]; signal?: AbortSignal;
+  }): Promise<{ blobs: Array<{ index: number; id: string; plaintextSha256: string; sizeBytes: number; reused: boolean }> }> {
+    if (!UUID_PATTERN.test(input.workspaceId) || !UUID_PATTERN.test(input.organizationId) ||
+        !UUID_PATTERN.test(input.engineInstanceId) || !Array.isArray(input.entries) ||
+        input.entries.length < 1 || input.entries.length > MAX_WORKSPACE_BLOB_BATCH_ENTRIES ||
+        input.entries.some(bytes => !(bytes instanceof Uint8Array)) ||
+        input.entries.reduce((size, bytes) => size + bytes.byteLength, 0) > MAX_WORKSPACE_BLOB_BATCH_BYTES) {
+      throw new WorkspaceBlobError("invalid_input", "Workspace object batch is invalid");
+    }
+    input = { ...input, organizationId: input.organizationId.toLowerCase(), workspaceId: input.workspaceId.toLowerCase(), engineInstanceId: input.engineInstanceId.toLowerCase() };
+    // Bound retained plaintext/ciphertext and R2 operations across all service
+    // instances in this process. Excess requests retry through the engine's
+    // checkpoint scheduler; there is no unbounded queue of request bodies.
+    if (activeBlobBatches >= 4) throw new WorkspaceBlobError("object_store_unavailable", "Workspace upload capacity is busy");
+    activeBlobBatches += 1;
+    const deadline = AbortSignal.timeout(25_000);
+    const signal = input.signal ? AbortSignal.any([deadline, input.signal]) : deadline;
+    type Row = { id: string; object_key: string; nonce: Buffer; plaintext_bytes: string | number;
+      plaintext_sha256: Buffer; encryption_key_version: number; state: string;
+      ciphertext_sha256: Buffer | null; auth_tag: Buffer | null };
+    const distinct = new Map<string, Uint8Array>();
+    const digests = input.entries.map(bytes => {
+      const digest = createHash("sha256").update(bytes).digest("hex");
+      distinct.set(digest, bytes); return digest;
+    });
+    const assertAuthority = async (tx: Tx) => {
+      signal.throwIfAborted();
+      await assertCurrentCloudEngineAuthority(tx, { ...input, workosEnabled: this.workosEnabled });
+      await tx.query("SELECT pg_advisory_xact_lock(hashtextextended('workspace-object-storage:' || $1::text, 0))", [input.organizationId]);
+    };
+    const reserve = async (tx: Tx, ids: string[], physical: boolean) => {
+      const result = await tx.query<{ rejection_code: string | null }>(
+        "SELECT reserve_workspace_blob_storage_batch($1,$2,$3::uuid[],$4) AS rejection_code",
+        [input.workspaceId, input.organizationId, ids, physical]);
+      const code = result.rows[0]?.rejection_code;
+      if (code === "object_storage_limit_not_configured" || code === "organization_object_storage_limit_exceeded" || code === "workspace_object_storage_limit_exceeded") {
+        throw new WorkspaceBlobError(code, "Durable workspace object-storage admission was rejected");
+      }
+      if (code !== null) throw new Error("workspace object batch reservation is invalid");
+    };
+    try {
+      const rows = await withSystemTx(this.pool, async tx => {
+        await assertAuthority(tx);
+        const loaded = await tx.query<Row>(`SELECT * FROM workspace_blobs
+          WHERE org_id=$1 AND plaintext_sha256=ANY($2::bytea[]) AND state <> 'deleted'
+          ORDER BY id FOR NO KEY UPDATE`, [input.organizationId, [...distinct.keys()].map(hash => Buffer.from(hash, "hex"))]);
+        const byHash = new Map(loaded.rows.map(row => [row.plaintext_sha256.toString("hex"), row]));
+        const missing = [...distinct].filter(([hash]) => !byHash.has(hash)).map(([hash, bytes]) => {
+          const id = randomUUID();
+          return { id, hash, size: bytes.byteLength, object_key: `workspace/v2/${input.organizationId}/${id}/k${this.keyVersion}`, nonce: randomBytes(12).toString("hex") };
+        });
+        if (missing.length) {
+          const inserted = await tx.query<Row>(`INSERT INTO workspace_blobs
+            (id, org_id, plaintext_sha256, plaintext_bytes, object_key, encryption_key_version, nonce)
+            SELECT id, $1, decode(hash,'hex'), size, object_key, $2, decode(nonce,'hex')
+            FROM jsonb_to_recordset($3::jsonb) AS x(id uuid, hash text, size bigint, object_key text, nonce text)
+            RETURNING *`, [input.organizationId, this.keyVersion, JSON.stringify(missing)]);
+          for (const row of inserted.rows) byHash.set(row.plaintext_sha256.toString("hex"), row);
+        }
+        for (const [hash, bytes] of distinct) {
+          const row = byHash.get(hash);
+          if (!row || Number(row.plaintext_bytes) !== bytes.byteLength || !["available", "pending_upload"].includes(row.state)) {
+            throw new WorkspaceBlobError("object_unavailable", "Workspace object reservation is unavailable");
+          }
+        }
+        const reclaimedRows = [...byHash.values()].filter(row => row.state === "pending_upload" && row.encryption_key_version !== this.keyVersion);
+        if (reclaimedRows.some(row => row.encryption_key_version > this.keyVersion)) {
+          throw new WorkspaceBlobError("object_unavailable", "Workspace object key version would downgrade data");
+        }
+        const reclaims = reclaimedRows.map(row => ({ id: row.id,
+          object_key: `workspace/v2/${input.organizationId}/${row.id}/k${this.keyVersion}-retry-${randomBytes(16).toString("hex")}`,
+          nonce: randomBytes(12).toString("hex") }));
+        if (reclaims.length) {
+          // A crashed old writer may have reached storage without publishing
+          // metadata. Keep its key charged and durably queued before replacing it.
+          for (const row of reclaimedRows) await this.recordDetachedObject(tx, {
+            blobId: row.id, organizationId: input.organizationId, objectKey: row.object_key, reservedBytes: Number(row.plaintext_bytes),
+          });
+          const reclaimed = await tx.query<Row>(`UPDATE workspace_blobs blob
+            SET object_key=x.object_key, nonce=decode(x.nonce,'hex'), encryption_key_version=$2
+            FROM jsonb_to_recordset($3::jsonb) AS x(id uuid, object_key text, nonce text)
+            WHERE blob.org_id=$1 AND blob.id=x.id AND blob.state='pending_upload' AND blob.reference_count=0
+            RETURNING blob.*`, [input.organizationId, this.keyVersion, JSON.stringify(reclaims)]);
+          if (reclaimed.rows.length !== reclaims.length) throw new Error("workspace object reservation changed");
+          for (const row of reclaimed.rows) byHash.set(row.plaintext_sha256.toString("hex"), row);
+        }
+        await reserve(tx, [...byHash.values()].map(row => row.id), missing.length > 0 || reclaims.length > 0);
+        signal.throwIfAborted();
+        return [...byHash.values()];
+      });
+      const pending = rows.filter(row => row.state !== "available");
+      const verified = new Map<string, { sealed: ReturnType<typeof sealWorkspaceObject>; reused: boolean }>();
+      let next = 0, failed = false;
+      const results = await Promise.allSettled(Array.from({ length: Math.min(MAX_BATCH_OBJECT_IO, pending.length) }, async () => {
+        while (!failed && next < pending.length) {
+          const row = pending[next++]!;
+          try {
+            await withWorkspaceObjectIo(signal, Number(row.plaintext_bytes), async () => {
+              signal.throwIfAborted();
+              const sealed = sealWorkspaceObject(distinct.get(row.plaintext_sha256.toString("hex"))!,
+                { blobId: row.id, organizationId: input.organizationId, keyVersion: row.encryption_key_version },
+                this.key(row.encryption_key_version), row.nonce);
+              try {
+                const outcome = await this.objectStore.putIfAbsent(row.object_key, sealed.ciphertext, { signal });
+                signal.throwIfAborted();
+                const stored = await this.objectStore.get(row.object_key, { signal, expectedBytes: sealed.ciphertext.byteLength });
+                try {
+                  if (!stored || stored.byteLength !== sealed.ciphertext.byteLength ||
+                      !timingSafeEqual(createHash("sha256").update(stored).digest(), sealed.ciphertextSha256)) {
+                    throw new WorkspaceBlobError("object_integrity_failed", "Workspace object upload integrity check failed");
+                  }
+                } finally { stored?.fill(0); }
+                signal.throwIfAborted();
+                verified.set(row.id, { sealed, reused: outcome === "already_exists" });
+              } finally { sealed.ciphertext.fill(0); }
+            });
+          } catch (error) { failed = true; throw error; }
+        }
+      }));
+      for (const result of results) if (result.status === "rejected") {
+        if (result.reason instanceof WorkspaceBlobError) throw result.reason;
+        throw new WorkspaceBlobError("object_store_unavailable", "Workspace object batch did not complete");
+      }
+      if (pending.length) {
+        const detached = await withSystemTx(this.pool, async tx => {
+          await assertAuthority(tx);
+          const current = await tx.query<Row>(`SELECT * FROM workspace_blobs
+            WHERE org_id=$1 AND id=ANY($2::uuid[]) ORDER BY id FOR NO KEY UPDATE`,
+          [input.organizationId, pending.map(row => row.id)]);
+          const byId = new Map(current.rows.map(row => [row.id, row]));
+          const detachedRows: Row[] = [];
+          for (const row of pending) {
+            const now = byId.get(row.id), proof = verified.get(row.id)!;
+            if (!now || now.object_key !== row.object_key || now.encryption_key_version !== row.encryption_key_version ||
+                !timingSafeEqual(now.nonce, row.nonce) || !["pending_upload", "available"].includes(now.state)) {
+              detachedRows.push(row); continue;
+            }
+            if (now.state === "available" && (!now.ciphertext_sha256 || !now.auth_tag ||
+                !timingSafeEqual(now.ciphertext_sha256, proof.sealed.ciphertextSha256) ||
+                !timingSafeEqual(now.auth_tag, proof.sealed.authTag))) {
+              throw new WorkspaceBlobError("object_integrity_failed", "Workspace object finalization conflict");
+            }
+          }
+          if (detachedRows.length) {
+            for (const row of detachedRows) await this.recordDetachedObject(tx, {
+              blobId: row.id, organizationId: input.organizationId, objectKey: row.object_key, reservedBytes: Number(row.plaintext_bytes),
+            });
+            return true;
+          }
+          await reserve(tx, pending.map(row => row.id), false);
+          await tx.query(`UPDATE workspace_blobs blob SET ciphertext_sha256=decode(x.hash,'hex'),
+            ciphertext_bytes=blob.plaintext_bytes, auth_tag=decode(x.tag,'hex'), state='available', available_at=now()
+            FROM jsonb_to_recordset($2::jsonb) AS x(id uuid, hash text, tag text)
+            WHERE blob.org_id=$1 AND blob.id=x.id AND blob.state='pending_upload'`,
+          [input.organizationId, JSON.stringify(pending.map(row => ({ id: row.id,
+            hash: verified.get(row.id)!.sealed.ciphertextSha256.toString("hex"), tag: verified.get(row.id)!.sealed.authTag.toString("hex") })))]);
+          signal.throwIfAborted();
+          return false;
+        });
+        if (detached) throw new WorkspaceBlobError("object_unavailable", "Workspace object finalization changed");
+      }
+      const byHash = new Map(rows.map(row => [row.plaintext_sha256.toString("hex"), row]));
+      return { blobs: digests.map((hash, index) => {
+        const row = byHash.get(hash)!;
+        return { index, id: row.id, plaintextSha256: hash, sizeBytes: Number(row.plaintext_bytes),
+          reused: row.state === "available" || verified.get(row.id)!.reused };
+      }) };
+    } catch (error) {
+      if (error instanceof Error && error.name === "CloudWorkspaceEngineAuthorityError") {
+        throw new WorkspaceBlobError("engine_authority_rejected", "Workspace object authority is not current");
+      }
+      if (signal.aborted && !(error instanceof WorkspaceBlobError)) {
+        throw new WorkspaceBlobError("object_store_unavailable", "Workspace object batch deadline expired");
+      }
+      throw error;
+    } finally { activeBlobBatches -= 1; }
+  }
+
   async put(input: {
     workspaceId: string;
     organizationId: string;
@@ -1591,6 +1891,7 @@ export class DatabaseCloudWorkspaceBlobService {
     engineInstanceId: string;
     heartbeatToken: string;
     bytes: Uint8Array;
+    signal?: AbortSignal;
   }): Promise<{
     id: string;
     plaintextSha256: string;
@@ -1613,6 +1914,7 @@ export class DatabaseCloudWorkspaceBlobService {
         workspaceId: input.workspaceId,
         organizationId: input.organizationId,
         bytes: input.bytes,
+        ...(input.signal ? { signal: input.signal } : {}),
         assertAuthority: (tx) =>
           assertCurrentCloudEngineAuthority(tx, {
             workspaceId: input.workspaceId,
@@ -1654,6 +1956,7 @@ export class DatabaseCloudWorkspaceBlobService {
     reused: boolean;
   }> {
     const assertAuthority = async (tx: Tx): Promise<void> => {
+      await lockCloudWorkspaceScope(tx, input);
       const authorized = await tx.query<{
         team_id: string;
         owner_user_id: string;
@@ -1692,6 +1995,7 @@ export class DatabaseCloudWorkspaceBlobService {
           billingOwnerUserId: scope.owner_user_id,
           workosEnabled: this.workosEnabled,
           requireWorkspaceOwner: true,
+          organizationLock: "share",
         });
       } catch {
         // Object publication is deliberately opaque: a caller that loses any
@@ -1730,66 +2034,37 @@ export class DatabaseCloudWorkspaceBlobService {
     });
   }
 
-  async getSystem(input: {
-    blobId: string;
-    organizationId: string;
-  }): Promise<Buffer> {
-    if (
-      !UUID_PATTERN.test(input.blobId) ||
-      !UUID_PATTERN.test(input.organizationId)
-    ) {
-      throw new WorkspaceBlobError(
-        "invalid_input",
-        "Workspace object identity is invalid",
-      );
-    }
-    return withSystemTx(this.pool, (tx) => this.getSystemInTx(tx, input));
+  /** Fetch immutable ciphertext without occupying a database connection. The
+   * metadata is checked again before release, so deletion/rotation can proceed
+   * during a slow object-store response without exposing stale plaintext. */
+  async getSystem(input: {blobId: string; organizationId: string}): Promise<Buffer> {
+    const row = await withSystemTx(this.pool, tx => this.objectDescriptor(tx, input), {consistentRead:true});
+    const bytes = await this.readObject(input, row);
+    try {
+      const current = await withSystemTx(this.pool, tx => this.objectDescriptor(tx, input), {consistentRead:true});
+      if (current.object_key !== row.object_key || current.encryption_key_version !== row.encryption_key_version ||
+          String(current.plaintext_bytes) !== String(row.plaintext_bytes) || !current.nonce.equals(row.nonce) ||
+          !current.auth_tag.equals(row.auth_tag) || !current.plaintext_sha256.equals(row.plaintext_sha256) ||
+          !current.ciphertext_sha256.equals(row.ciphertext_sha256))
+        throw new WorkspaceBlobError("object_unavailable", "Workspace object changed during download; retry the read");
+      return bytes;
+    } catch (error) { bytes.fill(0); throw error; }
   }
 
-  /** Coordinator-only read that preserves the caller's authorization lock
-   * through object lookup and decryption. This avoids a revocation or key
-   * rotation time-of-check/time-of-use window without opening a nested pool
-   * transaction. */
-  async getSystemInTx(
-    tx: Tx,
-    input: { blobId: string; organizationId: string },
-  ): Promise<Buffer> {
-    if (
-      !UUID_PATTERN.test(input.blobId) ||
-      !UUID_PATTERN.test(input.organizationId)
-    ) {
-      throw new WorkspaceBlobError(
-        "invalid_input",
-        "Workspace object identity is invalid",
-      );
-    }
-    const row = (
-      await tx.query<{
-        object_key: string;
-        encryption_key_version: number;
-        nonce: Buffer;
-        auth_tag: Buffer;
-        plaintext_sha256: Buffer;
-        ciphertext_sha256: Buffer;
-        plaintext_bytes: string | number;
-      }>(
-        `SELECT object_key, encryption_key_version, nonce, auth_tag,
-                plaintext_sha256, ciphertext_sha256, plaintext_bytes
-         FROM workspace_blobs
-         WHERE id = $1 AND org_id = $2 AND state = 'available'
-         FOR SHARE`,
-        [input.blobId, input.organizationId],
-      )
-    ).rows[0];
-    if (!row) {
-      throw new WorkspaceBlobError(
-        "object_unavailable",
-        "Workspace object is unavailable",
-      );
-    }
+  private async objectDescriptor(tx: Tx, input: {blobId: string; organizationId: string}): Promise<WorkspaceObjectDescriptor> {
+    if (!UUID_PATTERN.test(input.blobId) || !UUID_PATTERN.test(input.organizationId))
+      throw new WorkspaceBlobError("invalid_input", "Workspace object identity is invalid");
+    const row = (await tx.query<WorkspaceObjectDescriptor>(`SELECT object_key,encryption_key_version,nonce,auth_tag,
+      plaintext_sha256,ciphertext_sha256,plaintext_bytes FROM workspace_blobs
+      WHERE id=$1 AND org_id=$2 AND state='available'`, [input.blobId,input.organizationId])).rows[0];
+    if (!row) throw new WorkspaceBlobError("object_unavailable", "Workspace object is unavailable");
+    return row;
+  }
+
+  private async readObject(input: {blobId: string; organizationId: string}, row: WorkspaceObjectDescriptor): Promise<Buffer> {
     let ciphertext: Uint8Array | null;
     try {
-      ciphertext = await this.objectStore.get(row.object_key);
+      ciphertext = await this.objectStore.get(row.object_key, { expectedBytes: Number(row.plaintext_bytes) });
     } catch (error) {
       throw new WorkspaceBlobError(
         "object_store_unavailable",
@@ -1837,8 +2112,9 @@ export class DatabaseCloudWorkspaceBlobService {
     engineInstanceId: string;
     heartbeatToken: string;
   }): Promise<Buffer> {
+    let bytes: Buffer | undefined;
     try {
-      return await withSystemTx(this.pool, async (tx) => {
+      const authorize = async (tx: Tx) => {
         await assertCurrentCloudEngineAuthority(tx, {
           workspaceId: input.workspaceId,
           organizationId: input.organizationId,
@@ -1861,12 +2137,13 @@ export class DatabaseCloudWorkspaceBlobService {
             "Workspace object is unavailable",
           );
         }
-        return this.getSystemInTx(tx, {
-          blobId: input.blobId,
-          organizationId: input.organizationId,
-        });
-      });
+      };
+      await withSystemTx(this.pool, authorize);
+      bytes = await this.getSystem(input);
+      await withSystemTx(this.pool, authorize);
+      return bytes;
     } catch (error) {
+      bytes?.fill(0);
       if (error instanceof WorkspaceBlobError) throw error;
       if (
         error instanceof Error &&
@@ -2216,7 +2493,7 @@ export class DatabaseCloudWorkspaceBlobService {
           if (blob.object_key !== job.source_object_key) {
             throw new Error("rotation_source_changed");
           }
-          const sourceCiphertext = await this.objectStore.get(blob.object_key);
+          const sourceCiphertext = await this.objectStore.get(blob.object_key, { expectedBytes: Number(blob.plaintext_bytes) });
           if (!sourceCiphertext) throw new Error("rotation_source_missing");
           const plaintext = openWorkspaceObject(
             sourceCiphertext,
@@ -2253,7 +2530,7 @@ export class DatabaseCloudWorkspaceBlobService {
             job.target_object_key,
             sealed.ciphertext,
           );
-          const readback = await this.objectStore.get(job.target_object_key);
+          const readback = await this.objectStore.get(job.target_object_key, { expectedBytes: sealed.ciphertext.byteLength });
           if (
             !readback ||
             readback.length !== sealed.ciphertext.length ||

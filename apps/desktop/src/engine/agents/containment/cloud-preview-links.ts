@@ -269,9 +269,10 @@ export class CloudPreviewGatewayFactory
   constructor(options: CloudPreviewGatewayFactoryOptions = {}) {
     this.loadLinks = options.loadLinks ?? (() => loadCloudPreviewLinks());
     this.listenHost = options.listenHost ?? "0.0.0.0";
-    // Cloud admission is all-or-nothing. A missing/expired coordinator grant
-    // fails engine construction instead of silently shipping broken previews.
-    this.readLinks();
+    // Legacy signed-link pools are optional for runtimes that serve previews
+    // through user grants at the engine listener. Validate this pool on open
+    // and every navigation; its absence must never enable a local fallback or
+    // prevent unrelated files, agents and terminals from starting.
   }
 
   private readLinks(): CloudPreviewLinks {

@@ -1,6 +1,17 @@
-import { Hono } from "hono";
+import { Hono, type MiddlewareHandler } from "hono";
+import {createCloudAgentExecutionRoutes} from "./agent-credential-routes.js";
+import type {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
+import { HttpError } from "../authz.js";
+import { CLOUD_ACTOR_ADMISSION_PATH, CLOUD_ACTOR_TOKEN_PATTERN } from "./actor-sessions.js";
+import { CloudWorkspaceEngineAuthorityError } from "./engine-authority.js";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
+import { createCloudCommandRoutes } from "./command-routes.js";
+import type { DatabaseCloudWorkspaceCommandService } from "./commands.js";
+import { createCloudEventRoutes } from "./event-routes.js";
+import type { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
+import { createCloudActionRoutes } from "./action-routes.js";
+import type { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 
 import {
   CloudWorkspaceSetupMaterialError,
@@ -20,6 +31,8 @@ import {
 } from "./content-record.js";
 import {
   WorkspaceBlobError,
+  MAX_WORKSPACE_BLOB_BATCH_ENTRIES,
+  MAX_WORKSPACE_BLOB_BATCH_BYTES,
   type DatabaseCloudWorkspaceBlobService,
 } from "./object-store.js";
 import {
@@ -36,6 +49,11 @@ import {
   CloudWorkspaceEngineClientAdmissionError,
   type DatabaseCloudWorkspaceEngineClientAdmissionService,
 } from "./engine-client-admission.js";
+import {
+  CLOUD_RUNTIME_ACCESS_ADMISSION_PATH,
+  CloudRuntimeAccessAdmissionError,
+  type DatabaseCloudRuntimeAccessAdmissionService,
+} from "./runtime-access-admission.js";
 
 export const CLOUD_WORKSPACE_SETUP_ADMISSION_PATH =
   "/internal/v1/cloud-workspaces/setup/admission";
@@ -74,6 +92,7 @@ const BLOB_BODY_BYTES = 64 * 1024 * 1024;
 
 const SetupAdmissionBody = z
   .object({
+    materialVersion: z.literal(2).optional(),
     workspaceId: UUID,
     organizationId: UUID,
     generation: POSITIVE_INTEGER,
@@ -100,6 +119,8 @@ const EngineRegistrationBody = z
     executionFence: POSITIVE_INTEGER,
     engineInstanceId: UUID,
     protocolVersion: POSITIVE_INTEGER.max(65_535),
+    actorProtocolVersion: z.literal(2).optional(),
+    agentRuntime:z.object({profile:z.literal("zeros-cloud-worker-v3"),contractSha256:z.string().regex(/^[a-f0-9]{64}$/)}).strict().optional(),
   })
   .strict();
 
@@ -140,6 +161,7 @@ const EngineClientAdmissionBody = z
     generation: POSITIVE_INTEGER,
     engineInstanceId: UUID,
     grantToken: z.string().regex(SETUP_TOKEN_PATTERN),
+    renew: z.boolean().optional(),
   })
   .strict();
 
@@ -149,6 +171,22 @@ const EngineScope = {
   generation: POSITIVE_INTEGER,
   engineInstanceId: UUID,
 } as const;
+const BlobBatchBody = z.object({
+  ...EngineScope,
+  entries: z.array(z.object({ bytesBase64: z.string().max(Math.ceil(MAX_WORKSPACE_BLOB_BATCH_BYTES / 3) * 4)
+    .refine(value => value.length % 4 === 0 && !/[^A-Za-z0-9+/=]/.test(value)) }).strict())
+    .min(1).max(MAX_WORKSPACE_BLOB_BATCH_ENTRIES),
+}).strict();
+let activeBlobBatchBodies = 0;
+let activeBlobIngressBytes = 0;
+
+const RuntimeAccessAdmissionBody = z
+  .object({
+    ...EngineScope,
+    grantToken: z.string().regex(/^(?:zwp|zsh)_[A-Za-z0-9_-]{43}$/),
+    relativeLease: z.literal(true).optional(),
+  })
+  .strict();
 
 const RecordAppendBody = z
   .object({
@@ -264,6 +302,7 @@ const CheckpointCommitBody = z
     ]),
     manifestBlobId: UUID,
     artifactBlobId: UUID.nullable(),
+    artifactBlobIds: z.array(UUID).max(1_024).optional(),
     inclusionPolicy: z.record(z.unknown()),
     fileCount: z.number().int().safe().nonnegative().max(1_000_000),
     totalBytes: z
@@ -310,18 +349,26 @@ const UsageBody = z
   .strict();
 
 export interface CloudWorkspaceInternalSetupService {
+  agentExecutions?: DatabaseCloudAgentExecutionService;
+  commands?: DatabaseCloudWorkspaceCommandService;
+  events?: DatabaseCloudWorkspaceEventService;
+  actions?: DatabaseCloudWorkspaceActionService;
   redeem(input: CloudWorkspaceSetupRedemptionInput): Promise<unknown>;
   registerEngine(
     input: CloudWorkspaceEngineRegistrationInput,
   ): Promise<unknown>;
   heartbeat(input: CloudWorkspaceEngineHeartbeatInput): Promise<unknown>;
   admitEngineClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consume"];
+  admitActorClient?: DatabaseCloudWorkspaceEngineClientAdmissionService["consumeActor"];
+  admitRuntimeAccess?: DatabaseCloudRuntimeAccessAdmissionService["admit"];
   appendRecord?: DatabaseCloudWorkspaceDurableRecordService["append"];
   readRecordHead?: DatabaseCloudWorkspaceDurableRecordService["headForEngine"];
   appendContent?: DatabaseCloudWorkspaceContentService["append"];
   readContentHead?: DatabaseCloudWorkspaceContentService["headForEngine"];
   commitCheckpoint?: DatabaseCloudWorkspaceContentService["commitCheckpoint"];
+  authorizeBlobUpload?: DatabaseCloudWorkspaceBlobService["authorizeUpload"];
   putBlob?: DatabaseCloudWorkspaceBlobService["put"];
+  putBlobBatch?: DatabaseCloudWorkspaceBlobService["putBatch"];
   getBlob?: DatabaseCloudWorkspaceBlobService["getForEngine"];
   ingestUsage?: DatabaseCloudWorkspaceUsageService["ingestEngine"];
   readRecoveryManifest?: DatabaseCloudWorkspaceSetupRecoveryService["manifestPage"];
@@ -395,6 +442,59 @@ function durableErrorResponse(
   return { status: 422, code: error.code };
 }
 
+class WorkspaceBlobBodyError extends Error {
+  constructor(readonly status: 408 | 413) { super("Workspace upload body did not complete"); }
+}
+async function readWorkspaceBlobBody(request: Request, maximum: number): Promise<Buffer> {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && (!/^[0-9]+$/.test(declared) || Number(declared) > maximum)) throw new WorkspaceBlobBodyError(413);
+  if (!request.body) return Buffer.alloc(0);
+  const reader = request.body.getReader();
+  const slabs: Buffer[] = [];
+  let slab: Buffer | undefined, used = 0, allocated = 0;
+  let length = 0, fragments = 0, done = false, expired = false, cancellation: Promise<void> | null = null;
+  const abort = () => {
+    expired = true;
+    // Cancel closes the active read. Avoid a new Promise.race reaction on one
+    // shared pending deadline for every tiny network fragment.
+    cancellation ??= reader.cancel().catch(() => undefined);
+  };
+  const timer = setTimeout(abort, 15_000);
+  timer.unref();
+  request.signal.addEventListener("abort", abort, { once: true });
+  if (request.signal.aborted) abort();
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (expired) { if (!chunk.done) chunk.value.fill(0); throw new WorkspaceBlobBodyError(408); }
+      if (chunk.done) { done = true; break; }
+      length += chunk.value.byteLength;
+      try {
+        if (length > maximum) throw new WorkspaceBlobBodyError(413);
+        let offset = 0;
+        while (offset < chunk.value.byteLength) {
+          if (!slab || used === slab.length) {
+            slab = Buffer.allocUnsafe(Math.min(64 * 1024, maximum - allocated));
+            allocated += slab.length; used = 0; slabs.push(slab);
+          }
+          const count = Math.min(slab.length - used, chunk.value.byteLength - offset);
+          slab.set(chunk.value.subarray(offset, offset + count), used);
+          used += count; offset += count;
+        }
+      } finally { chunk.value.fill(0); }
+      if (++fragments % 256 === 0) await new Promise<void>(resolve => setImmediate(resolve));
+    }
+    if (declared !== null && length !== Number(declared)) throw new WorkspaceBlobBodyError(413);
+    return Buffer.concat(slabs, length);
+  } finally {
+    clearTimeout(timer); request.signal.removeEventListener("abort", abort);
+    if (!done) cancellation ??= reader.cancel().catch(() => undefined);
+    await cancellation;
+    for (const slab of slabs) slab.fill(0);
+    reader.releaseLock();
+  }
+}
+
 async function strictJson<T>(
   request: {
     header(name: string): string | undefined;
@@ -437,21 +537,46 @@ function recoveryCursor(raw: string | undefined): string | null | undefined {
 /** Capability-authenticated, non-browser endpoints used only by the immutable
  * sandbox helper and engine. They intentionally sit outside `/v1/*` account
  * middleware: the one-use/heartbeat bearer is the complete authority. */
+export const CLOUD_WORKSPACE_INTERNAL_PATHS = [
+  "/internal/v1/cloud-workspaces/*",
+  "/internal/v2/cloud-workspaces/*",
+] as const;
+
+export const cloudWorkspaceInternalResponseHeaders: MiddlewareHandler = async (c, next) => {
+  c.header("Cache-Control", "no-store");
+  c.header("Pragma", "no-cache");
+  c.header("X-Content-Type-Options", "nosniff");
+  await next();
+};
+
 export function createCloudWorkspaceInternalRoutes(
   service: CloudWorkspaceInternalSetupService,
 ): Hono {
   const routes = new Hono();
-  routes.use("/internal/v1/cloud-workspaces/*", async (c, next) => {
-    c.header("Cache-Control", "no-store");
-    c.header("Pragma", "no-cache");
-    c.header("X-Content-Type-Options", "nosniff");
-    await next();
-  });
+  const authenticateBlobIngress: MiddlewareHandler = async (c, next) => {
+    if (c.req.method !== "POST") return next();
+    const token = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+    if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
+    if (!service.authorizeBlobUpload) return c.json({ error: { code: "object_store_unavailable" } }, 503);
+    try { await service.authorizeBlobUpload(token); }
+    catch (error) {
+      if (!(error instanceof WorkspaceBlobError)) throw error;
+      const response = durableErrorResponse(error);
+      return c.json({ error: { code: response.code } }, response.status);
+    }
+    return next();
+  };
+  for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) routes.use(path, cloudWorkspaceInternalResponseHeaders);
+  if (service.commands) routes.route("/", createCloudCommandRoutes(service.commands));
+  if (service.events) routes.route("/", createCloudEventRoutes(service.events));
+  if (service.actions) routes.route("/", createCloudActionRoutes(service.actions));
+  if (service.agentExecutions) routes.route("/",createCloudAgentExecutionRoutes(service.agentExecutions));
   for (const path of [
     CLOUD_WORKSPACE_SETUP_ADMISSION_PATH,
     CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
     CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
     CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
+    CLOUD_ACTOR_ADMISSION_PATH,
   ]) {
     routes.use(path, bodyLimit({ maxSize: INTERNAL_BODY_BYTES }));
   }
@@ -484,7 +609,9 @@ export function createCloudWorkspaceInternalRoutes(
     const input = await strictJson(c.req, EngineRegistrationBody);
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
-      return c.json(await service.registerEngine({ ...input, token }));
+      const {actorProtocolVersion,agentRuntime,...binding}=input;
+      return c.json(await service.registerEngine({ ...binding, token,
+        ...(actorProtocolVersion===undefined?{}:{actorProtocolVersion}),...(agentRuntime===undefined?{}:{agentRuntime}) }));
     } catch (error) {
       if (!(error instanceof CloudWorkspaceSetupMaterialError)) throw error;
       return c.json(
@@ -503,7 +630,8 @@ export function createCloudWorkspaceInternalRoutes(
     const input = await strictJson(c.req, EngineHeartbeatBody);
     if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
     try {
-      const { repositoryCredentialRefresh, observedPorts, ...heartbeat } = input;
+      const { repositoryCredentialRefresh, observedPorts, ...heartbeat } =
+        input;
       return c.json(
         await service.heartbeat({
           ...heartbeat,
@@ -523,6 +651,23 @@ export function createCloudWorkspaceInternalRoutes(
     }
   });
 
+  if (service.admitActorClient) {
+    routes.post(CLOUD_ACTOR_ADMISSION_PATH, async c => {
+      c.header("Cache-Control","no-store");
+      const heartbeatToken=bearerToken(c.req.header("authorization"),HEARTBEAT_TOKEN_PATTERN);
+      if (!heartbeatToken) return c.json({error:{code:"invalid_capability"}},401);
+      const input=await strictJson(c.req,EngineClientAdmissionBody.extend({grantToken:z.string().regex(CLOUD_ACTOR_TOKEN_PATTERN)}));
+      if (!input) return c.json({error:{code:"invalid_request"}},422);
+      try {
+        const {grantToken,renew,...scope}=input;
+        return c.json(await service.admitActorClient!({...scope,token:grantToken,heartbeatToken,
+          ...(renew===undefined?{}:{renew})}));
+      } catch (error) {
+        if (!(error instanceof HttpError) && !(error instanceof CloudWorkspaceEngineAuthorityError) && !(error instanceof CloudWorkspaceEngineClientAdmissionError)) throw error;
+        return c.json({error:{code:"cloud_actor_admission_rejected"}},401);
+      }
+    });
+  }
   if (service.admitEngineClient) {
     routes.post(CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH, async (c) => {
       const heartbeatToken = bearerToken(
@@ -535,10 +680,11 @@ export function createCloudWorkspaceInternalRoutes(
       const input = await strictJson(c.req, EngineClientAdmissionBody);
       if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
       try {
-        const { grantToken, ...scope } = input;
+        const { grantToken, renew, ...scope } = input;
         return c.json(
           await service.admitEngineClient!({
             ...scope,
+            ...(renew === undefined ? {} : { renew }),
             token: grantToken,
             heartbeatToken,
           }),
@@ -547,6 +693,33 @@ export function createCloudWorkspaceInternalRoutes(
         if (!(error instanceof CloudWorkspaceEngineClientAdmissionError)) {
           throw error;
         }
+        return c.json({ error: { code: error.code } }, 401);
+      }
+    });
+  }
+
+  if (service.admitRuntimeAccess) {
+    routes.post(CLOUD_RUNTIME_ACCESS_ADMISSION_PATH, async (c) => {
+      const heartbeatToken = bearerToken(
+        c.req.header("authorization"),
+        HEARTBEAT_TOKEN_PATTERN,
+      );
+      if (!heartbeatToken)
+        return c.json({ error: { code: "invalid_capability" } }, 401);
+      const input = await strictJson(c.req, RuntimeAccessAdmissionBody);
+      if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
+      try {
+        const { grantToken, relativeLease, ...scope } = input;
+        return c.json(
+          await service.admitRuntimeAccess!({
+            ...scope,
+            token: grantToken,
+            heartbeatToken,
+            ...(relativeLease ? { relativeLease } : {}),
+          }),
+        );
+      } catch (error) {
+        if (!(error instanceof CloudRuntimeAccessAdmissionError)) throw error;
         return c.json({ error: { code: error.code } }, 401);
       }
     });
@@ -561,9 +734,11 @@ export function createCloudWorkspaceInternalRoutes(
       const afterPath = recoveryCursor(c.req.query("after"));
       const limitRaw = c.req.query("limit");
       const limit = limitRaw === undefined ? undefined : Number(limitRaw);
+      const version = c.req.query("version");
       if (
         !token ||
         afterPath === undefined ||
+        (version !== undefined && version !== "1" && version !== "2") ||
         (limit !== undefined &&
           (!Number.isSafeInteger(limit) || limit < 1 || limit > 500))
       ) {
@@ -575,13 +750,15 @@ export function createCloudWorkspaceInternalRoutes(
             token,
             afterPath,
             ...(limit === undefined ? {} : { limit }),
+            ...(version === undefined ? {} : { version: version === "2" ? 2 : 1 }),
           }),
         );
       } catch (error) {
         if (!(error instanceof CloudWorkspaceSetupRecoveryError)) throw error;
         return c.json(
           { error: { code: error.code } },
-          error.code === "recovery_blob_unavailable" ? 503 : 401,
+          error.code === "recovery_blob_unavailable" ? 503
+            : error.code === "recovery_format_unsupported" ? 409 : 401,
         );
       }
     });
@@ -760,11 +937,12 @@ export function createCloudWorkspaceInternalRoutes(
       const input = await strictJson(c.req, CheckpointCommitBody);
       if (!input) return c.json({ error: { code: "invalid_request" } }, 422);
       try {
-        const { requestId, ...checkpoint } = input;
+        const { requestId, artifactBlobIds, ...checkpoint } = input;
         return c.json(
           await service.commitCheckpoint!({
             ...checkpoint,
             ...(requestId === undefined ? {} : { requestId }),
+            ...(artifactBlobIds === undefined ? {} : { artifactBlobIds }),
             heartbeatToken: token,
           }),
         );
@@ -776,11 +954,56 @@ export function createCloudWorkspaceInternalRoutes(
     });
   }
 
+  if (service.putBlobBatch) {
+    const path = `${CLOUD_WORKSPACE_BLOB_PATH}/batch`;
+    routes.use(path, authenticateBlobIngress);
+    routes.use(path, async (c, next) => {
+      if (!bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN)) return c.json({ error: { code: "invalid_capability" } }, 401);
+      if (!contentTypeIsJson(c.req.header("content-type"))) return c.json({ error: { code: "invalid_request" } }, 422);
+      if (activeBlobBatchBodies >= 8 || activeBlobIngressBytes + 6 * 1024 * 1024 > 128 * 1024 * 1024) return c.json({ error: { code: "object_store_unavailable" } }, 503);
+      activeBlobBatchBodies += 1; activeBlobIngressBytes += 6 * 1024 * 1024;
+      try { await next(); } finally { activeBlobBatchBodies -= 1; activeBlobIngressBytes -= 6 * 1024 * 1024; }
+    });
+    routes.post(path, async c => {
+      const token = bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN);
+      if (!token) return c.json({ error: { code: "invalid_capability" } }, 401);
+      const entries: Buffer[] = [];
+      let bodyBytes: Buffer | undefined;
+      try {
+        bodyBytes = await readWorkspaceBlobBody(c.req.raw, 6 * 1024 * 1024);
+        let parsed: z.SafeParseReturnType<unknown, z.infer<typeof BlobBatchBody>>;
+        try { parsed = BlobBatchBody.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes))); }
+        catch { return c.json({ error: { code: "invalid_request" } }, 422); }
+        if (!parsed.success) return c.json({ error: { code: "invalid_request" } }, 422);
+        const input = parsed.data;
+        let total = 0;
+        for (const entry of input.entries) {
+          const bytes = Buffer.from(entry.bytesBase64, "base64");
+          entries.push(bytes); total += bytes.length;
+          if (bytes.toString("base64") !== entry.bytesBase64 || total > MAX_WORKSPACE_BLOB_BATCH_BYTES) {
+            return c.json({ error: { code: "invalid_request" } }, 422);
+          }
+        }
+        return c.json(await service.putBlobBatch!({ ...input, entries, heartbeatToken: token, signal: c.req.raw.signal }));
+      } catch (error) {
+        if (error instanceof WorkspaceBlobBodyError) return c.json({ error: { code: "invalid_request" } }, error.status);
+        if (!(error instanceof WorkspaceBlobError)) throw error;
+        const response = durableErrorResponse(error);
+        return c.json({ error: { code: response.code } }, response.status);
+      } finally { bodyBytes?.fill(0); for (const bytes of entries) bytes.fill(0); }
+    });
+  }
+
   if (service.putBlob && service.getBlob) {
-    routes.use(
-      CLOUD_WORKSPACE_BLOB_PATH,
-      bodyLimit({ maxSize: BLOB_BODY_BYTES }),
-    );
+    routes.use(CLOUD_WORKSPACE_BLOB_PATH, authenticateBlobIngress);
+    routes.use(CLOUD_WORKSPACE_BLOB_PATH, async (c, next) => {
+      if (c.req.method !== "POST") return next();
+      if (!bearerToken(c.req.header("authorization"), HEARTBEAT_TOKEN_PATTERN)) return c.json({ error: { code: "invalid_capability" } }, 401);
+      if (c.req.header("content-type")?.split(";", 1)[0]?.trim().toLowerCase() !== "application/octet-stream") return c.json({ error: { code: "invalid_request" } }, 422);
+      if (activeBlobIngressBytes + BLOB_BODY_BYTES > 128 * 1024 * 1024) return c.json({ error: { code: "object_store_unavailable" } }, 503);
+      activeBlobIngressBytes += BLOB_BODY_BYTES;
+      try { await next(); } finally { activeBlobIngressBytes -= BLOB_BODY_BYTES; }
+    });
     routes.post(CLOUD_WORKSPACE_BLOB_PATH, async (c) => {
       const token = bearerToken(
         c.req.header("authorization"),
@@ -797,20 +1020,23 @@ export function createCloudWorkspaceInternalRoutes(
       if (!query.success) {
         return c.json({ error: { code: "invalid_request" } }, 422);
       }
+      let bytes: Buffer | undefined;
       try {
-        const bytes = new Uint8Array(await c.req.arrayBuffer());
+        bytes = await readWorkspaceBlobBody(c.req.raw, BLOB_BODY_BYTES);
         return c.json(
           await service.putBlob!({
             ...query.data,
             heartbeatToken: token,
             bytes,
+            signal: c.req.raw.signal,
           }),
         );
       } catch (error) {
+        if (error instanceof WorkspaceBlobBodyError) return c.json({ error: { code: "invalid_request" } }, error.status);
         if (!(error instanceof WorkspaceBlobError)) throw error;
         const response = durableErrorResponse(error);
         return c.json({ error: { code: response.code } }, response.status);
-      }
+      } finally { bytes?.fill(0); }
     });
     routes.get(`${CLOUD_WORKSPACE_BLOB_PATH}/:blobId`, async (c) => {
       const token = bearerToken(

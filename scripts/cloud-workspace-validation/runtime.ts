@@ -35,13 +35,13 @@ import {
 } from "@zeros/protocol/github-auth";
 
 const INSTALL_PREVIEW_LINKS_COMMAND =
-  "/usr/local/bin/node /usr/local/lib/zeros/install-cloud-preview-links.mjs";
+  "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/install-cloud-preview-links.mjs";
 const INSTALL_GITHUB_CREDENTIAL_COMMAND =
-  "/usr/local/bin/node /usr/local/lib/zeros/install-cloud-github-credential.mjs";
+  "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/install-cloud-github-credential.mjs";
 const READ_GITHUB_REFRESH_REQUEST_COMMAND =
-  "/usr/local/bin/node /usr/local/lib/zeros/cloud-github-refresh-request.mjs read";
+  "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs read";
 const ACK_GITHUB_REFRESH_REQUEST_COMMAND =
-  "/usr/local/bin/node /usr/local/lib/zeros/cloud-github-refresh-request.mjs ack";
+  "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/cloud-github-refresh-request.mjs ack";
 const PREVIEW_LINK_MINT_CONCURRENCY = 8;
 const PREVIEW_REVOKE_ATTEMPTS = 3;
 const MAX_RETIRING_PREVIEW_GENERATIONS = 8;
@@ -955,7 +955,8 @@ export function assertCloudStateMatchesSnapshot(
   snapshot: CloudSnapshotAttestation,
 ): void {
   if (
-    snapshot.version !== 1 ||
+    ![1,2].includes(snapshot.version) ||
+    (snapshot.version===2&&state.region!==snapshot.region) ||
     state.snapshotId !== snapshot.snapshotId ||
     state.snapshotImageName !== snapshot.snapshotImageName
   ) {
@@ -974,7 +975,7 @@ export function verifyCloudRuntimeAttestation(
     exitCode !== 0 ||
     report.version !== 1 ||
     report.qualified !== true ||
-    report.profile !== "zeros-cloud-worker-v1" ||
+    report.profile !== "zeros-cloud-worker-v3" ||
     report.metadata?.build?.baseImage !== NODE_BASE_IMAGE ||
     report.metadata.build.imageContractSha256 !== imageContractSha256() ||
     report.metadata.build.source?.repositoryUrlSha256 !==
@@ -996,7 +997,7 @@ export async function attestCloudWorker(
   expectedSourceCommit: string,
 ): Promise<{ report: RuntimeAttestation; sha256: string }> {
   const response = await sandbox.process.executeCommand(
-    "/usr/local/bin/node /usr/local/lib/zeros/attest-cloud-worker.mjs",
+    "/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/attest-cloud-worker.mjs",
     undefined,
     undefined,
     // The in-image harness has its own 180s qualification timeout plus image
@@ -1090,7 +1091,7 @@ export async function relaunchQualifiedCloudEngine(
   await ensureEngineSession(sandbox);
   try {
     await sandbox.process.executeSessionCommand("zeros-engine", {
-      command: "/usr/local/bin/start-engine.sh",
+      command: "/opt/zeros-runtime/bin/start-engine.sh",
       runAsync: true,
     });
     if (!(await waitForCloudHealth(engineIngress.url))) {

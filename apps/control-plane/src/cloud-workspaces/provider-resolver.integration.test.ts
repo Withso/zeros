@@ -15,7 +15,11 @@ import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import type { DaytonaWorkspaceProviderConfig } from "./daytona-provider.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
-import { DatabaseDaytonaProviderResolver } from "./provider-resolver.js";
+import {
+  DatabaseDaytonaProviderResolver,
+  DatabaseCloudWorkspaceProviderResolver,
+} from "./provider-resolver.js";
+import { CloudWorkspaceProviderRegistry } from "./provider-registry.js";
 import type {
   CloudWorkspaceAccessProvider,
   CloudWorkspaceProvider,
@@ -98,6 +102,82 @@ d("generation-bound cloud provider resolution", () => {
       connectionVersion: 1,
       credentialSource: "hosted",
     });
+  });
+
+  it("retains an existing Daytona generation while Boat is also registered", async () => {
+    const daytona = provider();
+    const boat = { ...provider(), name: "boat" };
+    const resolver = new DatabaseCloudWorkspaceProviderResolver({
+      pool,
+      workosEnabled: false,
+      registry: new CloudWorkspaceProviderRegistry([
+        { name: "boat", hosted: { provider: boat } },
+        { name: "daytona", hosted: { provider: daytona } },
+      ]),
+    });
+    const resolved = await resolver.resolve({
+      workspaceId: fixture.workspaceId,
+      organizationId: fixture.organizationId,
+      generation: 1,
+      purpose: "lifecycle",
+    });
+    expect(resolved.provider).toBe(daytona);
+    expect(boat.create).not.toHaveBeenCalled();
+    expect(
+      (await resolver.cleanupScopes()).scopes.map((scope) => scope.provider),
+    ).toEqual([boat, daytona]);
+  });
+
+  it("constructs a hosted provider from an accepted generation after the deployment image changes", async () => {
+    const currentDefault = provider();
+    const originalImage = provider();
+    const factory = vi.fn(() => originalImage);
+    const resolver = new DatabaseDaytonaProviderResolver({
+      pool,
+      hostedProvider: currentDefault,
+      hostedConfig: {
+        ...hostedConfig,
+        snapshotId: "new-deployment-image",
+        cpuMillicores: 4000,
+      },
+      providerFactory: factory,
+      workosEnabled: false,
+    });
+    const resolved = await resolver.resolve({
+      workspaceId: fixture.workspaceId,
+      organizationId: fixture.organizationId,
+      generation: 1,
+      purpose: "lifecycle",
+    });
+    expect(resolved.provider).toBe(originalImage);
+    expect(factory).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({
+        snapshotId: "snapshot-pinned",
+        cpuMillicores: 2000,
+        apiKey: hostedConfig.apiKey,
+        apiUrl: hostedConfig.apiUrl,
+      }),
+    );
+  });
+
+  it("does not redirect an unavailable historical provider to managed Boat", async () => {
+    const boat = { ...provider(), name: "boat" };
+    const resolver = new DatabaseCloudWorkspaceProviderResolver({
+      pool,
+      workosEnabled: false,
+      registry: new CloudWorkspaceProviderRegistry([
+        { name: "boat", hosted: { provider: boat } },
+      ]),
+    });
+    await expect(
+      resolver.resolve({
+        workspaceId: fixture.workspaceId,
+        organizationId: fixture.organizationId,
+        generation: 1,
+        purpose: "cleanup",
+      }),
+    ).rejects.toMatchObject({ code: "provider_connection_unavailable" });
+    expect(boat.delete).not.toHaveBeenCalled();
   });
 
   it("opens a qualified delegated credential just in time and rejects it after revocation", async () => {

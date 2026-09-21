@@ -1,3 +1,4 @@
+import {withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
@@ -41,6 +42,7 @@ d("cloud paid-work authorization", () => {
       email: `member-${randomUUID()}@example.test`,
       displayName: "Member",
     });
+    await pool.query("UPDATE users SET staff_role = 'developer' WHERE id = ANY($1::uuid[])", [[owner.id, member.id]]);
   });
 
   async function personalScope() {
@@ -97,7 +99,7 @@ d("cloud paid-work authorization", () => {
       ),
     ).rejects.toMatchObject({ code: "cloud_workspaces_not_allowed" });
 
-    await withSystemTx(pool, (tx) =>
+    await withCloudFixtureOwnerTx(pool, (tx) =>
       tx.query(
         `INSERT INTO account_entitlements (
            user_id, plan, status, cloud_workspaces_allowed, source
@@ -119,9 +121,9 @@ d("cloud paid-work authorization", () => {
     ).rejects.toMatchObject({ code: "cloud_workspaces_not_allowed" });
   });
 
-  it("requires every active collaborator to hold Pro independently", async () => {
+  it("funds a Pro workspace from its owner without requiring other members to pay", async () => {
     const scope = await collaborativeScope();
-    await withSystemTx(pool, async (tx) => {
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
         `INSERT INTO workos_organization_links (
            organization_id, workos_organization_id, external_id, state
@@ -153,9 +155,15 @@ d("cloud paid-work authorization", () => {
           requireWorkspaceOwner: false,
         }),
       ),
-    ).rejects.toMatchObject({ code: "cloud_pro_collaborator_not_entitled" });
+    ).resolves.toMatchObject({ plan: "pro", entitlementScope: "account" });
 
-    await withSystemTx(pool, (tx) =>
+    await expect(withSystemTx(pool, (tx) => authorizeCloudWorkspaceOperation(tx, {
+      organizationId: scope.orgId, teamId: scope.teamId,
+      actorUserId: member.id, billingOwnerUserId: owner.id,
+      workosEnabled: true, requireWorkspaceOwner: false,
+    }))).rejects.toMatchObject({ code: "cloud_account_entitlement_required" });
+
+    await withCloudFixtureOwnerTx(pool, (tx) =>
       tx.query(
         `INSERT INTO account_entitlements (
            user_id, plan, status, cloud_workspaces_allowed, source
@@ -201,7 +209,7 @@ d("cloud paid-work authorization", () => {
         authorizeCloudWorkspaceOperation(tx, {
           organizationId: scope.orgId,
           teamId: scope.teamId,
-          actorUserId: owner.id,
+          actorUserId: member.id,
           billingOwnerUserId: owner.id,
           workosEnabled: false,
           requireWorkspaceOwner: false,
@@ -214,7 +222,7 @@ d("cloud paid-work authorization", () => {
 
   it("does not count a future-dated Pro collaborator entitlement", async () => {
     const scope = await collaborativeScope();
-    await withSystemTx(pool, async (tx) => {
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
         `INSERT INTO organization_entitlements (
            org_id, plan, status, cloud_workspaces_allowed, source
@@ -243,13 +251,46 @@ d("cloud paid-work authorization", () => {
         authorizeCloudWorkspaceOperation(tx, {
           organizationId: scope.orgId,
           teamId: scope.teamId,
-          actorUserId: owner.id,
+          actorUserId: member.id,
           billingOwnerUserId: owner.id,
           workosEnabled: false,
           requireWorkspaceOwner: false,
         }),
       ),
-    ).rejects.toMatchObject({ code: "cloud_pro_collaborator_not_entitled" });
+    ).rejects.toMatchObject({ code: "cloud_account_entitlement_required" });
+  });
+
+  it("admits an individually entitled Pro user without an organization subscription or five-member ceiling", async () => {
+    const scope = await collaborativeScope();
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
+      await tx.query(`INSERT INTO account_entitlements (user_id, plan, status, cloud_workspaces_allowed, source)
+        VALUES ($1, 'pro', 'active', true, 'operator')`, [owner.id]);
+      for (let index = 0; index < 5; index++) {
+        const additional = await tx.query<{id: string}>(`INSERT INTO users (email, display_name)
+          VALUES ($1, 'Additional member') RETURNING id`, [`additional-${randomUUID()}@example.test`]);
+        await tx.query(`INSERT INTO organization_members(org_id,user_id,role) VALUES ($1,$2,'member')`, [scope.orgId, additional.rows[0]!.id]);
+      }
+    });
+    await expect(withSystemTx(pool, (tx) => authorizeCloudWorkspaceOperation(tx, {
+      organizationId: scope.orgId, teamId: scope.teamId, actorUserId: owner.id,
+      billingOwnerUserId: owner.id, workosEnabled: false, requireWorkspaceOwner: true,
+    }))).resolves.toMatchObject({ entitlementScope: "account", plan: "pro", isPersonal: false });
+  });
+
+  it("denies non-staff even with active account and organization entitlements", async () => {
+    const scope = await collaborativeScope();
+    await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [owner.id]);
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
+      await tx.query(`INSERT INTO account_entitlements (user_id, plan, status, cloud_workspaces_allowed, source)
+        VALUES ($1,'pro','active',true,'operator')`, [owner.id]);
+      await tx.query(`INSERT INTO organization_entitlements(org_id,plan,status,cloud_workspaces_allowed,seat_limit,source)
+        VALUES ($1,'business','active',true,1,'operator')`, [scope.orgId]);
+      await tx.query(`INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES ($1,$2,'active')`, [scope.orgId, owner.id]);
+    });
+    await expect(withSystemTx(pool, (tx) => authorizeCloudWorkspaceOperation(tx, {
+      organizationId: scope.orgId, teamId: scope.teamId, actorUserId: owner.id,
+      billingOwnerUserId: owner.id, workosEnabled: false, requireWorkspaceOwner: false,
+    }))).rejects.toMatchObject({ code: "cloud_pilot_access_required" });
   });
 
   it("requires an active Business seat and enforces the purchased seat ceiling", async () => {

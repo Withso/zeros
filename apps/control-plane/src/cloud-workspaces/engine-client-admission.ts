@@ -1,7 +1,10 @@
 import type pg from "pg";
+import type {AuthedUser} from "../auth.js";
+import { createHash } from "node:crypto";
 
 import { withSystemTx } from "../db.js";
 import { authorizeCloudWorkspaceOperation } from "./authorization.js";
+import { CLOUD_ACTOR_TOKEN_PATTERN, DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import {
   assertCurrentCloudEngineAuthority,
   CloudWorkspaceEngineAuthorityError,
@@ -12,11 +15,25 @@ import {
   issueCloudWorkspaceGrant,
   normalizeCloudWorkspaceGrantAudience,
 } from "./grants.js";
+import {
+  consumeCloudWorkspaceDeviceProof,
+  WorkspaceReplicaError,
+  type CloudWorkspaceDeviceProof,
+} from "./replicas.js";
 
 export const CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH =
   "/internal/v1/cloud-workspaces/engine/client-admission" as const;
 export const CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_AUDIENCE =
   "zeros-cloud-workspace-engine-client-admission-v1" as const;
+export const CLOUD_RUNTIME_BRIDGE_PATH = "/v1/cloud-workspaces/bridge";
+export type CloudEngineRelayGrant = {
+  workspaceId: string;
+  organizationId: string;
+  generation: number;
+  authorityEpoch: number;
+  engineInstanceId: string;
+  resourceId: string;
+};
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -47,6 +64,8 @@ export type CloudWorkspaceEngineClientAdmission = {
   remotePort: number;
   grantToken: string;
   expiresAt: string;
+  /** Portable WSS endpoint. Older SSH clients may ignore this additive field. */
+  bridgeUrl?: string;
 };
 
 export type DatabaseCloudWorkspaceEngineClientAdmissionServiceOptions = {
@@ -55,6 +74,7 @@ export type DatabaseCloudWorkspaceEngineClientAdmissionServiceOptions = {
   enginePort: number;
   ttlSeconds?: number;
   workosEnabled?: boolean;
+  relayEnabled?: boolean;
 };
 
 /** Issues desktop-facing, one-use bridge capabilities and redeems them only
@@ -66,6 +86,8 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
   private readonly enginePort: number;
   private readonly ttlSeconds: number;
   private readonly workosEnabled: boolean;
+  private readonly bridgeUrl: string | null;
+  private readonly actors: DatabaseCloudWorkspaceActorSessionService | null;
 
   constructor(
     options: DatabaseCloudWorkspaceEngineClientAdmissionServiceOptions,
@@ -79,6 +101,14 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     this.enginePort = options.enginePort;
     this.ttlSeconds = options.ttlSeconds ?? 120;
     this.workosEnabled = options.workosEnabled === true;
+    this.bridgeUrl = options.relayEnabled
+      ? new URL(CLOUD_RUNTIME_BRIDGE_PATH, this.endpoint)
+          .toString()
+          .replace(/^https:/, "wss:")
+      : null;
+    this.actors = this.bridgeUrl ? new DatabaseCloudWorkspaceActorSessionService({
+      pool:this.pool,enginePort:this.enginePort,bridgeUrl:this.bridgeUrl,workosEnabled:this.workosEnabled,
+    }) : null;
     if (
       !Number.isSafeInteger(this.enginePort) ||
       this.enginePort < 1 ||
@@ -92,15 +122,32 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     }
   }
 
+  async issueActor(input:{organizationId:string;workspaceId:string;actorUserId:string;proof?:CloudWorkspaceDeviceProof;authenticatedUser:AuthedUser}) {
+    if (!this.actors || !input.proof) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_invalid","A trusted device is required for actor admission");
+    return this.actors.issue({...input,proof:input.proof});
+  }
+
+  async consumeActor(input:Parameters<DatabaseCloudWorkspaceActorSessionService["consume"]>[0]) {
+    if (!this.actors) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_rejected","Actor admission is unavailable");
+    return this.actors.consume(input);
+  }
+
+  async revokeActor(input:Parameters<DatabaseCloudWorkspaceActorSessionService["revoke"]>[0]) {
+    if (!this.actors) throw new CloudWorkspaceEngineClientAdmissionError("engine_client_admission_rejected","Actor admission is unavailable");
+    await this.actors.revoke(input);
+  }
+
   async issue(input: {
     organizationId: string;
     workspaceId: string;
     actorUserId: string;
+    proof?: CloudWorkspaceDeviceProof;
   }): Promise<CloudWorkspaceEngineClientAdmission> {
     if (
       !UUID_PATTERN.test(input.organizationId) ||
       !UUID_PATTERN.test(input.workspaceId) ||
-      !UUID_PATTERN.test(input.actorUserId)
+      !UUID_PATTERN.test(input.actorUserId) ||
+      (this.bridgeUrl !== null && !input.proof)
     ) {
       throw new CloudWorkspaceEngineClientAdmissionError(
         "engine_client_admission_invalid",
@@ -109,6 +156,10 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     }
     try {
       return await withSystemTx(this.pool, async (tx) => {
+        // Match lifecycle/access ordering: organization, workspace, then
+        // device/grant. Holding workspace while waiting for its organization
+        // deadlocks a concurrent renewal that already holds the organization.
+        await tx.query("SELECT id FROM organizations WHERE id = $1 FOR UPDATE", [input.organizationId]);
         const workspace = await tx.query<{
           team_id: string;
           owner_user_id: string;
@@ -116,9 +167,11 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
           authority_epoch: string | number;
           desired_state: string;
           status: string;
+          single_member_mode: boolean;
+          sharing_mode: string;
         }>(
           `SELECT team_id, owner_user_id, current_generation, authority_epoch,
-                  desired_state, status
+                  desired_state, status, single_member_mode, sharing_mode
            FROM cloud_workspaces
            WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
            FOR UPDATE`,
@@ -127,6 +180,7 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
         const current = workspace.rows[0];
         if (
           !current ||
+          !current.single_member_mode || current.sharing_mode !== "private" ||
           current.desired_state !== "running" ||
           !["ready", "busy"].includes(current.status)
         ) {
@@ -143,11 +197,23 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
           workosEnabled: this.workosEnabled,
           requireWorkspaceOwner: true,
         });
+        const device = input.proof
+          ? await consumeCloudWorkspaceDeviceProof(tx, {
+              accountUserId: input.actorUserId,
+              action: "engine.connect",
+              payload: {
+                organizationId: input.organizationId,
+                workspaceId: input.workspaceId,
+              },
+              proof: input.proof,
+            })
+          : null;
         const engine = await tx.query<{ id: string }>(
           `SELECT id
            FROM cloud_workspace_engine_instances
            WHERE workspace_id = $1 AND org_id = $2 AND generation = $3
              AND state = 'ready' AND revoked_at IS NULL
+             AND actor_protocol_version = 1
              AND lease_expires_at > now()
            ORDER BY registered_at DESC NULLS LAST, id DESC
            LIMIT 2`,
@@ -166,6 +232,14 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
           accountUserId: input.actorUserId,
           purpose: "engine-connect",
           engineInstanceId: engine.rows[0]!.id,
+          ...(device
+            ? {
+                device: {
+                  id: device.id,
+                  keyVersion: Number(device.key_version),
+                },
+              }
+            : {}),
           audience: this.endpoint,
           ttlSeconds: this.ttlSeconds,
           issuedBy: input.actorUserId,
@@ -193,11 +267,18 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
           remotePort: this.enginePort,
           grantToken: grant.token,
           expiresAt: grant.expiresAt.toISOString(),
+          ...(this.bridgeUrl ? { bridgeUrl: this.bridgeUrl } : {}),
         };
       });
     } catch (error) {
       if (error instanceof CloudWorkspaceEngineClientAdmissionError)
         throw error;
+      if (error instanceof WorkspaceReplicaError) {
+        throw new CloudWorkspaceEngineClientAdmissionError(
+          "engine_client_admission_rejected",
+          "Device admission was rejected",
+        );
+      }
       if (
         error instanceof CloudWorkspaceGrantError ||
         error instanceof CloudWorkspaceEngineAuthorityError
@@ -211,6 +292,80 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     }
   }
 
+  /** Lookup does not consume admission: the exact engine still redeems the
+   * one-use proof. Connected relays recheck current authority independently of
+   * the original admission deadline; revoked grants never renew a stream. */
+  async authorizeRelay(
+    token: string,
+    options: { connected?: boolean } = {},
+  ): Promise<CloudEngineRelayGrant | null> {
+    if (CLOUD_ACTOR_TOKEN_PATTERN.test(token)) return this.actors?.authorizeRelay(token,options) ?? null;
+    if (!GRANT_TOKEN_PATTERN.test(token)) return null;
+    return withSystemTx(this.pool, async (tx) => {
+      const result = await tx.query<{
+        workspace_id: string;
+        org_id: string;
+        generation: number;
+        authority_epoch: string | number;
+        engine_instance_id: string;
+        provider_resource_id: string;
+      }>(
+        `SELECT capability.workspace_id, capability.org_id, capability.generation, capability.authority_epoch,
+           capability.engine_instance_id, binding.provider_resource_id
+         FROM cloud_workspace_endpoint_grants capability
+         JOIN cloud_workspaces workspace ON workspace.id = capability.workspace_id AND workspace.org_id = capability.org_id
+           AND workspace.current_generation = capability.generation AND workspace.authority_epoch = capability.authority_epoch
+         JOIN cloud_workspace_engine_instances engine ON engine.id = capability.engine_instance_id
+           AND engine.workspace_id = capability.workspace_id AND engine.org_id = capability.org_id AND engine.generation = capability.generation
+           AND engine.account_user_id = capability.account_user_id AND engine.state = 'ready'
+           AND engine.revoked_at IS NULL AND engine.lease_expires_at > now() AND engine.actor_protocol_version = 1
+         JOIN users account ON account.id = capability.account_user_id AND account.deleted_at IS NULL
+           AND account.auth_status = 'active' AND account.auth_revision = capability.account_revision
+         JOIN organization_members member ON member.org_id = capability.org_id AND member.user_id = capability.account_user_id
+           AND member.authorization_revision = capability.authorization_revision
+         JOIN cloud_workspace_provider_bindings binding ON binding.workspace_id = capability.workspace_id
+           AND binding.org_id = capability.org_id AND binding.generation = capability.generation AND binding.observed_state = 'running'
+         JOIN cloud_workspace_generations generation ON generation.workspace_id = capability.workspace_id
+           AND generation.org_id = capability.org_id AND generation.generation = capability.generation AND generation.retired_at IS NULL
+         JOIN provider_connections connection ON connection.id = generation.provider_connection_id
+           AND connection.org_id = capability.org_id AND connection.state = 'active'
+         WHERE capability.token_hash = $1 AND capability.purpose = 'engine-connect' AND capability.audience = $2
+           AND ((NOT $5::boolean AND capability.device_id IS NULL) OR EXISTS (
+             SELECT 1 FROM devices device WHERE device.id = capability.device_id
+               AND device.user_id = capability.account_user_id AND device.key_version = capability.device_key_version
+               AND device.trust_state = 'trusted' AND device.revoked_at IS NULL
+           ))
+           AND capability.revoked_at IS NULL AND capability.setup_run_id IS NULL AND capability.setup_execution_fence IS NULL
+           AND (($3 AND capability.consumed_at IS NOT NULL) OR (NOT $3 AND capability.consumed_at IS NULL AND capability.expires_at > now()))
+           AND workspace.deleted_at IS NULL AND workspace.desired_state = 'running'
+           AND workspace.status IN ('ready', 'busy') AND workspace.single_member_mode AND workspace.sharing_mode = 'private'
+           AND workspace.owner_user_id = capability.account_user_id
+           AND cloud_workspace_generation_policy_current(workspace.id, capability.generation, capability.org_id)
+           AND cloud_workspace_runtime_authority_live(workspace.id, capability.generation, capability.account_user_id, $4)`,
+        [
+          createHash("sha256").update(token).digest(),
+          this.endpoint,
+          options.connected === true,
+          this.workosEnabled,
+          this.bridgeUrl !== null,
+        ],
+      );
+      const row = result.rows[0];
+      if (result.rows.length !== 1 || !row) return null;
+      const authorityEpoch = Number(row.authority_epoch);
+      if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1)
+        return null;
+      return {
+        workspaceId: row.workspace_id,
+        organizationId: row.org_id,
+        generation: row.generation,
+        authorityEpoch,
+        engineInstanceId: row.engine_instance_id,
+        resourceId: row.provider_resource_id,
+      };
+    });
+  }
+
   async consume(input: {
     token: string;
     heartbeatToken: string;
@@ -218,6 +373,7 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     workspaceId: string;
     generation: number;
     engineInstanceId: string;
+    renew?: boolean;
   }): Promise<{
     version: 1;
     audience: typeof CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_AUDIENCE;
@@ -241,12 +397,14 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
     }
     try {
       return await withSystemTx(this.pool, async (tx) => {
-        // Workspace → endpoint grant → engine is the global revocation order.
+        // Organization → workspace → endpoint grant → engine.
+        await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
         const workspace = await tx.query(
           `SELECT 1 FROM cloud_workspaces
-           WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
+           WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL AND single_member_mode AND sharing_mode = 'private'
+             AND EXISTS (SELECT 1 FROM cloud_workspace_engine_instances WHERE id=$3 AND actor_protocol_version=1)
            FOR UPDATE`,
-          [input.workspaceId, input.organizationId],
+          [input.workspaceId, input.organizationId, input.engineInstanceId],
         );
         if ((workspace.rowCount ?? 0) !== 1) {
           throw new CloudWorkspaceEngineClientAdmissionError(
@@ -262,6 +420,8 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
           engineInstanceId: input.engineInstanceId,
           audience: this.endpoint,
           workosEnabled: this.workosEnabled,
+          renew: input.renew === true,
+          requireDevice: this.bridgeUrl !== null,
         });
         if (!grant) {
           throw new CloudWorkspaceEngineClientAdmissionError(

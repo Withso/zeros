@@ -486,7 +486,10 @@ describe("repository layout contracts", () => {
     expect(licenses).not.toMatch(
       /@(?:anthropic-ai\/claude-agent-sdk|cursor\/sdk|vscode\/ripgrep)-linux-/,
     );
-    expect(licenses).not.toContain("@openai/codex@0.154.0-linux-x64");
+    // The independently deployed control plane now runs the native auth keeper.
+    expect(licenses).toContain("@openai/codex@0.154.0-linux-x64");
+    expect(licenses).toContain("control plane native runtime (Linux x64)");
+    expect(licenses).not.toContain("@openai/codex@0.154.0-win32-x64");
     expect(generator).not.toContain('"--no-optional"');
     expect(generator).toContain("runNpmLicenseInventory");
     expect(generator).toContain("web Pages functions");
@@ -648,10 +651,10 @@ describe("repository layout contracts", () => {
     );
     expect(image).toContain("&& pnpm rebuild better-sqlite3`");
     expect(image).not.toContain("pnpm rebuild better-sqlite3 || true");
-    expect(config).toContain('SANDBOX_ENGINE_DIR = "/opt/zeros"');
-    expect(config).toContain('SANDBOX_REPO_DIR = "/workspace/zeros"');
+    expect(config).toContain('SANDBOX_ENGINE_DIR = runtimeLayout.engine');
+    expect(config).toContain('SANDBOX_REPO_DIR = runtimeLayout.repository');
     expect(config).toMatch(/node:22[^"\n]+@sha256:[a-f0-9]{64}/);
-    expect(image).toContain("acl bubblewrap busybox-static ca-certificates");
+    expect(image).toContain("acl apparmor bubblewrap busybox-static ca-certificates");
     expect(image).toContain('"/etc/zeros/cloud-worker.json"');
     expect(dockerfile).toContain("bubblewrap");
     expect(dockerfile).toContain("podman");
@@ -660,7 +663,7 @@ describe("repository layout contracts", () => {
       "COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json",
     );
     expect(dockerfile).toContain(
-      "COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs",
+      "COPY sandbox/consume-cloud-admission.mjs /opt/zeros-runtime/lib/zeros/consume-cloud-admission.mjs",
     );
     expect(dockerfile).not.toContain("prepare-zsr-cgroups");
     expect(image).not.toContain("prepare-zsr-cgroups");
@@ -677,9 +680,31 @@ describe("repository layout contracts", () => {
     expect(runtime).toContain("relaunchQualifiedCloudEngine");
     expect(lifecycle).toContain("relaunchQualifiedCloudEngine");
     expect(launcher).toContain(
-      'node "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
+      '"$RUNTIME" "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
     );
+    expect(launcher).toContain('"$RUNTIME" /opt/zeros-runtime/lib/zeros/cloud-engine-launcher.mjs');
     expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
+  });
+
+  it("packages the durable layout and capture worker in both cloud image paths", () => {
+    const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
+    const image = read("scripts/cloud-workspace-validation/image.ts");
+    const launcher = read("scripts/cloud-workspace-validation/sandbox/start-engine.sh");
+    const layout = JSON.parse(read("scripts/cloud-workspace-validation/sandbox/runtime-layout.json"));
+    expect(layout.version).toBe(2);
+    for (const field of ["repository", "data", "agentHome", "captureHome", "log"]) {
+      expect(layout[field]).toMatch(/^\/srv\/zeros\//);
+      expect(dockerfile).toContain(layout[field]);
+    }
+    for (const field of ["repository", "data", "agentHome", "log"]) {
+      expect(launcher).toContain(layout[field]);
+    }
+    expect(dockerfile).toContain("COPY sandbox/runtime-layout.json /opt/zeros-runtime/lib/zeros/runtime-layout.json");
+    expect(image).toContain('"/opt/zeros-runtime/lib/zeros/runtime-layout.json"');
+    for (const source of [dockerfile, image]) {
+      expect(source).toContain("--uid 10002 --gid 10002");
+      expect(source).toContain("playwright-core install --with-deps chromium");
+    }
   });
 
   it("keeps private delivery ledgers out of tracked design references", () => {
@@ -714,13 +739,21 @@ describe("repository layout contracts", () => {
     const cloudDocs = "docs/cloud-workspace";
     const expected = [
       "README.md",
+      "account-pro-operations.md",
+      "agent-authentication-and-language-tools.md",
       "architecture.md",
+      "checkpoint-native-format.md",
+      "client-runtime-contract.md",
+      "compute-credits.md",
       "data-and-sync.md",
+      "database-qualification.md",
       "engineering-reference.md",
       "enterprise-and-self-hosting.md",
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "product-contract.md",
+      "provider-contract.md",
+      "qualification-status.md",
       "root-coordinator-threat-model.md",
       "security.md",
     ];

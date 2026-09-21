@@ -2,6 +2,35 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapterContext } from "../../../types";
 
 describe("Codex fallback selection", () => {
+  it("rejects a different model reported by thread creation before a prompt can run", async () => {
+    const instance = new CodexAppServerAdapter({ projectRoot: "/tmp/proj", mcpServers: [], sessionDirRoot: "/tmp/sessions",
+      emit: { onSessionUpdate: vi.fn(), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() } });
+    try {
+      await expect(instance.newSession({ cwd: "/tmp/proj", env: {
+        OPENAI_MODEL: "gpt-5.6-sol", ZEROS_REQUIRE_EXACT_MODEL: "1",
+      } })).rejects.toThrow(/exact model/i);
+    } finally { await instance.dispose(); }
+  });
+
+  it("stops an exact-model qualification and refuses another turn after native rerouting", async () => {
+    const instance = new CodexAppServerAdapter({ projectRoot: "/tmp/proj", mcpServers: [], sessionDirRoot: "/tmp/sessions",
+      emit: { onSessionUpdate: vi.fn(), onPermissionRequest: vi.fn(), onQuestionRequest: vi.fn(), onAgentStderr: vi.fn(), onAgentExit: vi.fn() } });
+    try {
+      const { session: info } = await instance.newSession({ cwd: "/tmp/proj", env: { OPENAI_MODEL: "gpt-5", ZEROS_REQUIRE_EXACT_MODEL: "1" } });
+      const session = (instance as unknown as { sessions: Map<string, import("../app-server-adapter").CodexSession> }).sessions.get(info.sessionId)!;
+      vi.mocked(session.runtime.runTurn).mockImplementation(async () => {
+        native.state.notificationHandlers.get("model/rerouted")?.({ threadId: session.threadId, turnId: "exact-turn", fromModel: "gpt-5", toModel: "gpt-5.6-sol", reason: "highRiskCyberActivity" });
+        return { status: "completed", turnId: "exact-turn", raw: {} } as never;
+      });
+      const send = () => instance.prompt({ sessionId: info.sessionId, prompt: [{ type: "text", text: "qualification" }] });
+      await expect(send()).rejects.toThrow(/exact model/i);
+      await expect(send()).rejects.toThrow(/exact model/i);
+      expect(session.runtime.runTurn).toHaveBeenCalledOnce();
+      expect(session.runtime.dispose).toHaveBeenCalled();
+      expect(session.env?.OPENAI_MODEL).toBe("gpt-5");
+    } finally { await instance.dispose(); }
+  });
+
   it.each([false, true])("uses the fallback on the next send unless manually changed: %s", async (manual) => {
     const updates: unknown[] = [];
     const instance = new CodexAppServerAdapter({ projectRoot: "/tmp/proj", mcpServers: [], sessionDirRoot: "/tmp/sessions",

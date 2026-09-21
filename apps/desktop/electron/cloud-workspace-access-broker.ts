@@ -1,3 +1,4 @@
+import type { CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -12,6 +13,7 @@ const ACCESS_TTL_MINUTES = 30;
 const MAX_ACTIVE_ACCESS = 64;
 
 export interface CloudWorkspaceAccessBrokerApi {
+  revokeEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;grantToken:string}):Promise<void>;
   issueEngineAdmission(
     accessToken: string,
     input: { organizationId: string; workspaceId: string },
@@ -118,7 +120,7 @@ type AccessLease = AccessTarget & {
 
 export type CloudWorkspaceRuntimeConnectionTarget = {
   kind: "cloud";
-  channel: "electron-ssh-tunnel";
+  channel: "electron-ssh-tunnel" | "control-plane-websocket";
   runtimeId: string;
   organizationId: string;
   workspaceId: string;
@@ -169,6 +171,9 @@ function safeFrameName(value: string): string {
 export class CloudWorkspaceAccessBroker {
   private readonly api: CloudWorkspaceAccessBrokerApi;
   private readonly getAccessToken: () => Promise<string | null>;
+  private readonly getAccountSessionKey: () => string | null;
+  private readonly accountSessionKey: string | null;
+  private readonly onRuntimeRetired: (runtimeIds: string[]) => void;
   private readonly getDeviceId: () => Promise<string>;
   private readonly randomId: () => string;
   private readonly now: () => number;
@@ -188,6 +193,7 @@ export class CloudWorkspaceAccessBroker {
   private readonly previewByFrame = new Map<string, string>();
   private readonly previewFrameTails = new Map<string, Promise<void>>();
   private readonly runtimeById = new Map<string, string>();
+  private readonly actorRuntimes = new Map<string,{target:CloudWorkspaceRuntimeConnectionTarget;grantToken:string;retainUntil:number;closing?:boolean}>();
   private pendingAccess = 0;
   // The auth store is cleared before its session-change listeners run. Keep
   // the most recent token that actually issued/revoked one of this broker's
@@ -199,6 +205,8 @@ export class CloudWorkspaceAccessBroker {
   constructor(input: {
     api: CloudWorkspaceAccessBrokerApi;
     getAccessToken: () => Promise<string | null>;
+    getAccountSessionKey: () => string | null;
+    onRuntimeRetired?: (runtimeIds: string[]) => void;
     getDeviceId?: () => Promise<string>;
     randomId?: () => string;
     now?: () => number;
@@ -215,6 +223,9 @@ export class CloudWorkspaceAccessBroker {
   }) {
     this.api = input.api;
     this.getAccessToken = input.getAccessToken;
+    this.getAccountSessionKey = input.getAccountSessionKey;
+    this.accountSessionKey = input.getAccountSessionKey();
+    this.onRuntimeRetired = input.onRuntimeRetired ?? (() => undefined);
     this.getDeviceId =
       input.getDeviceId ??
       (async () => {
@@ -257,6 +268,7 @@ export class CloudWorkspaceAccessBroker {
 
   private pruneExpired(): void {
     const now = this.now();
+    for (const [id, runtime] of this.actorRuntimes) if(runtime.retainUntil<=now)this.actorRuntimes.delete(id);
     for (const [id, lease] of this.leases) {
       if (Date.parse(lease.expiresAt) > now) continue;
       this.forgetLease(id, lease);
@@ -275,8 +287,18 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
+  /** A broker and every handle it issues belong to one canonical source session.
+   * Access-token rotation does not replace that identity. */
+  hasCurrentSession(): boolean {
+    let current: string | null = null;
+    try { current = this.getAccountSessionKey(); } catch { /* fail closed */ }
+    if (!this.disposed && this.accountSessionKey && current === this.accountSessionKey) return true;
+    if (!this.disposed) void this.dispose().catch(() => undefined);
+    return false;
+  }
+
   private reserveCapacity(): () => void {
-    if (this.disposed) {
+    if (!this.hasCurrentSession()) {
       throw new CloudWorkspaceAccessClientError(
         401,
         "signed_out",
@@ -284,7 +306,7 @@ export class CloudWorkspaceAccessBroker {
       );
     }
     this.pruneExpired();
-    if (this.leases.size + this.pendingAccess >= MAX_ACTIVE_ACCESS) {
+    if (this.leases.size + this.actorRuntimes.size + this.pendingAccess >= MAX_ACTIVE_ACCESS) {
       throw new CloudWorkspaceAccessClientError(
         429,
         "cloud_access_local_limit",
@@ -301,8 +323,9 @@ export class CloudWorkspaceAccessBroker {
   }
 
   private async token(): Promise<string> {
+    if (!this.hasCurrentSession()) throw new CloudWorkspaceAccessClientError(401, "signed_out", "Cloud workspace access authority has ended");
     const value = await this.getAccessToken();
-    if (!value) {
+    if (!value || !this.hasCurrentSession()) {
       throw new CloudWorkspaceAccessClientError(
         401,
         "signed_out",
@@ -397,7 +420,7 @@ export class CloudWorkspaceAccessBroker {
         expiresInMinutes: ACCESS_TTL_MINUTES,
         idempotencyKey: this.key("ssh"),
       });
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await this.cleanupSsh(token, {
           ...target,
           grantId: response.grant.id,
@@ -442,7 +465,7 @@ export class CloudWorkspaceAccessBroker {
           expiresInMinutes: ACCESS_TTL_MINUTES,
           idempotencyKey: this.key("preview"),
         });
-        if (this.disposed) {
+        if (!this.hasCurrentSession()) {
           await this.cleanup(token, {
             organizationId: input.organizationId,
             workspaceId: input.workspaceId,
@@ -481,7 +504,7 @@ export class CloudWorkspaceAccessBroker {
           });
           throw new Error("Cloud preview frame authorization did not complete");
         }
-        if (this.disposed) {
+        if (!this.hasCurrentSession()) {
           previewAuthorizationCleanup?.();
           await this.cleanup(token, {
             organizationId: input.organizationId,
@@ -539,7 +562,7 @@ export class CloudWorkspaceAccessBroker {
         }).catch(() => undefined);
         throw error;
       }
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
@@ -589,7 +612,7 @@ export class CloudWorkspaceAccessBroker {
         }).catch(() => undefined);
         throw error;
       }
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
@@ -640,7 +663,7 @@ export class CloudWorkspaceAccessBroker {
         }).catch(() => undefined);
         throw error;
       }
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await this.cleanupSsh(token, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
@@ -699,7 +722,7 @@ export class CloudWorkspaceAccessBroker {
         expiresInMinutes: ACCESS_TTL_MINUTES,
         idempotencyKey: this.key("tunnel"),
       });
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await this.cleanupSsh(token, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
@@ -738,7 +761,7 @@ export class CloudWorkspaceAccessBroker {
         }).catch(() => undefined);
         throw error;
       }
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await tunnel.stop().catch(() => undefined);
         await this.cleanupSsh(token, {
           organizationId: input.organizationId,
@@ -772,7 +795,7 @@ export class CloudWorkspaceAccessBroker {
         }).catch(() => undefined);
         throw error;
       }
-      if (this.disposed) {
+      if (!this.hasCurrentSession()) {
         await tunnel.stop().catch(() => undefined);
         await this.cleanupSsh(token, {
           organizationId: input.organizationId,
@@ -807,6 +830,17 @@ export class CloudWorkspaceAccessBroker {
     } finally {
       releaseCapacity();
     }
+  }
+
+  private actorRuntimeTarget(admission:CloudActorRuntimeGrant,runtimeId:string,sequence:number):CloudWorkspaceRuntimeConnectionTarget {
+    return {kind:"cloud",channel:"control-plane-websocket",runtimeId,connectionSequence:sequence,
+      organizationId:admission.organizationId,workspaceId:admission.workspaceId,generation:admission.generation,
+      authorityEpoch:admission.authorityEpoch,engineInstanceId:admission.engineInstanceId,url:admission.bridgeUrl,
+      cloudToken:admission.grantToken,expiresAt:Date.parse(admission.expiresAt)};
+  }
+
+  private async releaseActorAdmission(token:string,admission:{organizationId:string;workspaceId:string;grantToken:string}) {
+    await this.api.revokeEngineAdmission(token,{organizationId:admission.organizationId,workspaceId:admission.workspaceId,grantToken:admission.grantToken});
   }
 
   private runtimeTarget(
@@ -928,7 +962,7 @@ export class CloudWorkspaceAccessBroker {
         remotePort: input.admission.remotePort,
       },
     };
-    if (this.disposed) {
+    if (!this.hasCurrentSession()) {
       await tunnel.stop().catch(() => undefined);
       await this.cleanupSsh(input.token, provisional).catch(() => undefined);
       throw new CloudWorkspaceAccessClientError(
@@ -949,6 +983,13 @@ export class CloudWorkspaceAccessBroker {
     try {
       const token = await this.token();
       const admission = await this.api.issueEngineAdmission(token, input);
+      if(admission.version===2){
+        if(!this.hasCurrentSession()){await this.releaseActorAdmission(token,admission).catch(()=>undefined);throw new CloudWorkspaceAccessClientError(401,"signed_out","Cloud workspace access authority has ended");}
+        const target=this.actorRuntimeTarget(admission,this.randomId(),1);
+        this.actorRuntimes.set(target.runtimeId,{target,grantToken:admission.grantToken,retainUntil:this.now()+24*60*60_000});
+        return target;
+      }
+
       const lease = await this.createRuntimeLease({
         token,
         target: input,
@@ -983,6 +1024,26 @@ export class CloudWorkspaceAccessBroker {
     connectionSequence: number;
   }): Promise<CloudWorkspaceRuntimeConnectionTarget> {
     this.pruneExpired();
+    const actor=this.actorRuntimes.get(input.runtimeId);
+    if(actor){
+      const target=actor.target;
+      if(!this.hasCurrentSession()||actor.closing||target.organizationId!==input.organizationId||target.workspaceId!==input.workspaceId||target.generation!==input.generation||
+        target.authorityEpoch!==input.authorityEpoch||target.engineInstanceId!==input.engineInstanceId||target.connectionSequence!==input.connectionSequence)
+        throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
+      const token=await this.token();
+      const admission=await this.api.issueEngineAdmission(token,{organizationId:input.organizationId,workspaceId:input.workspaceId});
+      if(admission.version!==2)throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","An actor-aware cloud runtime is required");
+      if(!this.hasCurrentSession()||actor.closing||this.actorRuntimes.get(input.runtimeId)!==actor){
+        await this.releaseActorAdmission(token,admission).catch(()=>undefined);
+        throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
+      }
+      const next=this.actorRuntimeTarget(admission,input.runtimeId,input.connectionSequence+1);
+      this.actorRuntimes.set(input.runtimeId,{target:next,grantToken:admission.grantToken,retainUntil:this.now()+24*60*60_000});
+      await this.releaseActorAdmission(token,{...target,grantToken:actor.grantToken}).catch(()=>undefined);
+      const published=this.actorRuntimes.get(input.runtimeId);
+      if(!this.hasCurrentSession()||published?.target!==next||published.closing)throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","The cloud workspace runtime session has been superseded");
+      return next;
+    }
     const accessId = this.runtimeById.get(input.runtimeId);
     const current = accessId ? this.leases.get(accessId) : null;
     if (
@@ -1019,6 +1080,7 @@ export class CloudWorkspaceAccessBroker {
       );
     }
 
+    if(admission.version!==1)throw new CloudWorkspaceAccessClientError(409,"cloud_workspace_access_superseded","Reopen the upgraded cloud workspace runtime");
     const rotateTunnel =
       admission.generation !== current.generation ||
       admission.remotePort !== current.runtime.remotePort ||
@@ -1084,6 +1146,17 @@ export class CloudWorkspaceAccessBroker {
 
   async closeRuntime(runtimeId: string): Promise<boolean> {
     this.pruneExpired();
+    const actor=this.actorRuntimes.get(runtimeId);
+    if(actor){
+      if (!actor.closing) {
+        actor.closing=true;
+        try { this.onRuntimeRetired([runtimeId]); } catch { /* remote cleanup must continue */ }
+      }
+      const token=await this.token();
+      await this.releaseActorAdmission(token,{...actor.target,grantToken:actor.grantToken});
+      if(this.actorRuntimes.get(runtimeId)===actor)this.actorRuntimes.delete(runtimeId);
+      return true;
+    }
     const accessId = this.runtimeById.get(runtimeId);
     return accessId ? this.revoke(accessId) : false;
   }
@@ -1150,7 +1223,11 @@ export class CloudWorkspaceAccessBroker {
   /** Stop every local tunnel immediately and best-effort revoke every live
    * provider grant. Used when the account session or app lifetime ends. */
   async dispose(): Promise<void> {
+    if (this.disposed) return;
     this.disposed = true;
+    const runtimeIds = [...this.actorRuntimes.keys(), ...this.runtimeById.keys()];
+    try { this.onRuntimeRetired(runtimeIds); } catch { /* local cleanup must continue */ }
+    const actorRuntimes=[...this.actorRuntimes.values()];this.actorRuntimes.clear();
     const leases = [...this.leases.values()];
     this.leases.clear();
     this.previewByFrame.clear();
@@ -1170,12 +1247,12 @@ export class CloudWorkspaceAccessBroker {
         : undefined;
     const capturedToken = this.lastAccessToken;
     this.lastAccessToken = null;
-    const token =
-      capturedToken ?? (await this.getAccessToken().catch(() => null));
+    const token = capturedToken;
     if (!token) {
       if (localCleanupError) throw localCleanupError;
       return;
     }
+    await Promise.allSettled(actorRuntimes.map(actor=>this.releaseActorAdmission(token,{...actor.target,grantToken:actor.grantToken})));
     const providerRevocations: AccessLease[] = [];
     const sshGenerations = new Set<string>();
     for (const lease of leases) {

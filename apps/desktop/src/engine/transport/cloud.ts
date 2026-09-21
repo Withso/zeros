@@ -5,7 +5,7 @@
 // A cloud workspace is the SAME Zeros engine running inside a remote sandbox.
 // The Mac renderer reaches it through an Electron-main-owned loopback tunnel;
 // OpenSSH forwards that private connection to this port inside the exact
-// generation's sandbox. Provider preview access is a separate HTTP-only path.
+// generation's sandbox. Preview HTTP and WebSocket access have separate grants.
 //
 // It is a SEPARATE transport from LocalTransport on purpose:
 // LocalTransport's loopback/Origin gate is a DNS-rebinding defense for a server
@@ -33,6 +33,7 @@ import {
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, WebSocket } from "ws";
+import { CloudActorContextSchema, sameCloudActor, type CloudActorContext } from "@zeros/protocol/cloud-actors";
 import {
   MAX_BRIDGE_FRAME_BYTES,
   safeParseClientBridgeMessage,
@@ -42,7 +43,10 @@ import type { Transport, TransportClient } from "./types";
 import type {
   CloudRuntimeClientAdmission,
   CloudRuntimeReadiness,
+  CloudRuntimeServiceAccess,
 } from "../cloud-runtime-registration";
+import { CloudRuntimePreviewGateway } from "./cloud-preview-gateway";
+import { CloudRuntimeServiceGateway, type CloudRuntimeServiceStream } from "./cloud-service-gateway";
 
 /** Constant-time string compare for equal-length candidates. Length mismatches
  *  are rejected before the constant-time byte comparison.
@@ -144,11 +148,12 @@ const MAX_CONTROL_HANDLER_PEER_QUEUED_FRAMES = 8;
 const MAX_CONTROL_HANDLER_PEER_QUEUED_BYTES = 4 * 1024 * 1024;
 const MAX_HANDLER_RETAINED_BYTES = 64 * 1024 * 1024;
 const FORCE_CLOSE_TIMEOUT_MS = 1_000;
+const MAX_CLIENT_AUTHORITY_LEASE_MS = 10_000;
 const INTERNAL_READINESS_PATH = "/internal/readiness";
 const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const ENGINE_CONNECT_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
+const ENGINE_CONNECT_TOKEN_PATTERN = /^zw[sa]_[A-Za-z0-9_-]{43}$/;
 
 const CONTROL_HANDLER_MESSAGE_TYPES = new Set<string>([
   "OWNER_SIGNED_OUT",
@@ -205,6 +210,16 @@ export interface CloudTransportOptions {
    * heartbeat-authenticated control-plane channel. The bootstrap token above
    * remains available only to the image-owned setup qualification probe. */
   verifyToken?: (token: string) => Promise<CloudRuntimeClientAdmission | null>;
+  /** Revalidates the consumed grant, including device key and account trust.
+   * Required with verifyToken; direct provider connections have the same lease
+   * as relayed connections. A renewal never consumes another admission. */
+  renewToken?: (token: string) => Promise<CloudRuntimeClientAdmission | null>;
+  clientAuthorityLeaseMs?: number;
+  verifyServiceAccess?: (
+    token: string,
+  ) => Promise<CloudRuntimeServiceAccess | null>;
+  openServiceStream?: (grant: CloudRuntimeServiceAccess) => Promise<CloudRuntimeServiceStream>;
+  forbiddenPreviewPorts?: readonly number[];
   /** Bounded test/operator tuning. Production uses the conservative defaults;
    * callers cannot raise any value above its package-owned security ceiling. */
   maxConnections?: number;
@@ -241,6 +256,8 @@ class CloudClient implements TransportClient {
     private readonly maxBufferedBytes: number,
     private readonly maxTotalBufferedBytes: number,
     private readonly totalBufferedBytes: () => number,
+    private readonly authorityCurrent: () => boolean,
+    readonly cloudActor?: CloudActorContext,
   ) {
     this.ws.once("close", () => {
       if (this.forceCloseTimer) clearTimeout(this.forceCloseTimer);
@@ -248,7 +265,7 @@ class CloudClient implements TransportClient {
     });
   }
   send(msg: EngineMessage): void {
-    if (this.ws.readyState !== WebSocket.OPEN) return;
+    if (!this.authorized()) return;
     try {
       const payload = JSON.stringify(msg);
       const pendingBytes =
@@ -277,6 +294,12 @@ class CloudClient implements TransportClient {
         // ignore
       }
     }
+  }
+  authorized(): boolean {
+    if (this.ws.readyState !== WebSocket.OPEN) return false;
+    if (this.authorityCurrent()) return true;
+    this.close(1008, "client authority expired");
+    return false;
   }
   close(code = 1000, reason?: string): void {
     if (this.ws.readyState === WebSocket.CLOSED) return;
@@ -313,12 +336,22 @@ export class CloudTransport implements Transport {
   // OS-assigned ephemeral port once the server is listening (see start()).
   private port: number;
   private readonly token: string;
+  private readonly previewGateway: CloudRuntimePreviewGateway | null;
+  private readonly serviceGateway: CloudRuntimeServiceGateway | null;
   private readonly verifyToken:
     | ((token: string) => Promise<CloudRuntimeClientAdmission | null>)
     | null;
+  private readonly renewToken: CloudTransportOptions["renewToken"];
+  private readonly clientAuthorityLeaseMs: number;
   private readonly pendingAdmissions = new WeakMap<
     WebSocket,
-    { accountUserId: string | null; authorityEpoch: number | null }
+    {
+      accountUserId: string | null;
+      authorityEpoch: number | null;
+      grantToken: string | null;
+      expiresAtMs: number;
+      actor?: CloudActorContext;
+    }
   >();
   private readonly maxConnections: number;
   private readonly handshakeTimeoutMs: number;
@@ -378,6 +411,37 @@ export class CloudTransport implements Transport {
       throw new Error("cloud transport token verifier is invalid");
     }
     this.verifyToken = opts.verifyToken ?? null;
+    if (
+      !!opts.verifyToken !== !!opts.renewToken ||
+      (opts.renewToken !== undefined && typeof opts.renewToken !== "function")
+    ) {
+      throw new Error("cloud transport admission requires a renewal verifier");
+    }
+    this.renewToken = opts.renewToken;
+    this.clientAuthorityLeaseMs = boundedInteger(
+      opts.clientAuthorityLeaseMs,
+      MAX_CLIENT_AUTHORITY_LEASE_MS,
+      100,
+      MAX_CLIENT_AUTHORITY_LEASE_MS,
+      "cloud client authority lease",
+    );
+    this.previewGateway = opts.verifyServiceAccess
+      ? new CloudRuntimePreviewGateway({
+          verify: opts.verifyServiceAccess,
+          forbiddenPorts: () => [
+            this.port,
+            22222,
+            ...(opts.forbiddenPreviewPorts ?? []),
+          ],
+        })
+      : null;
+    this.serviceGateway = opts.verifyServiceAccess && opts.openServiceStream
+      ? new CloudRuntimeServiceGateway({
+          verify: opts.verifyServiceAccess,
+          open: opts.openServiceStream,
+          forbiddenPorts: () => [this.port, 22222, ...(opts.forbiddenPreviewPorts ?? [])],
+        })
+      : null;
     this.maxConnections = boundedInteger(
       opts.maxConnections,
       DEFAULT_MAX_CONNECTIONS,
@@ -433,6 +497,8 @@ export class CloudTransport implements Transport {
     });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
+      if (this.serviceGateway?.handleUpgrade(request, socket, head)) return;
+      if (this.previewGateway?.handleUpgrade(request, socket, head)) return;
       void this.handleUpgrade(request, socket, head);
     });
 
@@ -440,8 +506,15 @@ export class CloudTransport implements Transport {
       const admission = this.pendingAdmissions.get(ws) ?? {
         accountUserId: null,
         authorityEpoch: null,
+        grantToken: null,
+        expiresAtMs: 0,
       };
       this.pendingAdmissions.delete(ws);
+      let authorityExpiresAtMs = admission.expiresAtMs;
+      let finalized = false;
+      let renewalInFlight = false;
+      let renewalTimer: ReturnType<typeof setInterval> | undefined;
+      let expiryTimer: ReturnType<typeof setTimeout> | undefined;
       const client = new CloudClient(
         randomUUID(),
         admission.accountUserId,
@@ -450,11 +523,59 @@ export class CloudTransport implements Transport {
         this.maxBufferedBytes,
         this.maxTotalBufferedBytes,
         () => this.totalOutboundBufferedBytes(),
+        () =>
+          !admission.grantToken ||
+          (!finalized && Date.now() < authorityExpiresAtMs),
+        admission.actor,
       );
+      const armExpiry = () => {
+        if (expiryTimer) clearTimeout(expiryTimer);
+        expiryTimer = setTimeout(
+          () => client.close(1008, "client authority expired"),
+          Math.max(0, authorityExpiresAtMs - Date.now()),
+        );
+        expiryTimer.unref?.();
+      };
+      if (admission.grantToken) {
+        armExpiry();
+        renewalTimer = setInterval(
+          () => {
+            if (finalized || renewalInFlight || !client.authorized()) return;
+            renewalInFlight = true;
+            // Start time bounds the lease even if verification stalls. A late
+            // reply cannot resurrect a closed or expired connection.
+            const startedAt = Date.now();
+            void Promise.resolve()
+              .then(() => this.renewToken!(admission.grantToken!))
+              .then(
+                (fresh) => {
+                  if (finalized || !client.authorized()) return;
+                  if (
+                    !fresh ||
+                    fresh.accountUserId !== admission.accountUserId ||
+                    fresh.authorityEpoch !== admission.authorityEpoch ||
+                    !sameCloudActor(fresh.actor,admission.actor)
+                  ) {
+                    client.close(1008, "client authority revoked");
+                    return;
+                  }
+                  authorityExpiresAtMs =
+                    startedAt + this.clientAuthorityLeaseMs;
+                  armExpiry();
+                },
+                () => client.close(1008, "client authority unavailable"),
+              )
+              .finally(() => {
+                renewalInFlight = false;
+              });
+          },
+          Math.floor(this.clientAuthorityLeaseMs / 2),
+        );
+        renewalTimer.unref?.();
+      }
       this.clients.set(ws, client);
       let protocolReady = false;
       let protocolStarted = false;
-      let finalized = false;
       let preauthQueuedBytes = 0;
       const preauthMessages: Array<{ msg: EngineMessage; bytes: number }> = [];
       const handshakeTimer = setTimeout(() => {
@@ -464,6 +585,8 @@ export class CloudTransport implements Transport {
       const finalize = () => {
         if (finalized) return;
         finalized = true;
+        if (expiryTimer) clearTimeout(expiryTimer);
+        if (renewalTimer) clearInterval(renewalTimer);
         clearTimeout(handshakeTimer);
         preauthMessages.length = 0;
         preauthQueuedBytes = 0;
@@ -480,6 +603,7 @@ export class CloudTransport implements Transport {
         client.isAlive = true;
       });
       ws.on("message", (data) => {
+        if (!client.authorized()) return;
         const text = data.toString();
         let raw: unknown;
         try {
@@ -557,6 +681,7 @@ export class CloudTransport implements Transport {
     client: CloudClient,
     msg: EngineMessage,
   ): Promise<void> {
+    if (!client.authorized()) return Promise.resolve();
     try {
       return Promise.resolve(this.onMessageCb?.(client, msg));
     } catch (error) {
@@ -819,6 +944,11 @@ export class CloudTransport implements Transport {
   ): void {
     this.getInfo = fn;
   }
+  get supportsNativeServices(): boolean {
+    return this.serviceGateway !== null;
+  }
+  setHumanServicesPaused(paused: boolean): void { this.serviceGateway?.setPaused(paused); }
+
   get connectionCount(): number {
     return this.clients.size;
   }
@@ -879,6 +1009,8 @@ export class CloudTransport implements Transport {
   }
 
   async stop(): Promise<void> {
+    this.serviceGateway?.close();
+    this.previewGateway?.close();
     if (this.pingTimer) {
       clearInterval(this.pingTimer);
       this.pingTimer = null;
@@ -921,6 +1053,7 @@ export class CloudTransport implements Transport {
   private async authenticateToken(token: string): Promise<{
     accountUserId: string | null;
     authorityEpoch: number | null;
+    actor?: CloudActorContext;
   } | null> {
     if (tokensMatch(this.token, token)) {
       return { accountUserId: null, authorityEpoch: null };
@@ -934,7 +1067,9 @@ export class CloudTransport implements Transport {
         !admission ||
         !UUID_PATTERN.test(admission.accountUserId) ||
         !Number.isSafeInteger(admission.authorityEpoch) ||
-        admission.authorityEpoch < 1
+        admission.authorityEpoch < 1 ||
+        token.startsWith("zwa_") !== (admission.actor !== undefined) ||
+        (admission.actor !== undefined && !CloudActorContextSchema.safeParse(admission.actor).success)
       ) {
         return null;
       }
@@ -967,9 +1102,12 @@ export class CloudTransport implements Transport {
     const timeout = setTimeout(() => socket.destroy(), this.handshakeTimeoutMs);
     timeout.unref?.();
     try {
+      const admissionStartedAt = Date.now();
       const admission = await this.authenticateToken(credential);
       if (
         !admission ||
+        (admission.accountUserId !== null &&
+          Date.now() >= admissionStartedAt + this.clientAuthorityLeaseMs) ||
         socket.destroyed ||
         this.clients.size >= this.maxConnections
       ) {
@@ -978,7 +1116,11 @@ export class CloudTransport implements Transport {
       socket.resume();
       this.wss.handleUpgrade(request, socket, head, (ws) => {
         upgraded = true;
-        this.pendingAdmissions.set(ws, admission);
+        this.pendingAdmissions.set(ws, {
+          ...admission,
+          grantToken: admission.accountUserId === null ? null : credential,
+          expiresAtMs: admissionStartedAt + this.clientAuthorityLeaseMs,
+        });
         this.wss.emit("connection", ws, request);
       });
     } catch {
@@ -991,6 +1133,7 @@ export class CloudTransport implements Transport {
   }
 
   private handleHTTP(req: IncomingMessage, res: ServerResponse): void {
+    if (this.previewGateway?.handle(req, res)) return;
     const url = new URL(req.url ?? "", "http://sandbox");
     if (url.pathname === INTERNAL_READINESS_PATH) {
       this.handleInternalReadiness(url, req, res);

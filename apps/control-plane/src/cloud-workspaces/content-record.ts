@@ -6,6 +6,7 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
+import {lockWorkspaceObjectStorage} from "./storage-lock.js";
 import { authorizeCloudWorkspaceOperation } from "./authorization.js";
 import {
   assertCloudEngineIdentityForIdempotentReplay,
@@ -315,31 +316,6 @@ async function addBlobReference(
   }
 }
 
-async function removeBlobReference(
-  tx: Tx,
-  input: {
-    blobId: string;
-    organizationId: string;
-    kind: "file_entry";
-    referenceId: string;
-  },
-): Promise<void> {
-  const removed = await tx.query(
-    `DELETE FROM workspace_blob_references
-     WHERE blob_id = $1 AND org_id = $2
-       AND reference_kind = $3 AND reference_id = $4`,
-    [input.blobId, input.organizationId, input.kind, input.referenceId],
-  );
-  if ((removed.rowCount ?? 0) > 0) {
-    await tx.query(
-      `UPDATE workspace_blobs
-       SET reference_count = reference_count - 1
-       WHERE id = $1 AND org_id = $2 AND reference_count > 0`,
-      [input.blobId, input.organizationId],
-    );
-  }
-}
-
 export class DatabaseCloudWorkspaceContentService {
   private readonly pool: pg.Pool;
   private readonly workosEnabled: boolean;
@@ -371,6 +347,10 @@ export class DatabaseCloudWorkspaceContentService {
     ) {
       throw new WorkspaceContentError("invalid_input", "Content append input is invalid");
     }
+    // PostgreSQL UUID equality ignores casing. Persisted reference identities
+    // and the storage advisory lock must use the same canonical representation.
+    input = { ...input, workspaceId: input.workspaceId.toLowerCase(),
+      organizationId: input.organizationId.toLowerCase(), engineInstanceId: input.engineInstanceId.toLowerCase() };
     const mutations = validateWorkspaceFileMutations(input.mutations);
     const digest = createHash("sha256")
       .update(
@@ -428,6 +408,7 @@ export class DatabaseCloudWorkspaceContentService {
           );
         }
 
+        await lockWorkspaceObjectStorage(tx, input.organizationId);
         const upserts = mutations.filter(
           (mutation): mutation is Extract<WorkspaceFileMutation, { operation: "upsert" }> =>
             mutation.operation === "upsert",
@@ -438,12 +419,18 @@ export class DatabaseCloudWorkspaceContentService {
             plaintext_sha256: Buffer;
             plaintext_bytes: string | number;
           }>(
-            `SELECT id, plaintext_sha256, plaintext_bytes
-             FROM workspace_blobs
-             WHERE org_id = $1 AND state = 'available'
-               AND id = ANY($2::uuid[])
-             FOR SHARE`,
-            [input.organizationId, upserts.map((entry) => entry.blobId)],
+            `SELECT blob.id, blob.plaintext_sha256, blob.plaintext_bytes
+             FROM workspace_blobs blob
+             WHERE blob.org_id = $1 AND blob.state = 'available'
+               AND blob.id = ANY($2::uuid[])
+               AND EXISTS (
+                 SELECT 1 FROM workspace_blob_storage_reservations reservation
+                 WHERE reservation.blob_id = blob.id AND reservation.org_id = $1
+                   AND reservation.workspace_id = $3
+                   AND (reservation.state = 'referenced' OR reservation.expires_at > now())
+               )
+             FOR SHARE OF blob`,
+            [input.organizationId, upserts.map((entry) => entry.blobId), input.workspaceId],
           );
           const byId = new Map(blobs.rows.map((blob) => [blob.id, blob]));
           if (
@@ -543,127 +530,96 @@ export class DatabaseCloudWorkspaceContentService {
             mutations.length,
           ],
         );
-        for (const [index, mutation] of mutations.entries()) {
-          const sequence = index + 1;
-          const previous = await tx.query<{ blob_id: string | null }>(
-            `SELECT blob_id FROM workspace_file_entries
-             WHERE workspace_id = $1 AND normalized_path = $2 FOR UPDATE`,
-            [input.workspaceId, mutation.path],
-          );
-          const previousBlob = previous.rows[0]?.blob_id;
-          if (previousBlob) {
-            await removeBlobReference(tx, {
-              blobId: previousBlob,
-              organizationId: input.organizationId,
-              kind: "file_entry",
-              referenceId: fileEntryReferenceId(
-                input.workspaceId,
-                mutation.path,
-              ),
-            });
-            const legacyReferenceId = `${input.workspaceId}:${mutation.path}`;
-            if (Buffer.byteLength(legacyReferenceId, "utf8") <= 512) {
-              await removeBlobReference(tx, {
-                blobId: previousBlob,
-                organizationId: input.organizationId,
-                kind: "file_entry",
-                referenceId: legacyReferenceId,
-              });
-            }
-          }
-          await tx.query(
-            `INSERT INTO workspace_file_events (
-               workspace_id, org_id, revision, sequence, normalized_path,
-               operation, entry_type, mode, blob_id, content_sha256, size_bytes
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-            mutation.operation === "upsert"
-              ? [
-                  input.workspaceId,
-                  input.organizationId,
-                  revision,
-                  sequence,
-                  mutation.path,
-                  mutation.operation,
-                  mutation.entryType,
-                  mutation.mode,
-                  mutation.blobId,
-                  Buffer.from(mutation.contentSha256, "hex"),
-                  mutation.sizeBytes,
-                ]
-              : [
-                  input.workspaceId,
-                  input.organizationId,
-                  revision,
-                  sequence,
-                  mutation.path,
-                  mutation.operation,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                ],
-          );
-          await tx.query(
-            `INSERT INTO workspace_file_entries (
-               workspace_id, org_id, normalized_path, revision, entry_type,
-               mode, blob_id, content_sha256, size_bytes, tombstoned_at
-             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-             ON CONFLICT (workspace_id, normalized_path) DO UPDATE SET
-               revision = EXCLUDED.revision,
-               entry_type = EXCLUDED.entry_type,
-               mode = EXCLUDED.mode,
-               blob_id = EXCLUDED.blob_id,
-               content_sha256 = EXCLUDED.content_sha256,
-               size_bytes = EXCLUDED.size_bytes,
-               tombstoned_at = EXCLUDED.tombstoned_at,
-               updated_at = now()`,
-            mutation.operation === "upsert"
-              ? [
-                  input.workspaceId,
-                  input.organizationId,
-                  mutation.path,
-                  revision,
-                  mutation.entryType,
-                  mutation.mode,
-                  mutation.blobId,
-                  Buffer.from(mutation.contentSha256, "hex"),
-                  mutation.sizeBytes,
-                  null,
-                ]
-              : [
-                  input.workspaceId,
-                  input.organizationId,
-                  mutation.path,
-                  revision,
-                  null,
-                  null,
-                  null,
-                  null,
-                  null,
-                  new Date(),
-                ],
-          );
-          if (mutation.operation === "upsert") {
-            await addBlobReference(tx, {
-              blobId: mutation.blobId,
-              organizationId: input.organizationId,
-              workspaceId: input.workspaceId,
-              kind: "file_event",
-              referenceId: `${input.workspaceId}:${revision}:${sequence}`,
-            });
-            await addBlobReference(tx, {
-              blobId: mutation.blobId,
-              organizationId: input.organizationId,
-              workspaceId: input.workspaceId,
-              kind: "file_entry",
-              referenceId: fileEntryReferenceId(
-                input.workspaceId,
-                mutation.path,
-              ),
-            });
-          }
-        }
+        // One revision, with a bounded number of driver round trips regardless
+        // of file count. Input order still determines immutable event sequence.
+        const publication = JSON.stringify(mutations.map((mutation, index) => ({
+          sequence: index + 1, path: mutation.path, operation: mutation.operation,
+          entry_type: mutation.operation === "upsert" ? mutation.entryType : null,
+          mode: mutation.operation === "upsert" ? mutation.mode : null,
+          blob_id: mutation.operation === "upsert" ? mutation.blobId : null,
+          content_sha256: mutation.operation === "upsert" ? mutation.contentSha256 : null,
+          size_bytes: mutation.operation === "upsert" ? mutation.sizeBytes : null,
+          reference_id: fileEntryReferenceId(input.workspaceId, mutation.path),
+          legacy_reference_id: Buffer.byteLength(`${input.workspaceId}:${mutation.path}`, "utf8") <= 512
+            ? `${input.workspaceId}:${mutation.path}` : null,
+        })));
+        await tx.query(
+          `SELECT normalized_path FROM workspace_file_entries
+           WHERE workspace_id = $1 AND normalized_path = ANY($2::text[])
+           ORDER BY normalized_path COLLATE "C" FOR UPDATE`,
+          [input.workspaceId, mutations.map(mutation => mutation.path)],
+        );
+        // Delete only the mutable current-entry refs. Immutable event refs are
+        // retained. RETURNING makes decrements exact even for legacy or absent
+        // refs, and avoids updating a blob twice in sibling writable CTEs.
+        await tx.query(
+          `WITH changed AS (
+             SELECT * FROM jsonb_to_recordset($3::jsonb) AS x(path text, reference_id text, legacy_reference_id text)
+           ), removed AS (
+             DELETE FROM workspace_blob_references reference
+             USING workspace_file_entries entry, changed
+             WHERE entry.workspace_id = $1 AND entry.org_id = $2 AND entry.normalized_path = changed.path
+               AND reference.org_id = $2 AND reference.workspace_id = $1
+               AND reference.blob_id = entry.blob_id AND reference.reference_kind = 'file_entry'
+               AND (reference.reference_id = changed.reference_id OR reference.reference_id = changed.legacy_reference_id)
+             RETURNING reference.blob_id, reference.org_id
+           ), decrements AS (
+             SELECT blob_id, org_id, count(*)::bigint AS amount FROM removed GROUP BY blob_id, org_id
+           ) UPDATE workspace_blobs blob SET reference_count = blob.reference_count - decrements.amount
+             FROM decrements WHERE blob.id = decrements.blob_id AND blob.org_id = decrements.org_id`,
+          [input.workspaceId, input.organizationId, publication],
+        );
+        await tx.query(
+          `INSERT INTO workspace_file_events (
+             workspace_id, org_id, revision, sequence, normalized_path, operation,
+             entry_type, mode, blob_id, content_sha256, size_bytes
+           ) SELECT $1, $2, $3, sequence, path, operation, entry_type, mode, blob_id,
+                    decode(content_sha256, 'hex'), size_bytes
+             FROM jsonb_to_recordset($4::jsonb) AS x(sequence integer, path text, operation text,
+               entry_type text, mode integer, blob_id uuid, content_sha256 text, size_bytes bigint)
+             ORDER BY sequence`,
+          [input.workspaceId, input.organizationId, revision, publication],
+        );
+        // Tombstone all removals before upserts so a portable case-only rename
+        // succeeds independently of caller order under the live-path index.
+        await tx.query(
+          `INSERT INTO workspace_file_entries (workspace_id, org_id, normalized_path, revision, tombstoned_at)
+           SELECT $1, $2, path, $3, now() FROM jsonb_to_recordset($4::jsonb) AS x(path text, operation text)
+           WHERE operation = 'delete'
+           ON CONFLICT (workspace_id, normalized_path) DO UPDATE SET revision = EXCLUDED.revision,
+             entry_type = NULL, mode = NULL, blob_id = NULL, content_sha256 = NULL, size_bytes = NULL,
+             tombstoned_at = EXCLUDED.tombstoned_at, updated_at = now()`,
+          [input.workspaceId, input.organizationId, revision, publication],
+        );
+        await tx.query(
+          `INSERT INTO workspace_file_entries (
+             workspace_id, org_id, normalized_path, revision, entry_type, mode, blob_id, content_sha256, size_bytes
+           ) SELECT $1, $2, path, $3, entry_type, mode, blob_id, decode(content_sha256, 'hex'), size_bytes
+             FROM jsonb_to_recordset($4::jsonb) AS x(path text, operation text,
+               entry_type text, mode integer, blob_id uuid, content_sha256 text, size_bytes bigint)
+             WHERE operation = 'upsert'
+           ON CONFLICT (workspace_id, normalized_path) DO UPDATE SET revision = EXCLUDED.revision,
+             entry_type = EXCLUDED.entry_type, mode = EXCLUDED.mode, blob_id = EXCLUDED.blob_id,
+             content_sha256 = EXCLUDED.content_sha256, size_bytes = EXCLUDED.size_bytes,
+             tombstoned_at = NULL, updated_at = now()`,
+          [input.workspaceId, input.organizationId, revision, publication],
+        );
+        await tx.query(
+          `WITH changed AS (
+             SELECT * FROM jsonb_to_recordset($4::jsonb) AS x(sequence integer, blob_id uuid, reference_id text)
+             WHERE blob_id IS NOT NULL
+           ), added AS (
+             INSERT INTO workspace_blob_references (blob_id, org_id, workspace_id, reference_kind, reference_id)
+             SELECT blob_id, $2::uuid, $1::uuid, 'file_entry', reference_id FROM changed
+             UNION ALL
+             SELECT blob_id, $2::uuid, $1::uuid, 'file_event', $1::text || ':' || $3::text || ':' || sequence::text FROM changed
+             ON CONFLICT DO NOTHING RETURNING blob_id, org_id
+           ), increments AS (
+             SELECT blob_id, org_id, count(*)::bigint AS amount FROM added GROUP BY blob_id, org_id
+           ) UPDATE workspace_blobs blob SET reference_count = blob.reference_count + increments.amount
+             FROM increments WHERE blob.id = increments.blob_id AND blob.org_id = increments.org_id`,
+          [input.workspaceId, input.organizationId, revision, publication],
+        );
         await tx.query(
           `UPDATE workspace_content_heads
            SET current_revision = $2, updated_at = now()
@@ -736,6 +692,7 @@ export class DatabaseCloudWorkspaceContentService {
       | "recovery";
     manifestBlobId: string;
     artifactBlobId: string | null;
+    artifactBlobIds?: string[];
     inclusionPolicy: Record<string, unknown>;
     fileCount: number;
     totalBytes: number;
@@ -761,10 +718,15 @@ export class DatabaseCloudWorkspaceContentService {
       !SHA256_PATTERN.test(input.integritySha256) ||
       !UUID_PATTERN.test(input.manifestBlobId) ||
       (input.artifactBlobId !== null && !UUID_PATTERN.test(input.artifactBlobId)) ||
+      (input.artifactBlobIds !== undefined &&
+        (!Array.isArray(input.artifactBlobIds) ||
+          input.artifactBlobIds.length > 1_024 ||
+          input.artifactBlobIds.some((id) => typeof id !== "string" || !UUID_PATTERN.test(id)))) ||
       Buffer.byteLength(canonicalInclusionPolicy, "utf8") > 128 * 1024
     ) {
       throw new WorkspaceContentError("invalid_input", "Checkpoint input is invalid");
     }
+    const artifactBlobIds = [...new Set(input.artifactBlobIds ?? [])].sort();
     const digest = createHash("sha256")
       .update(
         canonicalJson({
@@ -774,6 +736,7 @@ export class DatabaseCloudWorkspaceContentService {
           reason: input.reason,
           manifestBlobId: input.manifestBlobId,
           artifactBlobId: input.artifactBlobId,
+          ...(artifactBlobIds.length ? { artifactBlobIds } : {}),
           inclusionPolicy: JSON.parse(canonicalInclusionPolicy),
           fileCount: input.fileCount,
           totalBytes: input.totalBytes,
@@ -853,17 +816,24 @@ export class DatabaseCloudWorkspaceContentService {
             "Checkpoint is not at the current content revision",
           );
         }
-      const blobIds = [input.manifestBlobId, input.artifactBlobId].filter(
+      await lockWorkspaceObjectStorage(tx, input.organizationId);
+      const blobIds = [input.manifestBlobId, input.artifactBlobId, ...artifactBlobIds].filter(
         (value): value is string => value !== null,
       );
       const blobs = await tx.query<{
         id: string;
         plaintext_sha256: Buffer;
       }>(
-        `SELECT id, plaintext_sha256 FROM workspace_blobs
-         WHERE org_id = $1 AND state = 'available' AND id = ANY($2::uuid[])
-         FOR SHARE`,
-        [input.organizationId, blobIds],
+        `SELECT blob.id, blob.plaintext_sha256 FROM workspace_blobs blob
+         WHERE blob.org_id = $1 AND blob.state = 'available' AND blob.id = ANY($2::uuid[])
+           AND EXISTS (
+             SELECT 1 FROM workspace_blob_storage_reservations reservation
+             WHERE reservation.blob_id = blob.id AND reservation.org_id = $1
+               AND reservation.workspace_id = $3
+               AND (reservation.state = 'referenced' OR reservation.expires_at > now())
+           )
+         FOR SHARE OF blob`,
+        [input.organizationId, blobIds, input.workspaceId],
       );
       if (new Set(blobs.rows.map((row) => row.id)).size !== new Set(blobIds).size) {
         throw new WorkspaceContentError(
@@ -1042,6 +1012,22 @@ export class DatabaseCloudWorkspaceContentService {
           kind: "checkpoint_artifact",
           referenceId: checkpointId,
         });
+      }
+      if (artifactBlobIds.length) {
+        // The versioned reference prevents an older recovery client from
+        // accepting a working-tree-only restore of a full native checkpoint.
+        await tx.query(
+          `WITH inserted AS (
+             INSERT INTO workspace_blob_references (
+               blob_id, org_id, workspace_id, reference_kind, reference_id
+             ) SELECT id, $1, $2, 'checkpoint_artifact', $3
+               FROM unnest($4::uuid[]) AS id
+             ON CONFLICT DO NOTHING RETURNING blob_id
+           ) UPDATE workspace_blobs blob
+             SET reference_count = blob.reference_count + 1
+             FROM inserted WHERE blob.id = inserted.blob_id AND blob.org_id = $1`,
+          [input.organizationId, input.workspaceId, `${checkpointId}:v2`, artifactBlobIds],
+        );
       }
       await tx.query(
         `UPDATE workspace_content_heads

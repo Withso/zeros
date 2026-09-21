@@ -3,6 +3,30 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type pg from "pg";
 
 import { withSystemTx, type Tx } from "../db.js";
+import { ensureUser } from "../auth.js";
+
+/** Explicit owner-only fixture setup. Production application transactions
+ * cannot grant personal Pro. Keep that distinction visible in integration tests. */
+export async function withCloudFixtureOwnerTx<T>(pool:pg.Pool,fn:(tx:Tx)=>Promise<T>):Promise<T> {
+  const client=await pool.connect();let discard=false;
+  try{
+    const authority=await client.query("SELECT current_user=pg_get_userbyid(relowner) AS owner FROM pg_class WHERE oid='public.account_entitlements'::regclass");
+    if(authority.rows[0]?.owner!==true)throw new Error("Cloud fixture requires the database owner");
+    await client.query("BEGIN; SELECT set_config('app.system','on',true)");
+    const result=await fn(client);await client.query("COMMIT");return result;
+  }catch(error){await client.query("ROLLBACK").catch(()=>{discard=true;});throw error;}
+  finally{client.release(discard);}
+}
+
+/** Only the disposable database owner assigns staff; application transactions
+ * deliberately cannot promote their own users. */
+export async function ensureCloudPilotUser(
+  pool: pg.Pool, input: Parameters<typeof ensureUser>[1],
+): ReturnType<typeof ensureUser> {
+  const user = await ensureUser(pool, input);
+  await pool.query("UPDATE users SET staff_role = 'developer' WHERE id = $1", [user.id]);
+  return user;
+}
 
 /**
  * Seed the normalized identity/provider rows required by migrations 0026 and
@@ -157,8 +181,9 @@ export type ReadyCloudWorkspaceFixture = {
  * edge instead of relying on legacy migration backfills. */
 export async function seedReadyCloudWorkspace(
   pool: pg.Pool,
+  options: {ownerUserId?:string} = {},
 ): Promise<ReadyCloudWorkspaceFixture> {
-  const userId = randomUUID();
+  const userId = options.ownerUserId ?? randomUUID();
   const organizationId = randomUUID();
   const teamId = randomUUID();
   const repositoryId = randomUUID();
@@ -172,12 +197,13 @@ export async function seedReadyCloudWorkspace(
   const bridgeToken = `zwb_${randomBytes(32).toString("base64url")}`;
   const email = `durable-${userId}@example.test`;
 
-  await withSystemTx(pool, async (tx) => {
-    await tx.query(
-      `INSERT INTO users (id, email, display_name)
-       VALUES ($1, $2, 'Durable Workspace Owner')`,
+  if(!options.ownerUserId) await pool.query(
+      `INSERT INTO users (id, email, display_name, staff_role)
+       VALUES ($1, $2, 'Durable Workspace Owner', 'developer')`,
       [userId, email],
-    );
+  );
+  await withCloudFixtureOwnerTx(pool, async (tx) => {
+    if(!options.ownerUserId) {
     await tx.query(
       `INSERT INTO user_identities (
          user_id, provider, provider_sub, email_at_link, email_verified_at
@@ -190,6 +216,7 @@ export async function seedReadyCloudWorkspace(
        ) VALUES ($1, 'pro', 'active', true, 'operator')`,
       [userId],
     );
+    }
     await tx.query(
       `INSERT INTO organizations (
          id, slug, name, created_by, is_personal, cloud_workspaces_allowed

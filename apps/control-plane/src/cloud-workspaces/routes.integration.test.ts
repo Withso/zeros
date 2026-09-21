@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
+import {withCloudFixtureOwnerTx} from "./test-fixtures.js";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   afterAll,
   beforeAll,
@@ -11,7 +12,8 @@ import {
 import { Hono } from "hono";
 import pg from "pg";
 
-import { ensureUser, type AuthedUser } from "../auth.js";
+import type { AuthedUser } from "../auth.js";
+import { ensureCloudPilotUser as ensureUser } from "./test-fixtures.js";
 import { HttpError } from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, withUserTx } from "../db.js";
@@ -19,6 +21,8 @@ import { runMigrations } from "../migrate.js";
 import type { CloudWorkspaceAccessService } from "./access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
+import { sealCloudProviderCredential } from "./provider-connections.js";
+import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -66,7 +70,10 @@ d("cloud workspace API contracts", () => {
   let accessService: CloudWorkspaceAccessService;
   let repositoryResolver: CloudWorkspaceRepositoryResolver;
 
-  const configureApp = (workosEnabled = false) => {
+  const configureApp = (
+    workosEnabled = false,
+    selectedConfig: CloudWorkspaceBackendConfig = cloudConfig,
+  ) => {
     app = new Hono();
     app.use("*", async (c, next) => {
       c.set("user", actor);
@@ -74,7 +81,7 @@ d("cloud workspace API contracts", () => {
     });
     app.route(
       "/",
-      createCloudWorkspaceRoutes(pool, cloudConfig, {
+      createCloudWorkspaceRoutes(pool, selectedConfig, {
         accessService,
         repositoryResolver,
         workosEnabled,
@@ -134,6 +141,17 @@ d("cloud workspace API contracts", () => {
     ...overrides,
   });
 
+  it("returns only the signed-in member's compute balance with no caching",async()=>{
+    const ledger=new DatabaseManagedComputeCreditLedger({pool,workosEnabled:false});
+    await ledger.grant({organizationId:orgId,userId:owner.id,startsAt:new Date(Date.now()-60000),endsAt:new Date(Date.now()+3600000),amountMicroUsd:20000000,policyId:'seat-v1',idempotencyKey:randomUUID()});
+    actor=owner;
+    const response=await request(`/v1/organizations/${orgId}/cloud-compute-credits`);
+    expect(response.status).toBe(200);expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await response.json()).toMatchObject({currency:'USD',unit:'micro_usd',periods:[{grantedMicroUsd:20000000}]});
+    actor=outsider;
+    expect((await request(`/v1/organizations/${orgId}/cloud-compute-credits`)).status).toBe(404);
+  });
+
   const createWorkspace = async (key = randomUUID()) => {
     const response = await request(
       `/v1/organizations/${orgId}/cloud-workspaces`,
@@ -145,6 +163,74 @@ d("cloud workspace API contracts", () => {
     };
     return { response, body, key };
   };
+
+  const customerDaytona = async () => {
+    const id = randomUUID();
+    const endpoint = "https://app.daytona.io/api";
+    const sealed = sealCloudProviderCredential(
+      "test-customer-provider-key-0123456789",
+      {
+        connectionId: id,
+        organizationId: orgId,
+        version: 1,
+        provider: "daytona",
+        endpoint,
+      },
+      randomBytes(32).toString("base64url"),
+    );
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO provider_connections
+           (id, org_id, owner_kind, owner_user_id, provider, display_name,
+            credential_source, current_version, state, region)
+         VALUES ($1, $2, 'user', $3, 'daytona', 'Customer Daytona', 'delegated', 1, 'active', 'eu')`,
+        [id, orgId, owner.id],
+      );
+      await tx.query(
+        `INSERT INTO provider_connection_versions
+           (connection_id, org_id, version, credential_source, endpoint, key_version,
+            nonce, ciphertext, auth_tag, credential_sha256, capabilities, created_by)
+         VALUES ($1, $2, 1, 'delegated', $3, 1, $4, $5, $6, $7, $8::jsonb, $9)`,
+        [
+          id,
+          orgId,
+          endpoint,
+          sealed.nonce,
+          sealed.ciphertext,
+          sealed.authTag,
+          sealed.credentialSha256,
+          JSON.stringify({
+            qualified: true,
+            lifecycle: true,
+            commandExecution: true,
+            daytonaTarget: "eu",
+          }),
+          owner.id,
+        ],
+      );
+    });
+    return id;
+  };
+
+  const managedBoatConfig = (): CloudWorkspaceBackendConfig => ({
+    ...cloudConfig,
+    provider: "boat",
+    imageRef: "boat-qualified-template",
+    snapshotId: "boat-qualified-template",
+    cpuMillicores: 4_000,
+    memoryMiB: 8_192,
+    providerProfiles: {
+      daytona: {
+        provider: "daytona",
+        imageRef: cloudConfig.imageRef,
+        architecture: cloudConfig.architecture,
+        cpuMillicores: cloudConfig.cpuMillicores,
+        memoryMiB: cloudConfig.memoryMiB,
+        storageMiB: cloudConfig.storageMiB,
+        sourceCommit: cloudConfig.sourceCommit,
+      },
+    },
+  });
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 6 });
@@ -306,6 +392,94 @@ d("cloud workspace API contracts", () => {
     configureApp();
   });
 
+  it("replays a create against its accepted image after the deployment default changes", async () => {
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    configureApp(false, {
+      ...cloudConfig,
+      imageRef: "new-default-image",
+      snapshotId: "new-default-image",
+    });
+    const response = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces`,
+      { method: "POST", key: created.key, body: createBody() },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      replayed: true,
+      workspace: { id: created.body.workspace.id },
+    });
+    expect(repositoryResolver.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("pins VM class in the generation and retains its create receipt across default changes",async()=>{
+    configureApp(false,{...cloudConfig,sandboxClass:"linux-vm"});
+    const created=await createWorkspace();expect(created.response.status).toBe(202);
+    expect((await pool.query("SELECT sandbox_class FROM cloud_workspace_generations WHERE workspace_id=$1",[created.body.workspace.id])).rows[0].sandbox_class).toBe("linux-vm");
+    await expect(pool.query("UPDATE cloud_workspace_generations SET sandbox_class='container' WHERE workspace_id=$1",[created.body.workspace.id])).rejects.toMatchObject({code:"23514"});
+    configureApp(false,{...cloudConfig,sandboxClass:"container"});
+    expect((await request(`/v1/organizations/${orgId}/cloud-workspaces`,{method:"POST",key:created.key,body:createBody()})).status).toBe(200);
+    expect(repositoryResolver.resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it("creates customer Daytona using its own profile when managed compute is Boat", async () => {
+    const connectionId = await customerDaytona();
+    configureApp(false, managedBoatConfig());
+    const response = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces`,
+      {
+        method: "POST",
+        key: randomUUID(),
+        body: createBody({ providerConnectionId: connectionId }),
+      },
+    );
+    const body = await response.json();
+    expect(response.status, JSON.stringify(body)).toBe(202);
+    expect(body).toMatchObject({
+      workspace: {
+        generation: { provider: "daytona", imageRef: "snap-pinned" },
+      },
+    });
+    const generation = await pool.query(
+      "SELECT provider, provider_connection_id, cpu_millicores, memory_mib FROM cloud_workspace_generations WHERE workspace_id = $1",
+      [body.workspace.id],
+    );
+    expect(generation.rows).toEqual([
+      {
+        provider: "daytona",
+        provider_connection_id: connectionId,
+        cpu_millicores: 2_000,
+        memory_mib: 4_096,
+      },
+    ]);
+  });
+
+  it("rejects a customer provider without a configured profile before repository I/O", async () => {
+    const connectionId = await customerDaytona();
+    configureApp(false, { ...managedBoatConfig(), providerProfiles: {} });
+    const response = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces`,
+      {
+        method: "POST",
+        key: randomUUID(),
+        body: createBody({ providerConnectionId: connectionId }),
+      },
+    );
+    expect(response.status).toBe(404);
+    expect(repositoryResolver.resolve).not.toHaveBeenCalled();
+  });
+
+  it("creates managed Boat when no customer connection is selected", async () => {
+    configureApp(false, managedBoatConfig());
+    const created = await createWorkspace();
+    expect(created.response.status, JSON.stringify(created.body)).toBe(202);
+    expect(created.body).toMatchObject({
+      workspace: {
+        generation: { provider: "boat", imageRef: "boat-qualified-template" },
+      },
+    });
+  });
+
   it("creates one stable workspace + generation + intent and never exposes the provider id", async () => {
     const created = await createWorkspace();
     expect(created.response.status, JSON.stringify(created.body)).toBe(202);
@@ -385,14 +559,16 @@ d("cloud workspace API contracts", () => {
       `/v1/organizations/${orgId}/cloud-workspaces`,
       { method: "POST", key, body: createBody() },
     );
-    expect(replay.status).toBe(403);
+    expect(replay.status).toBe(404);
     await expect(replay.json()).resolves.toMatchObject({
-      error: { code: "cloud_workspace_owner_required" },
+      error: { code: "not_found" },
     });
   });
 
   it("does not list or return an owner's workspace to another same-team member", async () => {
     const created = await createWorkspace();
+    // This row represents a workspace created before collaboration existed.
+    await pool.query("UPDATE cloud_workspaces SET single_member_mode=true,sharing_mode='private' WHERE id=$1",[created.body.workspace.id]);
     await withSystemTx(pool, async (tx) => {
       await tx.query(
         `INSERT INTO organization_members (org_id, user_id, role)
@@ -425,6 +601,52 @@ d("cloud workspace API contracts", () => {
     });
   });
 
+  it("creates shared workspaces and resolves them across member devices", async () => {
+    const created=await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId=created.body.workspace.id;
+    expect((await pool.query("SELECT sharing_mode,single_member_mode FROM cloud_workspaces WHERE id=$1",[workspaceId])).rows[0])
+      .toEqual({sharing_mode:"organization",single_member_mode:false});
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES ($1,$2,'member')",[orgId,outsider.id]);
+    await pool.query("UPDATE organization_entitlements SET seat_limit=2 WHERE org_id=$1",[orgId]);
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES ($1,$2,'active')",[orgId,outsider.id]);
+    actor=outsider;
+    const listed=await request(`/v1/organizations/${orgId}/cloud-workspaces`);
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toMatchObject({workspaces:[{id:workspaceId,sharingMode:"organization"}]});
+    const resolved=await request(`/v1/cloud-workspaces/${workspaceId}`);
+    expect(resolved.status).toBe(200);
+    expect(resolved.headers.get('cache-control')).toBe('no-store');
+    expect(await resolved.json()).toMatchObject({workspace:{id:workspaceId,organizationId:orgId},access:{role:"developer"}});
+    expect(await (await request('/v1/cloud-workspaces')).json()).toMatchObject({workspaces:[{id:workspaceId}]});
+    const managementView=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`);
+    expect(managementView.status).toBe(200);
+    expect(managementView.headers.get("cache-control")).toBe("no-store");
+    expect(await managementView.json()).toMatchObject({settings:null,provider:null,quota:null,usage:[]});
+    await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2",[orgId,outsider.id]);
+    expect((await request(`/v1/cloud-workspaces/${workspaceId}`)).status).toBe(404);
+  });
+
+  it("lets an external Pro guest discover only its granted workspace and redacted management data",async()=>{
+    const created=await createWorkspace(),sibling=await createWorkspace();const workspaceId=created.body.workspace.id,grant=randomUUID();
+    await pool.query(`INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')
+      ON CONFLICT(user_id) DO UPDATE SET plan='pro',status='active',cloud_workspaces_allowed=true`,[outsider.id]);
+    await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+      VALUES($1,$2,$3,$4,'developer',now()+interval '1 hour')`,[grant,workspaceId,orgId,outsider.id]);
+    actor=outsider;
+    expect((await pool.query("SELECT 1 FROM organization_members WHERE org_id=$1 AND user_id=$2",[orgId,actor.id])).rowCount).toBe(0);
+    expect(await (await request('/v1/cloud-workspaces')).json()).toMatchObject({workspaces:[{id:workspaceId}]});
+    expect((await request(`/v1/cloud-workspaces/${workspaceId}`)).status).toBe(200);
+    expect((await request(`/v1/cloud-workspaces/${sibling.body.workspace.id}`)).status).toBe(404);
+    const overview=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`);
+    expect(overview.status).toBe(200);expect(overview.headers.get('cache-control')).toBe('no-store');
+    expect(await overview.json()).toMatchObject({settings:null,provider:null,quota:null,usage:[],exports:[],replicas:[],forwards:[]});
+    for(const suffix of ['provider-connections','secret-bindings'])expect((await request(`/v1/organizations/${orgId}/cloud-workspace-management/${suffix}`)).status).toBe(404);
+    expect((await request(`/v1/organizations/${orgId}/cloud-workspaces`)).status).toBe(404);
+    await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE id=$1",[grant]);
+    expect((await request(`/v1/cloud-workspaces/${workspaceId}`)).status).toBe(404);
+  });
+
   it("exposes owner-only Phase 5 management APIs without returning secret or provider material", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
@@ -455,6 +677,7 @@ d("cloud workspace API contracts", () => {
       `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`,
     );
     expect(overview.status).toBe(200);
+    expect(overview.headers.get("cache-control")).toBe("no-store");
     const overviewBody = await overview.json();
     expect(overviewBody).toMatchObject({
       workspace: { id: workspaceId, repositoryId },
@@ -469,6 +692,7 @@ d("cloud workspace API contracts", () => {
       `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`,
     );
     expect(hidden.status).toBe(404);
+    expect(hidden.headers.get("cache-control")).toBe("no-store");
   });
 
   it("issues SSH, preview, and localhost-tunnel access through the coordinator", async () => {
@@ -778,6 +1002,26 @@ d("cloud workspace API contracts", () => {
     });
   });
 
+  it("requires an explicit discard to delete when a final checkpoint cannot complete", async () => {
+    const created = await createWorkspace();
+    const workspaceId = created.body.workspace.id;
+    await pool.query("UPDATE cloud_workspaces SET status = 'ready' WHERE id = $1", [workspaceId]);
+    const route = `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`;
+    const key = randomUUID();
+    const ordinary = await request(route, { method: "DELETE", key });
+    expect(ordinary.status).toBe(202);
+    await expect(ordinary.json()).resolves.toMatchObject({ workspace: { status: "ready", desiredState: "running" } });
+    const changedSemantics = await request(route, { method: "DELETE", key, body: { discardUncheckpointed: true } });
+    expect(changedSemantics.status).toBe(409);
+    const discarded = await request(route, { method: "DELETE", key: randomUUID(), body: { discardUncheckpointed: true } });
+    expect(discarded.status).toBe(202);
+    await expect(discarded.json()).resolves.toMatchObject({ workspace: { status: "deleting", desiredState: "deleted" } });
+    const checkpoints = await pool.query("SELECT state FROM workspace_checkpoint_requests WHERE workspace_id = $1", [workspaceId]);
+    expect(checkpoints.rows).toEqual([{ state: "cancelled" }]);
+    const audit = await pool.query("SELECT subject FROM audit_log WHERE org_id = $1 AND action = 'cloud_workspace.delete_requested' ORDER BY created_at DESC", [orgId]);
+    expect(audit.rows[0]?.subject).toMatchObject({ discardUncheckpointed: true });
+  });
+
   it("records lifecycle intent and retires active setup and grants before leaving running", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
@@ -887,10 +1131,36 @@ d("cloud workspace API contracts", () => {
     ]);
   });
 
+  it("lets shared administrators retire orphaned compute without another paid entitlement",async()=>{
+    const created=await createWorkspace(),workspaceId=created.body.workspace.id;
+    await withSystemTx(pool,async tx=>{
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[orgId,outsider.id]);
+      await tx.query("UPDATE users SET auth_status='identity_disabled' WHERE id=$1",[owner.id]);
+      await tx.query("UPDATE organization_entitlements SET status='cancelled',cloud_workspaces_allowed=false WHERE org_id=$1",[orgId]);
+    });actor=outsider;
+    for(const action of [{method:"POST",suffix:"/stop"},{method:"POST",suffix:"/archive"},{method:"DELETE",suffix:""}]){
+      const response=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}${action.suffix}`,{method:action.method,key:randomUUID()});
+      expect(response.status).toBe(202);
+    }
+    const intent=await pool.query("SELECT requested_by FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='delete'",[workspaceId]);
+    expect(intent.rows[0].requested_by).toBe(outsider.id);
+  });
+
+  it("binds shared lifecycle idempotency to the actual requester",async()=>{
+    const created=await createWorkspace(),workspaceId=created.body.workspace.id,key=randomUUID();
+    await withSystemTx(pool,tx=>tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[orgId,outsider.id]));
+    const endpoint=`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/stop`;
+    expect((await request(endpoint,{method:"POST",key})).status).toBe(202);
+    actor=outsider;expect((await request(endpoint,{method:"POST",key})).status).toBe(404);
+    const ownKey=randomUUID();expect((await request(endpoint,{method:"POST",key:ownKey})).status).toBe(202);
+    expect((await request(endpoint,{method:"POST",key:ownKey})).status).toBe(200);
+  });
+
   it("does not let another Organization admin stop, archive, or delete an owner-only workspace", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     await withSystemTx(pool, async (tx) => {
+      await tx.query("UPDATE cloud_workspaces SET sharing_mode='private',single_member_mode=true WHERE id=$1",[workspaceId]);
       await tx.query(
         `INSERT INTO organization_members (org_id, user_id, role)
          VALUES ($1, $2, 'admin')`,
@@ -913,9 +1183,9 @@ d("cloud workspace API contracts", () => {
         `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}${action.suffix}`,
         { method: action.method, key: randomUUID() },
       );
-      expect(response.status).toBe(403);
+      expect(response.status).toBe(404);
       await expect(response.json()).resolves.toMatchObject({
-        error: { code: "cloud_workspace_owner_required" },
+        error: { code: "not_found" },
       });
     }
   });
@@ -953,6 +1223,29 @@ d("cloud workspace API contracts", () => {
       { method: "DELETE", key: randomUUID() },
     );
     expect(deleted.status).toBe(202);
+  });
+
+  it.each(["wake", "upgrade"] as const)("charges the immutable Pro sponsor when an organization administrator requests %s", async operation => {
+    const created=await createWorkspace();expect(created.response.status).toBe(202);
+    const workspaceId=created.body.workspace.id;
+    await withCloudFixtureOwnerTx(pool,async tx=>{
+      await tx.query("UPDATE cloud_workspaces SET sharing_mode='organization',single_member_mode=false,status=$2,desired_state=$3 WHERE id=$1",[workspaceId,operation==='wake'?'stopped':'ready',operation==='wake'?'stopped':'running']);
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE workspace_id=$1",[workspaceId]);
+      await tx.query("UPDATE cloud_workspace_provider_bindings SET provider_resource_id=$2,observed_state=$3,last_observed_at=now() WHERE workspace_id=$1",[workspaceId,`sandbox-${workspaceId}`,operation==='wake'?'stopped':'running']);
+      await tx.query("UPDATE organization_entitlements SET plan='pro',seat_limit=NULL WHERE org_id=$1",[orgId]);
+      await tx.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'admin')",[orgId,outsider.id]);
+      for(const userId of [owner.id,outsider.id])await tx.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator') ON CONFLICT(user_id) DO UPDATE SET plan='pro',status='active',cloud_workspaces_allowed=true",[userId]);
+    });
+    actor=outsider;
+    const result=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/${operation==='wake'?'wake':'generations'}`,
+      {method:'POST',key:randomUUID(),...(operation==='upgrade'?{body:{operation:'upgrade'}}:{})});
+    const body=await result.json();expect(result.status,JSON.stringify(body)).toBe(202);
+    const billing=(await pool.query(`SELECT billing.billing_owner_user_id,billing.entitlement_scope,billing.entitlement_plan
+      FROM cloud_workspaces workspace JOIN workspace_billing_epochs billing ON billing.workspace_id=workspace.id
+        AND billing.billing_epoch=workspace.current_billing_epoch WHERE workspace.id=$1`,[workspaceId])).rows[0];
+    expect(billing).toEqual({billing_owner_user_id:owner.id,entitlement_scope:'account',entitlement_plan:'pro'});
+    expect((await pool.query("SELECT requested_by FROM cloud_workspace_lifecycle_intents WHERE id=$1",[body.intent.id])).rows[0].requested_by).toBe(outsider.id);
+    expect((await pool.query("SELECT 1 FROM team_members WHERE team_id=$1 AND user_id=$2",[teamId,outsider.id])).rowCount).toBe(0);
   });
 
   it("rebinds a renewed entitlement before waking a stopped generation", async () => {
@@ -1014,103 +1307,115 @@ d("cloud workspace API contracts", () => {
     });
   });
 
-  it("starts an idempotent generation replacement without mutating its source generation", async () => {
-    const created = await createWorkspace();
-    const workspaceId = created.body.workspace.id;
-    await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `UPDATE cloud_workspaces
+  it.each([false, true, "linux-vm"] as const)(
+    "pins a generation replacement across image/default changes (managed provider changed: %s)",
+    async (changeManagedProvider) => {
+      if(changeManagedProvider==="linux-vm")configureApp(false,{...cloudConfig,sandboxClass:"linux-vm"});
+      const created = await createWorkspace();
+      const workspaceId = created.body.workspace.id;
+      await withSystemTx(pool, async (tx) => {
+        await tx.query(
+          `UPDATE cloud_workspaces
          SET status = 'ready', updated_at = now()
          WHERE id = $1`,
-        [workspaceId],
-      );
-      await tx.query(
-        `UPDATE cloud_workspace_provider_bindings
+          [workspaceId],
+        );
+        await tx.query(
+          `UPDATE cloud_workspace_provider_bindings
          SET provider_resource_id = $2, observed_state = 'running',
              last_observed_at = now(), updated_at = now()
          WHERE workspace_id = $1 AND generation = 1`,
-        [workspaceId, `sandbox-${workspaceId}-1`],
-      );
-      await tx.query(
-        `UPDATE cloud_workspace_lifecycle_intents
+          [workspaceId, `sandbox-${workspaceId}-1`],
+        );
+        await tx.query(
+          `UPDATE cloud_workspace_lifecycle_intents
          SET state = 'succeeded', completed_at = now(), updated_at = now()
          WHERE workspace_id = $1 AND operation = 'create'`,
-        [workspaceId],
-      );
-    });
+          [workspaceId],
+        );
+      });
 
-    const key = randomUUID();
-    const first = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
-      {
-        method: "POST",
-        key,
-        body: { operation: "upgrade" },
-      },
-    );
-    expect(first.status).toBe(202);
-    const firstBody = (await first.json()) as {
-      workspace: { generation: { number: number }; status: string };
-      transition: {
-        operation: string;
-        sourceGeneration: number;
-        candidateGeneration: number;
-        state: string;
+      if (changeManagedProvider===true) configureApp(false, managedBoatConfig());
+
+      const key = randomUUID();
+      const first = await request(
+        `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
+        {
+          method: "POST",
+          key,
+          body: { operation: "upgrade" },
+        },
+      );
+      expect(first.status).toBe(202);
+      const firstBody = (await first.json()) as {
+        workspace: { generation: { number: number }; status: string };
+        transition: {
+          operation: string;
+          sourceGeneration: number;
+          candidateGeneration: number;
+          state: string;
+        };
+        intent: { operation: string; state: string };
       };
-      intent: { operation: string; state: string };
-    };
-    expect(firstBody).toMatchObject({
-      workspace: { generation: { number: 1 }, status: "ready" },
-      transition: {
-        operation: "upgrade",
-        sourceGeneration: 1,
-        candidateGeneration: 2,
-        state: "draining",
-      },
-      intent: { operation: "stop", state: "queued" },
-    });
+      expect(firstBody).toMatchObject({
+        workspace: { generation: { number: 1 }, status: "ready" },
+        transition: {
+          operation: "upgrade",
+          sourceGeneration: 1,
+          candidateGeneration: 2,
+          state: "draining",
+        },
+        intent: { operation: "stop", state: "queued" },
+      });
 
-    const replay = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
-      {
-        method: "POST",
-        key,
-        body: { operation: "upgrade" },
-      },
-    );
-    expect(replay.status).toBe(200);
-    expect(replay.headers.get("idempotency-replayed")).toBe("true");
-    await expect(replay.json()).resolves.toMatchObject(firstBody);
+      configureApp(false, {
+        ...managedBoatConfig(),
+        providerProfiles: {
+          daytona: { ...cloudConfig, imageRef: "new-image-after-acceptance" },
+        },
+      });
 
-    await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO organization_members (org_id, user_id, role)
+      const replay = await request(
+        `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
+        {
+          method: "POST",
+          key,
+          body: { operation: "upgrade" },
+        },
+      );
+      expect(replay.status).toBe(200);
+      expect(replay.headers.get("idempotency-replayed")).toBe("true");
+      await expect(replay.json()).resolves.toMatchObject(firstBody);
+
+      await withSystemTx(pool, async (tx) => {
+        await tx.query(
+          `INSERT INTO organization_members (org_id, user_id, role)
          VALUES ($1, $2, 'admin')`,
-        [orgId, outsider.id],
-      );
-      await tx.query(
-        `INSERT INTO team_members (team_id, org_id, user_id, role)
+          [orgId, outsider.id],
+        );
+        await tx.query(
+          `INSERT INTO team_members (team_id, org_id, user_id, role)
          VALUES ($1, $2, $3, 'maintainer')`,
-        [teamId, orgId, outsider.id],
+          [teamId, orgId, outsider.id],
+        );
+      });
+      actor = outsider;
+      const foreignReplay = await request(
+        `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
+        {
+          method: "POST",
+          key,
+          body: { operation: "upgrade" },
+        },
       );
-    });
-    actor = outsider;
-    const foreignReplay = await request(
-      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
-      {
-        method: "POST",
-        key,
-        body: { operation: "upgrade" },
-      },
-    );
-    expect(foreignReplay.status).toBe(403);
-    await expect(foreignReplay.json()).resolves.toMatchObject({
-      error: { code: "cloud_workspace_owner_required" },
-    });
-    actor = owner;
+      expect(foreignReplay.status).toBe(404);
+      await expect(foreignReplay.json()).resolves.toMatchObject({
+        error: { code: "not_found" },
+      });
+      actor = owner;
 
-    const stored = await pool.query(
-      `SELECT cw.current_generation, source.retired_at AS source_retired_at,
+      const stored = await pool.query(
+        `SELECT cw.current_generation, source.retired_at AS source_retired_at,
               candidate.image_ref AS candidate_image_ref,
               source_spec.settings_snapshot = candidate_spec.settings_snapshot
                 AS settings_copied,
@@ -1137,20 +1442,21 @@ d("cloud workspace API contracts", () => {
        JOIN workspace_checkpoint_requests checkpoint_request
          ON checkpoint_request.lifecycle_intent_id = i.id
        WHERE cw.id = $1`,
-      [workspaceId],
-    );
-    expect(stored.rows[0]).toEqual({
-      current_generation: 1,
-      source_retired_at: null,
-      candidate_image_ref: "snap-pinned",
-      settings_copied: true,
-      intent_generation: 1,
-      affects_workspace: false,
-      transition_state: "draining",
-      checkpoint_reason: "before_rebuild",
-      checkpoint_state: "queued",
-    });
-  });
+        [workspaceId],
+      );
+      expect(stored.rows[0]).toEqual({
+        current_generation: 1,
+        source_retired_at: null,
+        candidate_image_ref: "snap-pinned",
+        settings_copied: true,
+        intent_generation: 1,
+        affects_workspace: false,
+        transition_state: "draining",
+        checkpoint_reason: "before_rebuild",
+        checkpoint_state: "queued",
+      });
+    },
+  );
 
   it("reserves replacement headroom against later replacements and creates", async () => {
     const first = await createWorkspace();

@@ -34,6 +34,18 @@ function cloudTarget(now: number) {
 }
 
 describe("qualified cloud runtime connection target", () => {
+  it("accepts actor v2 only at the configured control-plane bridge",()=>{
+    vi.stubEnv("VITE_CONTROL_PLANE_URL","https://api.zeros.test");
+    try {
+      const now=1_800_000_000_000,target={...cloudTarget(now),channel:"control-plane-websocket",url:"wss://api.zeros.test/v1/cloud-workspaces/bridge",cloudToken:`zwa_${"b".repeat(43)}`};
+      expect(parseRuntimeConnectionTarget(target,now)).toEqual(target);
+      expect(cloudRuntimeWebSocketProtocols(target.cloudToken)[0]).toBe("zeros-v1");
+      for(const url of ["wss://provider.test/v1/cloud-workspaces/bridge",target.url+"?token=leak","ws://api.zeros.test/v1/cloud-workspaces/bridge"])
+        expect(()=>parseRuntimeConnectionTarget({...target,url},now)).toThrow();
+      expect(()=>parseRuntimeConnectionTarget({...target,cloudToken:CLOUD_TOKEN},now)).toThrow();
+    }finally{vi.unstubAllEnvs();}
+  });
+
   it("uses an exact Electron loopback tunnel and a subprotocol bearer", () => {
     const now = 1_800_000_000_000;
     const target = parseRuntimeConnectionTarget(cloudTarget(now), now);

@@ -242,10 +242,14 @@ function resolvePlatformIdentity(target, spec) {
   };
 }
 
-function normalizePackagedPlatformRecords(records) {
+function normalizePackagedPlatformRecords(records, {
+  targets = PACKAGED_PLATFORM_PACKAGES,
+  lockfile = ROOT_LOCKFILE,
+  surface = `desktop packaged runtime (${PACKAGED_DESKTOP_PLATFORM})`,
+} = {}) {
   const normalized = records.filter((record) => !isHostPlatformRecord(record));
 
-  for (const target of PACKAGED_PLATFORM_PACKAGES) {
+  for (const target of targets) {
     const parent = normalized.find(
       (record) => record.name === target.parentName,
     );
@@ -267,7 +271,7 @@ function normalizePackagedPlatformRecords(records) {
         `${target.packageName}: exact optional dependency is missing from ${target.parentName}`,
       );
     }
-    if (!ROOT_LOCKFILE.includes(`  '${name}@${version}':`)) {
+    if (!lockfile.includes(`  '${name}@${version}':`)) {
       throw new Error(
         `${name}@${version}: release target is missing from pnpm-lock.yaml`,
       );
@@ -278,9 +282,7 @@ function normalizePackagedPlatformRecords(records) {
       name,
       version,
       license: target.license,
-      surfaces: new Set([
-        `desktop packaged runtime (${PACKAGED_DESKTOP_PLATFORM})`,
-      ]),
+      surfaces: new Set([surface]),
       documentIds: [],
       documentSourceLabel: `${name}@${version} — terms supplied by ${parent.name}@${parent.version}`,
     });
@@ -428,10 +430,14 @@ function fallbackDocuments(record) {
 const rootRecords = normalizePackagedPlatformRecords(
   runPnpmLicenseInventory(ROOT, "root pnpm workspace"),
 );
-const controlPlaneRecords = runPnpmLicenseInventory(
+const controlPlaneRecords = normalizePackagedPlatformRecords(runPnpmLicenseInventory(
   join(ROOT, "apps", "control-plane"),
   "control plane",
-);
+), {
+  targets: [{ parentName: "@openai/codex", packageName: "@openai/codex-linux-x64", license: "Apache-2.0" }],
+  lockfile: readFileSync(join(ROOT, "apps/control-plane/pnpm-lock.yaml"), "utf8"),
+  surface: "control plane native runtime (Linux x64)",
+});
 const marketingRecords = runPnpmLicenseInventory(
   join(ROOT, "apps", "marketing"),
   "marketing standalone deployment",
@@ -586,7 +592,7 @@ const lines = [
   "deployed by Cloudflare, the independently locked web Pages functions,",
   "and the Electron runtime embedded in the desktop application. Optional",
   "JavaScript dependencies are included. Host-native optional packages are",
-  "normalized to the macOS arm64",
+  "normalized to the macOS arm64 desktop and Linux x64 control-plane",
   "release contents: the staged Claude runtime, the staged Codex runtime, the",
   "packaged Cursor runtime, and the packaged ripgrep binary are all included.",
   "Electron's distribution also carries its Chromium notices",

@@ -1,5 +1,9 @@
 # Cloud workspace engineering reference
 
+Native recovery format, compatibility, ownership and capacity limits are defined
+in [checkpoint-native-format.md](checkpoint-native-format.md). Exact-image
+allocation-loss and native-session resume qualification remain release gates.
+
 ## Current implementation status
 
 | Capability                                                | Repository status                                                                  | Current anchor                                                                                        |
@@ -7,7 +11,7 @@
 | Remote engine transport and exact runtime registry        | Implemented, gated; signed macOS/live E2E open                                     | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
 | Provider image/lifecycle qualification                    | Harness and protected workflow implemented; live evidence open                     | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                |
 | WorkOS identity and membership projection                 | Implemented with Auth0 rollback compatibility                                      | control-plane auth migrations/services and web WorkOS session/event handlers                          |
-| Organization Pro/Business/Enterprise paid authority       | Implemented and database-tested                                                    | migrations `0026`, `0046`, `0059`, `0062`, `authorization.ts`, `paid-authority.ts`                    |
+| Individual Pro and deferred Business funding boundaries | Implemented and database-tested                                                    | migrations `0026`, `0046`, `0059`, `0062`, `authorization.ts`, `paid-authority.ts`                    |
 | Reviewed entitlement, compute, and storage provisioning   | Implemented and database-tested                                                    | migrations `0054`–`0055`, `0062`, owner management commands                                           |
 | Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`, `0056`                                                       |
 | Lifecycle, setup worker, admission, and engine lease      | Implemented behind disabled setup-worker gate; live qualification open             | migrations `0020`–`0025`, setup and engine services                                                   |
@@ -20,10 +24,64 @@
 | Remote-authoritative Design routing                       | Implemented through the normal exact runtime bridge; product UI E2E open           | runtime connection registry and existing Design protocol/service                                      |
 | Management, usage, outbox, health, and self-host seams    | Implemented as APIs/services; dashboards/drills/template publication open          | `management*.ts`, `usage.ts`, `outbox.ts`, `health.ts`                                                |
 | Cloud creation/catalog/details/onboarding UI              | Deliberately deferred                                                              | final UI phase                                                                                        |
-| Organization multiplayer and ownership-transfer execution | Deferred to Phase 6A                                                               | persisted roles/transfer model only                                                                   |
+| Organization multiplayer and external workspace guests   | Implemented, staff gated; hosted guest qualification open                          | collaboration routes, actor sessions and individual Pro authority                                                                   |
 | Native mobile clients                                     | Deferred                                                                           | no `apps/ios` or `apps/android` boundary                                                              |
 
 ## Existing environment contract
+
+### New image storage layout
+
+New qualification images use the version-2 physical layout in
+`scripts/cloud-workspace-validation/sandbox/runtime-layout.json`:
+
+| Purpose | Physical path |
+| --- | --- |
+| Immutable engine and bundled toolchain | `/opt/zeros` |
+| Host broker helpers and fixed Node runtime | `/opt/zeros-runtime` |
+| Repository checkout | `/srv/zeros/workspace` |
+| Database and workspace state | `/srv/zeros/state` |
+| Host-only setup journals and managed settings | `/srv/zeros/setup`, `/srv/zeros/managed-settings` |
+| Agent home | `/srv/zeros/home/agent` |
+| Separate capture home | `/srv/zeros/home/capture` |
+| Engine log | `/srv/zeros/log/engine.log` |
+
+The layout is included in image metadata, the image contract hash and admission
+verification. It avoids relying on arbitrary `/workspace` and `/home` directories
+that are not retained by every provider's stop/resume capture. Both image build
+paths package the same capture identity and pinned browser installation.
+Qualification must verify persistence on the exact provider/image; a provider
+snapshot is not a substitute for durable checkpoint/export recovery.
+
+Existing generations retain their accepted image and its original layout. This
+change does not relocate a live checkout or create filesystem aliases. A layout
+upgrade requires a new qualified image/generation and the normal validated restore
+path. Headless clients discover the workspace through its runtime contract;
+desktop SSH/IDE integration must remove its legacy fixed checkout assumption
+before enabling this image for that client.
+
+Version-2 broker entrypoints use `/opt/zeros-runtime/lib/zeros` and
+`/opt/zeros-runtime/bin`. The version-1 `/usr/local` helper prefix is an image
+compatibility contract, not a directory to rename on a running allocation.
+Provider resume may restore files while resetting ownership of provider-managed
+parent directories. New images therefore qualify both content and ancestry;
+they never repair a user-writable helper prefix just before privileged execution.
+
+Boat restores the disk without re-running the OCI image entrypoint. Before
+bootstrap credentials are installed, the provider runner invokes the fixed
+`ensure-cloud-worker-supervisor.mjs` helper. It verifies the version-2 image
+profile and root-controlled paths, recreates private `/run/zeros` after a cold
+boot, and probes or starts the broker. A lifetime kernel file lock prevents
+concurrent startup from replacing a live endpoint. Readiness probes do not stop
+an active engine or consume a setup session. Setup admission and engine readiness
+remain separate checks; a live broker alone never makes a workspace ready.
+
+Cgroup admission checks the process scope and every visible ancestor, taking the
+tightest independent memory, CPU-rate and process bound. A child reporting `max`
+can still be constrained by its parent. Malformed membership/limits fail admission;
+an unrestricted VM is not treated as bounded. See the
+[kernel cgroup v2 contract](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html).
+
+### Existing bootstrap variables
 
 The validation foundation recognizes:
 
@@ -142,14 +200,14 @@ on Daytona's narrow generated toolbox client rather than adding the full
 image/AWS/telemetry SDK tree to the Railway runtime.
 
 The provider and toolbox clients are intentionally pinned together at
-`0.190.1`. Daytona's current SDK documentation describes newer event-streamed
+`0.214.0`. Daytona's current SDK documentation describes newer event-streamed
 lifecycle behavior; upgrading either client is therefore an adapter change,
 not routine dependency maintenance. It requires contract tests plus the full
 live stop/wake/delete/preview/SSH qualification before promotion.
 
 `daytona-setup-executor.ts` accepts only a pinned Daytona generation and invokes
 the fixed image-owned command
-`/usr/local/bin/node /usr/local/lib/zeros/setup-cloud-workspace.mjs`. Repository
+`/opt/zeros-runtime/bin/node /opt/zeros-runtime/lib/zeros/setup-cloud-workspace.mjs`. Repository
 text is never concatenated into the command. Its single compact environment
 envelope contains an expiring admission plus expected hashes/versions, not the
 settings document, installation ID, or provider credential. The database
@@ -305,6 +363,57 @@ UUID destinations and preserve released local identifiers as compatibility
 data. The placement-aware resolver preserves `.zeros/settings.toml` as optional
 shared input and always excludes `.zeros/settings.local.toml` and secret
 material from copies.
+
+## Checkpoint throughput and bounded storage admission
+
+Cold recovery captures the complete safe worktree. Small files use engine-only
+batches of at most 64 items and 4MiB decoded bytes; large files retain the binary
+object endpoint. The engine runs at most two requests concurrently, validates
+each returned index, digest and size, and keeps at most 10,000 acknowledged blob
+IDs for 15 minutes under the exact origin/workspace/generation/engine identity.
+This cache only avoids repeated uploads after interruption. A successful content
+append still requires current engine authority and a live, exact workspace blob
+reservation. Append success or failure clears these hints.
+
+Each batch uses one reservation transaction and one finalization transaction.
+Encrypted conditional PUT and strong read-back occur outside database locks;
+finalization rechecks engine authority, immutable object key, nonce and key
+version. Admission counts pending, quarantined and deleting objects, rotation
+reservations and detached deletion receipts. Reclaiming an interrupted old-key
+upload first charges and queues the old key and chooses a fresh physical key;
+it never reuses a fenced key or downgrades the key version.
+
+Migration `0092` adds set-based quota admission and avoids rescanning an unchanged
+workspace reservation ledger for every file reference. Content append publishes
+ordered immutable events, current entries and exact reference-count deltas in a
+bounded number of SQL statements. Tombstones precede replacement entries, so a
+case-only rename does not depend on input order. Both hashed and legacy mutable
+entry references are removed; immutable event references are retained. UUIDs
+use the same canonical identity for storage locks, encryption and references.
+
+Per API process, uploads share 32 object-I/O permits (at most 16 per small-file
+batch), at most 64MiB of active
+I/O payload and 64MiB queued payload, and at most 32 queued operations. Parsed
+upload ingress reserves at most 128MiB, with at most eight batch bodies and four
+active batch operations. Binary uploads use the same ingress and I/O budgets.
+Body readers reject malformed headers before buffering, enforce a cancellable
+15-second deadline, coalesce fragments into 64KiB slabs and periodically yield
+the event loop. Storage I/O has a 25-second deadline, propagated to S3 operations.
+Cancellation drains admitted work before buffers or capacity are released.
+Metadata-backed reads enforce the exact expected ciphertext length before
+allocating or consuming the response. These payload admission budgets are not
+a process RSS ceiling. The shared production S3 connection pool permits 16
+sockets; logical I/O permits include work waiting for a socket. Multiple batches
+share bounded FIFO admission and can fill it; overload is retriable, without a
+reserved per-workspace or interactive lane.
+Content append chunks are bounded by both 10,000 mutations and 7MiB of serialized
+mutations, leaving room under the 8MiB route body limit.
+
+Local regressions exercise a 4,000-file baseline with repeated and distinct
+contents, interrupted uploads, exact replay, quota rollback, revocation, key
+reclaim, UUID casing, fragmented bodies and shared scalar/batch capacity. These
+are algorithm and correctness checks; hosted cold capture/restore remains a
+separate qualification gate, measured through the deployed API and object store.
 
 ## Protocol contract
 

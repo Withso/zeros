@@ -10,24 +10,26 @@ import {
 import { openCloudProviderCredential } from "./provider-connections.js";
 import type { DaytonaSetupCommandRunner } from "./daytona-setup-executor.js";
 import {
+  CloudWorkspaceProviderRegistry,
+  type CloudWorkspaceProviderPurpose,
+  type CloudWorkspaceProviderRegistration,
+} from "./provider-registry.js";
+import {
   CloudProviderError,
   type CloudWorkspaceAccessProvider,
   type CloudWorkspaceProvider,
+  type CloudWorkspaceProviderName,
+  type CloudWorkspaceCommandRunner,
 } from "./provider.js";
 
-export type CloudWorkspaceProviderPurpose =
-  | "lifecycle"
-  | "ssh"
-  | "preview"
-  | "setup"
-  | "cleanup";
+export type { CloudWorkspaceProviderPurpose } from "./provider-registry.js";
 
 export type CloudWorkspaceProviderResolution = {
   provider: CloudWorkspaceProvider & CloudWorkspaceAccessProvider;
   connectionId: string;
   connectionVersion: number;
   credentialSource: "hosted" | "delegated";
-  commandRunner?: DaytonaSetupCommandRunner;
+  commandRunner?: CloudWorkspaceCommandRunner;
 };
 
 export type CloudWorkspaceProviderCleanupScope = {
@@ -66,7 +68,7 @@ type CommandRunnerFactory = (input: {
 type ResolvedRow = {
   connection_id: string;
   org_id: string;
-  provider: "daytona";
+  provider: CloudWorkspaceProviderName;
   owner_kind: "user" | "organization";
   owner_user_id: string | null;
   credential_source: "hosted" | "delegated";
@@ -85,6 +87,7 @@ type ResolvedRow = {
   retired_at: Date | string | null;
   owner_user_id_snapshot: string;
   image_ref: string;
+  sandbox_class: "container" | "linux-vm" | null;
   architecture: "linux/amd64" | "linux/arm64";
   cpu_millicores: number;
   memory_mib: number;
@@ -125,9 +128,10 @@ function capability(
   return document.qualified === true && document[field] === true;
 }
 
-function delegatedTarget(
-  row: Pick<ResolvedRow, "capabilities" | "region">,
-): string {
+function delegatedTarget(row: {
+  capabilities: Readonly<Record<string, unknown>>;
+  region: string | null;
+}): string {
   const configured = row.capabilities.daytonaTarget;
   const target =
     typeof configured === "string" && configured.length > 0
@@ -152,37 +156,21 @@ function sameHash(left: Buffer, right: Buffer): boolean {
  * credentials are decrypted only in this coordinator boundary and are never
  * returned to routes, renderers, setup payloads, logs, or the sandbox.
  */
-export class DatabaseDaytonaProviderResolver
-  implements CloudWorkspaceProviderResolver
-{
+export class DatabaseCloudWorkspaceProviderResolver implements CloudWorkspaceProviderResolver {
   private readonly pool: pg.Pool;
-  private readonly hostedProvider: CloudWorkspaceProvider &
-    CloudWorkspaceAccessProvider;
-  private readonly hostedConfig: DaytonaWorkspaceProviderConfig;
+  private readonly registry: CloudWorkspaceProviderRegistry;
   private readonly credentialKeys: ReadonlyMap<number, string>;
   private readonly workosEnabled: boolean;
-  private readonly providerFactory: ProviderFactory;
-  private readonly hostedCommandRunner: DaytonaSetupCommandRunner | null;
-  private readonly commandRunnerFactory: CommandRunnerFactory | null;
 
   constructor(input: {
     pool: pg.Pool;
-    hostedProvider: CloudWorkspaceProvider & CloudWorkspaceAccessProvider;
-    hostedConfig: DaytonaWorkspaceProviderConfig;
+    registry: CloudWorkspaceProviderRegistry;
     credentialKeys?: Readonly<Record<number, string>>;
     workosEnabled: boolean;
-    providerFactory?: ProviderFactory;
-    hostedCommandRunner?: DaytonaSetupCommandRunner;
-    commandRunnerFactory?: CommandRunnerFactory;
   }) {
     this.pool = input.pool;
-    this.hostedProvider = input.hostedProvider;
-    this.hostedConfig = input.hostedConfig;
+    this.registry = input.registry;
     this.workosEnabled = input.workosEnabled;
-    this.providerFactory =
-      input.providerFactory ?? ((config) => new DaytonaWorkspaceProvider(config));
-    this.hostedCommandRunner = input.hostedCommandRunner ?? null;
-    this.commandRunnerFactory = input.commandRunnerFactory ?? null;
     const keys = new Map<number, string>();
     for (const [rawVersion, encoded] of Object.entries(
       input.credentialKeys ?? {},
@@ -225,7 +213,7 @@ export class DatabaseDaytonaProviderResolver
                 version.auth_tag, version.credential_sha256,
                 version.credential_expires_at, version.retired_at,
                 workspace.owner_user_id AS owner_user_id_snapshot,
-                generation.image_ref, generation.architecture,
+                generation.image_ref, generation.sandbox_class, generation.architecture,
                 generation.cpu_millicores, generation.memory_mib,
                 generation.storage_mib,
                 cloud_workspace_paid_authority_live(
@@ -241,6 +229,7 @@ export class DatabaseDaytonaProviderResolver
          JOIN provider_connections connection
            ON connection.id = generation.provider_connection_id
           AND connection.org_id = generation.org_id
+          AND connection.provider = generation.provider
          JOIN provider_connection_versions version
            ON version.connection_id = connection.id
           AND version.org_id = connection.org_id
@@ -257,7 +246,7 @@ export class DatabaseDaytonaProviderResolver
       );
       return result.rows[0] ?? null;
     });
-    if (!row || row.provider !== "daytona") {
+    if (!row || !this.registry.supports(row.provider)) {
       throw providerFailure(
         "provider_connection_unavailable",
         "Generation-bound cloud provider connection is unavailable",
@@ -270,8 +259,17 @@ export class DatabaseDaytonaProviderResolver
     row: ResolvedRow | CleanupRow,
     purpose: CloudWorkspaceProviderPurpose,
   ): CloudWorkspaceProviderResolution {
+    if (!this.registry.supports(row.provider)) {
+      throw providerFailure(
+        "provider_connection_unavailable",
+        "Generation-bound cloud provider connection is unavailable",
+      );
+    }
     const cleanup = purpose === "cleanup";
-    if (!cleanup && (!row.paid_authority_live || row.connection_state !== "active")) {
+    if (
+      !cleanup &&
+      (!row.paid_authority_live || row.connection_state !== "active")
+    ) {
       throw providerFailure(
         "provider_authority_revoked",
         "Cloud provider authority is no longer active",
@@ -313,20 +311,24 @@ export class DatabaseDaytonaProviderResolver
     }
     const connectionVersion = safeVersion(row.provider_connection_version);
     if (row.credential_source === "hosted") {
-      if (row.endpoint !== "hosted://daytona") {
+      if (row.endpoint !== `hosted://${row.provider}`) {
         throw providerFailure(
           "provider_connection_invalid",
           "Hosted cloud provider endpoint is invalid",
         );
       }
       return {
-        provider: this.hostedProvider,
+        ...this.registry.hosted(row.provider, purpose, {
+          imageRef: row.image_ref,
+          ...(row.sandbox_class?{sandboxClass:row.sandbox_class}:{}),
+          architecture: row.architecture,
+          cpuMillicores: row.cpu_millicores,
+          memoryMiB: row.memory_mib,
+          storageMiB: row.storage_mib,
+        }),
         connectionId: row.connection_id,
         connectionVersion,
         credentialSource: "hosted",
-        ...(purpose === "setup"
-          ? { commandRunner: this.requireHostedCommandRunner() }
-          : {}),
       };
     }
 
@@ -396,64 +398,36 @@ export class DatabaseDaytonaProviderResolver
         "Delegated cloud provider credential integrity check failed",
       );
     }
-    const provider = this.providerFactory({
-      ...this.hostedConfig,
-      apiKey: credential,
-      apiUrl: row.endpoint,
-      target: delegatedTarget(row),
-      snapshotId: row.image_ref,
-      architecture: row.architecture,
-      cpuMillicores: row.cpu_millicores,
-      memoryMiB: row.memory_mib,
-      storageMiB: row.storage_mib,
-    });
     return {
-      provider,
+      ...this.registry.delegated(row.provider, {
+        apiKey: credential,
+        apiUrl: row.endpoint,
+        region: row.region,
+        capabilities: row.capabilities,
+        imageRef: row.image_ref,
+        ...(row.sandbox_class?{sandboxClass:row.sandbox_class}:{}),
+        architecture: row.architecture,
+        cpuMillicores: row.cpu_millicores,
+        memoryMiB: row.memory_mib,
+        storageMiB: row.storage_mib,
+        purpose,
+      }),
       connectionId: row.connection_id,
       connectionVersion,
       credentialSource: "delegated",
-      ...(purpose === "setup"
-        ? {
-            commandRunner: this.requireDelegatedCommandRunner({
-              apiKey: credential,
-              apiUrl: row.endpoint,
-            }),
-          }
-        : {}),
     };
-  }
-
-  private requireHostedCommandRunner(): DaytonaSetupCommandRunner {
-    if (!this.hostedCommandRunner) {
-      throw providerFailure(
-        "provider_command_not_configured",
-        "Hosted cloud provider command execution is unavailable",
-      );
-    }
-    return this.hostedCommandRunner;
-  }
-
-  private requireDelegatedCommandRunner(input: {
-    apiKey: string;
-    apiUrl: string;
-  }): DaytonaSetupCommandRunner {
-    if (!this.commandRunnerFactory) {
-      throw providerFailure(
-        "provider_command_not_configured",
-        "Delegated cloud provider command execution is unavailable",
-      );
-    }
-    return this.commandRunnerFactory(input);
   }
 
   async cleanupScopes(): Promise<{
     scopes: CloudWorkspaceProviderCleanupScope[];
     unavailable: number;
   }> {
-    const rows = await withSystemTx(this.pool, async (tx) =>
-      (
-        await tx.query<CleanupRow>(
-          `SELECT connection.id AS connection_id, connection.org_id,
+    const rows = await withSystemTx(
+      this.pool,
+      async (tx) =>
+        (
+          await tx.query<CleanupRow>(
+            `SELECT connection.id AS connection_id, connection.org_id,
                   connection.provider, connection.owner_kind,
                   connection.owner_user_id, connection.credential_source,
                   connection.state AS connection_state,
@@ -464,43 +438,39 @@ export class DatabaseDaytonaProviderResolver
                   version.key_version, version.nonce, version.ciphertext,
                   version.auth_tag, version.credential_sha256,
                   version.credential_expires_at, version.retired_at,
-                  $1::text AS image_ref,
-                  $2::text AS architecture,
-                  $3::integer AS cpu_millicores,
-                  $4::integer AS memory_mib,
-                  $5::integer AS storage_mib
+                  generation.image_ref, generation.sandbox_class, generation.architecture,
+                  generation.cpu_millicores, generation.memory_mib,
+                  generation.storage_mib
            FROM provider_connections connection
            JOIN provider_connection_versions version
              ON version.connection_id = connection.id
             AND version.org_id = connection.org_id
-           WHERE connection.provider = 'daytona'
-             AND connection.credential_source = 'delegated'
-             AND EXISTS (
-               SELECT 1 FROM cloud_workspace_generations generation
-               WHERE generation.provider_connection_id = connection.id
-                 AND generation.provider_connection_version = version.version
-                 AND generation.org_id = connection.org_id
-             )
+           JOIN LATERAL (
+             SELECT g.image_ref, g.sandbox_class, g.architecture, g.cpu_millicores,
+                    g.memory_mib, g.storage_mib
+             FROM cloud_workspace_generations g
+             WHERE g.provider_connection_id = connection.id
+               AND g.provider_connection_version = version.version
+               AND g.org_id = connection.org_id
+               AND g.provider = connection.provider
+             ORDER BY g.generation DESC, g.workspace_id
+             LIMIT 1
+           ) generation ON true
+           WHERE connection.credential_source = 'delegated'
            ORDER BY connection.id, version.version`,
-          [
-            this.hostedConfig.snapshotId,
-            this.hostedConfig.architecture,
-            this.hostedConfig.cpuMillicores,
-            this.hostedConfig.memoryMiB,
-            this.hostedConfig.storageMiB,
-          ],
-        )
-      ).rows,
+            [],
+          )
+        ).rows,
     );
-    const scopes: CloudWorkspaceProviderCleanupScope[] = [
-      {
-        provider: this.hostedProvider,
+    const scopes: CloudWorkspaceProviderCleanupScope[] = this.registry
+      .hostedScopes()
+      .map(({ provider }) => ({
+        provider,
         organizationId: null,
         connectionId: null,
         connectionVersion: null,
         credentialSource: "hosted",
-      },
-    ];
+      }));
     let unavailable = 0;
     for (const row of rows) {
       try {
@@ -522,9 +492,140 @@ export class DatabaseDaytonaProviderResolver
   }
 }
 
-export class StaticCloudWorkspaceProviderResolver
-  implements CloudWorkspaceProviderResolver
-{
+type DaytonaRuntimePolicy = Pick<
+  DaytonaWorkspaceProviderConfig,
+  | "operationTimeoutSeconds"
+  | "autoStopMinutes"
+  | "autoArchiveMinutes"
+  | "autoDeleteMinutes"
+  | "allowedSshHosts"
+  | "allowedPreviewHostSuffixes"
+>;
+
+export type DaytonaProviderRegistrationOptions = {
+  providerFactory?: ProviderFactory;
+  commandRunnerFactory?: CommandRunnerFactory;
+} & (
+  | {
+      hostedProvider: CloudWorkspaceProvider & CloudWorkspaceAccessProvider;
+      hostedConfig: DaytonaWorkspaceProviderConfig;
+      hostedCommandRunner?: DaytonaSetupCommandRunner;
+      runtimePolicy?: never;
+    }
+  | {
+      /** BYO-only registration has no managed account or credential. */
+      runtimePolicy: DaytonaRuntimePolicy;
+      hostedProvider?: never;
+      hostedConfig?: never;
+      hostedCommandRunner?: never;
+    }
+);
+
+export function createDaytonaProviderRegistration(
+  input: DaytonaProviderRegistrationOptions,
+): CloudWorkspaceProviderRegistration {
+  const hostedConfig = input.hostedConfig;
+  const hostedProvider = input.hostedProvider;
+  const policy = input.runtimePolicy ?? hostedConfig;
+  if (!policy || Boolean(hostedConfig) !== Boolean(hostedProvider)) {
+    throw new Error("Daytona provider registration requires a runtime policy");
+  }
+  const providerFactory =
+    input.providerFactory ??
+    ((config: DaytonaWorkspaceProviderConfig) =>
+      new DaytonaWorkspaceProvider(config));
+  return {
+    name: "daytona",
+    ...(hostedConfig && hostedProvider
+      ? {
+          hosted: {
+            provider: hostedProvider,
+            ...(input.hostedCommandRunner
+              ? { commandRunner: input.hostedCommandRunner }
+              : {}),
+          },
+          hostedForGeneration: (profile) => ({
+            provider:
+              profile.imageRef === hostedConfig.snapshotId &&
+              (profile.sandboxClass??"container") === (hostedConfig.sandboxClass??"container") &&
+              profile.architecture === hostedConfig.architecture &&
+              profile.cpuMillicores === hostedConfig.cpuMillicores &&
+              profile.memoryMiB === hostedConfig.memoryMiB &&
+              profile.storageMiB === hostedConfig.storageMiB
+                ? hostedProvider
+                : providerFactory({
+                    ...hostedConfig,
+                    snapshotId: profile.imageRef,
+                    sandboxClass: profile.sandboxClass??"container",
+                    architecture: profile.architecture,
+                    cpuMillicores: profile.cpuMillicores,
+                    memoryMiB: profile.memoryMiB,
+                    storageMiB: profile.storageMiB,
+                  }),
+            ...(input.hostedCommandRunner
+              ? { commandRunner: input.hostedCommandRunner }
+              : {}),
+          }),
+        }
+      : {}),
+    delegated: (connection) => {
+      const provider = providerFactory({
+        operationTimeoutSeconds: policy.operationTimeoutSeconds,
+        autoStopMinutes: policy.autoStopMinutes,
+        autoArchiveMinutes: policy.autoArchiveMinutes,
+        autoDeleteMinutes: policy.autoDeleteMinutes,
+        ...(policy.allowedSshHosts
+          ? { allowedSshHosts: policy.allowedSshHosts }
+          : {}),
+        ...(policy.allowedPreviewHostSuffixes
+          ? { allowedPreviewHostSuffixes: policy.allowedPreviewHostSuffixes }
+          : {}),
+        apiKey: connection.apiKey,
+        apiUrl: connection.apiUrl,
+        target: delegatedTarget(connection),
+        snapshotId: connection.imageRef,
+        ...(connection.sandboxClass?{sandboxClass:connection.sandboxClass}:{}),
+        architecture: connection.architecture,
+        cpuMillicores: connection.cpuMillicores,
+        memoryMiB: connection.memoryMiB,
+        storageMiB: connection.storageMiB,
+      });
+      return {
+        provider,
+        ...(connection.purpose === "setup" && input.commandRunnerFactory
+          ? {
+              commandRunner: input.commandRunnerFactory({
+                apiKey: connection.apiKey,
+                apiUrl: connection.apiUrl,
+              }),
+            }
+          : {}),
+      };
+    },
+  };
+}
+
+/** Source compatibility for the original single-provider constructor. */
+export class DatabaseDaytonaProviderResolver extends DatabaseCloudWorkspaceProviderResolver {
+  constructor(
+    input: DaytonaProviderRegistrationOptions & {
+      pool: pg.Pool;
+      credentialKeys?: Readonly<Record<number, string>>;
+      workosEnabled: boolean;
+    },
+  ) {
+    super({
+      pool: input.pool,
+      workosEnabled: input.workosEnabled,
+      ...(input.credentialKeys ? { credentialKeys: input.credentialKeys } : {}),
+      registry: new CloudWorkspaceProviderRegistry([
+        createDaytonaProviderRegistration(input),
+      ]),
+    });
+  }
+}
+
+export class StaticCloudWorkspaceProviderResolver implements CloudWorkspaceProviderResolver {
   constructor(
     private readonly provider: CloudWorkspaceProvider &
       CloudWorkspaceAccessProvider,

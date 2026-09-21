@@ -71,6 +71,7 @@ export class BridgeClient {
 
   engineRoot = "";
   engineVersion = "";
+  engineCapabilities: string[] = [];
 
   constructor(private readonly opts: BridgeClientOpts) {
     this.reqTimeout = opts.requestTimeoutMs ?? 15_000;
@@ -155,6 +156,7 @@ export class BridgeClient {
       case "ENGINE_READY": {
         this.engineRoot = String(msg.root ?? "");
         this.engineVersion = String(msg.version ?? "");
+        this.engineCapabilities = Array.isArray(msg.capabilities) ? msg.capabilities.filter((v): v is string => typeof v === "string") : [];
         // Reply with CONNECTED to complete the protocol handshake.
         try {
           this.sendMessage({
@@ -355,7 +357,9 @@ export class BridgeClient {
     } catch {
       /* ignore */
     }
-    if (ws.readyState === WebSocket.CLOSED) return;
+    // close()/terminate() may synchronously change the state above. Re-read it
+    // outside TypeScript's pre-call narrowing before installing the fallback.
+    if (Number(ws.readyState) === WebSocket.CLOSED) return;
     const forceClose = setTimeout(() => {
       try {
         ws.terminate();

@@ -8,6 +8,7 @@ import type pg from "pg";
 import {
   assertNoTopLevelTransactionControl,
   migrationChecksum,
+  migrationFailureDiagnostic,
   renamedMigrationAliasesFor,
   runMigrations,
   runServiceBootMigrations,
@@ -276,6 +277,35 @@ describe("migration checksums", () => {
 });
 
 describe("migration runner connection boundary", () => {
+  it("reports safe driver codes without logging driver messages or objects", () => {
+    const secret = "private-database-row-or-url";
+    const driverError = Object.assign(new Error(secret), { code: "23514", detail: secret });
+    expect(migrationFailureDiagnostic(driverError)).toContain("SQLSTATE 23514");
+    expect(migrationFailureDiagnostic(driverError)).not.toContain(secret);
+    expect(migrationFailureDiagnostic({ code: secret, detail: secret })).not.toContain(secret);
+    expect(migrationFailureDiagnostic(new Error(secret))).not.toContain(secret);
+  });
+
+  it("does not place driver data in a migration failure message", async () => {
+    const { pool } = poolWithAppliedMigrations([]);
+    const client = await pool.connect();
+    const query = vi.mocked(client.query).getMockImplementation()!;
+    const source = readFileSync(path.join(MIGRATIONS_DIR, LADDER[0]!), "utf8");
+    const sentinel = "private-row-content-from-database";
+    vi.spyOn(client, "query").mockImplementation(((sql: string, values?: unknown[]) => {
+      if (sql === source) return Promise.reject(Object.assign(new Error(sentinel), { code: "23514", detail: sentinel }));
+      return query(sql, values);
+    }) as typeof client.query);
+    try {
+      await runMigrations(pool);
+      throw new Error("Expected migration failure");
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain(`Migration ${LADDER[0]} failed`);
+      expect((error as Error).message).not.toContain(sentinel);
+    }
+  });
+
   it("uses one client, disables its request timeout, and holds the stable lock", async () => {
     const calls: Array<{ text: string; values: readonly unknown[] }> = [];
     const ledger = LADDER.map((name) => ({
@@ -400,6 +430,13 @@ describe("automatic service-boot migration policy", () => {
   );
   const productionWithoutApproval = { NODE_ENV: "production" };
 
+  it("requires an explicit rollout when compute funding precedes the security cursor migration",async()=>{
+    const boundary='0073_cloud_workspace_compute_leases.sql';
+    const before=LADDER.slice(0,LADDER.indexOf(boundary));
+    await expect(runServiceBootMigrations(poolWithAppliedMigrations(before).pool,{cloudWorkspacesEnabled:false,env:productionWithoutApproval})).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
+    await expect(runServiceBootMigrations(poolWithAppliedMigrations(before).pool,{cloudWorkspacesEnabled:true,env:{...productionWithoutApproval,CONTROL_PLANE_MIGRATION_APPROVALS:boundary}})).rejects.toThrow(/0073.*not approved/i);
+  });
+
   it("never defers the unapproved 0009 core-schema boundary", async () => {
     const coreBoundary = "0009_organization_team_hierarchy.sql";
     const { pool } = poolWithAppliedMigrations(
@@ -414,7 +451,7 @@ describe("automatic service-boot migration policy", () => {
     ).rejects.toThrow(/0009_organization_team_hierarchy\.sql.*not approved/i);
   });
 
-  it("stops at the unapproved boundary when cloud runtime is disabled", async () => {
+  it("requires the security cursor migration after stops at the unapproved boundary when cloud runtime is disabled", async () => {
     const { pool, calls } = poolWithAppliedMigrations(throughBeforeBoundary);
 
     await expect(
@@ -422,14 +459,7 @@ describe("automatic service-boot migration policy", () => {
         cloudWorkspacesEnabled: false,
         env: productionWithoutApproval,
       }),
-    ).resolves.toEqual({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: controlledBoundary,
-        dependentRuntime: "cloud_workspaces",
-      },
-    });
+    ).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
 
     const recordedNames = calls
       .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
@@ -441,7 +471,7 @@ describe("automatic service-boot migration policy", () => {
     );
   });
 
-  it("ignores a leaked 0025 approval at service boot and still leaves it pending", async () => {
+  it("requires the security cursor migration after ignores a leaked 0025 approval at service boot and still leaves it pending", async () => {
     const { pool, calls } = poolWithAppliedMigrations(throughBeforeBoundary);
 
     await expect(
@@ -452,13 +482,7 @@ describe("automatic service-boot migration policy", () => {
           CONTROL_PLANE_MIGRATION_APPROVALS: controlledBoundary,
         },
       }),
-    ).resolves.toMatchObject({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: controlledBoundary,
-      },
-    });
+    ).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
 
     const recordedNames = calls
       .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
@@ -469,24 +493,16 @@ describe("automatic service-boot migration policy", () => {
     );
   });
 
-  it("applies only the safe prefix before reporting the pending boundary", async () => {
+  it("applies only the safe prefix before refusing a pending core-security migration", async () => {
     const cloudStart = LADDER.indexOf("0020_cloud_workspace_setup_worker.sql");
     const { pool, calls } = poolWithAppliedMigrations(
       LADDER.slice(0, cloudStart),
     );
 
-    const result = await runServiceBootMigrations(pool, {
+    await expect(runServiceBootMigrations(pool, {
       cloudWorkspacesEnabled: false,
       env: productionWithoutApproval,
-    });
-
-    expect(result.ran).toEqual(
-      LADDER.slice(cloudStart, LADDER.indexOf(controlledBoundary)),
-    );
-    expect(result.status).toMatchObject({
-      state: "controlled_migration_pending",
-      migration: controlledBoundary,
-    });
+    })).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
     const recordedNames = calls
       .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
       .map(({ values }) => values[0]);
@@ -510,7 +526,7 @@ describe("automatic service-boot migration policy", () => {
     );
   });
 
-  it("stops before 0060 from a 0059 ledger even when older cloud state exists", async () => {
+  it("requires the security cursor migration after stops before 0060 from a 0059 ledger even when older cloud state exists", async () => {
     const { pool, calls } = poolWithAppliedMigrations(throughBeforeObjectFence);
 
     await expect(
@@ -518,14 +534,7 @@ describe("automatic service-boot migration policy", () => {
         cloudWorkspacesEnabled: false,
         env: productionWithoutApproval,
       }),
-    ).resolves.toEqual({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: objectFenceBoundary,
-        dependentRuntime: "cloud_workspaces",
-      },
-    });
+    ).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
 
     expect(
       calls.some(({ text }) =>
@@ -538,7 +547,7 @@ describe("automatic service-boot migration policy", () => {
     expect(recordedNames).not.toContain(objectFenceBoundary);
   });
 
-  it("ignores a leaked 0060 approval at service boot", async () => {
+  it("requires the security cursor migration after ignores a leaked 0060 approval at service boot", async () => {
     const { pool, calls } = poolWithAppliedMigrations(throughBeforeObjectFence);
 
     await expect(
@@ -549,13 +558,7 @@ describe("automatic service-boot migration policy", () => {
           CONTROL_PLANE_MIGRATION_APPROVALS: objectFenceBoundary,
         },
       }),
-    ).resolves.toMatchObject({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: objectFenceBoundary,
-      },
-    });
+    ).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
 
     const recordedNames = calls
       .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
@@ -563,7 +566,7 @@ describe("automatic service-boot migration policy", () => {
     expect(recordedNames).not.toContain(objectFenceBoundary);
   });
 
-  it("pauses the deletion lifecycle before 0061 while known WorkOS auth can continue", async () => {
+  it("requires the security cursor migration after pauses the deletion lifecycle before 0061 while known WorkOS auth can continue", async () => {
     const beforeProviderErasure = LADDER.slice(
       0,
       LADDER.indexOf(providerErasureBoundary),
@@ -575,14 +578,7 @@ describe("automatic service-boot migration policy", () => {
         cloudWorkspacesEnabled: false,
         env: productionWithoutApproval,
       }),
-    ).resolves.toEqual({
-      ran: [],
-      status: {
-        state: "controlled_migration_pending",
-        migration: providerErasureBoundary,
-        dependentRuntime: "cloud_workspaces",
-      },
-    });
+    ).rejects.toThrow(/0075_security_event_commit_order.*not covered/i);
     const recordedNames = calls
       .filter(({ text }) => /INSERT\s+INTO\s+schema_migrations/i.test(text))
       .map(({ values }) => values[0]);
@@ -638,4 +634,24 @@ describe("automatic service-boot migration policy", () => {
       /migration ledger is out of order.*0026_cloud_workspace_identity_and_entitlements\.sql.*0025_cloud_workspace_engine_authority\.sql/i,
     );
   });
+});
+
+it('preflights every pending controlled approval before applying the strict migration prefix',async()=>{
+  // Locate by number so a filename typo cannot silently select the full ladder.
+  const prefix=LADDER.filter(name=>Number(name.slice(0,4))<=62);
+  expect(prefix.length).toBe(62);
+  const {pool,calls}=poolWithAppliedMigrations(prefix);
+  await expect(runMigrations(pool,{env:{NODE_ENV:'production',CONTROL_PLANE_MIGRATION_APPROVALS:'0073_cloud_workspace_compute_leases.sql'}})).rejects.toThrow(/0075.*not approved/);
+  expect(calls.filter(({text})=>/INSERT\s+INTO\s+schema_migrations/i.test(text))).toEqual([]);
+});
+
+it('keeps every published full migration approval command complete for this artifact',()=>{
+  const controlled=LADDER.filter(name=>readFileSync(path.join(MIGRATIONS_DIR,name),'utf8').includes('-- zeros:requires-controlled-downtime'));
+  const root=path.resolve(MIGRATIONS_DIR,'../../..');
+  for(const name of ['apps/control-plane/.env.example','apps/control-plane/README.md','docs/deployment-environments.md','docs/cloud-workspace/infrastructure-and-operations.md']){
+    const source=readFileSync(path.join(root,name),'utf8');
+    const commands=[...source.matchAll(/CONTROL_PLANE_MIGRATION_APPROVALS=([\w.,]+)/g)];
+    expect(commands.length,name).toBeGreaterThan(0);
+    for(const command of commands)expect(command[1]!.split(','),name).toEqual(controlled);
+  }
 });

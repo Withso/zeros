@@ -16,6 +16,8 @@ export function allowedControlPlaneRoute(method, pathname) {
     return true;
   }
   if (method === "POST" && pathname === "/v1/invitations/accept") return true;
+  if (method === "POST" && pathname === "/v1/cloud-workspace-invitations/accept") return true;
+  if (method === "GET" && new RegExp(`^/v1/cloud-workspaces/${UUID}$`).test(pathname)) return true;
   if (method === "POST" && pathname === "/v1/organizations") return true;
   const root = new RegExp(`^/v1/organizations/${UUID}$`);
   if (root.test(pathname)) return ["GET", "PATCH", "DELETE"].includes(method);

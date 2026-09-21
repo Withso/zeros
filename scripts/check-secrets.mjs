@@ -78,8 +78,8 @@ const RULES = [
     name: "Private key block",
     re: /-----BEGIN (?:RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----/,
   },
-  // Database URLs that carry credentials AND point somewhere real. The host
-  // negative-lookahead keeps the everyday local fixtures green
+  // Database URLs that carry credentials AND point somewhere real. Exact host
+  // and reserved suffix checks keep the everyday local fixtures green
   // (postgres://postgres:postgres@localhost:5432/… in CI services and
   // apps/control-plane/.env.example) while catching a managed/pooler endpoint — which is
   // how a production Postgres URL slipped into the tree unnoticed. Note that a
@@ -87,7 +87,15 @@ const RULES = [
   // password at all, so a password is deliberately not required.
   {
     name: "Database URL with credentials (non-local host)",
-    re: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?):\/\/[^\s"'`/@]+@(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|host\.docker\.internal|db[:/\s])[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}/,
+    re: /\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?):\/\/[^\s"'`/@]+@[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?/,
+    isFixture: (match) => {
+      try {
+        const hostname = new URL(match).hostname.toLowerCase().replace(/\.$/, "");
+        return ["localhost", "127.0.0.1", "0.0.0.0", "host.docker.internal", "db"].includes(hostname) ||
+          /\.(?:test|invalid|localhost)$/.test(hostname) ||
+          /^(?:192\.0\.2|198\.51\.100|203\.0\.113)\.[0-9]{1,3}$/.test(hostname);
+      } catch { return false; }
+    },
   },
   // A Supabase project ref is exactly 20 lowercase alphanumerics. Anchoring on
   // that length keeps placeholders (`<ref>.supabase.co`, `ref.supabase.co`)
@@ -160,9 +168,12 @@ for (const file of tracked) {
   if (text.includes("\0")) continue; // skip binary
   text.split("\n").forEach((line, i) => {
     for (const rule of RULES) {
-      const m = rule.re.exec(line);
-      if (m && !looksLikePlaceholder(m[0]))
-        secretFindings.push({ file, line: i + 1, rule: rule.name });
+      // Inspect every occurrence: an example earlier on a line must never
+      // hide a real credential later on that line.
+      for (const m of line.matchAll(new RegExp(rule.re.source, "g"))) {
+        if (!looksLikePlaceholder(m[0]) && !rule.isFixture?.(m[0]))
+          secretFindings.push({ file, line: i + 1, rule: rule.name });
+      }
     }
     const role = line.includes("eyJ") ? supabaseJwtRole(line) : null;
     if (role)

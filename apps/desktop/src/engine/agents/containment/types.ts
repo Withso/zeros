@@ -153,6 +153,8 @@ export interface BoundaryProcessExit {
 }
 
 export interface BoundaryProcess {
+  /** Native SDK signal escalation must go through this domain's proof owner. */
+  readonly requiresOwnedSignals?: boolean;
   readonly pid: number;
   readonly child?: ChildProcess;
   readonly stdin: Writable | null;
@@ -262,6 +264,9 @@ export interface PreparedBoundary {
    * and cloud host-parity boundaries both return the deployment's real HOME. */
   readonly providerHomePath?: string;
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec;
+  /** Only after the spawning API proves that no child was created (no PID).
+   * A timeout or lost tracking callback is never evidence of no process. */
+  cancelUnstartedLaunch?(launch: BoundaryLaunchSpec): void;
   trackProcess(child: ChildProcess): BoundaryProcess;
   /** Adopt a PTY/supervisor process group spawned by the shared Node PTY host.
    * The asynchronous host protocol reports the pid after create() returns. */

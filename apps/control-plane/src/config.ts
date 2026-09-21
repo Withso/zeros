@@ -1,3 +1,4 @@
+import {loadCodexFingerprintKeys,type CodexFingerprintKeys} from "./cloud-workspaces/codex-fingerprint-keys.js";
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
@@ -16,6 +17,9 @@ import path from "node:path";
 import { z } from "zod";
 
 import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
+import { validateDatabaseConnections } from "./database-config.js";
+import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
+import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -26,8 +30,14 @@ function containsAsciiControl(value: string): boolean {
 }
 
 const EnvSchema = z.object({
-  /** Postgres connection string (Railway: the service's DATABASE_URL). */
+  /** Runtime Postgres connection; production uses an unprivileged login. */
   DATABASE_URL: z.string().min(1),
+  DATABASE_LISTEN_URL: z.string().min(1).optional(),
+  DATABASE_MIGRATION_URL: z.string().min(1).optional(),
+  DATABASE_MIGRATION_ROLE: z.string().min(1).optional(),
+  DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
+  DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
+  DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
@@ -158,11 +168,23 @@ export type FeedbackBackendConfig = {
 };
 
 export type CloudWorkspaceBackendConfig = {
-  provider: "daytona";
+  /** Managed default only. Explicit customer connections select independently. */
+  provider: CloudWorkspaceProviderName;
+  providerProfiles?: Readonly<
+    Partial<
+      Record<CloudWorkspaceProviderName, CloudWorkspaceProvisioningProfile>
+    >
+  >;
+  /** Customer Daytona onboarding is independent of the managed provider. The
+   * legacy flat endpoint/target is used only when Daytona is the default. */
+  daytonaConnection?: { apiUrl: string; target: string };
+  boat?: { accountScope: string; ttlSeconds: number | null };
+  computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
   apiKey: string;
   apiUrl: string;
   target: string;
   snapshotId: string;
+  sandboxClass?: "container" | "linux-vm";
   imageRef: string;
   architecture: "linux/amd64" | "linux/arm64";
   cpuMillicores: number;
@@ -179,6 +201,7 @@ export type CloudWorkspaceBackendConfig = {
    * It is independent from setup execution so settings can be prepared while
    * the unqualified image worker remains disabled. */
   settingsSecretEncryptionKeys: Readonly<Record<number, string>>;
+  codexRefreshFingerprints?: CodexFingerprintKeys;
   currentSettingsSecretEncryptionKeyVersion: number | null;
   /** Legacy V1 alias retained while deployments move to the keyring vars. */
   settingsSecretKeyV1: string | null;
@@ -195,8 +218,10 @@ export type CloudWorkspaceBackendConfig = {
   durability: {
     objectEncryptionKeys: Readonly<Record<number, string>>;
     currentObjectEncryptionKeyVersion: number;
-    objectStoreDirectory: string;
-  } | null;
+  } & (
+    | { objectStoreDirectory: string; s3?: never }
+    | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string } }
+  ) | null;
   /** Optional signed event sink. The database outbox remains authoritative
    * while this is absent; events are never silently acknowledged. */
   outbox: {
@@ -219,6 +244,17 @@ export type CloudWorkspaceBackendConfig = {
     leaseMs: number;
     admissionTtlSeconds: number;
   } | null;
+};
+
+export type CloudWorkspaceProvisioningProfile = {
+  provider: CloudWorkspaceProviderName;
+  sandboxClass?: "container" | "linux-vm";
+  imageRef: string;
+  architecture: "linux/amd64" | "linux/arm64";
+  cpuMillicores: number;
+  memoryMiB: number;
+  storageMiB: number;
+  sourceCommit: string | null;
 };
 
 export type AuthBackendConfig =
@@ -247,6 +283,14 @@ export type WorkOSBackendConfig = {
 
 export type Config = {
   databaseUrl: string;
+  databaseListenUrl?: string;
+  /** Optional for embedders; loadConfig always supplies resolved defaults. */
+  databaseMigrationUrl?: string;
+  databaseMigrationRole?: string;
+  databaseMigrationsOnBoot?: boolean;
+  databasePoolMax?: number;
+  /** All application routes and background writers are disabled during cutover. */
+  databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
   /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
   workos: WorkOSBackendConfig | null;
@@ -266,15 +310,43 @@ export type Config = {
 
 const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
-  CLOUD_WORKSPACE_PROVIDER: z.literal("daytona").default("daytona"),
-  DAYTONA_API_KEY: z.string().trim().min(16).max(4096),
+  CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("daytona"),
+  DAYTONA_API_KEY: z.string().trim().min(16).max(4096).optional(),
   DAYTONA_API_URL: z.string().url().default("https://app.daytona.io/api"),
   DAYTONA_TARGET: z
     .string()
     .trim()
     .regex(/^[A-Za-z0-9._-]{1,64}$/)
     .default("eu"),
-  DAYTONA_SNAPSHOT_ID: z.string().trim().min(1).max(512),
+  DAYTONA_SNAPSHOT_ID: z.string().trim().min(1).max(512).optional(),
+  DAYTONA_SANDBOX_CLASS: z.enum(["container", "linux-vm"]).optional(),
+  BOAT_API_KEY: z
+    .string()
+    .trim()
+    .regex(/^[\x21-\x7e]{16,4096}$/)
+    .optional(),
+  BOAT_ACCOUNT_SCOPE: z
+    .string()
+    .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/)
+    .optional(),
+  BOAT_SNAPSHOT_ID: z
+    .string()
+    .regex(
+      /^(?!(?:latest|tree|pull|rm|save|current|self|new)$)[a-z0-9][a-z0-9-]{0,62}$/,
+    )
+    .optional(),
+  BOAT_IMAGE_BUILD_SHA256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .optional(),
+  BOAT_TTL_SECONDS: z
+    .string().regex(/^[1-9][0-9]{0,3}$/).transform(Number)
+    .pipe(z.number().int().min(60).max(3600))
+    .optional(),
+  BOAT_COMPUTE_POLICY_ID: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional(),
+  BOAT_SECONDS_PER_DOLLAR: z.string().regex(/^[1-9][0-9]{0,12}$/).transform(Number)
+    .pipe(z.number().int().max(1_000_000_000_000)).optional(),
+  DAYTONA_BYO_ENABLED: z.enum(["true", "false"]).optional(),
   ZEROS_CLOUD_IMAGE_ARCHITECTURE: z
     .enum(["linux/amd64", "linux/arm64"])
     .default("linux/amd64"),
@@ -363,7 +435,8 @@ const CloudWorkspaceSetupEnvSchema = z.object({
     .string()
     .trim()
     .min(1)
-    .max(8 * 4_096),
+    .max(8 * 4_096)
+    .optional(),
   CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: z.coerce
     .number()
@@ -423,7 +496,13 @@ const CloudWorkspaceDurabilityEnvSchema = z.object({
     .min(1)
     .max(65_535)
     .default(1),
-  CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: z.string().trim().min(2).max(4096),
+  CLOUD_WORKSPACE_OBJECT_STORE_KIND: z.enum(["filesystem", "s3"]).default("filesystem"),
+  CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: z.string().trim().min(2).max(4096).optional(),
+  CLOUD_WORKSPACE_S3_ENDPOINT: z.string().trim().url().optional(),
+  CLOUD_WORKSPACE_S3_REGION: z.string().trim().min(1).max(100).default("auto"),
+  CLOUD_WORKSPACE_S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
+  CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: z.string().trim().min(1).max(256).optional(),
+  CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: z.string().trim().min(1).max(256).optional(),
 });
 
 const CloudWorkspaceOutboxEnvSchema = z.object({
@@ -941,8 +1020,34 @@ function loadCloudWorkspaceConfig(
     return null;
   }
 
+  const requiredProviderFields =
+    env.CLOUD_WORKSPACE_PROVIDER === "boat"
+      ? [
+          "BOAT_API_KEY",
+          "BOAT_ACCOUNT_SCOPE",
+          "BOAT_SNAPSHOT_ID",
+          "BOAT_IMAGE_BUILD_SHA256",
+          "BOAT_TTL_SECONDS",
+          "BOAT_COMPUTE_POLICY_ID",
+          "BOAT_SECONDS_PER_DOLLAR",
+          "CLOUD_WORKSPACE_STORAGE_MIB",
+        ]
+      : ["DAYTONA_API_KEY", "DAYTONA_SNAPSHOT_ID"];
+  for (const name of requiredProviderFields) {
+    if (!env[name]?.trim())
+      throw new Error(
+        `Invalid cloud workspace environment: ${name} is required`,
+      );
+  }
   const parsed = CloudWorkspaceEnvSchema.safeParse({
     ...env,
+    ...(env.CLOUD_WORKSPACE_PROVIDER === "boat"
+      ? {
+          CLOUD_WORKSPACE_CPU_MILLICORES:
+            env.CLOUD_WORKSPACE_CPU_MILLICORES ?? "4000",
+          CLOUD_WORKSPACE_MEMORY_MIB: env.CLOUD_WORKSPACE_MEMORY_MIB ?? "8192",
+        }
+      : {}),
     CLOUD_WORKSPACES_ENABLED: enabled,
   });
   if (!parsed.success) {
@@ -968,6 +1073,66 @@ function loadCloudWorkspaceConfig(
     );
   }
   const value = parsed.data;
+  if (
+    value.CLOUD_WORKSPACE_PROVIDER === "boat" &&
+    (value.ZEROS_CLOUD_IMAGE_ARCHITECTURE !== "linux/amd64" ||
+      ![
+        [2000, 4096],
+        [4000, 8192],
+        [8000, 16384],
+      ].some(
+        ([cpu, memory]) =>
+          cpu === value.CLOUD_WORKSPACE_CPU_MILLICORES &&
+          memory === value.CLOUD_WORKSPACE_MEMORY_MIB,
+      ))
+  )
+    throw new Error(
+      "Invalid cloud workspace environment: Boat requires a supported linux/amd64 CPU/memory profile",
+    );
+  const daytonaApiUrl = validatedServiceUrl(
+    value.DAYTONA_API_URL,
+    "DAYTONA_API_URL",
+    { allowPath: true },
+  );
+  let daytonaByoProfile: CloudWorkspaceProvisioningProfile | undefined;
+  if (
+    value.DAYTONA_BYO_ENABLED === "true" &&
+    value.CLOUD_WORKSPACE_PROVIDER !== "daytona"
+  ) {
+    const profile = z
+      .object({
+        DAYTONA_BYO_SNAPSHOT_ID: z.string().trim().min(1).max(512),
+        DAYTONA_BYO_SANDBOX_CLASS: z.enum(["container", "linux-vm"]).optional(),
+        DAYTONA_BYO_SOURCE_COMMIT: z
+          .string()
+          .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
+        DAYTONA_BYO_ARCHITECTURE: z
+          .enum(["linux/amd64", "linux/arm64"])
+          .default("linux/amd64"),
+        DAYTONA_BYO_CPU_MILLICORES: z.coerce.number().int().min(250).max(64000),
+        DAYTONA_BYO_MEMORY_MIB: z.coerce.number().int().min(512).max(262144),
+        DAYTONA_BYO_STORAGE_MIB: z.coerce.number().int().min(1024).max(2097152),
+      })
+      .safeParse(env);
+    if (!profile.success)
+      throw new Error(
+        "Invalid cloud workspace environment: " +
+          profile.error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; "),
+      );
+    const p = profile.data;
+    daytonaByoProfile = {
+      provider: "daytona",
+      ...(p.DAYTONA_BYO_SANDBOX_CLASS?{sandboxClass:p.DAYTONA_BYO_SANDBOX_CLASS}:{}),
+      imageRef: p.DAYTONA_BYO_SNAPSHOT_ID,
+      sourceCommit: p.DAYTONA_BYO_SOURCE_COMMIT,
+      architecture: p.DAYTONA_BYO_ARCHITECTURE,
+      cpuMillicores: p.DAYTONA_BYO_CPU_MILLICORES,
+      memoryMiB: p.DAYTONA_BYO_MEMORY_MIB,
+      storageMiB: p.DAYTONA_BYO_STORAGE_MIB,
+    };
+  }
   const allowedSshHosts = validatedDnsList(
     value.DAYTONA_SSH_HOSTS,
     "DAYTONA_SSH_HOSTS",
@@ -1102,6 +1267,7 @@ function loadCloudWorkspaceConfig(
     );
   }
   const settingsSecretKeyV1 = settingsSecretEncryptionKeys[1] ?? null;
+  const codexRefreshFingerprints=loadCodexFingerprintKeys(env);
   const durabilityRequested =
     setupEnabled === "true" ||
     [
@@ -1109,6 +1275,11 @@ function loadCloudWorkspaceConfig(
       env.CLOUD_WORKSPACE_OBJECT_KEYS_JSON,
       env.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION,
       env.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY,
+      env.CLOUD_WORKSPACE_OBJECT_STORE_KIND,
+      env.CLOUD_WORKSPACE_S3_ENDPOINT,
+      env.CLOUD_WORKSPACE_S3_BUCKET,
+      env.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID,
+      env.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY,
     ].some((entry) => typeof entry === "string" && entry.trim().length > 0);
   let durability: CloudWorkspaceBackendConfig["durability"] = null;
   if (durabilityRequested) {
@@ -1203,23 +1374,31 @@ function loadCloudWorkspaceConfig(
         "Invalid cloud workspace durability environment: the current object key version is not present in the keyring",
       );
     }
-    const rawObjectStoreDirectory =
-      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY;
-    const objectStoreDirectory = path.resolve(rawObjectStoreDirectory);
-    if (
-      !path.isAbsolute(rawObjectStoreDirectory) ||
-      objectStoreDirectory === path.parse(objectStoreDirectory).root ||
-      containsAsciiControl(rawObjectStoreDirectory)
-    ) {
-      throw new Error(
-        "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path",
-      );
+    const store = parsedDurability.data;
+    if (store.CLOUD_WORKSPACE_OBJECT_STORE_KIND === "s3") {
+      if (!store.CLOUD_WORKSPACE_S3_ENDPOINT || !store.CLOUD_WORKSPACE_S3_BUCKET || !store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || !store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) {
+        throw new Error("Invalid cloud workspace durability environment: all CLOUD_WORKSPACE_S3 endpoint, bucket and credential fields are required");
+      }
+      if (store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY) throw new Error("Invalid cloud workspace durability environment: choose one object store");
+      durability = {
+        objectEncryptionKeys, currentObjectEncryptionKeyVersion,
+        s3: {
+          endpoint: validatedServiceUrl(store.CLOUD_WORKSPACE_S3_ENDPOINT, "CLOUD_WORKSPACE_S3_ENDPOINT", { allowPath: false }),
+          region: store.CLOUD_WORKSPACE_S3_REGION,
+          bucket: store.CLOUD_WORKSPACE_S3_BUCKET,
+          accessKeyId: store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID,
+          secretAccessKey: store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY,
+        },
+      };
+    } else {
+      if (store.CLOUD_WORKSPACE_S3_ENDPOINT || store.CLOUD_WORKSPACE_S3_BUCKET || store.CLOUD_WORKSPACE_S3_ACCESS_KEY_ID || store.CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY) throw new Error("Invalid cloud workspace durability environment: S3 configuration requires the s3 store kind");
+      const rawObjectStoreDirectory = store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY;
+      const objectStoreDirectory = path.resolve(rawObjectStoreDirectory ?? ".");
+      if (!rawObjectStoreDirectory || !path.isAbsolute(rawObjectStoreDirectory) || objectStoreDirectory === path.parse(objectStoreDirectory).root || containsAsciiControl(rawObjectStoreDirectory)) {
+        throw new Error("Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path");
+      }
+      durability = { objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectStoreDirectory };
     }
-    durability = {
-      objectEncryptionKeys,
-      currentObjectEncryptionKeyVersion,
-      objectStoreDirectory,
-    };
   }
   let setupExecution: CloudWorkspaceBackendConfig["setupExecution"] = null;
   if (setupEnabled === "true") {
@@ -1240,24 +1419,35 @@ function loadCloudWorkspaceConfig(
       "CLOUD_WORKSPACE_CONTROL_PLANE_URL",
       { allowPath: false },
     );
-    const allowedToolboxOrigins = [
-      ...new Set(
-        setup.data.DAYTONA_TOOLBOX_ORIGINS.split(",").map((origin) =>
-          validatedServiceUrl(origin.trim(), "DAYTONA_TOOLBOX_ORIGINS", {
-            allowPath: false,
-          }),
-        ),
-      ),
-    ];
+    const allowedToolboxOrigins = setup.data.DAYTONA_TOOLBOX_ORIGINS
+      ? [
+          ...new Set(
+            setup.data.DAYTONA_TOOLBOX_ORIGINS.split(",").map((origin) =>
+              validatedServiceUrl(origin.trim(), "DAYTONA_TOOLBOX_ORIGINS", {
+                allowPath: false,
+              }),
+            ),
+          ),
+        ]
+      : [];
     if (
-      allowedToolboxOrigins.length < 1 ||
+      ((value.CLOUD_WORKSPACE_PROVIDER === "daytona" || daytonaByoProfile) &&
+        allowedToolboxOrigins.length < 1) ||
       allowedToolboxOrigins.length > 8 ||
       setup.data.CLOUD_WORKSPACE_ENGINE_PORT === 22_222
     ) {
       throw new Error(
-        "Invalid cloud workspace setup environment: toolbox origins or engine port are invalid",
+        "Invalid cloud workspace setup environment: DAYTONA_TOOLBOX_ORIGINS or engine port are invalid",
       );
     }
+    if (
+      value.CLOUD_WORKSPACE_PROVIDER === "boat" &&
+      (setup.data.CLOUD_WORKSPACE_ENGINE_PORT < 1024 ||
+        setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS > 1800)
+    )
+      throw new Error(
+        "Invalid cloud workspace setup environment: Boat requires an unprivileged engine port and CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS <= 1800",
+      );
     if (currentSettingsSecretEncryptionKeyVersion === null) {
       throw new Error(
         "Invalid cloud workspace setup environment: a current cloud workspace secret key is required",
@@ -1317,13 +1507,44 @@ function loadCloudWorkspaceConfig(
   }
   return {
     provider: value.CLOUD_WORKSPACE_PROVIDER,
-    apiKey: value.DAYTONA_API_KEY,
-    apiUrl: validatedServiceUrl(value.DAYTONA_API_URL, "DAYTONA_API_URL", {
-      allowPath: true,
-    }),
-    target: value.DAYTONA_TARGET,
-    snapshotId: value.DAYTONA_SNAPSHOT_ID,
-    imageRef: value.DAYTONA_SNAPSHOT_ID,
+    ...(value.CLOUD_WORKSPACE_PROVIDER === "boat"
+      ? {
+          boat: {
+            accountScope: value.BOAT_ACCOUNT_SCOPE!,
+            ttlSeconds: value.BOAT_TTL_SECONDS!,
+          },
+          computePolicy:{provider:"boat",policyId:value.BOAT_COMPUTE_POLICY_ID!,secondsPerDollar:value.BOAT_SECONDS_PER_DOLLAR!,
+            minimumTtlSeconds:Math.min(600,value.BOAT_TTL_SECONDS!),maximumTtlSeconds:value.BOAT_TTL_SECONDS!,
+            requestMarginSeconds:value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS+5},
+        }
+      : {}),
+    ...(daytonaByoProfile
+      ? {
+          providerProfiles: { daytona: daytonaByoProfile },
+          daytonaConnection: {
+            apiUrl: daytonaApiUrl,
+            target: value.DAYTONA_TARGET,
+          },
+        }
+      : {}),
+    apiKey: (value.CLOUD_WORKSPACE_PROVIDER === "boat"
+      ? value.BOAT_API_KEY
+      : value.DAYTONA_API_KEY)!,
+    apiUrl:
+      value.CLOUD_WORKSPACE_PROVIDER === "boat"
+        ? "https://boat.dev/api/v1"
+        : daytonaApiUrl,
+    target:
+      value.CLOUD_WORKSPACE_PROVIDER === "boat"
+        ? "managed"
+        : value.DAYTONA_TARGET,
+    snapshotId: (value.CLOUD_WORKSPACE_PROVIDER === "boat"
+      ? value.BOAT_SNAPSHOT_ID
+      : value.DAYTONA_SNAPSHOT_ID)!,
+    ...(value.CLOUD_WORKSPACE_PROVIDER==="daytona"&&value.DAYTONA_SANDBOX_CLASS?{sandboxClass:value.DAYTONA_SANDBOX_CLASS}:{}),
+    imageRef: (value.CLOUD_WORKSPACE_PROVIDER === "boat"
+      ? `boat:${value.BOAT_SNAPSHOT_ID}@sha256:${value.BOAT_IMAGE_BUILD_SHA256}`
+      : value.DAYTONA_SNAPSHOT_ID)!,
     architecture: value.ZEROS_CLOUD_IMAGE_ARCHITECTURE,
     cpuMillicores: value.CLOUD_WORKSPACE_CPU_MILLICORES,
     memoryMiB: value.CLOUD_WORKSPACE_MEMORY_MIB,
@@ -1334,6 +1555,7 @@ function loadCloudWorkspaceConfig(
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
     providerCredentialKeys,
     settingsSecretEncryptionKeys,
+    ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),
     currentSettingsSecretEncryptionKeyVersion,
     settingsSecretKeyV1,
     access: {
@@ -1439,6 +1661,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid environment: ${missing}`);
   }
   const e = parsed.data;
+  validateDatabaseConnections(e);
+  const migrationRole = validateMigrationRole(e.DATABASE_MIGRATION_ROLE);
   const auth = loadAuthConfig(e);
   const appOrigin = e.APP_ORIGIN
     ? validatedAppOrigin(e.APP_ORIGIN, e.NODE_ENV)
@@ -1484,7 +1708,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
 
   return {
-    databaseUrl: e.DATABASE_URL,
+    databaseUrl: parseDatabaseTarget(e.DATABASE_URL).toString(),
+    ...(e.DATABASE_LISTEN_URL ? {databaseListenUrl: parseDatabaseTarget(e.DATABASE_LISTEN_URL).toString()} : {}),
+    databaseMigrationUrl: parseDatabaseTarget(e.DATABASE_MIGRATION_URL ?? e.DATABASE_URL).toString(),
+    ...(migrationRole ? {databaseMigrationRole: migrationRole} : {}),
+    databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
+    databasePoolMax: e.DATABASE_POOL_MAX,
+    databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
     inviteLinkBase,

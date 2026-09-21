@@ -192,16 +192,24 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
     TransitionRow & { checkpoint_id: string }
   >(
     `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state,
-            checkpoint_request.checkpoint_id
+            checkpoint.id AS checkpoint_id
      FROM cloud_workspace_generation_transitions gt
      JOIN cloud_workspaces cw
        ON cw.id = gt.workspace_id AND cw.org_id = gt.org_id
-     JOIN workspace_checkpoint_requests checkpoint_request
+     LEFT JOIN workspace_checkpoint_requests checkpoint_request
        ON checkpoint_request.lifecycle_intent_id = gt.drain_intent_id
       AND checkpoint_request.workspace_id = gt.workspace_id
       AND checkpoint_request.org_id = gt.org_id
       AND checkpoint_request.generation = gt.source_generation
       AND checkpoint_request.state = 'succeeded'
+     JOIN cloud_workspace_generations candidate
+       ON candidate.workspace_id = gt.workspace_id AND candidate.org_id = gt.org_id
+      AND candidate.generation = gt.candidate_generation
+     JOIN workspace_checkpoints checkpoint
+       ON checkpoint.id = CASE WHEN gt.operation::text = 'recover'
+         THEN candidate.recovery_checkpoint_id ELSE checkpoint_request.checkpoint_id END
+      AND checkpoint.workspace_id = gt.workspace_id AND checkpoint.org_id = gt.org_id
+      AND checkpoint.state = 'durable'
      WHERE gt.id = $1 AND gt.workspace_id = $2 AND gt.org_id = $3
        AND gt.source_generation = $4 AND gt.state = 'draining'
        AND cw.current_generation = gt.source_generation

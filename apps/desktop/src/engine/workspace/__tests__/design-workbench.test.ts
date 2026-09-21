@@ -3,7 +3,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { startDesignCaptureService } from "../../design/capture-service";
+import { setDesignCaptureConfig } from "../../design/capture-client";
 import { WorkspaceService } from "../service";
 import { closeState, createWorkspace, setStateRootForTesting } from "../../git";
 import { getWorkspaceById } from "../../git/state";
@@ -35,9 +37,36 @@ describe("Design in the shared workbench", () => {
   });
 
   afterEach(async () => {
+    setDesignCaptureConfig(undefined);
     resetWorkspaceDesignApisForTests();
     closeState();
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("captures an exact Design revision for an admitted cloud device without a proposal or client browser", async () => {
+    const service = new WorkspaceService(root, { primaryDesignWorkspace: true });
+    const params = { workspaceId: "local-main" };
+    await service.handle("design.initialize", params);
+    const created = await service.handle("design.frame.create", { ...params, title: "Portable capture" }) as { frame: { file: string } };
+    const opened = await service.handle("design.foundation.open", { ...params, frame: created.frame.file }) as { summary: { revision: string } };
+    const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a1XcAAAAASUVORK5CYII=", "base64");
+    const render = vi.fn(async () => ({ bytes: png, renderer: "fixture" }));
+    const capture = await startDesignCaptureService(render);
+    setDesignCaptureConfig(capture);
+    const input = { ...params, frame: created.frame.file, expectedRevision: opened.summary.revision, width: 1, height: 1 };
+    try {
+      // Cloud admission already binds this engine to its one workspace. It
+      // has no client-local renderer, unlike the desktop service context.
+      const result = await service.handle("design.capture", input, { hostLocalResources: false });
+      expect(result).toMatchObject({ revision: opened.summary.revision, mimeType: "image/png", width: 1, height: 1, data: png.toString("base64") });
+      expect(JSON.stringify(result)).not.toContain(capture.token);
+      expect(JSON.stringify(result)).not.toContain(root);
+      await expect(service.handle("design.capture", { ...input, expectedRevision: "0".repeat(64) })).rejects.toThrow(/repository changed/i);
+      await expect(service.handle("design.capture", { ...input, width: 2049 })).rejects.toThrow();
+      await expect(service.handle("design.capture", { ...input, url: "https://example.test" })).rejects.toThrow();
+      await expect(service.handle("design.capture", { ...input, workspaceId: "unknown" })).rejects.toThrow();
+      expect(render).toHaveBeenCalledOnce();
+    } finally { setDesignCaptureConfig(undefined); await capture.stop(); }
   });
 
   it("initializes and edits Design without changing presentation, HEAD or the index", async () => {
@@ -74,6 +103,29 @@ describe("Design in the shared workbench", () => {
         content: "overwrite",
       }),
     ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+  });
+
+  it("initializes Design in a cloud primary checkout without creating a second worktree", async () => {
+    const cloud = new WorkspaceService(root, { primaryDesignWorkspace: true });
+    const params = { workspaceId: "local-main" };
+    const head = git(root, "rev-parse", "HEAD");
+    const index = git(root, "write-tree");
+    await expect(cloud.handle("design.initialize", params, { hostLocalResources: false }))
+      .resolves.toMatchObject({ snapshot: { frames: [] } });
+    await cloud.handle("design.frame.create", { ...params, title: "Cloud canvas" }, { hostLocalResources: false });
+    await expect(cloud.handle("design.initialize", params, { hostLocalResources: false }))
+      .resolves.toMatchObject({ snapshot: { frames: [expect.objectContaining({ title: "Cloud canvas" })] } });
+    expect(git(root, "rev-parse", "HEAD")).toBe(head);
+    expect(git(root, "write-tree")).toBe(index);
+    await expect(cloud.handle("design.initialize", params, { remote: true }))
+      .rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(cloud.handle("design.initialize", { workspaceId: "unknown-primary" }))
+      .rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+  });
+
+  it("preserves the local primary checkout's existing Design restriction", async () => {
+    await expect(service.handle("design.initialize", { workspaceId: "local-main" }))
+      .rejects.toMatchObject({ code: "VALIDATION_FAILED" });
   });
 
   it("commits the staged Code and Design snapshot while retaining later edits", async () => {

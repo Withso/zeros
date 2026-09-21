@@ -1,6 +1,22 @@
 import { HttpError } from "../authz.js";
 import type { Tx } from "../db.js";
 
+/** Acquire scope locks before devices, replicas, exports, or grants. This is
+ * only a lock-order primitive: callers must still authorize the live actor. */
+export async function lockCloudWorkspaceScope(tx: Tx, input: {
+  organizationId: string; workspaceId: string;
+  organizationLock?: "share" | "update"; workspaceLock?: "share" | "update";
+  skipLocked?: boolean;
+}): Promise<boolean> {
+  const skip = input.skipLocked ? " SKIP LOCKED" : "";
+  const org = await tx.query(`SELECT id FROM organizations WHERE id=$1
+    FOR ${input.organizationLock === "update" ? "UPDATE" : "SHARE"}${skip}`, [input.organizationId]);
+  if (org.rowCount !== 1) return false;
+  const workspace = await tx.query(`SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2
+    FOR ${input.workspaceLock === "share" ? "SHARE" : "UPDATE"}${skip}`, [input.workspaceId, input.organizationId]);
+  return workspace.rowCount === 1;
+}
+
 export type CloudWorkspaceEntitlementPlan =
   | "pro"
   | "business"
@@ -124,6 +140,8 @@ type ScopeRow = {
   organization_authorization_revision: string | number;
   membership_authorization_revision: string | number;
   account_revision: string | number;
+  actor_pilot_allowed: boolean;
+  owner_pilot_allowed: boolean;
   workos_sync_state: string | null;
   workos_organization_id: string | null;
 };
@@ -137,6 +155,7 @@ type OrganizationEntitlementRow = {
   plan: CloudWorkspaceEntitlementPlan;
   seat_limit: number | null;
   revision: string | number;
+  active: boolean;
 };
 
 function safeRevision(value: string | number, label: string): number {
@@ -195,9 +214,12 @@ export async function authorizeCloudWorkspaceOperation(
     actorUserId: string;
     billingOwnerUserId: string;
     workosEnabled: boolean;
-    /** Phase 5 runtime access is single-member. Phase 6 replaces this boolean
-     * with an explicit workspace-role permission decision. */
+    /** Sponsor-only operations retain this gate; shared access uses the
+     * workspace actor authority separately from compute funding. */
     requireWorkspaceOwner: boolean;
+    /** Read/runtime paths may share the tenant fence. Provisioning, billing
+     * and quota mutations retain the default exclusive organization lock. */
+    organizationLock?: "share" | "update";
   },
 ): Promise<CloudWorkspaceAuthorization> {
   await assertSystemAuthority(tx);
@@ -218,6 +240,8 @@ export async function authorizeCloudWorkspaceOperation(
             o.authorization_revision AS organization_authorization_revision,
             om.authorization_revision AS membership_authorization_revision,
             actor.auth_revision AS account_revision,
+            cloud_workspace_pilot_user_live(actor.id) AS actor_pilot_allowed,
+            cloud_workspace_pilot_user_live(billing_owner.id) AS owner_pilot_allowed,
             wol.state::text AS workos_sync_state,
             wol.workos_organization_id
      FROM organizations o
@@ -241,7 +265,7 @@ export async function authorizeCloudWorkspaceOperation(
       AND owner_team.user_id = billing_owner.id
      LEFT JOIN workos_organization_links wol ON wol.organization_id = o.id
      WHERE o.id = $1 AND o.deleted_at IS NULL
-     FOR UPDATE OF o`,
+     FOR ${input.organizationLock === "share" ? "SHARE" : "UPDATE"} OF o`,
     [
       input.organizationId,
       input.teamId,
@@ -282,46 +306,14 @@ export async function authorizeCloudWorkspaceOperation(
   };
 
   if (scope.is_personal) {
-    if (
-      scope.created_by !== input.actorUserId ||
-      input.actorUserId !== input.billingOwnerUserId
-    ) {
-      throw new CloudWorkspaceAuthorizationError(
-        404,
-        "cloud_workspace_scope_not_found",
-        "Authorized cloud workspace scope not found",
-      );
-    }
-    const cardinality = await tx.query<{ count: number }>(
-      `SELECT count(*)::integer AS count
-       FROM organization_members WHERE org_id = $1`,
-      [input.organizationId],
+    throw new CloudWorkspaceAuthorizationError(
+      403, "cloud_workspaces_not_allowed", "Personal workspaces are local only",
     );
-    if (cardinality.rows[0]?.count !== 1) {
-      throw new CloudWorkspaceAuthorizationError(
-        409,
-        "personal_organization_membership_invalid",
-        "Personal cloud requires exactly one account member",
-      );
-    }
-    const entitlement = await loadAccountEntitlement(tx, input.billingOwnerUserId);
-    if (!entitlement || entitlement.plan !== "pro") {
-      throw new CloudWorkspaceAuthorizationError(
-        403,
-        "cloud_account_entitlement_required",
-        "An active Pro account entitlement is required for Personal cloud",
-      );
-    }
-    return {
-      ...base,
-      isPersonal: true,
-      entitlementScope: "account",
-      plan: "pro",
-      entitlementRevision: safeRevision(
-        entitlement.revision,
-        "account entitlement",
-      ),
-    };
+  }
+  if (!scope.actor_pilot_allowed || !scope.owner_pilot_allowed) {
+    throw new CloudWorkspaceAuthorizationError(
+      403, "cloud_pilot_access_required", "Cloud workspaces are restricted to the staff pilot",
+    );
   }
 
   if (
@@ -336,55 +328,37 @@ export async function authorizeCloudWorkspaceOperation(
   }
 
   const entitlementResult = await tx.query<OrganizationEntitlementRow>(
-    `SELECT oe.plan, oe.seat_limit, oe.revision
-     FROM organization_entitlements oe
-     WHERE oe.org_id = $1
-       AND ${activeEntitlementSql("oe")}`,
+    `SELECT oe.plan, oe.seat_limit, oe.revision,
+            (${activeEntitlementSql("oe")}) AS active
+     FROM organization_entitlements oe WHERE oe.org_id = $1`,
     [input.organizationId],
   );
   const entitlement = entitlementResult.rows[0];
-  if (!entitlement) {
+
+  // Pro is an individual subscription. A legacy Pro organization row is not
+  // a funding source and other members' subscriptions never fund this owner.
+  // Business identity remains explicit even after cancellation: do not silently
+  // downgrade a lapsed Business organization to individual Pro authorization.
+  if (!entitlement || entitlement.plan === "pro") {
+    const owner = await loadAccountEntitlement(tx, input.billingOwnerUserId);
+    const actor = input.actorUserId === input.billingOwnerUserId
+      ? owner : await loadAccountEntitlement(tx, input.actorUserId);
+    if (owner?.plan !== "pro" || actor?.plan !== "pro") {
+      throw new CloudWorkspaceAuthorizationError(
+        403, "cloud_account_entitlement_required",
+        "Each cloud participant and the compute owner require an active Pro entitlement",
+      );
+    }
+    return { ...base, isPersonal: false, entitlementScope: "account", plan: "pro",
+      entitlementRevision: safeRevision(owner.revision, "account entitlement") };
+  }
+  if (!entitlement.active) {
     throw new CloudWorkspaceAuthorizationError(
-      403,
-      "cloud_organization_entitlement_required",
+      403, "cloud_organization_entitlement_required",
       "An active organization cloud entitlement is required",
     );
   }
-
-  if (entitlement.plan === "pro") {
-    const collaborators = await tx.query<{
-      member_count: number;
-      entitled_count: number;
-    }>(
-      `SELECT count(*)::integer AS member_count,
-              count(*) FILTER (
-                WHERE account.auth_status = 'active'
-                  AND account.deleted_at IS NULL
-                  AND ae.plan = 'pro'
-                  AND ${activeEntitlementSql("ae")}
-              )::integer AS entitled_count
-       FROM organization_members om
-       JOIN users account ON account.id = om.user_id
-       LEFT JOIN account_entitlements ae ON ae.user_id = om.user_id
-       WHERE om.org_id = $1`,
-      [input.organizationId],
-    );
-    const counts = collaborators.rows[0]!;
-    if (counts.member_count > 5) {
-      throw new CloudWorkspaceAuthorizationError(
-        403,
-        "cloud_pro_collaborator_limit_exceeded",
-        "A Pro organization supports at most five collaborators",
-      );
-    }
-    if (counts.entitled_count !== counts.member_count) {
-      throw new CloudWorkspaceAuthorizationError(
-        403,
-        "cloud_pro_collaborator_not_entitled",
-        "Every Pro organization collaborator needs an active Pro entitlement",
-      );
-    }
-  } else {
+  {
     const seats = await tx.query<{
       active_count: number;
       actor_seated: boolean;

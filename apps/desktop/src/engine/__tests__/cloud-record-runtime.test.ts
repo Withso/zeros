@@ -11,8 +11,9 @@ import {
   type CloudRuntimeConfig,
 } from "../cloud-runtime-registration";
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
-import { listChats, upsertChat } from "../db/chats";
-import { listChatMessagesSince, upsertChatMessage } from "../db/messages";
+import { deleteChat, listChats, upsertChat, wasChatDeleted } from "../db/chats";
+import { deleteTurnsForChat, deleteTurnsFrom } from "../db/turns";
+import { clearChatMessages, windowChatMessages, listChatMessagesSince, upsertChatMessage } from "../db/messages";
 import { getTurn, startTurn } from "../db/turns";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
@@ -228,7 +229,11 @@ function createRecordServer(initialEntries: readonly RemoteEntry[] = []) {
       replayed: false,
     });
   });
-  return { appendBodies, remote, requestFetch };
+  const deleteChildren = () => {
+    for(const [key,entry] of remote) if(entry.entityKind!=="chat")
+      remote.set(key,{...entry,revision:++revision,document:null,tombstonedAt:new Date(NOW).toISOString()});
+  };
+  return { appendBodies, remote, requestFetch, deleteChildren };
 }
 
 const roots: string[] = [];
@@ -242,6 +247,88 @@ afterEach(async () => {
 });
 
 describe("cloud durable record runtime", () => {
+  it("does not restore a locally reset transcript and its deleted turns before publishing deletion", async () => {
+    const root=await mkdtemp(path.join(os.tmpdir(),"zeros-record-reset-"));roots.push(root);setZerosDbPathForTesting(":memory:");
+    const server=createRecordServer([...remoteConversation("completed"),remoteMessage("chat-1","message-1")]);
+    const runtime=new CloudWorkspaceRecordRuntime(root,{fetch:server.requestFetch});await runtime.synchronize(authority);
+    clearChatMessages("chat-1");deleteTurnsFrom("chat-1","turn-1");
+    await runtime.synchronize(authority);
+    expect(windowChatMessages("chat-1",100)).toEqual([]);expect(getTurn("chat-1","turn-1")).toBeNull();
+    for(const entry of server.remote.values())if(entry.entityKind!=="chat")expect(entry.tombstonedAt).not.toBeNull();
+    await runtime.synchronize(authority);expect(windowChatMessages("chat-1",100)).toEqual([]);
+    // Reset undo is intentional after the deletion receipt; it may re-use a
+    // child's identity, unlike a permanently deleted conversation identity.
+    upsertChatMessage("chat-1",{msgId:"message-1",kind:"text",payload:'{"role":"assistant","text":"restored"}',createdAt:NOW});
+    await runtime.synchronize(authority);
+    expect(windowChatMessages("chat-1",100)).toHaveLength(1);
+    expect(server.remote.get(`message\0${messageEntityId("chat-1","message-1")}`)?.tombstonedAt).toBeNull();
+  });
+  it("applies newer remote child deletions even when an unrelated chat is locally dirty",async()=>{
+    const root=await mkdtemp(path.join(os.tmpdir(),"zeros-record-child-delete-"));roots.push(root);setZerosDbPathForTesting(":memory:");
+    const server=createRecordServer([...remoteConversation("completed"),remoteMessage("chat-1","message-1")]);
+    const runtime=new CloudWorkspaceRecordRuntime(root,{fetch:server.requestFetch});await runtime.synchronize(authority);
+    upsertChat(localChat("chat-2",root,"Dirty"));
+    server.deleteChildren();
+    await runtime.synchronize(authority);
+    expect(windowChatMessages("chat-1",100)).toEqual([]);expect(getTurn("chat-1","turn-1")).toBeNull();
+    expect(server.appendBodies.flatMap(body=>body.mutations).filter(m=>m.entityKind!=="chat"&&m.operation==="upsert")).toEqual([]);
+  });
+  it.each([false, true])("keeps a local deletion while publishing its durable tombstone (other chat=%s)", async otherChat => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-deleted-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const server = createRecordServer([...remoteConversation("completed"), remoteMessage("chat-1", "message-1")]);
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch });
+    await runtime.synchronize(authority);
+    if (otherChat) { upsertChat(localChat("chat-2", root, "Keep")); await runtime.synchronize(authority); }
+    deleteTurnsForChat("chat-1"); deleteChat("chat-1");
+    await runtime.synchronize(authority);
+    expect(listChats().map(chat => chat.id)).toEqual(otherChat ? ["chat-2"] : []);
+    expect(wasChatDeleted("chat-1")).toBe(true);
+    for (const entry of server.remote.values()) {
+      if (entry.entityId !== "chat-2") expect(entry.tombstonedAt).not.toBeNull();
+    }
+    await runtime.synchronize(authority);
+    expect(wasChatDeleted("chat-1")).toBe(true);
+  });
+
+  it("installs restored tombstones and rejects a locally dirty resurrection", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-remote-delete-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    const server = createRecordServer(remoteConversation("completed").map(entry => ({ ...entry, document: null, tombstonedAt: new Date(NOW).toISOString() })));
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: server.requestFetch });
+    await runtime.synchronize(authority);
+    expect(wasChatDeleted("chat-1")).toBe(true);
+    // A stale historical client cannot make its dirty version outrank deletion.
+    upsertChat(localChat("chat-1", root, "Stale write"));
+    await runtime.synchronize(authority);
+    expect(listChats()).toEqual([]);
+    expect(wasChatDeleted("chat-1")).toBe(true);
+    expect(server.appendBodies.flatMap(body => body.mutations)).toEqual([]);
+  });
+  it("commits a captured record revision while native streaming continues during upload", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-streaming-")); roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    let update = 0;
+    upsertChat(localChat("streaming-chat", root, "captured-0"));
+    const server = createRecordServer();
+    let streaming = true;
+    const fetcher = vi.fn<typeof fetch>(async (request, init) => {
+      const response = await server.requestFetch(request, init);
+      if (new URL(String(request)).pathname.endsWith("/record/append") && streaming)
+        upsertChat(localChat("streaming-chat", root, `captured-${++update}`));
+      return response;
+    });
+    const runtime = new CloudWorkspaceRecordRuntime(root, { fetch: fetcher });
+    await expect(runtime.synchronize(authority)).resolves.toBeUndefined();
+    expect(server.appendBodies).toHaveLength(1);
+    expect(listChats()[0].title).toBe("captured-1");
+    expect(server.remote.get("chat\0streaming-chat")?.document).toMatchObject({ chat: { title: "captured-0" } });
+    streaming = false;
+    await runtime.synchronize(authority);
+    expect(listChats()[0].title).toBe("captured-1");
+    expect(server.remote.get("chat\0streaming-chat")?.document).toMatchObject({ chat: { title: "captured-1" } });
+  });
+
   it("preserves conversations outside the synchronized repository during a clean restore", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-owned-"));
     const outside = await mkdtemp(
@@ -567,7 +654,7 @@ describe("cloud durable record runtime", () => {
     });
     const registration: CloudRuntimeRegistration = new CloudRuntimeRegistration(
       config,
-      {
+      { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
         fetch,
         now: () => NOW,
         onAuthorityLost: vi.fn(),

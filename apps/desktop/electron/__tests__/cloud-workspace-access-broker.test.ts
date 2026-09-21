@@ -21,6 +21,7 @@ const ENGINE_GRANT = `zws_${"c".repeat(43)}`;
 
 function api(): CloudWorkspaceAccessBrokerApi {
   return {
+    revokeEngineAdmission: vi.fn(async()=>undefined),
     issueEngineAdmission: vi.fn(async () => ({
       version: 1 as const,
       audience: "zeros-cloud-workspace-engine-client-admission-v1" as const,
@@ -104,6 +105,7 @@ function broker(
 ) {
   return new CloudWorkspaceAccessBroker({
     api: accessApi,
+    getAccountSessionKey: () => "account-a/session-a",
     getAccessToken: vi.fn(async () => "account-access-token"),
     getDeviceId: vi.fn(async () => DEVICE_ID),
     randomId: () => "55555555-5555-4555-8555-555555555555",
@@ -113,6 +115,70 @@ function broker(
 }
 
 describe("CloudWorkspaceAccessBroker", () => {
+  it("retires the issuing session before a replacement account can refresh its handle", async () => {
+    const accessApi = api();
+    vi.mocked(accessApi.issueEngineAdmission).mockResolvedValue({version:2,audience:"zeros-cloud-workspace-engine-client-admission-v2",
+      organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID,generation:7,authorityEpoch:9,engineInstanceId:ENGINE_INSTANCE_ID,
+      remotePort:47891,grantToken:`zwa_${"d".repeat(43)}`,expiresAt:new Date(NOW+120000).toISOString(),bridgeUrl:"wss://api.zeros.test/v1/cloud-workspaces/bridge"});
+    let identity = "account-a/session-a", token = "token-a";
+    const retired = vi.fn();
+    const broker = new CloudWorkspaceAccessBroker({api:accessApi,getAccountSessionKey:()=>identity,
+      getAccessToken:async()=>token,onRuntimeRetired:retired,now:()=>NOW});
+    const first=await broker.openRuntime({organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID});
+    token = "refreshed-token-a";
+    const refreshed=await broker.refreshRuntime(first);
+    expect(retired).not.toHaveBeenCalled();
+    vi.mocked(accessApi.revokeEngineAdmission).mockRejectedValue(new Error("offline"));
+    identity="account-b/session-b";token="token-b";
+    await expect(broker.refreshRuntime(refreshed)).rejects.toMatchObject({code:"cloud_workspace_access_superseded"});
+    expect(retired).toHaveBeenCalledWith([first.runtimeId]);
+    expect(accessApi.issueEngineAdmission).toHaveBeenCalledTimes(2);
+    await vi.waitFor(()=>expect(accessApi.revokeEngineAdmission).toHaveBeenLastCalledWith("refreshed-token-a",expect.any(Object)));
+  });
+  it("rejects a token refresh completed after the source session was replaced",async()=>{
+    const accessApi=api();let identity="account-a/session-a";
+    let resolveToken!:(value:string)=>void;
+    const broker=new CloudWorkspaceAccessBroker({api:accessApi,getAccountSessionKey:()=>identity,
+      getAccessToken:()=>new Promise(resolve=>{resolveToken=resolve;}),now:()=>NOW});
+    const opening=broker.openRuntime({organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID});
+    const rejected=expect(opening).rejects.toMatchObject({code:"signed_out"});
+    identity="account-a/session-new";resolveToken("replacement-token");await rejected;
+    expect(accessApi.issueEngineAdmission).not.toHaveBeenCalled();
+  });
+
+  it("fences an in-flight actor refresh as soon as close starts",async()=>{
+    const accessApi=api(),admission={version:2 as const,audience:"zeros-cloud-workspace-engine-client-admission-v2" as const,
+      organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID,generation:7,authorityEpoch:9,engineInstanceId:ENGINE_INSTANCE_ID,
+      remotePort:47891,grantToken:`zwa_${"d".repeat(43)}`,expiresAt:new Date(NOW+120000).toISOString(),bridgeUrl:"wss://api.zeros.test/v1/cloud-workspaces/bridge"};
+    vi.mocked(accessApi.issueEngineAdmission).mockResolvedValue(admission);
+    const retired=vi.fn();
+    const broker=new CloudWorkspaceAccessBroker({api:accessApi,getAccountSessionKey:()=>"account-a/session-a",getAccessToken:async()=>"account-token",onRuntimeRetired:retired,now:()=>NOW});
+    const first=await broker.openRuntime({organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID});
+    let mint!:(value:typeof admission)=>void,retire!:()=>void;
+    vi.mocked(accessApi.issueEngineAdmission).mockImplementationOnce(()=>new Promise(resolve=>{mint=resolve;}));
+    const refreshing=broker.refreshRuntime(first);const rejected=expect(refreshing).rejects.toMatchObject({code:"cloud_workspace_access_superseded"});
+    await vi.waitFor(()=>expect(mint).toBeTypeOf("function"));
+    vi.mocked(accessApi.revokeEngineAdmission).mockImplementationOnce(()=>new Promise(resolve=>{retire=resolve;}));
+    const closing=broker.closeRuntime(first.runtimeId);
+    expect(retired).toHaveBeenCalledWith([first.runtimeId]);
+    await vi.waitFor(()=>expect(retire).toBeTypeOf("function"));
+    mint({...admission,grantToken:`zwa_${"e".repeat(43)}`});
+    retire();await closing;await rejected;
+    expect(accessApi.revokeEngineAdmission).toHaveBeenCalledWith("account-token",expect.objectContaining({grantToken:`zwa_${"e".repeat(43)}`}));
+  });
+  it("connects actor v2 directly through the control-plane relay and releases only that connection",async()=>{
+    const accessApi=api();
+    vi.mocked(accessApi.issueEngineAdmission).mockResolvedValue({version:2,audience:"zeros-cloud-workspace-engine-client-admission-v2",
+      organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID,generation:7,authorityEpoch:9,engineInstanceId:ENGINE_INSTANCE_ID,
+      remotePort:47891,grantToken:`zwa_${"d".repeat(43)}`,expiresAt:new Date(NOW+120000).toISOString(),bridgeUrl:"wss://api.zeros.test/v1/cloud-workspaces/bridge"});
+    const broker=new CloudWorkspaceAccessBroker({api:accessApi,getAccountSessionKey:()=>"account-a/session-a",getAccessToken:async()=>"account-token",now:()=>NOW});
+    const target=await broker.openRuntime({organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID});
+    expect(target).toMatchObject({channel:"control-plane-websocket",url:"wss://api.zeros.test/v1/cloud-workspaces/bridge",cloudToken:`zwa_${"d".repeat(43)}`});
+    expect(accessApi.issueTunnel).not.toHaveBeenCalled();
+    await expect(broker.closeRuntime(target.runtimeId)).resolves.toBe(true);
+    expect(accessApi.revokeEngineAdmission).toHaveBeenCalledWith("account-token",{organizationId:ORGANIZATION_ID,workspaceId:WORKSPACE_ID,grantToken:`zwa_${"d".repeat(43)}`});
+    expect(accessApi.revoke).not.toHaveBeenCalled();
+  });
   it("keeps a preview capability in main and returns only safe navigation metadata", async () => {
     const accessApi = api();
     const authorizePreview = vi.fn(() => true);

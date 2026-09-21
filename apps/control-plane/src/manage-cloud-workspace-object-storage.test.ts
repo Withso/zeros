@@ -6,7 +6,7 @@ import {
   validateCloudWorkspaceObjectStorageRequest,
 } from "./manage-cloud-workspace-object-storage.js";
 
-const databaseUrl = "postgres://db.example.test:5432/zeros_alpha";
+const databaseUrl = "postgres://operator@db.example.test:5432/zeros_alpha";
 
 function request(
   overrides: Partial<

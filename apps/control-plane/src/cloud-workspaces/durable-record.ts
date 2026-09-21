@@ -5,7 +5,8 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx } from "../db.js";
-import { authorizeCloudWorkspaceOperation } from "./authorization.js";
+import { lockCloudWorkspaceScope } from "./authorization.js";
+import { authorizeCloudWorkspaceActor } from "./actors.js";
 import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 
 const ENTITY_KINDS = new Set([
@@ -460,6 +461,7 @@ export class DatabaseCloudWorkspaceDurableRecordService {
           engineInstanceId: input.engineInstanceId,
           heartbeatToken: input.heartbeatToken,
           workosEnabled: this.workosEnabled,
+          lock: "share",
         });
         const head = await tx.query<{ current_revision: string | number }>(
           `SELECT current_revision FROM workspace_record_heads
@@ -568,23 +570,16 @@ export class DatabaseCloudWorkspaceDurableRecordService {
       throw new HttpError(422, "invalid_input", "Record cursor is invalid");
     }
     return withSystemTx(this.pool, async (tx) => {
-      const workspace = await tx.query<{
-        team_id: string;
-        owner_user_id: string;
-      }>(
-        `SELECT team_id, owner_user_id FROM cloud_workspaces
-         WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL`,
-        [input.workspaceId, input.organizationId],
-      );
-      const scope = workspace.rows[0];
-      if (!scope) throw new HttpError(404, "not_found", "Workspace not found");
-      await authorizeCloudWorkspaceOperation(tx, {
+      if (!await lockCloudWorkspaceScope(tx, {
+        organizationId: input.organizationId, workspaceId: input.workspaceId,
+        organizationLock: "share", workspaceLock: "share",
+      })) throw new HttpError(404, "not_found", "Workspace not found");
+      await authorizeCloudWorkspaceActor(tx, {
+        workspaceId: input.workspaceId,
         organizationId: input.organizationId,
-        teamId: scope.team_id,
         actorUserId: input.accountUserId,
-        billingOwnerUserId: scope.owner_user_id,
-        workosEnabled: this.workosEnabled,
-        requireWorkspaceOwner: true,
+        capability: "read",
+        allowOwnerDataRecovery: true,
       });
       const head = await tx.query<{
         current_revision: string | number;

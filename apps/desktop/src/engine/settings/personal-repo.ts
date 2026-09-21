@@ -15,6 +15,8 @@ import {
 } from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { gitProcessOptions } from "../git/git-execution-identity";
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 import {
   readBoundedUtf8DescriptorSync,
   readBoundedUtf8FileSync,
@@ -44,7 +46,7 @@ function git(root: string, args: string[]): string {
   return execFileSync("git", ["-c", "core.fsmonitor=false", ...args], {
     cwd: root,
     encoding: "utf8",
-    env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    ...gitProcessOptions({ ...process.env, GIT_OPTIONAL_LOCKS: "0" }),
     stdio: ["ignore", "pipe", "pipe"],
     timeout: 5_000,
   }).trim();
@@ -270,6 +272,7 @@ export function ensureLocalSettingsIgnored(
     const info = fstatSync(fd);
     if (!info.isFile() || info.nlink !== 1)
       throw new Error("Git exclusions must use a regular file with one link.");
+    publishCloudWorkspacePath(exclude, fd);
     const text = readBoundedUtf8DescriptorSync(fd, 4 * 1024 * 1024);
     const rule = `/${relative}`;
     if (!text.split(/\r?\n/).includes(rule)) {

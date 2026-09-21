@@ -10,6 +10,7 @@ import {
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
+import {assertDatabaseLockOrder} from "./lock-order-test-utils.js";
 import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import { deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
@@ -201,6 +202,72 @@ d("cloud workspace immutable forks", () => {
       workosEnabled: false,
     });
     replicas = new DatabaseCloudWorkspaceReplicaService(pool, blobs, false);
+  });
+
+  it("locks organization before workspace when requesting a local export", async () => {
+    await assertDatabaseLockOrder(pool, {
+      parentSql: 'SELECT id FROM organizations WHERE id=$1 FOR UPDATE', parentId: fixture.organizationId,
+      childSql: 'SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE', childId: fixture.workspaceId,
+      parentQuery: /FROM organizations[\s\S]*FOR (?:UPDATE|SHARE)/,
+      action: controlled => new DatabaseCloudWorkspaceForkService(controlled, blobs, false).requestCloudToLocal({
+        organizationId: fixture.organizationId, workspaceId: fixture.workspaceId, accountUserId: fixture.userId,
+        targetLocalWorkspaceId: randomUUID(), idempotencyKey: randomUUID(), includeChats: false,
+      }),
+    });
+  });
+
+  it("skips a busy workspace before locking an expired fork", async () => {
+    const source = await seedLocalToCloudFork();
+    await pool.query("UPDATE cloud_workspaces SET status='requested' WHERE id=$1", [fixture.workspaceId]);
+    await pool.query("UPDATE workspace_fork_intents SET created_at=now()-interval '25 hours',deadline_at=now()-interval '1 hour' WHERE id=$1", [source.forkIntentId]);
+    await assertDatabaseLockOrder(pool, {
+      parentSql: 'SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE', parentId: fixture.workspaceId,
+      childSql: 'SELECT id FROM workspace_fork_intents WHERE id=$1 FOR UPDATE', childId: source.forkIntentId,
+      parentQuery: /(?:FROM|UPDATE) cloud_workspaces/,
+      action: controlled => new CloudWorkspaceForkWorker(controlled, blobs, {workerId: 'expiry-lock-order-test'}).runOnce(),
+    });
+  });
+
+  it("locks the coordinator upload scope before its storage advisory lock", async () => {
+    await assertDatabaseLockOrder(pool, {
+      parentSql: 'SELECT id FROM organizations WHERE id=$1 FOR UPDATE', parentId: fixture.organizationId,
+      childSql: "SELECT pg_advisory_xact_lock(hashtextextended('workspace-object-storage:' || $1::text,0))", childId: fixture.organizationId,
+      parentQuery: /FROM organizations|INSERT INTO workspace_blobs/,
+      action: controlled => new DatabaseCloudWorkspaceBlobService({pool: controlled, objectStore,
+        encryptionKeyV1: randomBytes(32).toString('base64url'), workosEnabled: false}).putCoordinator({
+        workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, bytes: Buffer.from('coordinator upload'),
+      }),
+    });
+  });
+
+  it("locks the engine organization before workspace-backed content publication", async () => {
+    const bytes = Buffer.from('engine lock order');
+    const blob = await blobs.put({...engine(), bytes});
+    await assertDatabaseLockOrder(pool, {
+      parentSql: 'SELECT id FROM organizations WHERE id=$1 FOR UPDATE', parentId: fixture.organizationId,
+      childSql: 'SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE', childId: fixture.workspaceId,
+      parentQuery: /FROM organizations|INSERT INTO workspace_content_heads/,
+      action: controlled => new DatabaseCloudWorkspaceContentService({pool: controlled, workosEnabled: false}).append({
+        ...engine(), expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: null, gitHeadRef: null,
+        mutations: [{operation: 'upsert', path: 'scope.txt', entryType: 'file', mode: 33188,
+          blobId: blob.id, contentSha256: blob.plaintextSha256, sizeBytes: bytes.length}],
+      }),
+    });
+  });
+
+  it("takes the storage advisory lock before checkpoint blob row locks", async () => {
+    const bytes = Buffer.from('deduplicated checkpoint content');
+    const blob = await blobs.put({...engine(), bytes});
+    await assertDatabaseLockOrder(pool, {
+      parentSql: "SELECT pg_advisory_xact_lock(hashtextextended('workspace-object-storage:' || $1::text,0))", parentId: fixture.organizationId,
+      childSql: 'SELECT id FROM workspace_blobs WHERE id=$1 FOR NO KEY UPDATE', childId: blob.id,
+      parentQuery: /pg_advisory_xact_lock|INSERT INTO workspace_blob_references/,
+      action: controlled => new DatabaseCloudWorkspaceContentService({pool: controlled, workosEnabled: false}).append({
+        ...engine(), expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: null, gitHeadRef: null,
+        mutations: [{operation: 'upsert', path: 'storage.txt', entryType: 'file', mode: 33188,
+          blobId: blob.id, contentSha256: blob.plaintextSha256, sizeBytes: bytes.length}],
+      }),
+    });
   });
 
   const engine = () => ({
@@ -1387,7 +1454,7 @@ d("cloud workspace immutable forks", () => {
     });
   });
 
-  it("lets the owner export the last durable checkpoint after paid compute stops", async () => {
+  it.each(["owner", "guest", "owner-team", "owner-team-legacy"] as const)("lets the %s export a durable checkpoint while preserving current actor authority", async (kind) => {
     const file = Buffer.from("portable after cancellation\n", "utf8");
     const fileBlob = await blobs.put({ ...engine(), bytes: file });
     const appended = await content.append({
@@ -1436,6 +1503,16 @@ d("cloud workspace immutable forks", () => {
        WHERE id = $1`,
       [fixture.workspaceId],
     );
+
+    let guestGrantId: string | undefined;
+    if (kind === "guest") {
+      const guest = await seedReadyCloudWorkspace(pool);
+      await pool.query("UPDATE cloud_workspaces SET single_member_mode=false,sharing_mode='organization' WHERE id=$1", [fixture.workspaceId]);
+      guestGrantId = randomUUID();
+      await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+        VALUES ($1,$2,$3,$4,'viewer',now()+interval '1 day')`, [guestGrantId,fixture.workspaceId,fixture.organizationId,guest.userId]);
+      fixture = {...fixture,userId:guest.userId};
+    }
 
     const targetLocalWorkspaceId = randomUUID();
     const requested = await forks.requestCloudToLocal({
@@ -1490,5 +1567,44 @@ d("cloud workspace immutable forks", () => {
       checkpointId: checkpoint.checkpointId,
       entries: [{ path: "portable.txt", blobId: fileBlob.id }],
     });
+    if (kind === "owner-team" || kind === "owner-team-legacy") {
+      if (kind === "owner-team-legacy") await pool.query(
+        "UPDATE workspace_export_grants SET actor_fingerprint=NULL WHERE fork_intent_id=$1", [requested.forkIntentId]);
+      // Recreate within one transaction: timestamps alone cannot fence this
+      // membership incarnation because now() is transaction-stable.
+      await withSystemTx(pool, async tx => {
+        await tx.query("DELETE FROM team_members WHERE team_id=$1 AND user_id=$2", [fixture.teamId,fixture.userId]);
+        await tx.query("INSERT INTO team_members(team_id,org_id,user_id) VALUES ($1,$2,$3)", [fixture.teamId,fixture.organizationId,fixture.userId]);
+      });
+      const read = (token:string) => forks.readExportManifest({...grantPayload,accountUserId:fixture.userId,
+        grantToken:token,afterPath:null,proof:proof(device,"fork.export.manifest.read",{...grantPayload,afterPath:null,limit:500})});
+      await expect(read(grant.grantToken)).rejects.toMatchObject({code:"grant_rejected"});
+      const fresh = await forks.issueExportGrant({...grantPayload,accountUserId:fixture.userId,
+        proof:proof(device,"fork.export.grant",grantPayload)});
+      await expect(read(fresh.grantToken)).resolves.toMatchObject({checkpointId:checkpoint.checkpointId});
+    }
+    if (kind === "owner") {
+      let started!:()=>void,resume!:()=>void;
+      const downloading=new Promise<void>(resolve=>{started=resolve;});
+      const released=new Promise<void>(resolve=>{resume=resolve;});
+      const get=objectStore.get.bind(objectStore);
+      objectStore.get=async key=>{started();await released;return get(key);};
+      const payload={...grantPayload,blobId:fileBlob.id};
+      const reading=forks.readExportBlob({...payload,accountUserId:fixture.userId,grantToken:grant.grantToken,
+        proof:proof(device,'fork.export.blob.read',payload)});
+      const settled=Promise.allSettled([reading]);
+      try { await downloading; await replicas.revokeDevice({accountUserId:fixture.userId,deviceId:device.deviceId}); }
+      finally { resume();await settled;objectStore.get=get; }
+      await expect(reading).rejects.toMatchObject({name: 'WorkspaceForkError',code:'device_proof_rejected'});
+    }
+    if (guestGrantId) {
+      await pool.query('UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE id=$1',[guestGrantId]);
+      await pool.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+        VALUES ($1,$2,$3,$4,'viewer',now()+interval '1 day')`, [randomUUID(),fixture.workspaceId,fixture.organizationId,fixture.userId]);
+      await expect(forks.readExportManifest({...grantPayload,accountUserId:fixture.userId,grantToken:grant.grantToken,
+        afterPath:null,proof:proof(device,'fork.export.manifest.read',{...grantPayload,afterPath:null,limit:500})}))
+        .rejects.toMatchObject({code:'grant_rejected'});
+    }
+
   });
 });

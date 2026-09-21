@@ -13,6 +13,7 @@ export type CloudWorkspaceRuntimeRetirementReason =
   | "paid_authority_revoked"
   | "provider_authority_revoked"
   | "provider_operation_failed"
+  | "engine_unavailable"
   | "setup_failed";
 
 export type RetiredCloudWorkspaceRuntimeAccess = {
@@ -64,6 +65,12 @@ export async function retireCloudWorkspaceRuntimeAccess(
   },
 ): Promise<RetiredCloudWorkspaceRuntimeAccess> {
   const generation = input.generation ?? null;
+  await tx.query(
+    `UPDATE cloud_workspace_runtime_service_grants SET revoked_at = now()
+     WHERE workspace_id = $1 AND org_id = $2 AND ($3::integer IS NULL OR generation = $3)
+       AND revoked_at IS NULL`,
+    [input.workspaceId, input.organizationId, generation],
+  );
   // Membership and scope retirement use client access -> endpoint grant ->
   // engine order. Keep lifecycle retirement in the same order so a stop/delete
   // racing a membership loss cannot hold an endpoint row while waiting for the

@@ -11,6 +11,7 @@ import type pg from "pg";
 import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
+import {authorizeCloudWorkspaceActor} from "./actors.js";
 import {
   authorizeCloudWorkspaceDataAccess,
   authorizeCloudWorkspaceOperation,
@@ -37,6 +38,18 @@ export type CloudWorkspaceDeviceProof = {
   nonce: string;
   signature: string;
 };
+
+/** Revalidate a device after an already signature-verified request crosses an
+ * external I/O boundary. This is not a substitute for initial proof admission. */
+export async function recheckCloudWorkspaceDevice(tx: Tx, input: {
+  accountUserId: string; deviceId: string; keyVersion: number;
+}): Promise<CloudWorkspaceVerifiedDevice> {
+  const row=(await tx.query<CloudWorkspaceVerifiedDevice>(`SELECT * FROM devices
+    WHERE id=$1 AND user_id=$2 AND key_version=$3 AND trust_state='trusted' AND revoked_at IS NULL
+    FOR UPDATE`,[input.deviceId,input.accountUserId,input.keyVersion])).rows[0];
+  if (!row) throw new WorkspaceReplicaError("device_proof_rejected", "Device authority changed");
+  return row;
+}
 
 export class WorkspaceReplicaError extends Error {
   constructor(
@@ -129,7 +142,7 @@ export type CloudWorkspaceVerifiedDevice = {
   id: string;
   user_id: string;
   label: string;
-  platform: "macos" | "windows" | "linux";
+  platform: "macos" | "windows" | "linux" | "ios" | "ipados" | "android" | "web";
   public_key: Buffer;
   key_fingerprint: Buffer;
   trust_state: string;
@@ -188,6 +201,7 @@ export async function consumeCloudWorkspaceDeviceProof(
   if (
     !device ||
     device.trust_state !== "trusted" ||
+    device.revoked_at !== null ||
     Number(device.key_version) !== proof.keyVersion ||
     device.public_key.length !== 32
   ) {
@@ -367,7 +381,7 @@ export class DatabaseCloudWorkspaceReplicaService {
   async registerDevice(input: {
     accountUserId: string;
     label: string;
-    platform: "macos" | "windows" | "linux";
+    platform: "macos" | "windows" | "linux" | "ios" | "ipados" | "android" | "web";
     publicKey: string;
     idempotencyKey: string;
   }) {
@@ -674,6 +688,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       access?: "paid" | "data";
     },
   ) {
+    // Scope locks precede workspace and device locks. Lifecycle paths use the
+    // same order, so sync cannot deadlock a stop/delete transaction.
+    await tx.query(`SELECT id FROM organizations WHERE id=$1 FOR SHARE`,
+      [input.organizationId]);
     const workspace = await tx.query<{
       team_id: string;
       owner_user_id: string;
@@ -682,10 +700,12 @@ export class DatabaseCloudWorkspaceReplicaService {
       desired_state: string;
       checkpoint_id: string | null;
       checkpoint_revision: string | number | null;
+      single_member_mode: boolean;
+      sharing_mode: "private" | "organization";
     }>(
       `SELECT workspace.team_id, workspace.owner_user_id,
               workspace.authority_epoch, workspace.status,
-              workspace.desired_state,
+              workspace.desired_state, workspace.single_member_mode, workspace.sharing_mode,
               head.current_checkpoint_id AS checkpoint_id,
               checkpoint.content_revision AS checkpoint_revision
        FROM cloud_workspaces workspace
@@ -704,25 +724,23 @@ export class DatabaseCloudWorkspaceReplicaService {
     const row = workspace.rows[0];
     if (!row)
       throw new WorkspaceReplicaError("not_found", "Workspace not found");
-    if (input.access === "data") {
-      await authorizeCloudWorkspaceDataAccess(tx, {
-        organizationId: input.organizationId,
-        teamId: row.team_id,
-        actorUserId: input.accountUserId,
-        ownerUserId: row.owner_user_id,
-        requireWorkspaceOwner: true,
-      });
-    } else {
+    const actor = await authorizeCloudWorkspaceActor(tx, {
+      organizationId: input.organizationId, workspaceId: input.workspaceId,
+      actorUserId: input.accountUserId, capability: "read", allowOwnerDataRecovery: true,
+    });
+    if (input.access !== "data") {
       await authorizeCloudWorkspaceOperation(tx, {
         organizationId: input.organizationId,
         teamId: row.team_id,
-        actorUserId: input.accountUserId,
+        actorUserId: row.owner_user_id,
         billingOwnerUserId: row.owner_user_id,
         workosEnabled: this.workosEnabled,
         requireWorkspaceOwner: true,
+        organizationLock: "share",
       });
     }
-    return row;
+    return {...row, actorFingerprint: actor.fingerprint,
+      legacyOwner: row.owner_user_id === input.accountUserId && row.single_member_mode && row.sharing_mode === "private"};
   }
 
   private async issueGrant(
@@ -740,8 +758,8 @@ export class DatabaseCloudWorkspaceReplicaService {
       `INSERT INTO workspace_replica_grants (
          replica_id, workspace_id, org_id, user_id, device_id,
          device_key_version, authority_epoch, workspace_authority_epoch,
-         token_sha256, expires_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+         token_sha256, expires_at, actor_fingerprint
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, cloud_workspace_actor_fingerprint($2,$4))`,
       [
         input.replica.id,
         input.replica.workspace_id,
@@ -792,15 +810,15 @@ export class DatabaseCloudWorkspaceReplicaService {
     };
     const digest = requestDigest(payload);
     return withSystemTx(this.pool, async (tx) => {
+      const authority = await this.authorizeWorkspace(tx, {
+        ...input,
+        lock: true,
+      });
       const device = await this.consumeDeviceProof(tx, {
         accountUserId: input.accountUserId,
         action: "replica.create",
         payload,
         proof: input.proof,
-      });
-      const authority = await this.authorizeWorkspace(tx, {
-        ...input,
-        lock: true,
       });
       if (
         authority.desired_state !== "running" ||
@@ -821,7 +839,10 @@ export class DatabaseCloudWorkspaceReplicaService {
         [input.accountUserId, input.idempotencyKey],
       );
       if (replay.rows[0]) {
-        if (!replay.rows[0].request_sha256.equals(digest)) {
+        if (!replay.rows[0].request_sha256.equals(digest) ||
+            replay.rows[0].device_id !== device.id ||
+            replay.rows[0].workspace_id !== input.workspaceId ||
+            replay.rows[0].org_id !== input.organizationId) {
           throw new WorkspaceReplicaError(
             "idempotency_conflict",
             "Replica idempotency key was reused",
@@ -928,7 +949,17 @@ export class DatabaseCloudWorkspaceReplicaService {
       payload: unknown;
       access?: "paid" | "data";
     },
-  ): Promise<{ replica: ReplicaRow; device: DeviceRow }> {
+    recheckDevice = false,
+  ) {
+    const authority = await this.authorizeWorkspace(tx, { ...input, lock: true });
+    const device = recheckDevice ? await recheckCloudWorkspaceDevice(tx, {
+      accountUserId: input.accountUserId, deviceId: input.proof.deviceId, keyVersion: input.proof.keyVersion,
+    }) : await this.consumeDeviceProof(tx, {
+      accountUserId: input.accountUserId,
+      action: input.action,
+      payload: input.payload,
+      proof: input.proof,
+    });
     const replica = await tx.query<ReplicaRow>(
       `SELECT ${REPLICA_COLUMNS}
        FROM workspace_replicas replica
@@ -947,14 +978,7 @@ export class DatabaseCloudWorkspaceReplicaService {
     if (!replica.rows[0]) {
       throw new WorkspaceReplicaError("not_found", "Replica not found");
     }
-    const device = await this.consumeDeviceProof(tx, {
-      accountUserId: input.accountUserId,
-      action: input.action,
-      payload: input.payload,
-      proof: input.proof,
-    });
-    await this.authorizeWorkspace(tx, { ...input, lock: true });
-    return { replica: replica.rows[0], device };
+    return { replica: replica.rows[0], device, authority };
   }
 
   async changeReplicaState(input: {
@@ -1364,6 +1388,7 @@ export class DatabaseCloudWorkspaceReplicaService {
       proof: CloudWorkspaceDeviceProof;
       allowDiverged?: boolean;
     },
+    recheckDevice = false,
   ): Promise<ReplicaRow> {
     if (
       !/^zwr_[A-Za-z0-9_-]{43}$/.test(input.grantToken) ||
@@ -1374,14 +1399,16 @@ export class DatabaseCloudWorkspaceReplicaService {
         "Replica grant is invalid",
       );
     }
+    const { replica: replicaRow, device, authority } = await this.lockReplicaForDevice(tx, input, recheckDevice);
     const grant = await tx.query<{
       device_id: string;
       device_key_version: string | number;
       authority_epoch: string | number;
       workspace_authority_epoch: string | number;
+      actor_fingerprint: string | null;
     }>(
       `SELECT device_id, device_key_version, authority_epoch,
-              workspace_authority_epoch
+              workspace_authority_epoch, actor_fingerprint
        FROM workspace_replica_grants
        WHERE replica_id = $1 AND workspace_id = $2 AND org_id = $3
          AND user_id = $4 AND token_sha256 = $5
@@ -1402,34 +1429,15 @@ export class DatabaseCloudWorkspaceReplicaService {
         "Replica grant is invalid",
       );
     }
-    const device = await this.consumeDeviceProof(tx, {
-      accountUserId: input.accountUserId,
-      action: input.action,
-      payload: input.payload,
-      proof: input.proof,
-    });
+    if (row.actor_fingerprint !== authority.actorFingerprint &&
+        !(row.actor_fingerprint === null && authority.legacyOwner))
+      throw new WorkspaceReplicaError("grant_rejected", "Replica actor authority changed");
     if (Number(row.device_key_version) !== Number(device.key_version)) {
       throw new WorkspaceReplicaError(
         "grant_rejected",
         "Replica grant is stale",
       );
     }
-    const replica = await tx.query<ReplicaRow>(
-      `SELECT ${REPLICA_COLUMNS}
-       FROM workspace_replicas replica
-       WHERE replica.id = $1 AND replica.workspace_id = $2
-         AND replica.org_id = $3 AND replica.user_id = $4
-         AND replica.device_id = $5
-       FOR UPDATE`,
-      [
-        input.replicaId,
-        input.workspaceId,
-        input.organizationId,
-        input.accountUserId,
-        device.id,
-      ],
-    );
-    const replicaRow = replica.rows[0];
     if (
       !replicaRow ||
       replicaRow.desired_state !== "active" ||
@@ -1443,7 +1451,6 @@ export class DatabaseCloudWorkspaceReplicaService {
         "Replica grant is stale",
       );
     }
-    const authority = await this.authorizeWorkspace(tx, { ...input });
     if (
       Number(authority.authority_epoch) !== Number(replicaRow.authority_epoch)
     ) {
@@ -1755,12 +1762,12 @@ export class DatabaseCloudWorkspaceReplicaService {
       );
     }
     const payload = { blobId: input.blobId };
-    return withSystemTx(this.pool, async (tx) => {
+    const authorize = async (tx: Tx, recheck = false) => {
       const replica = await this.authorizeGrant(tx, {
         ...input,
         action: "replica.blob.read",
         payload,
-      });
+      }, recheck);
       const allowed = await tx.query(
         `SELECT 1
          FROM workspace_checkpoint_entries entry
@@ -1789,21 +1796,17 @@ export class DatabaseCloudWorkspaceReplicaService {
       if ((allowed.rowCount ?? 0) !== 1) {
         throw new WorkspaceReplicaError("not_found", "Replica blob not found");
       }
-      // Keep the grant and replica rows locked through the object read. A
-      // concurrent pause/revoke/epoch change therefore linearizes either
-      // before this authorization or after the bytes have been delivered.
-      try {
-        return await this.blobs.getSystemInTx(tx, {
-          blobId: input.blobId,
-          organizationId: input.organizationId,
-        });
-      } catch {
-        throw new WorkspaceReplicaError(
-          "blob_unavailable",
-          "Replica blob is unavailable",
-        );
-      }
-    });
+    };
+    await withSystemTx(this.pool, tx => authorize(tx));
+    let bytes: Buffer;
+    try { bytes = await this.blobs.getSystem({blobId: input.blobId, organizationId: input.organizationId}); }
+    catch { throw new WorkspaceReplicaError("blob_unavailable", "Replica blob is unavailable"); }
+    try {
+      // The release decision is a second short transaction. A pause, device
+      // rotation or actor revocation during storage I/O discards the bytes.
+      await withSystemTx(this.pool, tx => authorize(tx, true));
+      return bytes;
+    } catch (error) { bytes.fill(0); throw error; }
   }
 
   async recordReceipt(input: {

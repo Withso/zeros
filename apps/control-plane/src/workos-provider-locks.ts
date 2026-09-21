@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
 
-import type { Tx } from "./db.js";
+import { withSystemTx, type Tx } from "./db.js";
+import {assertWorkOSProviderLockHeld,withHeldWorkOSProviderLock,WorkOSProviderLockLostError} from "./workos-provider-lock-context.js";
 
 export type WorkOSProviderSubject = {
   kind: "user" | "organization";
@@ -395,7 +396,7 @@ export function workOSUserProviderLockKey(userId: string): string {
 export const MAX_ACCOUNT_WORKOS_ERASURE_SUBJECTS = 256;
 
 export async function assertAccountWorkOSProviderErasureSubjectLimit(
-  database: pg.Pool | Tx,
+  database: Tx,
   deletionRequestId: string,
   subjects: readonly string[],
 ): Promise<void> {
@@ -445,7 +446,7 @@ export async function assertAccountWorkOSProviderErasureSubjectLimit(
  * captured by that fallback.
  */
 export async function accountWorkOSProviderSubjects(
-  database: pg.Pool | Tx,
+  database: Tx,
   userId: string,
 ): Promise<string[]> {
   const subjects = await database.query<{ provider_sub: string }>(
@@ -497,6 +498,16 @@ export async function resolveWorkOSProviderLockKeys(
   pool: pg.Pool,
   references: WorkOSProviderTargetReferences,
 ): Promise<string[]> {
+  // Runtime logins cannot bypass RLS. Resolve every identity under the same
+  // explicit system transaction used by identity/lifecycle writes; silently
+  // missing a hidden row would omit its deletion lock.
+  return withSystemTx(pool, (tx) => resolveProviderLockKeys(tx, references));
+}
+
+async function resolveProviderLockKeys(
+  tx: Tx,
+  references: WorkOSProviderTargetReferences,
+): Promise<string[]> {
   const userIds = Array.from(new Set(references.userIds ?? []));
   const organizationIds = Array.from(new Set(references.organizationIds ?? []));
   const organizationExternalIds = Array.from(
@@ -509,7 +520,7 @@ export async function resolveWorkOSProviderLockKeys(
     ),
   ];
   if (userIds.length > 0) {
-    const users = await pool.query<{ user_id: string }>(
+    const users = await tx.query<{ user_id: string }>(
       `SELECT DISTINCT user_id
        FROM user_identities
        WHERE provider = 'workos' AND provider_sub = ANY($1::text[])`,
@@ -520,7 +531,7 @@ export async function resolveWorkOSProviderLockKeys(
     );
   }
   if (organizationIds.length > 0 || organizationExternalIds.length > 0) {
-    const organizations = await pool.query<{ organization_id: string }>(
+    const organizations = await tx.query<{ organization_id: string }>(
       `SELECT DISTINCT organization_id
        FROM workos_organization_links
        WHERE ($1::text[] <> '{}'::text[]
@@ -550,6 +561,7 @@ export async function withWorkOSProviderLocks<T>(
   work: () => Promise<T>,
   options: WorkOSProviderLockOptions = {},
 ): Promise<T> {
+  assertWorkOSProviderLockHeld();
   const ordered = Array.from(new Set(keys)).sort();
   if (ordered.length === 0) return work();
 
@@ -574,52 +586,54 @@ export async function withWorkOSProviderLocks<T>(
       );
       const acquired: string[] = [];
       let contended = false;
+      let discard=false,workFailed=false;
+      const held=new AbortController();
+      const lost=()=>held.abort(new WorkOSProviderLockLostError());
+      // Checked-out pg clients do not retain the pool's idle error listener.
+      // Observe both loss paths throughout acquisition, HTTP and DB work.
+      client.on("error",lost);client.once("end",lost);
       try {
-        for (const key of ordered) {
-          throwIfAcquisitionExpired(deadline, options.signal);
-          const result = await client.query<{ acquired: boolean }>(
-            `SELECT pg_try_advisory_lock(
-               hashtextextended($1::text, 0)
-             ) AS acquired`,
-            [key],
-          );
-          if (!result.rows[0]?.acquired) {
-            contended = true;
-            break;
+        try{
+          for (const key of ordered) {
+            throwIfAcquisitionExpired(deadline, options.signal);held.signal.throwIfAborted();
+            const result = await client.query<{ acquired: boolean }>(
+              `SELECT pg_try_advisory_lock(
+                 hashtextextended($1::text, 0)
+               ) AS acquired`,
+              [key],
+            );
+            if (!result.rows[0]?.acquired) {
+              contended = true;
+              break;
+            }
+            acquired.push(key);
           }
-          acquired.push(key);
+        }catch(error){discard=true;throw error;}
+        if(!contended){
+          // Cancellation can arrive with the final successful query. This
+          // check must remain INSIDE the guaranteed unlock/release scope.
+          throwIfAcquisitionExpired(deadline, options.signal);
+          return await withHeldWorkOSProviderLock(held.signal,work);
         }
       } catch (error) {
-        // Closing the connection releases any session locks acquired before the
-        // failed query without trusting a connection in an unknown state.
-        client.release(true);
+        workFailed=true;held.signal.throwIfAborted();
         throw error;
+      } finally {
+        const unlockError=discard||held.signal.aborted?null:await unlockProviderKeys(client,acquired);
+        const connectionLost=held.signal.aborted;
+        held.abort(new WorkOSProviderLockLostError());
+        client.removeListener("error",lost);client.removeListener("end",lost);
+        client.release(discard||connectionLost||unlockError?true:undefined);
+        if(!workFailed){if(connectionLost)throw new WorkOSProviderLockLostError();if(unlockError)throw unlockError;}
       }
 
       if (contended) {
-        const unlockError = await unlockProviderKeys(client, acquired);
-        client.release(unlockError ? true : undefined);
-        if (unlockError) throw unlockError;
-
         // A blocking advisory-lock query would pin one pool connection per
         // waiter. Release before backing off so the holder can use the same pool
         // to checkpoint and durably complete the protected operation.
         await waitBeforeRetry(retryDelayMs, deadline, options.signal);
         retryDelayMs = Math.min(retryDelayMs * 2, 100);
         continue;
-      }
-
-      throwIfAcquisitionExpired(deadline, options.signal);
-      let workFailed = false;
-      try {
-        return await work();
-      } catch (error) {
-        workFailed = true;
-        throw error;
-      } finally {
-        const unlockError = await unlockProviderKeys(client, acquired);
-        client.release(unlockError ? true : undefined);
-        if (unlockError && !workFailed) throw unlockError;
       }
     }
   } finally {

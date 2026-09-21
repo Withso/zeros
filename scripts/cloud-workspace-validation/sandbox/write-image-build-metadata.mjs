@@ -11,6 +11,14 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import runtimeLayout from "./runtime-layout.json" with { type: "json" };
+import { readCloudHostRuntimeProfile } from "./cloud-runtime-profile.mjs";
+import {
+  cloudImageSourceIdentity,
+  cloudImageArtifactHashes,
+  cloudImageBaseOrigin,
+  readCloudImageNativeInventory,
+} from "./image-build-contract.mjs";
 
 function fail(message) {
   process.stderr.write(`[image-metadata] ${message}\n`);
@@ -24,7 +32,7 @@ function sha256(value) {
 function command(file, args) {
   const result = spawnSync(file, args, {
     encoding: "utf8",
-    env: { PATH: "/usr/local/bin:/usr/bin:/bin" },
+    env: { PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin" },
     timeout: 30_000,
     maxBuffer: 4 * 1024 * 1024,
   });
@@ -46,7 +54,7 @@ if (
   !output ||
   !path.isAbsolute(output) ||
   !baseImage ||
-  !/@sha256:[a-f0-9]{64}$/.test(baseImage) ||
+  (baseImage !== "native-linux" && !/@sha256:[a-f0-9]{64}$/.test(baseImage)) ||
   !repositoryUrl ||
   !repositoryRef ||
   !engineDirectory ||
@@ -70,15 +78,19 @@ const pin = JSON.parse(
 );
 const selectedPackages = [
   "acl",
+  "apparmor",
   "bubblewrap",
   "busybox-static",
+  "crun",
   "git",
   "git-lfs",
   "gnupg",
   "inotify-tools",
+  "openssh-sftp-server",
   "podman",
   "ripgrep",
   "slirp4netns",
+  "socat",
   "uidmap",
   "util-linux",
 ];
@@ -88,32 +100,22 @@ const packageVersions = Object.fromEntries(
     command("/usr/bin/dpkg-query", ["-W", "-f=${Version}", name]),
   ]),
 );
-const contractFiles = [
-  "package.json",
-  "pnpm-lock.yaml",
-  "scripts/zsr-qualification/pin.json",
-  "scripts/cloud-workspace-validation/sandbox/cloud-worker.json",
-];
-const contractDigest = sha256(
-  contractFiles
-    .map(
-      (relative) =>
-        `${relative}\0${readFileSync(path.join(engine, relative))}\0`,
-    )
-    .join(""),
-);
 const metadata = {
-  version: 1,
-  profile: "zeros-cloud-worker-v1",
-  baseImage,
+  version: 2,
+  profile: readCloudHostRuntimeProfile().profile,
+  ...cloudImageBaseOrigin(
+    baseImage,
+    baseImage === "native-linux" ? readCloudImageNativeInventory() : undefined,
+  ),
   architecture: process.arch,
+  runtimeLayout,
   imageContractSha256,
   source: {
     repositoryUrlSha256: sha256(repositoryUrl),
     ref: repositoryRef,
-    commit: command("/usr/bin/git", ["-C", engine, "rev-parse", "HEAD"]),
-    contractSha256: contractDigest,
+    ...cloudImageSourceIdentity(engine),
   },
+  artifacts: cloudImageArtifactHashes(engine),
   zsr: {
     package: pin.package,
     version: pin.version,

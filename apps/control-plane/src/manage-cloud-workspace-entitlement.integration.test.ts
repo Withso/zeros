@@ -1,3 +1,4 @@
+import {withCloudFixtureOwnerTx} from "./cloud-workspaces/test-fixtures.js";
 import { randomUUID } from "node:crypto";
 
 import pg from "pg";
@@ -481,7 +482,7 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
     ).rejects.toThrow(/non-operator.*billing authority/i);
   });
 
-  it("activates Pro only when every current collaborator already has live account authority", async () => {
+  it("activates Pro with more than five members without coupling their individual subscriptions", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const actor = await ensureUser(pool, {
       provider: "workos",
@@ -536,16 +537,24 @@ d("owner-managed cloud-workspace Organization entitlements", () => {
       validUntil: new Date(Date.now() + 86_400_000).toISOString(),
       seatLimit: "none",
       activeSeatUserIds: "none",
-      reason: "Activate Pro after verifying every collaborator account.",
+      reason: "Activate a Pro organization with individually funded members.",
     } as const;
 
-    await expect(
-      manageCloudWorkspaceEntitlement(
-        pool,
-        validateCloudWorkspaceEntitlementRequest(base),
-      ),
-    ).rejects.toThrow(/every collaborator.*Pro account authority/i);
-    await withSystemTx(pool, (tx) =>
+    // Unpaid or lapsed peers retain membership but cannot borrow the owner's
+    // Pro authority. They must not prevent other members using the organization.
+    for (let index = 0; index < 6; index++) {
+      const peer = await ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_entitlement_pro_peer_${suffix}_${index}`,
+        email: `entitlement-pro-peer-${suffix}-${index}@example.test`,
+        displayName: "Pro organization peer",
+      });
+      await withSystemTx(pool, (tx) => tx.query(
+        "INSERT INTO organization_members (org_id,user_id,role) VALUES ($1,$2,'member')",
+        [organizationId,peer.id],
+      ));
+    }
+    await withCloudFixtureOwnerTx(pool, (tx) =>
       tx.query(
         `INSERT INTO account_entitlements (
            user_id, plan, status, cloud_workspaces_allowed, source,

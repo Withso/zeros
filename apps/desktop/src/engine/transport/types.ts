@@ -11,6 +11,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { EngineMessage } from "../types";
+import type { CloudActorContext, CloudCommandActor } from "@zeros/protocol/cloud-actors";
 
 export interface TransportClient {
   /** Stable per-connection id. */
@@ -22,6 +23,12 @@ export interface TransportClient {
    * clients and image qualification probes intentionally omit it. */
   readonly accountUserId?: string | null;
   readonly authorityEpoch?: number | null;
+  /** Actor claims are supplied by the control plane, never a client message. */
+  readonly cloudActor?: CloudActorContext;
+  /** Durable engine-owned dispatch, independent of a connection lifetime. */
+  readonly cloudCommandActor?: CloudCommandActor;
+  /** Live transport lease, including closure while an operation was awaiting. */
+  authorized?():boolean;
   /** Send an engine message to this client (serialized + encrypted as needed). */
   send(msg: EngineMessage): void;
   close(code?: number, reason?: string): void;

@@ -12,6 +12,7 @@ const SECURITY_EVENT_KINDS = new Set([
   "organization.access_revoked",
   "organization.authorization_changed",
   "organization.data_changed",
+  "workspace.authorization_changed",
 ]);
 
 export type DesktopSecurityEventKind =
@@ -20,7 +21,8 @@ export type DesktopSecurityEventKind =
   | "session.revoked"
   | "organization.access_revoked"
   | "organization.authorization_changed"
-  | "organization.data_changed";
+  | "organization.data_changed"
+  | "workspace.authorization_changed";
 
 export type DesktopSecurityFrame = {
   event: string;
@@ -45,6 +47,8 @@ type SecuritySnapshot = {
     membershipRevision: number;
     dataRevision: number;
   }>;
+  workspaces: Array<{id:string;organizationId:string;role:string;accessRevision:number;dataRevision:number}>;
+  workspacesTruncated: boolean;
   cursor: number;
 };
 
@@ -52,6 +56,7 @@ type SecurityEvent = {
   sequence: number;
   kind: DesktopSecurityEventKind;
   organizationId: string | null;
+  workspaceId: string | null;
   accountRevision: number | null;
   authorizationRevision: number | null;
   dataRevision: number | null;
@@ -142,6 +147,17 @@ function parseSnapshot(value: unknown): SecuritySnapshot | null {
     return null;
   }
   const parsedOrganizations: SecuritySnapshot["organizations"] = [];
+  const workspaces=root.workspaces??[];
+  if(!Array.isArray(workspaces)||workspaces.length>1000||
+    (root.workspacesTruncated!==undefined&&typeof root.workspacesTruncated!=="boolean")) return null;
+  const parsedWorkspaces:SecuritySnapshot["workspaces"]=[];
+  for(const item of workspaces) {
+    const workspace=record(item);
+    if(!workspace||typeof workspace.id!=="string"||typeof workspace.organizationId!=="string"
+      ||!["viewer","prompter","developer","manager","owner"].includes(String(workspace.role))||!safeInteger(workspace.accessRevision,1)
+      ||!safeInteger(workspace.dataRevision??1,1)) return null;
+    parsedWorkspaces.push({id:workspace.id,organizationId:workspace.organizationId,role:String(workspace.role),accessRevision:workspace.accessRevision,dataRevision:(workspace.dataRevision??1) as number});
+  }
   for (const item of organizations) {
     const organization = record(item);
     if (
@@ -170,6 +186,8 @@ function parseSnapshot(value: unknown): SecuritySnapshot | null {
     },
     session: { id: session.id, status: "active" },
     organizations: parsedOrganizations,
+    workspaces: parsedWorkspaces,
+    workspacesTruncated: root.workspacesTruncated===true,
     cursor: root.cursor,
   };
 }
@@ -188,6 +206,9 @@ function snapshotSignature(snapshot: SecuritySnapshot): string {
         organization.membershipRevision,
         organization.dataRevision,
       ]),
+    [...snapshot.workspaces].sort((left,right)=>left.id.localeCompare(right.id))
+      .map(workspace=>[workspace.id,workspace.organizationId,workspace.role,workspace.accessRevision,workspace.dataRevision]),
+    snapshot.workspacesTruncated,
   ]);
 }
 
@@ -207,6 +228,8 @@ function parseSecurityEvent(value: string): SecurityEvent | null {
     !SECURITY_EVENT_KINDS.has(event.kind) ||
     (event.organizationId !== null &&
       typeof event.organizationId !== "string") ||
+    (event.workspaceId != null && typeof event.workspaceId!=="string") ||
+    (event.kind==="workspace.authorization_changed" && typeof event.workspaceId!=="string") ||
     (event.payload !== undefined && !record(event.payload)) ||
     typeof event.createdAt !== "string"
   ) {
@@ -228,6 +251,7 @@ function parseSecurityEvent(value: string): SecurityEvent | null {
     sequence: event.sequence,
     kind: event.kind as DesktopSecurityEventKind,
     organizationId: event.organizationId as string | null,
+    workspaceId: (event.workspaceId??null) as string|null,
     accountRevision,
     authorizationRevision,
     dataRevision,
@@ -496,7 +520,7 @@ export class WorkOSDesktopSecurityMonitor {
       const signature = snapshotSignature(snapshot);
       if (
         this.lastSnapshotSignature !== null &&
-        this.lastSnapshotSignature !== signature
+        (this.lastSnapshotSignature !== signature || snapshot.workspacesTruncated)
       ) {
         this.options.emit("auth-security-event", {
           kind: "snapshot.changed",

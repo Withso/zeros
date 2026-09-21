@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type {PreparedBoundary} from "../../../containment/types";
 
 import {
   spawnContainedClaudeProcess,
@@ -19,6 +20,18 @@ afterEach(async () => {
 describe.runIf(process.platform === "darwin" || process.platform === "linux")(
   "Claude territory process supervision",
   () => {
+    it("routes SDK kill escalation through the cloud lifetime owner",async()=>{
+      let release!:()=>void;
+      const held=new Promise<void>(resolve=>{release=resolve;});
+      let tracked!:ContainedClaudeProcess;
+      const stop=vi.fn(async()=>{await held;tracked.child.kill("SIGKILL");await tracked.exited;});
+      const boundary={wrapSpawn:(request:unknown)=>request,trackProcess:()=>({requiresOwnedSignals:true,stopAndProve:stop})} as unknown as PreparedBoundary;
+      const sdk=spawnContainedClaudeProcess({command:process.execPath,args:["-e","setInterval(()=>{},1000)"],env:process.env,signal:new AbortController().signal},
+        {onSpawn:value=>{tracked=value;trackedProcesses.push(value);},onStderr:()=>{}},boundary);
+      const rawKill=vi.spyOn(tracked.child,"kill");
+      try{sdk.kill("SIGTERM");sdk.kill("SIGKILL");expect(stop).toHaveBeenCalledOnce();expect(rawKill).not.toHaveBeenCalled();}
+      finally{release();await terminateContainedClaudeProcess(tracked,{graceMs:0});}
+    });
     it("kills and verifies a query process group with a live descendant", async () => {
       const abort = new AbortController();
       let tracked: ContainedClaudeProcess | undefined;

@@ -52,6 +52,7 @@ export async function enqueueWorkspaceCheckpointRequest(
       generation: number;
       lifecycle_intent_id: string | null;
       reason: WorkspaceCheckpointRequestReason;
+      requested_by:string|null;
     }>(
       `INSERT INTO workspace_checkpoint_requests (
          id, workspace_id, generation, org_id, requested_by,
@@ -61,7 +62,7 @@ export async function enqueueWorkspaceCheckpointRequest(
          now() + ($9::bigint * interval '1 millisecond')
        )
        ON CONFLICT (workspace_id, idempotency_key) DO NOTHING
-       RETURNING id, deadline_at, generation, lifecycle_intent_id, reason`,
+       RETURNING id, deadline_at, generation, lifecycle_intent_id, reason, requested_by`,
       [
         id,
         input.workspaceId,
@@ -82,8 +83,9 @@ export async function enqueueWorkspaceCheckpointRequest(
         generation: number;
         lifecycle_intent_id: string | null;
         reason: WorkspaceCheckpointRequestReason;
+        requested_by:string|null;
       }>(
-        `SELECT id, deadline_at, generation, lifecycle_intent_id, reason
+        `SELECT id, deadline_at, generation, lifecycle_intent_id, reason, requested_by
          FROM workspace_checkpoint_requests
          WHERE workspace_id = $1 AND idempotency_key = $2`,
         [input.workspaceId, input.idempotencyKey],
@@ -93,6 +95,7 @@ export async function enqueueWorkspaceCheckpointRequest(
     !row ||
     row.generation !== input.generation ||
     row.lifecycle_intent_id !== (input.lifecycleIntentId ?? null) ||
+    row.requested_by!==input.requestedBy ||
     row.reason !== input.reason
   ) {
     throw new Error("workspace checkpoint request idempotency conflict");
@@ -239,37 +242,43 @@ export class CloudWorkspaceCheckpointRequestWorker {
   }
 
   async expireOnce(): Promise<number> {
-    return withSystemTx(this.pool, async (tx) => {
-      const expired = await tx.query<{
+    let count = 0;
+    const visited: string[] = [];
+    // Acquire parents before children, as lifecycle admission does. Each
+    // transaction owns one scope only; a busy organization/workspace must not
+    // prevent expiry in another scope or accumulate cross-tenant lock waits.
+    for (let attempt = 0; attempt < 32 && count < 100; attempt += 1) {
+      const result = await withSystemTx(this.pool, async (tx) => {
+        const candidate = (await tx.query<{workspace_id:string;org_id:string}>(
+          `SELECT request.workspace_id, request.org_id
+           FROM organizations organization
+           JOIN workspace_checkpoint_requests request ON request.org_id = organization.id
+           WHERE request.state IN ('queued', 'delivered') AND request.deadline_at <= now()
+             AND NOT (request.workspace_id = ANY($1::uuid[]))
+           ORDER BY request.deadline_at, request.id
+           FOR UPDATE OF organization SKIP LOCKED LIMIT 1`, [visited],
+        )).rows[0];
+        if (!candidate) return null;
+        visited.push(candidate.workspace_id);
+        const workspace = await tx.query(
+          `SELECT id FROM cloud_workspaces WHERE id=$1 AND org_id=$2
+           FOR UPDATE SKIP LOCKED`, [candidate.workspace_id,candidate.org_id],
+        );
+        if (!workspace.rowCount) return 0;
+        const expired = await tx.query<{
         id: string;
         lifecycle_intent_id: string | null;
       }>(
-        `UPDATE workspace_checkpoint_requests request
-         SET state = 'expired', completed_at = now(),
-             error_code = 'checkpoint_deadline_exceeded'
-         WHERE request.id IN (
-           SELECT candidate.id
-           FROM workspace_checkpoint_requests candidate
-           WHERE candidate.state IN ('queued', 'delivered')
-             AND candidate.deadline_at <= now()
-           ORDER BY candidate.deadline_at, candidate.id
-           FOR UPDATE SKIP LOCKED
-           LIMIT 100
-         )
-         RETURNING request.id, request.lifecycle_intent_id`,
+        `SELECT id, lifecycle_intent_id FROM workspace_checkpoint_requests
+         WHERE workspace_id=$1 AND org_id=$2 AND state IN ('queued','delivered')
+           AND deadline_at <= now()
+         ORDER BY deadline_at, id LIMIT $3`,
+        [candidate.workspace_id,candidate.org_id,100-count],
       );
       const intentIds = expired.rows
         .map((row) => row.lifecycle_intent_id)
         .filter((id): id is string => id !== null);
       if (intentIds.length > 0) {
-        await tx.query(
-          `UPDATE cloud_workspace_lifecycle_intents
-           SET state = 'failed', completed_at = now(), updated_at = now(),
-               error_code = 'checkpoint_deadline_exceeded',
-               error_message = 'Final durable checkpoint did not complete'
-           WHERE id = ANY($1::uuid[]) AND state IN ('queued', 'observing')`,
-          [intentIds],
-        );
         const cancelledTransitions = await tx.query<{
           workspace_id: string;
           org_id: string;
@@ -297,8 +306,26 @@ export class CloudWorkspaceCheckpointRequestWorker {
             ],
           );
         }
+        await tx.query(
+          `UPDATE cloud_workspace_lifecycle_intents
+           SET state = 'failed', completed_at = now(), updated_at = now(),
+               error_code = 'checkpoint_deadline_exceeded',
+               error_message = 'Final durable checkpoint did not complete'
+           WHERE id = ANY($1::uuid[]) AND state IN ('queued', 'observing')`,
+          [intentIds],
+        );
       }
+      await tx.query(
+        `UPDATE workspace_checkpoint_requests
+         SET state='expired',completed_at=now(),error_code='checkpoint_deadline_exceeded'
+         WHERE id=ANY($1::uuid[]) AND state IN ('queued','delivered') AND deadline_at<=now()`,
+        [expired.rows.map(row=>row.id)],
+      );
       return expired.rowCount ?? 0;
-    });
+      });
+      if(result===null)break;
+      count+=result;
+    }
+    return count;
   }
 }

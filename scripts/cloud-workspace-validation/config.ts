@@ -23,6 +23,10 @@ import {
   type GithubCredential,
 } from "@zeros/protocol/github-auth";
 import { parseValidationAutoDeleteMinutes } from "./lib/qualification-gates";
+import {parseSnapshotAllocation,type SnapshotAllocationStore} from "./lib/snapshot-allocation";
+import { parseQualificationAllocation, type QualificationAllocationStore } from "./lib/qualification-allocation";
+import runtimeLayout from "./sandbox/runtime-layout.json" with { type: "json" };
+import {parseDaytonaSandboxClass,assertSnapshotPlacement,type SnapshotPlacement} from "./lib/snapshot-placement";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, "..", "..");
@@ -51,6 +55,7 @@ export function optEnv(name: string, fallback: string): string {
  *  makes a mirrored working copy preferable to a chatty remote filesystem.
  *  Override with DAYTONA_TARGET. */
 export const DAYTONA_TARGET = optEnv("DAYTONA_TARGET", "eu");
+export const DAYTONA_SANDBOX_CLASS = parseDaytonaSandboxClass(process.env.DAYTONA_SANDBOX_CLASS);
 export const DAYTONA_API_URL = optEnv(
   "DAYTONA_API_URL",
   "https://app.daytona.io/api",
@@ -123,6 +128,10 @@ export function makeDaytona(): Daytona {
     apiKey: requireEnv("DAYTONA_API_KEY"),
     apiUrl: DAYTONA_API_URL,
     target: DAYTONA_TARGET,
+    requestTimeoutMs: 30_000,
+    // Qualification commands retain the bounded polling lifecycle contract;
+    // a background SDK event socket must not keep a completed CLI alive.
+    useDeprecatedPolling: true,
   });
 }
 
@@ -204,13 +213,15 @@ export const CLOUD_ENGINE_INGRESS_TTL_SECONDS = (() => {
 
 /** Immutable, root-owned engine installation. Agent-controlled bytes must
  * never be loaded from this tree by the privileged coordinator. */
-export const SANDBOX_ENGINE_DIR = "/opt/zeros";
+export const SANDBOX_ENGINE_DIR = runtimeLayout.engine;
 /** Writable validation checkout served by the engine. This deliberately
  * differs from SANDBOX_ENGINE_DIR so an agent cannot replace its supervisor. */
-export const SANDBOX_REPO_DIR = "/workspace/zeros";
+export const SANDBOX_REPO_DIR = runtimeLayout.repository;
 /** Engine database/control state. It is absent from every code boundary. */
-export const SANDBOX_DATA_DIR = "/var/lib/zeros";
-export const SANDBOX_ENGINE_LOG = "/var/log/zeros/engine.log";
+export const SANDBOX_DATA_DIR = runtimeLayout.data;
+export const SANDBOX_ENGINE_LOG = runtimeLayout.log;
+export const SANDBOX_AGENT_HOME = runtimeLayout.agentHome;
+export const SANDBOX_CAPTURE_HOME = runtimeLayout.captureHome;
 export const SANDBOX_AGENT_UID = 10_001;
 export const SANDBOX_AGENT_GID = 10_001;
 
@@ -454,11 +465,14 @@ export function parseCloudValidationResources(
 
 export const RESOURCES = Object.freeze(parseCloudValidationResources());
 
-/** Operator sandboxes stay durable by default. Protected CI sets a bounded
- * provider-side deadline so a killed runner cannot orphan paid compute. */
+/** Auto-delete counts stopped time and is not a running-compute deadline. */
 export const VALIDATION_AUTO_DELETE_MINUTES = parseValidationAutoDeleteMinutes(
   process.env.ZEROS_CLOUD_VALIDATION_AUTO_DELETE_MINUTES,
 );
+export const VALIDATION_TTL_MINUTES = Number(process.env.ZEROS_CLOUD_VALIDATION_TTL_MINUTES ?? "120");
+if (!Number.isInteger(VALIDATION_TTL_MINUTES) || VALIDATION_TTL_MINUTES < 1 || VALIDATION_TTL_MINUTES > 720) {
+  throw new Error("Cloud qualification TTL must be an integer from 1 through 720 minutes");
+}
 
 // ── On-disk validation state (gitignored .context) ─────────────
 
@@ -775,8 +789,7 @@ export function parseCloudValidationState(raw: unknown): CloudValidationState {
   };
 }
 
-export interface CloudSnapshotAttestation {
-  version: 1;
+export interface CloudSnapshotAttestation extends SnapshotPlacement {
   snapshotId: string;
   snapshotName: string;
   snapshotImageName: string;
@@ -808,6 +821,62 @@ if (
   );
 }
 const STATE_FILE = path.join(STATE_DIR, "state.json");
+const ALLOCATION_INTENT_FILE = path.join(STATE_DIR, "allocation-intent.json");
+export const qualificationAllocationStore: QualificationAllocationStore = {
+  get providerScope() {
+    // Conservative fingerprint: rotation requires reconciling the old receipt
+    // with its original credential, never interpreting another account's empty
+    // inventory as deletion. The key itself is never persisted.
+    return createHash("sha256").update(JSON.stringify([DAYTONA_API_URL, DAYTONA_TARGET,
+      requireEnv("DAYTONA_API_KEY")])).digest("hex");
+  },
+  read() {
+    if (!fs.existsSync(ALLOCATION_INTENT_FILE)) return null;
+    assertPrivateStateFile(ALLOCATION_INTENT_FILE);
+    if (fs.statSync(ALLOCATION_INTENT_FILE).size > 4096) throw new Error("Allocation intent exceeds its size limit");
+    return parseQualificationAllocation(JSON.parse(fs.readFileSync(ALLOCATION_INTENT_FILE, "utf8")));
+  },
+  write(intent) {
+    fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
+    assertPrivateStateDirectory(STATE_DIR);
+    const temporary = `${ALLOCATION_INTENT_FILE}.${randomUUID()}.tmp`;
+    try {
+      const descriptor = fs.openSync(temporary, "wx", 0o600);
+      try { fs.writeFileSync(descriptor, JSON.stringify(parseQualificationAllocation(intent)) + "\n"); fs.fsyncSync(descriptor); }
+      finally { fs.closeSync(descriptor); }
+      fs.renameSync(temporary, ALLOCATION_INTENT_FILE);
+      const directory = fs.openSync(STATE_DIR, "r");
+      try { fs.fsyncSync(directory); } finally { fs.closeSync(directory); }
+    } finally { fs.rmSync(temporary, { force: true }); }
+  },
+  clear() {
+    if (fs.existsSync(ALLOCATION_INTENT_FILE)) {
+      assertPrivateStateFile(ALLOCATION_INTENT_FILE);
+      fs.unlinkSync(ALLOCATION_INTENT_FILE);
+    }
+  },
+};
+const SNAPSHOT_ALLOCATION_FILE=path.join(STATE_DIR,"snapshot-allocation.json");
+export const snapshotAllocationStore:SnapshotAllocationStore={
+  get providerScope(){return qualificationAllocationStore.providerScope;},
+  read(){
+    if(!fs.existsSync(SNAPSHOT_ALLOCATION_FILE))return null;
+    assertPrivateStateFile(SNAPSHOT_ALLOCATION_FILE);
+    if(fs.statSync(SNAPSHOT_ALLOCATION_FILE).size>4096)throw new Error("Snapshot receipt exceeds its bound");
+    return parseSnapshotAllocation(JSON.parse(fs.readFileSync(SNAPSHOT_ALLOCATION_FILE,"utf8")));
+  },
+  write(value){
+    fs.mkdirSync(STATE_DIR,{recursive:true,mode:0o700});assertPrivateStateDirectory(STATE_DIR);
+    const temporary=`${SNAPSHOT_ALLOCATION_FILE}.${randomUUID()}.tmp`;
+    try{
+      const file=fs.openSync(temporary,"wx",0o600);
+      try{fs.writeFileSync(file,JSON.stringify(parseSnapshotAllocation(value))+"\n");fs.fsyncSync(file);}finally{fs.closeSync(file);}
+      fs.renameSync(temporary,SNAPSHOT_ALLOCATION_FILE);
+      const directory=fs.openSync(STATE_DIR,"r");try{fs.fsyncSync(directory);}finally{fs.closeSync(directory);}
+    }finally{fs.rmSync(temporary,{force:true});}
+  },
+  clear(){if(fs.existsSync(SNAPSHOT_ALLOCATION_FILE)){assertPrivateStateFile(SNAPSHOT_ALLOCATION_FILE);fs.unlinkSync(SNAPSHOT_ALLOCATION_FILE);}},
+};
 const SNAPSHOT_ATTESTATION_FILE = path.join(
   STATE_DIR,
   "snapshot-attestation.json",
@@ -924,6 +993,18 @@ const LEGACY_STATE_FILES = [
   path.join(repoRoot, ".context", "cloud-workspace-validation", "state.json"),
   path.join(repoRoot, ".context", "cloud-spike", "state.json"),
 ];
+
+/** Even an old, malformed or dangling state path may be the only allocation
+ * reference. Provisioning must never replace it with a second sandbox. */
+export function hasExistingCloudValidationState(): boolean {
+  return [STATE_FILE, ...LEGACY_STATE_FILES].some(file => {
+    try { fs.lstatSync(file); return true; }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  });
+}
 const LEGACY_SNAPSHOT_ATTESTATION_FILES = [
   path.join(
     repoRoot,
@@ -1008,6 +1089,21 @@ export function imageContractSha256(): string {
     "sandbox/start-engine.sh",
     "sandbox/egress-probe.sh",
     "sandbox/cloud-worker.json",
+    "sandbox/runtime-layout.json",
+    "sandbox/cgroup-resources.mjs",
+    "sandbox/cloud-resource-admission.mjs",
+    "sandbox/image-build-contract.mjs",
+    "sandbox/cloud-setup-process.mjs",
+    "sandbox/cloud-runtime-profile.mjs",
+    "sandbox/cloud-engine-cgroup.mjs",
+    "sandbox/cloud-engine-view.mjs",
+    "sandbox/cloud-engine-launcher.mjs",
+    "sandbox/cloud-engine-namespace.c",
+    "sandbox/zeros-cloud-engine.apparmor",
+    "sandbox/qualify-cloud-engine.mjs",
+    "sandbox/qualify-cloud-capture.ts",
+    "sandbox/qualify-cloud-human-services.ts",
+    "sandbox/qualify-cloud-actor-tools.ts",
     "sandbox/write-image-build-metadata.mjs",
     "sandbox/attest-cloud-worker.mjs",
     "sandbox/consume-cloud-admission.mjs",
@@ -1016,6 +1112,7 @@ export function imageContractSha256(): string {
     "sandbox/cloud-github-refresh-request.mjs",
     "sandbox/cloud-git-askpass.mjs",
     "sandbox/cloud-worker-supervisor.mjs",
+    "sandbox/ensure-cloud-worker-supervisor.mjs",
     "sandbox/setup-cloud-workspace.mjs",
   ];
   return sha256(
@@ -1051,6 +1148,7 @@ export function saveSnapshotAttestation(
   attestation: CloudSnapshotAttestation,
   file: string = SNAPSHOT_ATTESTATION_FILE,
 ): void {
+  assertSnapshotPlacement(attestation);
   savePrivateJson(attestation, file);
   console.log(`  ↳ wrote ${path.relative(repoRoot, file)} (owner-only)`);
 }
@@ -1078,7 +1176,10 @@ export function loadSnapshotAttestation(
   assertPrivateStateFile(file);
   fs.chmodSync(path.dirname(file), 0o700);
   fs.chmodSync(file, 0o600);
-  return JSON.parse(fs.readFileSync(file, "utf8")) as CloudSnapshotAttestation;
+  if(fs.statSync(file).size>16384)throw new Error("Snapshot attestation exceeds its size limit");
+  const value=JSON.parse(fs.readFileSync(file, "utf8")) as CloudSnapshotAttestation;
+  assertSnapshotPlacement(value);
+  return value;
 }
 
 export function snapshotAttestationExists(

@@ -72,7 +72,11 @@ async function startTransport(
 }> {
   // port 0 → the OS assigns a free ephemeral port, read back via boundPort.
   // Hardcoded ports raced other listeners on CI and flaked with EADDRINUSE.
-  const t = new CloudTransport({ port: 0, ...opts });
+  const t = new CloudTransport({
+    port: 0,
+    ...opts,
+    ...(opts.verifyToken ? { renewToken: async () => ADMISSION } : {}),
+  });
   transports.push(t);
   await t.start();
   return { t, port: t.boundPort };

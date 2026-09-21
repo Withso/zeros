@@ -16,6 +16,7 @@ import { CURSOR_STATE_RECOVERY_HOLD_FILE } from "../../../session-paths";
 import type { AgentAdapterContext } from "../../../types";
 import type { PreparedBoundary } from "../../../containment/types";
 import { CursorSdkAdapter } from "../adapter";
+import * as cloudExecution from "../../../cloud-provider-execution";
 
 const {
   createRuntimeSpy,
@@ -136,12 +137,41 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
   else process.env.ZEROS_DATA_DIR = previousDataDir;
   await rm(root, { recursive: true, force: true });
 });
 
 describe("CursorSdkAdapter — failed contained startup cleanup", () => {
+  it("refuses to replace missing cloud history with a fresh native agent", async () => {
+    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({} as cloudExecution.CloudProviderExecution);
+    resumeSpy.mockRejectedValueOnce(new Error("Agent prior-agent-id not found"));
+    const adapter=new CursorSdkAdapter(makeCtx());
+    try {
+      await expect(adapter.loadSession({sessionId:"prior-agent-id",cwd:root,env:{CURSOR_API_KEY:"key"},executionBoundary:boundary()})).rejects.toThrow("not found");
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(disposeSpy).toHaveBeenCalledTimes(1);
+    } finally { await adapter.dispose(); }
+  });
+  it("lets the cloud worker create its persistent store outside private engine state", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const providerHome = path.join(root, "worker-home");
+    const admitted = { ...boundary(), status: { actor: "agent-code", backend: "cloud-worker" },
+      providerHomePath: providerHome } as unknown as PreparedBoundary;
+    try {
+      await adapter.newSession({ cwd: root, env: { CURSOR_API_KEY: "key" }, executionBoundary: admitted });
+      const stateRoot = createRuntimeSpy.mock.calls[0][0].env.ZEROS_CURSOR_STATE_ROOT as string;
+      expect(stateRoot.startsWith(providerHome + path.sep)).toBe(true);
+      // Only the actual worker may create these files. Engine mkdir would
+      // leave a 0700 engine-owned directory the cloud worker cannot open.
+      await expect(access(stateRoot)).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(access(path.join(root, "engine", "provider-state"))).rejects.toMatchObject({ code: "ENOENT" });
+      await adapter.listSessions({ cwd: root, env: { CURSOR_API_KEY: "key" }, executionBoundary: admitted });
+      expect(createRuntimeSpy.mock.calls[1][0].env.ZEROS_CURSOR_STATE_ROOT).toBe(stateRoot);
+    } finally { await adapter.dispose(); }
+  });
+
   it("loads team content under a Code actor's prepared boundary", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     await adapter.newSession({

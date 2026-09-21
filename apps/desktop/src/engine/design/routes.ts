@@ -1,4 +1,6 @@
 import { designContextReferenceSchema } from "@zeros/protocol/design-context";
+import { designWorkspaceCaptureSchema } from "@zeros/protocol/design-capture";
+import { captureWorkspaceDesign } from "./workspace-capture";
 import { createDesignContextReference, inspectDesignContext } from "./context";
 import {
   designReviewCaptureRequestSchema,
@@ -50,6 +52,7 @@ import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import {
   designTransactionSchema,
   type DesignOperation,
+  type DesignActor,
 } from "@zeros/design-core";
 import {
   opSettingsPreviewWrite,
@@ -120,7 +123,8 @@ import {
   type WorkspaceDesignHistoryEntry,
   type WorkspaceDesignHistoryState,
 } from "./workspace-history";
-async function applyDesktopDesignOperation(
+async function applyHumanDesignOperation(
+  actor: DesignActor,
   workspacePath: string,
   frame: string,
   intent: string,
@@ -137,7 +141,7 @@ async function applyDesktopDesignOperation(
     transactionId: `desktop:${randomUUID()}`,
     documentId,
     baseRevision,
-    actor: { kind: "human", id: "desktop" },
+    actor,
     intent,
     createdAt: Date.now(),
     ...(coalesceKey ? { coalesceKey } : {}),
@@ -184,6 +188,7 @@ export interface DesignWorkspaceRouteHost {
   ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>;
 }
 const DESIGN_WORKSPACE_ROUTES = new Set([
+  "design.capture",
   "design.context.create",
   "design.context.inspect",
   "design.review.snapshot",
@@ -237,10 +242,15 @@ export async function handleDesignWorkspaceRoute(
   host: DesignWorkspaceRouteHost,
   op: string,
   params: Params,
-  options: { remote: boolean; hostLocalResources: boolean },
+  options: { remote: boolean; hostLocalResources: boolean; actor?: DesignActor; primaryRepositoryRoot?: string },
 ): Promise<unknown> {
   const { remote, hostLocalResources } = options;
+  const applyDesktopDesignOperation = applyHumanDesignOperation.bind(null, options.actor ?? { kind: "human", id: "desktop" });
   switch (op) {
+    case "design.capture": {
+      const input = designWorkspaceCaptureSchema.parse(params);
+      return host.withDesignReadWorkspace(input.workspaceId, remote, ({ root }) => captureWorkspaceDesign(root, input));
+    }
     case "design.review.snapshot": {
       const input = designReviewRequestSchema.parse(params);
       return host.withDesignReadWorkspace(
@@ -378,6 +388,7 @@ export async function handleDesignWorkspaceRoute(
       let transaction;
       try {
         transaction = designTransactionSchema.parse(params.transaction);
+        if (options.actor) transaction = { ...transaction, actor: options.actor };
       } catch (error) {
         throw new GitError({
           code: "VALIDATION_FAILED",
@@ -515,8 +526,9 @@ export async function handleDesignWorkspaceRoute(
         try {
           result =
             direction === "undo"
-              ? await api.undo(documentId)
-              : await api.redo(documentId);
+              ? await api.undo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {})
+              : await api.redo(documentId, options.actor, options.actor ? { expectedRevision: reqStr(params, "expectedRevision") } : {});
+          if (!result && options.actor) throw new GitError({ code: "VALIDATION_FAILED", message: "Another collaborator changed Design history. Refresh before undoing." });
         } catch (error) {
           source.push(entry);
           throw error;
@@ -535,7 +547,7 @@ export async function handleDesignWorkspaceRoute(
       // Compatibility fallback for a history session created before this
       // service began tracking workspace-wide ordering. An empty canvas has
       // no fallback document, but a structural deletion above still works.
-      const frame = optStr(params, "frame");
+      const frame = options.actor ? undefined : optStr(params, "frame");
       if (!frame) {
         return {
           result: null,
@@ -1609,7 +1621,7 @@ export async function handleDesignWorkspaceRoute(
           message: "Design folders are managed in the desktop app.",
         });
       const repoRoot = reqStr(params, "repoRoot");
-      if (!isKnownRepoRoot(repoRoot))
+      if (options.primaryRepositoryRoot !== repoRoot && !isKnownRepoRoot(repoRoot))
         throw new GitError({
           code: "WORKSPACE_NOT_FOUND",
           message: "Open this repository in Zeros first.",
@@ -1665,7 +1677,7 @@ export async function handleDesignWorkspaceRoute(
         });
       }
       const repoRoot = reqStr(params, "repoRoot");
-      if (!isKnownRepoRoot(repoRoot)) {
+      if (options.primaryRepositoryRoot !== repoRoot && !isKnownRepoRoot(repoRoot)) {
         throw new GitError({
           code: "WORKSPACE_NOT_FOUND",
           message: "Open this repository in Zeros first.",
@@ -1690,7 +1702,7 @@ export async function handleDesignWorkspaceRoute(
         });
       }
       const repoRoot = reqStr(params, "repoRoot");
-      if (!isKnownRepoRoot(repoRoot)) {
+      if (options.primaryRepositoryRoot !== repoRoot && !isKnownRepoRoot(repoRoot)) {
         throw new GitError({
           code: "WORKSPACE_NOT_FOUND",
           message:

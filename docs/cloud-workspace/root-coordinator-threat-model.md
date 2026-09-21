@@ -2,11 +2,12 @@
 
 ## Decision status
 
-**Not approved for production.** The current Daytona image deliberately runs
+**Not approved for production.** The legacy version 1 image deliberately runs
 the PID 1 supervisor, image attester, fixed engine launcher, and Zeros engine as
 root. Repository Git operations, declared setup commands, terminals, and agent
 processes run as UID/GID 10001. This is a bounded qualification architecture,
-not satisfaction of the Phase 2 non-root requirement.
+not satisfaction of the non-root requirement. The version 2 candidate described
+below is the elimination path; its full live release qualification is incomplete.
 
 Phase 2 must remain release-blocked until either:
 
@@ -70,6 +71,65 @@ the general engine from root:
   root broker state;
 - rerun the complete live image, bridge, PTY, agent, stop/wake, generation
   replacement/rollback, preview, SSH/tunnel, soak, and deletion qualification.
+
+## Version 2 elimination candidate
+
+The common Linux image now launches the engine in a user namespace with exactly
+these mappings:
+
+```text
+namespace UID/GID 0          -> VM UID/GID 10003
+namespace UID/GID 10001–10002 -> VM UID/GID 10001–10002
+```
+
+VM root and the provider's login user are not mapped. The engine is namespace
+root, not VM root: its ownership and sandbox-construction capabilities apply
+only to the three mapped identities. Agent and capture identities remain
+distinct. Immutable deployment files appear as unmapped owners in the engine
+view; acceptance requires the exact kernel identity maps and a read-only mount,
+after the host broker attests physical root ownership.
+
+The host launcher provides a fixed mount and environment view. Setup journals,
+broker sockets, provider login homes and host root credentials are absent.
+Engine credentials use host `/run/zeros/engine`, projected as `/run/zeros` in the
+engine. Managed settings have a root-owned source and a read-only projected
+copy. The launcher places its native child in a finite cgroup before bubblewrap
+can fork. Retirement kills and drains the entire cgroup, including detached
+descendants, before another setup session can be admitted.
+
+Process-local `/proc` entries permit child identity mapping for rootless
+containers and browser sandboxes. Procfs remains fully visible: locked child
+mounts make Linux reject a new procfs mount in a nested container PID namespace.
+Global controls retain VM-root ownership, which is unmapped in the engine; its
+namespace capabilities cannot authorize writes to those controls. The native
+launcher checks procfs type and control ownership before entry. Qualification
+checks write denial without changing kernel values, alongside host process
+memory/root-link denial, ancestor namespace denial, locked deployment mounts,
+worker child-namespace creation, and actual private container execution. This
+depends on the exact kernel/user-namespace behavior and must pass on each image;
+it is not permission to disable provider security controls. See the
+[Linux user namespace permission rules](https://man7.org/linux/man-pages/man7/user_namespaces.7.html)
+and [mount visibility checks](https://github.com/torvalds/linux/blob/master/fs/namespace.c).
+
+On kernels with AppArmor's unprivileged-user-namespace restriction, a launcher
+in the initial host user namespace loads the image-owned `zeros-cloud-engine` application profile. It
+grants nested user namespaces only to the fixed, root-executable namespace
+helper and its descendants. The global restriction is never disabled. Hosts
+that require but cannot load this profile fail admission. Inside a provider's
+existing user namespace, outer policy belongs to the provider: the launcher
+does not attempt to replace host policy, and admission still requires the full
+nested engine, worker, and browser qualification. Fixed kernel sysctls may be
+read from root-owned provider FUSE projections with bounded reads; process UID
+maps require real procfs. Only the exact `/sys` and `/sys/fs` sysfs ancestors
+may have an unmapped owner. Writable cgroup controls still require UID 0 and
+cgroup-v2 filesystem identity. Private shared memory
+is a bounded 512 MiB tmpfs inside the engine's memory cgroup.
+
+The one-use image admission and fixed root supervisor remain required. A
+successful identity probe alone does not qualify the engine, agent sandbox,
+container workflow, capture, lifecycle or recovery behavior. Both provider
+artifacts must pass the complete applicable suite before the setup-worker gate
+can open. No root exception has been granted.
 
 ## Exception approval record
 

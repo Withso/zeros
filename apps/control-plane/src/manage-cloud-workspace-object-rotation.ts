@@ -1,3 +1,5 @@
+import {parseDatabaseTarget} from "./database-target.js";
+import {createMigrationPool} from "./db.js";
 // Guarded database-owner utility for retrying one exact terminal object-key
 // rotation failure. The default is a read-only, target-bound plan. Execution
 // requires the same database snapshot plus explicit approval and appends
@@ -98,7 +100,7 @@ export class CloudWorkspaceObjectRotationManagementError extends Error {
 function databaseTarget(databaseUrl: string): URL {
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = parseDatabaseTarget(databaseUrl);
   } catch {
     throw new CloudWorkspaceObjectRotationManagementError(
       "Invalid object-rotation configuration: DATABASE_URL must be a PostgreSQL URL",
@@ -126,6 +128,7 @@ function targetFingerprint(databaseUrl: string, channel: string): string {
         parsed.hostname.toLowerCase(),
         parsed.port || "5432",
         parsed.pathname,
+    decodeURIComponent(parsed.username),
       ].join("\0"),
       "utf8",
     )
@@ -679,7 +682,7 @@ async function runCli(): Promise<void> {
     currentObjectKeyVersion:
       process.env.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION,
   });
-  const pool = new pg.Pool({ connectionString: databaseUrl, max: 1 });
+  const pool = createMigrationPool(databaseUrl, {maxConnections: 1});
   try {
     const result = await manageCloudWorkspaceObjectRotationRetry(pool, request);
     console.log(

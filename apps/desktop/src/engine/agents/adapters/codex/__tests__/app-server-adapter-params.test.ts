@@ -84,6 +84,13 @@ describe("modePolicyFor", () => {
 });
 
 describe("buildThreadStartParams", () => {
+  it("disables provider fallback when a qualification requires the exact model", () => {
+    expect(buildThreadStartParams("/tmp", {
+      OPENAI_MODEL: "gpt-5.6-sol", ZEROS_REQUIRE_EXACT_MODEL: "1",
+    }, "ask")).toMatchObject({ model: "gpt-5.6-sol", allowProviderModelFallback: false });
+    expect(() => buildThreadStartParams("/tmp", { ZEROS_REQUIRE_EXACT_MODEL: "1" }, "ask")).toThrow(/explicit model/i);
+    expect(buildThreadStartParams("/tmp", { OPENAI_MODEL: "gpt-5.6-sol" }, "ask")).not.toHaveProperty("allowProviderModelFallback");
+  });
   it("emits `sandbox` as a plain string mode (SandboxMode wire format)", () => {
     for (const mode of MODES) {
       const params = buildThreadStartParams("/tmp", undefined, mode);

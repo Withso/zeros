@@ -8,6 +8,10 @@ import {
   realpathSync,
 } from "node:fs";
 import path from "node:path";
+import {
+  hasCloudEngineUserNamespace,
+  isCloudDeploymentOwner,
+} from "./cloud-deployment-authority.mjs";
 
 import type {
   CloudWorkerRuntimeConfiguration,
@@ -18,21 +22,16 @@ export const CLOUD_WORKER_CONFIG_PATH = "/etc/zeros/cloud-worker.json";
 const MAX_CONFIG_BYTES = 4 * 1024;
 
 export interface CloudWorkerConfiguration extends CloudWorkerRuntimeConfiguration {
-  readonly version: 1;
+  readonly version: 1 | 2 | 3;
   readonly backend: "cloud-worker";
-  readonly profile: "zeros-cloud-worker-v1";
+  readonly profile: "zeros-cloud-worker-v1" | "zeros-cloud-worker-v2" | "zeros-cloud-worker-v3";
   readonly toolchain: CloudWorkerToolchain;
 }
 
 function parseToolchain(value: unknown): CloudWorkerToolchain | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const record = value as Record<string, unknown>;
-  const expectedKeys = [
-    "bwrap",
-    "node",
-    "setpriv",
-    "supervisor",
-  ];
+  const expectedKeys = ["bwrap", "node", "setpriv", "supervisor"];
   if (Object.keys(record).sort().join("\0") !== expectedKeys.join("\0")) {
     return null;
   }
@@ -76,11 +75,16 @@ export function parseCloudWorkerConfiguration(
     "version",
   ];
   const toolchain = parseToolchain(value.toolchain);
+  const legacy =
+    value.version === 1 && value.profile === "zeros-cloud-worker-v1";
+  const isolated =
+    (value.version === 2 && value.profile === "zeros-cloud-worker-v2") ||
+    (value.version === 3 && value.profile === "zeros-cloud-worker-v3");
   if (
     Object.keys(value).sort().join("\0") !== expectedKeys.join("\0") ||
-    value.version !== 1 ||
+    (!legacy && !isolated) ||
     value.backend !== "cloud-worker" ||
-    value.profile !== "zeros-cloud-worker-v1" ||
+    (isolated && (value.uid !== 10001 || value.gid !== 10001)) ||
     !Number.isInteger(value.uid) ||
     Number(value.uid) <= 0 ||
     Number(value.uid) > 2_147_483_647 ||
@@ -92,9 +96,9 @@ export function parseCloudWorkerConfiguration(
     throw new Error("cloud-worker configuration has an unsupported contract");
   }
   return {
-    version: 1,
+    version: value.version as 1|2|3,
     backend: "cloud-worker",
-    profile: "zeros-cloud-worker-v1",
+    profile: value.profile as CloudWorkerConfiguration["profile"],
     uid: Number(value.uid),
     gid: Number(value.gid),
     toolchain,
@@ -114,7 +118,7 @@ function assertRootControlledPath(
     const isLeaf = cursor === file;
     if (
       stat.isSymbolicLink() ||
-      stat.uid !== 0 ||
+      !isCloudDeploymentOwner(cursor, stat.uid) ||
       (stat.mode & 0o022) !== 0 ||
       (isLeaf
         ? leafKind === "directory"
@@ -155,7 +159,9 @@ export function loadCloudWorkerConfiguration(
       typeof process.geteuid !== "function" ||
       process.geteuid() !== 0
     ) {
-      throw new Error("cloud-worker configuration requires a root Linux engine");
+      throw new Error(
+        "cloud-worker configuration requires a root Linux engine",
+      );
     }
     assertRootControlledPath(file);
     const stat = fstatSync(descriptor);
@@ -174,6 +180,11 @@ export function loadCloudWorkerConfiguration(
     configuration = parseCloudWorkerConfiguration(
       readFileSync(descriptor, "utf8"),
     );
+    if (configuration.version===1?hasCloudEngineUserNamespace():!hasCloudEngineUserNamespace(configuration.version)) {
+      throw new Error(
+        "cloud-worker profile does not match its engine namespace",
+      );
+    }
   } finally {
     closeSync(descriptor);
   }

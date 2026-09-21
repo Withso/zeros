@@ -2,13 +2,13 @@
 
 import { randomBytes } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   existsSync,
+  fchmodSync,
+  fchownSync,
   fsyncSync,
   lstatSync,
   openSync,
-  readFileSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -16,6 +16,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  ensureCloudHostRuntimeDirectory,
+  readCloudHostRuntimeProfile,
+} from "./cloud-runtime-profile.mjs";
 
 const OUTPUT = "/run/zeros/cloud-preview-links.json";
 const MAX_ENCODED_BYTES = 256 * 1024;
@@ -167,12 +171,14 @@ function assertReplaceableOutput(output, expectedUid) {
 
 export function installCloudPreviewLinkPayload(
   encoded,
-  { output = OUTPUT, expectedUid = 0, now = Date.now() } = {},
+  { output = OUTPUT, expectedUid = 0, expectedGid = -1, now = Date.now() } = {},
 ) {
   if (
     !path.isAbsolute(output) ||
     !Number.isInteger(expectedUid) ||
-    expectedUid < 0
+    expectedUid < 0 ||
+    !Number.isInteger(expectedGid) ||
+    expectedGid < -1
   ) {
     throw new Error("cloud preview installer options are invalid");
   }
@@ -189,10 +195,11 @@ export function installCloudPreviewLinkPayload(
   try {
     descriptor = openSync(temporary, "wx", 0o600);
     writeFileSync(descriptor, serialized, { encoding: "utf8" });
+    fchownSync(descriptor, expectedUid, expectedGid);
+    fchmodSync(descriptor, 0o600);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
-    chmodSync(temporary, 0o600);
     renameSync(temporary, output);
     const directoryDescriptor = openSync(directory, "r");
     try {
@@ -209,7 +216,8 @@ export function installCloudPreviewLinkPayload(
 
 const direct =
   process.argv[1] &&
-  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+  path.resolve(process.argv[1]) ===
+    path.resolve(fileURLToPath(import.meta.url));
 if (direct) {
   const encoded = process.env.ZEROS_CLOUD_PREVIEW_LINKS_B64 ?? "";
   delete process.env.ZEROS_CLOUD_PREVIEW_LINKS_B64;
@@ -217,7 +225,14 @@ if (direct) {
     if (process.platform !== "linux" || process.geteuid?.() !== 0) {
       throw new Error("root Linux coordinator required");
     }
-    installCloudPreviewLinkPayload(encoded);
+    const profile = ensureCloudHostRuntimeDirectory(
+      readCloudHostRuntimeProfile(),
+    );
+    installCloudPreviewLinkPayload(encoded, {
+      output: path.join(profile.runtimeDirectory, "cloud-preview-links.json"),
+      expectedUid: profile.engineUid,
+      expectedGid: profile.engineGid,
+    });
     process.stdout.write("installed cloud preview ingress\n");
   } catch {
     process.stderr.write("cloud preview ingress installation rejected\n");

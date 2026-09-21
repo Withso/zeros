@@ -240,6 +240,7 @@ describe("ZSR host-parity policy builder", () => {
 
       const prepared = await prepare(
         {
+          executionId: "x".repeat(128),
           actor: "agent-code",
           cwd: workspace,
           workspaceRoot: workspace,
@@ -256,8 +257,9 @@ describe("ZSR host-parity policy builder", () => {
       expect(prepared.document.filesystem.allowRead).toContain(state);
       expect(prepared.document.filesystem.allowWrite).toContain(state);
       expect(prepared.document.runtime.allowedUnixSockets).toContain(
-        path.join(state!, "podman.sock"),
+        path.join(prepared.paths.scratch, "podman.sock"),
       );
+      expect(Buffer.byteLength(path.join(prepared.paths.scratch, "podman.sock"))).toBeLessThan(108);
     },
   );
 

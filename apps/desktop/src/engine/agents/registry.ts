@@ -440,6 +440,14 @@ export function bundledRuntimeVersion(agentId: string): string | null {
  *  Typed as `EnrichedRegistryAgent` so it drops cleanly into the
  *  existing wire message; browser-side `BridgeRegistryAgent` is
  *  structurally compatible. */
+/** Public cloud inventory performs no authentication probes, provider calls or
+ * account discovery. Credential availability comes from actor-scoped grants. */
+export function cloudAgentManifest():EnrichedRegistryAgent[] {
+  return AGENT_MANIFEST.map(agent=>({id:agent.id,name:agent.name,version:"",description:agent.description,
+    ...(agent.icon?{icon:agent.icon}:{}),distribution:{},installed:agent.bundledRuntime===true,
+    launchKind:agent.bundledRuntime===true?"binary":"unavailable"}));
+}
+
 export function toBridgeAgents(
   installedBinaries: Set<string>,
   authenticatedAgentIds?: Set<string>,

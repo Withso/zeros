@@ -44,20 +44,27 @@ chat, paths, and processes remain private to its device. See
 
 ## Initial product scope
 
-The Phase 0–5 product permits single-owner Organization cloud workspaces only.
-Personal is permanently device-local and cannot own a `cloud_workspaces` row;
-migrations `0018_deletion_lifecycle.sql` and
-`0053_cloud_workspace_personal_organization_invariant.sql`, together with the
-authorization layer, enforce that boundary. Organization capability metadata is
-necessary but never replaces server-side membership, role, plan, quota,
-repository, provider-connection, and policy authorization. Organization
-membership does not grant access to another member's cloud workspace;
-collaboration is deferred to Phase 6A.
+The current backend milestone supports organization-shared workspaces and
+exact-workspace guest collaboration. Existing private workspaces stay private;
+new shared workspaces admit current organization members as developers. Invited
+guests never acquire organization membership or access to sibling workspaces.
+Personal remains permanently device-local; migrations `0018` and `0053` and
+server authorization enforce that boundary.
 
-For Organization paid admission, Pro Organizations are limited to five
-collaborators and require every collaborator to have Pro; Business/Enterprise
-Organizations require current seat assignments within the purchased limit.
+Pro is an individual subscription. A Pro account may join multiple Pro
+organizations; there is no purchased Pro organization subscription or five-member
+limit. Each actor and the immutable compute sponsor must retain their own current
+authority. One member's lapsed subscription does not disable unrelated members.
+Business/Enterprise subscriptions and purchased seat assignments remain separate.
 WorkOS membership alone never authorizes paid compute.
+
+The pilot admits active `platform_owner` and `developer` staff only. Public
+customer access and billing integration remain disabled. Staff receive explicit,
+audited operating-budget grants; staff status does not mint funds. The workspace
+owner sponsors compute. Editing and agent execution are shared, while invitations,
+workspace deletion and credential administration require owner/admin authority.
+Personal model credentials require explicit delegation, including to other admins.
+A client detach never stops another participant's active execution.
 
 The first supported release should provide:
 
@@ -72,13 +79,13 @@ The first supported release should provide:
 8. an optional per-user/per-device receive-only local replica; and
 9. quotas, audit records, and owner-visible cost/lifecycle information.
 
-The Phase 0–5 non-UI foundations support single-owner Organization cloud
-workspaces and explicit copies to or from local workspaces. “Seamless” remains
-a release claim only after the deferred UI and protected live-provider/macOS
-qualification pass. Phase 6A adds Organization multiplayer, presence, shared
-live chats, assignment, and ownership transfer execution. Native iOS/Android,
-automatic bidirectional file sync, and collaborative source/Design editing
-remain deferred.
+The earlier Phase 0–5 foundation has expanded to the eight backend steps in the
+[implementation roadmap](implementation-roadmap.md). Desktop cloud UI, native
+mobile/Windows clients, active ownership transfer, automatic bidirectional file
+sync and collaborative text editing are separate delivery work. Ordered durable
+streams and device-scoped authority are shared backend contracts. Their presence
+does not qualify an unbuilt client or promise zero network/cold-start latency.
+Release claims require the protected provider and deployment qualification gates.
 
 ## Compatibility
 

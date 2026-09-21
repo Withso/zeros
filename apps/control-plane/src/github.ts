@@ -116,12 +116,8 @@ export function startGithubOauthCleanup(
     running = true;
     try {
       await cleanupExpiredGithubOauth(pool);
-    } catch (error) {
-      console.warn(
-        `[github] OAuth cleanup failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+    } catch {
+      console.warn("[github] OAuth cleanup failed");
     } finally {
       running = false;
     }
@@ -1249,9 +1245,7 @@ export function createGithubPublicRoutes(
         `[github] oauth callback failed (reported as ${kind}): ${
           error instanceof HttpError
             ? `${error.status} ${error.code}`
-            : error instanceof Error
-              ? `${error.name}: ${error.message}`
-              : "unknown error"
+            : "internal"
         }`,
       );
       return c.redirect(

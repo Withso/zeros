@@ -3,6 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { withSystemTx, type Tx } from "./db.js";
+import {assertWorkOSProviderLockHeld,WorkOSProviderLockLostError} from "./workos-provider-lock-context.js";
 import type {
   WorkOSInvitationRecord,
   WorkOSManagementProvider,
@@ -1455,9 +1456,11 @@ export class WorkOSCommandProcessor {
             return renewal;
           };
           const checkpoint = async (): Promise<void> => {
+            assertWorkOSProviderLockHeld();
             if (leaseLost || !(await renew())) {
               throw new WorkOSCommandLeaseLost();
             }
+            assertWorkOSProviderLockHeld();
           };
           const timer = setInterval(() => {
             void renew();
@@ -1468,7 +1471,7 @@ export class WorkOSCommandProcessor {
             await checkpoint();
             await this.complete(command, result);
           } catch (error) {
-            if (error instanceof WorkOSCommandLeaseLost || leaseLost) return;
+            if (error instanceof WorkOSCommandLeaseLost || error instanceof WorkOSProviderLockLostError || leaseLost) return;
             await this.fail(command, error);
           } finally {
             clearInterval(timer);

@@ -8,5 +8,5 @@
  * falls inside this range; new qualifications and omitted environment values
  * always use the current shared protocol below.
  */
-export const CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION = 18 as const;
+export const CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION = 20 as const;
 export const MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION = 2 as const;

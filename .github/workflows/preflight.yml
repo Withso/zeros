@@ -613,7 +613,8 @@ jobs:
     # control plane. Ephemeral per job, so the tests are free to DROP SCHEMA.
     services:
       postgres:
-        image: postgres:16
+        # Match the managed database's qualified major version.
+        image: postgres:18
         env:
           POSTGRES_PASSWORD: postgres
         ports:

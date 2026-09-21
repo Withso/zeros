@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { isCloudDeploymentOwner } from "./cloud-deployment-authority.mjs";
 
 const POLICY_VERSION = 1;
 const COMMAND_VERSION = 6;
@@ -203,7 +204,7 @@ function validateCloudContainerWorker(command, policy, policyPath) {
     typeof worker !== "object" ||
     Array.isArray(worker) ||
     Object.keys(worker).sort().join("\0") !== expectedKeys.join("\0") ||
-    worker.version !== 1 ||
+    ![1, 2].includes(worker.version) ||
     worker.runtime !== "podman"
   ) {
     throw new Error("invalid cloud container-worker descriptor");
@@ -255,7 +256,11 @@ function validateCloudContainerWorker(command, policy, policyPath) {
     );
   }
   if (
-    worker.socket !== path.join(worker.state, "podman.sock") ||
+    worker.socket !==
+      (worker.version === 1
+        ? path.join(worker.state, "podman.sock")
+        : path.join(path.dirname(policyPath), "scratch", "podman.sock")) ||
+    Buffer.byteLength(worker.socket) >= 108 ||
     !policy.runtime.allowedUnixSockets.includes(worker.socket)
   ) {
     throw new Error("cloud container-worker socket is not admitted");
@@ -380,7 +385,7 @@ function trustedRootExecutable(file, label) {
     canonical !== file ||
     !stat.isFile() ||
     stat.isSymbolicLink() ||
-    stat.uid !== 0 ||
+    !isCloudDeploymentOwner(canonical, stat.uid) ||
     (stat.mode & 0o022) !== 0 ||
     (stat.mode & 0o111) === 0
   ) {
@@ -516,7 +521,10 @@ function containedTarget(command) {
   // Platform-specific restrictions belong to SRT's single generated profile.
   // Applying a second sandbox-exec here can be rejected after the outer macOS
   // Seatbelt profile is active.
-  return `${exact} ${targetArgv.map(shellQuote).join(" ")}`;
+  // Namespace entry can fall back to / when its intermediate identity cannot
+  // traverse a worker-owned 0700 directory. Re-enter only after SRT drops to
+  // the final worker identity, and fail closed if that cwd is no longer usable.
+  return `cd -- ${shellQuote(command.cwd)} && exec ${exact} ${targetArgv.map(shellQuote).join(" ")}`;
 }
 
 async function cleanupSandboxRuntime(sandboxManager) {

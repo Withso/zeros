@@ -1,6 +1,9 @@
 import type { SteerOutcome } from "@zeros/protocol/messages";
+import {cloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudCodexImage} from "./cloud-policy";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { FallbackModelSelection } from "../shared/fallback-model-selection";
+import { exactModelFallbackError, requireExplicitModel } from "../shared/exact-model-selection";
 import {
   AccountModelDiscovery,
   type AccountModelState,
@@ -316,6 +319,7 @@ export interface PendingApproval {
 }
 
 export interface CodexSession {
+  exactModelFailure?: Error;
   modelSelection: FallbackModelSelection;
   readonly modelState: AccountModelState;
   zerosSessionId: string;
@@ -1270,6 +1274,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // toast that strands the composer) so the renderer rebuilds + resends.
     const session = this.sessions.get(opts.sessionId);
     if (!session) throw codexDisconnectedFailure();
+    if (session.exactModelFailure) throw session.exactModelFailure;
 
     // Self-heal a send that lands after the app-server child already died
     // (an idle crash, or the narrow window right after a turn completed):
@@ -1420,6 +1425,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
             turnOptions,
           );
       session.activeTurnId = null;
+      if (session.exactModelFailure) throw session.exactModelFailure;
       if (session.cancelRequested || result.status === "cancelled") {
         return cancelledTurn();
       }
@@ -1490,6 +1496,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       };
     } catch (err) {
       session.activeTurnId = null;
+      if (session.exactModelFailure) throw session.exactModelFailure;
       if (session.cancelRequested) return cancelledTurn();
       // The child exited during this turn — but early enough that runTurn
       // REJECTED (the turn/start RPC was cut off by the client close) rather
@@ -1836,7 +1843,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   respondToPermission(opts: {
     permissionId: string;
     response: RequestPermissionResponse;
-  }): void {
+  }): boolean {
     // Find which session owns this permissionId — the linear scan is
     // bounded by active chats (single digits); the per-session Map
     // keeps the lookup itself O(1).
@@ -1844,7 +1851,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       if (
         this.settlePendingApproval(session, opts.permissionId, opts.response)
       ) {
-        return;
+        return true;
       }
     }
     // Unknown permissionId — already responded or session was disposed.
@@ -1852,6 +1859,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     console.log(
       `[codex-app-server] respondToPermission: unknown id ${opts.permissionId}`,
     );
+    return false;
   }
 
   respondToQuestion(opts: {
@@ -2433,6 +2441,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
           const result = await runtime.resumeThread({
             threadId: opts.resumeThreadId,
             cwd: opts.cwd,
+            ...(requireExplicitModel(opts.env, "OPENAI_MODEL") !== null
+              ? { model: opts.env!.OPENAI_MODEL }
+              : {}),
             // Enable the official bundled Browser plugin only when this thread
             // has a conversation-owned native IAB host. Code sessions keep
             // Codex's normal provider capabilities regardless of whether a
@@ -2463,7 +2474,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           const isStaleRollout =
             classified instanceof AgentFailureError &&
             classified.failure.kind === "session-expired";
-          if (!isStaleRollout) throw classified;
+          if (!isStaleRollout||cloudProviderExecution(opts.executionBoundary)) throw classified;
           console.warn(
             `[codex-app-server] thread/resume found no rollout for ` +
               `${opts.resumeThreadId}; auto-starting a fresh thread`,
@@ -2498,6 +2509,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
         providerSessionId = result.providerSessionId ?? result.threadId;
         threadModel = result.model ?? null;
       }
+      const mismatch = exactModelFallbackError(opts.env, "OPENAI_MODEL", threadModel ?? "");
+      if (mismatch) throw mismatch;
     } catch (err) {
       const runtimeFailure = await withRuntimeDisposeFailure(runtime, err);
       await removeSessionDir(zerosSessionId).catch(() => {});
@@ -2560,6 +2573,16 @@ export class CodexAppServerAdapter implements AgentAdapter {
       },
       emit: (notification: SessionNotification) => {
         const update = notification.update;
+        if (session && this.sessions.get(zerosSessionId) === session && update.sessionUpdate === "model_fallback") {
+          const failure = exactModelFallbackError(session.env, "OPENAI_MODEL", update.toModel);
+          if (failure) {
+            session.exactModelFailure ??= failure;
+            void this.cancel({ sessionId: zerosSessionId }).catch(() => undefined);
+            void session.runtime.dispose().catch(() => undefined);
+            this.ctx.emit.onSessionUpdate(this.agentId, notification);
+            return;
+          }
+        }
         if (session && this.sessions.get(zerosSessionId) === session && update.sessionUpdate === "model_fallback" && update.scope === "session" && !update.parentToolId) {
           const adopted = session.modelSelection.adopt(update.toModel, update.fromModel);
           if (adopted) {
@@ -3965,6 +3988,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       }
 
       if (block.type === "image" && typeof block.data === "string") {
+        if(cloudProviderExecution(session.executionBoundary)){
+          out.push(cloudCodexImage(block.data,block.mimeType));
+          continue;
+        }
         if (!imagesDir) {
           const { env } = await ensureSessionDir(session.zerosSessionId);
           imagesDir = path.join(env, "codex", "images");
@@ -4063,6 +4090,7 @@ export function buildThreadStartParams(
   nativeMcpConfig?: CodexThreadStartParams["config"],
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
+  const exact = requireExplicitModel(env, "OPENAI_MODEL");
   const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
   return {
     cwd,
@@ -4076,6 +4104,7 @@ export function buildThreadStartParams(
       ...codexBrowserThreadConfig(browserUse?.kind === "codex-app-server"),
     },
     ...(model ? { model } : {}),
+    ...(exact !== null ? { allowProviderModelFallback: false } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
     approvalPolicy,
   };

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {randomUUID} from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -73,6 +74,8 @@ interface TestEngineInternals {
   sessionChat: Map<string, string>;
   conversationExecution: Map<string, string>;
   conversationBindTokens: Map<string, number>;
+  beginConversationBind(id:string):number;
+  conversationAdmissionSignal(id:string,token:number):AbortSignal;
   sessionWorkspace: Map<string, string>;
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
@@ -157,6 +160,20 @@ function internals(engine: ZerosEngine): TestEngineInternals {
 }
 
 describe("agent session continuity across a local renderer reload", () => {
+  it.each([false,true])("a second cloud device does not supersede command admission (provisional route: %s)",async provisional=>{
+    const engine=new ZerosEngine({root:process.cwd(),port:29880}),state=internals(engine);
+    state.cloudWorker={version:1,backend:"cloud-worker",profile:"zeros-cloud-worker-v1",uid:10001,gid:10001,
+      toolchain:{node:"/usr/bin/node",supervisor:"/opt/zeros/zsr-supervisor.mjs",bwrap:"/usr/bin/bwrap",setpriv:"/usr/bin/setpriv"}};
+    const peer=testClient("second-device","cloud"),client:TransportClient={...peer.client,authorized:()=>true,
+      cloudActor:{sessionId:randomUUID(),deviceId:randomUUID(),role:"developer",fingerprint:"a".repeat(64)}};
+    state.router.register(client);vi.spyOn(state.workspace,"resolveCwd").mockReturnValue(process.cwd());vi.spyOn(state.pty,"isWithinAllowed").mockReturnValue(true);
+    const token=state.beginConversationBind("cloud-chat"),signal=state.conversationAdmissionSignal("cloud-chat",token);
+    const load=vi.spyOn(state.agents,"loadSession");
+    if(provisional){state.sessionChat.set("starting","cloud-chat");state.sessionAgent.set("starting","codex");state.conversationExecution.set("cloud-chat","starting");}
+    await state.handleMessage({type:"AGENT_LOAD_SESSION",id:"observer-load",source:"browser",timestamp:1,agentId:"codex",chatId:"cloud-chat",workspaceId:"workspace",adoptOnly:true},client);
+    expect(signal.aborted).toBe(false);expect(state.conversationBindTokens.get("cloud-chat")).toBe(token);expect(load).not.toHaveBeenCalled();
+    expect(peer.messages).not.toContainEqual(expect.objectContaining({type:"AGENT_SESSION_LOADED"}));
+  });
   it("retains optional questions across normal completion without treating them as a parked turn", () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
     const state = internals(engine);

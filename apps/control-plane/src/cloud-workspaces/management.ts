@@ -3,10 +3,15 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 
 import { audit } from "../audit.js";
-import { HttpError, requireOrganizationMembership, requireOrganizationRole } from "../authz.js";
+import {
+  HttpError,
+  requireOrganizationMembership,
+  requireOrganizationRole,
+} from "../authz.js";
 import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, type Tx } from "../db.js";
-import { authorizeCloudWorkspaceOperation } from "./authorization.js";
+import { authorizeCloudWorkspaceActor, authorizeCloudWorkspaceCleanup } from "./actors.js";
+import { lockCloudWorkspaceScope, authorizeCloudWorkspaceOperation } from "./authorization.js";
 import { enqueueWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { cancelCloudWorkspaceGenerationTransition } from "./generation-transitions.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
@@ -64,7 +69,8 @@ function credentialKey(config: CloudWorkspaceBackendConfig): {
     .filter((value) => Number.isSafeInteger(value) && value > 0)
     .sort((left, right) => right - left);
   const version = versions[0];
-  const key = version === undefined ? undefined : config.providerCredentialKeys[version];
+  const key =
+    version === undefined ? undefined : config.providerCredentialKeys[version];
   if (!version || !key) {
     throw new HttpError(
       503,
@@ -73,6 +79,45 @@ function credentialKey(config: CloudWorkspaceBackendConfig): {
     );
   }
   return { version, key };
+}
+
+/** New connections use the separately configured Daytona endpoint. Rotation
+ * uses the accepted version's endpoint and target: a credential change must
+ * never migrate the connection or send the new key to another provider. */
+function daytonaConnectionTarget(
+  value: { apiUrl: unknown; target: unknown } | null,
+): { apiUrl: string; target: string } {
+  const unavailable = () =>
+    new HttpError(
+      503,
+      "cloud_provider_not_configured",
+      "The customer Daytona endpoint and target are not configured",
+    );
+  if (
+    !value ||
+    typeof value.apiUrl !== "string" ||
+    value.apiUrl.length > 2_048 ||
+    /[\x00-\x20\x7f]/.test(value.apiUrl) ||
+    typeof value.target !== "string" ||
+    !/^[A-Za-z0-9._-]{1,64}$/.test(value.target)
+  )
+    throw unavailable();
+  let url: URL;
+  try {
+    url = new URL(value.apiUrl);
+  } catch {
+    throw unavailable();
+  }
+  if (
+    url.protocol !== "https:" ||
+    !url.hostname ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw unavailable();
+  return { apiUrl: value.apiUrl, target: value.target };
 }
 
 function currentSecretKey(config: CloudWorkspaceBackendConfig): {
@@ -181,7 +226,12 @@ async function organizationAuthority(
     paid: boolean;
   },
 ): Promise<OrganizationAuthority> {
-  await requireOrganizationRole(tx, input.organizationId, input.actorUserId, "admin");
+  await requireOrganizationRole(
+    tx,
+    input.organizationId,
+    input.actorUserId,
+    "admin",
+  );
   const row = (
     await tx.query<{ is_personal: boolean; team_id: string }>(
       `SELECT organization.is_personal, team.id AS team_id
@@ -221,10 +271,14 @@ async function workspaceAuthority(
     actorUserId: string;
     workosEnabled: boolean;
     paid: boolean;
+    capability:"read"|"edit"|"manage";
     lock?: boolean;
   },
 ): Promise<WorkspaceAuthority> {
-  await requireOrganizationMembership(tx, input.organizationId, input.actorUserId);
+  if(!await lockCloudWorkspaceScope(tx,{...input,organizationLock:input.lock?"update":"share",workspaceLock:input.lock?"update":"share"}))
+    throw new HttpError(404,"not_found","Cloud workspace not found");
+  if(input.capability==="manage")await authorizeCloudWorkspaceCleanup(tx,input);
+  else await authorizeCloudWorkspaceActor(tx,{...input,capability:input.capability,allowOwnerDataRecovery:input.capability==="read"});
   const row = (
     await tx.query<{
       id: string;
@@ -242,19 +296,10 @@ async function workspaceAuthority(
               workspace.current_generation, workspace.authority_epoch,
               workspace.status, workspace.desired_state
        FROM cloud_workspaces workspace
-       JOIN cloud_workspace_members member
-         ON member.workspace_id = workspace.id
-        AND member.org_id = workspace.org_id
-        AND member.user_id = $3 AND member.role = 'owner'
-       JOIN team_members team_member
-         ON team_member.team_id = workspace.team_id
-        AND team_member.org_id = workspace.org_id
-        AND team_member.user_id = $3
        WHERE workspace.org_id = $1 AND workspace.id = $2
-         AND workspace.owner_user_id = $3 AND workspace.single_member_mode
          AND workspace.deleted_at IS NULL
        ${input.lock ? "FOR UPDATE OF workspace" : ""}`,
-      [input.organizationId, input.workspaceId, input.actorUserId],
+      [input.organizationId, input.workspaceId],
     )
   ).rows[0];
   if (!row) throw new HttpError(404, "not_found", "Cloud workspace not found");
@@ -262,7 +307,7 @@ async function workspaceAuthority(
     await authorizeCloudWorkspaceOperation(tx, {
       organizationId: input.organizationId,
       teamId: row.team_id,
-      actorUserId: input.actorUserId,
+      actorUserId: row.owner_user_id,
       billingOwnerUserId: row.owner_user_id,
       workosEnabled: input.workosEnabled,
       requireWorkspaceOwner: true,
@@ -316,10 +361,7 @@ async function scheduleSecurityStops(
   input: {
     organizationId: string;
     actorUserId: string;
-    resourceKind:
-      | "provider_connection"
-      | "secret_binding"
-      | "managed_policy";
+    resourceKind: "provider_connection" | "secret_binding" | "managed_policy";
     resourceId: string;
     workspaceIds: readonly string[];
   },
@@ -517,7 +559,11 @@ export class DatabaseCloudWorkspaceManagementService {
     try {
       normalized = normalizeCloudWorkspaceSettingsDocument(input.document);
     } catch {
-      throw new HttpError(422, "cloud_settings_invalid", "Cloud settings document is invalid");
+      throw new HttpError(
+        422,
+        "cloud_settings_invalid",
+        "Cloud settings document is invalid",
+      );
     }
     return withSystemTx(this.pool, async (tx) => {
       await organizationAuthority(tx, {
@@ -557,7 +603,11 @@ export class DatabaseCloudWorkspaceManagementService {
         : 0;
       if (currentVersion !== input.expectedVersion) {
         if (current && jsonEqual(current.document, normalized.canonicalJson)) {
-          return { version: currentVersion, sha256: current.sha256, replayed: true };
+          return {
+            version: currentVersion,
+            sha256: current.sha256,
+            replayed: true,
+          };
         }
         throw new HttpError(
           409,
@@ -567,7 +617,11 @@ export class DatabaseCloudWorkspaceManagementService {
         );
       }
       if (current && jsonEqual(current.document, normalized.canonicalJson)) {
-        return { version: currentVersion, sha256: current.sha256, replayed: true };
+        return {
+          version: currentVersion,
+          sha256: current.sha256,
+          replayed: true,
+        };
       }
       const version = currentVersion + 1;
       const inserted = await tx.query<{ sha256: string }>(
@@ -593,19 +647,29 @@ export class DatabaseCloudWorkspaceManagementService {
          SET current_version = EXCLUDED.current_version, updated_at = now()`,
         [input.organizationId, input.repositoryId, input.scope, version],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.repository_settings_updated", {
-        repositoryId: input.repositoryId,
-        scope: input.scope,
-        version,
-        sha256: inserted.rows[0]!.sha256,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.repository_settings_updated",
+        {
+          repositoryId: input.repositoryId,
+          scope: input.scope,
+          version,
+          sha256: inserted.rows[0]!.sha256,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.repository_updated",
         aggregateKey: `repository-settings:${input.repositoryId}:${input.scope}`,
         revision: version,
         idempotencyKey: `repository-settings:${input.repositoryId}:${input.scope}:${version}`,
-        payload: { repositoryId: input.repositoryId, scope: input.scope, version },
+        payload: {
+          repositoryId: input.repositoryId,
+          scope: input.scope,
+          version,
+        },
       });
       return { version, sha256: inserted.rows[0]!.sha256, replayed: false };
     });
@@ -683,7 +747,11 @@ export class DatabaseCloudWorkspaceManagementService {
     try {
       normalized = normalizeCloudWorkspaceSettingsDocument(input.document);
     } catch {
-      throw new HttpError(422, "cloud_settings_invalid", "Environment profile is invalid");
+      throw new HttpError(
+        422,
+        "cloud_settings_invalid",
+        "Environment profile is invalid",
+      );
     }
     if (
       input.placement === "local" &&
@@ -738,7 +806,11 @@ export class DatabaseCloudWorkspaceManagementService {
           existing.is_default === input.isDefault &&
           jsonEqual(existing.document, normalized.canonicalJson);
         if (!exact) {
-          throw new HttpError(409, "cloud_profile_identity_conflict", "Environment profile identity is already in use");
+          throw new HttpError(
+            409,
+            "cloud_profile_identity_conflict",
+            "Environment profile identity is already in use",
+          );
         }
         return {
           profile: {
@@ -747,7 +819,10 @@ export class DatabaseCloudWorkspaceManagementService {
             name: input.name,
             placement: input.placement,
             isDefault: input.isDefault,
-            version: safeVersion(existing.current_version, "environment profile"),
+            version: safeVersion(
+              existing.current_version,
+              "environment profile",
+            ),
             document: existing.document,
             sha256: existing.sha256,
           },
@@ -788,22 +863,38 @@ export class DatabaseCloudWorkspaceManagementService {
            profile_id, org_id, version, schema_version, document, created_by
          ) VALUES ($1, $2, 1, 1, $3::jsonb, $4)
          RETURNING encode(document_sha256, 'hex') AS sha256`,
-        [input.id, input.organizationId, normalized.canonicalJson, input.actorUserId],
+        [
+          input.id,
+          input.organizationId,
+          normalized.canonicalJson,
+          input.actorUserId,
+        ],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.environment_profile_created", {
-        profileId: input.id,
-        ownerKind,
-        placement: input.placement,
-        isDefault: input.isDefault,
-        version: 1,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.environment_profile_created",
+        {
+          profileId: input.id,
+          ownerKind,
+          placement: input.placement,
+          isDefault: input.isDefault,
+          version: 1,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.environment_profile_created",
         aggregateKey: `environment-profile:${input.id}`,
         revision: 1,
         idempotencyKey: `environment-profile:${input.id}:1`,
-        payload: { profileId: input.id, ownerKind, placement: input.placement, version: 1 },
+        payload: {
+          profileId: input.id,
+          ownerKind,
+          placement: input.placement,
+          version: 1,
+        },
       });
       return {
         profile: {
@@ -838,7 +929,11 @@ export class DatabaseCloudWorkspaceManagementService {
       try {
         normalized = normalizeCloudWorkspaceSettingsDocument(input.document);
       } catch {
-        throw new HttpError(422, "cloud_settings_invalid", "Environment profile is invalid");
+        throw new HttpError(
+          422,
+          "cloud_settings_invalid",
+          "Environment profile is invalid",
+        );
       }
     }
     return withSystemTx(this.pool, async (tx) => {
@@ -874,16 +969,27 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, ownerKind, ownerUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Environment profile not found");
-      const currentVersion = safeVersion(row.current_version, "environment profile");
+      if (!row)
+        throw new HttpError(404, "not_found", "Environment profile not found");
+      const currentVersion = safeVersion(
+        row.current_version,
+        "environment profile",
+      );
       const name = input.name ?? row.name;
       const placement = input.placement ?? row.placement;
       const isDefault = input.isDefault ?? row.is_default;
-      const document = normalized?.canonicalJson ?? JSON.stringify(row.document);
+      const document =
+        normalized?.canonicalJson ?? JSON.stringify(row.document);
       if (
         placement === "local" &&
-        ((normalized?.document ?? (row.document as CloudWorkspaceSettingsDocument)).secretRefs ||
-          (normalized?.document ?? (row.document as CloudWorkspaceSettingsDocument)).setupCommands)
+        ((
+          normalized?.document ??
+          (row.document as CloudWorkspaceSettingsDocument)
+        ).secretRefs ||
+          (
+            normalized?.document ??
+            (row.document as CloudWorkspaceSettingsDocument)
+          ).setupCommands)
       ) {
         throw new HttpError(
           422,
@@ -964,13 +1070,19 @@ export class DatabaseCloudWorkspaceManagementService {
          WHERE id = $1 AND org_id = $2`,
         [input.id, input.organizationId, name, placement, isDefault, version],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.environment_profile_updated", {
-        profileId: input.id,
-        ownerKind,
-        placement,
-        isDefault,
-        version,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.environment_profile_updated",
+        {
+          profileId: input.id,
+          ownerKind,
+          placement,
+          isDefault,
+          version,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.environment_profile_updated",
@@ -1023,9 +1135,14 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, ownerKind, ownerUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Environment profile not found");
-      const currentVersion = safeVersion(row.current_version, "environment profile");
-      if (row.deleted_at) return { id: input.id, deleted: true, replayed: true };
+      if (!row)
+        throw new HttpError(404, "not_found", "Environment profile not found");
+      const currentVersion = safeVersion(
+        row.current_version,
+        "environment profile",
+      );
+      if (row.deleted_at)
+        return { id: input.id, deleted: true, replayed: true };
       if (currentVersion !== input.expectedVersion) {
         throw new HttpError(
           409,
@@ -1040,10 +1157,16 @@ export class DatabaseCloudWorkspaceManagementService {
          WHERE id = $1`,
         [input.id],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.environment_profile_deleted", {
-        profileId: input.id,
-        version: currentVersion,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.environment_profile_deleted",
+        {
+          profileId: input.id,
+          version: currentVersion,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.environment_profile_deleted",
@@ -1067,7 +1190,11 @@ export class DatabaseCloudWorkspaceManagementService {
         paid: false,
       });
       if (authority.isPersonal) {
-        throw new HttpError(404, "not_found", "Organization cloud policy not found");
+        throw new HttpError(
+          404,
+          "not_found",
+          "Organization cloud policy not found",
+        );
       }
       const row = (
         await tx.query<{
@@ -1114,7 +1241,11 @@ export class DatabaseCloudWorkspaceManagementService {
     try {
       normalized = normalizeCloudWorkspaceSettingsDocument(input.document);
     } catch {
-      throw new HttpError(422, "cloud_settings_invalid", "Organization cloud policy is invalid");
+      throw new HttpError(
+        422,
+        "cloud_settings_invalid",
+        "Organization cloud policy is invalid",
+      );
     }
     return withSystemTx(this.pool, async (tx) => {
       const authority = await organizationAuthority(tx, {
@@ -1123,9 +1254,18 @@ export class DatabaseCloudWorkspaceManagementService {
         paid: false,
       });
       if (authority.isPersonal) {
-        throw new HttpError(404, "not_found", "Organization cloud policy not found");
+        throw new HttpError(
+          404,
+          "not_found",
+          "Organization cloud policy not found",
+        );
       }
-      await requireOrganizationRole(tx, input.organizationId, input.actorUserId, "owner");
+      await requireOrganizationRole(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "owner",
+      );
       // Workspace creation/replacement takes the same organization lock before
       // resolving settings. This prevents a generation from pinning the old
       // head after the retirement trigger has already scanned it.
@@ -1190,7 +1330,12 @@ export class DatabaseCloudWorkspaceManagementService {
            org_id, version, schema_version, document, created_by
          ) VALUES ($1, $2, 1, $3::jsonb, $4)
          RETURNING document, encode(document_sha256, 'hex') AS sha256`,
-        [input.organizationId, version, normalized.canonicalJson, input.actorUserId],
+        [
+          input.organizationId,
+          version,
+          normalized.canonicalJson,
+          input.actorUserId,
+        ],
       );
       const affected = await tx.query<{ workspace_id: string }>(
         `SELECT workspace.id AS workspace_id
@@ -1219,11 +1364,17 @@ export class DatabaseCloudWorkspaceManagementService {
          SET current_version = EXCLUDED.current_version, updated_at = now()`,
         [input.organizationId, version],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.organization_policy_updated", {
-        version,
-        sha256: inserted.rows[0]!.sha256,
-        stoppedWorkspaceIds,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.organization_policy_updated",
+        {
+          version,
+          sha256: inserted.rows[0]!.sha256,
+          stoppedWorkspaceIds,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.organization_policy_updated",
@@ -1255,7 +1406,11 @@ export class DatabaseCloudWorkspaceManagementService {
         paid: false,
       });
       if (authority.isPersonal) {
-        throw new HttpError(404, "not_found", "Profile inheritance is not available");
+        throw new HttpError(
+          404,
+          "not_found",
+          "Profile inheritance is not available",
+        );
       }
       const rows = await tx.query<{
         id: string;
@@ -1278,7 +1433,10 @@ export class DatabaseCloudWorkspaceManagementService {
         consents: rows.rows.map((row) => ({
           id: row.id,
           personalProfileId: row.personal_profile_id,
-          personalProfileVersion: safeVersion(row.personal_profile_version, "profile consent"),
+          personalProfileVersion: safeVersion(
+            row.personal_profile_version,
+            "profile consent",
+          ),
           allowedPaths: row.allowed_paths,
           state: row.state,
           consentedAt: iso(row.consented_at),
@@ -1300,11 +1458,22 @@ export class DatabaseCloudWorkspaceManagementService {
   }): Promise<{ consent: Record<string, unknown>; replayed: boolean }> {
     const paths = [...new Set(input.allowedPaths)].sort();
     if (paths.length < 1 || paths.length !== input.allowedPaths.length) {
-      throw new HttpError(422, "cloud_profile_consent_invalid", "Inheritance paths must be unique");
+      throw new HttpError(
+        422,
+        "cloud_profile_consent_invalid",
+        "Inheritance paths must be unique",
+      );
     }
     const expiry = input.expiresAt ? new Date(input.expiresAt) : null;
-    if (expiry && (!Number.isFinite(expiry.getTime()) || expiry.getTime() <= Date.now())) {
-      throw new HttpError(422, "cloud_profile_consent_invalid", "Inheritance consent expiry must be in the future");
+    if (
+      expiry &&
+      (!Number.isFinite(expiry.getTime()) || expiry.getTime() <= Date.now())
+    ) {
+      throw new HttpError(
+        422,
+        "cloud_profile_consent_invalid",
+        "Inheritance consent expiry must be in the future",
+      );
     }
     return withSystemTx(this.pool, async (tx) => {
       const authority = await organizationAuthority(tx, {
@@ -1313,7 +1482,11 @@ export class DatabaseCloudWorkspaceManagementService {
         paid: false,
       });
       if (authority.isPersonal) {
-        throw new HttpError(404, "not_found", "Profile inheritance is not available");
+        throw new HttpError(
+          404,
+          "not_found",
+          "Profile inheritance is not available",
+        );
       }
       const profile = (
         await tx.query<{ document: unknown }>(
@@ -1329,16 +1502,28 @@ export class DatabaseCloudWorkspaceManagementService {
              AND profile.owner_user_id = $2
              AND profile.placement IN ('cloud', 'both')
              AND profile.deleted_at IS NULL AND version.version = $3`,
-          [input.personalProfileId, input.actorUserId, input.personalProfileVersion],
+          [
+            input.personalProfileId,
+            input.actorUserId,
+            input.personalProfileVersion,
+          ],
         )
       ).rows[0];
       if (!profile) {
-        throw new HttpError(404, "not_found", "Personal environment profile not found");
+        throw new HttpError(
+          404,
+          "not_found",
+          "Personal environment profile not found",
+        );
       }
       try {
         filterCloudWorkspaceSettingsByAllowedPaths(profile.document, paths);
       } catch {
-        throw new HttpError(422, "cloud_profile_consent_invalid", "Inheritance paths are invalid");
+        throw new HttpError(
+          422,
+          "cloud_profile_consent_invalid",
+          "Inheritance paths are invalid",
+        );
       }
       const existing = (
         await tx.query<{
@@ -1362,12 +1547,17 @@ export class DatabaseCloudWorkspaceManagementService {
           existing.org_id === input.organizationId &&
           existing.user_id === input.actorUserId &&
           existing.personal_profile_id === input.personalProfileId &&
-          safeVersion(existing.personal_profile_version, "profile consent") === input.personalProfileVersion &&
+          safeVersion(existing.personal_profile_version, "profile consent") ===
+            input.personalProfileVersion &&
           stableJson(existing.allowed_paths) === stableJson(paths) &&
           existing.state === "active" &&
           iso(existing.expires_at) === (expiry ? expiry.toISOString() : null);
         if (!exact) {
-          throw new HttpError(409, "cloud_profile_consent_conflict", "Inheritance consent identity is already in use");
+          throw new HttpError(
+            409,
+            "cloud_profile_consent_conflict",
+            "Inheritance consent identity is already in use",
+          );
         }
         return {
           consent: {
@@ -1392,7 +1582,10 @@ export class DatabaseCloudWorkspaceManagementService {
            AND (expires_at IS NULL OR expires_at > now())`,
         [input.organizationId, input.actorUserId, input.personalProfileId],
       );
-      const activeCount = safeVersion(active.rows[0]?.count ?? 0, "profile consent count");
+      const activeCount = safeVersion(
+        active.rows[0]?.count ?? 0,
+        "profile consent count",
+      );
       if (active.rows[0]?.same_profile) {
         throw new HttpError(
           409,
@@ -1425,24 +1618,38 @@ export class DatabaseCloudWorkspaceManagementService {
         );
       } catch (error) {
         if ((error as { code?: string }).code === "23505") {
-          throw new HttpError(409, "cloud_profile_consent_exists", "This profile version already has an inheritance consent");
+          throw new HttpError(
+            409,
+            "cloud_profile_consent_exists",
+            "This profile version already has an inheritance consent",
+          );
         }
         throw error;
       }
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.personal_profile_consent_created", {
-        consentId: input.id,
-        personalProfileId: input.personalProfileId,
-        personalProfileVersion: input.personalProfileVersion,
-        allowedPaths: paths,
-        expiresAt: expiry?.toISOString() ?? null,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.personal_profile_consent_created",
+        {
+          consentId: input.id,
+          personalProfileId: input.personalProfileId,
+          personalProfileVersion: input.personalProfileVersion,
+          allowedPaths: paths,
+          expiresAt: expiry?.toISOString() ?? null,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.personal_profile_consent_created",
         aggregateKey: `personal-profile-consent:${input.id}`,
         revision: 1,
         idempotencyKey: `personal-profile-consent:${input.id}:1`,
-        payload: { consentId: input.id, personalProfileId: input.personalProfileId, personalProfileVersion: input.personalProfileVersion },
+        payload: {
+          consentId: input.id,
+          personalProfileId: input.personalProfileId,
+          personalProfileVersion: input.personalProfileVersion,
+        },
       });
       return {
         consent: {
@@ -1462,7 +1669,10 @@ export class DatabaseCloudWorkspaceManagementService {
     id: string;
     organizationId: string;
     actorUserId: string;
-  }): Promise<{ consent: { id: string; state: "revoked" }; replayed: boolean }> {
+  }): Promise<{
+    consent: { id: string; state: "revoked" };
+    replayed: boolean;
+  }> {
     return withSystemTx(this.pool, async (tx) => {
       const authority = await organizationAuthority(tx, {
         ...input,
@@ -1470,7 +1680,11 @@ export class DatabaseCloudWorkspaceManagementService {
         paid: false,
       });
       if (authority.isPersonal) {
-        throw new HttpError(404, "not_found", "Profile inheritance is not available");
+        throw new HttpError(
+          404,
+          "not_found",
+          "Profile inheritance is not available",
+        );
       }
       const row = (
         await tx.query<{ state: string }>(
@@ -1479,7 +1693,8 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, input.actorUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Inheritance consent not found");
+      if (!row)
+        throw new HttpError(404, "not_found", "Inheritance consent not found");
       if (row.state === "revoked") {
         return { consent: { id: input.id, state: "revoked" }, replayed: true };
       }
@@ -1489,9 +1704,15 @@ export class DatabaseCloudWorkspaceManagementService {
          WHERE id = $1`,
         [input.id],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.personal_profile_consent_revoked", {
-        consentId: input.id,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.personal_profile_consent_revoked",
+        {
+          consentId: input.id,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.personal_profile_consent_revoked",
@@ -1621,7 +1842,11 @@ export class DatabaseCloudWorkspaceManagementService {
             this.config,
           );
         if (!exact) {
-          throw new HttpError(409, "cloud_secret_identity_conflict", "Secret binding identity is already in use");
+          throw new HttpError(
+            409,
+            "cloud_secret_identity_conflict",
+            "Secret binding identity is already in use",
+          );
         }
         return {
           binding: {
@@ -1648,7 +1873,11 @@ export class DatabaseCloudWorkspaceManagementService {
           secretKey.key,
         );
       } catch {
-        throw new HttpError(422, "cloud_secret_invalid", "Secret binding input is invalid");
+        throw new HttpError(
+          422,
+          "cloud_secret_invalid",
+          "Secret binding input is invalid",
+        );
       }
       await tx.query(
         `INSERT INTO secret_bindings (
@@ -1681,21 +1910,33 @@ export class DatabaseCloudWorkspaceManagementService {
           input.actorUserId,
         ],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.secret_binding_created", {
-        bindingId: input.id,
-        ownerKind,
-        name: input.name,
-        purpose: input.purpose,
-        placement: input.placement,
-        version: 1,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.secret_binding_created",
+        {
+          bindingId: input.id,
+          ownerKind,
+          name: input.name,
+          purpose: input.purpose,
+          placement: input.placement,
+          version: 1,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.secret_binding_created",
         aggregateKey: `secret-binding:${input.id}`,
         revision: 1,
         idempotencyKey: `secret-binding:${input.id}:1`,
-        payload: { bindingId: input.id, ownerKind, purpose: input.purpose, placement: input.placement, version: 1 },
+        payload: {
+          bindingId: input.id,
+          ownerKind,
+          purpose: input.purpose,
+          placement: input.placement,
+          version: 1,
+        },
       });
       return {
         binding: {
@@ -1761,9 +2002,14 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, ownerKind, ownerUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Secret binding not found");
+      if (!row)
+        throw new HttpError(404, "not_found", "Secret binding not found");
       if (row.state !== "active") {
-        throw new HttpError(409, "cloud_secret_revoked", "Secret binding is revoked");
+        throw new HttpError(
+          409,
+          "cloud_secret_revoked",
+          "Secret binding is revoked",
+        );
       }
       const currentVersion = safeVersion(row.current_version, "secret binding");
       const activeUses = Number(
@@ -1830,7 +2076,11 @@ export class DatabaseCloudWorkspaceManagementService {
           secretKey.key,
         );
       } catch {
-        throw new HttpError(422, "cloud_secret_invalid", "Secret binding input is invalid");
+        throw new HttpError(
+          422,
+          "cloud_secret_invalid",
+          "Secret binding input is invalid",
+        );
       }
       await tx.query(
         `INSERT INTO secret_binding_versions (
@@ -1863,19 +2113,30 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, currentVersion],
         );
       }
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.secret_binding_rotated", {
-        bindingId: input.id,
-        previousVersion: currentVersion,
-        version,
-        generationsUsingPreviousVersion: activeUses,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.secret_binding_rotated",
+        {
+          bindingId: input.id,
+          previousVersion: currentVersion,
+          version,
+          generationsUsingPreviousVersion: activeUses,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.secret_binding_rotated",
         aggregateKey: `secret-binding:${input.id}`,
         revision: version,
         idempotencyKey: `secret-binding:${input.id}:${version}`,
-        payload: { bindingId: input.id, previousVersion: currentVersion, version, generationsUsingPreviousVersion: activeUses },
+        payload: {
+          bindingId: input.id,
+          previousVersion: currentVersion,
+          version,
+          generationsUsingPreviousVersion: activeUses,
+        },
       });
       return {
         binding: {
@@ -1924,7 +2185,8 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, ownerKind, ownerUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Secret binding not found");
+      if (!row)
+        throw new HttpError(404, "not_found", "Secret binding not found");
       const version = safeVersion(row.current_version, "secret binding");
       if (row.state === "revoked") {
         return {
@@ -1965,11 +2227,17 @@ export class DatabaseCloudWorkspaceManagementService {
          WHERE id = $1 AND org_id = $2 AND state = 'active'`,
         [input.id, input.organizationId],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.secret_binding_revoked", {
-        bindingId: input.id,
-        version,
-        stoppedWorkspaceIds,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.secret_binding_revoked",
+        {
+          bindingId: input.id,
+          version,
+          stoppedWorkspaceIds,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_settings.secret_binding_revoked",
@@ -2024,7 +2292,9 @@ export class DatabaseCloudWorkspaceManagementService {
         [input.organizationId, input.actorUserId],
       );
       return {
-        connections: rows.rows.map((row) => this.providerConnectionDocument(row)),
+        connections: rows.rows.map((row) =>
+          this.providerConnectionDocument(row),
+        ),
       };
     });
   }
@@ -2067,9 +2337,15 @@ export class DatabaseCloudWorkspaceManagementService {
             ? capabilities.credentialExpiresAt
             : null,
       },
-      ...(row.created_at !== undefined ? { createdAt: iso(row.created_at) } : {}),
-      ...(row.updated_at !== undefined ? { updatedAt: iso(row.updated_at) } : {}),
-      ...(row.revoked_at !== undefined ? { revokedAt: iso(row.revoked_at) } : {}),
+      ...(row.created_at !== undefined
+        ? { createdAt: iso(row.created_at) }
+        : {}),
+      ...(row.updated_at !== undefined
+        ? { updatedAt: iso(row.updated_at) }
+        : {}),
+      ...(row.revoked_at !== undefined
+        ? { revokedAt: iso(row.revoked_at) }
+        : {}),
     };
   }
 
@@ -2081,7 +2357,10 @@ export class DatabaseCloudWorkspaceManagementService {
       ownerKind: "user" | "organization";
       paid: boolean;
     },
-  ): Promise<{ ownerKind: "user" | "organization"; ownerUserId: string | null }> {
+  ): Promise<{
+    ownerKind: "user" | "organization";
+    ownerUserId: string | null;
+  }> {
     const authority = await organizationAuthority(tx, {
       ...input,
       workosEnabled: this.options.workosEnabled,
@@ -2154,7 +2433,11 @@ export class DatabaseCloudWorkspaceManagementService {
         existing.credential_sha256 !== null &&
         same(existing.credential_sha256, digest);
       if (!exact) {
-        throw new HttpError(409, "cloud_provider_identity_conflict", "Provider connection identity is already in use");
+        throw new HttpError(
+          409,
+          "cloud_provider_identity_conflict",
+          "Provider connection identity is already in use",
+        );
       }
       return { owner, existing };
     });
@@ -2164,13 +2447,16 @@ export class DatabaseCloudWorkspaceManagementService {
         replayed: true,
       };
     }
-
+    const target = daytonaConnectionTarget(
+      this.config.daytonaConnection ??
+        (this.config.provider === "daytona" ? this.config : null),
+    );
     let qualification;
     try {
       qualification = await this.qualifier().qualify({
         apiKey: input.apiKey,
-        apiUrl: this.config.apiUrl,
-        target: this.config.target,
+        apiUrl: target.apiUrl,
+        target: target.target,
       });
     } catch (error) {
       if (error instanceof CloudProviderQualificationError) {
@@ -2240,7 +2526,11 @@ export class DatabaseCloudWorkspaceManagementService {
             replayed: true,
           };
         }
-        throw new HttpError(409, "cloud_provider_identity_conflict", "Provider connection identity is already in use");
+        throw new HttpError(
+          409,
+          "cloud_provider_identity_conflict",
+          "Provider connection identity is already in use",
+        );
       }
       const sealed = sealCloudProviderCredential(
         input.apiKey,
@@ -2249,7 +2539,7 @@ export class DatabaseCloudWorkspaceManagementService {
           organizationId: input.organizationId,
           version: 1,
           provider: "daytona",
-          endpoint: this.config.apiUrl,
+          endpoint: target.apiUrl,
         },
         storedKey.key,
       );
@@ -2266,7 +2556,7 @@ export class DatabaseCloudWorkspaceManagementService {
           owner.ownerUserId,
           input.displayName,
           JSON.stringify(capabilities),
-          this.config.target,
+          target.target,
         ],
       );
       await tx.query(
@@ -2281,7 +2571,7 @@ export class DatabaseCloudWorkspaceManagementService {
         [
           input.id,
           input.organizationId,
-          this.config.apiUrl,
+          target.apiUrl,
           storedKey.version,
           sealed.nonce,
           sealed.ciphertext,
@@ -2292,20 +2582,31 @@ export class DatabaseCloudWorkspaceManagementService {
           input.actorUserId,
         ],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.provider_connection_created", {
-        providerConnectionId: input.id,
-        ownerKind: owner.ownerKind,
-        provider: "daytona",
-        version: 1,
-        credentialExpiresAt: qualification.credentialExpiresAt,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.provider_connection_created",
+        {
+          providerConnectionId: input.id,
+          ownerKind: owner.ownerKind,
+          provider: "daytona",
+          version: 1,
+          credentialExpiresAt: qualification.credentialExpiresAt,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_provider.connection_created",
         aggregateKey: `provider-connection:${input.id}`,
         revision: 1,
         idempotencyKey: `provider-connection:${input.id}:1`,
-        payload: { providerConnectionId: input.id, ownerKind: owner.ownerKind, provider: "daytona", version: 1 },
+        payload: {
+          providerConnectionId: input.id,
+          ownerKind: owner.ownerKind,
+          provider: "daytona",
+          version: 1,
+        },
       });
       return {
         connection: this.providerConnectionDocument({
@@ -2318,7 +2619,7 @@ export class DatabaseCloudWorkspaceManagementService {
           current_version: 1,
           state: "active",
           capabilities,
-          region: this.config.target,
+          region: target.target,
         }),
         replayed: false,
       };
@@ -2355,12 +2656,13 @@ export class DatabaseCloudWorkspaceManagementService {
           capabilities: Record<string, unknown>;
           region: string | null;
           credential_sha256: Buffer | null;
+          endpoint: string;
         }>(
           `SELECT connection.owner_kind, connection.owner_user_id,
                   connection.display_name, connection.credential_source,
                   connection.current_version, connection.state,
                   connection.capabilities, connection.region,
-                  version.credential_sha256
+                  version.credential_sha256, version.endpoint
            FROM provider_connections connection
            JOIN provider_connection_versions version
              ON version.connection_id = connection.id
@@ -2377,12 +2679,21 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, input.actorUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Provider connection not found");
+      if (!row)
+        throw new HttpError(404, "not_found", "Provider connection not found");
       if (row.credential_source !== "delegated") {
-        throw new HttpError(409, "cloud_provider_managed", "Hosted provider credentials are operator-managed");
+        throw new HttpError(
+          409,
+          "cloud_provider_managed",
+          "Hosted provider credentials are operator-managed",
+        );
       }
       if (row.state !== "active") {
-        throw new HttpError(409, "cloud_provider_revoked", "Provider connection is not active");
+        throw new HttpError(
+          409,
+          "cloud_provider_revoked",
+          "Provider connection is not active",
+        );
       }
       const version = safeVersion(row.current_version, "provider connection");
       const uses = Number(
@@ -2427,12 +2738,16 @@ export class DatabaseCloudWorkspaceManagementService {
         generationsUsingPreviousVersion: preflight.uses,
       };
     }
+    const target = daytonaConnectionTarget({
+      apiUrl: preflight.row.endpoint,
+      target: preflight.row.capabilities.daytonaTarget ?? preflight.row.region,
+    });
     let qualification;
     try {
       qualification = await this.qualifier().qualify({
         apiKey: input.apiKey,
-        apiUrl: this.config.apiUrl,
-        target: this.config.target,
+        apiUrl: target.apiUrl,
+        target: target.target,
       });
     } catch (error) {
       if (error instanceof CloudProviderQualificationError) {
@@ -2460,6 +2775,7 @@ export class DatabaseCloudWorkspaceManagementService {
                   state, capabilities, region
            FROM provider_connections
            WHERE id = $1 AND org_id = $2 AND credential_source = 'delegated'
+             AND provider = 'daytona'
              AND (
                (owner_kind = 'organization' AND owner_user_id IS NULL)
                OR (owner_kind = 'user' AND owner_user_id = $3)
@@ -2468,11 +2784,19 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, input.actorUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Provider connection not found");
+      if (!row)
+        throw new HttpError(404, "not_found", "Provider connection not found");
       if (row.state !== "active") {
-        throw new HttpError(409, "cloud_provider_revoked", "Provider connection is not active");
+        throw new HttpError(
+          409,
+          "cloud_provider_revoked",
+          "Provider connection is not active",
+        );
       }
-      const currentVersion = safeVersion(row.current_version, "provider connection");
+      const currentVersion = safeVersion(
+        row.current_version,
+        "provider connection",
+      );
       if (currentVersion !== input.expectedVersion) {
         const currentHash = (
           await tx.query<{ credential_sha256: Buffer | null }>(
@@ -2525,7 +2849,7 @@ export class DatabaseCloudWorkspaceManagementService {
           organizationId: input.organizationId,
           version,
           provider: "daytona",
-          endpoint: this.config.apiUrl,
+          endpoint: target.apiUrl,
         },
         storedKey.key,
       );
@@ -2546,7 +2870,7 @@ export class DatabaseCloudWorkspaceManagementService {
           input.id,
           input.organizationId,
           version,
-          this.config.apiUrl,
+          target.apiUrl,
           storedKey.version,
           sealed.nonce,
           sealed.ciphertext,
@@ -2562,7 +2886,13 @@ export class DatabaseCloudWorkspaceManagementService {
          SET current_version = $3, capabilities = $4::jsonb,
              region = $5, updated_at = now()
          WHERE id = $1 AND org_id = $2`,
-        [input.id, input.organizationId, version, JSON.stringify(capabilities), this.config.target],
+        [
+          input.id,
+          input.organizationId,
+          version,
+          JSON.stringify(capabilities),
+          target.target,
+        ],
       );
       const uses = Number(
         (
@@ -2583,20 +2913,31 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, currentVersion],
         );
       }
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.provider_connection_rotated", {
-        providerConnectionId: input.id,
-        previousVersion: currentVersion,
-        version,
-        generationsUsingPreviousVersion: uses,
-        credentialExpiresAt: qualification.credentialExpiresAt,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.provider_connection_rotated",
+        {
+          providerConnectionId: input.id,
+          previousVersion: currentVersion,
+          version,
+          generationsUsingPreviousVersion: uses,
+          credentialExpiresAt: qualification.credentialExpiresAt,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_provider.connection_rotated",
         aggregateKey: `provider-connection:${input.id}`,
         revision: version,
         idempotencyKey: `provider-connection:${input.id}:${version}`,
-        payload: { providerConnectionId: input.id, previousVersion: currentVersion, version, generationsUsingPreviousVersion: uses },
+        payload: {
+          providerConnectionId: input.id,
+          previousVersion: currentVersion,
+          version,
+          generationsUsingPreviousVersion: uses,
+        },
       });
       return {
         connection: this.providerConnectionDocument({
@@ -2609,7 +2950,7 @@ export class DatabaseCloudWorkspaceManagementService {
           current_version: version,
           state: "active",
           capabilities,
-          region: this.config.target,
+          region: target.target,
         }),
         replayed: false,
         generationsUsingPreviousVersion: uses,
@@ -2650,9 +2991,14 @@ export class DatabaseCloudWorkspaceManagementService {
           [input.id, input.organizationId, input.actorUserId],
         )
       ).rows[0];
-      if (!row) throw new HttpError(404, "not_found", "Provider connection not found");
+      if (!row)
+        throw new HttpError(404, "not_found", "Provider connection not found");
       if (row.credential_source !== "delegated") {
-        throw new HttpError(409, "cloud_provider_managed", "Hosted provider credentials are operator-managed");
+        throw new HttpError(
+          409,
+          "cloud_provider_managed",
+          "Hosted provider credentials are operator-managed",
+        );
       }
       const version = safeVersion(row.current_version, "provider connection");
       if (row.state === "revoked") {
@@ -2695,18 +3041,28 @@ export class DatabaseCloudWorkspaceManagementService {
          WHERE id = $1 AND org_id = $2 AND state <> 'revoked'`,
         [input.id, input.organizationId],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.provider_connection_revoked", {
-        providerConnectionId: input.id,
-        version,
-        stoppedWorkspaceIds,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.provider_connection_revoked",
+        {
+          providerConnectionId: input.id,
+          version,
+          stoppedWorkspaceIds,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         eventType: "cloud_provider.connection_revoked",
         aggregateKey: `provider-connection-revocation:${input.id}`,
         revision: version,
         idempotencyKey: `provider-connection:${input.id}:revoked:${version}`,
-        payload: { providerConnectionId: input.id, version, stoppedWorkspaceIds },
+        payload: {
+          providerConnectionId: input.id,
+          version,
+          stoppedWorkspaceIds,
+        },
       });
       return {
         connection: { id: input.id, state: "revoked", version },
@@ -2724,40 +3080,48 @@ export class DatabaseCloudWorkspaceManagementService {
     return withSystemTx(this.pool, async (tx) => {
       const workspace = await workspaceAuthority(tx, {
         ...input,
+        capability:"read",
         workosEnabled: this.options.workosEnabled,
         paid: false,
       });
-      const settings = (
-        await tx.query<{
-          id: string;
-          effective_document: Record<string, unknown>;
-          provenance: Record<string, unknown>;
-          source_versions: Record<string, unknown>;
-          sha256: string;
-          created_at: Date | string;
-        }>(
-          `SELECT id, effective_document, provenance, source_versions,
+      const sponsor = workspace.ownerUserId===input.actorUserId;
+      const settings = sponsor ?
+        (
+          await tx.query<{
+            id: string;
+            effective_document: Record<string, unknown>;
+            provenance: Record<string, unknown>;
+            source_versions: Record<string, unknown>;
+            sha256: string;
+            created_at: Date | string;
+          }>(
+            `SELECT id, effective_document, provenance, source_versions,
                   encode(effective_sha256, 'hex') AS sha256, created_at
            FROM workspace_settings_versions
            WHERE workspace_id = $1 AND org_id = $2 AND generation = $3`,
-          [input.workspaceId, input.organizationId, workspace.currentGeneration],
-        )
-      ).rows[0] ?? null;
-      const provider = (
-        await tx.query<{
-          id: string;
-          owner_kind: "user" | "organization";
-          owner_user_id: string | null;
-          provider: "daytona";
-          display_name: string;
-          credential_source: "hosted" | "delegated";
-          current_version: string | number;
-          state: "active" | "revoked" | "invalid";
-          capabilities: Record<string, unknown>;
-          region: string | null;
-          generation_version: string | number;
-        }>(
-          `SELECT connection.id, connection.owner_kind,
+            [
+              input.workspaceId,
+              input.organizationId,
+              workspace.currentGeneration,
+            ],
+          )
+        ).rows[0] ?? null : null;
+      const provider = sponsor ?
+        (
+          await tx.query<{
+            id: string;
+            owner_kind: "user" | "organization";
+            owner_user_id: string | null;
+            provider: "daytona";
+            display_name: string;
+            credential_source: "hosted" | "delegated";
+            current_version: string | number;
+            state: "active" | "revoked" | "invalid";
+            capabilities: Record<string, unknown>;
+            region: string | null;
+            generation_version: string | number;
+          }>(
+            `SELECT connection.id, connection.owner_kind,
                   connection.owner_user_id, connection.provider,
                   connection.display_name, connection.credential_source,
                   connection.current_version, connection.state,
@@ -2769,25 +3133,30 @@ export class DatabaseCloudWorkspaceManagementService {
             AND connection.org_id = generation.org_id
            WHERE generation.workspace_id = $1 AND generation.org_id = $2
              AND generation.generation = $3`,
-          [input.workspaceId, input.organizationId, workspace.currentGeneration],
-        )
-      ).rows[0] ?? null;
+            [
+              input.workspaceId,
+              input.organizationId,
+              workspace.currentGeneration,
+            ],
+          )
+        ).rows[0] ?? null : null;
       // This allocation must remain identical to route and operator quota
       // admission, including candidate reservations and pending provider disk.
-      const quota = (
-        await tx.query<{
-          max_workspaces: number;
-          max_running_workspaces: number;
-          max_cpu_millicores: number;
-          max_memory_mib: number;
-          max_storage_mib: number;
-          workspace_count: number;
-          running_count: number;
-          cpu_millicores: string | number;
-          memory_mib: string | number;
-          storage_mib: string | number;
-        }>(
-          `WITH workspace_usage AS (
+      const quota = sponsor ?
+        (
+          await tx.query<{
+            max_workspaces: number;
+            max_running_workspaces: number;
+            max_cpu_millicores: number;
+            max_memory_mib: number;
+            max_storage_mib: number;
+            workspace_count: number;
+            running_count: number;
+            cpu_millicores: string | number;
+            memory_mib: string | number;
+            storage_mib: string | number;
+          }>(
+            `WITH workspace_usage AS (
              SELECT count(*)::integer AS workspace_count,
                     count(*) FILTER (
                       WHERE desired_state = 'running'
@@ -2853,16 +3222,16 @@ export class DatabaseCloudWorkspaceManagementService {
            CROSS JOIN workspace_usage
            CROSS JOIN generation_usage
            WHERE quota.org_id = $1`,
-          [input.organizationId],
-        )
-      ).rows[0] ?? null;
-      const usage = await tx.query<{ meter: string; quantity: string }>(
+            [input.organizationId],
+          )
+        ).rows[0] ?? null : null;
+      const usage = sponsor ? await tx.query<{ meter: string; quantity: string }>(
         `SELECT meter, sum(quantity)::text AS quantity
          FROM cloud_workspace_usage_events
          WHERE workspace_id = $1 AND org_id = $2
          GROUP BY meter ORDER BY meter`,
         [input.workspaceId, input.organizationId],
-      );
+      ) : {rows:[]};
       const checkpoints = await tx.query<{
         id: string;
         generation: number;
@@ -2914,28 +3283,29 @@ export class DatabaseCloudWorkspaceManagementService {
         `SELECT id, include_chats, state, record_revision, content_revision,
                 created_at, available_at, expires_at, error_code
          FROM workspace_exports
-         WHERE workspace_id = $1 AND org_id = $2
+         WHERE workspace_id = $1 AND org_id = $2 AND requested_by=$3
          ORDER BY created_at DESC, id DESC LIMIT 20`,
-        [input.workspaceId, input.organizationId],
+        [input.workspaceId, input.organizationId,input.actorUserId],
       );
-      const retention = (
-        await tx.query<{
-          record_event_days: number;
-          content_event_days: number;
-          checkpoint_days: number;
-          export_days: number;
-          legal_hold: boolean;
-          version: string | number;
-          updated_at: Date | string;
-          last_applied_at: Date | string | null;
-        }>(
-          `SELECT record_event_days, content_event_days, checkpoint_days,
+      const retention =
+        (
+          await tx.query<{
+            record_event_days: number;
+            content_event_days: number;
+            checkpoint_days: number;
+            export_days: number;
+            legal_hold: boolean;
+            version: string | number;
+            updated_at: Date | string;
+            last_applied_at: Date | string | null;
+          }>(
+            `SELECT record_event_days, content_event_days, checkpoint_days,
                   export_days, legal_hold, version, updated_at, last_applied_at
            FROM workspace_retention_policies
            WHERE workspace_id = $1 AND org_id = $2`,
-          [input.workspaceId, input.organizationId],
-        )
-      ).rows[0] ?? null;
+            [input.workspaceId, input.organizationId],
+          )
+        ).rows[0] ?? null;
       const ports = await tx.query<{
         port: number;
         protocol: string;
@@ -2968,7 +3338,7 @@ export class DatabaseCloudWorkspaceManagementService {
                 last_error_code
          FROM workspace_replicas
          WHERE workspace_id = $1 AND org_id = $2 AND user_id = $3
-         ORDER BY updated_at DESC, id`,
+         ORDER BY updated_at DESC, id LIMIT 100`,
         [input.workspaceId, input.organizationId, input.actorUserId],
       );
       const forwards = await tx.query<{
@@ -3007,20 +3377,21 @@ export class DatabaseCloudWorkspaceManagementService {
          ORDER BY created_at DESC, id DESC LIMIT 20`,
         [input.workspaceId, input.organizationId],
       );
-      const deletion = (
-        await tx.query<{
-          state: string;
-          attempt_count: number;
-          error_code: string | null;
-          updated_at: Date | string;
-          completed_at: Date | string | null;
-        }>(
-          `SELECT state, attempt_count, error_code, updated_at, completed_at
+      const deletion =
+        (
+          await tx.query<{
+            state: string;
+            attempt_count: number;
+            error_code: string | null;
+            updated_at: Date | string;
+            completed_at: Date | string | null;
+          }>(
+            `SELECT state, attempt_count, error_code, updated_at, completed_at
            FROM workspace_deletion_jobs
            WHERE workspace_id = $1 AND org_id = $2`,
-          [input.workspaceId, input.organizationId],
-        )
-      ).rows[0] ?? null;
+            [input.workspaceId, input.organizationId],
+          )
+        ).rows[0] ?? null;
 
       const effective = settings?.effective_document ?? {};
       const secretNames = Array.isArray(effective.secretRefs)
@@ -3061,7 +3432,10 @@ export class DatabaseCloudWorkspaceManagementService {
         provider: provider
           ? {
               ...this.providerConnectionDocument(provider),
-              generationVersion: safeVersion(provider.generation_version, "generation provider"),
+              generationVersion: safeVersion(
+                provider.generation_version,
+                "generation provider",
+              ),
             }
           : null,
         quota: quota
@@ -3082,7 +3456,10 @@ export class DatabaseCloudWorkspaceManagementService {
               },
             }
           : null,
-        usage: usage.rows.map((row) => ({ meter: row.meter, quantity: row.quantity })),
+        usage: sponsor ? usage.rows.map((row) => ({
+          meter: row.meter,
+          quantity: row.quantity,
+        })) : [],
         checkpoints: checkpoints.rows.map((row) => ({
           id: row.id,
           generation: row.generation,
@@ -3189,10 +3566,14 @@ export class DatabaseCloudWorkspaceManagementService {
     workspaceId: string;
     actorUserId: string;
     idempotencyKey: string;
-  }): Promise<{ request: { id: string; deadlineAt: string }; replayed: boolean }> {
+  }): Promise<{
+    request: { id: string; deadlineAt: string };
+    replayed: boolean;
+  }> {
     return withSystemTx(this.pool, async (tx) => {
       const workspace = await workspaceAuthority(tx, {
         ...input,
+        capability:"edit",
         workosEnabled: this.options.workosEnabled,
         paid: true,
         lock: true,
@@ -3223,17 +3604,30 @@ export class DatabaseCloudWorkspaceManagementService {
           idempotencyKey: input.idempotencyKey,
         });
       } catch (error) {
-        if (error instanceof Error && error.message.includes("idempotency conflict")) {
-          throw new HttpError(409, "idempotency_key_reused", "Checkpoint idempotency key was reused");
+        if (
+          error instanceof Error &&
+          error.message.includes("idempotency conflict")
+        ) {
+          throw new HttpError(
+            409,
+            "idempotency_key_reused",
+            "Checkpoint idempotency key was reused",
+          );
         }
         throw error;
       }
       if ((existing.rowCount ?? 0) === 0) {
-        await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.checkpoint_requested", {
-          workspaceId: input.workspaceId,
-          generation: workspace.currentGeneration,
-          checkpointRequestId: request.id,
-        });
+        await audit(
+          tx,
+          input.organizationId,
+          input.actorUserId,
+          "cloud_workspace.checkpoint_requested",
+          {
+            workspaceId: input.workspaceId,
+            generation: workspace.currentGeneration,
+            checkpointRequestId: request.id,
+          },
+        );
         await outbox(tx, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
@@ -3241,11 +3635,18 @@ export class DatabaseCloudWorkspaceManagementService {
           aggregateKey: `checkpoint-request:${request.id}`,
           revision: 1,
           idempotencyKey: `checkpoint-request:${request.id}:1`,
-          payload: { workspaceId: input.workspaceId, generation: workspace.currentGeneration, checkpointRequestId: request.id },
+          payload: {
+            workspaceId: input.workspaceId,
+            generation: workspace.currentGeneration,
+            checkpointRequestId: request.id,
+          },
         });
       }
       return {
-        request: { id: request.id, deadlineAt: request.deadlineAt.toISOString() },
+        request: {
+          id: request.id,
+          deadlineAt: request.deadlineAt.toISOString(),
+        },
         replayed: (existing.rowCount ?? 0) !== 0,
       };
     });
@@ -3264,6 +3665,7 @@ export class DatabaseCloudWorkspaceManagementService {
     return withSystemTx(this.pool, async (tx) => {
       await workspaceAuthority(tx, {
         ...input,
+        capability:"manage",
         workosEnabled: this.options.workosEnabled,
         paid: false,
         lock: true,
@@ -3343,14 +3745,20 @@ export class DatabaseCloudWorkspaceManagementService {
           input.actorUserId,
         ],
       );
-      await audit(tx, input.organizationId, input.actorUserId, "cloud_workspace.retention_updated", {
-        workspaceId: input.workspaceId,
-        version,
-        recordEventDays: input.recordEventDays,
-        contentEventDays: input.contentEventDays,
-        checkpointDays: input.checkpointDays,
-        exportDays: input.exportDays,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.actorUserId,
+        "cloud_workspace.retention_updated",
+        {
+          workspaceId: input.workspaceId,
+          version,
+          recordEventDays: input.recordEventDays,
+          contentEventDays: input.contentEventDays,
+          checkpointDays: input.checkpointDays,
+          exportDays: input.exportDays,
+        },
+      );
       await outbox(tx, {
         organizationId: input.organizationId,
         workspaceId: input.workspaceId,

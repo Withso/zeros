@@ -14,6 +14,7 @@ import {
   type HostTransport,
 } from "../host-client";
 import { classifyCursorSdkError } from "../../adapter";
+import type {CloudProviderExecution} from "../../../../cloud-provider-execution";
 
 /** In-memory transport that records the engine→host lines and lets the test
  *  push host→engine lines back. Mirrors one cursor-host.cjs over a pipe. */
@@ -121,6 +122,48 @@ describe("toHostError", () => {
 });
 
 describe("CursorHostClient proxy", () => {
+  it("retires cloud authority if a native send outlives its response deadline",async()=>{
+    vi.useFakeTimers();
+    const close=vi.fn(async()=>{}),fake=new FakeTransport();
+    const cloud={lease:{assertLive:()=>{},close,admission:{model:"qualified-model"}},
+      coordinator:{environment:()=>({CURSOR_API_KEY:"synthetic"})}} as unknown as CloudProviderExecution;
+    const client=new CursorHostClient(()=>fake,cloud);
+    try{
+      const pending=client.request("agent.send",{message:"work"},100);void pending.catch(()=>{});
+      await vi.advanceTimersByTimeAsync(101);await expect(pending).rejects.toThrow("timed out");
+      expect(close).toHaveBeenCalledOnce();
+    }finally{await client.dispose();vi.useRealTimers();}
+  });
+  it("ignores lines and exits from a disposed transport generation",async()=>{
+    const old=new FakeTransport(),fresh=new FakeTransport();let next=old;
+    const client=new CursorHostClient(()=>next);
+    const pending=client.request("agent.create",{});void pending.catch(()=>{});
+    await client.dispose();await expect(pending).rejects.toThrow("disposed");
+    next=fresh;const current=client.request("agent.create",{});
+    old.emit({k:"res",id:fresh.lastReq().id,ok:true,result:"stale"});old.die();
+    fresh.emit({k:"res",id:fresh.lastReq().id,ok:true,result:"current"});
+    await expect(current).resolves.toBe("current");await client.dispose();
+  });
+  it("round trips workload tools and aborts them on Stop without leaking a late result to a new host",async()=>{
+    const leaseAbort=new AbortController();let toolSignal:AbortSignal|undefined;let finishTool!:(value:unknown)=>void;
+    const call=vi.fn((_input:unknown,signal:AbortSignal)=>{toolSignal=signal;return new Promise(resolve=>{finishTool=resolve;});});
+    const close=vi.fn(async()=>{});
+    const cloud={lease:{assertLive:()=>{},admission:{model:"qualified-model"},signal:leaseAbort.signal,close},
+      tools:{call},coordinator:{environment:()=>({CURSOR_API_KEY:"synthetic"})}} as unknown as CloudProviderExecution;
+    const old=new FakeTransport(),fresh=new FakeTransport();let next=old;
+    const client=new CursorHostClient(()=>next,cloud);
+    const start=client.request("run.wait",{runId:"run"});void start.catch(()=>{});
+    old.emit({k:"tool",id:"12345678-1234-1234-1234-123456789012",request:{operation:"exec",command:"sleep 30"}});
+    expect(call).toHaveBeenCalledOnce();expect(toolSignal?.aborted).toBe(false);
+    const cancel=client.request("run.cancel",{runId:"run"});void cancel.catch(()=>{});
+    expect(toolSignal?.aborted).toBe(true);
+    await client.dispose();next=fresh;
+    const replacement=client.request("run.wait",{runId:"new"});void replacement.catch(()=>{});
+    finishTool({ok:true,data:{text:"late"}});await Promise.resolve();await Promise.resolve();
+    expect(fresh.sent.some(value=>value.k==="tool_result")).toBe(false);
+    expect(close).toHaveBeenCalledOnce();await client.dispose();
+    await Promise.allSettled([start,cancel,replacement]);
+  });
   it("binds operations to the native handle even when resume reuses agentId", async () => {
     const { client, fake } = makeClient();
     const creating = client.module().Agent.create({});

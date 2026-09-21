@@ -5,8 +5,9 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { PassThrough, Readable } from "node:stream";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import {
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
@@ -24,6 +25,11 @@ import {
   recoverInterruptedCloudWorkspaceClone,
   repositoryIdentityMatchesSetup,
   writeAllSync,
+  readCloudWorkspaceSetupInput,
+  cloudWorkspaceImageAdmissionChecks,
+  cloudWorkspaceImageAdmissionDiagnostic,
+  parseRecoveryManifestPage,
+  parseRecoveryDesignSelection,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
@@ -37,6 +43,166 @@ const ORGANIZATION_ID = "00000000-0000-4000-8000-000000000002";
 const SETUP_RUN_ID = "00000000-0000-4000-8000-000000000003";
 const ENGINE_INSTANCE_ID = "00000000-0000-4000-8000-000000000004";
 const execFileAsync = promisify(execFile);
+
+describe("versioned cloud recovery manifests", () => {
+  const checkpointId = "11111111-1111-4111-8111-111111111111";
+  const blob = { blobId: "22222222-2222-4222-8222-222222222222", contentSha256: "a".repeat(64), sizeBytes: 12 };
+  const page = { version: 2, audience: "zeros-cloud-workspace-recovery-manifest-v2", checkpointId, contentRevision: 1,
+    gitBaseCommit: "a".repeat(40), gitHeadRef: null, fileCount: 0, totalBytes: 0, entries: [], nextAfterPath: null,
+    manifest: blob, artifacts: [blob] };
+  it("validates native artifact descriptors and preserves the v1 wire contract", () => {
+    expect(parseRecoveryManifestPage(page, { checkpointId, contentRevision: 1 }, null)).toEqual(page);
+    const { manifest: _manifest, artifacts: _artifacts, ...legacy } = page;
+    legacy.version = 1; legacy.audience = "zeros-cloud-workspace-recovery-manifest-v1";
+    expect(parseRecoveryManifestPage(legacy, { checkpointId, contentRevision: 1 }, null)).toEqual(legacy);
+    for (const invalid of [{ ...page, artifacts: [blob, blob] }, { ...page, artifacts: [{ ...blob, sizeBytes: 17 * 1024 * 1024 }] },
+      { ...page, manifest: { ...blob, destination: "/root/secret" } }, { ...page, version: 3 }, { ...page, checkpointId: blob.blobId }]) {
+      expect(() => parseRecoveryManifestPage(invalid, { checkpointId, contentRevision: 1 }, null)).toThrow();
+    }
+  });
+  it("restores only validated private Design selection fields", () => {
+    expect(parseRecoveryDesignSelection({ directory_id: "design_test" })).toEqual({ directory_id: "design_test" });
+    expect(parseRecoveryDesignSelection({ directory: "apps/design" })).toEqual({ directory: "apps/design" });
+    for (const value of [{ env: { TOKEN: "private" } }, { directory: "../outside" }, { directory: "/root" }, { directory_id: "../../secret" },
+      { directory: ".zeros/credentials" }, { directory: "C:/host" }, { directory: "design/../secret" }, { directory_id: "design_test", token: "private" }]) {
+      expect(() => parseRecoveryDesignSelection(value)).toThrow();
+    }
+  });
+});
+
+describe("cloud image admission diagnostics", () => {
+  it("retains only a closed human-service failure phase for cold setup diagnosis", () => {
+    for (const phase of ["configuration", "worker-launch", "handshake", "identity", "exec-pty", "pty", "sftp", "namespace-retirement"])
+      expect(cloudWorkspaceImageAdmissionDiagnostic({ qualification: { humanServices: { secure: false, phase, error: "private output" } } })).toMatchObject({ humanServicePhase: phase });
+    for (const phase of [undefined, "secret arbitrary provider output", {}, "a".repeat(1000)])
+      expect(cloudWorkspaceImageAdmissionDiagnostic({ qualification: { humanServices: { secure: false, phase } } })).toMatchObject({ humanServicePhase: null });
+  });
+  it("distinguishes cold runtime failures using only bounded known probe names", () => {
+    expect(cloudWorkspaceImageAdmissionDiagnostic({ qualification: {
+      identity: { secure: true, checks: [{ name: "fixed-engine-user-namespace", status: "pass" }] },
+      workload: { secure: false, checks: [
+        { name: "cloud-private-container-execution", status: "fail", detail: "credential material" },
+        { name: "private credential in a forged probe name", status: "fail" },
+      ] },
+      capture: null,
+    } })).toMatchObject({ identity: true, workload: false, capture: false,
+      failedProbes: ["cloud-private-container-execution"] });
+    expect(cloudWorkspaceImageAdmissionDiagnostic(null)).toMatchObject({
+      identity: false, workload: false, capture: false, failedProbes: [],
+    });
+  });
+  it("retains setup and helper failures when all workload probes pass", () => {
+    const diagnostic = cloudWorkspaceImageAdmissionDiagnostic({
+      qualification: { identity: { secure: true }, workload: { secure: true }, capture: { secure: true } },
+      setupQualification: { secure: false, unprivileged: true, detachedDescendantsRetired: false, timeoutRetired: true, error: "private output" },
+      helpers: { trusted: { node: true, bwrap: false, "private forged name": false },
+        deploymentTrusted: { engineTree: false, runtimeTree: true, "private forged name": false } },
+    });
+    expect(diagnostic).toMatchObject({ setup: { secure: false, unprivileged: true, detachedDescendantsRetired: false, timeoutRetired: true },
+      failedHelpers: ["bwrap", "engineTree"] });
+    expect(JSON.stringify(diagnostic)).not.toContain("private");
+  });
+  it("identifies failed gates without copying provider output or credential material", () => {
+    const checks = cloudWorkspaceImageAdmissionChecks(
+      { image: { sourceCommit: "a".repeat(40), ref: "snapshot-pinned" } },
+      { version: 1, profile: "zeros-cloud-worker-v1" },
+      { code: 1, timedOut: false, overflow: false },
+      {
+        version: 1,
+        profile: "zeros-cloud-worker-v1",
+        qualified: false,
+        metadata: { build: { source: { commit: "a".repeat(40) } } },
+        helpers: {
+          deploymentTrusted: { setupHelper: true, workerSupervisor: true },
+        },
+        resources: { finite: true },
+        qualification: { secure: false, error: "private provider body" },
+      },
+    );
+    expect(checks).toMatchObject({
+      execution: false,
+      report: true,
+      profile: true,
+      qualified: false,
+      source: true,
+      build: true,
+      helpers: true,
+      resources: true,
+      runtime: false,
+    });
+    expect(
+      Object.values(checks).every((value) => typeof value === "boolean"),
+    ).toBe(true);
+    expect(JSON.stringify(checks)).not.toContain("private provider body");
+  });
+
+  it("records malformed attestation as a closed gate", () => {
+    const checks = cloudWorkspaceImageAdmissionChecks(
+      { image: { sourceCommit: "a".repeat(40), ref: "snapshot-pinned" } },
+      { version: 2, profile: "zeros-cloud-worker-v2" },
+      { code: 0, timedOut: false, overflow: false },
+      null,
+    );
+    expect(checks.report).toBe(false);
+    expect(checks.resources).toBe(false);
+    expect(checks.runtime).toBe(false);
+  });
+});
+
+describe("cloud setup credential transport", () => {
+  it("reads a bounded request from SSH stdin without an environment or argv secret", async () => {
+    const encoded = Buffer.from("test-request").toString("base64url");
+    await expect(
+      readCloudWorkspaceSetupInput({
+        args: ["--stdin"],
+        env: {},
+        input: Readable.from([encoded.slice(0, 3), encoded.slice(3)]),
+      }),
+    ).resolves.toBe(encoded);
+  });
+
+  it("retains the existing environment transport and consumes its value once", async () => {
+    const env = { ZEROS_CLOUD_WORKSPACE_SETUP_B64: "encoded-request" };
+    await expect(
+      readCloudWorkspaceSetupInput({ args: [], env, input: Readable.from([]) }),
+    ).resolves.toBe("encoded-request");
+    expect(env).toEqual({});
+  });
+
+  it("rejects ambiguous input, unexpected arguments, oversized and stalled stdin", async () => {
+    await expect(
+      readCloudWorkspaceSetupInput({
+        args: ["--stdin"],
+        env: { ZEROS_CLOUD_WORKSPACE_SETUP_B64: "secret" },
+        input: Readable.from(["different"]),
+      }),
+    ).rejects.toBeDefined();
+    await expect(
+      readCloudWorkspaceSetupInput({
+        args: ["--stdin", "ignored"],
+        env: {},
+        input: Readable.from([]),
+      }),
+    ).rejects.toBeDefined();
+    await expect(
+      readCloudWorkspaceSetupInput({
+        args: ["--stdin"],
+        env: {},
+        input: Readable.from(["a".repeat(64 * 1024)]),
+      }),
+    ).rejects.toBeDefined();
+    const stalled = new PassThrough();
+    await expect(
+      readCloudWorkspaceSetupInput({
+        args: ["--stdin"],
+        env: {},
+        input: stalled,
+        timeoutMs: 10,
+      }),
+    ).rejects.toBeDefined();
+    expect(stalled.destroyed).toBe(true);
+  });
+});
 
 function encode(value: unknown): string {
   return Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
@@ -317,6 +483,40 @@ describe("cloud workspace image setup protocol", () => {
     }
   });
 
+  it("accepts version-2 measured resource contracts without accepting a downgrade or unknown resource fields", () => {
+    const request = parseCloudWorkspaceSetupRequest(
+      encode(requestDocument()),
+      NOW,
+    );
+    const old = materialDocument();
+    const resources = {
+      architecture: "linux/amd64",
+      cpuMillicores: 4000,
+      memoryMiB: 8192,
+      storageMiB: 40960,
+    };
+    const current = { ...old, version: 2, image: { ...old.image, resources } };
+    expect(
+      parseCloudWorkspaceSetupMaterials(current, request, NOW).image.resources,
+    ).toEqual(resources);
+    for (const invalid of [
+      { ...current, version: 1 },
+      { ...current, version: 3 },
+      { ...current, image: old.image },
+      {
+        ...current,
+        image: { ...current.image, resources: { ...resources, memoryMiB: 0 } },
+      },
+      {
+        ...current,
+        image: { ...current.image, resources: { ...resources, skip: true } },
+      },
+    ])
+      expect(() =>
+        parseCloudWorkspaceSetupMaterials(invalid, request, NOW),
+      ).toThrow(/materials are invalid/);
+  });
+
   it("accepts exact setup materials while rejecting authority injection", () => {
     const request = parseCloudWorkspaceSetupRequest(
       encode(requestDocument()),
@@ -532,7 +732,7 @@ describe("cloud worker supervisor protocol", () => {
     expect(children).toHaveLength(1);
     expect(spawnCalls).toEqual([
       {
-        file: "/usr/local/bin/start-engine.sh",
+        file: "/opt/zeros-runtime/bin/start-engine.sh",
         args: [],
         options: {
           cwd: "/",
@@ -541,7 +741,7 @@ describe("cloud worker supervisor protocol", () => {
           env: {
             HOME: "/root",
             LANG: "C.UTF-8",
-            PATH: "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            PATH: "/opt/zeros-runtime/bin:/usr/bin:/bin:/usr/sbin:/sbin",
             ZEROS_ACCOUNT_JWT_AUD: "zeros-cloud",
             ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
             ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
@@ -558,5 +758,47 @@ describe("cloud worker supervisor protocol", () => {
         },
       },
     ]);
+  });
+
+  it("reaps the engine scope even when its launcher exited or was lost", async () => {
+    for (const child of [null, { exitCode: 0, signalCode: null }]) {
+      const retire = vi.fn().mockResolvedValue(undefined);
+      const supervisor = new CloudWorkerSupervisor({ engineScope: { retire } });
+      supervisor.child = child;
+      await supervisor.apply({ operation: "prepare" });
+      expect(retire).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("retires both setup and engine descendants before issuing launch authority", async () => {
+    const engine = vi
+      .fn()
+      .mockRejectedValue(new Error("engine retirement failed"));
+    const setup = vi.fn().mockResolvedValue(undefined);
+    const supervisor = new CloudWorkerSupervisor({
+      engineScope: { retire: engine },
+      setupScope: { retire: setup },
+    });
+    await expect(supervisor.apply({ operation: "prepare" })).rejects.toThrow(
+      /engine retirement failed/,
+    );
+    expect(setup).toHaveBeenCalledOnce();
+    engine.mockResolvedValue(undefined);
+    setup.mockRejectedValue(new Error("setup retirement failed"));
+    await expect(supervisor.apply({ operation: "prepare" })).rejects.toThrow(
+      /setup retirement failed/,
+    );
+  });
+
+  it("does not mint a new launch session without confirmed descendant retirement", async () => {
+    const retire = vi
+      .fn()
+      .mockRejectedValue(new Error("retirement unconfirmed"));
+    const supervisor = new CloudWorkerSupervisor({ engineScope: { retire } });
+    supervisor.session = `zsp_${"S".repeat(43)}`;
+    await expect(supervisor.apply({ operation: "prepare" })).rejects.toThrow(
+      /retirement unconfirmed/,
+    );
+    expect(supervisor.session).toBeNull();
   });
 });

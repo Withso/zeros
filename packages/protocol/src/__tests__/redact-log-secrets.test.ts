@@ -8,6 +8,18 @@ import { describe, it, expect } from "vitest";
 import { redactLogSecrets } from "../scrub";
 
 describe("redactLogSecrets — removes credentials", () => {
+  it("removes cloud capabilities in headers and browser WebSocket protocols", () => {
+    for (const prefix of ["zws", "zwh", "zwb", "zwp", "zsh"]) {
+      const token = `${prefix}_${"a".repeat(42)}-`;
+      const input = JSON.stringify({ headers: { "x-zeros-runtime-service": token,
+        "sec-websocket-protocol": `zeros.service.v1, zeros.authorization.${token}` } });
+      const output = redactLogSecrets(input);
+      expect(output).not.toContain(token);
+      expect(() => JSON.parse(output)).not.toThrow();
+    }
+    const encoded = Buffer.from(`zws_${"a".repeat(43)}`).toString("base64url");
+    expect(redactLogSecrets(`sec-websocket-protocol: zeros-v1,zeros-cloud-token.${encoded}`)).not.toContain(encoded);
+  });
   it("redacts secret-bearing JSON fields, keeping the line parseable", () => {
     const line = JSON.stringify({
       text: "auth ok",

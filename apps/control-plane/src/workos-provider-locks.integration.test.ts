@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { assertWorkOSProviderLockHeld } from "./workos-provider-lock-context.js";
 
 import { withWorkOSProviderLocks } from "./workos-provider-locks.js";
 
@@ -40,6 +41,33 @@ d("WorkOS provider locks", () => {
   });
 
   afterAll(async () => pool.end());
+
+  it("fences a terminated lock holder and lets a new connection acquire its target", async () => {
+    const key = `workos-provider-test:${randomUUID()}`;
+    const entered = deferred(), resume = deferred(), disconnected = deferred();
+    const lockPool = new pg.Pool({ connectionString: databaseUrl, max: 2 });
+    let pid = 0;
+    lockPool.on("connect", client => {
+      pid = (client as pg.PoolClient & { processID: number }).processID;
+      client.once("end", disconnected.resolve);
+    });
+    const externalStep = vi.fn();
+    const holder = withWorkOSProviderLocks(lockPool, [key], async () => {
+      entered.resolve(); await resume.promise;
+      assertWorkOSProviderLockHeld(); externalStep();
+    }).then(() => null, error => error);
+    try {
+      await entered.promise;
+      expect(pid).toBeGreaterThan(0);
+      await pool.query("SELECT pg_terminate_backend($1)", [pid]);
+      await disconnected.promise;
+      resume.resolve();
+      expect(await holder).toMatchObject({ code: "workos_provider_lock_lost" });
+      expect(externalStep).not.toHaveBeenCalled();
+      await expect(withWorkOSProviderLocks(pool, [key], async () => "recovered"))
+        .resolves.toBe("recovered");
+    } finally { resume.resolve(); await holder; await lockPool.end(); }
+  });
 
   it("does not let same-target waiters starve the lock holder's database work", async () => {
     const key = `workos-provider-test:${randomUUID()}`;

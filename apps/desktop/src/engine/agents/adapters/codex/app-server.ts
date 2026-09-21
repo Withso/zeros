@@ -1,3 +1,4 @@
+import {CloudCodexAuth} from "./cloud-auth";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 // ──────────────────────────────────────────────────────────
 // Codex app-server runtime — long-lived JSON-RPC over stdio.
@@ -54,6 +55,9 @@ import {
 } from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
 import type { PreparedBoundary } from "../../containment/types";
+import {cloudProviderExecution} from "../../cloud-provider-execution";
+import {CloudCodexExecServer} from "./cloud-exec-server";
+import {cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "./cloud-policy";
 import { hasKernelExecutionBoundary } from "../../containment/status";
 import {
   JSON_RPC_NO_RESPONSE,
@@ -61,7 +65,7 @@ import {
   JsonRpcRequestError,
 } from "../shared/jsonrpc";
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
-import { resolveCodexBinary, type CodexBinarySource } from "./binary-resolver";
+import { resolveCodexBinary, resolveCloudCodexBinaryFromImage, type CodexBinarySource } from "./binary-resolver";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import { MAX_PENDING_MCP_ELICITATIONS } from "../shared/mcp-elicitation";
 
@@ -579,9 +583,15 @@ export async function bootCodexAppServerRuntime(
   opts: CodexAppServerBootOptions,
 ): Promise<CodexAppServerHandle> {
   const logTag = opts.logTag ?? "codex-app-server";
+  const cloud=cloudProviderExecution(opts.executionBoundary);
+  const cloudAuth=cloud?new CloudCodexAuth(cloud.lease):null;
+  cloud?.lease.assertLive();
+  let cloudEnvironment:CloudCodexExecServer|undefined;
 
-  const binarySource = await resolveCodexBinary({ override: opts.cliBinary });
-  const env = await buildSpawnEnvWithLoginPath(opts.env);
+  const binarySource = cloud ? await resolveCloudCodexBinaryFromImage() : await resolveCodexBinary({ override: opts.cliBinary });
+  if(cloud&&(binarySource.source!=="bundled"||!binarySource.path.startsWith("/opt/zeros/")||binarySource.path.endsWith(".js")))
+    throw new Error("Cloud Codex requires the pinned native executable");
+  const env = cloud?cloud.coordinator.environment():await buildSpawnEnvWithLoginPath(opts.env);
 
   // The binary-resolver returns either an executable path or the
   // wrapper script `bin/codex.js`. For the latter, we need to spawn
@@ -590,7 +600,7 @@ export async function bootCodexAppServerRuntime(
     ? [process.execPath, [binarySource.path]]
     : [binarySource.path, []];
 
-  const mcpArgs = buildMcpServerOverrides((opts.mcpServers ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s));
+  const mcpArgs = buildMcpServerOverrides((cloud?cloud.productServers:opts.mcpServers ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s));
 
   // Feature overrides (per-process `-c`, no ~/.codex/config.toml mutation):
   //   • default_mode_request_user_input — codex only puts the
@@ -607,6 +617,7 @@ export async function bootCodexAppServerRuntime(
   const featureArgs = codexAppServerFeatureArgs(
     hasKernelExecutionBoundary(opts.executionBoundary),
   );
+  if(cloud)for(const [name,value] of Object.entries(CLOUD_CODEX_CONFIG))featureArgs.push("-c",`${name}=${JSON.stringify(value)}`);
 
   const proc = spawnStdioAgent({
     command,
@@ -648,7 +659,7 @@ export async function bootCodexAppServerRuntime(
   // (and image metadata), so unconditional console.log would violate
   // the prompts-stay-out-of-production-logs rule. Set DEBUG_CODEX_RPC=1
   // to enable; even then we redact `params.input` before printing.
-  const rpcTraceEnabled = process.env.DEBUG_CODEX_RPC === "1";
+  const rpcTraceEnabled = !cloud&&process.env.DEBUG_CODEX_RPC === "1";
   // Turn inactivity listeners are registered by runTurn() after the
   // `turn/start` ack. Any inbound JSON-RPC frame from this per-session
   // app-server counts as activity: streamed output, progress, warnings,
@@ -685,8 +696,8 @@ export async function bootCodexAppServerRuntime(
     },
   });
   registerCodexHostRequestHandlers(client, {
-    onDynamicToolCall: opts.onDynamicToolCall,
-    refreshChatgptAuthTokens: opts.refreshChatgptAuthTokens,
+    onDynamicToolCall: cloud?params=>cloudCodexToolCall(cloud,params):opts.onDynamicToolCall,
+    refreshChatgptAuthTokens: cloudAuth?params=>cloudAuth.refresh(params):opts.refreshChatgptAuthTokens,
     generateAttestation: opts.generateAttestation,
   });
 
@@ -977,6 +988,17 @@ export async function bootCodexAppServerRuntime(
   // acknowledgement. Register every blocking handler first so the first frame
   // cannot race a partially initialized host.
   client.notify("initialized", {});
+  if(cloud){
+    try{
+      cloudEnvironment=await CloudCodexExecServer.start(cloud,binarySource.path);
+      const login=cloudAuth!.login();
+      if(login)await client.request("account/login/start",login,{timeoutMs:5000});
+      await client.request("environment/add",{environmentId:cloudEnvironment.environmentId,execServerUrl:cloudEnvironment.url,connectTimeoutMs:5000},{timeoutMs:6000});
+      const info=await client.request<{cwd:string|null}>("environment/info",{environmentId:cloudEnvironment.environmentId},{timeoutMs:5000});
+      if(info.cwd!=="file:///srv/zeros/workspace")throw new Error("Cloud native executor identity is invalid");
+      cloud.lease.assertLive();
+    }catch{void cloud.lease.close().catch(()=>{});throw new Error("Cloud native executor admission failed");}
+  }
 
   // ── Track turn lifecycle for runTurn correlation ─────────
   //
@@ -1094,6 +1116,7 @@ export async function bootCodexAppServerRuntime(
 
   // ── Exit cleanup ──────────────────────────────────────────
   void proc.exited.then(({ code, signal }) => {
+    if(cloud)void cloud.lease.close().catch(()=>{});
     client.close(`codex exited code=${code} signal=${signal ?? ""}`);
     abandonPendingServerRequests();
     for (const w of turnWaiters.values()) w.resolve("failed");
@@ -1109,6 +1132,17 @@ export async function bootCodexAppServerRuntime(
     params: unknown,
     rpcOpts?: { timeoutMs?: number },
   ): Promise<T> => {
+    if(cloud){
+      if(!cloudEnvironment)throw new Error("Cloud native executor is unavailable");
+      params=cloudCodexRequest(cloud,cloudEnvironment.environmentId,method,params);
+      await cloud.lease.validate();
+      if(["thread/start","thread/resume","turn/start"].includes(method)){
+        try{
+          const status=await client.request<{status:string}>("environment/status",{environmentId:cloudEnvironment.environmentId},{timeoutMs:5000});
+          if(status.status!=="ready")throw new Error("Cloud native executor is unavailable");
+        }catch{void cloud.lease.close().catch(()=>{});throw new Error("Cloud native executor is unavailable");}
+      }
+    }
     let attempt = 0;
     let lastErr: unknown = null;
     while (attempt <= OVERLOAD_MAX_RETRIES) {
@@ -1128,6 +1162,7 @@ export async function bootCodexAppServerRuntime(
           attempt++;
           continue;
         }
+        if(cloud)void cloud.lease.close().catch(()=>{});
         throw err;
       }
     }
@@ -1351,6 +1386,7 @@ export async function bootCodexAppServerRuntime(
         turnWaiters.clear();
         client.close("dispose");
         await proc.stop();
+        if(cloud)await cloud.lease.close();
       })();
       return disposePromise;
     },

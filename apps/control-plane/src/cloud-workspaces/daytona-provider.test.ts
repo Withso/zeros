@@ -147,9 +147,55 @@ describe("DaytonaWorkspaceProvider", () => {
     expect(mapDaytonaState("started")).toBe("running");
     expect(mapDaytonaState("stopped")).toBe("stopped");
     expect(mapDaytonaState("archived")).toBe("archived");
-    expect(mapDaytonaState("paused")).toBe("stopped");
+    expect(mapDaytonaState("paused")).toBe("paused");
     expect(mapDaytonaState("destroying")).toBe("deleting");
     expect(mapDaytonaState("a-new-provider-state")).toBe("unknown");
+  });
+
+  it.each(["container", undefined])("rejects a VM generation resolving to class %s",async sandboxClass=>{
+    const input=createInput(),item=Object.assign(sandbox(input.workspaceId),{sandboxClass,autoPauseInterval:0,autoArchiveInterval:0});
+    const client=fakeClient([item]);const create=vi.spyOn(client,"create");
+    const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",autoArchiveMinutes:0},client);
+    await expect(provider.create(input)).rejects.toMatchObject({code:"provider_resource_configuration_mismatch"});
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it.each([{autoPauseInterval:10},{snapshot:"replaced-image"},{public:true},{cpu:4}])("refuses wake after VM configuration drift: %j",async drift=>{
+    const item=Object.assign(sandbox(randomUUID(),1,"stopped"),{sandboxClass:"linux-vm",autoPauseInterval:0,autoArchiveInterval:0},drift);
+    const client=Object.assign(fakeClient([item]),{preflightVm:vi.fn(async()=>{})});
+    const start=vi.spyOn(client,"start");
+    const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",autoArchiveMinutes:0},client);
+    await expect(provider.start(item.id)).rejects.toMatchObject({code:"provider_resource_configuration_mismatch"});
+    expect(start).not.toHaveBeenCalled();
+  });
+  it.each([undefined,"invalid",new Date(Date.now()-1000).toISOString(),new Date(Date.now()+3600_000).toISOString()])("does not adopt a qualification VM with an invalid deadline: %s",async autoDestroyAt=>{
+    const input=createInput(),item=Object.assign(sandbox(input.workspaceId),{sandboxClass:"linux-vm",autoPauseInterval:0,autoArchiveInterval:0,autoDestroyAt});
+    const client=fakeClient([item]),create=vi.spyOn(client,"create");
+    const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",autoArchiveMinutes:0,ttlMinutes:10},client);
+    await expect(provider.create(input)).rejects.toMatchObject({code:"provider_qualification_deadline_invalid"});
+    expect(create).not.toHaveBeenCalled();
+  });
+  it("cold-stops a paused VM and never resumes its preserved process authority",async()=>{
+    const item=Object.assign(sandbox(randomUUID(),1,"paused"),{sandboxClass:"linux-vm",autoPauseInterval:0,autoArchiveInterval:0});
+    const client=fakeClient([item]),start=vi.spyOn(client,"start"),stop=vi.spyOn(client,"stop");
+    const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",autoArchiveMinutes:0},client);
+    await expect(provider.start(item.id)).rejects.toMatchObject({code:"provider_paused_requires_stop"});expect(start).not.toHaveBeenCalled();
+    await expect(provider.stop(item.id)).resolves.toMatchObject({state:"stopped",storageOffloaded:true});expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it("archives a VM by proving cold stop and offloaded storage without container archive",async()=>{
+    const item=Object.assign(sandbox(randomUUID()),{sandboxClass:"linux-vm",autoPauseInterval:0,autoArchiveInterval:0});
+    const client=fakeClient([item]),archive=vi.spyOn(client,"archive"),stop=vi.spyOn(client,"stop");
+    const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",autoArchiveMinutes:0},client);
+    await expect(provider.archive(item.id)).resolves.toMatchObject({state:"stopped",storageOffloaded:true});
+    await expect(provider.archive(item.id)).resolves.toMatchObject({state:"stopped",storageOffloaded:true});
+    expect(stop).toHaveBeenCalledOnce();expect(archive).not.toHaveBeenCalled();
+  });
+
+  it("rejects missing VM quota before creating and never uses container capacity",async()=>{
+    const client=Object.assign(fakeClient([]),{preflightVm:vi.fn(async()=>{throw new Error("VM quota unavailable");})}),create=vi.spyOn(client,"create");
+    const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",autoArchiveMinutes:0},client);
+    await expect(provider.create(createInput())).rejects.toThrow();expect(client.preflightVm).toHaveBeenCalledOnce();expect(create).not.toHaveBeenCalled();
   });
 
   it("returns the existing immutable-label match instead of creating twice", async () => {
@@ -396,6 +442,38 @@ describe("DaytonaWorkspaceProvider", () => {
     });
   });
 
+  it("resolves native engine services through the same private, validated endpoint", async () => {
+    const item = sandbox(randomUUID());
+    const client = fakeClient([item]);
+    const provider = new DaytonaWorkspaceProvider(config, client);
+    await expect(provider.getEngineEndpoint(item.id, 4_173)).resolves.toEqual({
+      url: `https://4173-${item.id}.proxy.daytona.work/`,
+      headerName: "x-daytona-preview-token",
+      headerValue: "preview-token-abcdefghijklmnopqrstuvwxyz",
+    });
+    client.getPreviewUrl = vi.fn(async () => ({
+      sandboxId: item.id,
+      url: "https://169.254.169.254/",
+      token: "preview-token-abcdefghijklmnopqrstuvwxyz",
+    }));
+    await expect(provider.getEngineEndpoint(item.id, 4_173)).rejects.toMatchObject({
+      code: "provider_access_response_invalid",
+    });
+    await expect(provider.getEngineEndpoint(item.id, 0)).rejects.toMatchObject({
+      code: "provider_preview_port_invalid",
+    });
+  });
+
+  it("skips malformed foreign labels without abandoning later inventory", async () => {
+    const malformed = sandbox(randomUUID());
+    malformed.labels.zeros_workspace = "foreign-invalid-identity";
+    const valid = sandbox(randomUUID());
+    const provider = new DaytonaWorkspaceProvider(config, fakeClient([malformed, valid]));
+    const listed = [];
+    for await (const item of provider.listManaged()) listed.push(item.resourceId);
+    expect(listed).toEqual([valid.id]);
+  });
+
   it("rejects preview endpoints outside the pinned Daytona proxy suffix", async () => {
     const item = sandbox(randomUUID());
     const client = fakeClient([item]);
@@ -565,6 +643,11 @@ describe("DaytonaWorkspaceProvider", () => {
         return;
       }
       const body = JSON.parse(rawBody) as Record<string, unknown>;
+      if (body.snapshot && ["cpu", "memory", "disk"].some(key => key in body)) {
+        response.statusCode = 400;
+        response.end(JSON.stringify({ message: "Cannot specify Sandbox resources when using a snapshot" }));
+        return;
+      }
       response.statusCode = 201;
       response.end(
         JSON.stringify({
@@ -573,9 +656,9 @@ describe("DaytonaWorkspaceProvider", () => {
           target: body.target,
           labels: body.labels,
           snapshot: body.snapshot,
-          cpu: body.cpu,
-          memory: body.memory,
-          disk: body.disk,
+          cpu: 2,
+          memory: 4,
+          disk: 20,
           public: body.public,
           autoStopInterval: body.autoStopInterval,
           autoArchiveInterval: body.autoArchiveInterval,
@@ -611,26 +694,50 @@ describe("DaytonaWorkspaceProvider", () => {
         headers: {
           authorization: "Bearer test-key-do-not-use",
           "x-daytona-source": "zeros-control-plane",
-          "x-daytona-sdk-version": "0.190.1",
+          "x-daytona-sdk-version": "0.214.0",
         },
         body: {
           name: `zeros-${input.workspaceId}-g1`,
           snapshot: "snap-pinned",
           target: "eu",
           public: false,
-          cpu: 2,
-          memory: 4,
-          disk: 20,
           autoStopInterval: 0,
           autoArchiveInterval: 10_080,
           autoDeleteInterval: -1,
         },
       });
+      const createBody = requests[1]!.body as Record<string, unknown>;
+      expect(["cpu", "memory", "disk"].some(key => key in createBody)).toBe(false);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
     }
+  });
+
+  it.each(["valid","wrong-class","wrong-region","quota-missing","quota-exhausted","auto-pause"])("verifies real generated VM preflight and bounded create: %s",async scenario=>{
+    const posts:Record<string,unknown>[]=[];
+    const server=createServer(async(request,response)=>{
+      const url=new URL(request.url!,"http://test.invalid");response.setHeader("content-type","application/json");
+      const send=(data:unknown)=>response.end(JSON.stringify(data));
+      if(url.pathname==="/api-keys/current")return send({organizationId:"test-org"});
+      if(url.pathname==="/snapshots/snap-pinned")return send({id:"snap-pinned",state:"active",sandboxClass:scenario==="wrong-class"?"container":"linux-vm",regionIds:[scenario==="wrong-region"?"us":"eu"],cpu:2,mem:4,disk:20});
+      if(url.pathname.endsWith("/available-sandbox-classes"))return send([{regionId:"eu",sandboxClass:scenario==="quota-missing"?"container":"linux-vm"}]);
+      if(url.pathname.endsWith("/usage"))return send({regionUsage:[{regionId:"eu",sandboxClass:"linux-vm",totalCpuQuota:4,currentCpuUsage:scenario==="quota-exhausted"?4:0,totalMemoryQuota:8,currentMemoryUsage:0,totalDiskQuota:40,currentDiskUsage:0,maxCpuPerSandbox:4,maxMemoryPerSandbox:8,maxDiskPerSandbox:40,maxDiskPerNonEphemeralSandbox:40}]});
+      if(request.method==="GET")return send({items:[],nextCursor:null});
+      const chunks:Buffer[]=[];for await(const chunk of request)chunks.push(Buffer.from(chunk));
+      const body=JSON.parse(Buffer.concat(chunks).toString()) as Record<string,unknown>;posts.push(body);
+      return send({...body,id:"created-vm",state:"creating",sandboxClass:"linux-vm",cpu:2,memory:4,disk:20,autoDestroyAt:new Date(Date.now()+600_000).toISOString(),autoPauseInterval:scenario==="auto-pause"?60:0});
+    });
+    await new Promise<void>(resolve=>server.listen(0,"127.0.0.1",resolve));
+    try{
+      const provider=new DaytonaWorkspaceProvider({...config,sandboxClass:"linux-vm",ttlMinutes:10,apiUrl:`http://127.0.0.1:${(server.address() as AddressInfo).port}`});
+      const result=provider.create(createInput());
+      if(scenario==="valid")await expect(result).resolves.toMatchObject({state:"provisioning",metadata:{sandboxClass:"linux-vm",autoPauseMinutes:0}});
+      else await expect(result).rejects.toBeInstanceOf(Error);
+      expect(posts).toHaveLength(["valid","auto-pause"].includes(scenario)?1:0);
+      if(posts.length){expect(posts[0]).toMatchObject({autoPauseInterval:0,autoStopInterval:0,ttlMinutes:10});expect(posts[0]).not.toHaveProperty("autoArchiveInterval");}
+    }finally{await new Promise<void>((resolve,reject)=>server.close(error=>error?reject(error):resolve()));}
   });
 
   it("sends bounded SSH and private-preview calls through the pinned generated client", async () => {
@@ -735,7 +842,7 @@ describe("DaytonaWorkspaceProvider", () => {
           query: { expiresInMinutes: "15" },
           authorization: "Bearer test-key-do-not-use",
           source: "zeros-control-plane",
-          sdkVersion: "0.190.1",
+          sdkVersion: "0.214.0",
         },
         {
           method: "GET",
@@ -743,7 +850,7 @@ describe("DaytonaWorkspaceProvider", () => {
           query: {},
           authorization: "Bearer test-key-do-not-use",
           source: "zeros-control-plane",
-          sdkVersion: "0.190.1",
+          sdkVersion: "0.214.0",
         },
         {
           method: "DELETE",
@@ -751,7 +858,7 @@ describe("DaytonaWorkspaceProvider", () => {
           query: {},
           authorization: "Bearer test-key-do-not-use",
           source: "zeros-control-plane",
-          sdkVersion: "0.190.1",
+          sdkVersion: "0.214.0",
         },
       ]);
     } finally {

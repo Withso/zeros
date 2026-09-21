@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import pg from "pg";
 import { loadConfig } from "./config.js";
+import { createMigrationPool, withSystemTx } from "./db.js";
 
 const MIGRATIONS_DIR = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -28,6 +29,25 @@ const CONTROLLED_DOWNTIME_MARKER = "-- zeros:requires-controlled-downtime";
 // between PostgreSQL versions. The session lock spans the ledger work and all
 // per-file transactions on the same dedicated client.
 const MIGRATION_LOCK_KEYS = [0x5a45524f, 0x4d494752] as const;
+
+// Only messages authored by this runner may reach deployment logs. Driver
+// errors can include row values, SQL parameters or credential-bearing URLs.
+class MigrationDiagnosticError extends Error {}
+
+function safeSqlState(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error
+    ? error.code
+    : undefined;
+  return typeof code === "string" && /^[0-9A-Z]{5}$/.test(code)
+    ? ` (SQLSTATE ${code})`
+    : "";
+}
+
+export function migrationFailureDiagnostic(error: unknown): string {
+  return error instanceof MigrationDiagnosticError
+    ? error.message
+    : `Migration failed${safeSqlState(error)}. Check database connectivity and the migration configuration.`;
+}
 
 /**
  * Exact compatibility aliases from the two cloud-workspace branch revisions
@@ -305,7 +325,7 @@ export function assertNoTopLevelTransactionControl(
 ): void {
   const control = findTopLevelTransactionControl(sql);
   if (!control) return;
-  throw new Error(
+  throw new MigrationDiagnosticError(
     `Migration ${file} contains top-level transaction control ${control.keyword} ` +
       `at line ${control.line}; the migration runner owns transaction boundaries.`,
   );
@@ -344,7 +364,7 @@ export function assertMigrationApproved(
   ) {
     return;
   }
-  throw new Error(
+  throw new MigrationDiagnosticError(
     `Migration ${file} requires controlled downtime and is not approved. ` +
       `Stop the old deployment, take a database backup, then set ` +
       `CONTROL_PLANE_MIGRATION_APPROVALS=${file} for the one-time rollout.`,
@@ -355,6 +375,7 @@ type Migration = { file: string; sql: string; checksum: string };
 
 export type MigrationStatus =
   | { state: "current" }
+  | { state: "maintenance" }
   | {
       state: "controlled_migration_pending";
       migration: string;
@@ -435,6 +456,18 @@ const CONTROLLED_MIGRATION_BOOT_POLICIES: Readonly<
       "0060_cloud_workspace_pending_blob_deletions.sql",
       "0061_workos_provider_erasure_fences.sql",
       "0062_cloud_workspace_entitlement_operations.sql",
+      "0063_cloud_workspace_compute_providers.sql",
+      "0064_cloud_workspace_provider_operations.sql",
+      "0065_cloud_workspace_engine_devices.sql",
+      "0066_cloud_workspace_commands.sql",
+      "0067_cloud_workspace_event_streams.sql",
+      "0068_cloud_workspace_setup_retry_fences.sql",
+      "0069_cloud_workspace_action_receipts.sql",
+      "0070_cloud_workspace_checkpoint_recovery.sql",
+      "0071_cloud_workspace_runtime_services.sql",
+      "0072_cloud_workspace_compute_credits.sql",
+      "0073_cloud_workspace_compute_leases.sql",
+      "0074_cloud_workspace_drift_scheduling.sql",
     ],
   },
   "0060_cloud_workspace_pending_blob_deletions.sql": {
@@ -447,6 +480,18 @@ const CONTROLLED_MIGRATION_BOOT_POLICIES: Readonly<
       "0060_cloud_workspace_pending_blob_deletions.sql",
       "0061_workos_provider_erasure_fences.sql",
       "0062_cloud_workspace_entitlement_operations.sql",
+      "0063_cloud_workspace_compute_providers.sql",
+      "0064_cloud_workspace_provider_operations.sql",
+      "0065_cloud_workspace_engine_devices.sql",
+      "0066_cloud_workspace_commands.sql",
+      "0067_cloud_workspace_event_streams.sql",
+      "0068_cloud_workspace_setup_retry_fences.sql",
+      "0069_cloud_workspace_action_receipts.sql",
+      "0070_cloud_workspace_checkpoint_recovery.sql",
+      "0071_cloud_workspace_runtime_services.sql",
+      "0072_cloud_workspace_compute_credits.sql",
+      "0073_cloud_workspace_compute_leases.sql",
+      "0074_cloud_workspace_drift_scheduling.sql",
     ],
   },
   "0061_workos_provider_erasure_fences.sql": {
@@ -458,7 +503,24 @@ const CONTROLLED_MIGRATION_BOOT_POLICIES: Readonly<
     safePendingSuffix: [
       "0061_workos_provider_erasure_fences.sql",
       "0062_cloud_workspace_entitlement_operations.sql",
+      "0063_cloud_workspace_compute_providers.sql",
+      "0064_cloud_workspace_provider_operations.sql",
+      "0065_cloud_workspace_engine_devices.sql",
+      "0066_cloud_workspace_commands.sql",
+      "0067_cloud_workspace_event_streams.sql",
+      "0068_cloud_workspace_setup_retry_fences.sql",
+      "0069_cloud_workspace_action_receipts.sql",
+      "0070_cloud_workspace_checkpoint_recovery.sql",
+      "0071_cloud_workspace_runtime_services.sql",
+      "0072_cloud_workspace_compute_credits.sql",
+      "0073_cloud_workspace_compute_leases.sql",
+      "0074_cloud_workspace_drift_scheduling.sql",
     ],
+  },
+  "0073_cloud_workspace_compute_leases.sql": {
+    dependentRuntime: "cloud_workspaces",
+    requiresEmptyPreBoundaryCloudState: false,
+    safePendingSuffix: ["0073_cloud_workspace_compute_leases.sql", "0074_cloud_workspace_drift_scheduling.sql"],
   },
 };
 
@@ -479,7 +541,7 @@ function assertSafePendingSuffix(
         ? -1
         : Math.min(actual.length, expected.length);
   if (mismatchAt === -1) return;
-  throw new Error(
+  throw new MigrationDiagnosticError(
     `Cannot defer controlled migration ${migrations[index]!.file}: pending ` +
       `migration ${actual[mismatchAt] ?? expected[mismatchAt]} is not covered ` +
       `by its explicit dormant-runtime policy.`,
@@ -528,7 +590,7 @@ async function withMigrationClient<T>(
     );
     originalStatementTimeout = timeout.rows[0]?.statement_timeout ?? null;
     if (originalStatementTimeout === null) {
-      throw new Error("Could not read migration client statement_timeout");
+      throw new MigrationDiagnosticError("Could not read migration client statement_timeout");
     }
     await client.query("SET statement_timeout = 0");
     timeoutDisabled = true;
@@ -566,11 +628,22 @@ async function withMigrationClient<T>(
 
   if (!completed) throw operationError;
   if (cleanupError) {
-    throw new Error(
-      `Migration client cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+    throw new MigrationDiagnosticError(
+      `Migration client cleanup failed${safeSqlState(cleanupError)}.`,
     );
   }
   return result as T;
+}
+
+function assertKnownLedger(migrations: readonly Migration[], names: Iterable<string>): void {
+  const known = new Set(migrations.flatMap((migration) => [
+    migration.file, ...renamedMigrationAliasesFor(migration.file),
+  ]));
+  for (const name of names) {
+    if (!known.has(name)) {
+      throw new MigrationDiagnosticError("Database contains an unknown migration; use a runtime that supports the deployed schema before service boot or migration.");
+    }
+  }
 }
 
 async function prepareMigrationLedger(
@@ -597,6 +670,7 @@ async function prepareMigrationLedger(
       checksum: string | null;
     }>("SELECT name, checksum FROM schema_migrations");
     const applied = new Map(rows.map((row) => [row.name, row.checksum]));
+    assertKnownLedger(migrations, applied.keys());
 
     for (const migration of migrations) {
       if (!applied.has(migration.file)) continue;
@@ -610,10 +684,8 @@ async function prepareMigrationLedger(
         );
         applied.set(migration.file, migration.checksum);
       } else if (recorded !== migration.checksum) {
-        throw new Error(
-          `Migration ${migration.file} checksum mismatch: the database records ` +
-            `${recorded}, but the file is ${migration.checksum}. Released ` +
-            `migration content is immutable.`,
+        throw new MigrationDiagnosticError(
+          `Migration ${migration.file} checksum mismatch. Released migration content is immutable.`,
         );
       }
     }
@@ -761,8 +833,8 @@ async function applyMigration(
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
-    throw new Error(
-      `Migration ${migration.file} failed: ${error instanceof Error ? error.message : String(error)}`,
+    throw new MigrationDiagnosticError(
+      `Migration ${migration.file} failed${safeSqlState(error)}.`,
     );
   }
 }
@@ -776,6 +848,16 @@ async function executeMigrations(
   return withMigrationClient(pool, async (client) => {
     const applied = await prepareMigrationLedger(client, migrations);
     const ran: string[] = [];
+
+    // An operator should learn about every missing approval before any
+    // application migration commits. Service-boot compatibility keeps its
+    // separately reviewed dormant-subsystem behavior below.
+    if (policy.mode === "explicit") {
+      for (const migration of migrations) {
+        if (!applied.has(migration.file) && !recordedAlias(migration, applied))
+          assertMigrationApproved(migration.file, migration.sql, env);
+      }
+    }
 
     for (const [index, migration] of migrations.entries()) {
       if (applied.has(migration.file)) continue;
@@ -796,7 +878,7 @@ async function executeMigrations(
         false,
       );
       if (unexpectedLater) {
-        throw new Error(
+        throw new MigrationDiagnosticError(
           `Migration ledger is out of order: ${unexpectedLater.file} is ` +
             `recorded after missing ${migration.file}.`,
         );
@@ -816,7 +898,7 @@ async function executeMigrations(
             true,
           );
           if (later) {
-            throw new Error(
+            throw new MigrationDiagnosticError(
               `Migration ledger is out of order: ${later.file} is recorded ` +
                 `after missing controlled boundary ${migration.file}.`,
             );
@@ -824,7 +906,7 @@ async function executeMigrations(
           if (bootPolicy.requiresEmptyPreBoundaryCloudState) {
             const existingCloudState = await findPreBoundaryCloudState(client);
             if (existingCloudState) {
-              throw new Error(
+              throw new MigrationDiagnosticError(
                 `Cannot defer controlled migration ${migration.file}: existing ` +
                   `cloud state was found in ${existingCloudState}. Run the ` +
                   `strict operator migration during controlled downtime before ` +
@@ -845,7 +927,7 @@ async function executeMigrations(
         // Automatic production boot never consumes the operator approval
         // variable. Only a migration with an explicit dormant-subsystem
         // policy may pause; core-schema and future marked boundaries fail.
-        throw new Error(
+        throw new MigrationDiagnosticError(
           `Migration ${migration.file} requires controlled downtime and is ` +
             `not approved for automatic service boot. ` +
             `CONTROL_PLANE_MIGRATION_APPROVALS is honored only by the strict ` +
@@ -880,6 +962,49 @@ export async function runMigrations(
   return result.ran;
 }
 
+/** Read-only artifact/ledger inspection. Printing a plan never applies its
+ * approvals; an operator still owns drain, backup and explicit execution. */
+export async function planMigrations(pool: pg.Pool) {
+  const migrations = await loadMigrations();
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    const exists = await client.query<{ledger: string | null}>("SELECT to_regclass('public.schema_migrations')::text AS ledger");
+    const names = exists.rows[0]?.ledger
+      ? (await client.query<{name: string}>("SELECT name FROM schema_migrations ORDER BY name")).rows.map(row => row.name)
+      : [];
+    assertKnownLedger(migrations, names);
+    const applied = new Map(names.map(name => [name, null]));
+    const pending = migrations.filter(migration => !applied.has(migration.file) && !recordedAlias(migration, applied));
+    await client.query("COMMIT");
+    return {pendingMigrations: pending.map(migration => migration.file),
+      controlledApprovals: pending.filter(migration => requiresControlledDowntime(migration.sql)).map(migration => migration.file)};
+  } catch (error) { await client.query("ROLLBACK").catch(() => undefined); throw error; }
+  finally { client.release(); }
+}
+
+/** Runtime boot after an explicit migrator. This never creates or repairs the
+ * ledger, and works with a login that has no schema-changing privileges. */
+export async function verifyMigrations(
+  pool: pg.Pool,
+): Promise<ServiceBootMigrationResult> {
+  const migrations = await loadMigrations();
+  const { rows } = await withSystemTx(pool, tx => tx.query<{ name: string; checksum: string | null }>(
+    "SELECT name, checksum FROM schema_migrations",
+  ), { consistentRead: true });
+  const applied = new Map(rows.map((row) => [row.name, row.checksum]));
+  assertKnownLedger(migrations, applied.keys());
+  for (const migration of migrations) {
+    if (!applied.has(migration.file)) {
+      throw new MigrationDiagnosticError(`Migration ${migration.file} is pending; run the separate migrator before service boot.`);
+    }
+    if (applied.get(migration.file) !== migration.checksum) {
+      throw new MigrationDiagnosticError(`Migration ${migration.file} checksum mismatch; service boot cannot repair the ledger.`);
+    }
+  }
+  return { ran: [], status: { state: "current" } };
+}
+
 /**
  * Automatic boot runner. It may report one of the reviewed pending cloud
  * boundaries only while cloud runtime is actually disabled; every other case
@@ -901,8 +1026,16 @@ export async function runServiceBootMigrations(
 
 async function runMigrationCli(): Promise<void> {
   const config = loadConfig();
-  const pool = new pg.Pool({ connectionString: config.databaseUrl, max: 2 });
+  const pool = createMigrationPool(config.databaseMigrationUrl ?? config.databaseUrl, {
+    maxConnections: 1,
+    applicationName: "zeros-migrator",
+    ...(config.databaseMigrationRole ? {role: config.databaseMigrationRole} : {}),
+  });
   try {
+    if (process.argv.includes("--plan")) {
+      console.log(JSON.stringify({state: "planned", ...await planMigrations(pool)}));
+      return;
+    }
     const ran = await runMigrations(pool);
     console.log(
       ran.length
@@ -922,7 +1055,7 @@ if (
   fileURLToPath(import.meta.url) === path.resolve(process.argv[1])
 ) {
   runMigrationCli().catch((error: unknown) => {
-    console.error(error);
+    console.error(migrationFailureDiagnostic(error));
     process.exitCode = 1;
   });
 }

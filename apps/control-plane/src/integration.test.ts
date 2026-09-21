@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { runMigrations } from "./migrate.js";
-import { ensureUser } from "./auth.js";
+import { ensureUser, resolveAuthenticatedUser } from "./auth.js";
 import { withSystemTx, withUserTx } from "./db.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -36,6 +36,58 @@ d("schema + signup transaction", () => {
       displayName,
     });
   };
+
+  it("keeps warm WorkOS authentication read-only until session metadata changes", async () => {
+    const subject = `user_${randomUUID()}`;
+    const input = { provider: "workos", providerSubject: subject,
+      email: `warm-${randomUUID()}@example.test`, displayName: "Warm Session",
+      session: { id: `session_${randomUUID()}`, clientKind: "desktop" as const, authTime: null,
+        tokenExpiresAt: Math.floor(Date.now() / 1000) + 900 } };
+    const user = await resolveAuthenticatedUser(pool, input);
+    const snapshot = async () => (await pool.query(
+      "SELECT xmin::text AS version,last_seen_at,last_token_expires_at FROM auth_sessions WHERE provider_session_id=$1", [input.session.id])).rows[0];
+    const before = await snapshot();
+    expect((await resolveAuthenticatedUser(pool, input)).id).toBe(user.id);
+    expect(await snapshot()).toEqual(before);
+    await resolveAuthenticatedUser(pool, { ...input, session: { ...input.session, tokenExpiresAt: input.session.tokenExpiresAt + 60 } });
+    expect((await snapshot()).last_token_expires_at.getTime()).toBe((input.session.tokenExpiresAt + 60) * 1000);
+    await pool.query("UPDATE auth_sessions SET last_seen_at=now()-interval '16 minutes' WHERE provider_session_id=$1", [input.session.id]);
+    await resolveAuthenticatedUser(pool, input);
+    expect((await snapshot()).last_seen_at.getTime()).toBeGreaterThan(Date.now() - 60_000);
+    await pool.query("UPDATE auth_sessions SET status='revoked',revoked_at=now(),revocation_reason='qualification' WHERE provider_session_id=$1", [input.session.id]);
+    await expect(resolveAuthenticatedUser(pool, input)).rejects.toMatchObject({ code: "session_revoked" });
+  });
+
+  it("preserves the verified identity email for returning invitation recipients despite profile email drift", async () => {
+    const input = { provider: "workos", providerSubject: `user_${randomUUID()}`,
+      email: `original-${randomUUID()}@example.test`, displayName: "Recipient" };
+    const user = await ensureUser(pool, input);
+    const currentEmail = `verified-${randomUUID()}@example.test`;
+    const other = await ensureUser(pool, { provider: "auth0", providerSubject: randomUUID(), email: currentEmail, displayName: "Different Account" });
+    const authed = await resolveAuthenticatedUser(pool, { ...input, email: currentEmail });
+    expect(authed.id).toBe(user.id);
+    expect(authed.id).not.toBe(other.id);
+    expect(authed.email).toBe(input.email);
+    expect(authed.identity?.verifiedEmail).toBe(currentEmail);
+  });
+
+  it("does not wait for browser token refresh when its account binding is already current", async () => {
+    const subject=`user_${randomUUID()}`;
+    const input={provider:"workos",providerSubject:subject,email:`bound-${randomUUID()}@example.test`,displayName:"Bound",
+      session:{id:`session_${randomUUID()}`,clientKind:"web" as const,authTime:null,tokenExpiresAt:Math.floor(Date.now()/1000)+900}};
+    const user=await resolveAuthenticatedUser(pool,input);
+    await pool.query(`INSERT INTO workos_browser_sessions(credential_hash,kind,sealed_session,provider_session_id,provider_sub,
+      email,access_token_expires_at,expires_at,revision,account_user_id,account_revision)
+      VALUES(digest($1,'sha256'),'session','encrypted-fixture',$1,$2,$3,now()+interval '15 minutes',now()+interval '1 day',1,$4,$5)`,
+      [input.session.id,subject,input.email,user.id,user.accountRevision]);
+    const blocker=await pool.connect();
+    const authPool=new pg.Pool({connectionString:url,max:1,statement_timeout:1000});
+    try{
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT 1 FROM workos_browser_sessions WHERE provider_session_id=$1 FOR UPDATE',[input.session.id]);
+      expect((await resolveAuthenticatedUser(authPool,input)).id).toBe(user.id);
+    }finally{await blocker.query('ROLLBACK');blocker.release();await authPool.end();}
+  });
 
   /** Mirror POST /v1/organizations' atomic bootstrap. */
   const createOrganization = async (
@@ -214,6 +266,46 @@ d("schema + signup transaction", () => {
     expect(users.rowCount).toBe(1);
   });
 
+  it("authenticates WorkOS through a NOINHERIT runtime login without leaking role or identity", async () => {
+    const role = `zeros_auth_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(`CREATE ROLE ${role} LOGIN NOINHERIT NOSUPERUSER NOBYPASSRLS`);
+    await pool.query(`GRANT zeros_app TO ${role}`);
+    const runtimeUrl = new URL(url!);
+    runtimeUrl.username = role;
+    const runtime = new pg.Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+    const identity = {
+      provider: "workos" as const,
+      providerSubject: `user_${randomUUID().replaceAll("-", "")}`,
+      email: `runtime-${randomUUID()}@example.com`,
+      displayName: "Restricted runtime",
+    };
+    try {
+      await expect(runtime.query("SELECT id FROM public.users")).rejects.toMatchObject({ code: "42501" });
+      const first = await ensureUser(runtime, identity);
+      await pool.query("UPDATE users SET staff_role = 'developer' WHERE id = $1", [first.id]);
+      const again = await ensureUser(runtime, identity);
+      expect(again).toMatchObject({ id: first.id, staffRole: "developer" });
+      await withUserTx(runtime, first.id, async tx => {
+        const context = await tx.query("SELECT current_user AS role, app_is_system() AS system, app_current_user() AS user_id");
+        expect(context.rows).toEqual([{ role: "zeros_app", system: false, user_id: first.id }]);
+      });
+      await withSystemTx(runtime, async tx => {
+        expect((await tx.query("SELECT current_user AS role, app_is_system() AS system, app_current_user() AS user_id")).rows)
+          .toEqual([{ role: "zeros_app", system: true, user_id: null }]);
+        expect((await tx.query("SHOW transaction_isolation")).rows[0]).toEqual({ transaction_isolation: "repeatable read" });
+        expect((await tx.query("SHOW transaction_read_only")).rows[0]).toEqual({ transaction_read_only: "on" });
+      }, { consistentRead: true });
+      const state = await runtime.query(`SELECT current_user AS role,
+        nullif(current_setting('app.system', true), '') AS system,
+        nullif(current_setting('app.user_id', true), '') AS user_id`);
+      expect(state.rows).toEqual([{ role, system: null, user_id: null }]);
+      await expect(runtime.query("SELECT id FROM public.users")).rejects.toMatchObject({ code: "42501" });
+    } finally {
+      await runtime.end();
+      await pool.query(`DROP ROLE ${role}`);
+    }
+  });
+
   it("binds a WorkOS subject to one internal account without auto-linking by email", async () => {
     const providerSubject = `user_${randomUUID().replaceAll("-", "")}`;
     const email = `workos-${randomUUID()}@example.com`;
@@ -235,6 +327,7 @@ d("schema + signup transaction", () => {
     expect(first.identity).toEqual({
       provider: "workos",
       subject: providerSubject,
+      verifiedEmail: email,
     });
     const binding = await pool.query<{
       user_id: string;

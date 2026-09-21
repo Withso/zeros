@@ -25,11 +25,7 @@ describe("cloud provider credential envelope", () => {
     expect(sealed.ciphertext.toString("utf8")).not.toContain(credential);
     expect(sealed.credentialSha256).toHaveLength(32);
     expect(
-      openCloudProviderCredential(
-        { keyVersion: 1, ...sealed },
-        binding,
-        key,
-      ),
+      openCloudProviderCredential({ keyVersion: 1, ...sealed }, binding, key),
     ).toBe(credential);
   });
 
@@ -59,6 +55,48 @@ describe("cloud provider credential envelope", () => {
       sealCloudProviderCredential(
         "daytona_test_credential_0123456789",
         { ...binding, endpoint: "https://token@app.daytona.io/api" },
+        key,
+      ),
+    ).toThrow("invalid");
+  });
+
+  it.each(["", "unsupported", "DAYTONA", "daytona\0boat"])(
+    "rejects an unknown runtime provider binding: %j",
+    (provider) => {
+      const key = randomBytes(32).toString("base64url");
+      expect(() =>
+        sealCloudProviderCredential(
+          "provider_test_credential_0123456789",
+          { ...binding, provider: provider as never },
+          key,
+        ),
+      ).toThrow("invalid");
+    },
+  );
+
+  it("binds Boat credentials to the provider as well as tenant and version", () => {
+    const key = randomBytes(32).toString("base64url");
+    const boatBinding = {
+      ...binding,
+      provider: "boat" as const,
+      endpoint: "https://boat.dev/api/v1",
+    };
+    const sealed = sealCloudProviderCredential(
+      "provider_test_credential_0123456789",
+      boatBinding,
+      key,
+    );
+    expect(
+      openCloudProviderCredential(
+        { keyVersion: 1, ...sealed },
+        boatBinding,
+        key,
+      ),
+    ).toBe("provider_test_credential_0123456789");
+    expect(() =>
+      openCloudProviderCredential(
+        { keyVersion: 1, ...sealed },
+        { ...boatBinding, provider: "daytona" },
         key,
       ),
     ).toThrow("invalid");

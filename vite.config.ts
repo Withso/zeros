@@ -14,7 +14,10 @@ import react from "@vitejs/plugin-react";
 // The control-plane origin is derived from VITE_CONTROL_PLANE_URL so local and
 // Railway-provided domains work as well as the custom *.zeros.build domains.
 // Organizations and feedback now share this one authenticated backend.
-function buildElectronRendererCsp(controlPlaneOrigin: string): string {
+export function buildElectronRendererCsp(controlPlaneOrigin: string): string {
+  const controlPlaneWebSocketOrigin = controlPlaneOrigin
+    ? controlPlaneOrigin.replace(/^https:/, "wss:").replace(/^http:/, "ws:")
+    : "";
   const connectSrc = [
     "'self'",
     "ws://localhost:*",
@@ -33,6 +36,7 @@ function buildElectronRendererCsp(controlPlaneOrigin: string): string {
     // NOT a tracking or telemetry endpoint.
     "https://withso.github.io",
     controlPlaneOrigin,
+    controlPlaneWebSocketOrigin,
   ]
     .filter(Boolean)
     .join(" ");

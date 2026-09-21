@@ -43,9 +43,11 @@ import { createDevAuthConfigurationRoutes } from "./dev-auth-configuration.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
   createCloudWorkspaceInternalRoutes,
+  CLOUD_WORKSPACE_INTERNAL_PATHS,
+  cloudWorkspaceInternalResponseHeaders,
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
-import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import { previewRequestFromEdge, type CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
 import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
 import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
 import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
@@ -60,10 +62,13 @@ import {
 import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
 import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 import type { MigrationStatus } from "./migrate.js";
+import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
+import { createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 
 export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
+  cloudRuntimeServiceAccess?: DatabaseCloudRuntimeServiceAccess;
   cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
   cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService;
   cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService;
@@ -76,11 +81,21 @@ export type CreateAppDependencies = {
 
 function isCloudWorkspaceApiPath(requestPath: string): boolean {
   return (
+    requestPath === "/v1/cloud-workspaces" ||
+    requestPath.startsWith("/v1/cloud-workspaces/") ||
+    requestPath === "/v1/cloud-agent-credentials" ||
+    requestPath.startsWith("/v1/cloud-agent-credentials/") ||
+    requestPath === "/v1/cloud-workspace-invitations/accept" ||
+    requestPath === "/v1/cloud-compute-credits" ||
+    requestPath === "/v1/auth/snapshot" ||
+    requestPath === "/v1/auth/events" ||
     requestPath === "/v1/devices" ||
     requestPath.startsWith("/v1/devices/") ||
     requestPath === "/internal/v1/cloud-workspaces" ||
     requestPath.startsWith("/internal/v1/cloud-workspaces/") ||
-    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management)(?:\/|$)/u.test(
+    requestPath === "/internal/v2/cloud-workspaces" ||
+    requestPath.startsWith("/internal/v2/cloud-workspaces/") ||
+    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management|cloud-compute-credits)(?:\/|$)/u.test(
       requestPath,
     )
   );
@@ -95,6 +110,22 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): Hono {
   const app = new Hono();
+  if (config.databaseMaintenanceMode) {
+    // A restored database may contain deliverable outboxes and live sessions.
+    // Do not even assemble provider/auth routers while fencing its writers.
+    app.use("*", async c => {
+      c.header("Cache-Control", "no-store");
+      if ((c.req.method === "GET" || c.req.method === "HEAD") && c.req.path === "/healthz") {
+        try {
+          await pool.query("SELECT 1");
+          return c.json({ ok: true, maintenance: true });
+        } catch { return c.json({ ok: false, maintenance: true }, 503); }
+      }
+      c.header("Retry-After", "30");
+      return c.json({ error: "maintenance", message: "Service is temporarily unavailable" }, 503);
+    });
+    return app;
+  }
   const pendingMigration =
     dependencies.migrationStatus?.state === "controlled_migration_pending"
       ? dependencies.migrationStatus
@@ -117,7 +148,7 @@ export function createApp(
           error: {
             code: "controlled_migration_pending",
             message:
-              "Cloud workspaces are disabled until the pending controlled migration is applied",
+              "This service is temporarily unavailable until the pending controlled migration is applied",
             migration: pendingMigration.migration,
           },
         },
@@ -153,14 +184,15 @@ export function createApp(
     );
     app.use("*", async (c, next) => {
       const access = dependencies.cloudWorkspaceAccessService!;
-      if (!access.recognizesPreviewRequest(c.req.raw)) {
+      const previewRequest = previewRequestFromEdge(c.req.raw);
+      if (!access.recognizesPreviewRequest(previewRequest)) {
         await next();
         return;
       }
       // Run a no-op continuation through the shared limiter before capability
       // parsing, PostgreSQL, provider lookup, or upstream body buffering.
       await previewPreAuthLimit(c, async () => undefined);
-      const proxied = await access.handlePreviewRequest(c.req.raw);
+      const proxied = await access.handlePreviewRequest(previewRequest);
       if (proxied) return proxied;
       await next();
     });
@@ -291,7 +323,10 @@ export function createApp(
         return isIP(clientIp) ? clientIp : "unknown";
       },
     );
-    app.use("/internal/v1/cloud-workspaces/*", internalPreAuthLimit);
+    for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) {
+      app.use(path, cloudWorkspaceInternalResponseHeaders);
+      app.use(path, internalPreAuthLimit);
+    }
     app.route(
       "/",
       createCloudWorkspaceInternalRoutes(
@@ -314,6 +349,7 @@ export function createApp(
         "content-type",
         "idempotency-key",
         "x-zeros-access-credential",
+        "x-zeros-runtime-admission",
         "x-zeros-device-id",
         "x-zeros-device-key-version",
         "x-zeros-device-timestamp",
@@ -454,6 +490,9 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
+  if (dependencies.cloudRuntimeServiceAccess && !pendingMigration) {
+    app.route("/", createCloudRuntimeServiceRoutes(dependencies.cloudRuntimeServiceAccess));
+  }
   app.route("/", createAccountRecoveryRoutes(pool));
   app.route("/", createDeletionLifecycleRoutes(pool));
   if (config.workos?.opsOrigin && config.deploymentChannel !== "beta") {
@@ -510,12 +549,17 @@ export function createApp(
         err.status,
       );
     }
-    console.error("[error]", err);
+    // Driver errors may contain SQL, identity data and bound values. Retain
+    // only a bounded SQLSTATE for diagnosis; unknown errors stay private in
+    // every deployment channel, including development and qualification.
+    const sqlState = "code" in err && typeof err.code === "string" &&
+      /^[A-Z0-9]{5}$/.test(err.code) ? err.code : undefined;
+    console.error("[error]", { code: "internal", ...(sqlState ? { sqlState } : {}) });
     return c.json(
       {
         error: {
           code: "internal",
-          message: config.isProduction ? "Internal error" : String(err),
+          message: "Internal error",
         },
       },
       500,

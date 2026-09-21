@@ -74,6 +74,220 @@ afterEach(() => {
 });
 
 describe("cloud runtime registration", () => {
+  it("preserves verified device control and Stop during a temporary record outage while blocking new claims", async () => {
+    vi.useFakeTimers(); vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, Date.now)!;
+    const sync = completedDurableRecordSync();
+    sync.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("temporary record outage"));
+    const fetcher = vi.fn(async (url: URL | string) => {
+      const path = new URL(url).pathname;
+      if (path.endsWith("/register")) return Response.json(registrationResponse());
+      if (path.endsWith("/heartbeat")) return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-heartbeat-v1",
+        accepted: true, engineInstanceId: runtime.engine.instanceId, leaseExpiresAtMs: NOW + 120000 });
+      if (path.endsWith("/client-admission")) return Response.json({ version: 1, audience: "zeros-cloud-workspace-engine-client-admission-v1",
+        admitted: true, accountUserId: ACCOUNT_USER_ID, authorityEpoch: 1 });
+      return Response.json({ result: { paused: true } });
+    });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) }, fetch: fetcher as typeof fetch, now: Date.now,
+      onAuthorityLost: vi.fn(), onDurableRecordSync: sync });
+    await registration.start(); await vi.advanceTimersByTimeAsync(30000);
+    expect(registration.readiness()).toBeNull();
+    await expect(registration.verifyClientAdmission(`zws_${"A".repeat(43)}`, true)).resolves.toMatchObject({ accountUserId: ACCOUNT_USER_ID });
+    await expect(registration.commandRequest({ kind: "stop", conversationId: "chat", operationId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" })).resolves.toEqual({ paused: true });
+    await expect(registration.commandRequest({ kind: "claim", conversationId: "chat", executionId: "execution" })).rejects.toMatchObject({ code: "command_durability_unavailable" });
+    await registration.stop();
+  });
+
+  it("flushes a fresh durable transcript before each terminal command receipt", async () => {
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const barriers: Array<() => void> = [];
+    let initial = true;
+    const sync = vi.fn(async () => {
+      if (initial) { initial = false; return; }
+      await new Promise<void>(resolve => { barriers.push(resolve); });
+    });
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockImplementation(async () => Response.json({ result: { state: "succeeded" } }));
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: fetcher, now: () => NOW, onAuthorityLost: vi.fn(), onDurableRecordSync: sync,
+    });
+    await registration.start();
+    const request = { kind: "settle" as const, result: {
+      commandId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", claimId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+      state: "succeeded" as const, resultCode: null,
+    } };
+    const first = registration.commandRequest(request);
+    await vi.waitFor(() => expect(barriers).toHaveLength(1));
+    const second = registration.commandRequest(request);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    barriers[0](); await first;
+    await vi.waitFor(() => expect(barriers).toHaveLength(2));
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    barriers[1](); await second;
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    await registration.stop();
+  });
+
+  it("renews a consumed connection and ignores admission replies after shutdown", async () => {
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      () => NOW,
+    )!;
+    let finish!: (response: Response) => void;
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: fetcher,
+      now: () => NOW,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
+    });
+    await registration.start();
+    const pending = registration.verifyClientAdmission(
+      `zws_${"A".repeat(43)}`,
+      true,
+    );
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toMatchObject({
+      renew: true,
+    });
+    await registration.stop();
+    finish(
+      Response.json({
+        version: 1,
+        audience: "zeros-cloud-workspace-engine-client-admission-v1",
+        admitted: true,
+        authorityEpoch: 1,
+        accountUserId: ACCOUNT_USER_ID,
+      }),
+    );
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it("rechecks service access through current heartbeat authority and refuses stale replies", async () => {
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      () => NOW,
+    )!;
+    const capability = `zwp_${"P".repeat(43)}`;
+    const admission = {
+      version: 1,
+      audience: "zeros-cloud-runtime-access-admission-v1",
+      admitted: true,
+      grantId: "66666666-6666-4666-8666-666666666666",
+      accountUserId: ACCOUNT_USER_ID,
+      authorityEpoch: 1,
+      kind: "preview",
+      remotePort: 3000,
+      expiresAtMs: NOW + 10_000,
+    };
+    let finish!: (response: Response) => void;
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(Response.json(admission))
+      .mockImplementationOnce(
+        () =>
+          new Promise<Response>((resolve) => {
+            finish = resolve;
+          }),
+      );
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: fetcher,
+      now: () => NOW,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
+    });
+    expect(await registration.verifyServiceAccess(capability)).toBeNull();
+    await registration.start();
+    await expect(registration.verifyServiceAccess(capability)).resolves.toEqual(
+      admission,
+    );
+    expect(fetcher.mock.calls[1][0]).toBe(
+      "https://control.example.test/internal/v1/cloud-workspaces/engine/access-admission",
+    );
+    expect(fetcher.mock.calls[1][1].headers.authorization).toBe(
+      `Bearer zwh_${"H".repeat(43)}`,
+    );
+    expect(JSON.parse(fetcher.mock.calls[1][1].body)).toMatchObject({
+      grantToken: capability,
+      generation: 3,
+    });
+    const pending = registration.verifyServiceAccess(capability);
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await registration.stop();
+    finish(Response.json(admission));
+    await expect(pending).resolves.toBeNull();
+  });
+
+  it.each([
+    { remotePort: 22 },
+    { expiresAtMs: NOW },
+    { expiresAtMs: NOW + 11_000 },
+    { kind: "ssh" },
+    { version: 2 },
+    { grantId: "invalid" },
+    { injected: true },
+  ])("rejects malformed runtime service grants %j", async (change) => {
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      () => NOW,
+    )!;
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce(Response.json(registrationResponse()))
+        .mockResolvedValueOnce(
+          Response.json({
+            version: 1,
+            audience: "zeros-cloud-runtime-access-admission-v1",
+            admitted: true,
+            grantId: "66666666-6666-4666-8666-666666666666",
+            accountUserId: ACCOUNT_USER_ID,
+            authorityEpoch: 1,
+            kind: "preview",
+            remotePort: 3000,
+            expiresAtMs: NOW + 10_000,
+            ...change,
+          }),
+        ),
+      now: () => NOW,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
+    });
+    await registration.start();
+    await expect(
+      registration.verifyServiceAccess(`zwp_${"P".repeat(43)}`),
+    ).resolves.toBeNull();
+    await registration.stop();
+  });
+
+  it("uses a request-anchored relative service lease across clock skew and rejects expired transit", async () => {
+    let now = NOW;
+    const runtime = consumeCloudRuntimeEnvironment({ [CLOUD_RUNTIME_ENV]: encodedRuntime() }, () => NOW)!;
+    const grant = { version: 1, audience: "zeros-cloud-runtime-access-admission-v1", admitted: true,
+      grantId: "66666666-6666-4666-8666-666666666666", accountUserId: ACCOUNT_USER_ID,
+      authorityEpoch: 1, kind: "preview", remotePort: 3000,
+      expiresAtMs: NOW + 70_000, leaseDurationMs: 10_000 };
+    const fetcher = vi.fn().mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockImplementationOnce(async () => { now += 200; return Response.json(grant); })
+      .mockImplementationOnce(async () => { now += 10_001; return Response.json(grant); });
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) }, fetch: fetcher, now: () => now,
+      onAuthorityLost: vi.fn(), onDurableRecordSync: completedDurableRecordSync() });
+    await registration.start();
+    await expect(registration.verifyServiceAccess(`zwp_${"P".repeat(43)}`)).resolves.toMatchObject({ expiresAtMs: NOW + 10_000 });
+    expect(JSON.parse(fetcher.mock.calls[1]![1].body)).toHaveProperty("relativeLease", true);
+    await expect(registration.verifyServiceAccess(`zwp_${"P".repeat(43)}`)).resolves.toBeNull();
+    await registration.stop();
+  });
+
   it("consumes and deletes the one-process runtime environment", () => {
     const env = { [CLOUD_RUNTIME_ENV]: encodedRuntime() };
     const runtime = consumeCloudRuntimeEnvironment(env, () => NOW);
@@ -94,6 +308,20 @@ describe("cloud runtime registration", () => {
     expect(env).not.toHaveProperty(CLOUD_RUNTIME_ENV);
   });
 
+  it("registers actor protocol and verified private runtime identity together", async () => {
+    const runtime=consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},()=>NOW)!;
+    const fetch=vi.fn<typeof globalThis.fetch>(async()=>Response.json(registrationResponse()));
+    const agentRuntime={profile:"zeros-cloud-worker-v3" as const,contractSha256:"a".repeat(64)};
+    const registration=new CloudRuntimeRegistration(runtime,{
+      fetch,now:()=>NOW,onAuthorityLost:vi.fn(),onDurableRecordSync:completedDurableRecordSync(),
+      ...{agentRuntime},
+    });
+    try {
+      await registration.start();
+      expect(JSON.parse(String(fetch.mock.calls[0]![1]?.body))).toMatchObject({actorProtocolVersion:2,agentRuntime});
+    } finally { await registration.stop(); }
+  });
+
   it("registers the exact engine without putting a capability in URL or body", async () => {
     const runtime = consumeCloudRuntimeEnvironment(
       { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
@@ -102,7 +330,7 @@ describe("cloud runtime registration", () => {
     const fetch = vi.fn<typeof globalThis.fetch>(async () =>
       Response.json(registrationResponse()),
     );
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: () => NOW,
       onAuthorityLost: vi.fn(),
@@ -133,6 +361,8 @@ describe("cloud runtime registration", () => {
       executionFence: runtime.execution.executionFence,
       engineInstanceId: runtime.engine.instanceId,
       protocolVersion: runtime.engine.protocolVersion,
+      actorProtocolVersion: 2,
+      agentRuntime: {profile:"zeros-cloud-worker-v3",contractSha256:"a".repeat(64)},
     });
     expect(String(init?.body)).not.toContain(runtime.registration.token);
     await registration.stop();
@@ -155,7 +385,7 @@ describe("cloud runtime registration", () => {
         ),
       );
     const onAuthorityLost = vi.fn();
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost,
@@ -187,7 +417,7 @@ describe("cloud runtime registration", () => {
           { status: 401 },
         ),
       );
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost: () => {
@@ -221,7 +451,7 @@ describe("cloud runtime registration", () => {
           leaseExpiresAtMs: NOW + 120_000,
         }),
       );
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost: vi.fn(),
@@ -262,7 +492,7 @@ describe("cloud runtime registration", () => {
         }),
       )
       .mockResolvedValueOnce(Response.json({ admitted: true }));
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: () => NOW,
       onAuthorityLost: vi.fn(),
@@ -294,6 +524,22 @@ describe("cloud runtime registration", () => {
     await expect(
       registration.verifyClientAdmission(grantToken),
     ).resolves.toBeNull();
+    await registration.stop();
+  });
+
+  it("redeems v2 actor admission without relaxing the strict v1 response contract",async()=>{
+    vi.useFakeTimers();vi.setSystemTime(NOW);
+    const runtime=consumeCloudRuntimeEnvironment({[CLOUD_RUNTIME_ENV]:encodedRuntime()},Date.now)!;
+    const body={version:2,audience:"zeros-cloud-workspace-engine-client-admission-v2",admitted:true,
+      authorityEpoch:9,accountUserId:ACCOUNT_USER_ID,actorSessionId:"22222222-2222-4222-8222-222222222222",
+      deviceId:"33333333-3333-4333-8333-333333333333",role:"developer",fingerprint:"a".repeat(64)};
+    const fetch=vi.fn().mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(Response.json(body)).mockResolvedValueOnce(Response.json({...body,version:1}));
+    const registration=new CloudRuntimeRegistration(runtime,{ agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },fetch:fetch as typeof globalThis.fetch,now:()=>NOW,onAuthorityLost:vi.fn(),onDurableRecordSync:completedDurableRecordSync()});
+    await registration.start();
+    await expect(registration.verifyClientAdmission(`zwa_${"G".repeat(43)}`)).resolves.toMatchObject({accountUserId:ACCOUNT_USER_ID,actor:{sessionId:body.actorSessionId,deviceId:body.deviceId,role:"developer"}});
+    expect(fetch.mock.calls[1]![0]).toContain("/internal/v2/cloud-workspaces/engine/client-admission");
+    await expect(registration.verifyClientAdmission(`zws_${"H".repeat(43)}`)).resolves.toBeNull();
     await registration.stop();
   });
 
@@ -348,7 +594,7 @@ describe("cloud runtime registration", () => {
       );
     const installRepositoryCredential = vi.fn();
     const acknowledgeRepositoryCredentialRefresh = vi.fn(() => true);
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost: vi.fn(),
@@ -409,7 +655,7 @@ describe("cloud runtime registration", () => {
       finish = resolve;
     });
     const onCheckpointRequested = vi.fn(() => checkpoint);
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost: vi.fn(),
@@ -453,7 +699,7 @@ describe("cloud runtime registration", () => {
         },
       },
     ]) {
-      const registration = new CloudRuntimeRegistration(runtime, {
+      const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
         fetch: vi.fn(async () =>
           Response.json(response),
         ) as typeof globalThis.fetch,
@@ -486,7 +732,7 @@ describe("cloud runtime registration", () => {
         }),
       );
     const onDurableRecordSync = completedDurableRecordSync();
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost: vi.fn(),
@@ -514,7 +760,7 @@ describe("cloud runtime registration", () => {
       complete = resolve;
     });
     const onDurableRecordSync = vi.fn(() => durableRecordSync);
-    const registration = new CloudRuntimeRegistration(runtime, {
+    const registration = new CloudRuntimeRegistration(runtime, { agentRuntime: { profile: "zeros-cloud-worker-v3", contractSha256: "a".repeat(64) },
       fetch: vi.fn(async () =>
         Response.json(registrationResponse()),
       ) as typeof globalThis.fetch,

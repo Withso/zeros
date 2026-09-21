@@ -1,3 +1,4 @@
+import { publishCloudWorkspacePath } from "../files/cloud-workspace-ownership";
 // ──────────────────────────────────────────────────────────
 // Settings foundation — TOML file layer (engine-owned)
 // ──────────────────────────────────────────────────────────
@@ -323,6 +324,7 @@ export function writeSettingsFile(
   const tmp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   try {
     writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
+    publishCloudWorkspacePath(tmp);
     renameSync(tmp, filePath);
   } catch (err) {
     try {
@@ -343,6 +345,7 @@ export function writeSettingsFileRaw(filePath: string, text: string): void {
   const tmp = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   try {
     writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
+    publishCloudWorkspacePath(tmp);
     renameSync(tmp, filePath);
   } catch (err) {
     try {

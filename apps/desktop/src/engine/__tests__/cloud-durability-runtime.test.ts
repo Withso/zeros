@@ -34,6 +34,7 @@ const authority = {
 };
 const checkpointIt = it.runIf(process.platform === "linux");
 
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -69,6 +70,70 @@ async function addTrackedNestedFile(root: string): Promise<string> {
   await git(root, "commit", "--quiet", "-m", "add nested entry");
   return nested;
 }
+
+describe("cloud checkpoint repository program isolation", () => {
+  checkpointIt("publishes periodic recovery without inventing a control-plane request receipt", async () => {
+    const root = await checkpointRepository();
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    let committed: Record<string, unknown> | undefined;
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/checkpoints/commit")) committed = JSON.parse(String(init?.body));
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    await runtime.checkpoint({ id: "55555555-5555-4555-8555-555555555555", reason: "periodic", deadlineAtMs: Date.now() + 60_000 }, authority);
+    expect(committed).toMatchObject({ reason: "periodic", artifactBlobIds: expect.any(Array) });
+    expect(committed).not.toHaveProperty("requestId");
+  });
+
+  it("does not invoke a repository-selected filesystem monitor during capture", async () => {
+    const root = await checkpointRepository();
+    const hook = path.join(root, ".git", "checkpoint-monitor");
+    await writeFile(hook, '#!/bin/sh\n: > "$0.called"\nprintf "0\\n"\n', {
+      mode: 0o755,
+    });
+    await git(root, "config", "core.fsmonitor", hook);
+    const scan = await scanCloudWorkspaceChanges(root);
+    expect(scan.entries.get("README.md")?.bytes.toString()).toBe(
+      "checkpoint\n",
+    );
+    await expect(fs.stat(`${hook}.called`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("captures worktree bytes without running repository clean filters", async () => {
+    const root = await checkpointRepository();
+    await writeFile(
+      path.join(root, ".gitattributes"),
+      "README.md filter=checkpoint\n",
+    );
+    await git(root, "add", ".gitattributes");
+    await git(root, "commit", "--quiet", "-m", "register filter name");
+    const hook = path.join(root, ".git", "checkpoint-filter");
+    await writeFile(hook, '#!/bin/sh\n: > "$0.called"\ncat\n', { mode: 0o755 });
+    await git(root, "config", "filter.checkpoint.clean", hook);
+    await git(root, "config", "filter.checkpoint.required", "true");
+    await writeFile(path.join(root, "README.md"), "CHECKPOINT\n");
+    const scan = await scanCloudWorkspaceChanges(root);
+    expect(scan.entries.get("README.md")?.bytes.toString()).toBe(
+      "CHECKPOINT\n",
+    );
+    await expect(fs.stat(`${hook}.called`)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("retains staged deletions and index-only additions without evaluating a diff", async () => {
+    const root = await checkpointRepository();
+    await git(root, "rm", "--quiet", "README.md");
+    await writeFile(path.join(root, "added.txt"), "staged then deleted\n");
+    await git(root, "add", "added.txt");
+    await unlink(path.join(root, "added.txt"));
+    const scan = await scanCloudWorkspaceChanges(root);
+    expect(scan.deletions).toEqual(new Set(["README.md", "added.txt"]));
+    expect(scan.entries.size).toBe(0);
+  });
+});
 
 function recordingCheckpointFetch(writes: string[]): typeof fetch {
   return (async (input, init) => {
@@ -125,6 +190,15 @@ function checkpointFetchHarness(options: {
         entries: options.projectionEntries,
         nextAfterPath: null,
       });
+    }
+    if (pathname.endsWith("/blobs/batch")) {
+      const body = JSON.parse(String(init?.body));
+      return Response.json({ blobs: body.entries.map((entry: { bytesBase64: string }, index: number) => {
+        const bytes = Buffer.from(entry.bytesBase64, "base64");
+        uploadCount += 1;
+        options.afterBlobUpload?.(uploadCount);
+        return { index, id: blobId, plaintextSha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length };
+      }) });
     }
     if (pathname.endsWith("/blobs")) {
       uploadCount += 1;
@@ -741,6 +815,52 @@ describe("cloud durability scanner", () => {
 });
 
 describe("cloud durability checkpoint coordination", () => {
+  checkpointIt("retains acknowledged uploads across an interrupted cold baseline without declaring content durable", async () => {
+    const root = await checkpointRepository();
+    for (let index = 0; index < 129; index += 1) await writeFile(path.join(root, `file-${index}.txt`), `content-${index}`);
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    let requests = 0, failed = false;
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/blobs/batch")) {
+        requests += 1;
+        if (requests === 3 && !failed) { failed = true; return Response.json({}, { status: 503 }); }
+      }
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    const directive = { id: "55555555-5555-4555-8555-555555555555", reason: "periodic" as const, deadlineAtMs: Date.now() + 60_000 };
+    await expect(runtime.checkpoint(directive, authority)).rejects.toThrow("request was rejected");
+    expect(harness.appendBodies).toHaveLength(0);
+    const before = requests;
+    await runtime.checkpoint(directive, authority);
+    expect(requests - before).toBe(1);
+    expect(harness.appendBodies.flatMap(body => body.mutations as object[])).toHaveLength(130);
+  });
+
+  checkpointIt("uploads a cold baseline in bounded batches and keeps large files on the binary path", async () => {
+    const root = await checkpointRepository();
+    for (let index = 0; index < 257; index += 1) await writeFile(path.join(root, `file-${index}.txt`), `content-${index}`);
+    await writeFile(path.join(root, "large.bin"), Buffer.alloc(4 * 1024 * 1024 + 1, 65));
+    const harness = checkpointFetchHarness({ initialRevision: 0, projectionEntries: [] });
+    const batches: number[] = [];
+    let binaryFiles = 0;
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch: (async (input, init) => {
+      const pathname = new URL(String(input)).pathname;
+      if (pathname.endsWith("/blobs/batch")) {
+        const body = JSON.parse(String(init?.body));
+        batches.push(body.entries.length);
+        expect(body.entries.length).toBeLessThanOrEqual(64);
+        expect(body.entries.reduce((n: number, entry: { bytesBase64: string }) => n + Buffer.from(entry.bytesBase64, "base64").length, 0)).toBeLessThanOrEqual(4 * 1024 * 1024);
+      } else if (pathname.endsWith("/blobs")) binaryFiles += 1;
+      return harness.fetch(input, init);
+    }) as typeof fetch });
+    await runtime.checkpoint({ id: "55555555-5555-4555-8555-555555555555", reason: "periodic", deadlineAtMs: Date.now() + 60_000 }, authority);
+    expect(batches.reduce((a, b) => a + b, 0)).toBe(258);
+    expect(batches.length).toBeLessThanOrEqual(6);
+    // One large file plus the checkpoint's native artifacts/manifest.
+    expect(binaryFiles).toBeLessThan(10);
+    expect(harness.appendBodies.flatMap(body => body.mutations as object[])).toHaveLength(259);
+  });
+
   checkpointIt(
     "rejects an unrelated directive while a checkpoint is active",
     async () => {
@@ -1154,10 +1274,10 @@ describe("cloud durability checkpoint coordination", () => {
   );
 
   checkpointIt(
-    "does not start a second file upload after the directive deadline",
+    "does not start a subsequent batch after the directive deadline",
     async () => {
       const root = await checkpointRepository();
-      await writeFile(path.join(root, "second.txt"), "second file\n");
+      for (let index = 0; index < 128; index += 1) await writeFile(path.join(root, `extra-${index}.txt`), `file ${index}`);
       vi.useFakeTimers();
       try {
         vi.setSystemTime(new Date("2026-09-04T12:00:00.000Z"));
@@ -1181,7 +1301,7 @@ describe("cloud durability checkpoint coordination", () => {
             authority,
           ),
         ).rejects.toThrow("cloud checkpoint deadline expired");
-        expect(getUploadCount()).toBe(1);
+        expect(getUploadCount()).toBe(64);
         expect(appendBodies).toHaveLength(0);
       } finally {
         vi.useRealTimers();
@@ -1478,6 +1598,14 @@ describe("cloud durability projection validation", () => {
             nextAfterPath: null,
           });
         }
+        if (pathname.endsWith("/blobs/batch")) {
+          const request = JSON.parse(String(init?.body));
+          return Response.json({ blobs: request.entries.map((entry: { bytesBase64: string }, index: number) => {
+            const bytes = Buffer.from(entry.bytesBase64, "base64");
+            return { index, id: target === "blob" ? [blobId] : blobId,
+              plaintextSha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.length };
+          }) });
+        }
         if (pathname.endsWith("/blobs")) {
           const bytes = init?.body;
           if (!(bytes instanceof Uint8Array)) {
@@ -1513,7 +1641,7 @@ describe("cloud durability projection validation", () => {
       ),
     ).rejects.toThrow(
       target === "blob"
-        ? "cloud durability blob response is invalid"
+        ? "cloud durability batch response is invalid"
         : "cloud checkpoint commit response is invalid",
     );
   });

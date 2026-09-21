@@ -5,12 +5,14 @@ import { CloudWorkspaceAccessBroker } from "./cloud-workspace-access-broker";
 import { cloudWorkspaceDesktopCapabilityEnabled } from "../src/engine/cloud-workspace-capability";
 import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
 import { CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
-import { ensureCloudAccessDeviceForMain } from "./cloud-replica-host-runtime";
+import { ensureCloudAccessDeviceForMain, signCloudEngineAdmissionForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 import {
   getValidAccessTokenForMain,
+  getSessionUserForMain,
   onMainAuthSessionChanged,
 } from "./ipc/commands/auth-session";
+import { emitEvent } from "./ipc/events";
 import { IS_DEV } from "./runtime-mode";
 
 declare const __ZEROS_CONTROL_PLANE_URL_BAKED__: string | undefined;
@@ -102,20 +104,28 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
   if (!cloudWorkspaceDesktopCapabilityEnabled()) {
     throw new Error("Cloud workspaces are not enabled in this desktop build");
   }
-  if (broker) return broker;
+  if (broker?.hasCurrentSession()) return broker;
+  broker = null;
   const hosts = allowedSshHosts();
-  const knownHostEntries = pinnedSshKnownHostEntries();
+
   const previewHostSuffixes = allowedPreviewHostSuffixes();
-  const ssh = new CloudWorkspaceSshRuntime({
+  let ssh: CloudWorkspaceSshRuntime | null = null;
+  const getSsh = () => {
+    if (ssh) return ssh;
+    const knownHostEntries = pinnedSshKnownHostEntries();
+    ssh = new CloudWorkspaceSshRuntime({
     runtimeRoot: path.join(app.getPath("sessionData"), "cloud-ssh"),
     knownHostsPath: path.join(app.getPath("userData"), "cloud-ssh-known-hosts"),
     ...(hosts ? { allowedSshHosts: hosts } : {}),
     ...(knownHostEntries ? { knownHostEntries } : {}),
     allowTrustOnFirstUse: !knownHostEntries && allowSshTrustOnFirstUse(),
   });
+    return ssh;
+  };
   broker = new CloudWorkspaceAccessBroker({
     api: new CloudWorkspaceAccessClient({
       baseUrl: controlPlaneBaseUrl(),
+      signEngineAdmission: signCloudEngineAdmissionForMain,
       allowInsecureLoopback: IS_DEV,
       ...(hosts ? { allowedSshHosts: hosts } : {}),
       ...(previewHostSuffixes
@@ -123,13 +133,19 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
         : {}),
     }),
     getAccessToken: getValidAccessTokenForMain,
+    getAccountSessionKey: () => {
+      const user = getSessionUserForMain();
+      if (!user) return null;
+      return JSON.stringify([user.provider, user.accountId ?? user.sub, user.sessionId ?? null]);
+    },
+    onRuntimeRetired: (runtimeIds) => emitEvent("cloud-workspace-access-retired", { runtimeIds }),
     getDeviceId: async () => (await ensureCloudAccessDeviceForMain()).deviceId,
     writeClipboard: (value) => clipboard.writeText(value),
-    launchTerminal: (input) => ssh.launchTerminal(input),
-    launchIde: (input) => ssh.launchIde(input),
-    startTunnel: (input) => ssh.startTunnel(input),
-    startDynamicTunnel: (input) => ssh.startDynamicTunnel(input),
-    disposeLocalAccess: () => ssh.dispose(),
+    launchTerminal: (input) => getSsh().launchTerminal(input),
+    launchIde: (input) => getSsh().launchIde(input),
+    startTunnel: (input) => getSsh().startTunnel(input),
+    startDynamicTunnel: (input) => getSsh().startDynamicTunnel(input),
+    disposeLocalAccess: async () => { await ssh?.dispose(); },
   });
   return broker;
 }
@@ -151,4 +167,17 @@ export function revokeCloudWorkspacePreviewFrame(
 // tunnel. The broker retains only the last account token that actually issued
 // its grants long enough to attempt remote revocation; provider TTL and
 // lifecycle revocation remain the durable backstop when the network is down.
-onMainAuthSessionChanged(disposeCloudWorkspaceAccessBroker);
+export function reconcileCloudWorkspaceAccessSession(): void {
+  if (broker && !broker.hasCurrentSession()) {
+    previewFrameAuthorizations.clear();
+    broker = null;
+  }
+}
+onMainAuthSessionChanged(reconcileCloudWorkspaceAccessSession);
+
+/** Shared-store notifications must retire cloud authority before advertising
+ * the replacement login to the renderer. Same-source refresh is a no-op. */
+export function handleSharedCloudAccessSessionChange(notify: () => void): void {
+  reconcileCloudWorkspaceAccessSession();
+  notify();
+}

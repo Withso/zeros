@@ -9,6 +9,10 @@ import {
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
+import { parse as parseToml } from "smol-toml";
+import { gitExecutionIdentity } from "./git/git-execution-identity";
+import { captureCloudNativeCheckpoint, type NativeCheckpointRoots } from "./agents/containment/cloud-checkpoint-artifacts.mjs";
+import { DESIGN_DIRECTORY_ID_PATTERN, sanitizeDesignDirectoryName } from "./design/directory-path";
 
 const execFileAsync = promisify(execFile);
 const CONTENT_HEAD_PATH = "/internal/v1/cloud-workspaces/engine/content/head";
@@ -38,6 +42,12 @@ export type CloudCheckpointDirective = {
     | "before_fork"
     | "before_rebuild"
     | "manual";
+  deadlineAtMs: number;
+};
+
+export type CloudCheckpointCapture = CloudCheckpointDirective | {
+  id: string;
+  reason: "periodic";
   deadlineAtMs: number;
 };
 
@@ -229,22 +239,42 @@ async function gitBuffer(
     throw new CloudCheckpointDeadlineError();
   }
   try {
-    const result = await execFileAsync("git", args, {
-      cwd: root,
-      encoding: "buffer",
-      maxBuffer: 64 * 1024 * 1024,
-      timeout,
-      killSignal: "SIGKILL",
-      env: {
-        HOME: process.env.HOME,
-        LANG: "C.UTF-8",
-        PATH: process.env.PATH,
-        GIT_CONFIG_NOSYSTEM: "1",
-        GIT_CONFIG_GLOBAL: "/dev/null",
-        GIT_OPTIONAL_LOCKS: "0",
-        GIT_TERMINAL_PROMPT: "0",
+    const result = await execFileAsync(
+      "git",
+      [
+        "--no-pager",
+        "--work-tree=.",
+        "-c",
+        "core.fsmonitor=false",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.untrackedCache=false",
+        ...args,
+      ],
+      {
+        cwd: root,
+        ...gitExecutionIdentity(),
+        encoding: "buffer",
+        maxBuffer: 64 * 1024 * 1024,
+        timeout,
+        killSignal: "SIGKILL",
+        env: {
+          HOME: process.env.HOME,
+          LANG: "C.UTF-8",
+          PATH: process.env.PATH,
+          GIT_CONFIG_NOSYSTEM: "1",
+          GIT_CONFIG_GLOBAL: "/dev/null",
+          GIT_NO_REPLACE_OBJECTS: "1",
+          GIT_NO_LAZY_FETCH: "1",
+          // Checkpoint enumeration never owns network authority, including a
+          // repository-selected remote helper for a missing promisor object.
+          GIT_ALLOW_PROTOCOL: "",
+          GIT_OPTIONAL_LOCKS: "0",
+          GIT_TERMINAL_PROMPT: "0",
+        },
       },
-    });
+    );
     return Buffer.from(result.stdout);
   } catch (error) {
     if (deadlineAtMs !== undefined && Date.now() >= deadlineAtMs) {
@@ -730,12 +760,15 @@ async function scanCloudWorkspaceChangesOnce(
     requireDescriptorSafety,
     async (captureRoot, commandRoot) => {
       const revision = baseCommit ?? "HEAD";
-      const [commit, tracked, changed, untracked] = await Promise.all([
-        gitText(
-          commandRoot,
-          ["rev-parse", "--verify", `${revision}^{commit}`],
-          deadlineAtMs,
-        ),
+      const commit = await gitText(
+        commandRoot,
+        ["rev-parse", "--verify", `${revision}^{commit}`],
+        deadlineAtMs,
+      );
+      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
+        throw new Error("cloud checkpoint Git base is invalid");
+      }
+      const [tracked, basePaths, untracked] = await Promise.all([
         gitBuffer(
           commandRoot,
           ["ls-files", "-z", "--cached", "--"],
@@ -743,15 +776,7 @@ async function scanCloudWorkspaceChangesOnce(
         ),
         gitBuffer(
           commandRoot,
-          [
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-ext-diff",
-            "--no-renames",
-            revision,
-            "--",
-          ],
+          ["ls-tree", "-r", "--name-only", "-z", "--full-tree", commit, "--"],
           deadlineAtMs,
         ),
         gitBuffer(
@@ -760,9 +785,6 @@ async function scanCloudWorkspaceChangesOnce(
           deadlineAtMs,
         ),
       ]);
-      if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit)) {
-        throw new Error("cloud checkpoint Git base is invalid");
-      }
       let headRef: string | null = null;
       try {
         const candidate = await gitText(
@@ -779,12 +801,15 @@ async function scanCloudWorkspaceChangesOnce(
       // The durable projection is the complete safe working tree, not merely the
       // dirty overlay. This keeps a receive-only folder useful without copying
       // `.git` and makes a revert-to-HEAD distinguishable from a tracked deletion.
-      // `changed` remains in the union because an index-staged deletion no longer
-      // appears in `ls-files --cached` but must still become a tombstone.
+      // The exact base tree retains staged deletions absent from the index.
+      // Enumerating names never evaluates diff/clean/textconv filters, which
+      // are repository-selected programs even for a name-only working diff.
+      // Pin the tree to the resolved object so a concurrent HEAD update cannot
+      // mix one commit identity with another commit's path list.
       const paths = [
         ...new Set([
           ...splitNull(tracked),
-          ...splitNull(changed),
+          ...splitNull(basePaths),
           ...splitNull(untracked),
         ]),
       ]
@@ -1035,17 +1060,50 @@ async function isAppendRevisionConflict(
 
 export class CloudWorkspaceDurabilityRuntime {
   private readonly fetch: typeof fetch;
+  private readonly nativeRoots: NativeCheckpointRoots;
   private active: Promise<void> | null = null;
+  // Acknowledgements are an upload retry hint, never durable file state. The
+  // server still checks exact reservation ownership/expiry on every append.
+  private uploadCacheScope = "";
+  private readonly uploadCache = new Map<string, { blobId: string; expiresAtMs: number }>();
 
   constructor(
     private readonly repositoryRoot: string,
-    dependencies: { fetch?: typeof fetch } = {},
+    dependencies: { fetch?: typeof fetch; nativeRoots?: Omit<NativeCheckpointRoots, "repository"> } = {},
   ) {
     this.fetch = dependencies.fetch ?? globalThis.fetch;
+    this.nativeRoots = { ...dependencies.nativeRoots, repository: repositoryRoot };
+  }
+
+  private async readPrivateDesignSelection(deadlineAtMs: number): Promise<{ directory_id?: string; directory?: string } | null> {
+    const file = ".zeros/settings.local.toml";
+    // A tracked personal file never supplies the private Design selection.
+    if ((await gitText(this.repositoryRoot, ["ls-files", "--cached", "--", file], deadlineAtMs)).length) return null;
+    return withCaptureRoot(this.repositoryRoot, true, async root => {
+      let entry: ScannedEntry;
+      try { entry = await readEntry(root, file); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
+      try {
+        if (entry.entryType !== "file" || entry.sizeBytes > 512 * 1024) throw new Error("cloud private Design settings are invalid");
+        const design = parseToml(entry.bytes.toString("utf8")).design;
+        if (!isRecord(design)) return null;
+        const selection: { directory_id?: string; directory?: string } = {};
+        if (design.directory_id !== undefined) {
+          if (typeof design.directory_id !== "string" || !DESIGN_DIRECTORY_ID_PATTERN.test(design.directory_id)) throw new Error("cloud private Design selection is invalid");
+          selection.directory_id = design.directory_id;
+        }
+        if (design.directory !== undefined) {
+          const directory = sanitizeDesignDirectoryName(design.directory);
+          if (!directory) throw new Error("cloud private Design selection is invalid");
+          selection.directory = directory;
+        }
+        return Object.keys(selection).length ? selection : null;
+      } finally { entry.bytes.fill(0); }
+    });
   }
 
   checkpoint(
-    directive: CloudCheckpointDirective,
+    directive: CloudCheckpointCapture,
     authority: CloudDurabilityAuthority,
   ): Promise<void> {
     if (this.active) {
@@ -1068,11 +1126,11 @@ export class CloudWorkspaceDurabilityRuntime {
     return `${origin}${pathname}`;
   }
 
-  private scope(authority: CloudDurabilityAuthority): Record<string, string> {
+  private scope(authority: CloudDurabilityAuthority) {
     return {
       workspaceId: authority.workspaceId,
       organizationId: authority.organizationId,
-      generation: String(authority.generation),
+      generation: authority.generation,
       engineInstanceId: authority.engineInstanceId,
     };
   }
@@ -1133,7 +1191,7 @@ export class CloudWorkspaceDurabilityRuntime {
     for (let page = 0; page < 100_000; page += 1) {
       const url = new URL(this.endpoint(authority, CONTENT_HEAD_PATH));
       for (const [key, value] of Object.entries(this.scope(authority))) {
-        url.searchParams.set(key, value);
+        url.searchParams.set(key, String(value));
       }
       url.searchParams.set("limit", "200");
       if (afterPath !== null) {
@@ -1266,7 +1324,7 @@ export class CloudWorkspaceDurabilityRuntime {
     assertCheckpointBeforeDeadline(deadlineAtMs);
     const url = new URL(this.endpoint(authority, BLOB_PATH));
     for (const [key, value] of Object.entries(this.scope(authority))) {
-      url.searchParams.set(key, value);
+      url.searchParams.set(key, String(value));
     }
     const raw = await boundedJson(
       await this.request(
@@ -1302,6 +1360,86 @@ export class CloudWorkspaceDurabilityRuntime {
     };
   }
 
+  private async uploadBatch(
+    authority: CloudDurabilityAuthority,
+    entries: readonly ScannedEntry[],
+    deadlineAtMs: number,
+  ): Promise<ProjectionEntry[]> {
+    const raw = await this.postJson(authority, `${BLOB_PATH}/batch`, {
+      ...this.scope(authority),
+      entries: entries.map(entry => ({ bytesBase64: entry.bytes.toString("base64") })),
+    }, deadlineAtMs);
+    if (!isRecord(raw) || !Array.isArray(raw.blobs) || raw.blobs.length !== entries.length) {
+      throw new Error("cloud durability batch response is invalid");
+    }
+    const results = new Map<number, ProjectionEntry>();
+    for (const blob of raw.blobs) {
+      if (!isRecord(blob) || !Number.isInteger(blob.index) || results.has(Number(blob.index))) {
+        throw new Error("cloud durability batch response is invalid");
+      }
+      const entry = entries[Number(blob.index)];
+      if (!entry || typeof blob.id !== "string" || !UUID_PATTERN.test(blob.id) ||
+          blob.plaintextSha256 !== entry.contentSha256 || blob.sizeBytes !== entry.sizeBytes) {
+        throw new Error("cloud durability batch response is invalid");
+      }
+      results.set(Number(blob.index), { operation: "upsert", path: entry.path,
+        entryType: entry.entryType, mode: entry.mode, blobId: blob.id,
+        contentSha256: entry.contentSha256, sizeBytes: entry.sizeBytes });
+    }
+    return entries.map((_, index) => results.get(index)!);
+  }
+
+  private async uploadChangedEntries(
+    authority: CloudDurabilityAuthority,
+    entries: readonly ScannedEntry[],
+    deadlineAtMs: number,
+  ): Promise<ProjectionEntry[]> {
+    const scope = JSON.stringify({ origin: new URL(authority.heartbeatEndpoint).origin, ...this.scope(authority) });
+    if (scope !== this.uploadCacheScope) { this.uploadCache.clear(); this.uploadCacheScope = scope; }
+    for (const [key, value] of this.uploadCache) if (value.expiresAtMs <= Date.now()) this.uploadCache.delete(key);
+    const keyFor = (entry: { contentSha256: string | null; sizeBytes: number | null }) => `${entry.contentSha256}:${entry.sizeBytes}`;
+    const ready = new Map<string, ProjectionEntry>();
+    const pendingEntries = entries.filter(entry => {
+      const cached = this.uploadCache.get(keyFor(entry));
+      if (!cached) return true;
+      ready.set(entry.path, { operation: "upsert", path: entry.path, entryType: entry.entryType,
+        mode: entry.mode, blobId: cached.blobId, contentSha256: entry.contentSha256, sizeBytes: entry.sizeBytes });
+      return false;
+    });
+    const batches: ScannedEntry[][] = [];
+    let batch: ScannedEntry[] = [], size = 0;
+    for (const entry of pendingEntries) {
+      if (batch.length && (batch.length === 64 || size + entry.sizeBytes > 4 * 1024 * 1024)) {
+        batches.push(batch); batch = []; size = 0;
+      }
+      batch.push(entry); size += entry.sizeBytes;
+      if (entry.sizeBytes > 4 * 1024 * 1024) { batches.push(batch); batch = []; size = 0; }
+    }
+    if (batch.length) batches.push(batch);
+    const uploaded: ProjectionEntry[][] = new Array(batches.length);
+    let next = 0, failed = false;
+    // Bound both network concurrency and retained encoded request bodies. Drain
+    // admitted requests before the caller erases the scan's plaintext buffers.
+    const outcomes = await Promise.allSettled(Array.from({ length: Math.min(2, batches.length) }, async () => {
+      while (!failed && next < batches.length) {
+        const index = next++, current = batches[index]!;
+        try {
+          assertCheckpointBeforeDeadline(deadlineAtMs);
+          uploaded[index] = current[0]!.sizeBytes > 4 * 1024 * 1024
+            ? [await this.upload(authority, current[0]!, deadlineAtMs)]
+            : await this.uploadBatch(authority, current, deadlineAtMs);
+          for (const entry of uploaded[index]!) {
+            ready.set(entry.path, entry);
+            this.uploadCache.set(keyFor(entry), { blobId: entry.blobId!, expiresAtMs: Date.now() + 15 * 60_000 });
+            while (this.uploadCache.size > 10_000) this.uploadCache.delete(this.uploadCache.keys().next().value!);
+          }
+        } catch (error) { failed = true; throw error; }
+      }
+    }));
+    for (const outcome of outcomes) if (outcome.status === "rejected") throw outcome.reason;
+    return entries.map(entry => ready.get(entry.path)!);
+  }
+
   private async postJson(
     authority: CloudDurabilityAuthority,
     pathname: string,
@@ -1324,7 +1462,7 @@ export class CloudWorkspaceDurabilityRuntime {
   }
 
   private async runCheckpoint(
-    directive: CloudCheckpointDirective,
+    directive: CloudCheckpointCapture,
     authority: CloudDurabilityAuthority,
   ): Promise<void> {
     if (
@@ -1384,26 +1522,12 @@ export class CloudWorkspaceDurabilityRuntime {
           }
         }
         try {
-          for (const entry of scan.entries.values()) {
+          const changed = [...scan.entries.values()].filter(entry => {
             const prior = projection.entries.get(entry.path);
-            if (
-              prior &&
-              prior.operation === "upsert" &&
-              prior.entryType === entry.entryType &&
-              prior.mode === entry.mode &&
-              prior.contentSha256 === entry.contentSha256 &&
-              prior.sizeBytes === entry.sizeBytes
-            ) {
-              continue;
-            }
-            assertCheckpointBeforeDeadline(directive.deadlineAtMs);
-            const uploaded = await this.upload(
-              authority,
-              entry,
-              directive.deadlineAtMs,
-            );
-            mutations.push(uploaded);
-          }
+            return !prior || prior.operation !== "upsert" || prior.entryType !== entry.entryType ||
+              prior.mode !== entry.mode || prior.contentSha256 !== entry.contentSha256 || prior.sizeBytes !== entry.sizeBytes;
+          });
+          mutations.push(...await this.uploadChangedEntries(authority, changed, directive.deadlineAtMs));
         } finally {
           for (const entry of scan.entries.values()) entry.bytes.fill(0);
         }
@@ -1434,9 +1558,20 @@ export class CloudWorkspaceDurabilityRuntime {
         try {
           // A directive may be redelivered after an ambiguous response. Binding
           // the key to its exact revision keeps only the same request replayable.
-          for (let offset = 0; offset < mutations.length; offset += 10_000) {
+          const chunks: Array<Array<Record<string, unknown>>> = [];
+          let chunk: Array<Record<string, unknown>> = [], chunkBytes = 2;
+          for (const mutation of mutations) {
+            const bytes = Buffer.byteLength(JSON.stringify(mutation), "utf8") + 1;
+            // Leave room for the bounded scope, revision and Git metadata under
+            // the control plane's 8MiB request limit, including escaped paths.
+            if (chunk.length && (chunk.length === 10_000 || chunkBytes + bytes > 7 * 1024 * 1024)) {
+              chunks.push(chunk); chunk = []; chunkBytes = 2;
+            }
+            chunk.push(mutation); chunkBytes += bytes;
+          }
+          if (chunk.length) chunks.push(chunk);
+          for (const [chunkIndex, chunk] of chunks.entries()) {
             assertCheckpointBeforeDeadline(directive.deadlineAtMs);
-            const chunk = mutations.slice(offset, offset + 10_000);
             const expectedRevision = projection.currentRevision;
             const raw = await this.postJson(
               authority,
@@ -1444,7 +1579,7 @@ export class CloudWorkspaceDurabilityRuntime {
               {
                 ...this.scope(authority),
                 expectedRevision,
-                idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.chunk.${offset / 10_000}`,
+                idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.chunk.${chunkIndex}`,
                 gitBaseCommit: confirmation.gitBaseCommit,
                 gitHeadRef: confirmation.gitHeadRef,
                 mutations: chunk,
@@ -1477,7 +1612,9 @@ export class CloudWorkspaceDurabilityRuntime {
             }
             projection.currentRevision = Number(raw.revision);
           }
+          this.uploadCache.clear();
         } catch (error) {
+          this.uploadCache.clear();
           for (const entry of confirmation.entries.values())
             entry.bytes.fill(0);
           if (error instanceof CloudDurabilityAppendRevisionConflictError) {
@@ -1551,10 +1688,38 @@ export class CloudWorkspaceDurabilityRuntime {
       if (!finalScan)
         throw new Error("cloud checkpoint could not quiesce the working tree");
       assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+      const designSelection = await this.readPrivateDesignSelection(directive.deadlineAtMs);
+      const native = await captureCloudNativeCheckpoint({
+        roots: this.nativeRoots,
+        identity: gitExecutionIdentity(),
+        deadlineAtMs: directive.deadlineAtMs,
+        putChunk: async (value) => {
+          const bytes = Buffer.from(value);
+          try {
+            const uploaded = await this.upload(authority, {
+              path: "native-checkpoint-chunk", entryType: "file", mode: 33188,
+              sizeBytes: bytes.length, contentSha256: createHash("sha256").update(bytes).digest("hex"), bytes,
+            }, directive.deadlineAtMs);
+            if (uploaded.operation !== "upsert") throw new Error("invalid native checkpoint upload");
+            return { blobId: uploaded.blobId, contentSha256: uploaded.contentSha256, sizeBytes: uploaded.sizeBytes };
+          } finally { bytes.fill(0); }
+        },
+      });
+      const afterNative = await scanCloudWorkspaceChanges(this.repositoryRoot, {
+        requireDescriptorSafety: true, deadlineAtMs: directive.deadlineAtMs,
+      });
+      try {
+        if (afterNative.fingerprint !== finalScan.fingerprint ||
+          JSON.stringify(await this.readPrivateDesignSelection(directive.deadlineAtMs)) !== JSON.stringify(designSelection)) {
+          throw new Error("cloud checkpoint changed during native recovery capture");
+        }
+      } finally { for (const entry of afterNative.entries.values()) entry.bytes.fill(0); }
       const manifestBytes = Buffer.from(
         JSON.stringify({
-          version: 1,
-          audience: "zeros-cloud-workspace-checkpoint-manifest-v1",
+          version: 2,
+          audience: "zeros-cloud-workspace-checkpoint-manifest-v2",
+          native,
+          designSelection,
           gitBaseCommit: finalScan.gitBaseCommit,
           gitHeadRef: finalScan.gitHeadRef,
           entries: [...finalScan.entries.values()].map(
@@ -1593,15 +1758,18 @@ export class CloudWorkspaceDurabilityRuntime {
         CHECKPOINT_PATH,
         {
           ...this.scope(authority),
-          requestId: directive.id,
+          ...(directive.reason === "periodic" ? {} : { requestId: directive.id }),
           idempotencyKey: `checkpoint.${directive.id}.commit`,
           contentRevision: projection.currentRevision,
           reason: directive.reason,
           manifestBlobId: manifest.blobId,
           artifactBlobId: null,
+          artifactBlobIds: [...new Set(native.chunks.map(chunk => chunk.blobId))].sort(),
           inclusionPolicy: {
-            version: 1,
+            version: 2,
             basis: "complete-safe-working-tree",
+            native: "git-index-history-and-allowlisted-agent-design-state",
+            maxNativeBytes: 2 * 1024 * 1024 * 1024,
             ignored: "excluded",
             secretLike: "excluded",
             maxFileBytes: MAX_FILE_BYTES,

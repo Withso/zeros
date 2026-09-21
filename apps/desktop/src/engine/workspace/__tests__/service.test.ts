@@ -47,6 +47,7 @@ import {
 } from "../../design/design-api";
 import { getDesignSelection } from "../../design/selection";
 import { getDesignScreenshot } from "../../design/screenshots";
+import { setDesignCaptureConfig } from "../../design/capture-client";
 import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
 import { rememberRecognizedDesignDirectories } from "../../design/recognition-store";
 import { withWorkspaceGitMutation } from "../../git/mutation-lock";
@@ -54,6 +55,7 @@ import { firstUseDesignDirectoryNameForRepo } from "../../design/directory";
 
 const PNG_1X1_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+const cloudActorIdentity = { userId: "11111111-1111-4111-8111-111111111111", deviceId: "22222222-2222-4222-8222-222222222222" };
 
 describe("WorkspaceService", () => {
   let dir: string;
@@ -106,6 +108,104 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
+  it("serves Design through the admitted cloud primary checkout without local resource authority", async () => {
+    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
+    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
+    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
+    const initialized = await cloud.handle("design.initialize", target, options);
+    expect(initialized).toMatchObject({ snapshot: { protocolCapability: null } });
+    const created = await cloud.handle("design.frame.create", { ...target, title: "Cloud frame" }, options) as { frame: { file: string } };
+    expect(await cloud.handle("design.foundation.open", { ...target, frame: created.frame.file }, options)).toHaveProperty("summary.revision");
+    expect(await cloud.handle("design.snapshot", target, options)).toMatchObject({ snapshot: { protocolCapability: null } });
+    fs.writeFileSync(path.join(dir, ".env"), "QUALIFICATION_SECRET=fixture\n");
+    await expect(cloud.handle("file.read", { ...target, path: ".env" }, options)).rejects.toThrow(/secret|credential/i);
+    for (const workspaceId of [dir, "/etc", "unrelated-workspace"]) {
+      await expect(cloud.handle("design.initialize", { workspaceId }, options)).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    }
+    await expect(cloud.handle("design.listDirectories", { ...target, repoRoot: "/etc" }, options)).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+  });
+
+  it("does not grant relay or unqualified desktop clients cloud Design authority", async () => {
+    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
+    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
+    await expect(cloud.handle("design.initialize", target, { remote: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    await expect(svc.handle("design.initialize", target, { remote: true, cloudWorker: true })).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    expect(fs.existsSync(path.join(dir, firstUseDesignDirectoryNameForRepo(dir)))).toBe(false);
+  });
+
+  it("preserves the strict capture request when resolving an admitted cloud checkout", async () => {
+    const cloud = new WorkspaceService(dir, { primaryDesignWorkspace: true });
+    const options = { remote: true, cloudWorker: true, hostLocalResources: false, cloudActorIdentity };
+    const target = { workspaceId: LOCAL_MAIN_WORKSPACE_ID };
+    await cloud.handle("design.initialize", target, options);
+    const created = await cloud.handle("design.frame.create", { ...target, title: "Capture" }, options) as { frame: { file: string } };
+    const opened = await cloud.handle("design.foundation.open", { ...target, frame: created.frame.file }, options) as { summary: { revision: string } };
+    setDesignCaptureConfig({ url: "http://127.0.0.1:19876", token: "a".repeat(64) });
+    const capture = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      const request = JSON.parse(String(init?.body));
+      return Response.json({ version: 1, revision: request.revision, width: 1, height: 1,
+        renderer: "qualification", data: PNG_1X1_BASE64 });
+    });
+    vi.stubGlobal("fetch", capture);
+    try {
+      await expect(cloud.handle("design.capture", { ...target, frame: created.frame.file,
+        expectedRevision: opened.summary.revision, width: 1, height: 1 }, options)).resolves.toMatchObject({ mimeType: "image/png", width: 1, height: 1 });
+      expect(capture).toHaveBeenCalledOnce();
+      await expect(cloud.handle("design.review.snapshot", { ...target, scope: "uncommitted" }, options)).resolves.toMatchObject({ scope: "uncommitted" });
+    } finally { setDesignCaptureConfig(undefined); vi.unstubAllGlobals(); }
+  });
+
+  it("resolves cloud directory discovery without registering a desktop project", async () => {
+    const cloud=new WorkspaceService(dir,{primaryDesignWorkspace:true});
+    const options={remote:true,cloudWorker:true,hostLocalResources:false,cloudActorIdentity};
+    const target={workspaceId:LOCAL_MAIN_WORKSPACE_ID};
+    await cloud.handle("design.initialize",target,options);
+    const directory=designDirectoryNameFor(dir);
+    expect(await cloud.handle("design.previewExistingDirectory",{...target,folder:directory},options)).toMatchObject({directory});
+  });
+
+  it("binds cloud Design receipts and undo to the authenticated human device", async () => {
+    const cloud=new WorkspaceService(dir,{primaryDesignWorkspace:true});
+    const a={remote:true,cloudWorker:true,hostLocalResources:false,cloudActorIdentity};
+    const b={...a,cloudActorIdentity:{...cloudActorIdentity,deviceId:"33333333-3333-4333-8333-333333333333"}};
+    const target={workspaceId:LOCAL_MAIN_WORKSPACE_ID};
+    await cloud.handle("design.initialize",target,a);
+    const created=await cloud.handle("design.frame.create",{...target,title:"Shared"},a) as {frame:{file:string}};
+    const selected={...target,frame:created.frame.file};
+    const opened=await cloud.handle("design.foundation.open",selected,a) as {summary:{revision:string}};
+    const transaction={schemaVersion:1,transactionId:"shared-actor-first",documentId:`frame:${created.frame.file}`,baseRevision:opened.summary.revision,
+      actor:{kind:"agent",id:"forged-other-person"},intent:"Move frame",createdAt:1,coalesceKey:"same-drag",
+      operations:[{operationId:"move-a",type:"frame.set-geometry",frame:created.frame.file,geometry:{x:37,y:0,width:400,height:300,z:0}}]};
+    const applied=await cloud.handle("design.transaction.apply",{...selected,transaction},a) as {result:{revision:string;receipt:{actor:unknown}}};
+    expect(applied.result.receipt.actor).toEqual({kind:"human",id:`cloud:${cloudActorIdentity.userId}:${cloudActorIdentity.deviceId}`});
+    const otherUndo=await cloud.handle("design.history.undo",{...selected,expectedRevision:applied.result.revision},b) as {result:unknown};
+    expect(otherUndo.result).toBeNull();
+    const second=await cloud.handle("design.transaction.apply",{...selected,transaction:{...transaction,transactionId:"shared-actor-second",baseRevision:applied.result.revision,createdAt:2,operations:[{...transaction.operations[0],operationId:"move-b",geometry:{x:87,y:0,width:400,height:300,z:0}}]}},b) as {result:{revision:string}};
+    await expect(cloud.handle("design.history.undo",{...selected,expectedRevision:second.result.revision},a)).rejects.toThrow(/another|history/i);
+    await expect(cloud.handle("design.history.undo",{...selected,expectedRevision:applied.result.revision},b)).rejects.toThrow(/repository changed/i);
+    const undoB=await cloud.handle("design.history.undo",{...selected,expectedRevision:second.result.revision},b) as {result:{revision:string}};
+    expect((await cloud.handle("design.snapshot",target,b) as {snapshot:{frames:{x:number}[]}}).snapshot.frames[0].x).toBe(37);
+    await cloud.handle("design.history.undo",{...selected,expectedRevision:undoB.result.revision},a);
+    expect((await cloud.handle("design.snapshot",target,a) as {snapshot:{frames:{x:number}[]}}).snapshot.frames[0].x).not.toBe(37);
+  });
+
+  it.each(["chats.upsert", "chats.bulkUpsert"])("rejects stale cloud %s without clearing a deletion fence", async op => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    const { deleteChat, getChat, wasChatDeleted } = await import("../../db/chats");
+    setZerosDbPathForTesting(path.join(stateDir, "cloud-deleted.db"));
+    try {
+      deleteChat("deleted");
+      const stale = { id: "deleted", folder: dir };
+      const params = op === "chats.upsert" ? { chat: stale } : { chats: [{ id: "new", folder: dir }, stale] };
+      await expect(svc.handle(op, params, { cloudWorker: true })).rejects.toThrow(/deleted/i);
+      expect(wasChatDeleted("deleted")).toBe(true); expect(getChat("deleted")).toBeNull();
+      expect(getChat("new")).toBeNull();
+      // Intentional local restoration remains compatible.
+      await svc.handle(op, params);
+      expect(getChat("deleted")).not.toBeNull();
+    } finally { closeZerosDb(); setZerosDbPathForTesting(null); }
+  });
+
   it("persists first-use composer mode without reviving a deleted or moved conversation", async () => {
     const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
     setZerosDbPathForTesting(path.join(stateDir, "composer-mode.db"));
@@ -142,6 +242,29 @@ describe("WorkspaceService", () => {
       await expect(svc.handle("chats.setComposerMode", {
         chatId: "existing-mode", folder: "/visible", mode: "design",
       }, { remote: true })).rejects.toThrow(/restricted/i);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+    }
+  });
+
+  it("compares a device's mode revision before changing or seeding the conversation", async () => {
+    const { setZerosDbPathForTesting, closeZerosDb } = await import("../../db");
+    setZerosDbPathForTesting(path.join(stateDir, "composer-mode-cas.db"));
+    try {
+      const params = { chatId: "shared-mode", folder: dir, mode: "design", expectedRevision: 0,
+        initialChat: { id: "shared-mode", folder: dir } };
+      expect(await svc.handle("chats.setComposerMode", params)).toEqual({ mode: "design", revision: 1 });
+      await expect(svc.handle("chats.setComposerMode", { ...params, mode: "code" })).rejects.toThrow("Composer mode changed");
+      expect(await svc.handle("chats.setComposerMode", { ...params, mode: "code", expectedRevision: 1 })).toEqual({ mode: "code", revision: 2 });
+      await expect(svc.handle("chats.setComposerMode", params)).rejects.toThrow("Composer mode changed");
+      for (const revision of [-1, 0.5, "2", null, Number.MAX_SAFE_INTEGER + 1]) {
+        await expect(svc.handle("chats.setComposerMode", { ...params, expectedRevision: revision })).rejects.toThrow(/revision/i);
+      }
+      await expect(svc.handle("chats.setComposerMode", { ...params, chatId: "new-mode", expectedRevision: -1,
+        initialChat: { id: "new-mode", folder: dir } })).rejects.toThrow(/revision/i);
+      const { getChat } = await import("../../db/chats");
+      expect(getChat("new-mode")).toBeNull();
     } finally {
       closeZerosDb();
       setZerosDbPathForTesting(null);

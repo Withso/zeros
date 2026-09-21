@@ -105,12 +105,28 @@ PostgreSQL owns structured tenant identity, authorization, lifecycle, settings
 versions, cursors, audit, usage, and ordering. The
 `CloudWorkspaceObjectStore` boundary owns encrypted file blobs, checkpoints,
 transcript artifacts, and full bounded logs. The hosted implementation can use
-a private mounted Railway volume through the hardened filesystem adapter; a
-future S3-compatible or customer-owned adapter must preserve conditional
-publication, strong read-back, integrity, deletion, and tenant-key contracts.
+a private S3-compatible bucket through the shared S3 adapter or a mounted volume
+through the filesystem adapter. Both preserve conditional publication, bounded
+read-back, integrity, deletion fences, and tenant-key contracts.
 An optional queue/cache may accelerate workers but cannot be the sole durable
 record. Use a transactional outbox so database commits and asynchronous work do
 not diverge.
+
+For R2/S3, set `CLOUD_WORKSPACE_OBJECT_STORE_KIND=s3`, the HTTPS service origin
+in `CLOUD_WORKSPACE_S3_ENDPOINT` (no bucket path), `CLOUD_WORKSPACE_S3_REGION`,
+`CLOUD_WORKSPACE_S3_BUCKET`, and bucket-scoped `CLOUD_WORKSPACE_S3_ACCESS_KEY_ID`
+and `CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY`. Omit the filesystem directory. Keep
+the bucket private, with public development URLs and public custom domains
+disabled. The adapter publishes ciphertext with `If-None-Match: *`; deletion
+atomically replaces the same key with a permanent zero-byte fence. A late PUT
+cannot recreate that key. Do not apply lifecycle rules that remove these
+fences, and preserve them in disaster recovery. Provider delete permissions are
+not required by this adapter. R2 documents its [S3 operation and conditional
+request support](https://developers.cloudflare.com/r2/api/s3/api/).
+
+Shared storage removes the filesystem single-writer restriction, but does not
+by itself qualify API/relay replicas. Replica rollout also requires concurrent
+command/replay, route ownership, lease fencing, and reconnect load tests.
 
 For the filesystem adapter, attach one Railway volume to one control-plane
 service instance and mount it at a parent such as `/data`. Configure
@@ -280,16 +296,16 @@ For every environment that has not yet applied `0025`:
 
    ```bash
    NODE_ENV=production \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql \
    node dist/migrate.js
    ```
 
    (`pnpm --dir apps/control-plane migrate` is the source-checkout equivalent.)
-   The command serializes against every boot runner. All three exact approvals
-   are required because this path crosses all three cloud-era controlled
-   boundaries. It never
+   The command serializes against every boot runner. The command includes all
+   eight exact approvals: the core-schema boundary and seven cloud-era controlled
+   boundaries. Every pending controlled migration requires its approval. It never
    skips an unapproved migration to apply a suffix, and service boot cannot use
-   either approval to execute a migration.
+   these approvals to execute a migration.
 
 7. Verify that canonical `schema_migrations` now runs contiguously through the
    release tip with non-null checksums, then inspect the authority-retirement
@@ -333,11 +349,12 @@ For every environment whose canonical ledger is already through `0059` but not
 
    ```bash
    NODE_ENV=production \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql \
    node dist/migrate.js
    ```
 
-   Without both exact filenames it fails. A standing approval on the web
+   Without the exact approval for every pending controlled migration it fails
+   before applying any migration. A standing approval on the web
    service is ignored and must never be used as a substitute for the drained
    window.
 

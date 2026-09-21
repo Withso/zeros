@@ -42,8 +42,9 @@ beforeAll(() => {
   execFileSync("pnpm", ["build"], {
     cwd: PACKAGE_ROOT,
     encoding: "utf8",
+    timeout: 45_000,
   });
-});
+}, 60_000);
 
 it("runs the compiled quota manager as the documented production entrypoint", () => {
   const result = spawnSync(process.execPath, [DIST_QUOTA_MANAGER], {

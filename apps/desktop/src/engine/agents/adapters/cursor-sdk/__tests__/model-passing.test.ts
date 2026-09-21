@@ -1657,6 +1657,72 @@ describe("CursorSdkAdapter — recovers when Cursor has retired the picked model
     "Cannot use this model: grok-4.5. Available models: default, grok-4.6, composer-2.5, composer-2, gpt-5.5. Use Cursor.models.list() to discover valid selections.";
   const ENV = { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.5" };
 
+  it("exact model selection refuses an unsupported effort instead of silently using the default", async () => {
+    modelsListSpy.mockResolvedValue([{ id: "grok-4.6", parameters: [{id: "effort", values: [{value: "low"}]}] }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.6" } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.some(model => model.value === "grok-4.6")).toBe(true));
+      createSpy.mockClear();
+      await expect(adapter.newSession({ cwd: "/tmp/proj", env: {
+        CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.6", ZEROS_REQUIRE_EXACT_MODEL: "1", ZEROS_THINKING_EFFORT: "xhigh",
+      } })).rejects.toBeDefined();
+      expect(createSpy).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["newSession", "loadSession"] as const)(
+    "%s: exact model selection never substitutes after a provider rejection",
+    async (stage) => {
+      const attempt = stage === "newSession" ? createSpy : resumeSpy;
+      attempt.mockRejectedValueOnce(new Error(REJECTION)).mockResolvedValue(fakeAgent);
+      const adapter = new CursorSdkAdapter(makeCtx());
+      try {
+        const options = { cwd: "/tmp/proj", env: { ...ENV, ZEROS_REQUIRE_EXACT_MODEL: "1" } };
+        await expect(stage === "newSession"
+          ? adapter.newSession(options)
+          : adapter.loadSession({ ...options, sessionId: "prior-agent-id" }))
+          .rejects.toBeDefined();
+        expect(attempt).toHaveBeenCalledTimes(1);
+        expect(sendSpy).not.toHaveBeenCalled();
+      } finally { await adapter.dispose(); }
+    },
+  );
+
+  it("exact model selection rejects a known unavailable pick before native creation", async () => {
+    modelsListSpy.mockResolvedValue([{ id: "composer-2.5", displayName: "Composer" }]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      await adapter.newSession({ cwd: "/tmp/proj", env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.some(model => model.value === "composer-2.5")).toBe(true));
+      createSpy.mockClear();
+      await expect(adapter.newSession({ cwd: "/tmp/proj", env: { ...ENV, ZEROS_REQUIRE_EXACT_MODEL: "1" } })).rejects.toBeDefined();
+      expect(createSpy).not.toHaveBeenCalled();
+    } finally { await adapter.dispose(); }
+  });
+
+  it.each(["throw", "terminal"])("exact model selection never retries a %s prompt rejection on another model", async (failure) => {
+    modelsListSpy.mockResolvedValue([
+      { id: "grok-4.6", displayName: "Grok", parameters: [{ id: "effort", values: [{value: "xhigh"}] }] },
+      { id: "composer-2.5", displayName: "Composer" },
+      { id: "composer-2", displayName: "Composer 2" },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    try {
+      const { session } = await adapter.newSession({ cwd: "/tmp/proj", env: {
+        CURSOR_API_KEY: "key_test", CURSOR_MODEL: "grok-4.6",
+        ZEROS_REQUIRE_EXACT_MODEL: "1", ZEROS_THINKING_EFFORT: "xhigh",
+      } });
+      await vi.waitFor(async () => expect((await adapter.initialize())._meta?.models?.some(model => model.value === "composer-2")).toBe(true));
+      const rejection = new Error("Cannot use this model: grok-4.6. Available models: composer-2.5.");
+      if (failure === "throw") sendSpy.mockRejectedValueOnce(rejection);
+      else sendSpy.mockResolvedValueOnce({ ...makeRun("error"), wait: async () => ({ status: "error", error: { code: "invalid_model", message: rejection.message } }) });
+      await expect(adapter.prompt({ sessionId: session.sessionId, prompt: TEXT })).rejects.toBeDefined();
+      expect(sendSpy).toHaveBeenCalledTimes(1);
+      expect(sendSpy.mock.calls[0][1].model).toMatchObject({ id: "grok-4.6", params: expect.arrayContaining([{id: "effort", value: "xhigh"}]) });
+    } finally { await adapter.dispose(); }
+  });
+
   it("newSession: retries Agent.create once on a model the account lists", async () => {
     createSpy
       .mockReset()

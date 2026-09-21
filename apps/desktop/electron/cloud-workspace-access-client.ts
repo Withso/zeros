@@ -1,3 +1,6 @@
+import { CloudActorRuntimeGrantSchema, type CloudActorRuntimeGrant } from "@zeros/protocol/cloud-actors";
+import type { CloudReplicaDeviceProof } from "../src/engine/cloud-replica-device";
+
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
@@ -104,7 +107,7 @@ export type CloudWorkspacePreviewAccess = {
   };
 };
 
-export type CloudWorkspaceEngineAdmission = {
+export type CloudWorkspaceLegacyEngineAdmission = {
   version: 1;
   audience: "zeros-cloud-workspace-engine-client-admission-v1";
   workspaceId: string;
@@ -116,6 +119,9 @@ export type CloudWorkspaceEngineAdmission = {
   grantToken: string;
   expiresAt: string;
 };
+
+export type CloudWorkspaceEngineAdmission = CloudWorkspaceLegacyEngineAdmission | CloudActorRuntimeGrant;
+type EngineAdmissionSigner = (accessToken: string, input: { organizationId: string; workspaceId: string }) => Promise<CloudReplicaDeviceProof>;
 
 type Fetch = typeof fetch;
 
@@ -327,6 +333,7 @@ function validatedGrant(
 }
 
 export class CloudWorkspaceAccessClient {
+  private readonly signEngineAdmission?: EngineAdmissionSigner;
   private readonly baseUrl: string;
   private readonly fetch: Fetch;
   private readonly now: () => number;
@@ -335,6 +342,7 @@ export class CloudWorkspaceAccessClient {
 
   constructor(input: {
     baseUrl: string;
+    signEngineAdmission?: EngineAdmissionSigner;
     fetch?: Fetch;
     now?: () => number;
     allowedSshHosts?: readonly string[];
@@ -345,6 +353,7 @@ export class CloudWorkspaceAccessClient {
       input.baseUrl,
       input.allowInsecureLoopback === true,
     );
+    this.signEngineAdmission = input.signEngineAdmission;
     this.fetch = input.fetch ?? globalThis.fetch;
     this.now = input.now ?? Date.now;
     const hosts = input.allowedSshHosts ?? DEFAULT_SSH_HOSTS;
@@ -392,9 +401,19 @@ export class CloudWorkspaceAccessClient {
       body?: unknown;
       idempotencyKey?: string;
       credential?: string;
+      deviceProof?: CloudReplicaDeviceProof;
+      runtimeAdmission?: string;
     },
   ): Promise<unknown> {
     const headers: Record<string, string> = {
+      ...(input.deviceProof ? {
+        "x-zeros-device-id": input.deviceProof.deviceId,
+        "x-zeros-device-key-version": String(input.deviceProof.keyVersion),
+        "x-zeros-device-timestamp": String(input.deviceProof.timestampMs),
+        "x-zeros-device-nonce": input.deviceProof.nonce,
+        "x-zeros-device-signature": input.deviceProof.signature,
+      } : {}),
+      ...(input.runtimeAdmission ? {"x-zeros-runtime-admission": input.runtimeAdmission} : {}),
       accept: "application/json",
       authorization: `Bearer ${bearer(accessToken)}`,
       "cache-control": "no-store",
@@ -793,10 +812,33 @@ export class CloudWorkspaceAccessClient {
     };
   }
 
-  async issueEngineAdmission(
+  async issueEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string}):Promise<CloudActorRuntimeGrant> {
+    const requestPath=this.runtimePath(input.organizationId,input.workspaceId),now=this.now();
+    if(!this.signEngineAdmission)throw new CloudWorkspaceAccessClientError(0,"device_proof_required","A trusted device is required for cloud workspace access");
+    const proof=await this.signEngineAdmission(accessToken,input);
+    if(!UUID_PATTERN.test(proof.deviceId)||!Number.isSafeInteger(proof.keyVersion)||proof.keyVersion<1||
+      !Number.isSafeInteger(proof.timestampMs)||Math.abs(proof.timestampMs-this.now())>60000||
+      !/^[A-Za-z0-9_-]{16,128}$/.test(proof.nonce)||!/^[A-Za-z0-9_-]{86}$/.test(proof.signature))
+      throw new CloudWorkspaceAccessClientError(0,"device_proof_required","The cloud workspace device proof is invalid");
+    const body=await this.request(accessToken,{method:"POST",path:requestPath,expectedStatus:201,body:{actorProtocolVersion:2},deviceProof:proof});
+    const parsed=CloudActorRuntimeGrantSchema.safeParse(body);
+    const bridge=new URL("/v1/cloud-workspaces/bridge",this.baseUrl);bridge.protocol=bridge.protocol==="https:"?"wss:":"ws:";
+    if(!parsed.success||parsed.data.organizationId!==input.organizationId||parsed.data.workspaceId!==input.workspaceId||
+      parsed.data.bridgeUrl!==bridge.toString()||!validExpiry(parsed.data.expiresAt,now,2))
+      throw new CloudWorkspaceAccessClientError(201,"bad_response","The cloud workspace control plane returned invalid runtime access");
+    return parsed.data;
+  }
+
+  async revokeEngineAdmission(accessToken:string,input:{organizationId:string;workspaceId:string;grantToken:string}):Promise<void>{
+    if(!/^zwa_[A-Za-z0-9_-]{43}$/.test(input.grantToken))throw new CloudWorkspaceAccessClientError(0,"invalid_request","Cloud workspace admission is invalid");
+    await this.request(accessToken,{method:"DELETE",path:this.runtimePath(input.organizationId,input.workspaceId),expectedStatus:204,runtimeAdmission:input.grantToken});
+  }
+
+  /** Explicit compatibility only; the server restricts this to private, single-member v1 engines. */
+  async issueLegacyEngineAdmission(
     accessToken: string,
     input: { organizationId: string; workspaceId: string },
-  ): Promise<CloudWorkspaceEngineAdmission> {
+  ): Promise<CloudWorkspaceLegacyEngineAdmission> {
     const now = this.now();
     const body = await this.request(accessToken, {
       method: "POST",

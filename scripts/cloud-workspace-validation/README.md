@@ -73,18 +73,20 @@ identity, cleanup, and fail-closed verdict regressions.
 
 ```bash
 export DAYTONA_API_KEY=dtn_... # required
+export DAYTONA_SANDBOX_CLASS=linux-vm # required for the qualified isolation boundary
 export DAYTONA_TARGET=eu       # optional: us | eu; default eu
 export ZEROS_CLOUD_OWNER_SUB='user_workos-owner-id'
 export ZEROS_ACCOUNT_ACCESS_TOKEN='eyJ...' # client-only JWT; sub must equal owner
 export ZEROS_ACCOUNT_JWT_JWKS_URL='https://tenant/.well-known/jwks.json'
 # Or configure ZEROS_ACCOUNT_JWT_ISSUER / ZEROS_ACCOUNT_JWT_PUBLIC_KEY.
 export ZEROS_CLOUD_REQUIRED_AGENTS='claude,codex,cursor' # paid live differential
+export ZEROS_CLOUD_AGENT_SELECTIONS='{"claude":{"model":"claude-haiku-4-5"},"codex":{"model":"gpt-5.6-sol","effort":"high"},"cursor":{"model":"grok-4.6","effort":"xhigh","fast":false}}'
 ```
 
 `@daytona/sdk` is an exact root dev dependency. Run commands from the repository
 root with `pnpm tsx scripts/cloud-workspace-validation/<name>.ts`.
 The harness and control-plane provider/toolbox clients are all pinned at
-`0.190.1`. Treat a Daytona SDK/client upgrade as a qualification reset: update
+`0.214.0`. Treat a Daytona SDK/client upgrade as a qualification reset: update
 the adapters together, rerun contract tests, and complete this live matrix
 before using the new version in a release.
 
@@ -100,6 +102,12 @@ The GitHub workflow is the canonical production-shaped path. An operator must:
    exact private repository and commit, allowed Daytona toolbox origins, and
    the Cloudflare tunnel token. Set
    `ZSR_CLOUD_QUALIFICATION_TUNNEL_ORIGIN` as an Environment variable.
+   Also set `ZSR_CLOUD_VM_REGISTRY_REPOSITORY` to a registry/repository path
+   (without a tag or scheme) and the protected
+   `ZSR_CLOUD_VM_REGISTRY_USERNAME` / `ZSR_CLOUD_VM_REGISTRY_PASSWORD` secrets
+   to a credential scoped to publishing that repository. Configure separate
+   read access in Daytona for a private registry. The account must have Linux
+   VM quota in the selected region; the workflow never falls back to containers.
 4. Dispatch a `rehearsal` run first. Confirm its artifact contains the sanitized
    attestation and digest, and confirm both sandbox and snapshot inventories are
    empty after cleanup.
@@ -119,8 +127,25 @@ is deleted by the workflow, and an unattested retained image is not eligible for
 
 ## Validation sequence
 
+Linux VM snapshots require a published OCI image; Daytona's Dockerfile builder
+is a container-only path ([Daytona snapshots](https://www.daytona.io/docs/snapshots/)).
+The workflow first runs `publish-vm-image.ts` on the trusted runner, then passes
+its fresh, owner-only receipt to `bake-snapshot.ts`. The consumer verifies the
+source commit, recipe and image contract before registering the immutable digest.
+For a local run, authenticate Docker to the intended registry with
+`docker login --password-stdin`, set `ZEROS_CLOUD_VM_REGISTRY_REPOSITORY` and an
+absolute, nonexistent `ZEROS_CLOUD_VM_IMAGE_RECEIPT` path in a private directory,
+and run the publisher before step 1 with the same pinned `ZEROS_REPO_COMMIT` and
+image settings. Use an ephemeral `DOCKER_CONFIG` directory and remove it and the
+receipt on success, failure or cancellation. Never upload either as evidence.
+Docker's [password-stdin option](https://docs.docker.com/reference/cli/docker/login/)
+keeps the password out of command arguments and shell history. Registry image
+storage is separate from sandbox/snapshot cleanup: configure repository retention
+for rehearsal tags and preserve any digest referenced by a promoted snapshot.
+
 | Order | Command                                                                      | Validates                                                     |
 | ----- | ---------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 0     | `pnpm tsx scripts/cloud-workspace-validation/publish-vm-image.ts`            | Publish commit-pinned Linux VM image and private digest receipt |
 | 1     | `pnpm tsx scripts/cloud-workspace-validation/bake-snapshot.ts`               | Reproducible image build and native Node ABI                  |
 | 2     | `pnpm tsx scripts/cloud-workspace-validation/provision.ts`                   | Sandbox create, engine start, health, and private local state |
 | 3     | `pnpm tsx scripts/cloud-workspace-validation/preview-coordinator.ts`         | Keep running separately; rotate authenticated preview ingress |
@@ -142,7 +167,17 @@ All qualification commands fail non-zero: an unreachable required endpoint, miss
 SSH round trip, premature soak interruption, dead final socket, or a drop count
 above `ZEROS_SOAK_MAX_DROPS` cannot print a warning and still graduate. The
 default drop budget is zero. `agent-smoke.ts` is deliberately opt-in and refuses
-to run unless `ZEROS_CLOUD_REQUIRED_AGENTS` names at least one provider. CPU,
+to run unless `ZEROS_CLOUD_REQUIRED_AGENTS` names at least one provider and
+`ZEROS_CLOUD_AGENT_SELECTIONS` supplies an explicit model for each. Codex and
+Cursor also require an explicit effort. This JSON accepts only `model`,
+`effort`, and optional boolean `fast`; credentials never belong in it. The
+protected workflow takes it from the `ZSR_CLOUD_AGENT_SELECTIONS` repository
+variable and validates it before allocating compute. Session requests carry
+these exact controls with `ZEROS_REQUIRE_EXACT_MODEL=1`: Cursor refuses model
+substitution on create, resume and prompt retries, and Codex disables native
+provider catalog fallback. Ordinary interactive sessions retain their existing
+availability recovery. Do not use Auto/default routing to qualify a pinned
+model. CPU,
 memory, and disk inputs are parsed and capped before any paid provider request;
 provider calls and inventory checks have deadlines.
 
@@ -214,6 +249,9 @@ redistribution approval remain outside this provider qualification.
 | Variable                                                 | Default                               | Purpose                                           |
 | -------------------------------------------------------- | ------------------------------------- | ------------------------------------------------- |
 | `DAYTONA_API_KEY`                                        | required                              | Provisioning API credential; never enters sandbox |
+| `DAYTONA_SANDBOX_CLASS`                                  | `container` (legacy parser only)       | Set `linux-vm` explicitly; protected workflow requires it |
+| `ZEROS_CLOUD_VM_REGISTRY_REPOSITORY`                      | required by VM publisher              | Registry/repository path, no tag or scheme; writer via Docker store |
+| `ZEROS_CLOUD_VM_IMAGE_RECEIPT`                           | required for Linux VM                 | Absolute owner-only fresh publication receipt consumed by bake |
 | `DAYTONA_TARGET`                                         | `eu`                                  | Provider region (`us` or `eu`)                    |
 | `ZEROS_SNAPSHOT_NAME`                                    | `zeros-engine-v1`                     | Registered image/snapshot name                    |
 | `ZEROS_REPO_URL` / `ZEROS_REPO_REF`                      | public repo / `main`                  | Reachable source ref baked into the image         |
@@ -225,6 +263,7 @@ redistribution approval remain outside this provider qualification.
 | `ZEROS_SOAK_HOURS` / `ZEROS_SOAK_PING_MS`                | `4` / `25000`                         | Soak duration and operation cadence               |
 | `ZEROS_SOAK_MAX_DROPS`                                   | `0`                                   | Maximum drops before the soak fails               |
 | `ZEROS_CLOUD_REQUIRED_AGENTS`                            | required by agent smoke               | Comma-separated paid live provider gate           |
+| `ZEROS_CLOUD_AGENT_SELECTIONS`                           | required by agent smoke               | JSON model/effort/Fast selection for every required agent |
 | `ZEROS_CLOUD_VALIDATION_SKIP_RECONNECT`                  | unset                                 | Skip only the reconnect portion of `test-client`  |
 | `ZEROS_CLOUD_VALIDATION_STATE_DIR`                       | `~/.zeros/cloud-workspace-validation` | Absolute engine-private operator-state override   |
 | `ZEROS_CLOUD_VALIDATION_AUTO_DELETE_MINUTES`             | disabled                              | 60–10080 minute killed-run provider backstop      |

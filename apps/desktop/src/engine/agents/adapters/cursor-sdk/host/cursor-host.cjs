@@ -1172,6 +1172,25 @@ function localStoreFor(cwd) {
 function withLocalStore(opts) {
   const out = { ...(opts || {}) };
   const local = { ...(out.local || {}) };
+  if (out.zerosWorkloadTools) {
+    const schema=out.zerosWorkloadTools.inputSchema;
+    if(!schema||typeof schema!=="object"||Array.isArray(schema)||Buffer.byteLength(JSON.stringify(schema))>32768)
+      throw new Error("Cloud workload tool schema is invalid");
+    delete out.zerosWorkloadTools;
+    local.customTools={workspace:{
+      description:"Read, list, search and compare-and-edit workspace files, execute and monitor commands, or use disk-backed TypeScript/JavaScript/Python symbols and completions. LSP positions use zero-based UTF-16 columns. Use returned SHA-256 values for edits. Output encoding is utf8 or base64.",
+      inputSchema:{type:"object",properties:{request:schema},required:["request"],additionalProperties:false},
+      execute:async(args)=>{
+        const result=await requestCloudTool(args.request);
+        return {content:[{type:"text",text:JSON.stringify(result)}],isError:!result.ok};
+      },
+    }};
+    // Repeat restrictions on every native create/resume/prewarm. They are not
+    // persisted by the SDK and must never depend on the saved conversation.
+    out.tools=["mcp","askQuestion","updateTodos","readTodos"];
+    local.settingSources=[];local.dirs=undefined;out.agents={};
+  }
+  out.local=local;
   if (local.store) return out;
   const cwd = typeof local.cwd === "string" && local.cwd ? local.cwd : out.cwd;
   const store = localStoreFor(cwd);
@@ -1179,6 +1198,23 @@ function withLocalStore(opts) {
   local.store = store;
   out.local = local;
   return out;
+}
+
+const pendingCloudTools=new Map();
+function requestCloudTool(request){
+  if(pendingCloudTools.size>=4)return Promise.resolve({ok:false,error:"capacity"});
+  if(Buffer.byteLength(JSON.stringify(request)??"null")>262144)return Promise.resolve({ok:false,error:"invalid_input"});
+  const id=randomUUID();
+  return new Promise(resolve=>{
+    const timer=setTimeout(()=>{
+      pendingCloudTools.delete(id);send({k:"tool_cancel",id});resolve({ok:false,error:"timeout"});
+    },310000);timer.unref();
+    pendingCloudTools.set(id,{resolve,timer});send({k:"tool",id,request});
+  });
+}
+function cancelCloudTools(){
+  for(const[id,pending]of pendingCloudTools){clearTimeout(pending.timer);send({k:"tool_cancel",id});pending.resolve({ok:false,error:"unavailable"});}
+  pendingCloudTools.clear();
 }
 
 /** Same, for Agent.list — whose ListAgentsOptions takes `store` at the TOP
@@ -1585,6 +1621,7 @@ async function handle(m) {
       return;
     }
     case "run.cancel": {
+      cancelCloudTools();
       const entry = runs.get(args.runId);
       if (entry) {
         runs.delete(args.runId);
@@ -1676,6 +1713,10 @@ process.stdin.on("data", (chunk) => {
         Promise.resolve()
           .then(() => handle(msg))
           .catch((err) => fail(msg.id, err));
+      } else if(msg && msg.k === "tool_result" && typeof msg.id === "string") {
+        const pending=pendingCloudTools.get(msg.id);
+        if(pending){pendingCloudTools.delete(msg.id);clearTimeout(pending.timer);
+          pending.resolve(msg.result&&typeof msg.result==="object"&&typeof msg.result.ok==="boolean"?msg.result:{ok:false,error:"unavailable"});}
       }
     }
     nl = buf.indexOf("\n");
@@ -1689,6 +1730,7 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  cancelCloudTools();
   // Cancel every live run + dispose agents/stores, then AWAIT the settle with a
   // hard cap. `run.cancel()` is what fires @cursor/sdk's AbortSignal, which is
   // the ONLY thing that kills the actual `cursor-agent` runtime — the SDK spawns

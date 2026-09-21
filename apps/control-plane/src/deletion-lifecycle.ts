@@ -7,6 +7,7 @@ import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { audit } from "./audit.js";
 import { withSystemTx, type Tx } from "./db.js";
+import { eraseCloudWorkspaceCollaborationIdentity } from "./cloud-workspaces/actors.js";
 import {
   enqueueWorkOSCommand,
   enqueueWorkOSUserDeletionCommand,
@@ -293,6 +294,14 @@ async function assertOrganizationCloudPurgeReady(
   organizationId: string,
   consumeFencedDeletions: boolean,
 ): Promise<void> {
+  const retainedProviderOperation = await tx.query(
+    `SELECT 1 FROM cloud_workspace_provider_operations
+     WHERE org_id = $1 AND deleted_at IS NULL LIMIT 1 FOR UPDATE`,
+    [organizationId],
+  );
+  if (retainedProviderOperation.rows[0]) {
+    throw new Error("organization_provider_deletion_not_verified");
+  }
   const retainedWorkspace = await tx.query(
     `SELECT 1 FROM cloud_workspaces
      WHERE org_id = $1
@@ -341,6 +350,10 @@ async function assertOrganizationCloudPurgeReady(
     throw new Error("organization_blob_deletion_not_fenced");
   }
   if (consumeFencedDeletions) {
+    await tx.query(
+      `DELETE FROM cloud_workspace_provider_operations WHERE org_id = $1 AND deleted_at IS NOT NULL`,
+      [organizationId],
+    );
     await tx.query(
       `DELETE FROM workspace_blob_object_deletions
        WHERE org_id = $1 AND fenced_at IS NOT NULL AND reserved_bytes = 0`,
@@ -1320,6 +1333,7 @@ function lifecycleRetryMs(attempt: number): number {
 
 const ORGANIZATION_PURGE_READINESS_ERRORS = new Set([
   "organization_cloud_deletion_not_verified",
+  "organization_provider_deletion_not_verified",
   "organization_blob_deletion_not_verified",
   "organization_blob_rotation_not_terminal",
   "organization_blob_reservation_not_released",
@@ -1470,9 +1484,8 @@ export class DeletionLifecycleProcessor {
     const keys: string[] = [];
     if (request.target_kind === "account" && request.target_user_id) {
       keys.push(workOSUserProviderLockKey(request.target_user_id));
-      const subjects = await accountWorkOSProviderSubjects(
-        this.pool,
-        request.target_user_id,
+      const subjects = await withSystemTx(this.pool, (tx) =>
+        accountWorkOSProviderSubjects(tx, request.target_user_id!),
       );
       keys.push(
         ...subjects.map((subject) =>
@@ -1490,13 +1503,13 @@ export class DeletionLifecycleProcessor {
       keys.push(
         workOSOrganizationProviderLockKey(request.target_organization_id),
       );
-      const links = await this.pool.query<{
+      const links = await withSystemTx(this.pool, (tx) => tx.query<{
         workos_organization_id: string | null;
       }>(
         `SELECT workos_organization_id FROM workos_organization_links
          WHERE organization_id = $1`,
         [request.target_organization_id],
-      );
+      ));
       keys.push(
         ...links.rows.flatMap((link) =>
           link.workos_organization_id
@@ -1759,9 +1772,8 @@ export class DeletionLifecycleProcessor {
 
   private async providerReady(request: ClaimedDeletion): Promise<boolean> {
     if (request.target_kind === "account" && request.target_user_id) {
-      const capturedSubjects = await accountWorkOSProviderSubjects(
-        this.pool,
-        request.target_user_id,
+      const capturedSubjects = await withSystemTx(this.pool, (tx) =>
+        accountWorkOSProviderSubjects(tx, request.target_user_id!),
       );
       const commands = await withSystemTx(this.pool, (tx) =>
         tx.query<{
@@ -2034,6 +2046,7 @@ export class DeletionLifecycleProcessor {
          WHERE created_by = $1 AND is_personal`,
         [request.target_user_id],
       );
+      await eraseCloudWorkspaceCollaborationIdentity(tx, request.target_user_id!);
       await tx.query(`DELETE FROM user_identities WHERE user_id = $1`, [
         request.target_user_id,
       ]);
@@ -2050,6 +2063,9 @@ export class DeletionLifecycleProcessor {
          WHERE id = $1`,
         [request.target_user_id],
       );
+      await tx.query("SELECT public.purge_account_pro_configuration($1)", [
+        request.target_user_id,
+      ]);
       await notify(tx, {
         userId: null,
         email: account.rows[0].email,

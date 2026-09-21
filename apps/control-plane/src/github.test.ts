@@ -4,7 +4,7 @@ import {
   randomUUID,
   verify,
 } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import pg from "pg";
 
@@ -13,6 +13,7 @@ import { HttpError } from "./authz.js";
 import type { GithubBackendConfig } from "./config.js";
 import {
   cleanupExpiredGithubOauth,
+  startGithubOauthCleanup,
   createGithubPublicRoutes,
   createGithubRoutes,
   createGithubUnconfiguredRoutes,
@@ -29,6 +30,18 @@ import { runMigrations } from "./migrate.js";
 // `GithubAppClientError: Not found`. A precise code is what lets Settings say
 // "use gh CLI or a Personal Access Token for now".
 describe("GitHub routes without a registered App", () => {
+  it("does not log database error details from the OAuth cleanup loop", async () => {
+    const sentinel = "private-cleanup-database-value";
+    const pool = { connect: vi.fn().mockRejectedValue(new Error(sentinel)) } as unknown as pg.Pool;
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stop = startGithubOauthCleanup(pool);
+    try {
+      await vi.waitFor(() => expect(log).toHaveBeenCalled());
+      expect(log).toHaveBeenCalledExactlyOnceWith("[github] OAuth cleanup failed");
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    } finally { stop(); log.mockRestore(); }
+  });
+
   it("answers every /v1/github route with github_not_configured", async () => {
     const app = createGithubUnconfiguredRoutes();
 
@@ -908,6 +921,24 @@ dbDescribe("GitHub App OAuth handoff", () => {
     expect(await response.json()).toMatchObject({
       error: { code: "github_oauth_failed" },
     });
+  });
+
+  it("does not log private database details when an OAuth callback cannot persist", async () => {
+    const started = await startFlow(appA, "p".repeat(43));
+    const sentinel = "private-callback-database-value";
+    const failedPool = {
+      connect: vi.fn().mockImplementationOnce(() => pool.connect())
+        .mockRejectedValue(Object.assign(new Error(sentinel), { code: "23505", detail: sentinel })),
+    } as unknown as pg.Pool;
+    const failed = testApp(failedPool, userA, { fetch: githubFetch([]) });
+    const log = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const response = await callback(failed, started.state);
+      expect(response.status).toBe(302);
+      expect(response.headers.get("location")).toContain("github_unavailable");
+      expect(log).toHaveBeenCalledExactlyOnceWith("[github] oauth callback failed (reported as github_unavailable): internal");
+      expect(JSON.stringify(log.mock.calls)).not.toContain(sentinel);
+    } finally { log.mockRestore(); }
   });
 
   it("physically removes expired token handoffs instead of only hiding them", async () => {

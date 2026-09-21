@@ -42,3 +42,24 @@ describe("check-secrets WorkOS credentials", () => {
     expect(result.status).toBe(0);
   });
 });
+
+describe("check-secrets database fixtures", () => {
+  it.each(["primary.test", "database.invalid", "localhost", "127.0.0.1", "203.0.113.1"])(
+    "allows a reserved local fixture host %s", (host) => {
+      expect(scanTrackedFixture(`postgres://fixture@${host}:5432/test\n`).status).toBe(0);
+    },
+  );
+
+  it.each(["primary.test.attacker.tld", "localhost.attacker.tld", "127.0.0.1.attacker.tld", "real.database.tld"])(
+    "still detects credentials on %s", (host) => {
+      const result = scanTrackedFixture(`postgres://fixture@${host}:5432/test\n`);
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Database URL");
+    },
+  );
+
+  it("does not let a fixture hide a second credential on the same line", () => {
+    const publicHost = "real.database.tld";
+    expect(scanTrackedFixture(`postgres://fixture@database.test postgres://account@${publicHost}`).status).toBe(1);
+  });
+});

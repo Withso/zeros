@@ -202,7 +202,7 @@ async function nextCheckAt(
   workspaceId: string,
   generation: number,
 ): Promise<Date> {
-  const result = authorization.isPersonal
+  const result = authorization.entitlementScope === "account"
     ? await tx.query<{ next_check_at: Date }>(
         `SELECT least(
            now() + ($2::bigint * interval '1 millisecond'),
@@ -308,7 +308,11 @@ async function scheduleExecutionAuthorityStop(
          error_code = $3,
          error_message = $4
      WHERE workspace_id = $1 AND org_id = $2
-       AND operation <> 'delete'
+       AND (operation <> 'delete' OR EXISTS (
+         SELECT 1 FROM workspace_checkpoint_requests request
+         WHERE request.lifecycle_intent_id = cloud_workspace_lifecycle_intents.id
+           AND request.state <> 'succeeded'
+       ))
        AND state IN ('queued', 'observing')`,
     [workspace.id, workspace.org_id, authorityLoss, errorMessage],
   );

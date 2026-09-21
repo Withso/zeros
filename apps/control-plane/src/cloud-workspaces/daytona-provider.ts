@@ -1,6 +1,9 @@
 import {
   Configuration,
   SandboxApi,
+  ApiKeysApi,
+  OrganizationsApi,
+  SnapshotsApi,
   type CreateSandbox,
   type PortPreviewUrl,
   type Sandbox,
@@ -25,7 +28,7 @@ import {
 const MANAGED_LABEL = "zeros_managed";
 const WORKSPACE_LABEL = "zeros_workspace";
 const GENERATION_LABEL = "zeros_generation";
-const API_CLIENT_VERSION = "0.190.1";
+const API_CLIENT_VERSION = "0.214.0";
 const ACCESS_TOKEN_PATTERN = /^[A-Za-z0-9._~-]{16,4096}$/;
 const PROVIDER_ACCESS_ID_PATTERN = /^[A-Za-z0-9._:-]{1,512}$/;
 const HOST_PATTERN =
@@ -48,6 +51,9 @@ export type DaytonaSandboxLike = Pick<
   | "autoStopInterval"
   | "autoArchiveInterval"
   | "autoDeleteInterval"
+  | "autoPauseInterval"
+  | "sandboxClass"
+  | "autoDestroyAt"
 >;
 
 type DaytonaCreateParams = {
@@ -56,15 +62,16 @@ type DaytonaCreateParams = {
   target: string;
   labels: Record<string, string>;
   public: false;
-  cpu: number;
-  memory: number;
-  disk: number;
   autoStopInterval: number;
-  autoArchiveInterval: number;
+  autoArchiveInterval?: number;
   autoDeleteInterval: number;
+  autoPauseInterval?: number;
+  ttlMinutes?: number;
 };
 
 export interface DaytonaClientLike {
+  /** Fresh account/class/quota and snapshot checks before a VM allocation. */
+  preflightVm?(): Promise<void>;
   create(
     params: DaytonaCreateParams,
     options: { timeoutSeconds: number },
@@ -103,6 +110,10 @@ export type DaytonaWorkspaceProviderConfig = {
   apiUrl: string;
   target: string;
   snapshotId: string;
+  /** Omitted only by legacy container generation contracts. */
+  sandboxClass?: "container" | "linux-vm";
+  /** Qualification-only wall-clock bound; independent of inactivity cleanup. */
+  ttlMinutes?: number;
   architecture: "linux/amd64" | "linux/arm64";
   cpuMillicores: number;
   memoryMiB: number;
@@ -235,6 +246,9 @@ function requestTimeout(timeoutSeconds: number): { timeout: number } {
 
 class GeneratedDaytonaClient implements DaytonaClientLike {
   private readonly api: SandboxApi;
+  private readonly keys: ApiKeysApi;
+  private readonly organizations: OrganizationsApi;
+  private readonly snapshots: SnapshotsApi;
 
   constructor(private readonly config: DaytonaWorkspaceProviderConfig) {
     const configuration = new Configuration({
@@ -249,6 +263,39 @@ class GeneratedDaytonaClient implements DaytonaClientLike {
       },
     });
     this.api = new SandboxApi(configuration);
+    this.keys = new ApiKeysApi(configuration);
+    this.organizations = new OrganizationsApi(configuration);
+    this.snapshots = new SnapshotsApi(configuration);
+  }
+
+  async preflightVm(): Promise<void> {
+    const options={...requestTimeout(this.config.operationTimeoutSeconds),maxRedirects:0,maxContentLength:1024*1024};
+    const key=(await this.keys.getCurrentApiKey(undefined,options)).data as unknown as {organizationId?:unknown};
+    if(typeof key.organizationId!=="string"||!/^[a-zA-Z0-9_-]{1,128}$/.test(key.organizationId))
+      throw new CloudProviderError("provider_account_unverified","Daytona API key account identity is unavailable",false);
+    const [snapshot,classes,usage]=await Promise.all([
+      this.snapshots.getSnapshot(this.config.snapshotId,undefined,options),
+      this.organizations.listAvailableSandboxClasses(key.organizationId,options),
+      this.organizations.getOrganizationUsageOverview(key.organizationId,options),
+    ]);
+    const image=snapshot.data;
+    if(image.id!==this.config.snapshotId||image.sandboxClass!=="linux-vm"||image.state!=="active"||
+      !image.regionIds?.includes(this.config.target)||image.cpu!==this.config.cpuMillicores/1000||
+      image.mem!==this.config.memoryMiB/1024||image.disk!==this.config.storageMiB/1024)
+      throw new CloudProviderError("provider_snapshot_configuration_mismatch","Daytona VM snapshot is not available with the pinned resources and region",false);
+    const quota=usage.data.regionUsage.filter(row=>row.regionId===this.config.target&&row.sandboxClass==="linux-vm");
+    if(!classes.data.some(row=>row.regionId===this.config.target&&row.sandboxClass==="linux-vm")||quota.length!==1)
+      throw new CloudProviderError("provider_vm_quota_unavailable","Daytona Linux VM quota is unavailable in the selected region",false);
+    const row=quota[0]!;
+    const limits=[
+      [image.cpu,row.totalCpuQuota,row.currentCpuUsage,row.maxCpuPerSandbox],
+      [image.mem,row.totalMemoryQuota,row.currentMemoryUsage,row.maxMemoryPerSandbox],
+      [image.disk,row.totalDiskQuota,row.currentDiskUsage,row.maxDiskPerSandbox],
+    ];
+    if(limits.some(([needed,total,used,max])=>![needed,total,used].every(value=>typeof value==="number"&&Number.isFinite(value)&&value>=0)||
+      needed!>total!-used!||(max!==null&&max!==undefined&&needed!>max))||
+      (row.maxDiskPerNonEphemeralSandbox!==null&&image.disk>row.maxDiskPerNonEphemeralSandbox))
+      throw new CloudProviderError("provider_vm_quota_exhausted","Daytona Linux VM capacity is insufficient for the pinned resources",false);
   }
 
   async create(
@@ -261,12 +308,11 @@ class GeneratedDaytonaClient implements DaytonaClientLike {
       target: params.target,
       labels: params.labels,
       public: params.public,
-      cpu: params.cpu,
-      memory: params.memory,
-      disk: params.disk,
       autoStopInterval: params.autoStopInterval,
-      autoArchiveInterval: params.autoArchiveInterval,
+      ...(params.autoArchiveInterval!==undefined?{autoArchiveInterval:params.autoArchiveInterval}:{}),
       autoDeleteInterval: params.autoDeleteInterval,
+      ...(params.autoPauseInterval!==undefined?{autoPauseInterval:params.autoPauseInterval}:{}),
+      ...(params.ttlMinutes!==undefined?{ttlMinutes:params.ttlMinutes}:{}),
     };
     return (
       await this.api.createSandbox(
@@ -302,7 +348,9 @@ class GeneratedDaytonaClient implements DaytonaClientLike {
       if (cursor) args[1] = cursor;
       args[2] = Math.min(100, Math.max(1, query.limit));
       args[5] = JSON.stringify(query.labels);
-      args[25] = requestTimeout(this.config.operationTimeoutSeconds);
+      // Pinned generated API v0.214 adds wall-clock deadline filters before
+      // the final Axios options argument. Contract tests cover the wire URL.
+      args[28] = requestTimeout(this.config.operationTimeoutSeconds);
       const response = await this.api.listSandboxes(...args);
       for (const item of response.data.items) yield item;
       const next = response.data.nextCursor ?? undefined;
@@ -442,7 +490,7 @@ export function mapDaytonaState(
     case "pausing":
       return "stopping";
     case "paused":
-      return "stopped";
+      return "paused";
     case "stopping":
       return "stopping";
     case "stopped":
@@ -491,10 +539,13 @@ function resource(sandbox: DaytonaSandboxLike): CloudProviderResource {
   return {
     resourceId: sandbox.id,
     state: mapDaytonaState(String(sandbox.state ?? "unknown")),
+    ...(sandbox.sandboxClass==="linux-vm"&&sandbox.state==="stopped"?{storageOffloaded:true}:{}),
     target: sandbox.target || null,
     ...identity,
     metadata: {
       snapshot: sandbox.snapshot ?? null,
+      sandboxClass: sandbox.sandboxClass ?? null,
+      providerState: String(sandbox.state ?? "unknown"),
       cpu: sandbox.cpu,
       memoryGiB: sandbox.memory,
       diskGiB: sandbox.disk,
@@ -502,6 +553,8 @@ function resource(sandbox: DaytonaSandboxLike): CloudProviderResource {
       autoStopMinutes: sandbox.autoStopInterval ?? null,
       autoArchiveMinutes: sandbox.autoArchiveInterval ?? null,
       autoDeleteMinutes: sandbox.autoDeleteInterval ?? null,
+      autoPauseMinutes: sandbox.autoPauseInterval ?? null,
+      autoDestroyAt: sandbox.autoDestroyAt ?? null,
       hasProviderError: Boolean(sandbox.errorReason),
     },
   };
@@ -568,10 +621,16 @@ function assertResourceId(value: unknown): asserts value is string {
 
 function assertConfiguredResource(
   value: CloudProviderResource,
-  input: CloudProviderCreateInput,
+  input: Pick<CloudProviderCreateInput, "imageRef" | "cpuMillicores" | "memoryMiB" | "storageMiB">,
   config: DaytonaWorkspaceProviderConfig,
 ): void {
   const metadata = value.metadata;
+  if (config.ttlMinutes !== undefined) {
+    const deadline = typeof metadata.autoDestroyAt === "string" ? Date.parse(metadata.autoDestroyAt) : NaN;
+    const now = Date.now();
+    if (!Number.isFinite(deadline) || deadline <= now || deadline > now + config.ttlMinutes * 60_000 + 5_000)
+      throw new CloudProviderError("provider_qualification_deadline_invalid", "Qualification sandbox has no verified finite wall-clock deadline", false);
+  }
   if (
     value.target !== config.target ||
     metadata.snapshot !== input.imageRef ||
@@ -580,7 +639,9 @@ function assertConfiguredResource(
     !sameNumber(metadata.diskGiB, input.storageMiB / 1_024) ||
     metadata.publicPreview !== false ||
     metadata.autoStopMinutes !== config.autoStopMinutes ||
-    metadata.autoArchiveMinutes !== config.autoArchiveMinutes ||
+    (config.sandboxClass==="linux-vm"
+      ? metadata.sandboxClass!=="linux-vm"||metadata.autoPauseMinutes!==0
+      : (metadata.sandboxClass!==null&&metadata.sandboxClass!=="container")||metadata.autoArchiveMinutes!==config.autoArchiveMinutes) ||
     metadata.autoDeleteMinutes !== config.autoDeleteMinutes
   ) {
     throw new CloudProviderError(
@@ -639,6 +700,8 @@ export class DaytonaWorkspaceProvider
     private readonly config: DaytonaWorkspaceProviderConfig,
     client?: DaytonaClientLike,
   ) {
+    if(config.ttlMinutes!==undefined&&(!Number.isSafeInteger(config.ttlMinutes)||config.ttlMinutes<1||config.ttlMinutes>1440))
+      throw new Error("Daytona qualification TTL must be from 1 through 1440 minutes");
     this.client = client ?? new GeneratedDaytonaClient(config);
   }
 
@@ -703,6 +766,7 @@ export class DaytonaWorkspaceProvider
     }
 
     try {
+      if(this.config.sandboxClass==="linux-vm")await this.preflightVm();
       const created = resource(
         await this.client.create(
           {
@@ -711,14 +775,14 @@ export class DaytonaWorkspaceProvider
             target: this.config.target,
             labels: identityLabels(input),
             public: false,
-            cpu: input.cpuMillicores / 1_000,
-            memory: input.memoryMiB / 1_024,
-            disk: input.storageMiB / 1_024,
+            // Snapshot resources are inherited. Daytona rejects resource
+            // overrides here; assertConfiguredResource checks the result.
             // The engine owns idleness because provider preview traffic and
             // background agents do not reliably update provider activity.
             autoStopInterval: this.config.autoStopMinutes,
-            autoArchiveInterval: this.config.autoArchiveMinutes,
+            ...(this.config.sandboxClass==="linux-vm"?{autoPauseInterval:0}:{autoArchiveInterval:this.config.autoArchiveMinutes}),
             autoDeleteInterval: this.config.autoDeleteMinutes,
+            ...(this.config.ttlMinutes!==undefined?{ttlMinutes:this.config.ttlMinutes}:{}),
           },
           { timeoutSeconds: this.config.operationTimeoutSeconds },
         ),
@@ -776,12 +840,21 @@ export class DaytonaWorkspaceProvider
       const rawState = String(currentRaw.state ?? "unknown");
       const observedState = current.state;
       if (operation === "start") {
+        if(rawState==="paused"||rawState==="pausing"||rawState==="resuming")
+          throw new CloudProviderError("provider_paused_requires_stop","Cold-stop the paused VM before starting a fresh runtime",false);
+        assertConfiguredResource(current, {
+          imageRef: this.config.snapshotId,
+          cpuMillicores: this.config.cpuMillicores,
+          memoryMiB: this.config.memoryMiB,
+          storageMiB: this.config.storageMiB,
+        }, this.config);
         if (
           observedState === "running" ||
           ["starting", "resuming", "restoring"].includes(rawState)
         ) {
           return current;
         }
+        if(this.config.sandboxClass==="linux-vm")await this.preflightVm();
         return resourceForId(
           await this.client.start(
             resourceId,
@@ -789,6 +862,10 @@ export class DaytonaWorkspaceProvider
           ),
           resourceId,
         );
+      }
+      if(operation==="archive"&&current.metadata.sandboxClass==="linux-vm"){
+        if(current.storageOffloaded===true||observedState==="stopping")return current;
+        return resourceForId(await this.client.stop(resourceId,this.config.operationTimeoutSeconds),resourceId);
       }
       if (operation === "stop") {
         if (
@@ -842,6 +919,15 @@ export class DaytonaWorkspaceProvider
       }
       throw normalizeDaytonaError(error, operation);
     }
+  }
+
+  async preflightAllocation():Promise<void>{
+    if(this.config.sandboxClass==="linux-vm")await this.preflightVm();
+  }
+
+  private async preflightVm():Promise<void>{
+    if(!this.client.preflightVm)throw new CloudProviderError("provider_vm_preflight_unavailable","Daytona VM allocation requires account and snapshot qualification",false);
+    await this.client.preflightVm();
   }
 
   start(resourceId: string): Promise<CloudProviderResource> {
@@ -1039,13 +1125,25 @@ export class DaytonaWorkspaceProvider
     }
   }
 
+  getEngineEndpoint(resourceId: string, port: number): Promise<CloudProviderPreviewEndpoint> {
+    return this.getPreviewEndpoint(resourceId, port);
+  }
+
   async *listManaged(): AsyncIterable<CloudProviderResource> {
     try {
       for await (const sandbox of this.client.list({
         labels: { [MANAGED_LABEL]: "true" },
         limit: 100,
       })) {
-        yield resource(sandbox);
+        // Inventory is untrusted: a foreign or manually edited label must not
+        // prevent reconciliation of every later resource in this account.
+        try {
+          yield resource(sandbox);
+        } catch (error) {
+          if (error instanceof CloudProviderError &&
+              ["provider_identity_invalid", "provider_resource_id_invalid"].includes(error.code)) continue;
+          throw error;
+        }
       }
     } catch (error) {
       throw normalizeDaytonaError(error, "list managed resources");

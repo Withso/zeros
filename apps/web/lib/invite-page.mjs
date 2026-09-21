@@ -1,5 +1,6 @@
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{20,200}$/;
 const NONCE = /^[A-Za-z0-9_-]{8,128}$/;
+export {responseHeaders as invitationResponseHeaders,shell as invitationPageShell};
 
 export function invitationTokenFromSearchParams(searchParams) {
   const zerosTokens = searchParams.getAll("token");

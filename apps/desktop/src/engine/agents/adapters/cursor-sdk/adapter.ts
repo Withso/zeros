@@ -22,10 +22,12 @@ import { isDevRuntime } from "../../../runtime";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
+import { cloudProviderExecution } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
 import { nativeMcpPassthroughEnabled } from "../shared/mcp-passthrough";
+import { requireExplicitModel, requiresExactModel } from "../shared/exact-model-selection";
 import {
   extractUnavailableModelId,
   parseAvailableModelsFromError,
@@ -56,7 +58,7 @@ import {
 } from "./host/host-client";
 import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
-import { durableCursorStateRoot } from "./state-overlay";
+import { cloudCursorStateRoot, durableCursorStateRoot } from "./state-overlay";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
 
 const AGENT_ID = "cursor";
@@ -1211,12 +1213,27 @@ export class CursorSdkAdapter implements AgentAdapter {
       id,
       state.discoveredModels.get(id),
     );
-    return cursorModelSelection(
+    const selection = cursorModelSelection(
       id,
       model,
       env?.ZEROS_THINKING_EFFORT,
       env?.ZEROS_FAST_MODE === "1",
     );
+    if (requiresExactModel(env)) {
+      const effort = env?.ZEROS_THINKING_EFFORT;
+      const acceptableEfforts = effort === "xhigh" ? ["xhigh", "extra-high"] : [effort];
+      if (
+        selection.id !== env?.CURSOR_MODEL ||
+        (effort && !selection.params?.some(parameter =>
+          CURSOR_EFFORT_PARAMETER_RX.test(parameter.id) && acceptableEfforts.includes(parameter.value))) ||
+        (env?.ZEROS_FAST_MODE === "1" && !selection.params?.some(parameter =>
+          CURSOR_FAST_PARAMETER_RX.test(parameter.id) && ["true", "fast", "on"].includes(parameter.value)))
+      ) throw new AgentFailureError({
+        kind: "protocol-error", stage: "newSession", agentId: AGENT_ID,
+        message: "The exact requested Cursor model settings are unavailable; substitution is disabled.",
+      });
+    }
+    return selection;
   }
 
   /** Start catalog discovery without putting it on the session critical path.
@@ -1272,10 +1289,12 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (process.env.CURSOR_RIPGREP_PATH && !env.CURSOR_RIPGREP_PATH) {
       env.CURSOR_RIPGREP_PATH = process.env.CURSOR_RIPGREP_PATH;
     }
-    // Every shipped local and cloud boundary is host parity. Cursor therefore
-    // writes the durable per-workspace store directly; generation-private
-    // overlays are retained only as a boot-recovery format for older builds.
-    const localState = await durableCursorStateRoot(opts.cwd);
+    // Cloud history belongs to the worker's persistent home. Creating its
+    // directory here would give it the engine's owner/mode; defer that to the
+    // contained host. Local stores retain their serialized location.
+    const localState = opts.executionBoundary.status.backend === "cloud-worker"
+      ? cloudCursorStateRoot(opts.cwd, opts.executionBoundary.providerHomePath)
+      : await durableCursorStateRoot(opts.cwd);
     env.ZEROS_CURSOR_STATE_ROOT = localState;
     const runtime = createCursorHostRuntime({
       executionBoundary: opts.executionBoundary,
@@ -1432,6 +1451,19 @@ export class CursorSdkAdapter implements AgentAdapter {
     env?: Record<string, string>,
     state: CursorModelState = this.modelState,
   ): string {
+    const exact = requireExplicitModel(env, "CURSOR_MODEL");
+    if (exact !== null) {
+      if (
+        (state.discoveredModelIds && !state.discoveredModelIds.has(exact)) ||
+        state.deniedModels.has(exact)
+      ) {
+        throw new AgentFailureError({
+          kind: "protocol-error", stage: "newSession", agentId: AGENT_ID,
+          message: "The exact requested Cursor model is unavailable; model substitution is disabled.",
+        });
+      }
+      return exact;
+    }
     // Env-var names are Zeros conventions (mirror EFFORT_ENV_VAR /
     // FAST_MODE_ENV_VAR in model-catalog.ts, which is renderer-side and must not
     // be imported into the engine). The Claude/Codex adapters read the same
@@ -1540,6 +1572,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       return { result: await attempt(opts.modelId), modelId: opts.modelId };
     } catch (err) {
+      if (requiresExactModel(opts.env)) throw err;
       const message = normalizeProviderError("cursor", err).message;
       if (!this.absorbModelRejection(opts.state, opts.modelId, err)) {
         throw err;
@@ -1640,14 +1673,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       runtime.sdk,
     );
-    let modelId = this.resolveModel(
-      opts.env?.CURSOR_MODEL,
-      opts.env,
-      modelState,
-    );
+    let modelId: string;
     const sdk = runtime.sdk;
     let agent: SdkAgent;
     try {
+      modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState);
       const sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // Discovery above is detached, so a retired pick can reach the SDK here;
       // withModelRecovery turns its "Cannot use this model" into one retry on
@@ -1761,11 +1791,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       apiKey,
       runtime.sdk,
     );
-    let modelId = this.resolveModel(
-      opts.env?.CURSOR_MODEL,
-      opts.env,
-      modelState,
-    );
+    let modelId = "";
     const sdk = runtime.sdk;
     // Per-session MCP registry (gateway-resolved for this cwd). `Agent.resume`
     // takes a Partial<AgentOptions>, which accepts `mcpServers` — so we re-inject
@@ -1779,6 +1805,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
+      modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env, modelState);
       sessionMcp = this.mcpServers(catalog.servers, opts.env, opts.cwd);
       // A reopened chat carries the model it was created on; if Cursor has
       // retired it since, `Agent.resume` throws "Cannot use this model" on
@@ -1835,7 +1862,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       // case recovers this way; auth / transport failures still throw so
       // the UI can prompt re-auth or retry instead of silently dropping
       // the user's context.
-      if (failure.failure.kind !== "session-expired") {
+      if (failure.failure.kind !== "session-expired" || cloudProviderExecution(opts.executionBoundary)) {
         await this.finalizeRejectedSessionRuntime(runtime);
         throw failure;
       }
@@ -2014,7 +2041,7 @@ export class CursorSdkAdapter implements AgentAdapter {
 
     // Prefer RunResult.error; legacy hosts can still require the local store
     // fallback. Retry a model rejection once, only before any model output.
-    const MAX_ATTEMPTS = 2;
+    const MAX_ATTEMPTS = requiresExactModel(session.env) ? 1 : 2;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       const lastAttempt = attempt >= MAX_ATTEMPTS;
       // attempt 1 honours the chat's pick (minus anything already denied this

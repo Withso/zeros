@@ -63,6 +63,7 @@ export async function assertCloudEngineIdentityForIdempotentReplay(
   if (!validIdentityInput(input)) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
+  await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
   await tx.query(
     `SELECT id FROM cloud_workspaces
      WHERE id = $1 AND org_id = $2
@@ -87,8 +88,8 @@ export async function assertCloudEngineIdentityForIdempotentReplay(
   }
 }
 
-/** Caller must use a system transaction. Workspace-first locking preserves the
- * global revocation/engine lock order established by migration 0025. */
+/** Caller must use a system transaction. Parent scope precedes workspace and
+ * engine locks, including implicit foreign-key locks during publication. */
 export async function assertCurrentCloudEngineAuthority(
   tx: Tx,
   input: {
@@ -98,11 +99,15 @@ export async function assertCurrentCloudEngineAuthority(
     engineInstanceId: string;
     heartbeatToken: string;
     workosEnabled: boolean;
+    /** Pure reads share the same revocation fence without serializing readers.
+     * Mutations retain exclusive workspace/engine locks by default. */
+    lock?: "share" | "update";
   },
 ): Promise<CurrentCloudEngineAuthority> {
   if (!validIdentityInput(input)) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
+  await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
   const workspace = await tx.query<{
     current_generation: number;
     authority_epoch: string | number;
@@ -113,7 +118,7 @@ export async function assertCurrentCloudEngineAuthority(
      FROM cloud_workspaces
      WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
        AND cloud_workspace_generation_policy_current(id, $3, org_id)
-     FOR UPDATE`,
+     FOR ${input.lock === "share" ? "SHARE" : "UPDATE"}`,
     [input.workspaceId, input.organizationId, input.generation],
   );
   const current = workspace.rows[0];
@@ -140,7 +145,7 @@ export async function assertCurrentCloudEngineAuthority(
        AND cloud_workspace_runtime_authority_live(
          engine.workspace_id, engine.generation, engine.account_user_id, $5
        )
-     FOR UPDATE`,
+     FOR ${input.lock === "share" ? "SHARE" : "UPDATE"}`,
     [
       input.engineInstanceId,
       input.workspaceId,
