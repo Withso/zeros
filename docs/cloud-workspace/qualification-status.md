@@ -83,6 +83,12 @@ do not clear Daytona or production operations gates.
   rejection evidence and permanent unallocated closure; historical requests
   with incomplete evidence remain unresolved. This repair needs live deployment
   qualification and cannot be used to infer old resources were erased.
+- Full-suite verification exposed two concurrent filesystem cleanup races:
+  an upload inode can lose its last link during inspection, and another
+  deleter can publish a permanent fence before unlink. Bounded reinspection
+  preserves the existing file checks and deletion fence. Deterministic
+  regressions cover both races, unsafe replacements and persistent ambiguity;
+  the repair still requires deployed qualification.
 - Provider DELETE acceptance and a subsequent 404 are not data-erasure evidence.
   Storage and cleanup records remain until a matching terminal receipt exists.
 
