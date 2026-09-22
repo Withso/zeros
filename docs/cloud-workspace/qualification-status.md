@@ -8,8 +8,9 @@ The current release milestone is an internal pilot for standing Zeros staff
 roles `platform_owner` and `developer`. Customer subscription/payment integration
 is deferred. Organization ownership, membership, tenant isolation, explicit
 operator-funded allowances, quotas and finite compute leases still apply.
-Organization creation's staff gate does not by itself prove cloud admission is
-staff-only; server admission and staff-revocation tests remain exit requirements.
+The isolated deployed API has passed staff-admission withdrawal and restoration,
+including denial when a staff account lacks its own Pro entitlement. Provider
+runtime admission remains a separate qualification boundary.
 
 Alpha, Beta and Production now use PlanetScale Postgres; the control-plane
 application remains on Railway. All three cutovers passed source fencing, data
@@ -60,9 +61,13 @@ do not clear Daytona or production operations gates.
 - Earlier engine qualification used fixture identity issuance. Subsequent
   isolated Railway tests exercised normal WorkOS authentication, delivered
   invitations, workspace-scoped guest acceptance, concurrent devices and guest
-  revocation through the public API. GitHub App repository-scoped token issue,
-  resolution and revocation were tested separately. Main deployment and private
-  repository qualification remain distinct exit conditions.
+  revocation through the public API. The current isolated API also passes Claude
+  and Cursor credential connection, delegation, rotation and revocation; Codex
+  account metadata and duplicate refresh-seed rejection; and independent staff
+  and Pro withdrawal checks. A disposable private repository passed scoped
+  GitHub App token issue, a real Git fetch, token revocation and anonymous denial.
+  These checks do not claim a provider-host clone, current-image agent turn or
+  interactive native sign-in ceremony.
 - Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remains disabled. Encrypted backup recovery has separate evidence. Full regional recovery and runtime recovery remain open.
 - Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
   connection fencing, dropped-column and enum restore compatibility, sequence
@@ -79,8 +84,9 @@ do not clear Daytona or production operations gates.
   allocation probes reached the host, but unprivileged worker namespace creation
   failed; a privileged-root success does not clear that boundary.
   Native image tests do not substitute for normal public admission or qualify
-  subsequent runtime changes. Registry publication and exact-image public API
-  recovery remain activation gates.
+  subsequent runtime changes. The protected registry publication workflow
+  records source provenance separately from provider qualification. Exact-image
+  public API recovery remains an activation gate.
 - The rejected-create audit found that unbound journals could indefinitely
   retain cleanup and compute reservations. Migration 0093 adds per-dispatch
   rejection evidence and permanent unallocated closure; historical requests

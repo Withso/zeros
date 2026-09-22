@@ -780,7 +780,7 @@ pnpm check:licenses
 
 For a release candidate, also run the database-backed suites with
 `TEST_DATABASE_URL` and exercise authentication, invitations, optional GitHub
-flows, health checks, and migration startup in a disposable staging
+flows, health checks, guarded migrations and startup ledger verification in a disposable staging
 environment.
 
 Individual Pro grants and revocations during the staff pilot use the explicit

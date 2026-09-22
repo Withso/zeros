@@ -43,7 +43,11 @@ it does not block direct provider calls. Qualification must avoid provider
 operations until their separate release gates pass.
 
 End-user cloud creation/catalog/details UI is deliberately not wired yet.
-Organization sharing and individually entitled external collaborators have backend contracts and regression coverage; deployed qualification remains open. Presence UI, ownership transfer execution, mobile apps, and a published customer-managed Railway template are later work. Documents in
+Organization sharing and individually entitled external collaborators have
+backend contracts, regression coverage and isolated deployed API evidence.
+Provider runtime and native client qualification remain open. Presence UI,
+ownership transfer execution, mobile apps, and a published customer-managed
+Railway template are later work. Documents in
 this folder distinguish implemented repository behavior from release
 qualification and deferred product surfaces.
 
@@ -73,7 +77,8 @@ qualification and deferred product surfaces.
   harness, Design and attachment recovery, its bounds and format compatibility.
 - [Security](security.md) defines trust boundaries and release blockers.
 - [Root coordinator exception review](root-coordinator-threat-model.md)
-  records the unresolved privileged-engine decision and required evidence.
+  records the privileged coordinator boundary, unprivileged engine/worker
+  separation and required provider evidence.
 - [Infrastructure and operations](infrastructure-and-operations.md) defines
   image, lifecycle, observability, and provider requirements.
 - [Enterprise and self-hosting](enterprise-and-self-hosting.md) defines the

@@ -3,6 +3,10 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import {
+  cloudWorkspaceProvisioningProfile,
+  configuredCloudWorkspaceProviders,
+} from "./cloud-workspaces/provisioning-profile.js";
+import {
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
   MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
 } from "./cloud-workspaces/engine-protocol-version.js";
@@ -653,6 +657,30 @@ describe("cloud workspace backend configuration", () => {
     expect(() => loadConfig({ ...env, DAYTONA_BYO_ENABLED: "yes" })).toThrow(
       /DAYTONA_BYO_ENABLED/,
     );
+  });
+
+  it("allows Daytona credential onboarding without enabling its compute profile", () => {
+    const cloud = loadConfig({
+      ...boatEnv(),
+      DAYTONA_CONNECTIONS_ENABLED: "true",
+      DAYTONA_TARGET: "us",
+      CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: "false",
+    }).cloudWorkspaces!;
+    expect(cloud.daytonaConnection).toEqual({
+      apiUrl: "https://app.daytona.io/api",
+      target: "us",
+    });
+    expect(cloud.providerProfiles).toBeUndefined();
+    expect(cloud.provider).toBe("boat");
+    expect(configuredCloudWorkspaceProviders(cloud)).toEqual(["boat"]);
+    expect(() => cloudWorkspaceProvisioningProfile(cloud, "daytona"))
+      .toThrow("no valid provisioning profile");
+    expect(cloud.backgroundWorkersEnabled).toBe(false);
+    expect(cloud.setupExecution).toBeNull();
+    expect(loadConfig({ ...boatEnv(), DAYTONA_CONNECTIONS_ENABLED: "false" })
+      .cloudWorkspaces?.daytonaConnection).toBeUndefined();
+    expect(() => loadConfig({ ...boatEnv(), DAYTONA_CONNECTIONS_ENABLED: "yes" }))
+      .toThrow(/DAYTONA_CONNECTIONS_ENABLED/);
   });
 
   it("runs Boat setup without requiring Daytona toolbox access", () => {

@@ -280,10 +280,8 @@ jobs:
         run: pnpm check:packaging-paths
 
       - name: Control-plane migrations naming + forward-only
-        # apps/control-plane/migrations/ is the third ladder and was the only unguarded
-        # one. runMigrations records applied files by FILENAME with no
-        # checksum, so editing a released migration never re-runs — the file
-        # just stops describing the deployed schema.
+        # Preserve released migration files. The migration ledger records their
+        # checksums, and hosted boot verifies the ledger without applying SQL.
         run: pnpm check:control-plane-migrations
 
       - name: Desktop ↔ web deep-link schemes in lockstep
@@ -612,11 +610,10 @@ jobs:
   control-plane:
     name: control plane
     runs-on: ubuntu-latest
-    # A real Postgres, because the DB suite self-skips without one and that
-    # silence reads as "green" — a destructive migration can reach review having
-    # executed nowhere but a laptop. runMigrations() also runs at service BOOT,
-    # so a migration that throws isn't a failed deploy, it's a crash-loop with no
-    # control plane. Ephemeral per job, so the tests are free to DROP SCHEMA.
+    # The DB suite requires real Postgres; otherwise integration tests self-skip.
+    # Exercise migrations before the guarded deployment step. Hosted boot only
+    # verifies the migration ledger. This database is ephemeral per job, so
+    # the tests are free to DROP SCHEMA.
     services:
       postgres:
         # Match the managed database's qualified major version.

@@ -350,6 +350,7 @@ const CloudWorkspaceEnvSchema = z.object({
   BOAT_SECONDS_PER_DOLLAR: z.string().regex(/^[1-9][0-9]{0,12}$/).transform(Number)
     .pipe(z.number().int().max(1_000_000_000_000)).optional(),
   DAYTONA_BYO_ENABLED: z.enum(["true", "false"]).optional(),
+  DAYTONA_CONNECTIONS_ENABLED: z.enum(["true", "false"]).default("false"),
   ZEROS_CLOUD_IMAGE_ARCHITECTURE: z
     .enum(["linux/amd64", "linux/arm64"])
     .default("linux/amd64"),
@@ -1526,9 +1527,9 @@ function loadCloudWorkspaceConfig(
             requestMarginSeconds:value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS+5},
         }
       : {}),
-    ...(daytonaByoProfile
+    ...(daytonaByoProfile ? { providerProfiles: { daytona: daytonaByoProfile } } : {}),
+    ...(daytonaByoProfile || value.DAYTONA_CONNECTIONS_ENABLED === "true"
       ? {
-          providerProfiles: { daytona: daytonaByoProfile },
           daytonaConnection: {
             apiUrl: daytonaApiUrl,
             target: value.DAYTONA_TARGET,
