@@ -22,13 +22,12 @@ import {
   cloneRepo,
   initRepo,
   isGitError,
-  isRepo,
   listWorkspaceFiles,
-  readOriginUrl,
   type DetectedTool,
 } from "../../../src/engine/git";
 import type { CommandHandler } from "../router";
 import { listWorkspaceFilesWithDesign } from "../../../src/engine/design/file-listing";
+import { runFile } from "../../../src/engine/git/git-exec";
 
 // ── Argument validation helpers ──────────────────────────
 
@@ -186,7 +185,29 @@ export const workspaceInspectFolder: CommandHandler = async (args) => {
   const cmd = "workspace_inspect_folder";
   const folderPath = requireString(args, "path", cmd);
   try {
-    const inRepo = await isRepo(folderPath);
+    // A resume-time read must distinguish absent Git from an unavailable
+    // folder, malformed config, missing executable or ownership rejection.
+    // The generic isRepo predicate intentionally collapses all these errors.
+    const probe = (gitArgs: string[]) =>
+      runFile("git", ["-C", folderPath, ...gitArgs], {
+        maxBufferBytes: 1024 * 1024,
+        timeoutMs: 10_000,
+        env: { ...process.env, LC_ALL: "C" },
+      });
+    let inRepo = true;
+    try {
+      await probe(["rev-parse", "--git-dir"]);
+    } catch (error) {
+      const failure = error as { code?: unknown; stderr?: unknown };
+      if (
+        failure.code !== 128 ||
+        !/^fatal: not a git repository \(or any (?:of the )?parent/m.test(
+          String(failure.stderr ?? ""),
+        )
+      )
+        throw error;
+      inRepo = false;
+    }
     if (!inRepo) {
       return {
         isRepo: false,
@@ -210,9 +231,12 @@ export const workspaceInspectFolder: CommandHandler = async (args) => {
     }
     let originUrl: string | null = null;
     try {
-      originUrl = await readOriginUrl(folderPath);
-    } catch {
-      // No origin configured — fine.
+      originUrl =
+        (await probe(["config", "--get", "remote.origin.url"])).stdout.trim() || null;
+    } catch (error) {
+      const failure = error as { code?: unknown; stderr?: unknown };
+      // config --get exits 1 with no error output only when the key is absent.
+      if (failure.code !== 1 || String(failure.stderr ?? "").trim()) throw error;
     }
     let branch: string | null = null;
     try {

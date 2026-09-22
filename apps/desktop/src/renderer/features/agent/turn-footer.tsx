@@ -31,6 +31,7 @@ import {
   Button,
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -750,9 +751,11 @@ export const TurnFooter = memo(function TurnFooter({
 
       {confirmOpen && (
         <Dialog open onOpenChange={(o) => !o && setConfirmOpen(false)}>
-          <DialogContent showCloseButton={false} className="max-w-md">
+          <DialogContent className="max-w-md">
             <DialogHeader>
               <DialogTitle>Reset to this point?</DialogTitle>
+            </DialogHeader>
+            <DialogBody>
               <DialogDescription>
                 This rolls back this turn and every later turn in this chat —
                 the conversation is truncated here, and recorded file changes
@@ -768,11 +771,12 @@ export const TurnFooter = memo(function TurnFooter({
                 Concurrent edits are preserved when possible; overlapping edits
                 are left untouched. You can undo the reset afterward.
               </p>
-            </DialogHeader>
-            <DialogFooter className="mt-2 gap-2">
+            </DialogBody>
+            <DialogFooter>
               <Button
                 variant="secondary"
                 size="sm"
+                autoFocus
                 onClick={() => setConfirmOpen(false)}
               >
                 Cancel

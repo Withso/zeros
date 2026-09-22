@@ -2,34 +2,28 @@
 // Synthetic "Local main" workspace per project
 // ──────────────────────────────────────────────────────────
 //
-// Every Project shows a permanent first workspace called "Local main"
-// representing the project's primary checkout (the `repoRoot`, not a
-// linked git worktree). It is:
-//   - synthesized at render time (never persisted to state.db)
-//   - undeletable (Repository panel hides delete/archive affordances for it)
-//   - always the first workspace under its project
-//   - the owning workspace for any chat whose `folder === repoRoot`
-//
-// Legacy chats authored before worktrees existed
-// always carried `folder = repoRoot`. Surfacing them as children of
-// the Local main row keeps those chats visible in the new tree
-// without forcing the user to migrate them into a worktree.
+// Compatibility destination for conversations and files saved in a project's
+// original checkout before worktrees became the only new-work flow. The row
+// is synthesized (never stored in state.db) and cannot be archived/deleted as
+// a managed worktree. Presentation lists include it only for opened roots.
 //
 // The id format `local:<repoSlug>` is intentionally not a valid
 // engine workspace id (no `ws_` prefix). Any IPC call that receives
 // this id will fail — callers should branch on `isLocalMainWorkspace()`
 // first and fall back to "no engine workspace exists for this row".
 //
-// 2026-07-28: the row is now OFFERED only behind the "Work in local
-// main" experimental flag (Settings → Experimental, off by default),
-// which gates the top bar's main tab and stops a repo switch from
-// landing on the trunk. It is still SYNTHESIZED unconditionally: the
-// resolution paths below back repo-root chats, the active-tab lookup,
-// and the delete/remove escape hatches, all of which must keep working
-// with the flag off. Gate the affordance, never the row.
+// Original-folder rows exist only to recover previously opened chats/files.
+// New project opens always use managed worktrees. Keep the serialized local:
+// identity so existing conversations remain reachable after this change.
 
 import type { Workspace } from "../platform/git";
-import type { Project } from "./projects-store";
+import { deriveProjectName, type Project } from "./projects-store";
+import {
+  findProjectForFolder,
+  findWorkspaceForFolder,
+  folderIsWithinRoot,
+  isWorktreePath,
+} from "./workspace-resolution";
 
 /** Prefix on the synthetic Local-main workspace id. */
 export const LOCAL_MAIN_ID_PREFIX = "local:";
@@ -45,10 +39,18 @@ export function localMainWorkspaceId(repoSlug: string): string {
  *  `laptop-minimal` icon (rendered in WorkspaceRow), not the label. */
 export const LOCAL_MAIN_LABEL = "main";
 
+export function localMainWorkspaceLabel(project: Project): string {
+  return project.isGitRepository === false
+    ? deriveProjectName(project.repoRoot)
+    : LOCAL_MAIN_LABEL;
+}
+
 /** Test whether a workspace id (or full Workspace) refers to the
  *  synthetic Local main row. Use this before sending the workspace id
  *  to any engine IPC — synthetic ids will fail with WORKSPACE_NOT_FOUND. */
-export function isLocalMainWorkspace(idOrWorkspace: string | Workspace): boolean {
+export function isLocalMainWorkspace(
+  idOrWorkspace: string | Workspace,
+): boolean {
   const id =
     typeof idOrWorkspace === "string" ? idOrWorkspace : idOrWorkspace.id;
   return id.startsWith(LOCAL_MAIN_ID_PREFIX);
@@ -62,11 +64,9 @@ export function buildLocalMainWorkspace(project: Project): Workspace {
     id: localMainWorkspaceId(project.repoSlug),
     repoSlug: project.repoSlug,
     repoRoot: project.repoRoot,
-    // Branch is unknown at the renderer layer (we'd need a git IPC
-    // probe to find HEAD). "main" is the common case and the label
-    // is shown verbatim in the breadcrumb. The tab strip uses the
-    // sidebar label below, not the branch field.
-    branch: "main",
+    // This synthetic row uses branch as its display name. Plain folders keep
+    // their basename; Git roots preserve the existing "main" label.
+    branch: localMainWorkspaceLabel(project),
     baseBranch: "main",
     path: project.repoRoot,
     status: "in-progress",
@@ -96,4 +96,46 @@ export function withLocalMainWorkspace(
 ): Workspace[] {
   const live = engineWorkspaces.filter((w) => w.archivedAt == null);
   return [buildLocalMainWorkspace(project), ...live];
+}
+
+/** Compatibility projection for previously opened checkout directories. Keep
+ * the repository's stable local: identity but navigate to the saved exact cwd.
+ * Managed worktrees and separately registered nested repositories keep ownership. */
+export function withFolderWorkspaces(
+  projects: readonly Project[],
+  workspaces: Workspace[],
+  openedFolders: ReadonlySet<string> = new Set(),
+  lastWorkspaceByRepoRoot: Readonly<Record<string, string>> = {},
+): Workspace[] {
+  const foldersByProject = new Map<string, Set<string>>();
+  for (const cwd of openedFolders) {
+    if (isWorktreePath(cwd) || findWorkspaceForFolder(cwd, workspaces)) continue;
+    const project = findProjectForFolder(cwd, projects);
+    if (!project || !folderIsWithinRoot(cwd, project.repoRoot)) continue;
+    let folders = foldersByProject.get(project.id);
+    if (!folders) {
+      folders = new Set();
+      foldersByProject.set(project.id, folders);
+    }
+    folders.add(cwd);
+  }
+  const folders: Workspace[] = [];
+  for (const project of projects) {
+    const saved = foldersByProject.get(project.id);
+    if (
+      !saved?.size ||
+      workspaces.some((w) => w.id === localMainWorkspaceId(project.repoSlug))
+    )
+      continue;
+    const remembered = lastWorkspaceByRepoRoot[project.repoRoot];
+    const path =
+      remembered && saved.has(remembered)
+        ? remembered
+        : saved.has(project.repoRoot)
+          ? project.repoRoot
+          : saved.values().next().value!;
+    folders.push({ ...buildLocalMainWorkspace(project), path });
+  }
+  if (folders.length === 0) return workspaces;
+  return [...folders, ...workspaces];
 }

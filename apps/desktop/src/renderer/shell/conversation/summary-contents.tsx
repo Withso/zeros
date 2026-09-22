@@ -48,6 +48,7 @@ import {
   useContextGraphSnapshot,
 } from "../workbench/tabs/context-graph-data";
 import { recentSummaryContext, summaryDestinationTab } from "./summary-model";
+import { isWorkspaceReviewAvailable } from "../workbench/tab-capabilities";
 
 const DESTINATIONS = [
   "changes",
@@ -281,6 +282,8 @@ export function SummaryContents({
         className="border-border1 border-t pt-3"
       >
         {DESTINATIONS.map((type) => {
+          if (type === "review" && !isWorkspaceReviewAvailable(project))
+            return null;
           const { icon: Icon, label } = TAB_TYPE_META[type];
           return (
             <Button

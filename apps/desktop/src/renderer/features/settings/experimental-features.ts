@@ -27,7 +27,6 @@ import { useCallback, useSyncExternalStore } from "react";
 /** The set of experimental feature flags. */
 export type ExperimentalFeature =
   | "terminalAgents"
-  | "workInLocalMain"
   | "hideArchivedWorkspacesAfter15Days";
 
 const STORAGE_KEY = "zeros.experimentalFeatures";
@@ -39,9 +38,14 @@ function readPersisted(): PersistedShape {
     const raw = readPreferenceCache(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as unknown;
-    return parsed && typeof parsed === "object"
-      ? (parsed as PersistedShape)
-      : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    // Retired preference: old installations may keep the key on disk, but it
+    // must never re-enable original-folder work. Drop it on the next write.
+    const retained = { ...parsed } as PersistedShape & {
+      workInLocalMain?: boolean;
+    };
+    delete retained.workInLocalMain;
+    return retained;
   } catch {
     return {};
   }

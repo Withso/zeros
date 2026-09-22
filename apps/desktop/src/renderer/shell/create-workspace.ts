@@ -27,6 +27,7 @@
 // direct-create flow because Design has no agent prompt.
 // ──────────────────────────────────────────────────────────
 
+import { prepareProjectFolder } from "./project-folder-setup";
 import { dbDeleteChat } from "../features/agent/agent-history-client";
 import { discardQueuedContextGraphWrites } from "../features/agent/composer-editor/context-graph-staging";
 import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-events";
@@ -65,6 +66,8 @@ export async function createWorkspaceForProject(args: {
   project: Project;
   dispatch: Dispatch;
   kind?: "code" | "design";
+  /** The in-app open flow has just awaited Git setup for this exact root. */
+  gitSetupComplete?: boolean;
   /** Fork the new worktree off this ref instead of the repo's default branch
    *  (the Create page's "Create from…" base). */
   baseBranch?: string;
@@ -91,6 +94,9 @@ export async function createWorkspaceForProject(args: {
   // prior creates and archives continue in parallel.
   let prepared: Awaited<ReturnType<typeof workspacePrepareCreate>>;
   try {
+    if (!args.gitSetupComplete && (isNativeRuntime() || isExpectedElectron())) {
+      await prepareProjectFolder(project.repoRoot);
+    }
     prepared = await workspacePrepareCreate({
       repoRoot: project.repoRoot,
       repoSlug: project.repoSlug,

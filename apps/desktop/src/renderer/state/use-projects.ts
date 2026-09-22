@@ -81,6 +81,7 @@ function sameProject(a: Project, b: Project): boolean {
     a.repoRoot === b.repoRoot &&
     a.repoSlug === b.repoSlug &&
     a.originUrl === b.originUrl &&
+    a.isGitRepository === b.isGitRepository &&
     a.addedAt === b.addedAt
   );
 }

@@ -5,14 +5,14 @@
 // Desktop, zero projects → replaces Conversation pane + Workbench below the global top
 // bar. Centered Zeros mark over three big tiles that fire the same
 // add-project flows as the Dispatcher folder menu (via AddProjectProvider):
-// Open project / Open GitHub project / Quick start.
+// Open project / Open GitHub project / Start from scratch.
 //
 // The container is a window-drag region (the tiles are <button>s, so
 // useCustomWindowDrag auto-excludes them) — it stands in for the column
 // header strips this view replaces, so the window stays draggable.
 
 import { useRef, type ComponentType } from "react";
-import { FolderOpen, Sparkles } from "lucide-react";
+import { FolderOpen, Plus } from "lucide-react";
 
 import { GithubIcon } from "../shared/ui";
 import { Tile } from "../shared/ui/primitives";
@@ -79,8 +79,8 @@ export function NoProjectsView() {
           onClick={openGithubProject}
         />
         <StartTile
-          icon={Sparkles}
-          label="Quick start"
+          icon={Plus}
+          label="Start from scratch"
           description="Start a fresh repo"
           onClick={quickStart}
         />

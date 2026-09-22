@@ -33,6 +33,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -507,22 +508,24 @@ function DeleteTeamDialog({
             be undone.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-2">
-          <label htmlFor="confirm-team-name" className="text-fg1 text-sm font-medium">
-            Type <span className="font-semibold">{team.name}</span> to confirm
-          </label>
-          <Input
-            id="confirm-team-name"
-            autoFocus
-            value={confirmName}
-            disabled={busy}
-            onChange={(e) => setConfirmName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void destroy();
-            }}
-            placeholder={team.name}
-          />
-        </div>
+        <DialogBody>
+          <div className="flex flex-col gap-2">
+            <label htmlFor="confirm-team-name" className="text-fg1 text-sm font-medium">
+              Type <span className="font-semibold">{team.name}</span> to confirm
+            </label>
+            <Input
+              id="confirm-team-name"
+              autoFocus
+              value={confirmName}
+              disabled={busy}
+              onChange={(e) => setConfirmName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void destroy();
+              }}
+              placeholder={team.name}
+            />
+          </div>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>
             Cancel

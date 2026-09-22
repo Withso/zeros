@@ -45,6 +45,43 @@ Deletion cleanup follows semantic path ownership, not raw equality: include
 normalized descendant cwd keys, but protect a separately registered nested
 repository (the most-specific known owner wins).
 
+New in-app folder opens ask for confirmation when Git is absent. Dismissal must
+not register the folder or mutate Git. Confirmation re-inspects the exact root,
+initializes local Git and an initial commit when needed, then creates or reuses
+a managed worktree. Create uses the same Git preparation.
+Do not create original-folder chats as an error fallback or a default repository
+switch destination. Unknown inspection results are errors, not non-Git folders.
+Opening an external deep link only registers the project; startup and resume
+inspection are read-only. The retired direct-folder preference is ignored.
+
+Previously opened roots retain their last confirmed `isGitRepository` snapshot
+and `local:<repoSlug>` identity. `useFolderWorkspaces` projects roots only when
+saved chats, workbench state or selection already refer to them. This projection
+includes saved checkout subdirectories, preserves their exact navigation cwd,
+and assigns nested paths to their most-specific registered owner. A missing
+repository selection stays absent instead of defaulting to the primary checkout.
+Its repository-page fallback publishes the selected filter atomically. The
+projection never enters managed-workspace caches or engine lifecycle calls. Restoring old
+state keeps its original directory and does not mutate Git or move chats.
+
+Desktop app resume uses one capability observer with two concurrent folder
+inspections, coalesced focus/visibility events and exact-owner in-flight
+deduplication. Persist only confirmed Git/origin snapshots, preserving identity
+and references on no change. Reject obsolete responses after local writes or
+owner removal. Missing paths, permission/config failures and unavailable Git
+are errors, not evidence that Git or an origin was removed. Both Review entry
+points (summary and tab strip) share the same capability predicate.
+
+Legacy plain folders are standalone tabs in Grouped, Ungrouped, Active, and
+repository-specific filters: never paint a second repository marker, group
+surface, or sticky lead for them. Their settings expose Environment, Actions,
+and Paths; Workspaces, Git, Files-to-copy, worktree lifecycle scripts, workspace
+storage paths, and the archive picker require Git. File browsing remains
+available in the workbench. Resolve an unavailable saved settings view to
+Environment synchronously without overwriting the preference, and evict retained
+Git-only views when capability disappears. A confirmed local Git repository
+gets the full settings navigation even without an origin or GitHub connection.
+
 ### 2. Treat reads as exact-key server state
 
 Bridge, native IPC, Git, SQLite, and future cloud/sandbox reads are shared server state, not component-local loading state.

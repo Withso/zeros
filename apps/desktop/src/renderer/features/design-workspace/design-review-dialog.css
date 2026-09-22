@@ -2,11 +2,15 @@
   width: min(640px, calc(100vw - 32px));
   max-width: none;
   height: min(480px, calc(100vh - 48px));
-  grid-template-columns: 176px minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
   gap: 0;
   overflow: hidden;
   padding: 0;
+}
+.design-review-content {
+  display: grid;
+  grid-template-columns: 176px minmax(0, 1fr);
+  gap: 0;
 }
 .design-review-sidebar {
   padding: 12px 8px;
@@ -45,7 +49,7 @@
   gap: 8px;
   min-height: 48px;
   flex-shrink: 0;
-  padding: 8px 40px 8px 12px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border1);
 }
 .design-review-header h2 {
@@ -92,7 +96,6 @@
   font-size: var(--text-sm);
 }
 .design-review-footer {
-  padding: 12px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
@@ -166,7 +169,7 @@
   border-radius: var(--radius-md);
 }
 @media (max-width: 640px) {
-  .design-review-dialog {
+  .design-review-content {
     grid-template-columns: minmax(0, 1fr);
   }
   .design-review-sidebar {

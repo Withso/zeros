@@ -17,6 +17,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -122,83 +123,83 @@ export function CreateTeamDialog({
             Pick a name. Invite people if needed.
           </DialogDescription>
         </DialogHeader>
-
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-2">
-            <label htmlFor="new-team-name" className="text-fg1 text-sm font-medium">
-              Team name
-            </label>
-            <div className="flex items-center gap-3">
-              {/* Logo picker — a square the size of the resulting logo;
-                  click to choose, click again to replace. */}
-              <input
-                ref={fileRef}
-                type="file"
-                accept={TEAM_LOGO_ACCEPT}
-                className="hidden"
-                onChange={(e) => {
-                  void pickLogo(e.target.files?.[0] ?? null);
-                  e.target.value = "";
-                }}
-              />
-              <button
-                type="button"
-                aria-label={logo ? "Change logo" : "Add a logo (optional)"}
-                title={logo ? "Change logo" : "Add a logo (optional)"}
-                disabled={busy}
-                onClick={() => fileRef.current?.click()}
-                className="border-border3 hover:border-border4 hover:bg-bg2 flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-dashed outline-none"
-              >
-                {logo ? (
-                  <img src={logo} alt="" className="size-full object-cover" draggable={false} />
-                ) : (
-                  <ImagePlus size={16} className="text-fg2" />
-                )}
-              </button>
-              <Input
-                id="new-team-name"
-                autoFocus
-                value={name}
-                maxLength={80}
-                disabled={busy}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Acme Inc"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") void create();
-                }}
-              />
+        <DialogBody>
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-2">
+              <label htmlFor="new-team-name" className="text-fg1 text-sm font-medium">
+                Team name
+              </label>
+              <div className="flex items-center gap-3">
+                {/* Logo picker — a square the size of the resulting logo;
+                    click to choose, click again to replace. */}
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept={TEAM_LOGO_ACCEPT}
+                  className="hidden"
+                  onChange={(e) => {
+                    void pickLogo(e.target.files?.[0] ?? null);
+                    e.target.value = "";
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={logo ? "Change logo" : "Add a logo (optional)"}
+                  title={logo ? "Change logo" : "Add a logo (optional)"}
+                  disabled={busy}
+                  onClick={() => fileRef.current?.click()}
+                  className="border-border3 hover:border-border4 hover:bg-bg2 flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-dashed outline-none"
+                >
+                  {logo ? (
+                    <img src={logo} alt="" className="size-full object-cover" draggable={false} />
+                  ) : (
+                    <ImagePlus size={16} className="text-fg2" />
+                  )}
+                </button>
+                <Input
+                  id="new-team-name"
+                  autoFocus
+                  value={name}
+                  maxLength={80}
+                  disabled={busy}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Acme Inc"
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void create();
+                  }}
+                />
+              </div>
+              {logo && (
+                <button
+                  type="button"
+                  onClick={() => setLogo(null)}
+                  disabled={busy}
+                  className="text-fg2 hover:text-fg1 self-start text-xs"
+                >
+                  Remove logo
+                </button>
+              )}
             </div>
-            {logo && (
-              <button
-                type="button"
-                onClick={() => setLogo(null)}
+
+            <div className="flex flex-col gap-2">
+              <label htmlFor="new-team-invites" className="text-fg1 text-sm font-medium">
+                Invite members <span className="text-fg2 font-normal">(optional)</span>
+              </label>
+              <Textarea
+                id="new-team-invites"
+                value={invites}
                 disabled={busy}
-                className="text-fg2 hover:text-fg1 self-start text-xs"
-              >
-                Remove logo
-              </button>
-            )}
+                onChange={(e) => setInvites(e.target.value)}
+                placeholder="email@company.com"
+                spellCheck={false}
+                rows={3}
+              />
+              <p className={inviteProblem ? "text-red-primary text-xs" : "text-fg2 text-xs"}>
+                {inviteProblem ?? "Comma or newline separated."}
+              </p>
+            </div>
           </div>
-
-          <div className="flex flex-col gap-2">
-            <label htmlFor="new-team-invites" className="text-fg1 text-sm font-medium">
-              Invite members <span className="text-fg2 font-normal">(optional)</span>
-            </label>
-            <Textarea
-              id="new-team-invites"
-              value={invites}
-              disabled={busy}
-              onChange={(e) => setInvites(e.target.value)}
-              placeholder="email@company.com"
-              spellCheck={false}
-              rows={3}
-            />
-            <p className={inviteProblem ? "text-red-primary text-xs" : "text-fg2 text-xs"}>
-              {inviteProblem ?? "Comma or newline separated."}
-            </p>
-          </div>
-        </div>
-
+        </DialogBody>
         <DialogFooter className="items-center sm:justify-between">
           {onSwitchToJoin ? (
             <button

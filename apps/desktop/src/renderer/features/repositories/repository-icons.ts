@@ -537,10 +537,11 @@ const AUTOMATIC_ICON_WARM_CONCURRENCY = 3;
  * normal automatic cache still deduplicates against icons already mounted by
  * visible surfaces. */
 export async function warmAutomaticRepositoryIcons(
-  projects: readonly Pick<Project, "repoRoot" | "originUrl">[],
+  projects: readonly Pick<Project, "repoRoot" | "originUrl" | "isGitRepository">[],
 ): Promise<void> {
   const targetsByKey = new Map<string, AutomaticIconTarget>();
   for (const project of projects) {
+    if (project.isGitRepository === false) continue;
     const target = automaticIconTarget(project.repoRoot, project.originUrl);
     if (target.repoRoot) targetsByKey.set(target.key, target);
   }
@@ -580,7 +581,7 @@ export async function warmAutomaticRepositoryIcons(
  * synchronously; after the bridge connects, every registered repository gets
  * one bounded, idle background revalidation for this app session. */
 export function useWarmAutomaticRepositoryIcons(
-  projects: readonly Pick<Project, "repoRoot" | "originUrl">[],
+  projects: readonly Pick<Project, "repoRoot" | "originUrl" | "isGitRepository">[],
 ): void {
   useEffect(() => {
     let disposed = false;
@@ -720,7 +721,9 @@ export function useResolvedRepositoryIcon(project: Project): {
   automatic: AutomaticRepositoryIcon;
   loading: boolean;
 } {
-  const choice = useRepositoryIconChoice(project.repoRoot);
+  const customChoice = useRepositoryIconChoice(project.repoRoot);
+  const choice =
+    customChoice ?? (project.isGitRepository === false ? FOLDER_ICON : null);
   const automatic = useAutomaticRepositoryIcon(
     project.repoRoot,
     project.originUrl,
@@ -732,3 +735,5 @@ export function useResolvedRepositoryIcon(project: Project): {
     loading: choice === null && automatic.loading,
   };
 }
+
+const FOLDER_ICON: RepositoryIconChoice = { kind: "lucide", value: "folder" };

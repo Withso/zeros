@@ -385,6 +385,11 @@ mode does not select a sandbox or make Code files read-only.
 One workspace, branch, conversation, and provider binding handle Code and
 Design. The existing Design tab stays beside the other workbench tabs. Without
 a directory, its primary action is **Create design directory**.
+New project opens confirm Git initialization when needed, then create a managed worktree. For a
+previously saved plain-folder session without Git, the recovery tab shows a Folder icon,
+**Initialize Git**, and “Initialize Git to create a workspace for Design.”
+Initialization uses the explicit local initial-commit flow; it neither publishes
+to GitHub nor moves existing chats. The canvas still requires a managed workspace.
 
 In the composer's **+** menu, **Design — Create and edit designs** selects
 Design mode. A removable Design tag appears beside +, before the other composer
@@ -969,7 +974,10 @@ The minimal v1 conversation workflow does not require proposals or expose
 proposal/result tools to the model.
 
 The **Review Design changes** dialog lives inside the Design tab. It is a compact
-640 × 480 dialog, bounded by the window, with an undimmed background. It retains
+640 × 480 dialog, bounded by the window, with the shared 50% black modal overlay,
+15px title and top-right close control. Its shared header, middle section, and
+full-width checkpoint footer use 12px 16px 0, 24px 16px, and 10px padding
+respectively. It retains
 modal focus/scroll isolation, explicit close/Escape, and protection against
 accidental outside dismissal; the background canvas does not become interactive
 while review is open. Narrow windows hide the canvas sidebar and keep the

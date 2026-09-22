@@ -20,6 +20,8 @@ import { Button } from "../shared/ui/primitives/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
+  DialogFooter,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -109,10 +111,11 @@ export function RepositoryIconDialog({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const iconListRef = useRef<HTMLDivElement | null>(null);
   const choice = useRepositoryIconChoice(project.repoRoot);
+  const plainFolder = project.isGitRepository === false;
   const automatic = useAutomaticRepositoryIcon(
     project.repoRoot,
     project.originUrl,
-    open,
+    open && !plainFolder,
   );
 
   useEffect(() => {
@@ -182,8 +185,8 @@ export function RepositoryIconDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="flex max-h-[min(620px,calc(100vh-48px))] max-w-xl flex-col gap-0 overflow-hidden p-0">
-        <DialogHeader className="px-5 pt-5">
-          <DialogTitle className="text-base">
+        <DialogHeader>
+          <DialogTitle>
             Change icon for {project.name}
           </DialogTitle>
           <DialogDescription className="sr-only">
@@ -192,186 +195,203 @@ export function RepositoryIconDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={tab} onValueChange={setTab} className="min-h-0">
-          <TabsList className="border-border1 mt-3 h-auto w-full justify-start rounded-none border-b bg-transparent px-4 py-0">
-            <TabsTrigger
-              value="icons"
-              className="data-[state=active]:border-fg1 rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 text-xs shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            >
-              Icons
-            </TabsTrigger>
-            <TabsTrigger
-              value="upload"
-              className="data-[state=active]:border-fg1 rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 text-xs shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
-            >
-              Upload
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="icons" className="mt-0 min-h-0 outline-none">
-            <div className="border-border1 border-b p-3">
-              <div className="relative">
-                <Search className="text-fg2 pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
-                <Input
-                  autoFocus
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="Search icons and emojis"
-                  aria-label="Search icons and emojis"
-                  className="h-7 pl-8 text-xs"
-                />
-              </div>
-            </div>
-            <div
-              ref={iconListRef}
-              className="max-h-[390px] overflow-y-auto p-3"
-            >
-              <div
-                role="listbox"
-                aria-label="Repository icons and emojis"
-                className="grid grid-cols-9 gap-1"
+        <DialogBody className="gap-0 overflow-y-auto">
+          <Tabs value={tab} onValueChange={setTab} className="min-h-0">
+            <TabsList className="border-border1 h-auto w-full justify-start rounded-none border-b bg-transparent p-0">
+              <TabsTrigger
+                value="icons"
+                className="data-[state=active]:border-fg1 rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 text-xs shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
               >
-                {filteredIcons.map((icon) => {
-                  const selected =
-                    choice?.kind === "lucide" && choice.value === icon.name;
-                  return (
-                    <Tooltip key={icon.name} label={icon.label}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-label={icon.label}
-                        aria-selected={selected}
-                        onClick={() =>
-                          choose({ kind: "lucide", value: icon.name })
-                        }
-                        className={cn(
-                          "text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright inline-flex size-9 items-center justify-center rounded-sm transition-colors focus-visible:ring-1 focus-visible:outline-none",
-                          selected && "bg-bg1-hover text-fg1",
-                        )}
-                      >
-                        <icon.Icon className="size-4" strokeWidth={1.5} />
-                      </button>
-                    </Tooltip>
-                  );
-                })}
-                {filteredEmojis.map((emoji) => {
-                  const selected =
-                    choice?.kind === "emoji" && choice.value === emoji.value;
-                  return (
-                    <Tooltip key={emoji.value} label={emoji.label}>
-                      <button
-                        type="button"
-                        role="option"
-                        aria-selected={selected}
-                        onClick={() =>
-                          choose({ kind: "emoji", value: emoji.value })
-                        }
-                        className={cn(
-                          "hover:bg-bg1-hover focus-visible:ring-highlighted-bright inline-flex size-9 items-center justify-center rounded-sm text-lg transition-colors focus-visible:ring-1 focus-visible:outline-none",
-                          selected && "bg-bg1-hover",
-                        )}
-                      >
-                        <span aria-hidden="true">{emoji.value}</span>
-                        <span className="sr-only">{emoji.label}</span>
-                      </button>
-                    </Tooltip>
-                  );
-                })}
-              </div>
-              {filteredIcons.length === 0 && filteredEmojis.length === 0 && (
-                <p className="text-muted-fg py-8 text-center text-xs">
-                  No icons or emojis match.
-                </p>
-              )}
-            </div>
-          </TabsContent>
+                Icons
+              </TabsTrigger>
+              <TabsTrigger
+                value="upload"
+                className="data-[state=active]:border-fg1 rounded-none border-b-2 border-transparent bg-transparent px-3 py-2 text-xs shadow-none data-[state=active]:bg-transparent data-[state=active]:shadow-none"
+              >
+                Upload
+              </TabsTrigger>
+            </TabsList>
 
-          <TabsContent value="upload" className="mt-0 outline-none">
-            <div className="flex flex-col items-center px-6 py-7 text-center">
-              <RepositoryIconGraphic
-                choice={null}
-                automatic={automatic}
-                name={project.name}
-                className="bg-bg2-hover text-fg1 size-14 rounded-lg text-lg font-medium"
-              />
-              <span className="bg-bg2 text-fg1 mt-3 rounded-md px-3 py-1.5 text-xs">
-                {automatic.loading || automatic.refreshing
-                  ? "Finding repository icon…"
-                  : automaticRepositoryIconLabel(automatic.source)}
-              </span>
-              {automatic.source?.kind === "repository-file" && (
-                <code className="text-muted-fg text-2xxs mt-2 max-w-full truncate">
-                  {automatic.source.path}
-                </code>
-              )}
-              <p className="text-fg2 mt-3 max-w-md text-xs leading-5">
-                By default, Zeros uses the first common favicon, logo, or app
-                icon found in the repository. If none exists, it uses the GitHub
-                repository owner&apos;s avatar, then the repository initial.
-              </p>
-              <div className="mt-3 flex items-center gap-2">
-                {choice && (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => {
-                      setRepositoryIconChoice(project.repoRoot, null);
-                      onOpenChange(false);
-                    }}
-                  >
-                    Use automatic
-                  </Button>
-                )}
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Refresh automatic repository icon"
-                  disabled={automatic.loading || automatic.refreshing}
-                  onClick={automatic.refresh}
-                >
-                  {automatic.loading || automatic.refreshing ? (
-                    <ZerosSpinner size={16} />
-                  ) : (
-                    <RotateCw className="size-3.5" />
-                  )}
-                </Button>
-              </div>
-            </div>
-
-            <div className="border-border1 border-t px-6 py-5">
-              <div className="flex items-start justify-between gap-5">
-                <div>
-                  <p className="text-fg1 text-sm font-medium">
-                    Upload your own icon
-                  </p>
-                  <p className="text-fg2 mt-1 text-xs leading-5">
-                    PNG or JPEG, up to 5 MB. Large images are resized locally
-                    before they are saved.
-                  </p>
+            <TabsContent value="icons" className="mt-0 min-h-0 outline-none">
+              <div className="border-border1 border-b py-3">
+                <div className="relative">
+                  <Search className="text-fg2 pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
+                  <Input
+                    autoFocus
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Search icons and emojis"
+                    aria-label="Search icons and emojis"
+                    className="h-7 pl-8 text-xs"
+                  />
                 </div>
-                <Button
-                  type="button"
-                  variant="secondary"
-                  size="default"
-                  disabled={uploading}
-                  onClick={() => fileInputRef.current?.click()}
-                >
-                  <ImageUp className="size-3.5" />
-                  {uploading ? "Uploading…" : "Upload"}
-                </Button>
               </div>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/png,image/jpeg,.png,.jpg,.jpeg"
-                className="hidden"
-                onChange={(event) => void handleUpload(event.target.files?.[0])}
-              />
+              <div
+                ref={iconListRef}
+                className="max-h-[390px] overflow-y-auto pt-3"
+              >
+                <div
+                  role="listbox"
+                  aria-label="Repository icons and emojis"
+                  className="grid grid-cols-9 gap-1"
+                >
+                  {filteredIcons.map((icon) => {
+                    const selected =
+                      choice?.kind === "lucide" && choice.value === icon.name;
+                    return (
+                      <Tooltip key={icon.name} label={icon.label}>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-label={icon.label}
+                          aria-selected={selected}
+                          onClick={() =>
+                            choose({ kind: "lucide", value: icon.name })
+                          }
+                          className={cn(
+                            "text-fg2 hover:bg-bg1-hover hover:text-fg1 focus-visible:ring-highlighted-bright inline-flex size-9 items-center justify-center rounded-sm transition-colors focus-visible:ring-1 focus-visible:outline-none",
+                            selected && "bg-bg1-hover text-fg1",
+                          )}
+                        >
+                          <icon.Icon className="size-4" strokeWidth={1.5} />
+                        </button>
+                      </Tooltip>
+                    );
+                  })}
+                  {filteredEmojis.map((emoji) => {
+                    const selected =
+                      choice?.kind === "emoji" && choice.value === emoji.value;
+                    return (
+                      <Tooltip key={emoji.value} label={emoji.label}>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={selected}
+                          onClick={() =>
+                            choose({ kind: "emoji", value: emoji.value })
+                          }
+                          className={cn(
+                            "hover:bg-bg1-hover focus-visible:ring-highlighted-bright inline-flex size-9 items-center justify-center rounded-sm text-lg transition-colors focus-visible:ring-1 focus-visible:outline-none",
+                            selected && "bg-bg1-hover",
+                          )}
+                        >
+                          <span aria-hidden="true">{emoji.value}</span>
+                          <span className="sr-only">{emoji.label}</span>
+                        </button>
+                      </Tooltip>
+                    );
+                  })}
+                </div>
+                {filteredIcons.length === 0 && filteredEmojis.length === 0 && (
+                  <p className="text-muted-fg py-8 text-center text-xs">
+                    No icons or emojis match.
+                  </p>
+                )}
+              </div>
+            </TabsContent>
+
+            <TabsContent value="upload" className="mt-0 outline-none">
+              <div className="flex flex-col items-center pt-6 text-center">
+                <RepositoryIconGraphic
+                  choice={
+                    plainFolder ? { kind: "lucide", value: "folder" } : null
+                  }
+                  automatic={automatic}
+                  name={project.name}
+                  className="bg-bg2-hover text-fg1 size-14 rounded-lg text-lg font-medium"
+                />
+                <span className="bg-bg2 text-fg1 mt-3 rounded-md px-3 py-1.5 text-xs">
+                  {plainFolder
+                    ? "Folder"
+                    : automatic.loading || automatic.refreshing
+                      ? "Finding repository icon…"
+                      : automaticRepositoryIconLabel(automatic.source)}
+                </span>
+                {!plainFolder && automatic.source?.kind === "repository-file" && (
+                  <code className="text-muted-fg text-2xxs mt-2 max-w-full truncate">
+                    {automatic.source.path}
+                  </code>
+                )}
+                <p className="text-fg2 mt-3 max-w-md text-xs leading-5">
+                  {plainFolder ? (
+                    "Folders use the Folder icon by default."
+                  ) : (
+                    <>
+                      By default, Zeros uses the first common favicon, logo, or
+                      app icon found in the repository. If none exists, it uses
+                      the GitHub repository owner&apos;s avatar, then the repository
+                      initial.
+                    </>
+                  )}
+                </p>
+                <div className="mt-3 flex items-center gap-2">
+                  {choice && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => {
+                        setRepositoryIconChoice(project.repoRoot, null);
+                        onOpenChange(false);
+                      }}
+                    >
+                      Use automatic
+                    </Button>
+                  )}
+                  {!plainFolder && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label="Refresh automatic repository icon"
+                      disabled={automatic.loading || automatic.refreshing}
+                      onClick={automatic.refresh}
+                    >
+                      {automatic.loading || automatic.refreshing ? (
+                        <ZerosSpinner size={16} />
+                      ) : (
+                        <RotateCw className="size-3.5" />
+                      )}
+                    </Button>
+                  )}
+                </div>
+              </div>
+
+            </TabsContent>
+          </Tabs>
+        </DialogBody>
+        {tab === "upload" && (
+          <DialogFooter className="block">
+            <div className="flex items-start justify-between gap-5">
+              <div>
+                <p className="text-fg1 text-sm font-medium">
+                  Upload your own icon
+                </p>
+                <p className="text-fg2 mt-1 text-xs leading-5">
+                  PNG or JPEG, up to 5 MB. Large images are resized locally
+                  before they are saved.
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="default"
+                disabled={uploading}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <ImageUp className="size-3.5" />
+                {uploading ? "Uploading…" : "Upload"}
+              </Button>
             </div>
-          </TabsContent>
-        </Tabs>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/png,image/jpeg,.png,.jpg,.jpeg"
+              className="hidden"
+              onChange={(event) => void handleUpload(event.target.files?.[0])}
+            />
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );

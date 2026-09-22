@@ -34,7 +34,7 @@
 // deep links (settings-page redirects them here).
 
 import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
-import { ExternalLink } from "lucide-react";
+import { ExternalLink, Folder } from "lucide-react";
 
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { branchDisplayName } from "../../shared/lib/branch-name";
@@ -42,7 +42,11 @@ import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
 import { WorkspaceContextMenu } from "../../shared/ui/workspace-context-menu";
 import { WorkspaceModeToggleView } from "../../shared/ui/workspace-mode-header";
-import { repoPageModeForView } from "../../state/repo-page-mode";
+import {
+  effectiveRepoPageView,
+  isRepoPageViewAvailable,
+  repoPageModeForView,
+} from "../../state/repo-page-mode";
 import { RepositoryIcon } from "./repository-icon";
 import {
   selectRepoPageView,
@@ -53,6 +57,8 @@ import {
   type RepoPageView as StoreRepoPageView,
 } from "../../state/store";
 import type { Project } from "../../state/projects-store";
+import { isLocalMainWorkspace } from "../../state/local-main-workspace";
+import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
 import { useProjects, useWorkspacesFor } from "../../state/use-projects";
 import {
   dedupePendingCreates,
@@ -197,7 +203,11 @@ function RepoWorkspaceRow({
         aria-busy={archiving || undefined}
         className="hover:bg-bg2 flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition-colors select-none"
       >
-        <StatusIcon status={w.status} className="size-3.5 shrink-0" />
+        {isLocalMainWorkspace(w) ? (
+          <Folder className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} />
+        ) : (
+          <StatusIcon status={w.status} className="size-3.5 shrink-0" />
+        )}
         <span className="text-fg1 min-w-0 truncate text-sm font-medium">
           {row.title}
         </span>
@@ -232,10 +242,20 @@ function RepoWorkspacesList({ project }: { project: Project }) {
   const { workspaces: allWorkspaces, loading } = useWorkspacesFor(
     project.repoSlug,
   );
+  const { projects } = useProjects();
+  const listedWorkspaces = useFolderWorkspaces(allWorkspaces, projects);
   const activeOrganization = useActiveOrganization();
   const accessibleWorkspaces = useMemo(
-    () => filterRowsForOrganization(allWorkspaces, activeOrganization),
-    [activeOrganization, allWorkspaces],
+    () =>
+      filterRowsForOrganization(
+        listedWorkspaces.filter(
+          (workspace) =>
+            !isLocalMainWorkspace(workspace) ||
+            workspace.repoRoot === project.repoRoot,
+        ),
+        activeOrganization,
+      ),
+    [activeOrganization, listedWorkspaces, project.repoRoot],
   );
   const workspaces = useLiveVisible(accessibleWorkspaces);
   const rawPendingCreates = usePendingCreatesFor(project.repoSlug);
@@ -270,7 +290,9 @@ function RepoWorkspacesList({ project }: { project: Project }) {
         const branch = branchDisplayName(w.branch);
         return {
           workspace: w,
-          title: titleByFolder.get(w.path)?.title || branch,
+          title: isLocalMainWorkspace(w)
+            ? branch
+            : titleByFolder.get(w.path)?.title || branch,
           branch,
           ts: w.lastActiveAt ?? w.createdAt,
         };
@@ -389,9 +411,11 @@ export function RepoPage({ project }: { project: Project }) {
   const persistedView = useWorkspaceStore((state) =>
     selectRepoPageView(state, project.id),
   );
-  const view = persistedView;
+  const view = effectiveRepoPageView(project, persistedView);
   const mode = repoPageModeForView(view);
-  const configViews = mode === "code" ? CODE_CONFIG_VIEWS : DESIGN_CONFIG_VIEWS;
+  const configViews = (
+    mode === "code" ? CODE_CONFIG_VIEWS : DESIGN_CONFIG_VIEWS
+  ).filter((section) => isRepoPageViewAvailable(project, section.id));
 
   // Recently visited repo/view trees survive repository and section switches.
   // This retains local form state and Keychain-backed rows; the shared settings
@@ -411,7 +435,8 @@ export function RepoPage({ project }: { project: Project }) {
       .map((target) => ({
         ...target,
         project: availableProjectById.get(target.project.id) ?? target.project,
-      }));
+      }))
+      .filter((target) => isRepoPageViewAvailable(target.project, target.view));
     const activeProject = availableProjectById.get(project.id) ?? null;
     const current = next[next.length - 1];
     if (
@@ -521,11 +546,15 @@ export function RepoPage({ project }: { project: Project }) {
                   className="h-7"
                   aria-label={`${mode === "code" ? "Code" : "Design"} repository settings`}
                 >
-                  {mode === "code" && (
-                    <TabsTrigger value="workspaces" className="py-0.5 text-xs">
-                      Workspaces
-                    </TabsTrigger>
-                  )}
+                  {mode === "code" &&
+                    isRepoPageViewAvailable(project, "workspaces") && (
+                      <TabsTrigger
+                        value="workspaces"
+                        className="py-0.5 text-xs"
+                      >
+                        Workspaces
+                      </TabsTrigger>
+                    )}
                   {configViews.map((s) => (
                     <TabsTrigger
                       key={s.id}

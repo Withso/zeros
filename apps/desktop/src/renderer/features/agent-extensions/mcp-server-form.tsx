@@ -39,6 +39,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -319,23 +320,25 @@ function ImportJsonDialog({
             block from another tool&rsquo;s docs.
           </DialogDescription>
         </DialogHeader>
-        <Textarea
-          value={text}
-          onChange={(e) => {
-            setText(e.target.value);
-            setError(null);
-          }}
-          rows={8}
-          placeholder={'{\n  "mcpServers": {\n    "context7": {\n      "command": "npx",\n      "args": ["-y", "@upstash/context7-mcp"]\n    }\n  }\n}'}
-          className="font-mono text-xs"
-          autoFocus
-        />
-        {error && (
-          <p className="text-red-primary flex items-center gap-1.5 text-xs">
-            <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
-            {error}
-          </p>
-        )}
+        <DialogBody>
+          <Textarea
+            value={text}
+            onChange={(e) => {
+              setText(e.target.value);
+              setError(null);
+            }}
+            rows={8}
+            placeholder={'{\n  "mcpServers": {\n    "context7": {\n      "command": "npx",\n      "args": ["-y", "@upstash/context7-mcp"]\n    }\n  }\n}'}
+            className="font-mono text-xs"
+            autoFocus
+          />
+          {error && (
+            <p className="text-red-primary flex items-center gap-1.5 text-xs">
+              <AlertTriangle className="size-3.5 shrink-0" aria-hidden="true" />
+              {error}
+            </p>
+          )}
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" size="sm" onClick={onClose}>
             Cancel

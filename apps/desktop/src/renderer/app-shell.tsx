@@ -71,6 +71,7 @@ import { TopBar } from "./shell/top-bar";
 import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
+import { useProjectCapabilitiesRefresh } from "./shell/use-project-capabilities-refresh";
 import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
 import {
   AddProjectProvider,
@@ -967,6 +968,7 @@ function MainShellBody({
   // is collapsed, Home is visible, or a missing-worktree panel replaces the
   // workspace shell. Consumers remain ordinary key subscriptions.
   useGitRefreshCoordinator();
+  useProjectCapabilitiesRefresh();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
   const createWorkspaceProjectId = useCreateWorkspaceProjectId();

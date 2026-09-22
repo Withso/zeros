@@ -11,11 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  loadProjects,
-  removeProject,
-  upsertProject,
-} from "../projects-store";
+import { loadProjects, removeProject, upsertProject } from "../projects-store";
 
 class MemStorage {
   private m = new Map<string, string>();
@@ -51,6 +47,23 @@ afterEach(() => {
 // projects-store only touches localStorage at call time (inside the tests,
 // after beforeEach installs the polyfill) — the top-level import is safe.
 const BACKUP_KEY = "zeros-projects-v1-backup"; // PREFIX + BACKUP_KEY
+
+it("retains inspected folder identity across reloads and unrelated project updates", () => {
+  const folder = upsertProject({
+    repoRoot: "/projects/To-do app",
+    isGitRepository: false,
+  });
+  expect(loadProjects()[0].isGitRepository).toBe(false);
+  expect(upsertProject({ repoRoot: folder.repoRoot }).isGitRepository).toBe(
+    false,
+  );
+  const initialized = upsertProject({
+    repoRoot: folder.repoRoot,
+    isGitRepository: true,
+  });
+  expect(initialized.id).toBe(folder.id);
+  expect(loadProjects()[0].isGitRepository).toBe(true);
+});
 
 it("keeps project identities distinct when the clock and weak random source repeat", () => {
   vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);

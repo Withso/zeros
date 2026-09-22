@@ -22,7 +22,6 @@ import {
   Plus,
   Search,
   Variable,
-  X,
 } from "lucide-react";
 
 import type { DesignOperation, DesignTransaction } from "@zeros/design-core";
@@ -33,6 +32,10 @@ import type {
 } from "../../platform/git";
 import {
   Button,
+  DialogCloseButton,
+  DialogHeader,
+  DialogBody,
+  DialogFooter,
   Input,
   Label,
   ScrollArea,
@@ -511,7 +514,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
           ref={panelRef}
           data-design-theme-editor=""
           aria-modal="false"
-          className="border-border2 bg-bg1 fixed z-50 grid h-[min(680px,calc(100vh-48px))] w-[min(760px,calc(100vw-48px))] grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-0 overflow-hidden overscroll-contain rounded-lg border shadow-[var(--shadow-dropdown)] outline-none"
+          className="border-border2 bg-bg1 fixed z-50 grid h-[min(680px,calc(100vh-48px))] w-[min(760px,calc(100vw-48px))] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden overscroll-contain rounded-lg border shadow-[var(--shadow-dropdown)] outline-none"
           style={{
             left: position.x,
             top: position.y,
@@ -535,8 +538,8 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
             });
           }}
         >
-          <div className="flex flex-col gap-1 px-4 pt-3 pb-2">
-            <div className="flex min-w-0 items-start gap-2">
+          <DialogHeader className="gap-1">
+            <div className="flex min-w-0 items-center gap-2">
               <div
                 data-design-theme-drag-handle=""
                 role="button"
@@ -578,358 +581,350 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
               >
                 <GripHorizontal className="text-muted-fg size-4 shrink-0" />
                 <Palette className="size-4 shrink-0" />
-                <DialogPrimitive.Title className="truncate text-xs font-medium">
+                <DialogPrimitive.Title className="text-dialog-title truncate font-medium">
                   Theme editor
                 </DialogPrimitive.Title>
               </div>
-              <DialogPrimitive.Close asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  aria-label="Close theme editor"
-                >
-                  <X />
-                </Button>
-              </DialogPrimitive.Close>
+              <DialogCloseButton aria-label="Close theme editor" />
             </div>
             <DialogPrimitive.Description className="text-muted-fg text-xs">
               Edit CSS variables as a mode matrix. Values stay in tokens.css and
               preview immediately on every live canvas frame.
             </DialogPrimitive.Description>
-          </div>
+          </DialogHeader>
 
-          <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
-            <div className="relative min-w-48 flex-1">
-              <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
-              <Input
-                value={query}
-                className="zd-design-search h-8 pl-7 text-xs"
-                aria-label="Search theme variables"
-                placeholder="Search variables"
-                onChange={(event) => setQuery(event.target.value)}
-              />
-            </div>
-            <Select
-              value={activeTheme ?? "__base__"}
-              onValueChange={(value) =>
-                onActiveThemeChange(value === "__base__" ? null : value)
-              }
-            >
-              <SelectTrigger
-                size="sm"
-                className="zd-design-control-applied h-8 w-40"
-                aria-label="Preview theme"
+          <DialogBody className="grid grid-rows-[auto_minmax(0,1fr)] gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-48 flex-1">
+                <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2" />
+                <Input
+                  value={query}
+                  className="zd-design-search h-8 pl-7 text-xs"
+                  aria-label="Search theme variables"
+                  placeholder="Search variables"
+                  onChange={(event) => setQuery(event.target.value)}
+                />
+              </div>
+              <Select
+                value={activeTheme ?? "__base__"}
+                onValueChange={(value) =>
+                  onActiveThemeChange(value === "__base__" ? null : value)
+                }
               >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="__base__">Base</SelectItem>
-                {themes.map((theme) => (
-                  <SelectItem key={theme} value={theme}>
-                    {theme}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Button
-              type="button"
-              variant={pasteOpen ? "secondary-on" : "secondary"}
-              size="sm"
-              className={cn(
-                "zd-design-control-quiet",
-                pasteOpen && "zd-design-state-active",
-              )}
-              onClick={() => {
-                setPasteOpen((current) => !current);
-                setNewVariableOpen(false);
-              }}
-            >
-              <ClipboardPaste />
-              Paste CSS
-            </Button>
-            <Button
-              type="button"
-              variant={newVariableOpen ? "secondary-on" : "secondary"}
-              size="sm"
-              className={cn(
-                "zd-design-control-quiet",
-                newVariableOpen && "zd-design-state-active",
-              )}
-              onClick={() => {
-                setNewVariableOpen((current) => !current);
-                setPasteOpen(false);
-              }}
-            >
-              <Plus />
-              Variable
-            </Button>
-            <div
-              data-design-theme-type-filter=""
-              role="group"
-              aria-label="Filter variables by type"
-              className="flex basis-full items-center gap-1 overflow-x-auto pt-0.5"
-            >
-              {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
-                const count =
-                  type === "all"
-                    ? tokens.length
-                    : (tokenTypeCounts.get(type) ?? 0);
-                if (type !== "all" && count === 0) return null;
-                return (
-                  <button
-                    key={type}
-                    type="button"
-                    aria-pressed={typeFilter === type}
-                    className={cn(
-                      "zd-design-theme-filter shrink-0 rounded-sm px-2 py-1 text-[10px] capitalize",
-                      typeFilter === type && "zd-design-theme-mode-active",
-                    )}
-                    onClick={() => setTypeFilter(type)}
-                  >
-                    {type} <span className="font-mono opacity-70">{count}</span>
-                  </button>
-                );
-              })}
+                <SelectTrigger
+                  size="sm"
+                  className="zd-design-control-applied h-8 w-40"
+                  aria-label="Preview theme"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__base__">Base</SelectItem>
+                  {themes.map((theme) => (
+                    <SelectItem key={theme} value={theme}>
+                      {theme}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <Button
+                type="button"
+                variant={pasteOpen ? "secondary-on" : "secondary"}
+                size="sm"
+                className={cn(
+                  "zd-design-control-quiet",
+                  pasteOpen && "zd-design-state-active",
+                )}
+                onClick={() => {
+                  setPasteOpen((current) => !current);
+                  setNewVariableOpen(false);
+                }}
+              >
+                <ClipboardPaste />
+                Paste CSS
+              </Button>
+              <Button
+                type="button"
+                variant={newVariableOpen ? "secondary-on" : "secondary"}
+                size="sm"
+                className={cn(
+                  "zd-design-control-quiet",
+                  newVariableOpen && "zd-design-state-active",
+                )}
+                onClick={() => {
+                  setNewVariableOpen((current) => !current);
+                  setPasteOpen(false);
+                }}
+              >
+                <Plus />
+                Variable
+              </Button>
+              <div
+                data-design-theme-type-filter=""
+                role="group"
+                aria-label="Filter variables by type"
+                className="flex basis-full items-center gap-1 overflow-x-auto pt-0.5"
+              >
+                {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
+                  const count =
+                    type === "all"
+                      ? tokens.length
+                      : (tokenTypeCounts.get(type) ?? 0);
+                  if (type !== "all" && count === 0) return null;
+                  return (
+                    <button
+                      key={type}
+                      type="button"
+                      aria-pressed={typeFilter === type}
+                      className={cn(
+                        "zd-design-theme-filter shrink-0 rounded-sm px-2 py-1 text-[10px] capitalize",
+                        typeFilter === type && "zd-design-theme-mode-active",
+                      )}
+                      onClick={() => setTypeFilter(type)}
+                    >
+                      {type} <span className="font-mono opacity-70">{count}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
 
-          <div className="flex min-h-0 flex-col overflow-hidden">
-            {pasteOpen ? (
-              <div className="bg-bg1-highlight mx-4 mb-3 flex flex-col gap-3 rounded-lg p-4">
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 flex-col">
-                    <span className="text-fg1 text-xs font-medium">
-                      Paste CSS variables
-                    </span>
-                    <span className="text-muted-fg text-xs">
-                      Supports :root, html, :host, [data-theme],
-                      [data-zd-theme], .dark, and .theme-name blocks.
+            <div className="flex min-h-0 flex-col overflow-hidden">
+              {pasteOpen ? (
+                <div className="bg-bg1-highlight mx-4 mb-3 flex flex-col gap-3 rounded-lg p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-col">
+                      <span className="text-fg1 text-xs font-medium">
+                        Paste CSS variables
+                      </span>
+                      <span className="text-muted-fg text-xs">
+                        Supports :root, html, :host, [data-theme],
+                        [data-zd-theme], .dark, and .theme-name blocks.
+                      </span>
+                    </div>
+                    <span
+                      className={cn(
+                        "shrink-0 text-xs",
+                        parsedImport.error ? "text-red-primary" : "text-muted-fg",
+                      )}
+                    >
+                      {parsedImport.error ?? importSummary(parsedImport.imports)}
                     </span>
                   </div>
-                  <span
-                    className={cn(
-                      "shrink-0 text-xs",
-                      parsedImport.error ? "text-red-primary" : "text-muted-fg",
-                    )}
-                  >
-                    {parsedImport.error ?? importSummary(parsedImport.imports)}
-                  </span>
+                  <Textarea
+                    value={cssDraft}
+                    className="zd-design-control-applied min-h-36 resize-y font-mono text-xs"
+                    aria-label="CSS variables to import"
+                    spellCheck={false}
+                    onChange={(event) => setCssDraft(event.target.value)}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setPasteOpen(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={
+                        !foundation.data ||
+                        !!parsedImport.error ||
+                        action !== null
+                      }
+                      onClick={() => void importCss()}
+                    >
+                      {action === "import" ? "Importing…" : "Import variables"}
+                    </Button>
+                  </div>
                 </div>
-                <Textarea
-                  value={cssDraft}
-                  className="zd-design-control-applied min-h-36 resize-y font-mono text-xs"
-                  aria-label="CSS variables to import"
-                  spellCheck={false}
-                  onChange={(event) => setCssDraft(event.target.value)}
-                />
-                <div className="flex justify-end gap-2">
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setPasteOpen(false)}
-                  >
-                    Cancel
-                  </Button>
+              ) : null}
+
+              {newVariableOpen ? (
+                <div className="bg-bg1-highlight mx-4 mb-3 grid grid-cols-[minmax(160px,1fr)_minmax(160px,2fr)_auto] items-end gap-3 rounded-lg p-4">
+                  <div className="flex flex-col gap-1">
+                    <Label
+                      className="text-muted-fg text-xs"
+                      htmlFor={newVariableNameId}
+                    >
+                      Variable
+                    </Label>
+                    <Input
+                      id={newVariableNameId}
+                      value={newVariableName}
+                      className="zd-design-control-applied h-8 font-mono text-xs"
+                      onChange={(event) => setNewVariableName(event.target.value)}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-1">
+                    <Label
+                      className="text-muted-fg text-xs"
+                      htmlFor={newVariableValueId}
+                    >
+                      Base value
+                    </Label>
+                    <Input
+                      id={newVariableValueId}
+                      value={newVariableValue}
+                      className="zd-design-control-applied h-8 font-mono text-xs"
+                      placeholder="rebeccapurple, 16px, 0.2s…"
+                      onChange={(event) =>
+                        setNewVariableValue(event.target.value)
+                      }
+                    />
+                  </div>
                   <Button
                     type="button"
                     size="sm"
                     disabled={
+                      !newVariableName.trim() ||
+                      !newVariableValue.trim() ||
                       !foundation.data ||
-                      !!parsedImport.error ||
                       action !== null
                     }
-                    onClick={() => void importCss()}
+                    onClick={() => void addVariable()}
                   >
-                    {action === "import" ? "Importing…" : "Import variables"}
+                    {action === "variable" ? "Creating…" : "Create"}
                   </Button>
                 </div>
-              </div>
-            ) : null}
+              ) : null}
 
-            {newVariableOpen ? (
-              <div className="bg-bg1-highlight mx-4 mb-3 grid grid-cols-[minmax(160px,1fr)_minmax(160px,2fr)_auto] items-end gap-3 rounded-lg p-4">
-                <div className="flex flex-col gap-1">
-                  <Label
-                    className="text-muted-fg text-xs"
-                    htmlFor={newVariableNameId}
+              <ScrollArea data-design-theme-scroll="" className="min-h-0 flex-1">
+                <div className="min-w-max pb-3">
+                  <div
+                    className="border-border1 bg-bg1 sticky top-0 z-20 grid border-b"
+                    style={{
+                      gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
+                    }}
                   >
-                    Variable
-                  </Label>
-                  <Input
-                    id={newVariableNameId}
-                    value={newVariableName}
-                    className="zd-design-control-applied h-8 font-mono text-xs"
-                    onChange={(event) => setNewVariableName(event.target.value)}
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <Label
-                    className="text-muted-fg text-xs"
-                    htmlFor={newVariableValueId}
-                  >
-                    Base value
-                  </Label>
-                  <Input
-                    id={newVariableValueId}
-                    value={newVariableValue}
-                    className="zd-design-control-applied h-8 font-mono text-xs"
-                    placeholder="rebeccapurple, 16px, 0.2s…"
-                    onChange={(event) =>
-                      setNewVariableValue(event.target.value)
-                    }
-                  />
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={
-                    !newVariableName.trim() ||
-                    !newVariableValue.trim() ||
-                    !foundation.data ||
-                    action !== null
-                  }
-                  onClick={() => void addVariable()}
-                >
-                  {action === "variable" ? "Creating…" : "Create"}
-                </Button>
-              </div>
-            ) : null}
-
-            <ScrollArea data-design-theme-scroll="" className="min-h-0 flex-1">
-              <div className="min-w-max pb-3">
-                <div
-                  className="border-border1 bg-bg1 sticky top-0 z-20 grid border-b"
-                  style={{
-                    gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
-                  }}
-                >
-                  <div className="text-muted-fg bg-bg1 sticky left-0 z-30 px-4 py-2 text-xs font-medium">
-                    Variable
-                  </div>
-                  <button
-                    type="button"
-                    className={cn(
-                      "text-fg2 m-1 w-fit rounded-sm px-3 py-1 text-xs font-medium",
-                      activeTheme === null && "zd-design-theme-mode-active",
-                    )}
-                    aria-pressed={activeTheme === null}
-                    onClick={() => onActiveThemeChange(null)}
-                  >
-                    Base
-                  </button>
-                  {themes.map((theme) => (
+                    <div className="text-muted-fg bg-bg1 sticky left-0 z-30 px-4 py-2 text-xs font-medium">
+                      Variable
+                    </div>
                     <button
-                      key={theme}
                       type="button"
                       className={cn(
-                        "m-1 w-fit rounded-sm px-3 py-1 text-left text-xs font-medium",
-                        activeTheme === theme
-                          ? "zd-design-theme-mode-active"
-                          : "text-fg2",
+                        "text-fg2 m-1 w-fit rounded-sm px-3 py-1 text-xs font-medium",
+                        activeTheme === null && "zd-design-theme-mode-active",
                       )}
-                      aria-pressed={activeTheme === theme}
-                      onClick={() => onActiveThemeChange(theme)}
+                      aria-pressed={activeTheme === null}
+                      onClick={() => onActiveThemeChange(null)}
                     >
-                      {theme}
+                      Base
                     </button>
-                  ))}
-                </div>
+                    {themes.map((theme) => (
+                      <button
+                        key={theme}
+                        type="button"
+                        className={cn(
+                          "m-1 w-fit rounded-sm px-3 py-1 text-left text-xs font-medium",
+                          activeTheme === theme
+                            ? "zd-design-theme-mode-active"
+                            : "text-fg2",
+                        )}
+                        aria-pressed={activeTheme === theme}
+                        onClick={() => onActiveThemeChange(theme)}
+                      >
+                        {theme}
+                      </button>
+                    ))}
+                  </div>
 
-                {groupedTokens.map(([group, rows]) => (
-                  <React.Fragment key={group}>
-                    <div className="bg-bg1-highlight text-muted-fg sticky left-0 z-10 px-4 py-1.5 text-[10px] font-medium tracking-wide uppercase">
-                      {group}
-                    </div>
-                    {rows.map((token) => {
-                      const type = inferDesignTokenType(
-                        token.name,
-                        token.value,
-                        token.syntax,
-                      );
-                      return (
-                        <div
-                          key={token.name}
-                          className="group/token hover:bg-bg1-hover grid min-h-11 items-center"
-                          style={{
-                            gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
-                          }}
-                        >
-                          <div className="bg-bg1 group-hover/token:bg-bg1-hover sticky left-0 z-10 flex min-w-0 items-center gap-2 px-4 py-2">
-                            <Variable className="text-muted-fg size-3.5 shrink-0" />
-                            <div className="flex min-w-0 flex-1 flex-col">
-                              <code className="text-fg1 truncate text-xs">
-                                {token.name}
-                              </code>
-                              <span className="text-muted-fg truncate text-[10px]">
-                                {type} · {token.usageCount} uses
-                              </span>
+                  {groupedTokens.map(([group, rows]) => (
+                    <React.Fragment key={group}>
+                      <div className="bg-bg1-highlight text-muted-fg sticky left-0 z-10 px-4 py-1.5 text-[10px] font-medium tracking-wide uppercase">
+                        {group}
+                      </div>
+                      {rows.map((token) => {
+                        const type = inferDesignTokenType(
+                          token.name,
+                          token.value,
+                          token.syntax,
+                        );
+                        return (
+                          <div
+                            key={token.name}
+                            className="group/token hover:bg-bg1-hover grid min-h-11 items-center"
+                            style={{
+                              gridTemplateColumns: `minmax(260px, 1.35fr) repeat(${themes.length + 1}, minmax(190px, 1fr))`,
+                            }}
+                          >
+                            <div className="bg-bg1 group-hover/token:bg-bg1-hover sticky left-0 z-10 flex min-w-0 items-center gap-2 px-4 py-2">
+                              <Variable className="text-muted-fg size-3.5 shrink-0" />
+                              <div className="flex min-w-0 flex-1 flex-col">
+                                <code className="text-fg1 truncate text-xs">
+                                  {token.name}
+                                </code>
+                                <span className="text-muted-fg truncate text-[10px]">
+                                  {type} · {token.usageCount} uses
+                                </span>
+                              </div>
                             </div>
-                          </div>
-                          <div className="px-3 py-2">
-                            <ThemeValueField
-                              token={token}
-                              theme={null}
-                              value={token.value || token.initialValue}
-                              disabled={!canEdit}
-                              onCommit={async (value) => {
-                                await updateDesignTokenCached(workspaceId!, {
-                                  frame: frame!.file,
-                                  name: token.name,
-                                  theme: null,
-                                  value,
-                                  sourceVersion: tokenSourceVersion!,
-                                });
-                              }}
-                            />
-                          </div>
-                          {themes.map((theme) => (
-                            <div key={theme} className="px-3 py-2">
+                            <div className="px-3 py-2">
                               <ThemeValueField
                                 token={token}
-                                theme={theme}
-                                value={token.themeValues[theme] ?? ""}
-                                inheritedValue={
-                                  token.value || token.initialValue
-                                }
+                                theme={null}
+                                value={token.value || token.initialValue}
                                 disabled={!canEdit}
                                 onCommit={async (value) => {
                                   await updateDesignTokenCached(workspaceId!, {
                                     frame: frame!.file,
                                     name: token.name,
-                                    theme,
+                                    theme: null,
                                     value,
                                     sourceVersion: tokenSourceVersion!,
                                   });
                                 }}
                               />
                             </div>
-                          ))}
-                        </div>
-                      );
-                    })}
-                  </React.Fragment>
-                ))}
+                            {themes.map((theme) => (
+                              <div key={theme} className="px-3 py-2">
+                                <ThemeValueField
+                                  token={token}
+                                  theme={theme}
+                                  value={token.themeValues[theme] ?? ""}
+                                  inheritedValue={
+                                    token.value || token.initialValue
+                                  }
+                                  disabled={!canEdit}
+                                  onCommit={async (value) => {
+                                    await updateDesignTokenCached(workspaceId!, {
+                                      frame: frame!.file,
+                                      name: token.name,
+                                      theme,
+                                      value,
+                                      sourceVersion: tokenSourceVersion!,
+                                    });
+                                  }}
+                                />
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })}
+                    </React.Fragment>
+                  ))}
 
-                {tokens.length === 0 ? (
-                  <div className="text-muted-fg flex min-h-52 flex-col items-center justify-center gap-2 px-6 text-center text-xs">
-                    <Palette className="size-6" />
-                    <span>No theme variables yet.</span>
-                    <span>
-                      Paste CSS variables or create the first variable above.
-                    </span>
-                  </div>
-                ) : groupedTokens.length === 0 ? (
-                  <div className="text-muted-fg flex min-h-40 items-center justify-center px-6 text-xs">
-                    No variables match “{query}”.
-                  </div>
-                ) : null}
-              </div>
-            </ScrollArea>
-          </div>
-
-          <div className="border-border1 flex items-center justify-between gap-3 border-t px-4 py-3">
+                  {tokens.length === 0 ? (
+                    <div className="text-muted-fg flex min-h-52 flex-col items-center justify-center gap-2 px-6 text-center text-xs">
+                      <Palette className="size-6" />
+                      <span>No theme variables yet.</span>
+                      <span>
+                        Paste CSS variables or create the first variable above.
+                      </span>
+                    </div>
+                  ) : groupedTokens.length === 0 ? (
+                    <div className="text-muted-fg flex min-h-40 items-center justify-center px-6 text-xs">
+                      No variables match “{query}”.
+                    </div>
+                  ) : null}
+                </div>
+              </ScrollArea>
+            </div>
+          </DialogBody>
+          <DialogFooter className="justify-between gap-3">
             <div className="flex min-w-0 items-center gap-2">
               <Input
                 value={newTheme}
@@ -970,7 +965,7 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
                 Done
               </Button>
             </div>
-          </div>
+          </DialogFooter>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>

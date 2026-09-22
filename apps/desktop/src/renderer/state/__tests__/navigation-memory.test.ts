@@ -22,6 +22,7 @@ import {
   useWorkspaceStore,
 } from "../workspace-store";
 import type { ChatThread } from "../store";
+import { resolveRepoWorkspaceDestination } from "../../shell/workspace-tabs";
 
 let sequence = 0;
 function identities() {
@@ -188,9 +189,71 @@ describe("scoped navigation memory", () => {
     const state = useWorkspaceStore.getState();
     expect(selectLastWorkspaceFolderForRepo(state, rootA)).toBe(worktreeA);
     expect(selectLastWorkspaceFolderForRepo(state, rootB)).toBe(worktreeB);
-    expect(selectLastWorkspaceFolderForRepo(state, "/never-opened")).toBe(
-      "/never-opened",
-    );
+    expect(selectLastWorkspaceFolderForRepo(state, "/never-opened")).toBeNull();
+  });
+
+  it("does not turn a fresh repository selection into an original-folder chat", () => {
+    const { projectA, rootA } = identities();
+    const project = {
+      id: projectA,
+      name: "Fresh repository",
+      repoRoot: rootA,
+      repoSlug: `fresh-${sequence}`,
+      originUrl: null,
+      addedAt: sequence,
+    };
+    const state = useWorkspaceStore.getState();
+    for (const cachedWorkspaces of [undefined, []]) {
+      expect(
+        resolveRepoWorkspaceDestination({
+          project,
+          rememberedFolder: selectLastWorkspaceFolderForRepo(state, rootA),
+          cachedWorkspaces,
+        }),
+      ).toBeNull();
+    }
+
+    state.dispatch({
+      type: "OPEN_WORKSPACE",
+      folder: rootA,
+      repoRoot: rootA,
+      chatId: null,
+    });
+    expect(
+      resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: selectLastWorkspaceFolderForRepo(
+          useWorkspaceStore.getState(),
+          rootA,
+        ),
+        cachedWorkspaces: [],
+      }),
+    ).toMatchObject({ id: `local:${project.repoSlug}`, path: rootA });
+  });
+
+  it("publishes a worktree-less repository and its selected filter atomically", () => {
+    const { projectA, projectB } = identities();
+    const { dispatch } = useWorkspaceStore.getState();
+    dispatch({ type: "OPEN_REPO_PAGE", projectId: projectA });
+    dispatch({ type: "SET_WORKSPACE_LIST_FILTER", filter: `repo:${projectA}` });
+    const snapshots: Array<[string, string | null, string]> = [];
+    const stop = useWorkspaceStore.subscribe((state) => {
+      snapshots.push([
+        state.activePage,
+        state.activeRepoId,
+        state.workspaceListFilter,
+      ]);
+    });
+    try {
+      dispatch({
+        type: "OPEN_REPO_PAGE",
+        projectId: projectB,
+        workspaceListFilter: `repo:${projectB}`,
+      });
+      expect(snapshots).toEqual([["repo", projectB, `repo:${projectB}`]]);
+    } finally {
+      stop();
+    }
   });
 
   it("keeps repository hub tabs isolated and restores them on route open", () => {

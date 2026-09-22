@@ -33,6 +33,7 @@ import {
   Dialog,
   DialogClose,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -228,10 +229,9 @@ export function AddEnvVariableDialog({
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogContent
         className="max-w-md"
-        // Cancel is the one dismiss affordance (no X), and Escape is inert
-        // while a save is in flight — a mid-save close would let the pending
-        // write land on (or wipe) a reopened dialog.
-        showCloseButton={false}
+        // Dismissal stays unavailable while a save is in flight — a mid-save
+        // close would let the pending write land on (or wipe) a reopened dialog.
+        showCloseButton={!saving}
         onEscapeKeyDown={(e) => {
           if (saving) e.preventDefault();
         }}
@@ -256,108 +256,108 @@ export function AddEnvVariableDialog({
               : "For agents in this repo, in every workspace."}
           </DialogDescription>
         </DialogHeader>
-
-        {bulk === null ? (
-          <>
-            <div className="grid gap-1.5">
-              <Label htmlFor="add-env-var-name">Name</Label>
-              <Input
-                id="add-env-var-name"
-                autoFocus
-                type="text"
-                spellCheck={false}
-                autoComplete="off"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                onPaste={onFieldPaste("name")}
-                placeholder="MY_VARIABLE"
-                className="font-mono text-sm"
-              />
-              {nameIssue && (
-                <p className="text-xs text-red-primary">
-                  {trimmedName}: {nameIssue}
-                </p>
-              )}
-              {replacesStored && (
-                <p className="text-xs text-fg2">
-                  {trimmedName} is already set — Save replaces its stored value
-                </p>
-              )}
-              {renames && initial && (
-                <p className="text-xs text-fg2">
-                  Save renames {initial.name} to {trimmedName} — the old name
-                  is removed
-                </p>
-              )}
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="add-env-var-value">Value</Label>
-              <Textarea
-                id="add-env-var-value"
-                rows={5}
-                spellCheck={false}
-                autoComplete="off"
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                onPaste={onFieldPaste("value")}
-                placeholder="value"
-                className="font-mono text-sm"
-              />
-              <p className="text-xs text-fg2">
-                Paste a block of KEY=VALUE to add multiple secrets
-              </p>
-            </div>
-          </>
-        ) : (
-          <div className="grid gap-1.5">
-            <div className="flex items-center justify-between">
-              <div className="flex items-baseline gap-2">
-                <Label>Secrets</Label>
-                <span className="text-xs text-fg2">{bulk.length}</span>
+        <DialogBody>
+          {bulk === null ? (
+            <>
+              <div className="grid gap-1.5">
+                <Label htmlFor="add-env-var-name">Name</Label>
+                <Input
+                  id="add-env-var-name"
+                  autoFocus
+                  type="text"
+                  spellCheck={false}
+                  autoComplete="off"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  onPaste={onFieldPaste("name")}
+                  placeholder="MY_VARIABLE"
+                  className="font-mono text-sm"
+                />
+                {nameIssue && (
+                  <p className="text-xs text-red-primary">
+                    {trimmedName}: {nameIssue}
+                  </p>
+                )}
+                {replacesStored && (
+                  <p className="text-xs text-fg2">
+                    {trimmedName} is already set — Save replaces its stored value
+                  </p>
+                )}
+                {renames && initial && (
+                  <p className="text-xs text-fg2">
+                    Save renames {initial.name} to {trimmedName} — the old name
+                    is removed
+                  </p>
+                )}
               </div>
-              <Button variant="ghost" size="sm" onClick={clearBulk}>
-                Clear
-              </Button>
-            </div>
-            <div className="max-h-56 divide-y divide-border1 overflow-y-auto rounded-md border border-border1 bg-bg1-highlight">
-              {bulk.map((p) => (
-                <div
-                  key={p.key}
-                  className="flex min-w-0 items-baseline gap-3 px-3 py-2"
-                >
-                  <span className="shrink-0 font-mono text-sm text-fg1">
-                    {p.key}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate font-mono text-sm text-fg2">
-                    {p.value}
-                  </span>
-                  {existingNames.includes(p.key) && (
-                    <span className="shrink-0 text-xs text-muted-fg">
-                      replaces stored
-                    </span>
-                  )}
+              <div className="grid gap-1.5">
+                <Label htmlFor="add-env-var-value">Value</Label>
+                <Textarea
+                  id="add-env-var-value"
+                  rows={5}
+                  spellCheck={false}
+                  autoComplete="off"
+                  value={value}
+                  onChange={(e) => setValue(e.target.value)}
+                  onPaste={onFieldPaste("value")}
+                  placeholder="value"
+                  className="font-mono text-sm"
+                />
+                <p className="text-xs text-fg2">
+                  Paste a block of KEY=VALUE to add multiple secrets
+                </p>
+              </div>
+            </>
+          ) : (
+            <div className="grid gap-1.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-baseline gap-2">
+                  <Label>Secrets</Label>
+                  <span className="text-xs text-fg2">{bulk.length}</span>
                 </div>
-              ))}
+                <Button variant="ghost" size="sm" onClick={clearBulk}>
+                  Clear
+                </Button>
+              </div>
+              <div className="max-h-56 divide-y divide-border1 overflow-y-auto rounded-md border border-border1 bg-bg1-highlight">
+                {bulk.map((p) => (
+                  <div
+                    key={p.key}
+                    className="flex min-w-0 items-baseline gap-3 px-3 py-2"
+                  >
+                    <span className="shrink-0 font-mono text-sm text-fg1">
+                      {p.key}
+                    </span>
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm text-fg2">
+                      {p.value}
+                    </span>
+                    {existingNames.includes(p.key) && (
+                      <span className="shrink-0 text-xs text-muted-fg">
+                        replaces stored
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {(skippedUnsafe.length > 0 || skippedReserved.length > 0) && (
-          <div className="grid gap-1">
-            {skippedUnsafe.length > 0 && (
-              <p className="text-xs text-fg2">
-                Skipped {skippedUnsafe.join(", ")} — unsafe to pass to agents
-              </p>
-            )}
-            {skippedReserved.length > 0 && (
-              <p className="text-xs text-fg2">
-                Skipped {skippedReserved.join(", ")} — already set at the user
-                level
-              </p>
-            )}
-          </div>
-        )}
-
+          {(skippedUnsafe.length > 0 || skippedReserved.length > 0) && (
+            <div className="grid gap-1">
+              {skippedUnsafe.length > 0 && (
+                <p className="text-xs text-fg2">
+                  Skipped {skippedUnsafe.join(", ")} — unsafe to pass to agents
+                </p>
+              )}
+              {skippedReserved.length > 0 && (
+                <p className="text-xs text-fg2">
+                  Skipped {skippedReserved.join(", ")} — already set at the user
+                  level
+                </p>
+              )}
+            </div>
+          )}
+        </DialogBody>
         <DialogFooter>
           <DialogClose asChild>
             <Button variant="ghost" disabled={saving}>

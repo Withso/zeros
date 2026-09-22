@@ -1,3 +1,4 @@
+import { expect } from "@playwright/test";
 import { runDesignWorkbenchSmoke } from "./ui-smoke-design-workbench.mjs";
 // Design-workspace portion of the real-browser interaction contract. Keeping
 // it beside (rather than embedded in) ui-smoke-composer lets the design surface
@@ -2535,6 +2536,25 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       (await page.locator(".bg-scrim").count()) === 0,
   );
   const themeStartBox = await themeDialog.boundingBox();
+  await expect(themeDialog.locator('[data-slot="dialog-header"]')).toHaveCSS("padding", "12px 16px 0px");
+  await expect(themeDialog.locator('[data-slot="dialog-body"]')).toHaveCSS("padding", "24px 16px");
+  await expect(themeDialog.locator('[data-slot="dialog-footer"]')).toHaveCSS("padding", "10px");
+  const themeClose = themeDialog.getByRole("button", { name: "Close theme editor", exact: true });
+  await expect(themeClose).toHaveCSS("width", "20px");
+  await expect(themeClose).toHaveCSS("height", "20px");
+  await expect(themeClose).toHaveCSS("border-radius", "999px");
+  await expect(themeClose.locator("svg")).toHaveCSS("width", "12px");
+  await expect(themeClose.locator("svg")).toHaveCSS("height", "12px");
+  check(
+    "theme editor places its close button at the right edge of the header",
+    await themeDialog.evaluate((element) => {
+      const close = element.querySelector('button[aria-label="Close theme editor"]');
+      const closeBox = close.getBoundingClientRect();
+      const headerBox = close.parentElement.getBoundingClientRect();
+      const titleBox = element.querySelector("h2").getBoundingClientRect();
+      return titleBox.right < closeBox.left && Math.abs(closeBox.right - headerBox.right) < 1;
+    }),
+  );
   const themeDragHandle = themeDialog.getByRole("button", {
     name: "Move theme editor",
   });

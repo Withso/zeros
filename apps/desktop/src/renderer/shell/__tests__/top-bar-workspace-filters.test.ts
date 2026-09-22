@@ -114,7 +114,7 @@ describe("multi-repository top-bar controls", () => {
       source.indexOf("{/* The removed per-repository plus"),
     );
     expect(navMap).toMatch(
-      /const groupedRepository\s*=\s*workspaceListFilter === "grouped";/,
+      /const groupedRepository\s*=\s*groupedLane && item\.project\.isGitRepository !== false;/,
     );
     expect(navMap).toContain("groupedBackground={");
     expect(navMap).toContain("groupEnd={groupEnd}");
@@ -171,7 +171,7 @@ describe("multi-repository top-bar controls", () => {
     );
 
     expect(navMap).toMatch(
-      /const groupGap\s*=\s*groupedRepository && item\.kind === "project" && index > 0;/,
+      /const groupGap\s*=\s*groupedLane &&\s*!!previous &&\s*previous\.project\.id !== item\.project\.id;/,
     );
     expect(navMap).toContain("groupGap={groupGap}");
     expect(source).toMatch(/const WORKSPACE_GROUP_GAP_CLS = "w-\d+";/);

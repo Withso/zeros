@@ -13,6 +13,7 @@ import { Button } from "../../shared/ui/primitives/button";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -117,11 +118,13 @@ export function DesignCheckoutPause({
         <DialogContent className="max-w-md">
           <DialogHeader>
             <DialogTitle>Cancel {status.operation}?</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
             <DialogDescription>
               Git will return to the state before this operation. Conflict
               resolutions made during it may be discarded.
             </DialogDescription>
-          </DialogHeader>
+          </DialogBody>
           <DialogFooter>
             <Button
               variant="ghost"

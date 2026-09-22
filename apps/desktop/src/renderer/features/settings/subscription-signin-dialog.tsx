@@ -3,6 +3,7 @@ import type { BrowserSubscriptionProvider } from "@zeros/protocol/provider-auth"
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
   DialogTitle,
   DialogDescription,
 } from "../../shared/ui/primitives/dialog";
@@ -31,14 +32,17 @@ export function SubscriptionSignInDialog({
     >
       {provider && (
         <DialogContent>
-          <DialogTitle>Connect {SUBSCRIPTION_NAMES[provider]}</DialogTitle>
-          <DialogDescription>
-            Continue in your browser to connect your subscription.
-          </DialogDescription>
+          <DialogHeader>
+            <DialogTitle>Connect {SUBSCRIPTION_NAMES[provider]}</DialogTitle>
+            <DialogDescription>
+              Continue in your browser to connect your subscription.
+            </DialogDescription>
+          </DialogHeader>
           <SubscriptionConnectionPanel
             key={provider}
             provider={provider}
             surfaceActive={active}
+            dialogFooter
           />
         </DialogContent>
       )}

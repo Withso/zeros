@@ -12,6 +12,7 @@ import {
 } from "../../shared/ui/primitives/dropdown-menu";
 import type { BrowserSubscriptionProvider } from "@zeros/protocol/provider-auth";
 import { Button, Input } from "../../shared/ui";
+import { DialogBody, DialogFooter } from "../../shared/ui/primitives/dialog";
 import { useNativeRuntime } from "../../platform/runtime";
 import { useCachedRead } from "../../state/use-cached-read";
 import {
@@ -34,11 +35,16 @@ export function SubscriptionConnectionPanel({
   provider,
   surfaceActive,
   onChanged = unchanged,
+  dialogFooter = false,
 }: {
   provider: BrowserSubscriptionProvider;
   surfaceActive: boolean;
   onChanged?: () => Promise<unknown>;
+  /** Use full-width separated actions when this panel fills a dialog body. */
+  dialogFooter?: boolean;
 }) {
+  const Actions = dialogFooter ? DialogFooter : "div";
+  const Body = dialogFooter ? DialogBody : "div";
   const native = useNativeRuntime().ready;
   const read = useCachedRead(subscriptionCache, provider, readSubscription, {
     enabled: native && surfaceActive,
@@ -122,132 +128,134 @@ export function SubscriptionConnectionPanel({
   };
   return (
     <section
-      className="flex flex-col gap-3"
+      className={dialogFooter ? "flex flex-col" : "flex flex-col gap-3"}
       aria-label={`${name} subscription connection`}
     >
-      <p className="text-fg1 text-sm" role="status">
-        {status?.state === "connected"
-          ? `Connected${status.email ? ` as ${status.email}` : ` to ${name}`}${status.plan ? ` · ${status.plan}` : ""}`
-          : status?.state === "connecting"
-            ? provider === "claude" && status.canSubmitCode
-              ? "If the browser gives you a sign-in code, paste it here. Sign-in expires after 5 minutes."
-              : "Complete sign-in in your browser. Sign-in expires after 5 minutes."
-            : status?.state === "expired"
-              ? `Your ${name} connection expired. Sign in again.`
-              : `Sign in through ${provider === "codex" ? "ChatGPT" : name} to use your subscription`}
-      </p>
-      {!!status?.accounts?.length && (
-        <RadioGroup
-          aria-label={`${name} accounts`}
-          value={status.activeAccountId ?? ""}
-          disabled={
-            !surfaceActive || changingAccount || status.state === "connecting"
-          }
-          onValueChange={(id) => void changeAccount(id)}
-          className="ml-6 gap-1"
-        >
-          {status.accounts.map((account, index) => {
-            const label = account.email ?? `Account ${index + 1}`;
-            const disabled =
-              !surfaceActive ||
-              changingAccount ||
-              status.state === "connecting";
-            return (
-              <div
-                key={account.id}
-                className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-1"
-              >
-                <RadioGroupItem
-                  value={account.id}
-                  className="[&>span:last-child]:min-w-0 [&>span:last-child]:truncate"
-                  label={`${label}${account.plan ? ` · ${account.plan}` : ""}${account.state !== "connected" ? " · Sign in required" : ""}`}
-                />
-                <DropdownMenu
-                  open={surfaceActive && accountMenu === account.id}
-                  onOpenChange={(open) =>
-                    setAccountMenu(open ? account.id : null)
-                  }
+      <Body className="flex flex-col gap-3">
+        <p className="text-fg1 text-sm" role="status">
+          {status?.state === "connected"
+            ? `Connected${status.email ? ` as ${status.email}` : ` to ${name}`}${status.plan ? ` · ${status.plan}` : ""}`
+            : status?.state === "connecting"
+              ? provider === "claude" && status.canSubmitCode
+                ? "If the browser gives you a sign-in code, paste it here. Sign-in expires after 5 minutes."
+                : "Complete sign-in in your browser. Sign-in expires after 5 minutes."
+              : status?.state === "expired"
+                ? `Your ${name} connection expired. Sign in again.`
+                : `Sign in through ${provider === "codex" ? "ChatGPT" : name} to use your subscription`}
+        </p>
+        {!!status?.accounts?.length && (
+          <RadioGroup
+            aria-label={`${name} accounts`}
+            value={status.activeAccountId ?? ""}
+            disabled={
+              !surfaceActive || changingAccount || status.state === "connecting"
+            }
+            onValueChange={(id) => void changeAccount(id)}
+            className="ml-6 gap-1"
+          >
+            {status.accounts.map((account, index) => {
+              const label = account.email ?? `Account ${index + 1}`;
+              const disabled =
+                !surfaceActive ||
+                changingAccount ||
+                status.state === "connecting";
+              return (
+                <div
+                  key={account.id}
+                  className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 py-1"
                 >
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      variant="ghost"
-                      size="icon-sm"
-                      disabled={disabled}
-                      aria-label={`Account options for ${label}`}
-                    >
-                      <MoreVertical className="size-4" aria-hidden="true" />
-                    </Button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent align="end">
-                    <DropdownMenuItem
-                      className="text-red-primary focus:text-red-primary"
-                      disabled={disabled}
-                      onSelect={() => void changeAccount(account.id, true)}
-                    >
-                      Disconnect
-                    </DropdownMenuItem>
-                  </DropdownMenuContent>
-                </DropdownMenu>
+                  <RadioGroupItem
+                    value={account.id}
+                    className="[&>span:last-child]:min-w-0 [&>span:last-child]:truncate"
+                    label={`${label}${account.plan ? ` · ${account.plan}` : ""}${account.state !== "connected" ? " · Sign in required" : ""}`}
+                  />
+                  <DropdownMenu
+                    open={surfaceActive && accountMenu === account.id}
+                    onOpenChange={(open) =>
+                      setAccountMenu(open ? account.id : null)
+                    }
+                  >
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        disabled={disabled}
+                        aria-label={`Account options for ${label}`}
+                      >
+                        <MoreVertical className="size-4" aria-hidden="true" />
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem
+                        className="text-red-primary focus:text-red-primary"
+                        disabled={disabled}
+                        onSelect={() => void changeAccount(account.id, true)}
+                      >
+                        Disconnect
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              );
+            })}
+          </RadioGroup>
+        )}
+        {(error || status?.error || read.error) && (
+          <p className="text-fg2 text-xs" role="alert">
+            {error ??
+              status?.error ??
+              "Could not check the connection. Try refreshing."}
+          </p>
+        )}
+        {!native && (
+          <p className="text-fg2 text-xs">
+            Open the Zeros desktop app to connect this device.
+          </p>
+        )}
+        {provider === "claude" &&
+          status?.state === "connecting" &&
+          status.canSubmitCode &&
+          !showCode && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="self-start"
+              onClick={() => setShowCode(true)}
+            >
+              Use a sign-in code
+            </Button>
+          )}
+        {provider === "claude" &&
+          showCode &&
+          status?.state === "connecting" &&
+          status.canSubmitCode && (
+            <form
+              className="flex flex-col gap-2"
+              onSubmit={(event) => void submit(event)}
+            >
+              <div className="flex items-center gap-2">
+                <Input
+                  id={codeId}
+                  aria-label="Claude sign-in code"
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  maxLength={4096}
+                  value={code}
+                  onChange={(event) => setCode(event.target.value)}
+                />
+                <Button
+                  size="sm"
+                  type="submit"
+                  disabled={submitting || !code.trim()}
+                >
+                  Submit code
+                </Button>
               </div>
-            );
-          })}
-        </RadioGroup>
-      )}
-      {(error || status?.error || read.error) && (
-        <p className="text-fg2 text-xs" role="alert">
-          {error ??
-            status?.error ??
-            "Could not check the connection. Try refreshing."}
-        </p>
-      )}
-      {!native && (
-        <p className="text-fg2 text-xs">
-          Open the Zeros desktop app to connect this device.
-        </p>
-      )}
-      {provider === "claude" &&
-        status?.state === "connecting" &&
-        status.canSubmitCode &&
-        !showCode && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="self-start"
-            onClick={() => setShowCode(true)}
-          >
-            Use a sign-in code
-          </Button>
-        )}
-      {provider === "claude" &&
-        showCode &&
-        status?.state === "connecting" &&
-        status.canSubmitCode && (
-          <form
-            className="flex flex-col gap-2"
-            onSubmit={(event) => void submit(event)}
-          >
-            <div className="flex items-center gap-2">
-              <Input
-                id={codeId}
-                aria-label="Claude sign-in code"
-                type="password"
-                autoComplete="off"
-                spellCheck={false}
-                maxLength={4096}
-                value={code}
-                onChange={(event) => setCode(event.target.value)}
-              />
-              <Button
-                size="sm"
-                type="submit"
-                disabled={submitting || !code.trim()}
-              >
-                Submit code
-              </Button>
-            </div>
-          </form>
-        )}
-      <div className="flex items-center gap-2">
+            </form>
+          )}
+      </Body>
+      <Actions className={dialogFooter ? undefined : "flex items-center gap-2"}>
         <Button
           variant="secondary"
           size="sm"
@@ -273,7 +281,7 @@ export function SubscriptionConnectionPanel({
         >
           <RefreshCw className="size-3.5" aria-hidden="true" />
         </Button>
-      </div>
+      </Actions>
     </section>
   );
 }

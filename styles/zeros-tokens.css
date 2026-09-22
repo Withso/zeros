@@ -213,6 +213,7 @@
   --text-2xxs: 0.6875rem;
   --text-3xxs: 0.75rem;
   --text-xs: 0.8125rem;
+  --text-dialog-title: var(--dialog-title-size);
 
   /* ── FONT WEIGHTS — softened from Tailwind's defaults ──
    * Wired to the --weight-* primitives in :root rather than written as
@@ -486,9 +487,10 @@
    * Defined here once so component files reference the token instead of
    * inlining an rgba() shadow. */
   --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
-  /* Modal overlay veil (dialog/sheet). Theme-scoped: a heavy black wash is
-   * right over a dark UI but crushing over a light one (see light block). */
-  --scrim: hsl(0 0% 0% / 0.8);
+  /* Shared modal chrome and overlay veil in both themes. */
+  --dialog-title-size: 0.9375rem; /* 15px shared popup heading */
+  --dialog-close-radius: 999px;
+  --scrim: rgba(0, 0, 0, 0.5);
 
   /* ── HIGHLIGHTED (neutral interaction emphasis) ── */
   /* User-message bubble. Neutral Dark ALIASES this to bg2 so the bubble reads
@@ -725,7 +727,7 @@
    * against white, so lower alpha than the dark theme's 0.35. */
   --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12);
   /* Lighter veil — 80% black over a white UI reads as a blackout. */
-  --scrim: hsl(0 0% 0% / 0.4);
+  --scrim: rgba(0, 0, 0, 0.5);
 
   /* ── HIGHLIGHTED ── */
   --highlighted-bg: hsl(

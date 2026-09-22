@@ -319,6 +319,8 @@ export interface IgnoredTreeModel {
 }
 
 export interface IgnoredEntriesState {
+  /** True after an exact-workspace roots listing has succeeded. */
+  resolved: boolean;
   /** Ignored paths to merge into the tree's path list. */
   paths: string[];
   /** Directories we've expanded and loaded — passed to resetPaths as
@@ -540,7 +542,11 @@ export function useIgnoredEntries(
   // that is still open rather than one resetPaths just shut.
   const expandedSet = active?.expanded ?? EMPTY_EXPANDED;
   const expandedDirs = useMemo(() => [...expandedSet], [expandedSet]);
-  return { paths, expandedDirs };
+  return {
+    paths,
+    expandedDirs,
+    resolved: active?.resolved ?? warmRoots !== null,
+  };
 }
 
 /** What `loadDir` did — "failed" is the one the watcher must not re-arm on. */
@@ -552,6 +558,7 @@ type LoadOutcome = "loaded" | "failed";
  *  `loaded`, so the tree rendered another worktree's paths. */
 export interface IgnoredState {
   cwd: string | undefined;
+  resolved: boolean;
   roots: string[];
   /** Directories the user has opened. Sticky across refreshes — it is what we
    *  replay into resetPaths, and what tells us to re-list on a refresh. Cleared
@@ -565,7 +572,13 @@ export interface IgnoredState {
 }
 
 export function emptyState(cwd: string | undefined): IgnoredState {
-  return { cwd, roots: [], expanded: new Set(), loaded: new Map() };
+  return {
+    cwd,
+    resolved: false,
+    roots: [],
+    expanded: new Set(),
+    loaded: new Map(),
+  };
 }
 
 /** A mount's starting state: the previous visit's roots when this workspace is
@@ -575,7 +588,9 @@ export function emptyState(cwd: string | undefined): IgnoredState {
  *  there is nothing for them to do until the user opens a branch. */
 export function warmState(cwd: string | undefined): IgnoredState {
   const roots = peekIgnoredRoots(cwd);
-  return roots ? { ...emptyState(cwd), roots } : emptyState(cwd);
+  return roots
+    ? { ...emptyState(cwd), roots, resolved: true }
+    : emptyState(cwd);
 }
 
 /** A roots listing came back. Same workspace → keep open branches and their
@@ -587,10 +602,16 @@ export function withRoots(
   roots: string[],
 ): IgnoredState {
   if (prev.cwd !== cwd) {
-    return { cwd, roots, expanded: new Set(), loaded: new Map() };
+    return {
+      cwd,
+      roots,
+      resolved: true,
+      expanded: new Set(),
+      loaded: new Map(),
+    };
   }
-  if (sameList(prev.roots, roots)) return prev;
-  return { ...prev, roots };
+  if (prev.resolved && sameList(prev.roots, roots)) return prev;
+  return { ...prev, roots, resolved: true };
 }
 
 /** A re-listing of an already-open directory — how a file that a terminal, an

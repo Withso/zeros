@@ -33,6 +33,8 @@
 // engine worktrees have a git surface; the synthetic "Local main" trunk is a
 // first-class editable target, and a non-git folder gets Initialize/Publish.
 
+import { upsertProject } from "../../../state/projects-store";
+import { notifyProjectsChanged } from "../../../state/use-projects";
 import React, {
   useCallback,
   useEffect,
@@ -453,6 +455,8 @@ export function NotAGitRepo({
     setError(null);
     try {
       await gitInitInPlace(repoRoot);
+      upsertProject({ repoRoot, isGitRepository: true });
+      notifyProjectsChanged();
       onInitialized(); // bumps refreshKey → re-inspect clears this state
     } catch (e) {
       setError(isGitErrorShape(e) ? e.message : String(e));
