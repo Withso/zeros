@@ -67,6 +67,29 @@ describe("cloud runtime publication authority", () => {
     expect(source).toContain("docker info --format '{{.DockerRootDir}}'");
     expect(source).toContain('"$ZEROS_CLOUD_VM_DOCKER_ROOT"');
   });
+  it("makes the isolated registry login readable to the pinned attestation action and restores it before cleanup", () => {
+    const stage = source.indexOf("publication-registry-auth.ts stage");
+    const attest = source.indexOf("- name: Attest image source provenance");
+    const restore = source.indexOf("publication-registry-auth.ts restore");
+    expect(stage).toBeGreaterThan(
+      source.indexOf("- name: Validate publication receipt"),
+    );
+    expect(stage).toBeLessThan(attest);
+    expect(restore).toBeGreaterThan(attest);
+    expect(restore).toBeLessThan(
+      source.indexOf("- name: Verify published provenance"),
+    );
+    const cleanupRestore = source.lastIndexOf(
+      "publication-registry-auth.ts restore",
+    );
+    expect(cleanupRestore).toBeGreaterThan(
+      source.indexOf("- name: Remove publication builder"),
+    );
+    expect(cleanupRestore).toBeLessThan(
+      source.indexOf('rm -rf -- "$DOCKER_CONFIG"'),
+    );
+    expect(source).not.toMatch(/(?:echo|export)\s+["']?HOME=/);
+  });
   it("retains only resource diagnostics and removes the owned builder as well as credentials", () => {
     expect(source).toContain(
       "cloud-runtime-resources-${{ github.run_id }}-${{ github.run_attempt }}",

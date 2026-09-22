@@ -137,6 +137,17 @@ returned digest. The workflow attests and verifies that digest against its
 source commit and uploads a sanitized `publication.json` receipt. This proves
 publication/provenance, not host isolation, provider parity, or promotion.
 
+The pinned attestation action's OCI client reads only the default Docker config,
+ignoring `DOCKER_CONFIG`. Immediately around that action, the Linux publisher
+temporarily installs only its ephemeral GHCR auth entry at that expected path.
+It preserves the prior file's exact bytes, permissions and presence in a private
+write-ahead journal, then restores it in the next `always()` step; final cleanup
+also retries restoration. It never changes `HOME`, reuses other registry secrets,
+or uploads the journal. Unsafe files/directories and changed restoration targets
+fail closed. These operations assume this job is the only authorized writer of
+the default config; hash checks detect observed drift, not an interprocess lock.
+As with builder cleanup, complete runner loss leaves disposal to the hosted VM.
+
 The publication builder uses a digest-pinned BuildKit container with 4 GiB total
 memory, a two-CPU quota and two concurrent build steps. A 2 GiB free-space threshold
 is polled on both the build-context filesystem and Docker's discovered local data
