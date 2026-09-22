@@ -30,6 +30,9 @@ import {
 
 const temporaryDirectories: string[] = [];
 const execFileAsync = promisify(execFile);
+// The pagination cases create 4,097 real directories and fsync their removals.
+// Give shared CI storage a bounded fixture budget without changing sweep limits.
+const shardSweepTestTimeoutMs = 30_000;
 
 function versionedStagingShard(root: string, index: number): string {
   const bucket = Math.floor(index / 4_096).toString(16).padStart(2, "0");
@@ -411,7 +414,7 @@ describe("encrypted workspace object storage", () => {
     expect(removed[0]! + removed[1]!).toBe(32);
   });
 
-  it("sweeps past more than one bounded page of historical empty shards", async () => {
+  it("sweeps past more than one bounded page of historical empty shards", { timeout: shardSweepTestTimeoutMs }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-objects-"));
     temporaryDirectories.push(root);
     const staging = path.join(root, ".uploads-v2");
@@ -433,7 +436,7 @@ describe("encrypted workspace object storage", () => {
     await expect(readdir(staging)).resolves.toEqual([]);
   });
 
-  it("does not starve an aged upload behind a full page of recent shards", async () => {
+  it("does not starve an aged upload behind a full page of recent shards", { timeout: shardSweepTestTimeoutMs }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-objects-"));
     temporaryDirectories.push(root);
     const staging = path.join(root, ".uploads-v2");

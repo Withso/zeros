@@ -49,4 +49,34 @@ describe("cloud runtime publication authority", () => {
     expect(publisher).toContain("org.opencontainers.image.source=");
     expect(publisher).toContain("org.opencontainers.image.revision=");
   });
+  it("bounds the isolated builder before registry authentication", () => {
+    expect(source).toContain("--driver docker-container");
+    expect(source).toMatch(/image=moby\/buildkit@sha256:[a-f0-9]{64}/);
+    expect(source).toContain("--driver-opt memory=4g");
+    expect(source).toContain("--driver-opt memory-swap=4g");
+    expect(source).toContain("--driver-opt cpu-quota=200000");
+    expect(source).toContain("--driver-opt cpu-period=100000");
+    expect(source).toContain("--driver-opt restart-policy=no");
+    expect(source).toContain("max-parallelism = 2");
+    expect(source.indexOf("--driver docker-container")).toBeLessThan(
+      source.indexOf("docker login"),
+    );
+    expect(source).toContain(
+      'ZEROS_CLOUD_VM_MIN_FREE_DISK_BYTES: "2147483648"',
+    );
+    expect(source).toContain("docker info --format '{{.DockerRootDir}}'");
+    expect(source).toContain('"$ZEROS_CLOUD_VM_DOCKER_ROOT"');
+  });
+  it("retains only resource diagnostics and removes the owned builder as well as credentials", () => {
+    expect(source).toContain(
+      "cloud-runtime-resources-${{ github.run_id }}-${{ github.run_attempt }}",
+    );
+    expect(source).toContain("/resources.log");
+    expect(source).toContain("free --bytes");
+    expect(source).toContain("df --block-size=1");
+    expect(source).toContain("docker stats --no-stream");
+    expect(source).toContain('docker buildx rm --force "$BUILDX_BUILDER"');
+    expect(source).not.toMatch(/docker inspect(?![^\n]*--format)/);
+    expect(source).not.toMatch(/path:\s*\$\{\{[^\n]*\/docker/);
+  });
 });

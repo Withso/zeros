@@ -11,8 +11,8 @@ export default defineConfig({
     // them clobber each other mid-run. They also both apply 0004, whose
     // `CREATE ROLE zeros_app` guard is a check-then-create on a CLUSTER-wide
     // object — two concurrent runs can both see it missing and one then fails
-    // with duplicate_object. Serializing is the honest fix; the whole suite is
-    // well under a second, so there is nothing to win back here.
+    // with duplicate_object. Keep schema-mutating files serial; optimize their
+    // individual fixtures rather than running shared-schema resets concurrently.
     fileParallelism: false,
   },
 });
