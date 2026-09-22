@@ -39,7 +39,7 @@ jobs:
       - name: Verify publisher before registry authentication
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec vitest run scripts/__tests__/cloud-vm-snapshot.test.ts scripts/__tests__/cloud-runtime-publication.test.ts
+          pnpm exec vitest run scripts/__tests__/cloud-vm-snapshot.test.ts scripts/__tests__/cloud-runtime-publication.test.ts scripts/__tests__/cloud-publication-disk-budget.test.ts scripts/__tests__/cloud-publication-process.test.ts
       - name: Bind immutable publication identity
         env:
           REPOSITORY: ${{ github.repository }}
@@ -56,15 +56,53 @@ jobs:
             echo "ZEROS_REPO_URL=https://github.com/$REPOSITORY.git"
             echo "ZEROS_REPO_COMMIT=$GITHUB_SHA"
             echo "DAYTONA_SANDBOX_CLASS=linux-vm"
+            echo "BUILDX_BUILDER=zeros-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           } >> "$GITHUB_ENV"
+      - name: Configure bounded publication builder
+        run: |
+          set -euo pipefail
+          state_dir="$RUNNER_TEMP/cloud-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker_root=$(timeout 15 docker info --format '{{.DockerRootDir}}')
+          if [[ "$docker_root" != /* || "$docker_root" == *$'\n'* || "$docker_root" == *$'\r'* || ! -d "$docker_root" ]]; then
+            echo 'Publication requires a local Docker storage directory'
+            exit 1
+          fi
+          printf 'ZEROS_CLOUD_VM_DOCKER_ROOT=%s\n' "$docker_root" >> "$GITHUB_ENV"
+          printf '[worker.oci]\n  max-parallelism = 2\n' > "$state_dir/buildkitd.toml"
+          docker buildx create --name "$BUILDX_BUILDER" --driver docker-container \
+            --driver-opt image=moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3 \
+            --driver-opt memory=4g --driver-opt memory-swap=4g \
+            --driver-opt cpu-quota=200000 --driver-opt cpu-period=100000 \
+            --driver-opt restart-policy=no \
+            --buildkitd-config "$state_dir/buildkitd.toml" --bootstrap
       - name: Publish exact runtime image
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY_ACTOR: ${{ github.actor }}
+          ZEROS_CLOUD_VM_MIN_FREE_DISK_BYTES: "2147483648"
         run: |
           set -euo pipefail
           printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_ACTOR" --password-stdin
           unset REGISTRY_TOKEN REGISTRY_ACTOR
+          resource_log="$RUNNER_TEMP/cloud-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/resources.log"
+          resources() {
+            {
+              date -u '+%Y-%m-%dT%H:%M:%SZ'
+              free --bytes
+              df --block-size=1 "$RUNNER_TEMP" "$ZEROS_CLOUD_VM_DOCKER_ROOT"
+              timeout 10 docker stats --no-stream --format 'cpu={{.CPUPerc}} memory={{.MemUsage}} block={{.BlockIO}}' "buildx_buildkit_${BUILDX_BUILDER}0"
+              timeout 10 docker inspect --format 'status={{.State.Status}} oom={{.State.OOMKilled}} exit={{.State.ExitCode}}' "buildx_buildkit_${BUILDX_BUILDER}0"
+            } 2>&1 | tee -a "$resource_log" || true
+          }
+          resources
+          (while sleep 20; do resources; done) &
+          monitor_pid=$!
+          stop_monitor() {
+            kill "$monitor_pid" 2>/dev/null || true
+            wait "$monitor_pid" 2>/dev/null || true
+            resources
+          }
+          trap stop_monitor EXIT
           pnpm tsx scripts/cloud-workspace-validation/publish-vm-image.ts
       - name: Validate publication receipt
         id: receipt
@@ -90,9 +128,22 @@ jobs:
           path: ${{ runner.temp }}/cloud-runtime-${{ github.run_id }}-${{ github.run_attempt }}/publication.json
           if-no-files-found: error
           retention-days: 30
-      - name: Remove registry credential store
+      - name: Retain bounded resource diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloud-runtime-resources-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cloud-runtime-${{ github.run_id }}-${{ github.run_attempt }}/resources.log
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove publication builder and registry credential store
         if: always()
         run: |
+          cleanup_status=0
+          if [ -n "${BUILDX_BUILDER:-}" ]; then
+            timeout --kill-after=5s 30s docker buildx rm --force "$BUILDX_BUILDER" || cleanup_status=$?
+          fi
           if [ -n "${DOCKER_CONFIG:-}" ]; then
             rm -rf -- "$DOCKER_CONFIG"
           fi
+          exit "$cleanup_status"

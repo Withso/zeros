@@ -137,6 +137,23 @@ returned digest. The workflow attests and verifies that digest against its
 source commit and uploads a sanitized `publication.json` receipt. This proves
 publication/provenance, not host isolation, provider parity, or promotion.
 
+The publication builder uses a digest-pinned BuildKit container with 4 GiB total
+memory, a two-CPU quota and two concurrent build steps. A 2 GiB free-space threshold
+is polled on both the build-context filesystem and Docker's discovered local data
+root. The publisher cancels if either falls below that threshold or cannot be
+measured; this is not a strict disk reservation. Cancellation and the 90-minute
+build deadline escalate from termination to a forced kill after five seconds.
+Optional `ZEROS_CLOUD_VM_MIN_FREE_DISK_BYTES` applies the same guard to manual runs,
+which must also set `ZEROS_CLOUD_VM_DOCKER_ROOT` to Docker's local storage directory.
+Leaving the byte threshold unset preserves the existing CLI behavior. Remote
+Docker storage requires a separately qualified monitoring mechanism.
+The workflow retains bounded memory, disk, builder state and I/O diagnostics for
+seven days, and removes its builder and private registry credential store on
+success or ordinary failure while the runner remains available. Runner loss can
+prevent cleanup and artifact upload; sanitized resource samples are also streamed
+to the job log. These limits isolate builder pressure; they do not diagnose every
+runner disconnect or guarantee runner availability.
+
 The protected provider-qualification workflow below remains a separate gate.
 Publishing an image does not enable cloud execution or consume sandbox budget.
 
@@ -265,6 +282,8 @@ redistribution approval remain outside this provider qualification.
 | `DAYTONA_SANDBOX_CLASS`                                  | `container` (legacy parser only)       | Set `linux-vm` explicitly; protected workflow requires it |
 | `ZEROS_CLOUD_VM_REGISTRY_REPOSITORY`                      | required by VM publisher              | Registry/repository path, no tag or scheme; writer via Docker store |
 | `ZEROS_CLOUD_VM_IMAGE_RECEIPT`                           | required for Linux VM                 | Absolute owner-only fresh publication receipt consumed by bake |
+| `ZEROS_CLOUD_VM_MIN_FREE_DISK_BYTES`                     | unset; publication CI uses 2147483648 | Poll context and Docker storage filesystems; cancel below this nonnegative byte count |
+| `ZEROS_CLOUD_VM_DOCKER_ROOT`                            | required when disk guard is enabled  | Absolute local Docker data directory; CI discovers it through `docker info` |
 | `DAYTONA_TARGET`                                         | `eu`                                  | Provider region (`us` or `eu`)                    |
 | `ZEROS_SNAPSHOT_NAME`                                    | `zeros-engine-v1`                     | Registered image/snapshot name                    |
 | `ZEROS_REPO_URL` / `ZEROS_REPO_REF`                      | public repo / `main`                  | Reachable source ref baked into the image         |
