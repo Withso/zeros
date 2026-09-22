@@ -25,6 +25,13 @@ vi.mock("@daytona/sdk", () => ({ Image: { base: () => image.builder } }));
 import { buildEngineImage } from "../cloud-workspace-validation/image";
 
 describe("cloud image generated runtime artifacts", () => {
+  it("installs the SFTP helper required by the immutable package inventory", () => {
+    buildEngineImage();
+    const install = image.commands.find((command) =>
+      command.startsWith("apt-get install "),
+    );
+    expect(install?.split(/\s+/)).toContain("openssh-sftp-server");
+  });
   it("builds the ignored ZSR supervisor before recording the deployable image", () => {
     buildEngineImage();
     const build = image.commands.findIndex((command) =>

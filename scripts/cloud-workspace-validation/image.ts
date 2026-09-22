@@ -94,7 +94,7 @@ export function buildEngineImage(options: {sourceCommit?:string} = {}): Image {
         //    admission canary. The baked attestation records resolved package
         //    versions; the snapshot digest is the deployment identity.
         "apt-get update",
-        "apt-get install -y --no-install-recommends acl apparmor bubblewrap busybox-static ca-certificates crun curl file g++ git git-lfs gnupg inotify-tools make openssh-client podman procps python3 ripgrep slirp4netns socat uidmap unzip util-linux xz-utils",
+        "apt-get install -y --no-install-recommends acl apparmor bubblewrap busybox-static ca-certificates crun curl file g++ git git-lfs gnupg inotify-tools make openssh-client openssh-sftp-server podman procps python3 ripgrep slirp4netns socat uidmap unzip util-linux xz-utils",
         "rm -rf /var/lib/apt/lists/*",
         `groupadd --gid ${SANDBOX_AGENT_GID} zeros-agent`,
         "install -d -o root -g root -m 0755 /srv/zeros /srv/zeros/home",
