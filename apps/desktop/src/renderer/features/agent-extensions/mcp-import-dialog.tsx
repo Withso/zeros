@@ -18,6 +18,7 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -302,90 +303,90 @@ export function McpImportDialog({ open, onClose }: { open: boolean; onClose: () 
             encrypted vault.
           </DialogDescription>
         </DialogHeader>
-
-        <div className="flex max-h-[50vh] flex-col gap-4 overflow-y-auto">
-          {loading ? (
-            <div className="flex items-center gap-2 py-8 text-sm text-fg2">
-              <ZerosSpinner size={16} />
-              Scanning…
-            </div>
-          ) : scanError ? (
-            <p className="flex items-center gap-1.5 py-4 text-sm text-red-primary">
-              <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
-              {scanError}
-            </p>
-          ) : !hasAny ? (
-            <p className="py-8 text-center text-sm text-fg2">
-              No MCP servers found in Cursor, Claude, Codex, or Factory configs.
-            </p>
-          ) : (
-            (sources ?? [])
-              .filter((src) => src.servers.length > 0 || src.warning)
-              .map((src) => (
-                <section key={src.source} className="flex flex-col gap-1.5">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <h3 className="text-xs font-medium text-fg2">{src.label}</h3>
-                    {src.warning && (
-                      <Tooltip label={src.warning}>
-                        <span className="truncate text-xs text-fg2">
-                          {src.warning}
-                        </span>
-                      </Tooltip>
-                    )}
-                  </div>
-                  <div className="flex flex-col">
-                    {src.servers.map((srv) => {
-                      const already = existingNames.has(srv.name);
-                      const key = keyOf(src.source, srv.name);
-                      const isSel = selected.has(key);
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          disabled={already || busy}
-                          onClick={() => toggle(key)}
-                          className={cn(
-                            "flex items-center gap-2.5 rounded-sm px-1.5 py-2 text-left",
-                            already ? "opacity-50" : "hover:bg-bg2",
-                          )}
-                        >
-                          <span
-                            className={cn(
-                              "flex size-4 shrink-0 items-center justify-center rounded-sm border",
-                              isSel && !already
-                                ? "border-primary-button-bg bg-primary-button-bg text-primary-button-fg"
-                                : "border-border2",
-                            )}
-                            aria-hidden="true"
-                          >
-                            {isSel && !already && <Check className="size-3" />}
+        <DialogBody>
+          <div className="flex max-h-[50vh] flex-col gap-4 overflow-y-auto">
+            {loading ? (
+              <div className="flex items-center gap-2 py-8 text-sm text-fg2">
+                <ZerosSpinner size={16} />
+                Scanning…
+              </div>
+            ) : scanError ? (
+              <p className="flex items-center gap-1.5 py-4 text-sm text-red-primary">
+                <AlertTriangle className="size-4 shrink-0" aria-hidden="true" />
+                {scanError}
+              </p>
+            ) : !hasAny ? (
+              <p className="py-8 text-center text-sm text-fg2">
+                No MCP servers found in Cursor, Claude, Codex, or Factory configs.
+              </p>
+            ) : (
+              (sources ?? [])
+                .filter((src) => src.servers.length > 0 || src.warning)
+                .map((src) => (
+                  <section key={src.source} className="flex flex-col gap-1.5">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <h3 className="text-xs font-medium text-fg2">{src.label}</h3>
+                      {src.warning && (
+                        <Tooltip label={src.warning}>
+                          <span className="truncate text-xs text-fg2">
+                            {src.warning}
                           </span>
-                          <TransportPill transport={srv.transport} />
-                          <div className="min-w-0 flex-1">
-                            <div className="truncate text-sm text-fg1">{srv.name}</div>
-                            <div className="truncate font-mono text-xs text-fg2">
-                              {endpointSummary(srv as RawServer)}
+                        </Tooltip>
+                      )}
+                    </div>
+                    <div className="flex flex-col">
+                      {src.servers.map((srv) => {
+                        const already = existingNames.has(srv.name);
+                        const key = keyOf(src.source, srv.name);
+                        const isSel = selected.has(key);
+                        return (
+                          <button
+                            key={key}
+                            type="button"
+                            disabled={already || busy}
+                            onClick={() => toggle(key)}
+                            className={cn(
+                              "flex items-center gap-2.5 rounded-sm px-1.5 py-2 text-left",
+                              already ? "opacity-50" : "hover:bg-bg2",
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                "flex size-4 shrink-0 items-center justify-center rounded-sm border",
+                                isSel && !already
+                                  ? "border-primary-button-bg bg-primary-button-bg text-primary-button-fg"
+                                  : "border-border2",
+                              )}
+                              aria-hidden="true"
+                            >
+                              {isSel && !already && <Check className="size-3" />}
+                            </span>
+                            <TransportPill transport={srv.transport} />
+                            <div className="min-w-0 flex-1">
+                              <div className="truncate text-sm text-fg1">{srv.name}</div>
+                              <div className="truncate font-mono text-xs text-fg2">
+                                {endpointSummary(srv as RawServer)}
+                              </div>
                             </div>
-                          </div>
-                          {already && (
-                            <span className="shrink-0 text-xs text-fg2">Already added</span>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </section>
-              ))
-          )}
+                            {already && (
+                              <span className="shrink-0 text-xs text-fg2">Already added</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </section>
+                ))
+            )}
 
-          {hasAny && (
-            <p className="text-xs text-fg2">
-              Tip: Cursor caps the total number of MCP tools at ~40 across all servers —
-              importing many at once may exceed that.
-            </p>
-          )}
-        </div>
-
+            {hasAny && (
+              <p className="text-xs text-fg2">
+                Tip: Cursor caps the total number of MCP tools at ~40 across all servers —
+                importing many at once may exceed that.
+              </p>
+            )}
+          </div>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
             Cancel

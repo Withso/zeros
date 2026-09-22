@@ -399,6 +399,8 @@ interface WorkspaceFileTreeProps {
   paddingTop?: number;
   /** Extra classes for the root (sizing). Theme vars + bg already live here. */
   className?: string;
+  /** Shown only for a confirmed empty workspace, never a filtered empty tree. */
+  emptyWorkspaceState?: React.ReactNode;
 }
 
 /** Imperative search bridge for hosts that place their filter in shared chrome
@@ -429,6 +431,7 @@ export const WorkspaceFileTree = React.forwardRef<
     designFilter,
     paddingTop = TREE_CONTENT_PAD_TOP,
     className,
+    emptyWorkspaceState,
   },
   ref,
 ) {
@@ -530,12 +533,11 @@ export const WorkspaceFileTree = React.forwardRef<
   // design document belong to its tree, not the code tree. The directories come
   // from the same validated listing snapshot, so an ignored root that
   // merely shares a design folder's name prefix stays where it is.
-  const { paths: rawIgnoredPaths, expandedDirs } = useIgnoredEntries(
-    cwd,
-    reloadKey,
-    model,
-    active,
-  );
+  const {
+    paths: rawIgnoredPaths,
+    expandedDirs,
+    resolved: ignoredResolved,
+  } = useIgnoredEntries(cwd, reloadKey, model, active);
   const ignoredPaths = useMemo(() => {
     const filter = designFilterRef.current;
     if (!filter || rawIgnoredPaths.length === 0) return rawIgnoredPaths;
@@ -950,6 +952,14 @@ export const WorkspaceFileTree = React.forwardRef<
           />
         )}
       />
+      {emptyWorkspaceState &&
+        cwd &&
+        listing !== EMPTY_FILE_LISTING &&
+        rawTrackedPaths.length === 0 &&
+        rawIgnoredPaths.length === 0 &&
+        ignoredResolved && (
+          <div className="absolute inset-0">{emptyWorkspaceState}</div>
+        )}
     </div>
   );
 });

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AppWindow,
+  Folder,
   Atom,
   Bird,
   BookOpen,
@@ -59,6 +60,7 @@ export interface RepositoryEmojiOption {
 }
 
 export const REPOSITORY_ICONS: RepositoryIconOption[] = [
+  { name: "folder", label: "Folder", keywords: ["directory", "files"], Icon: Folder },
   { name: "code-2", label: "Code", keywords: ["dev", "brackets"], Icon: Code2 },
   {
     name: "app-window",

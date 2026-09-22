@@ -385,6 +385,43 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("creates and reads nested files in a registered folder without initializing Git", async () => {
+    const folder = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-plain-folder-"));
+    try {
+      await svc.handle("project.upsert", {
+        repoRoot: folder,
+        repoSlug: "plain-folder",
+        name: "Plain folder",
+      });
+      const result = await svc.handle(
+        "file.write",
+        {
+          workspaceId: folder,
+          path: "src/nested/hello.txt",
+          content: "Folder workspace\n",
+        },
+        { remote: false },
+      );
+      expect(result).toMatchObject({ kind: "success" });
+      expect(
+        fs.readFileSync(path.join(folder, "src/nested/hello.txt"), "utf8"),
+      ).toBe("Folder workspace\n");
+      expect(
+        await svc.handle(
+          "file.read",
+          { workspaceId: folder, path: "src/nested/hello.txt" },
+          { remote: false },
+        ),
+      ).toMatchObject({ kind: "text", content: "Folder workspace\n" });
+      expect(
+        await svc.handle("file.tree", { workspaceId: folder }, { remote: false }),
+      ).toMatchObject({ files: expect.arrayContaining(["src/nested/hello.txt"]) });
+      expect(fs.existsSync(path.join(folder, ".git"))).toBe(false);
+    } finally {
+      fs.rmSync(folder, { recursive: true, force: true });
+    }
+  });
+
   it.each([false, true])(
     "writes an image attachment into the workspace context graph (symlinked root: %s)",
     async (symlinked) => {

@@ -30,6 +30,7 @@ import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -1136,17 +1137,19 @@ export function GitHubSection({
               This changes how Zeros connects to GitHub.
             </DialogDescription>
           </DialogHeader>
-          <ul className="text-fg2 m-0 list-disc space-y-2 pl-5 text-sm">
-            <li>
-              Zeros will stop using this connection for pull requests, pushes,
-              and other GitHub actions.
-            </li>
-            <li>gh CLI auth becomes the selected authentication method.</li>
-            <li>
-              The GitHub App installation and its repository access stay on
-              GitHub until you change them in GitHub settings.
-            </li>
-          </ul>
+          <DialogBody>
+            <ul className="text-fg2 m-0 list-disc space-y-2 pl-5 text-sm">
+              <li>
+                Zeros will stop using this connection for pull requests, pushes,
+                and other GitHub actions.
+              </li>
+              <li>gh CLI auth becomes the selected authentication method.</li>
+              <li>
+                The GitHub App installation and its repository access stay on
+                GitHub until you change them in GitHub settings.
+              </li>
+            </ul>
+          </DialogBody>
           <DialogFooter>
             <Button
               ref={disconnectCancelRef}

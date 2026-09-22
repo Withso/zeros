@@ -31,8 +31,22 @@ import {
 
 const folderA = "/summary-fixture/a";
 const folderB = "/summary-fixture/b";
-upsertProject({ repoRoot: folderA, name: "Summary A" });
-upsertProject({ repoRoot: folderB, name: "Summary B" });
+// This fixture exercises every destination, including GitHub Review. Plain
+// folder and local-only Review absence live in harness-folder-workspace.
+upsertProject({
+  repoRoot: folderA,
+  repoSlug: "a",
+  name: "Summary A",
+  isGitRepository: true,
+  originUrl: "https://github.com/example/summary-a.git",
+});
+upsertProject({
+  repoRoot: folderB,
+  repoSlug: "b",
+  name: "Summary B",
+  isGitRepository: true,
+  originUrl: "https://github.com/example/summary-b.git",
+});
 const listeners = new Map<string, Set<(message: BridgeMessage) => void>>();
 const messages: Array<Record<string, unknown>> = [];
 const overlayIntents: boolean[] = [];

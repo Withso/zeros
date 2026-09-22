@@ -2,7 +2,7 @@
 // Projects store — Repository panel's top-level entity
 // ──────────────────────────────────────────────────────────
 //
-// A Project = a git repo the user has opened in Zeros. Holds:
+// A Project = a repository or plain folder opened in Zeros. Holds:
 //   - `repoRoot`: absolute path of the main checkout
 //   - `repoSlug`: derived from origin URL (matches engine state.db)
 //   - `name`:    user-visible label (defaults to the repo's basename)
@@ -26,6 +26,7 @@
 import { getSetting, setSetting } from "../platform/settings";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { isWorktreePath } from "./workspace-resolution";
+import type { InspectFolderResult } from "../platform/git";
 import {
   bridgeProjectUpsert,
   bridgeProjectRemove,
@@ -39,6 +40,13 @@ const STORAGE_KEY = "projects-v1";
  *  key disappears but the backup carries the last good state. */
 const BACKUP_KEY = "projects-v1-backup";
 
+// Session-local generations prevent a background inspection from overwriting
+// a newer explicit Git setup. Entries are removed with their project owner.
+const gitRevisions = new Map<string, number>();
+export function projectGitRevision(id: string): number {
+  return gitRevisions.get(id) ?? 0;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -46,6 +54,8 @@ export interface Project {
   repoSlug: string;
   /** GitHub origin URL when we could read it. Used by the PR picker. */
   originUrl: string | null;
+  /** Last confirmed folder inspection. Absent in older boot caches. */
+  isGitRepository?: boolean;
   addedAt: number;
 }
 
@@ -81,6 +91,8 @@ function normalizeProjectList(projects: Project[]): {
     if (!existing.repoSlug && project.repoSlug)
       existing.repoSlug = project.repoSlug;
     if (!existing.name && project.name) existing.name = project.name;
+    if (existing.isGitRepository === undefined)
+      existing.isGitRepository = project.isGitRepository;
     existing.addedAt = Math.min(existing.addedAt, project.addedAt);
   }
   return { projects: Array.from(byRoot.values()), changed };
@@ -239,6 +251,7 @@ export function upsertProject(args: {
   repoSlug?: string;
   originUrl?: string | null;
   name?: string;
+  isGitRepository?: boolean;
 }): Project {
   const repoRoot = normalizeProjectRoot(args.repoRoot);
   const projects = loadProjects();
@@ -246,6 +259,13 @@ export function upsertProject(args: {
   if (existing) {
     // Bump origin / slug if we now know them and didn't before.
     let changed = false;
+    if (
+      args.isGitRepository !== undefined &&
+      existing.isGitRepository !== args.isGitRepository
+    ) {
+      existing.isGitRepository = args.isGitRepository;
+      changed = true;
+    }
     if (args.originUrl && !existing.originUrl) {
       existing.originUrl = args.originUrl;
       changed = true;
@@ -261,6 +281,7 @@ export function upsertProject(args: {
       changed = true;
     }
     if (changed) {
+      gitRevisions.set(existing.id, projectGitRevision(existing.id) + 1);
       saveProjects(projects);
       pushUpsert(existing);
     }
@@ -276,6 +297,9 @@ export function upsertProject(args: {
     repoRoot,
     repoSlug: slug,
     originUrl: args.originUrl ?? null,
+    ...(args.isGitRepository !== undefined
+      ? { isGitRepository: args.isGitRepository }
+      : {}),
     addedAt: Date.now(),
   };
   saveProjects([project, ...projects]);
@@ -283,9 +307,42 @@ export function upsertProject(args: {
   return project;
 }
 
+/** Apply an authoritative inspection to the same still-registered owner.
+ * Unlike additive upserts, this may clear or replace an origin. Names, slugs,
+ * workspace IDs and chat directories are stable across Git/remote changes. */
+export function applyProjectGitInspection(
+  owner: Project,
+  revision: number,
+  inspection: InspectFolderResult,
+): boolean {
+  const projects = loadProjects();
+  const project = projects.find((row) => row.id === owner.id);
+  if (
+    !project ||
+    project.repoRoot !== owner.repoRoot ||
+    projectGitRevision(owner.id) !== revision ||
+    project.isGitRepository !== owner.isGitRepository ||
+    project.originUrl !== owner.originUrl
+  )
+    return false;
+  const originUrl = inspection.isRepo ? inspection.originUrl : null;
+  if (
+    project.isGitRepository === inspection.isRepo &&
+    project.originUrl === originUrl
+  )
+    return false;
+  project.isGitRepository = inspection.isRepo;
+  project.originUrl = originUrl;
+  gitRevisions.set(project.id, revision + 1);
+  saveProjects(projects);
+  pushUpsert(project);
+  return true;
+}
+
 export function removeProject(projectId: string): void {
   const projects = loadProjects();
   const target = projects.find((p) => p.id === projectId);
+  gitRevisions.delete(projectId);
   const next = projects.filter((p) => p.id !== projectId);
   saveProjects(next);
   // Removing the LAST project must ALSO clear the backup. saveProjects() leaves

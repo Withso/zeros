@@ -19,7 +19,10 @@ import { Button } from "../../shared/ui";
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogBody,
   DialogDescription,
+  DialogFooter,
   DialogTitle,
 } from "../../shared/ui/primitives/dialog";
 import { toast } from "../../shared/ui/primitives/elements";
@@ -170,31 +173,31 @@ export function AddLocalProjectDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[480px] gap-4">
-        <div className="flex flex-col gap-1.5">
-          <DialogTitle className="text-sm font-medium">
+      <DialogContent className="max-w-[480px]">
+        <DialogHeader>
+          <DialogTitle className="font-medium">
             Add local project
           </DialogTitle>
-          <DialogDescription className="text-fg2 text-sm">
+          <DialogDescription className="text-fg2 text-xs">
             This folder is a worktree managed by{" "}
             <span className="text-fg1 font-medium">{toolLabel}</span>. Zeros
             will add its repository and adopt this worktree as a workspace — the
             worktree stays exactly where it is.
           </DialogDescription>
-        </div>
-
-        <div className="border-border1 bg-bg2 flex flex-col gap-1.5 rounded-md border px-3 py-2.5">
-          <div className="flex items-center gap-2">
-            <GitBranch className="text-fg2 size-3.5 shrink-0" />
-            <span className="text-fg1 truncate text-sm">{branchLabel}</span>
+        </DialogHeader>
+        <DialogBody>
+          <div className="border-border1 bg-bg2 flex flex-col gap-1.5 rounded-md border px-3 py-2.5">
+            <div className="flex items-center gap-2">
+              <GitBranch className="text-fg2 size-3.5 shrink-0" />
+              <span className="text-fg1 truncate text-sm">{branchLabel}</span>
+            </div>
+            {ownerRepo && (
+              <div className="text-fg2 pl-5.5 text-xs">{ownerRepo}</div>
+            )}
+            <div className="text-fg2 truncate pl-5.5 text-xs">{inspect.path}</div>
           </div>
-          {ownerRepo && (
-            <div className="text-fg2 pl-5.5 text-xs">{ownerRepo}</div>
-          )}
-          <div className="text-fg2 truncate pl-5.5 text-xs">{inspect.path}</div>
-        </div>
-
-        <div className="flex items-center justify-end gap-2 pt-1">
+        </DialogBody>
+        <DialogFooter>
           <Button
             variant="ghost"
             size="sm"
@@ -212,7 +215,7 @@ export function AddLocalProjectDialog({
             {busy && <ZerosSpinner size={16} tone="inverted" />}
             Add project
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

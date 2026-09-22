@@ -14,7 +14,7 @@
 // The Code/Design toggle above the card's right edge (the same control every
 // workspace's chat strip carries) picks which MODE the new workspace opens in:
 //
-//   Code   → "Create" creates a git worktree in the selected project
+//   Code   → creates a worktree in the selected project
 //            (optionally off a chosen PR/branch base) and lands a fresh chat
 //            bound to the picked agent + model. With a typed prompt it seeds
 //            that chat's composer and one-shot auto-sends the first turn
@@ -32,7 +32,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderOpen, FolderPlus, Sparkles } from "lucide-react";
+import { ChevronDown, FolderOpen, FolderPlus, Plus } from "lucide-react";
 
 import { GithubIcon } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
@@ -66,7 +66,8 @@ import {
   useActiveChatId,
 } from "../../state/store";
 import type { ChatThread } from "../../state/store";
-import { newChatId } from "../../state/chat-id";
+import { createDispatcherChat } from "./dispatcher-chat";
+import { prepareProjectFolder } from "../project-folder-setup";
 import {
   loadAgents,
   useAgentsSnapshot,
@@ -159,17 +160,8 @@ export function DispatcherPage({
   // project switches (a designer creating several design workspaces should not
   // re-pick Design each time); it collapses to Code wherever Design cannot run.
   const [requestedMode, setRequestedMode] = useState<WorkspaceMode>("code");
-  const mode: WorkspaceMode = designWorkspaceCreationAvailable
-    ? requestedMode
-    : "code";
   const wasActiveRef = useRef(false);
   const lastInitialProjectIdRef = useRef<string | null | undefined>(undefined);
-
-  // The base is repo-scoped — clear it whenever the target project changes so a
-  // branch from project A never leaks into a create on project B.
-  useEffect(() => {
-    setBase(null);
-  }, [selectedProjectId]);
 
   // Warm the agent registry each time the page becomes active (route through
   // loadAgents — a raw sessions.listAgents() round-trips the engine but never
@@ -212,19 +204,28 @@ export function DispatcherPage({
     [projects, selectedProjectId],
   );
 
+  const needsGitSetup = selectedProject?.isGitRepository === false;
+  const canCreateDesign = designWorkspaceCreationAvailable;
+  const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
+
+  // A branch selection belongs to the selected repository's Git capability.
+  useEffect(() => {
+    setBase(null);
+  }, [selectedProjectId]);
+
   // What Design entry would do to the selected repository's main checkout
   // (open its design folder, or create "<repo> - Design"). Warmed while the
   // page is active so flipping the toggle answers from the cache; a hidden
   // Create page reads nothing.
   const designTarget = useDesignDirectoryTarget(
-    active && designWorkspaceCreationAvailable && selectedProject
+    active && canCreateDesign && selectedProject
       ? designDirectoryTargetKeyForRepo(selectedProject.repoRoot)
       : null,
   );
 
   const handleCreateDesign = async () => {
     const project = selectedProject;
-    if (!project || busy || designBusy || !designWorkspaceCreationAvailable) {
+    if (!active || !project || busy || designBusy || !canCreateDesign) {
       return;
     }
     setDesignBusy(true);
@@ -244,7 +245,7 @@ export function DispatcherPage({
 
   const handleCreate = async (payload: DispatcherCreatePayload) => {
     const project = selectedProject;
-    if (!project || busy) return;
+    if (!active || !project || busy || designBusy) return;
     // Organization selection is part of the create intent. Snapshot it before
     // any asynchronous reservation so a switch during prepare cannot retarget
     // the new workspace.
@@ -267,6 +268,9 @@ export function DispatcherPage({
     const baseBranch = base?.branch;
     let prepared: Awaited<ReturnType<typeof workspacePrepareCreate>>;
     try {
+      if (nativeRuntime.ready || nativeRuntime.expectedElectron) {
+        await prepareProjectFolder(project.repoRoot);
+      }
       prepared = await workspacePrepareCreate({
         repoRoot: project.repoRoot,
         repoSlug: project.repoSlug,
@@ -299,55 +303,13 @@ export function DispatcherPage({
     markWorkspaceSettling(prepared.path);
     setBusy(false);
 
-    const chatId = newChatId();
-    const chat: ChatThread = {
-      id: chatId,
+    const chatId = createDispatcherChat({
+      dispatch,
+      repoRoot: project.repoRoot,
       folder: prepared.path,
-      agentId: payload.selection.agentId,
-      agentName: payload.selection.agentName,
-      model: payload.selection.model,
-      effort: payload.effort,
-      permissionMode: payload.permissionMode,
-      // Carry the EXACT native mode the user picked so bind restores it
-      // losslessly (e.g. Claude "Accept Edits" doesn't collapse to "Auto").
-      ...(payload.lastModeId ? { lastModeId: payload.lastModeId } : {}),
-      ...(payload.fast ? { fast: true } : {}),
-      ...(payload.additionalDirectories.length > 0
-        ? { additionalDirectories: payload.additionalDirectories }
-        : {}),
-      title: "Untitled",
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    // Seed the composer draft BEFORE ADD_CHAT so the AgentChat that mounts
-    // for this chat reads it on first render, then mark it for one-shot
-    // auto-send — the send waits until the session is ready, and the session
-    // itself waits for settling to clear, so the agent never starts before
-    // checkout. ADD_CHAT activates the chat (sets activeChatId),
-    // switching Conversation pane to the new workspace THIS frame.
-    if (payload.serialized) {
-      dispatch({
-        type: "SET_CHAT_DRAFT",
-        chatId,
-        draft: {
-          text: payload.serialized.displayText,
-          attachments: payload.serialized.attachments,
-          json: payload.serialized.json,
-        },
-      });
-    }
-    dispatch({
-      type: "ADD_CHAT",
-      chat,
-      recordWorkspaceActivity: true,
-      openWorkspace: {
-        repoRoot: project.repoRoot,
-        validationPending: true,
-      },
+      payload,
+      validationPending: true,
     });
-    if (payload.serialized) {
-      dispatch({ type: "REQUEST_AUTO_SEND", chatId });
-    }
 
     const rollbackOptimisticChat = () => {
       discardQueuedContextGraphWrites(prepared.path);
@@ -472,7 +434,7 @@ export function DispatcherPage({
       <div className="flex w-full max-w-[640px] flex-col gap-2">
         {/* Workspace mode is page-level intent, not composer content. Keep it
             outside the card and align it with the card's right edge. */}
-        {designWorkspaceCreationAvailable && (
+        {canCreateDesign && (
           <div data-dispatcher-mode-switcher="" className="flex self-end">
             <WorkspaceModeToggleView
               mode={mode}
@@ -574,8 +536,8 @@ export function DispatcherPage({
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => onQuickStart()}>
-                  <Sparkles className="text-fg2" strokeWidth={1.5} />
-                  <span>Quick start</span>
+                  <Plus className="text-fg2" strokeWidth={1.5} />
+                  <span>Start from scratch</span>
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -584,11 +546,13 @@ export function DispatcherPage({
 
             {/* Create from… — pick a PR/branch base (right-aligned, matching
               the shared design). Cloud toggle is intentionally omitted. */}
-            <CreateFromSource
-              project={selectedProject}
-              value={base}
-              onChange={setBase}
-            />
+            {!needsGitSetup && (
+              <CreateFromSource
+                project={selectedProject}
+                value={base}
+                onChange={setBase}
+              />
+            )}
           </div>
 
           {/* Composer — flush, full-width (no card, no outer padding); its own

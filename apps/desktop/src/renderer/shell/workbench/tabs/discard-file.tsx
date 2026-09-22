@@ -12,6 +12,7 @@ import {
   Button,
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -172,11 +173,13 @@ export function DiscardDialog({
   }, [onConfirm]);
   return (
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>
             {isNew ? "Delete untracked file?" : "Discard file changes?"}
           </DialogTitle>
+        </DialogHeader>
+        <DialogBody>
           <DialogDescription>
             {isNew ? (
               <>
@@ -196,9 +199,9 @@ export function DiscardDialog({
               </>
             )}
           </DialogDescription>
-        </DialogHeader>
-        <DialogFooter className="mt-2 gap-2">
-          <Button variant="secondary" size="sm" onClick={onCancel}>
+        </DialogBody>
+        <DialogFooter>
+          <Button autoFocus variant="secondary" size="sm" onClick={onCancel}>
             Cancel
           </Button>
           <Button variant="destructive" size="sm" onClick={onConfirm}>

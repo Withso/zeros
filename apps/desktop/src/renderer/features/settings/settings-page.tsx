@@ -91,6 +91,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -1500,11 +1501,13 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Delete Codex memories?</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
             <DialogDescription>
               This removes the local memories Codex has learned on this device.
               It does not delete your Zeros chats.
             </DialogDescription>
-          </DialogHeader>
+          </DialogBody>
           <DialogFooter>
             <Button
               variant="ghost"
@@ -1548,8 +1551,6 @@ function TerminalAgentsPanel() {
 function ExperimentalPanel() {
   const [terminalAgents, setTerminalAgents] =
     useExperimentalFeature("terminalAgents");
-  const [workInLocalMain, setWorkInLocalMain] =
-    useExperimentalFeature("workInLocalMain");
   const [hideArchived, setHideArchived] = useExperimentalFeature(
     "hideArchivedWorkspacesAfter15Days",
   );
@@ -1569,16 +1570,6 @@ function ExperimentalPanel() {
             checked={terminalAgents}
             onCheckedChange={setTerminalAgents}
             aria-label="Show the Terminal Agents tab"
-          />
-        </SettingsRow>
-        <SettingsRow
-          label="Work in local main"
-          hint="Adds a main tab for each repo's primary checkout so agents can run against it."
-        >
-          <Switch
-            checked={workInLocalMain}
-            onCheckedChange={setWorkInLocalMain}
-            aria-label="Show the main workspace in the top bar"
           />
         </SettingsRow>
         <SettingsRow

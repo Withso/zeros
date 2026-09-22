@@ -21,6 +21,7 @@ import {
   EyeOff,
   Ellipsis,
   FolderX,
+  Folder,
   GitMerge,
   GitPullRequestArrow,
   Trash2,
@@ -45,6 +46,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogHeader,
   DialogTitle,
   DialogDescription,
@@ -97,6 +99,8 @@ import {
   projectInitial,
   RepositoryIcon,
 } from "../repositories/repository-icon";
+import { isLocalMainWorkspace } from "../../state/local-main-workspace";
+import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
 import type { Project } from "../../state/projects-store";
 
 const REPO_CHIP_CLS =
@@ -142,10 +146,11 @@ export function DashboardPage() {
   const { projects } = useProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
+  const listedWorkspaces = useFolderWorkspaces(liveWorkspaces, projects);
   const activeOrganization = useActiveOrganization();
   const accessibleLiveWorkspaces = useMemo(
-    () => filterRowsForOrganization(liveWorkspaces, activeOrganization),
-    [activeOrganization, liveWorkspaces],
+    () => filterRowsForOrganization(listedWorkspaces, activeOrganization),
+    [activeOrganization, listedWorkspaces],
   );
   const workspaces = useLiveVisible(accessibleLiveWorkspaces);
   const rawPending = usePendingCreatesAll();
@@ -267,7 +272,9 @@ export function DashboardPage() {
         workspace: w,
         project,
         repoName: project?.name ?? w.repoSlug,
-        title: titleByFolder.get(w.path)?.title || branch,
+        title: isLocalMainWorkspace(w)
+            ? branch
+            : titleByFolder.get(w.path)?.title || branch,
         branch,
       };
     };
@@ -686,13 +693,15 @@ function ArchivedCard({
             <DialogTitle>
               Delete the saved snapshot for “{row.title}”?
             </DialogTitle>
+          </DialogHeader>
+          <DialogBody>
             <DialogDescription>
               Files stored only in this snapshot, including uncommitted files
               and attachments, will no longer be restorable from this archive.
               Chats, messages, the branch, and workspace history will be kept.
               Unarchiving afterward restores committed files only.
             </DialogDescription>
-          </DialogHeader>
+          </DialogBody>
           <DialogFooter>
             <Button
               disabled={deletingSnapshot}
@@ -768,7 +777,10 @@ function DashboardCard({
   // Lazy, tri-state dirtiness probe (replaces the removed heavy withChanges list
   // column). `undefined` until the first probe resolves → resolveCardActionKind
   // shows NO button rather than a possibly-wrong destructive Merge.
-  const hasChanges = useWorkspaceHasChanges(w, true, { probeWithPr: true });
+  const localFolder = isLocalMainWorkspace(w);
+  const hasChanges = useWorkspaceHasChanges(localFolder ? null : w, !localFolder, {
+    probeWithPr: true,
+  });
   // Missing or broken Git metadata keeps the workspace reachable for recovery.
   const missing = w.present === false;
 
@@ -903,7 +915,9 @@ function DashboardCard({
           <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
             {row.branch}
           </span>
-          {missing ? (
+          {localFolder ? (
+            <Folder className="text-fg2 size-3.5" strokeWidth={1.5} />
+          ) : missing ? (
             <Tooltip label="Worktree folder deleted on disk">
               <FolderX
                 className="text-red-fg size-3.5 shrink-0"

@@ -22,7 +22,6 @@ import {
   FolderOpen,
   Plus,
   Settings,
-  Sparkles,
   SquareKanban,
 } from "lucide-react";
 
@@ -36,6 +35,7 @@ import {
   useLiveWorkspaces,
   useProjects,
 } from "../state/use-projects";
+import { useFolderWorkspaces } from "../state/use-folder-workspaces";
 import { countLiveVisibleBySlug } from "../state/live-workspace-selectors";
 import {
   usePendingCreatesAll,
@@ -133,7 +133,7 @@ function RepoRow({
         <RepositoryIcon project={project} className="size-full rounded-sm" />
       </span>
       <span className="min-w-0 flex-1 truncate">{project.name}</span>
-      {count > 0 && (
+      {project.isGitRepository !== false && count > 0 && (
         <span className="text-muted-fg shrink-0 text-xs tabular-nums">
           {count}
         </span>
@@ -165,7 +165,8 @@ export function HomeSidebar() {
       : activePage;
   // Same single live source the top bar + Dashboard read (the per-repo cache
   // union), so a repo badge can never disagree with that repo's tab count.
-  const { workspaces } = useLiveWorkspaces();
+  const { workspaces: managedWorkspaces } = useLiveWorkspaces();
+  const workspaces = useFolderWorkspaces(managedWorkspaces, projects);
   const rawPending = usePendingCreatesAll();
   const activeOrganization = useActiveOrganization();
   const accessibleWorkspaces = useMemo(
@@ -302,8 +303,8 @@ export function HomeSidebar() {
                 <span>Open GitHub project…</span>
               </DropdownMenuItem>
               <DropdownMenuItem onSelect={quickStart}>
-                <Sparkles />
-                <span>Quick start…</span>
+                <Plus />
+                <span>Start from scratch…</span>
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>

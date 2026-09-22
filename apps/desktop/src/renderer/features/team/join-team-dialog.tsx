@@ -17,6 +17,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -86,29 +87,31 @@ export function JoinTeamDialog({
             You've been invited to join a team on Zeros.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-1.5">
-          <Input
-            autoFocus
-            value={draft}
-            disabled={busy}
-            onChange={(e) => {
-              setDraft(e.target.value);
-              setError(null);
-            }}
-            placeholder="https://app.zeros.build/invite?token=…"
-            aria-label="Invite link or code"
-            spellCheck={false}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void join();
-            }}
-          />
-          {draft.trim() && !token && (
-            <p className="text-fg2 text-xs">
-              That doesn't look like an invite link or code.
-            </p>
-          )}
-          {error && <p className="text-red-primary text-xs">{error}</p>}
-        </div>
+        <DialogBody>
+          <div className="flex flex-col gap-1.5">
+            <Input
+              autoFocus
+              value={draft}
+              disabled={busy}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                setError(null);
+              }}
+              placeholder="https://app.zeros.build/invite?token=…"
+              aria-label="Invite link or code"
+              spellCheck={false}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void join();
+              }}
+            />
+            {draft.trim() && !token && (
+              <p className="text-fg2 text-xs">
+                That doesn't look like an invite link or code.
+              </p>
+            )}
+            {error && <p className="text-red-primary text-xs">{error}</p>}
+          </div>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" disabled={busy} onClick={() => onOpenChange(false)}>
             Cancel

@@ -3,7 +3,7 @@
 // ──────────────────────────────────────────────────────────
 //
 // A frosted command surface: a search box at the top and the shortcut catalog
-// below (no visible title bar). Opened from anywhere with ⌘/ (see
+// below a shared dialog heading. Opened from anywhere with ⌘/ (see
 // use-shortcuts-hotkey.ts); dismissed by Escape, click-away, or ⌘/ again.
 //
 // Two modes:
@@ -18,21 +18,19 @@
 // CommandItem's data-[selected] fill is overridden to transparent) and nothing
 // to activate — the palette is a reference surface.
 //
-// It composes cmdk inside the raw Radix Dialog primitives — NOT the shared
-// <CommandDialog> — for two reasons:
-//   1. a lighter scrim (bg-scrim/30, no full-screen blur) so the app frosts
-//      *through* the panel instead of hiding behind the modal's 80% veil, and
-//   2. glass on the panel itself: a --bg2 wash (30%) + a STRONG, smooth
-//      backdrop blur that melts the app behind into clean colour — thick
-//      glass, not a thin film and not a milky frost. The inner cmdk root is forced
-//      transparent (bg-transparent overrides its default opaque bg-bg3) so
-//      the glass shows through.
-// Both light and dark themes come for free — every class is a token utility.
+// The shared dialog owns its heading, close control and 50% modal scrim.
+// The command surface retains its translucent panel and backdrop blur.
 // ──────────────────────────────────────────────────────────
 
 import * as React from "react";
-import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { publishNativeSurfaceOverlayIntent } from "../shared/ui/native-surface-overlay";
+import {
+  Dialog,
+  DialogContent,
+  DialogBody,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "../shared/ui/primitives/dialog";
 
 import {
   Command,
@@ -85,70 +83,55 @@ export function ShortcutsPalette({
       }));
 
   return (
-    <DialogPrimitive.Root
-      open={open}
-      onOpenChange={(nextOpen) => {
-        publishNativeSurfaceOverlayIntent(nextOpen);
-        onOpenChange(nextOpen);
-      }}
-    >
-      <DialogPrimitive.Portal>
-        {/* Light scrim only — dims the app a touch so the glass reads, but
-            keeps it visible through the panel (no full-screen blur). */}
-        <DialogPrimitive.Overlay
-          className={cn(
-            "bg-scrim/30 fixed inset-0 z-50",
-            "data-[state=open]:animate-in data-[state=closed]:animate-out",
-            "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
-          )}
-        />
-        <DialogPrimitive.Content
-          aria-label="Keyboard shortcuts"
-          className={cn(
-            // Dead-center both axes. FIXED height (not max-h): the panel is
-            // the same size on every tab / search state — no height jumps —
-            // and stays responsive to the window through the 72vh term.
-            // 344px = eight visible shortcut rows: input 36 (h-9) + tabs 44
-            // (py-2 + h-7) + list padding 8 + 8 × 32px rows; 660px wide keeps
-            // the previous 600×312 proportion. Overflowing content scrolls
-            // in the list (flex-col + min-h-0).
-            "fixed top-1/2 left-1/2 z-50 flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
-            "h-[min(72vh,344px)]",
-            "border-border2/60 overflow-hidden rounded-lg border shadow-[var(--shadow-dropdown)]",
-            // Thick glass (tuned to the user's reference): a --bg2 wash for
-            // warmth + a STRONG smooth blur that melts the app behind into clean
-            // colour — not a thin see-through film, not a milky frost (milk = too
-            // little tint + too much saturate; deep glass = the reverse). Levers:
-            // blur = glass thickness; bg2 alpha = warmth/body; and note --bg2 ≈
-            // the app's own luminance, so it's the SCRIM (not the tint) that
-            // actually darkens the panel — deepen bg-scrim if you want it darker.
-            "bg-bg2/30 backdrop-blur-[28px] backdrop-saturate-[1.2]",
-            // Subtle scale-from-center on open/close (matches dialog.tsx). The
-            // panel is centered with the negative translate-x / translate-y
-            // half utilities, which in Tailwind v4 are the standalone
-            // `translate` property — separate from the `transform`
-            // tw-animate-css animates — so it stays put through the zoom. Do
-            // NOT re-add the slide-in helpers: those double the -50% into the
-            // animated transform and fling the panel to the top-left (see the
-            // long note in dialog.tsx). `origin-center` + zoom keeps it pinned
-            // to the middle.
-            "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
-            "data-[state=open]:animate-in data-[state=closed]:animate-out",
-            "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
-            "data-[state=open]:zoom-in-97 data-[state=closed]:zoom-out-97",
-          )}
-        >
-          {/* Radix a11y: labelled + described, nothing visible (no title bar). */}
-          <DialogPrimitive.Title className="sr-only">
-            Keyboard shortcuts
-          </DialogPrimitive.Title>
-          <DialogPrimitive.Description className="sr-only">
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent
+        dismissable
+        aria-label="Keyboard shortcuts"
+        className={cn(
+          // Dead-center both axes. FIXED height (not max-h): the panel is
+          // the same size on every tab / search state — no height jumps —
+          // and stays responsive to the window through the 72vh term.
+          // 432px = title row 40 + body padding 48 + eight shortcut rows: input 36 (h-9) + tabs 44
+          // (py-2 + h-7) + list padding 8 + 8 × 32px rows; 660px wide keeps
+          // the previous 600×312 proportion. Overflowing content scrolls
+          // in the list (flex-col + min-h-0).
+          "fixed top-1/2 left-1/2 z-50 flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
+          "h-[min(72vh,432px)] gap-0 p-0",
+          "border-border2/60 overflow-hidden rounded-lg border shadow-[var(--shadow-dropdown)]",
+          // Thick glass (tuned to the user's reference): a --bg2 wash for
+          // warmth + a STRONG smooth blur that melts the app behind into clean
+          // colour — not a thin see-through film, not a milky frost (milk = too
+          // little tint + too much saturate; deep glass = the reverse). Levers:
+          // blur = glass thickness; bg2 alpha = warmth/body; and note --bg2 ≈
+          // the app's own luminance, so it's the SCRIM (not the tint) that
+          // actually darkens the panel — deepen bg-scrim if you want it darker.
+          "bg-bg2/30 backdrop-blur-[28px] backdrop-saturate-[1.2]",
+          // Subtle scale-from-center on open/close (matches dialog.tsx). The
+          // panel is centered with the negative translate-x / translate-y
+          // half utilities, which in Tailwind v4 are the standalone
+          // `translate` property — separate from the `transform`
+          // tw-animate-css animates — so it stays put through the zoom. Do
+          // NOT re-add the slide-in helpers: those double the -50% into the
+          // animated transform and fling the panel to the top-left (see the
+          // long note in dialog.tsx). `origin-center` + zoom keeps it pinned
+          // to the middle.
+          "origin-center duration-200 ease-out data-[state=closed]:duration-150 data-[state=closed]:ease-in",
+          "data-[state=open]:animate-in data-[state=closed]:animate-out",
+          "data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
+          "data-[state=open]:zoom-in-97 data-[state=closed]:zoom-out-97",
+        )}
+      >
+        <DialogHeader>
+          <DialogTitle>Keyboard shortcuts</DialogTitle>
+          <DialogDescription className="sr-only">
             Search and browse every keyboard shortcut.
-          </DialogPrimitive.Description>
+          </DialogDescription>
+        </DialogHeader>
 
+        <DialogBody className="flex-1 gap-0">
           {/* bg-transparent overrides the cmdk root's opaque bg-bg3 so the
-              panel glass shows through the list; min-h-0 lets the root shrink
-              inside the capped panel so CommandList (flex-1) scrolls. */}
+                panel glass shows through the list; min-h-0 lets the root shrink
+                inside the capped panel so CommandList (flex-1) scrolls. */}
           <Command className="min-h-0 bg-transparent">
             <CommandInput
               autoFocus
@@ -158,7 +141,7 @@ export function ShortcutsPalette({
             />
 
             {/* Category tabs — hidden while searching (results span every
-                category and carry their own tag instead). */}
+                  category and carry their own tag instead). */}
             {!searching && (
               <div className="flex shrink-0 flex-wrap items-center gap-1 px-2 py-2">
                 {SHORTCUT_CATEGORIES.map((category) => {
@@ -203,9 +186,9 @@ export function ShortcutsPalette({
                     {shortcut.label}
                   </span>
                   {/* Chips share the tabs' translucent --selected-glass wash
-                      so they stay glassy on the frosted panel. The Kbd here
-                      also drops its border (this palette only — everywhere
-                      else Kbd keeps border1): the wash alone is the chip. */}
+                        so they stay glassy on the frosted panel. The Kbd here
+                        also drops its border (this palette only — everywhere
+                        else Kbd keeps border1): the wash alone is the chip. */}
                   {searching && (
                     <span className="text-3xxs text-fg2 shrink-0 rounded-sm bg-[var(--selected-glass)] px-1.5 py-px font-medium">
                       {category.label}
@@ -225,8 +208,8 @@ export function ShortcutsPalette({
               ))}
             </CommandList>
           </Command>
-        </DialogPrimitive.Content>
-      </DialogPrimitive.Portal>
-    </DialogPrimitive.Root>
+        </DialogBody>
+      </DialogContent>
+    </Dialog>
   );
 }

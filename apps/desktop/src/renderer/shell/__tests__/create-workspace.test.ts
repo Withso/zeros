@@ -8,6 +8,10 @@ const peekWorkspacesFor = vi.fn<(slug: string) => Workspace[] | undefined>();
 const reloadWorkspacesFor = vi.fn<(slug: string) => Promise<boolean>>();
 const workspacePrepareCreate = vi.fn();
 const workspaceCreate = vi.fn();
+const prepareProjectFolder = vi.fn();
+vi.mock("../project-folder-setup", () => ({
+  prepareProjectFolder: (root: string) => prepareProjectFolder(root),
+}));
 const spawnPreparedDefaultChat = vi.fn((_args: unknown) => ({
   id: "chat-1",
   agentId: null,
@@ -96,6 +100,9 @@ const project = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  prepareProjectFolder
+    .mockReset()
+    .mockResolvedValue({ isRepo: true, hasCommits: true });
   isNativeRuntime.mockReturnValue(true);
   isExpectedElectron.mockReturnValue(true);
 });
@@ -162,6 +169,18 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
 });
 
 describe("createWorkspaceForProject", () => {
+  it("does not reserve, navigate or spawn a chat when automatic Git setup fails", async () => {
+    prepareProjectFolder.mockRejectedValue(new Error("Git unavailable"));
+    const dispatch = vi.fn();
+    expect(await createWorkspaceForProject({ project, dispatch })).toBe(false);
+    expect(workspacePrepareCreate).not.toHaveBeenCalled();
+    expect(spawnPreparedDefaultChat).not.toHaveBeenCalled();
+    expect(dispatch).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledWith(
+      expect.stringContaining("Git unavailable"),
+    );
+  });
+
   it("refuses Design creation outside the desktop runtime", async () => {
     isNativeRuntime.mockReturnValue(false);
     isExpectedElectron.mockReturnValue(false);

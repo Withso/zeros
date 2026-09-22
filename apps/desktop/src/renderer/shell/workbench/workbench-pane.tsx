@@ -34,7 +34,7 @@ import { WorkbenchToggleButton } from "./toggle-button";
 import { useTerminalStore } from "../terminal/terminal-store";
 import { useWorkbenchFolder } from "./use-workbench-folder";
 import { TerminalPanel } from "./tabs/terminal-tab";
-import { visibleWorkbenchTabs } from "./terminal-tabs";
+import { availableWorkspaceTabs } from "./tab-capabilities";
 import { useTerminalPanelLayoutStore } from "../terminal/terminal-panel-layout";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import {
@@ -251,7 +251,6 @@ export function WorkbenchPane({
   collapsed = false,
 }: WorkbenchPaneProps) {
   const allTabs = useWorkbenchTabs();
-  const tabs = useMemo(() => visibleWorkbenchTabs(allTabs), [allTabs]);
   const [terminalHost, setTerminalHost] = useState<HTMLDivElement | null>(null);
   const persistedActiveId = useActiveWorkbenchTabId();
   const workbenchSlice = useWorkspaceStore(selectWorkbench);
@@ -262,6 +261,10 @@ export function WorkbenchPane({
   // auto-focus below.
   const { workspace: activeWorkspace, project: activeProject } =
     useActiveWorkspace();
+  const tabs = useMemo(
+    () => availableWorkspaceTabs(allTabs, activeProject),
+    [allTabs, activeProject],
+  );
   const storedActiveId = activeWorkspace
     ? migrateDesignPresentation(workbenchSlice, activeWorkspace.kind === "design" ? "design" : "code").activeId
     : persistedActiveId;

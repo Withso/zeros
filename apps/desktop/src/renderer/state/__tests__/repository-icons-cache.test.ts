@@ -220,6 +220,14 @@ describe("automatic repository icon cache", () => {
     expect(getAutomaticRepositoryIcon("/repo", "origin-b")).toBeNull();
   });
 
+  it("does not probe files or GitHub for a plain folder's default icon", async () => {
+    await warmAutomaticRepositoryIcons([
+      { repoRoot: "/projects/plain", originUrl: null, isGitRepository: false },
+    ]);
+    expect(mocks.readWorkspaceFile).not.toHaveBeenCalled();
+    expect(mocks.ghRepositoryOwnerAvatar).not.toHaveBeenCalled();
+  });
+
   it("warms every registered repository with bounded detection concurrency", async () => {
     let active = 0;
     let maxActive = 0;

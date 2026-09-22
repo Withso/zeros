@@ -27,7 +27,7 @@
 // ──────────────────────────────────────────────────────────
 
 import React, { useCallback, useRef, useState } from "react";
-import { FolderOpen, FolderTree, Search } from "lucide-react";
+import { File, FolderOpen, FolderTree, Search } from "lucide-react";
 
 import { useActiveWorkspace } from "@/renderer/state/use-active-workspace";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
@@ -313,6 +313,20 @@ export const FilesTab = React.memo(function FilesTab({
               // with no design document, so the split never has to be switched
               // on after the tree mounted and the filter was captured.
               designFilter="exclude-design"
+              emptyWorkspaceState={
+                !layout.hasFile ? (
+                  <div className="flex h-full min-h-0 flex-col items-center justify-center gap-3 px-6 text-center">
+                    <File
+                      className="text-muted-fg size-10"
+                      strokeWidth={1}
+                      aria-hidden
+                    />
+                    <p className="text-fg2 max-w-sm text-xs">
+                      No files in this workspace
+                    </p>
+                  </div>
+                ) : undefined
+              }
               initialSelectedPath={tab.filePath}
               selectedPath={treeSelectionMirrorTarget(active, tab.filePath)}
               scrollMemoryKey={JSON.stringify([

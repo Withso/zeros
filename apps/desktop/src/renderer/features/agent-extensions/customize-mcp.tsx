@@ -46,6 +46,7 @@ import { toast } from "../../shared/ui/primitives/elements";
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -157,49 +158,51 @@ function HeadlessAuthModal({
             the code (or the full redirect URL) it gives you.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col gap-4">
-          <div className="flex flex-col gap-1.5">
-            <span className="text-fg1 text-[14px] font-medium">
-              Authorization URL
-            </span>
-            <div className="flex gap-2">
+        <DialogBody>
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-fg1 text-[14px] font-medium">
+                Authorization URL
+              </span>
+              <div className="flex gap-2">
+                <Input
+                  readOnly
+                  value={state?.url ?? ""}
+                  className="font-mono text-xs"
+                  onFocus={(e) => e.currentTarget.select()}
+                />
+                <Button
+                  variant="secondary"
+                  size="lg"
+                  className="shrink-0"
+                  onClick={() => {
+                    if (state?.url) {
+                      void navigator.clipboard?.writeText(state.url);
+                      toast.success("URL copied");
+                    }
+                  }}
+                >
+                  Copy
+                </Button>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1.5">
+              <span className="text-fg1 text-[14px] font-medium">
+                Code or redirect URL
+              </span>
               <Input
-                readOnly
-                value={state?.url ?? ""}
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="code=… or the full …/callback?code=… URL"
                 className="font-mono text-xs"
-                onFocus={(e) => e.currentTarget.select()}
+                autoFocus
               />
-              <Button
-                variant="secondary"
-                size="lg"
-                className="shrink-0"
-                onClick={() => {
-                  if (state?.url) {
-                    void navigator.clipboard?.writeText(state.url);
-                    toast.success("URL copied");
-                  }
-                }}
-              >
-                Copy
-              </Button>
+              <p className="text-fg2 text-xs">
+                Paste what the browser shows after you authorize.
+              </p>
             </div>
           </div>
-          <div className="flex flex-col gap-1.5">
-            <span className="text-fg1 text-[14px] font-medium">
-              Code or redirect URL
-            </span>
-            <Input
-              value={code}
-              onChange={(e) => setCode(e.target.value)}
-              placeholder="code=… or the full …/callback?code=… URL"
-              className="font-mono text-xs"
-              autoFocus
-            />
-            <p className="text-fg2 text-xs">
-              Paste what the browser shows after you authorize.
-            </p>
-          </div>
-        </div>
+        </DialogBody>
         <DialogFooter>
           <Button variant="ghost" size="sm" onClick={onCancel}>
             Cancel

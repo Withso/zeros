@@ -53,22 +53,17 @@ export function leftmostLiveWorkspace(
  * no remembered workspace”. A confirmed list may invalidate a deleted target;
  * an unresolved list preserves the complete remembered identity immediately.
  *
- * `allowLocalMain` mirrors the "Work in local main" experimental flag. With it
- * off the primary checkout stops being an offered destination: a switch prefers
- * a real worktree instead, so the flag's whole point — never silently putting
- * an agent in the trunk — holds for navigation and not just for the tab strip.
- * Main stays the terminal fallback for a repo with no worktree at all, because
- * there is nowhere else to go; the top bar then shows "+" and no tabs. */
+ * Prefer managed worktrees when available. The original folder remains a
+ * compatibility fallback for existing root-bound chats and cold snapshots. */
 export function resolveRepoWorkspaceDestination(args: {
   project: Project;
   rememberedFolder: string | null | undefined;
   cachedWorkspaces: readonly Workspace[] | undefined;
-  allowLocalMain?: boolean;
-}): WorkspaceNavigationTarget {
+}): WorkspaceNavigationTarget | null {
   const { project, cachedWorkspaces } = args;
-  const allowLocalMain = args.allowLocalMain !== false;
   const accessibleCachedWorkspaces = cachedWorkspaces;
-  const rememberedFolder = args.rememberedFolder || project.repoRoot;
+  const rememberedFolder = args.rememberedFolder;
+  if (!rememberedFolder) return leftmostLiveWorkspace(cachedWorkspaces);
   const main = buildLocalMainWorkspace(project);
   const matched = accessibleCachedWorkspaces
     ? findWorkspaceForFolder(rememberedFolder, accessibleCachedWorkspaces)
@@ -82,10 +77,8 @@ export function resolveRepoWorkspaceDestination(args: {
     // The remembered folder is the primary checkout (or a directory below it).
     // A cold list can't prove a worktree exists, so it keeps the remembered
     // identity rather than guessing — the warm case is the one that redirects.
-    if (!allowLocalMain) {
-      const alternative = leftmostLiveWorkspace(accessibleCachedWorkspaces);
-      if (alternative) return alternative;
-    }
+    const alternative = leftmostLiveWorkspace(accessibleCachedWorkspaces);
+    if (alternative) return alternative;
     return rememberedFolder === project.repoRoot
       ? main
       : { path: rememberedFolder, repoRoot: project.repoRoot };
@@ -99,11 +92,7 @@ export function resolveRepoWorkspaceDestination(args: {
       validationPending: true,
     };
   }
-  if (!allowLocalMain) {
-    const alternative = leftmostLiveWorkspace(accessibleCachedWorkspaces);
-    if (alternative) return alternative;
-  }
-  return main;
+  return leftmostLiveWorkspace(accessibleCachedWorkspaces);
 }
 
 /** Shown instead of a number once a total no longer fits the two-digit budget

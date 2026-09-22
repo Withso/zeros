@@ -35,6 +35,8 @@ import { type SettingsSource } from "../settings/settings-ui";
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogTitle,
@@ -269,24 +271,28 @@ export function DesignSection({
           if (!open && !removing) setRemoveName(null);
         }}
       >
-        <DialogContent className="max-w-[480px] gap-4">
-          <DialogTitle>Remove Design registration?</DialogTitle>
-          <DialogDescription className="flex flex-col gap-3">
-            <span>
-              “{removeName}” will become a regular folder. Zeros will remove its
-              design.toml, saved Design metadata, registration, and unmodified
-              generated rules.md.
-            </span>
-            <span>
-              The folder and all HTML, CSS, images, and other source files will
-              stay exactly as they are. Custom rules.md content is preserved.
-            </span>
-            <span>
-              Tracked metadata removal is committed in the main checkout. You
-              can choose the folder again later; canvas positions and other
-              metadata-only settings will need to be rebuilt.
-            </span>
-          </DialogDescription>
+        <DialogContent className="max-w-[480px]">
+          <DialogHeader>
+            <DialogTitle>Remove Design registration?</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
+            <DialogDescription className="flex flex-col gap-3">
+              <span>
+                “{removeName}” will become a regular folder. Zeros will remove its
+                design.toml, saved Design metadata, registration, and unmodified
+                generated rules.md.
+              </span>
+              <span>
+                The folder and all HTML, CSS, images, and other source files will
+                stay exactly as they are. Custom rules.md content is preserved.
+              </span>
+              <span>
+                Tracked metadata removal is committed in the main checkout. You
+                can choose the folder again later; canvas positions and other
+                metadata-only settings will need to be rebuilt.
+              </span>
+            </DialogDescription>
+          </DialogBody>
           <DialogFooter>
             <Button
               variant="secondary"

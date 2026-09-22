@@ -18,7 +18,10 @@ import { Button, GithubIcon, Input } from "../../shared/ui";
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogBody,
   DialogDescription,
+  DialogFooter,
   DialogTitle,
 } from "../../shared/ui/primitives/dialog";
 import {
@@ -165,7 +168,7 @@ export function PublishToGithubDialog({
         private: isPrivate,
       });
       // Stamp the new remote onto the project so git surfaces light up.
-      upsertProject({ repoRoot, originUrl: res.originUrl });
+      upsertProject({ repoRoot, originUrl: res.originUrl, isGitRepository: true });
       notifyProjectsChanged();
       toast.success(`Published to ${res.owner}/${res.repo}`);
       onPublished?.({ repoRoot, originUrl: res.originUrl });
@@ -188,7 +191,7 @@ export function PublishToGithubDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-[520px] gap-5"
+        className="max-w-[520px]"
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canSubmit) {
             e.preventDefault();
@@ -196,99 +199,100 @@ export function PublishToGithubDialog({
           }
         }}
       >
-        <div className="flex flex-col gap-1.5">
-          <DialogTitle className="text-sm font-medium">
+        <DialogHeader>
+          <DialogTitle className="font-medium">
             Create a private GitHub repo?
           </DialogTitle>
-          <DialogDescription className="text-fg2 text-sm">
+          <DialogDescription className="text-fg2 text-xs">
             Zeros will create a private GitHub repo, add it as{" "}
             <code className="bg-bg2-hover text-fg1 rounded-sm px-1 text-xs">
               origin
             </code>
             , and push the current branch. Git is initialized first if needed.
           </DialogDescription>
-        </div>
+        </DialogHeader>
+        <DialogBody className="gap-5">
+          {ownersError ? (
+            <p className="text-red-primary text-sm">
+              {ownersError}. Sign in to GitHub in Settings first.
+            </p>
+          ) : (
+            <>
+              {/* Owner */}
+              <div className="flex flex-col gap-1.5">
+                <label className="text-fg1 text-sm font-medium">Owner</label>
+                <Select value={owner} onValueChange={setOwner}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue placeholder="Select an owner" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {owners.map((o) => (
+                      <SelectItem key={o.login} value={o.login}>
+                        {o.login}
+                        {o.type === "org" ? " (org)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-        {ownersError ? (
-          <p className="text-red-primary text-sm">
-            {ownersError}. Sign in to GitHub in Settings first.
-          </p>
-        ) : (
-          <>
-            {/* Owner */}
-            <div className="flex flex-col gap-1.5">
-              <label className="text-fg1 text-sm font-medium">Owner</label>
-              <Select value={owner} onValueChange={setOwner}>
-                <SelectTrigger className="w-full">
-                  <SelectValue placeholder="Select an owner" />
-                </SelectTrigger>
-                <SelectContent>
-                  {owners.map((o) => (
-                    <SelectItem key={o.login} value={o.login}>
-                      {o.login}
-                      {o.type === "org" ? " (org)" : ""}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+              {/* Repository name */}
+              <div className="flex flex-col gap-1.5">
+                <label
+                  htmlFor="pub-name"
+                  className="text-fg1 text-sm font-medium"
+                >
+                  Repository name
+                </label>
+                <Input
+                  id="pub-name"
+                  autoFocus
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="my-project"
+                  spellCheck={false}
+                />
+                {owner && name.trim() && (
+                  <p className="text-fg2 text-xs">
+                    Will create{" "}
+                    <span className="bg-bg2-hover text-fg1 rounded-sm px-1 text-xs">
+                      {owner}/{name.trim()}
+                    </span>
+                  </p>
+                )}
+                {nameState.kind === "available" && (
+                  <p className="text-fg2 text-xs">
+                    Repository name is available.
+                  </p>
+                )}
+                {nameState.kind === "taken" && (
+                  <p className="text-red-primary text-xs">
+                    That repository already exists.
+                  </p>
+                )}
+                {nameState.kind === "error" && (
+                  <p className="text-red-primary text-xs">{nameState.message}</p>
+                )}
+              </div>
 
-            {/* Repository name */}
-            <div className="flex flex-col gap-1.5">
-              <label
-                htmlFor="pub-name"
-                className="text-fg1 text-sm font-medium"
-              >
-                Repository name
-              </label>
-              <Input
-                id="pub-name"
-                autoFocus
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="my-project"
-                spellCheck={false}
-              />
-              {owner && name.trim() && (
-                <p className="text-fg2 text-xs">
-                  Will create{" "}
-                  <span className="bg-bg2-hover text-fg1 rounded-sm px-1 text-xs">
-                    {owner}/{name.trim()}
+              {/* Private toggle */}
+              <label className="flex items-center justify-between gap-2">
+                <span className="flex flex-col gap-0.5">
+                  <span className="text-fg1 text-sm font-medium">
+                    Private repository
                   </span>
-                </p>
-              )}
-              {nameState.kind === "available" && (
-                <p className="text-fg2 text-xs">
-                  Repository name is available.
-                </p>
-              )}
-              {nameState.kind === "taken" && (
-                <p className="text-red-primary text-xs">
-                  That repository already exists.
-                </p>
-              )}
-              {nameState.kind === "error" && (
-                <p className="text-red-primary text-xs">{nameState.message}</p>
-              )}
-            </div>
-
-            {/* Private toggle */}
-            <label className="flex items-center justify-between gap-2">
-              <span className="flex flex-col gap-0.5">
-                <span className="text-fg1 text-sm font-medium">
-                  Private repository
+                  <span className="text-fg2 text-xs">
+                    Only you (and collaborators you add) can see it.
+                  </span>
                 </span>
-                <span className="text-fg2 text-xs">
-                  Only you (and collaborators you add) can see it.
-                </span>
-              </span>
-              <Switch checked={isPrivate} onCheckedChange={setIsPrivate} />
-            </label>
-          </>
-        )}
+                <Switch checked={isPrivate} onCheckedChange={setIsPrivate} />
+              </label>
+            </>
+          )}
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 pt-1">
+          {/* Footer */}
+        </DialogBody>
+        <DialogFooter>
           <Button
             variant="ghost"
             size="sm"
@@ -310,7 +314,7 @@ export function PublishToGithubDialog({
             )}
             <span>Create repo and publish</span>
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

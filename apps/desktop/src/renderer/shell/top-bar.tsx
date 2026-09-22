@@ -20,6 +20,7 @@ import {
   Archive,
   Check,
   ClipboardList,
+  Folder,
   GitBranch,
   GitMerge,
   GitMergeConflict,
@@ -27,7 +28,6 @@ import {
   GitPullRequestClosed,
   Home,
   ImageIcon,
-  LaptopMinimal,
   ListFilter,
   MessageCircleQuestionMark,
   PenTool,
@@ -35,6 +35,7 @@ import {
   Settings,
 } from "lucide-react";
 
+import { useFolderWorkspaces } from "../state/use-folder-workspaces";
 import { type Workspace } from "../platform/git";
 import { usePrIslandKind } from "./pr/pr-island-state-store";
 import { useNativeRuntime } from "../platform/runtime";
@@ -46,7 +47,6 @@ import {
 } from "../features/agent/sessions-store";
 import {
   isLocalMainWorkspace,
-  LOCAL_MAIN_LABEL,
   withLocalMainWorkspace,
 } from "../state/local-main-workspace";
 import {
@@ -118,10 +118,6 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "../shared/ui/primitives/popover";
-import {
-  isExperimentalEnabled,
-  useExperimentalFeature,
-} from "../features/settings/experimental-features";
 import { useActiveOrganization } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { toast } from "../shared/ui/primitives/elements";
@@ -194,19 +190,12 @@ import {
 function prefetchProjectWorkspaceDestination(project: Project): void {
   prefetchWorkspacesFor(project.repoSlug);
   const state = useWorkspaceStore.getState();
-  prefetchWorkspaceSurface(
-    resolveRepoWorkspaceDestination({
-      project,
-      rememberedFolder: selectLastWorkspaceFolderForRepo(
-        state,
-        project.repoRoot,
-      ),
-      cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
-      // Synchronous read: this warms the cache from a plain event handler, and
-      // it must agree with the destination handleSelectFilter will pick.
-      allowLocalMain: isExperimentalEnabled("workInLocalMain"),
-    }),
-  );
+  const destination = resolveRepoWorkspaceDestination({
+    project,
+    rememberedFolder: selectLastWorkspaceFolderForRepo(state, project.repoRoot),
+    cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
+  });
+  if (destination) prefetchWorkspaceSurface(destination);
 }
 
 // Top-bar destinations use the same inset, borderless geometry as the app's
@@ -220,8 +209,7 @@ const ICON_BUTTON_CLS =
 const MENU_ICON_BUTTON_CLS =
   "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
 // Main is a named destination and follows the workspace pill metrics.
-const MAIN_TAB_CLS =
-  "h-7 shrink-0 justify-start gap-2.5 rounded-md px-2.5 text-xs text-fg2 transition-none hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1 data-[active=true]:hover:bg-sidebar-bg-hover [&_svg]:size-3.5";
+
 // The app window bottoms out at 800px. Interpolate through the constrained
 // 800–1200px band, then hold the requested default/max widths above it.
 const PROJECT_TRIGGER_CLS =
@@ -777,20 +765,24 @@ export function WorkspaceTab({
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
-  const changeLines = useWorkspaceChangeLines(workspace);
+  const localFolder = isLocalMainWorkspace(workspace);
+  const changeLines = useWorkspaceChangeLines(localFolder ? null : workspace);
   const label = workspaceLabel(workspace);
   const hasDraft = useAnyChatHasDraft(draftChatIds);
   const showDraft = hasDraft && !active;
   const archiving = useWorkspaceArchiving(workspace.id);
   const trailingAgentState =
-    mixedRepositories &&
-    !archiving &&
-    (awaitingKind !== null || working);
+    mixedRepositories && !archiving && (awaitingKind !== null || working);
   // Legacy workspace kinds remain a visual hint; every workspace has agents.
   const trailingDesignMark =
-    mixedRepositories && !!project && !archiving && !working && awaitingKind === null && designWorkspace;
+    mixedRepositories &&
+    !!project &&
+    !archiving &&
+    !working &&
+    awaitingKind === null &&
+    designWorkspace;
   const trailingTabState = trailingAgentState || trailingDesignMark;
-  const archiveAction = !archiving && !modeSwitching && (
+  const archiveAction = !localFolder && !archiving && !modeSwitching && (
     <span
       className={
         showDraft
@@ -893,6 +885,8 @@ export function WorkspaceTab({
               />
             ) : working ? (
               <AgentActivityIndicator activity={activity} />
+            ) : localFolder ? (
+              <Folder className="size-3.5" strokeWidth={1.25} />
             ) : (
               (prTabIcon(workspace, islandKind) ?? (
                 <GitBranch className="size-3.5" strokeWidth={1.25} />
@@ -1439,16 +1433,10 @@ export function TopBar() {
     refreshing: activeProjectRefreshing,
   } = useWorkspacesFor(activeProject?.repoSlug ?? null);
 
-  // "Work in local main" (Settings → Experimental, off by default). This gates
-  // the main TAB and where a repo switch lands — never the synthetic row
-  // itself: `mainWorkspace` still backs active-tab resolution for repo-root
-  // chats, the bounce-to-main safety net, and the delete/remove escape hatches.
-  // Dropping it from `visibleWorkspaces` would strand those paths instead.
-  const [workInLocalMain] = useExperimentalFeature("workInLocalMain");
-
+  const listedWorkspaces = useFolderWorkspaces(liveWorkspaces, projects);
   const accessibleWorkspaces = useMemo(
-    () => filterRowsForOrganization(liveWorkspaces, activeOrganization),
-    [activeOrganization, liveWorkspaces],
+    () => filterRowsForOrganization(listedWorkspaces, activeOrganization),
+    [activeOrganization, listedWorkspaces],
   );
   const activeProjectAccessibleWorkspaces = useMemo(
     () =>
@@ -1622,7 +1610,7 @@ export function TopBar() {
             (pendingByProject.get(project.id)?.length ?? 0) > 0,
         );
     return visibleProjects.flatMap((project): TopBarNavItem[] => [
-      ...(workspaceListFilter === "grouped"
+      ...(workspaceListFilter === "grouped" && project.isGitRepository !== false
         ? [
             {
               kind: "project" as const,
@@ -1659,8 +1647,8 @@ export function TopBar() {
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
-  // invalidate that identity; when it proves the worktree was deleted, move to
-  // main as a new authoritative navigation (never as an initial-cache guess).
+  // invalidate that identity; when it proves the worktree was deleted, open
+  // another worktree or its repository page (never an initial-cache guess).
   useEffect(() => {
     if (
       activePage !== "workspace" ||
@@ -1696,14 +1684,18 @@ export function TopBar() {
     // yet must not be bounced to main — its placeholder create is still in
     // flight, so the announced path is legitimate even though it isn't listed.
     if (allPendingCreates.some((c) => c.path === activeFolder)) return;
-    openWorkspace(
-      resolveRepoWorkspaceDestination({
-        project: activeProject,
-        rememberedFolder: activeFolder,
-        cachedWorkspaces: activeProjectAccessibleWorkspaces,
-        allowLocalMain: workInLocalMain,
-      }),
-    );
+    const destination = resolveRepoWorkspaceDestination({
+      project: activeProject,
+      rememberedFolder: activeFolder,
+      cachedWorkspaces: activeProjectAccessibleWorkspaces,
+    });
+    if (destination) openWorkspace(destination);
+    else
+      dispatch({
+        type: "OPEN_REPO_PAGE",
+        projectId: activeProject.id,
+        view: "workspaces",
+      });
   }, [
     activeFolder,
     activeFolderProvisioning,
@@ -1716,7 +1708,6 @@ export function TopBar() {
     activeProjectRefreshing,
     mainWorkspace,
     openWorkspace,
-    workInLocalMain,
   ]);
 
   const activeWorkspaceId = useMemo(() => {
@@ -1762,7 +1753,9 @@ export function TopBar() {
           ? item.pending.token === activeWorkspaceTabKey
           : false,
     );
-    return owner?.project.id ?? null;
+    return owner?.project.isGitRepository === false
+      ? null
+      : (owner?.project.id ?? null);
   }, [activeWorkspaceTabKey, groupedLane, navItems]);
 
   const workspaceNavRef = useRef<HTMLElement | null>(null);
@@ -2181,27 +2174,25 @@ export function TopBar() {
         return;
       }
       const state = useWorkspaceStore.getState();
-      openWorkspace(
-        resolveRepoWorkspaceDestination({
-          project,
-          rememberedFolder: selectLastWorkspaceFolderForRepo(
-            state,
-            project.repoRoot,
-          ),
-          cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
-          allowLocalMain: workInLocalMain,
-        }),
-        { workspaceListFilter: nextFilter },
-      );
+      const destination = resolveRepoWorkspaceDestination({
+        project,
+        rememberedFolder: selectLastWorkspaceFolderForRepo(
+          state,
+          project.repoRoot,
+        ),
+        cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
+      });
+      if (destination)
+        openWorkspace(destination, { workspaceListFilter: nextFilter });
+      else
+        dispatch({
+          type: "OPEN_REPO_PAGE",
+          projectId: project.id,
+          view: "workspaces",
+          workspaceListFilter: nextFilter,
+        });
     },
-    [
-      activePage,
-      activeProject?.id,
-      dispatch,
-      openWorkspace,
-      projects,
-      workInLocalMain,
-    ],
+    [activePage, activeProject?.id, dispatch, openWorkspace, projects],
   );
 
   const handleSelectWorkspace = useCallback(
@@ -2241,21 +2232,6 @@ export function TopBar() {
     activePage === "customize" ||
     activePage === "settings" ||
     activePage === "repo";
-  const displayMainWorkspace = useMemo(
-    () =>
-      filterProject
-        ? (withLocalMainWorkspace(
-            filterProject,
-            realWorkspaces.filter(
-              (workspace) => workspace.repoRoot === filterProject.repoRoot,
-            ),
-          )[0] ?? null)
-        : null,
-    [filterProject, realWorkspaces],
-  );
-  const mainTabVisible = workInLocalMain && !!displayMainWorkspace;
-  const mainActive =
-    mainTabVisible && activeWorkspaceId === displayMainWorkspace.id;
   const stripHasTabs = navItems.length > 0;
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
 
@@ -2392,7 +2368,7 @@ export function TopBar() {
         )}
       />
 
-      {filterProject && (
+      {filterProject && filterProject.isGitRepository !== false && (
         <div className={TOP_BAR_ITEM_CLS}>
           <ProjectMarker
             project={filterProject}
@@ -2413,46 +2389,7 @@ export function TopBar() {
         </div>
       ) : null}
 
-      {/* Experimental Local main remains fixed in a repository-only view.
-          Once the row fills, only the workspace lane shrinks and scrolls. */}
       <div className="flex h-full min-w-0 flex-1 items-stretch">
-        {mainTabVisible && displayMainWorkspace && (
-          <>
-            {filterProject && (
-              <TopBarBoundary
-                showSeparator={navigationBoundarySeparatorVisible(
-                  false,
-                  mainActive,
-                )}
-              />
-            )}
-            <div className={TOP_BAR_ITEM_CLS}>
-              <Button
-                type="button"
-                variant="ghost"
-                size="default"
-                className={MAIN_TAB_CLS}
-                aria-current={mainActive ? "page" : undefined}
-                aria-label="Open main checkout"
-                data-active={mainActive}
-                onPointerEnter={() =>
-                  handlePrefetchWorkspace(displayMainWorkspace)
-                }
-                onFocus={() => handlePrefetchWorkspace(displayMainWorkspace)}
-                onClick={() => handleSelectWorkspace(displayMainWorkspace)}
-              >
-                <span
-                  className="inline-flex size-4 shrink-0 items-center justify-center"
-                  aria-hidden="true"
-                >
-                  <LaptopMinimal className="size-3.5" strokeWidth={1.25} />
-                </span>
-                {LOCAL_MAIN_LABEL}
-              </Button>
-            </div>
-          </>
-        )}
-
         {stripHasTabs && (
           <div className="relative h-full min-w-0 shrink overflow-hidden">
             <nav
@@ -2486,7 +2423,8 @@ export function TopBar() {
                 data-workspace-lane="true"
               >
                 {navItems.map((item, index) => {
-                  const groupedRepository = workspaceListFilter === "grouped";
+                  const groupedRepository =
+                    groupedLane && item.project.isGitRepository !== false;
                   const active =
                     item.kind === "workspace"
                       ? activeWorkspaceTabKey === item.workspace.id
@@ -2501,17 +2439,17 @@ export function TopBar() {
                       : previous.kind === "pending"
                         ? activeWorkspaceTabKey === previous.pending.token
                         : false
-                    : mainActive;
+                    : false;
                   const groupEnd =
                     groupedRepository &&
                     item.kind !== "project" &&
-                    (!next || next.kind === "project");
-                  // Every repository begins with its icon, so a project item is
-                  // a group start by construction. `index > 0` keeps the lane's
-                  // leading carrier at the sticky/content inset instead of
-                  // indenting the whole strip by the wider group gap.
+                    (!next || next.project.id !== item.project.id);
+                  // Plain folders stand alone between repository groups. Keep
+                  // the boundary gap without giving them a group surface/lead.
                   const groupGap =
-                    groupedRepository && item.kind === "project" && index > 0;
+                    groupedLane &&
+                    !!previous &&
+                    previous.project.id !== item.project.id;
                   return (
                     <React.Fragment key={item.key}>
                       <TopBarBoundary
@@ -2520,7 +2458,7 @@ export function TopBar() {
                           groupedRepository && item.kind !== "project"
                         }
                         groupGap={groupGap}
-                        suppressSeparator={groupedRepository}
+                        suppressSeparator={groupedLane}
                         showSeparator={navigationBoundarySeparatorVisible(
                           leftActive,
                           active,
@@ -2635,30 +2573,32 @@ export function TopBar() {
       <div className="flex h-full shrink-0 items-center gap-1">
         <ResourceMonitor />
 
-        <div className={TOP_BAR_TRAILING_ITEM_CLS}>
-          {contextProject ? (
-            <ArchivedWorkspacePicker
-              key={contextProject.id}
-              project={contextProject}
-            />
-          ) : (
-            <Tooltip
-              label="Select a repository to view archived workspaces"
-              side="bottom"
-            >
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className={MENU_ICON_BUTTON_CLS}
-                aria-label="Archived workspaces"
-                disabled
+        {contextProject?.isGitRepository !== false && (
+          <div className={TOP_BAR_TRAILING_ITEM_CLS}>
+            {contextProject ? (
+              <ArchivedWorkspacePicker
+                key={contextProject.id}
+                project={contextProject}
+              />
+            ) : (
+              <Tooltip
+                label="Select a repository to view archived workspaces"
+                side="bottom"
               >
-                <Archive className="size-3.5" strokeWidth={1.5} />
-              </Button>
-            </Tooltip>
-          )}
-        </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className={MENU_ICON_BUTTON_CLS}
+                  aria-label="Archived workspaces"
+                  disabled
+                >
+                  <Archive className="size-3.5" strokeWidth={1.5} />
+                </Button>
+              </Tooltip>
+            )}
+          </div>
+        )}
       </div>
     </header>
   );

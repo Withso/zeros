@@ -26,6 +26,7 @@ import { primeDesignWorkspaceSnapshot } from "./state/design-workspace-cache";
 import { DesignWorkspaceSidebar } from "./design-workspace-sidebar";
 import { DesignWorkspaceColumn } from "./design-workspace";
 import { errorMessage } from "./design-workspace-error";
+import { DesignGitSetup } from "./design-git-setup";
 
 /** Human authoring surface; selecting it has no effect on agent authority. */
 export function DesignWorkbenchSurface({
@@ -74,6 +75,12 @@ export function DesignWorkbenchSurface({
       setCreating(false);
     }
   }, [active, creating, key, refreshTarget, workspace.id]);
+
+  if (localMain && project?.isGitRepository === false) {
+    return (
+      <DesignGitSetup key={project.id} project={project} active={active} />
+    );
+  }
 
   if (!localMain && checkout.data?.conflicts.length)
     return (

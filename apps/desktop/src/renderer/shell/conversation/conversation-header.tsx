@@ -62,7 +62,7 @@ import {
 import { selectActiveFolder, useWorkspaceStore } from "../../state/store";
 import { type Project } from "../../state/projects-store";
 import { findWorkspaceForFolder } from "../../state/workspace-resolution";
-import { LOCAL_MAIN_LABEL } from "../../state/local-main-workspace";
+import { localMainWorkspaceLabel } from "../../state/local-main-workspace";
 import {
   notifyWorkspacesChanged,
   useProjectForFolder,
@@ -661,7 +661,7 @@ export function ConversationHeader({
   const workspaceLabel = workspace
     ? branchDisplayName(optimisticBranch ?? workspace.branch)
     : isLocalMain
-      ? LOCAL_MAIN_LABEL
+      ? localMainWorkspaceLabel(project)
       : "main";
 
   const handleRenameCommitted = (newBranch: string) => {
@@ -694,7 +694,7 @@ export function ConversationHeader({
           />
         ) : (
           <Tooltip
-            label={workspace ? "Click to rename" : "Project main checkout"}
+            label={workspace ? "Click to rename" : project.isGitRepository === false ? "Project folder" : "Project main checkout"}
           >
             <button
               type="button"
