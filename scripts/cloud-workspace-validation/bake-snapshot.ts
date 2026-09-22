@@ -1,13 +1,13 @@
 // ──────────────────────────────────────────────────────────
-// bake-snapshot.ts — build + register the zeros-engine-v0 snapshot.
+// bake-snapshot.ts — build or register the configured cloud runtime snapshot.
 // ──────────────────────────────────────────────────────────
 //
 //   pnpm tsx scripts/cloud-workspace-validation/bake-snapshot.ts
 //
-// Bakes the Image (image.ts) into a named, registered Daytona Snapshot so
-// `provision.ts` can `create({ snapshot })` for warm-pool (sub-90 ms) repeat
-// creates. One-time per image-spec change; bump SNAPSHOT_NAME's suffix when the
-// build changes. Streams the build logs.
+// Container qualification builds the canonical image.ts recipe; Linux VM
+// qualification registers a published digest after validating its build receipt.
+// `provision.ts` creates from the resulting named snapshot. Startup latency is a
+// provider qualification measurement. Use a new SNAPSHOT_NAME when inputs change.
 //
 // Prereqs: DAYTONA_API_KEY exported (see ./README.md).
 // ──────────────────────────────────────────────────────────

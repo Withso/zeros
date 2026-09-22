@@ -4,7 +4,7 @@
 //
 //   pnpm tsx scripts/cloud-workspace-validation/provision.ts
 //
-// Creates a sandbox from the zeros-engine-v0 snapshot, sets the lifecycle
+// Creates a sandbox from the configured snapshot, sets the lifecycle
 // timers (autoStop:0 — engine owns sleep; operator runs default to no automatic
 // deletion while protected CI uses a bounded provider backstop), injects the
 // cloud port + a freshly-minted connection token, starts the engine as a managed

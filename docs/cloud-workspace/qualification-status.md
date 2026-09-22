@@ -25,7 +25,7 @@ paused; Daytona worker isolation is still unqualified. See
 | Step | Repository implementation and evidence | Open exit condition |
 | --- | --- | --- |
 | 1. Contracts | Portable client/runtime, provider, command, checkpoint and security contracts; Organization ownership and Personal-local enforcement | Keep advertised capabilities within this matrix |
-| 2. Provider registry | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions | Production connection onboarding qualification |
+| 2. Provider registry | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions; isolated deployed Daytona onboarding/replay/rejected rotation/revocation | Live valid second-key rotation and qualification with an enabled compute profile |
 | 3. Secure Linux / Boat | Pinned native image, unprivileged engine/worker separation, setup, admission, heartbeat, lifecycle and finite provider lease; live authorized Boat create/readiness | Exact production deployment, remaining provider deletion proof and host-security release review |
 | 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat | Production agent-account connection/authentication flow and declared tooling gaps below |
 | 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat | Fleet/region load qualification and later native client release tests |
@@ -68,6 +68,16 @@ do not clear Daytona or production operations gates.
   GitHub App token issue, a real Git fetch, token revocation and anonymous denial.
   These checks do not claim a provider-host clone, current-image agent turn or
   interactive native sign-in ceremony.
+- Deployed Daytona connection checks verified the supplied key without allocating
+  compute. Personal onboarding and guest provider administration were denied;
+  a stored valid key could not create a workspace while its compute profile was
+  absent. Invalid rotation preserved the existing version, and revoked connection
+  reuse was denied. Valid second-key rotation has database regression coverage
+  but still needs two valid keys for live qualification.
+- Revoking an owned WorkOS test session closed both of its open event streams
+  and denied API access while another user's session remained valid. Revocation
+  took about 60 seconds through the isolated deployment's event-polling fallback.
+  This proves session isolation, not instant revocation or native-device behavior.
 - Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remains disabled. Encrypted backup recovery has separate evidence. Full regional recovery and runtime recovery remain open.
 - Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
   connection fencing, dropped-column and enum restore compatibility, sequence
