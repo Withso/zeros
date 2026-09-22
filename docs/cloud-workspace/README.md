@@ -26,20 +26,28 @@ has separate implementation and qualification work remaining:
   filesystem adapter is hardened for a private mounted Railway volume.
 - Local-to-cloud and cloud-to-local are immutable copy/fork workflows. The
   destination always receives a new workspace UUID and the source remains
-  unchanged. An owner/device receive-only replica may mirror a cloud workspace
-  in Phase 5, but never becomes cloud authority or uploads local edits.
+  unchanged. Each authorized member/device receive-only replica may mirror a
+  cloud workspace, but never becomes cloud authority or uploads local edits.
 - Electron main owns exact-execution remote connection leases, short-lived SSH,
   authenticated previews, and `127.0.0.1` forwards. Raw provider capabilities
   do not enter renderer state.
 
-`CLOUD_WORKSPACES_ENABLED` and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
-remain `false` until the exact images for each enabled provider, lifecycle/rollback/delete paths,
-root-coordinator exception, and signed macOS SSH/preview/tunnel flow have passed
+Public cloud routes and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
+remain disabled until the exact images for each enabled provider, lifecycle/rollback/delete paths,
+engine/worker isolation, and signed macOS SSH/preview/tunnel flow have passed
 their protected qualification. Repository tests are not substitutes for that
-evidence.
+evidence. A staff-only isolated API qualification backend may set
+`CLOUD_WORKSPACES_ENABLED=true`, `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED=false`
+and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. This pauses background loops;
+it does not block direct provider calls. Qualification must avoid provider
+operations until their separate release gates pass.
 
 End-user cloud creation/catalog/details UI is deliberately not wired yet.
-Organization sharing and individually entitled external collaborators have backend contracts and regression coverage; deployed qualification remains open. Presence UI, ownership transfer execution, mobile apps, and a published customer-managed Railway template are later work. Documents in
+Organization sharing and individually entitled external collaborators have
+backend contracts, regression coverage and isolated deployed API evidence.
+Provider runtime and native client qualification remain open. Presence UI,
+ownership transfer execution, mobile apps, and a published customer-managed
+Railway template are later work. Documents in
 this folder distinguish implemented repository behavior from release
 qualification and deferred product surfaces.
 
@@ -69,7 +77,8 @@ qualification and deferred product surfaces.
   harness, Design and attachment recovery, its bounds and format compatibility.
 - [Security](security.md) defines trust boundaries and release blockers.
 - [Root coordinator exception review](root-coordinator-threat-model.md)
-  records the unresolved privileged-engine decision and required evidence.
+  records the privileged coordinator boundary, unprivileged engine/worker
+  separation and required provider evidence.
 - [Infrastructure and operations](infrastructure-and-operations.md) defines
   image, lifecycle, observability, and provider requirements.
 - [Enterprise and self-hosting](enterprise-and-self-hosting.md) defines the

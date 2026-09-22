@@ -9,22 +9,17 @@ processes run as UID/GID 10001. This is a bounded qualification architecture,
 not satisfaction of the non-root requirement. The version 2 candidate described
 below is the elimination path; its full live release qualification is incomplete.
 
-Phase 2 must remain release-blocked until either:
+The common image implements the non-root host identity described below. Release
+qualification still requires its exact provider/image, actual worker UID and
+kernel boundaries to pass. Legacy root-profile behavior is retained here for
+compatibility and incident analysis; it is not the current deployment design.
+Code review and database tests do not replace that provider evidence.
 
-1. the engine is moved behind a minimal privileged broker and runs as a distinct
-   non-root identity; or
-2. the exception is approved by the accountable security owner for an explicit
-   image digest, provider configuration, expiry date, and set of compensating
-   controls after a green live Daytona qualification.
-
-Code review, unit tests, and PostgreSQL integration tests do not constitute that
-approval or the required provider evidence.
-
-## Scope and necessity
+## Legacy version 1 scope and necessity
 
 The exception applies only to the image profile identified by
-`/etc/zeros/cloud-worker.json` and its immutable snapshot digest. The current
-engine remains root because the cloud-worker containment backend validates
+`/etc/zeros/cloud-worker.json` and its immutable snapshot digest. The legacy
+engine remained root because the cloud-worker containment backend validates
 root-controlled tools and uses a privileged supervisor to create namespaces,
 mount the admitted filesystem view, and drop an agent command to UID/GID 10001.
 The root engine also reads short-lived root-owned credential projections without
@@ -38,7 +33,7 @@ registration material, and every root-readable file in that tenant sandbox.
 
 ## Trust boundaries and controls
 
-| Threat                                                                          | Current controls                                                                                                                                                                                                                                                                                     | Residual risk                                                                                                                            |
+| Threat                                                                          | Legacy controls                                                                                                                                                                                                                                                                                     | Residual risk                                                                                                                            |
 | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | Repository or agent code executes outside its admitted view                     | Fixed root-owned engine/toolchain; cloud-worker ZSR qualification; commands drop to UID/GID 10001; exact filesystem and socket policy                                                                                                                                                                | An engine/parser/runtime compromise occurs before or outside the child boundary and gains sandbox root                                   |
 | A writable checkout replaces bootstrap code                                     | Engine, launcher, helpers, marker, and build metadata are physically separate, root-owned, non-group-writable, attested immediately before launch, and tied to one snapshot/source contract                                                                                                          | Sandbox root can still modify these files after compromise unless the provider mount is immutable                                        |
@@ -144,5 +139,6 @@ repository with all of the following:
 - confirmation that `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` remains `false` until
   the approved artifact is deployed.
 
-No approval record is present as of this review. The exception therefore remains
-open and the setup worker gate must remain disabled.
+No root exception has been approved. Keep setup disabled until the current
+non-root image passes all applicable release gates; a legacy exception record
+cannot qualify a different image or provider.

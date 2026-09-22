@@ -1,11 +1,11 @@
 # Hosted Postgres qualification
 
-Status: Alpha's main writer is on PlanetScale after a fenced copy, exact source
-row comparison, forward migrations, runtime-role verification and public API
-checks. Beta's read-only source profile and encrypted archive have passed
-independent readback; Beta and Production cutovers remain pending. Main-dataset
-disaster recovery and sustained production load remain open. The control-plane application stays on
-Railway and its database target is standard PlanetScale Postgres. Existing
+Status, September 22, 2026: Alpha, Beta and Production use PlanetScale Postgres.
+Each cutover preserved its own source data, applied forward migrations, verified
+runtime roles and API behavior, and retained the old writer fence. Normal app
+access is restored. Backup recovery checks do not complete regional disaster
+recovery or sustained production-load qualification. The control-plane
+application stays on Railway. Existing
 SQL, workspace identities, RLS, migrations and portable client contracts remain
 authoritative. The compute providers remain independent of database hosting.
 
@@ -37,6 +37,13 @@ it must not be supplied to a hosted API using verify-only boot. Transaction
 helpers use `SET LOCAL ROLE zeros_app` and transaction-local authorization.
 Boot verification enters that role too: a NOINHERIT runtime login has no direct
 table access. Migration 0086 makes its migration-ledger access read-only.
+
+Create runtime membership under the stable migration-owner role, with `SET`
+permission but neither inherited table authority nor `ADMIN OPTION`. Inspect
+`pg_auth_members.grantor` and verify the native runtime login after retiring
+temporary administrative credentials. PostgreSQL membership grants depend on
+their grantor retaining authority; object reassignment alone does not preserve
+every grant. See [PostgreSQL role grants](https://www.postgresql.org/docs/18/sql-grant.html).
 
 Initial compatibility testing must use direct primary connections on port 5432
 with certificate and hostname verification. A single transaction-pooler URL is

@@ -127,6 +127,19 @@ is deleted by the workflow, and an unattested retained image is not eligible for
 
 ## Validation sequence
 
+The separate `cloud-runtime-publication.yml` workflow publishes the common OCI
+runtime without allocating a sandbox or using agent/provider credentials. It
+accepts only `main` in the `cloud-runtime-publication` environment; configure
+that environment with a deployment branch policy allowing only `main` before
+dispatch. Its short-lived repository token writes the repository-linked GHCR
+package. A unique source/run/attempt tag locates the build; consumers pin the
+returned digest. The workflow attests and verifies that digest against its
+source commit and uploads a sanitized `publication.json` receipt. This proves
+publication/provenance, not host isolation, provider parity, or promotion.
+
+The protected provider-qualification workflow below remains a separate gate.
+Publishing an image does not enable cloud execution or consume sandbox budget.
+
 Linux VM snapshots require a published OCI image; Daytona's Dockerfile builder
 is a container-only path ([Daytona snapshots](https://www.daytona.io/docs/snapshots/)).
 The workflow first runs `publish-vm-image.ts` on the trusted runner, then passes
@@ -275,7 +288,9 @@ redistribution approval remain outside this provider qualification.
 | `ZEROS_CLOUD_GITHUB_REPOSITORIES`                        | optional                              | Comma-separated repository-name scope             |
 | `ZEROS_CLOUD_GITHUB_TOKEN`                               | optional                              | Direct short-lived operator working copy          |
 
-The trusted root engine necessarily receives create-time provider credentials;
+The trusted engine receives explicitly admitted agent credentials; provider
+administrative credentials stay in the external coordinator. The engine maps to
+host UID/GID 10003 in the current image; the fixed host broker remains privileged.
 ZSR keeps its environment outside code views and projects only the active
 provider's bounded values into that provider session. Still use short-lived,
 narrowly scoped values, never bake credentials into the image, and run the
@@ -284,8 +299,8 @@ delete step when validation finishes.
 ## Design capture qualification
 
 The image now includes pinned Playwright Core/Chromium and a dedicated
-`zeros-capture` user (UID/GID 10002), separate from the agent. The root-owned
-engine admits `/opt/zeros/dist-engine/design-capture-worker.js` only after a
+`zeros-capture` user (UID/GID 10002), separate from the agent. The immutable
+engine installation admits `/opt/zeros/dist-engine/design-capture-worker.js` only after a
 sandboxed render canary succeeds. The worker receives composed HTML on stdin,
 returns one bounded PNG on stdout, and exits. It receives no provider or capture
 service credentials. Chromium sandboxing is mandatory; there is no no-sandbox

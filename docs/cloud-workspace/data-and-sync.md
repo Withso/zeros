@@ -2,9 +2,8 @@
 
 This document defines the product and engineering contract for creating a
 Zeros workspace locally or in cloud, making integrity-checked copies between
-those placements, and keeping private device replicas. Migrations `0026`
-through `0062` and the desktop engine services implement the non-UI
-foundation. End-user wiring and protected live qualification remain separate
+those placements, and keeping private device replicas. The append-only cloud
+migration ladder and desktop engine services implement the non-UI foundation. End-user wiring and protected live qualification remain separate
 release work.
 
 ## The three independent dimensions
@@ -29,7 +28,7 @@ This separation produces three valid creation combinations:
 | Tenant       | Runs on this Mac                                         | Runs in cloud                                                             |
 | ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Personal     | Private local workspace                                  | Not supported                                                             |
-| Organization | Organization-governed but device-private local workspace | Single-owner cloud workspace in Phase 5; member collaboration is Phase 6A |
+| Organization | Organization-governed but device-private local workspace | Cloud authority shared according to workspace roles; staff pilot only |
 
 ## Sources of truth
 
@@ -68,7 +67,7 @@ The workspace-details actions use verbs that state their consequence:
   source.
 - **Create local copy** forks a new private local workspace and retains the
   cloud source.
-- **Sync to this Mac** creates or resumes the owner's receive-only local
+- **Sync to this Mac** creates or resumes the authorized member's receive-only local
   replica; cloud remains authoritative.
 - **Pause sync on this Mac** affects only that replica and leaves its files on
   disk.
@@ -111,10 +110,12 @@ workspace, not a way to make one Mac authoritative for the cloud source.
   process state. If Organization policy requires a minimal placement audit
   registration, disclose that before creation and store only identity/policy
   metadata.
-- A Phase 5 Organization cloud workspace is single-owner: Organization
-  membership alone does not grant runtime, replica, access, export, or
-  lifecycle authority. Member collaboration and role-based workspace access
-  are deferred to Phase 6A.
+- An Organization cloud workspace has one compute sponsor and one execution
+  authority. Organization sharing, explicit member roles and accepted
+  workspace-scoped guest grants determine collaborator access. Eligible members
+  can attach independent device replicas; credentials and management require
+  their own authority. Legacy private single-member workspaces retain owner-only
+  behavior. Individual Pro and staff admission apply to each participating user.
 - Forking an Organization cloud workspace to one Mac does not suspend or
   modify the source. The destination is a new local workspace in Personal or an
   authorized Organization, subject to export and destination-creation policy.
@@ -285,13 +286,13 @@ closed, and limits are never inferred from sandbox disk allocation or the
 object-store provider's volume size. The per-workspace logical ceiling cannot
 exceed the Organization physical ceiling.
 
-## Phase-5 local replica contract
+## Receive-only local replica contract
 
 The first production sync mode is **cloud-to-device, receive-only, safe**:
 
 1. Each authorized user/device pair has its own replica identity, grant,
-   desired state, cursor, local path, and health. Phase 5 authorizes only the
-   owner; Phase 6A may admit additional members. No Organization-wide
+   desired state, cursor, local path, and health. Current workspace actor
+   authority permits each eligible member independently. No Organization-wide
    `sync_enabled` boolean exists.
 2. Initial sync downloads an exact checkpoint manifest, then applies ordered
    file events after that manifest revision.
@@ -360,8 +361,8 @@ to Personal only when export policy permits it.
 ### Sync or download a cloud workspace
 
 **Sync to this Mac** creates a device replica and does not change authority.
-Phase 5 permits the workspace owner; Phase 6A may let each Organization member
-create a separate replica when their role and policy allow it. The local
+Each authorized member can create a separate replica when current workspace
+role, entitlement and device policy allow it. The local
 absolute path remains only in that device's SQLite database; the server stores
 at most a user-chosen label and the state needed for authorization and
 recovery.
@@ -375,11 +376,12 @@ disabled by Organization export policy.
 
 This is a copy, not an authority handoff:
 
-1. The owner requests an idempotent cloud-to-local fork with a fresh target
+1. An authorized actor requests an idempotent cloud-to-local fork with a fresh target
    local UUID and optional chat-history selection.
-2. The control plane requires current account, tenant, Team, workspace-owner,
-   and device proof. Existing durable data remains exportable after paid
-   compute cancellation, but membership and owner authority remain mandatory.
+2. The control plane requires current workspace read authority and trusted
+   device proof. Guests receive exact workspace authority, never tenant-wide
+   membership. Existing durable data remains recoverable by its owner after
+   paid compute cancellation through the narrower data-recovery authority.
 3. The checkpoint worker pins the last durable file manifest and record
    revision without stopping the source cloud engine.
 4. A short-lived, one-use, device-key-version-bound export grant pages the
@@ -394,11 +396,11 @@ This is a copy, not an authority handoff:
 The cloud owner may later archive or delete the source through its normal
 lifecycle controls. That decision is not part of the copy transaction.
 
-## Deferred Phase 6A multiplayer replica behavior
+## Multiplayer replica behavior
 
-The following is a Phase 6A design contract, not current Phase 5 behavior. Once
-Organization-member collaboration is implemented, the cloud engine remains
-authoritative for every admitted member:
+The backend authorizes each replica independently. Client UI and signed-client
+lifecycle qualification remain open; the cloud engine stays authoritative for
+every admitted member:
 
 ```text
                          cloud engine
@@ -417,8 +419,8 @@ erasure of bytes already downloaded, so policy and UI must state that boundary.
 
 Presence and shared chats are sequenced by the cloud engine/durable event
 stream, not by the file synchronizer. Collaborative source or Design editing is
-a separate feature. Phase 6A may allow many observers/prompters and multiple
-agent chats, while retaining one engine-owned Git/source mutation lane and the
+a separate feature. Multiple observers/prompters and agent chats retain one
+engine-owned Git/source mutation lane and the
 Design API's exact-revision transactions.
 
 ## SSH, previews, and forwarding to the Mac

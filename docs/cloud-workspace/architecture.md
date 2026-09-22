@@ -31,9 +31,11 @@ The design separates four concerns:
 4. **Data plane:** the durable workspace record, encrypted checkpoints/blobs,
    per-replica cursors, artifacts/backups, and the user's Git remote.
 
-The engine is the live ordering authority while a workspace is running. The
-control plane must not become a byte-by-byte relay for normal engine traffic
-unless a future network design explicitly requires it.
+The engine is the live ordering authority while a workspace is running.
+`CloudRuntimeBridgeRelay` carries authenticated engine frames for portable
+clients without taking execution ownership. It bounds connections, queued
+bytes and admission work, and revalidates actor/device/generation authority.
+Provider administrative credentials remain behind this relay boundary.
 
 ## Identity and placement boundary
 

@@ -3,6 +3,10 @@ import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 import {
+  cloudWorkspaceProvisioningProfile,
+  configuredCloudWorkspaceProviders,
+} from "./cloud-workspaces/provisioning-profile.js";
+import {
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
   MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
 } from "./cloud-workspaces/engine-protocol-version.js";
@@ -655,6 +659,30 @@ describe("cloud workspace backend configuration", () => {
     );
   });
 
+  it("allows Daytona credential onboarding without enabling its compute profile", () => {
+    const cloud = loadConfig({
+      ...boatEnv(),
+      DAYTONA_CONNECTIONS_ENABLED: "true",
+      DAYTONA_TARGET: "us",
+      CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: "false",
+    }).cloudWorkspaces!;
+    expect(cloud.daytonaConnection).toEqual({
+      apiUrl: "https://app.daytona.io/api",
+      target: "us",
+    });
+    expect(cloud.providerProfiles).toBeUndefined();
+    expect(cloud.provider).toBe("boat");
+    expect(configuredCloudWorkspaceProviders(cloud)).toEqual(["boat"]);
+    expect(() => cloudWorkspaceProvisioningProfile(cloud, "daytona"))
+      .toThrow("no valid provisioning profile");
+    expect(cloud.backgroundWorkersEnabled).toBe(false);
+    expect(cloud.setupExecution).toBeNull();
+    expect(loadConfig({ ...boatEnv(), DAYTONA_CONNECTIONS_ENABLED: "false" })
+      .cloudWorkspaces?.daytonaConnection).toBeUndefined();
+    expect(() => loadConfig({ ...boatEnv(), DAYTONA_CONNECTIONS_ENABLED: "yes" }))
+      .toThrow(/DAYTONA_CONNECTIONS_ENABLED/);
+  });
+
   it("runs Boat setup without requiring Daytona toolbox access", () => {
     const cloud = loadConfig({
       ...cloudSetupEnv(),
@@ -680,6 +708,12 @@ describe("cloud workspace backend configuration", () => {
     ).toBeNull();
   });
 
+  it("supports API replicas without implicitly starting cloud background work", () => {
+    expect(loadConfig({...cloudEnv(), CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:"false"}).cloudWorkspaces?.backgroundWorkersEnabled).toBe(false);
+    expect(loadConfig(cloudEnv()).cloudWorkspaces?.backgroundWorkersEnabled).toBe(true);
+    for(const enabled of ["true", "false"])expect(()=>loadConfig({...cloudEnv(), CLOUD_WORKSPACES_ENABLED:enabled, CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:"typo"})).toThrow(/BACKGROUND_WORKERS_ENABLED/);
+  });
+
   it("loads one pinned Daytona provider contract behind the gate", () => {
     expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
       provider: "daytona",
@@ -696,6 +730,7 @@ describe("cloud workspace backend configuration", () => {
       operationTimeoutSeconds: 180,
       autoArchiveMinutes: 10_080,
       reconcileIntervalMs: 5_000,
+      backgroundWorkersEnabled: true,
       access: {
         allowedSshHosts: ["ssh.app.daytona.io"],
         allowedPreviewHostSuffixes: ["proxy.daytona.work"],

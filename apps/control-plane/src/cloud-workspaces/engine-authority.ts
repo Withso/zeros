@@ -13,6 +13,21 @@ export class CloudWorkspaceEngineAuthorityError extends Error {
   }
 }
 
+/** Only after assertCurrentCloudEngineAuthority has locked this engine and its
+ * parents in the same transaction. Later credential locks can consume the
+ * remaining lease time even though those authority rows cannot change. */
+export async function assertCloudEngineAuthorityDeadline(
+  tx: Tx,
+  engineInstanceId: string,
+  workosEnabled: boolean,
+): Promise<void> {
+  const live = await tx.query(`SELECT 1 FROM cloud_workspace_engine_instances
+    WHERE id=$1 AND lease_expires_at>clock_timestamp()
+      AND cloud_workspace_runtime_authority_live(workspace_id,generation,account_user_id,$2)`,
+  [engineInstanceId,workosEnabled]);
+  if (live.rowCount !== 1) throw new CloudWorkspaceEngineAuthorityError();
+}
+
 export type CurrentCloudEngineAuthority = {
   workspaceId: string;
   organizationId: string;
@@ -141,7 +156,7 @@ export async function assertCurrentCloudEngineAuthority(
        AND engine.org_id = $3
        AND engine.generation = $4
        AND engine.state = 'ready'
-       AND engine.lease_expires_at > now()
+       AND engine.lease_expires_at > clock_timestamp()
        AND cloud_workspace_runtime_authority_live(
          engine.workspace_id, engine.generation, engine.account_user_id, $5
        )
@@ -178,6 +193,9 @@ export async function assertCurrentCloudEngineAuthority(
   if ((completedFinalCheckpoint.rowCount ?? 0) !== 0) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
+  // SELECT ... FOR UPDATE may evaluate its predicate before waiting. Recheck
+  // deadlines after both scope and engine locks have actually been acquired.
+  await assertCloudEngineAuthorityDeadline(tx,input.engineInstanceId,input.workosEnabled);
   const authorityEpoch = Number(current.authority_epoch);
   if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) {
     throw new CloudWorkspaceEngineAuthorityError();

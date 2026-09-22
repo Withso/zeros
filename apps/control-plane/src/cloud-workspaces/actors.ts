@@ -151,7 +151,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       const inviter = await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
       if(input.idempotencyKey) {
         const replay=(await tx.query<{id:string;request_sha256:Buffer;expires_at:Date;revoked_at:Date|null;inviter_fingerprint:string;live:boolean}>(
-          `SELECT id,request_sha256,expires_at,revoked_at,inviter_fingerprint,expires_at>now() AS live FROM cloud_workspace_invitations
+          `SELECT id,request_sha256,expires_at,revoked_at,inviter_fingerprint,expires_at>clock_timestamp() AS live FROM cloud_workspace_invitations
           WHERE workspace_id=$1 AND invited_by=$2 AND idempotency_key=$3`,[input.workspaceId,input.actorUserId,input.idempotencyKey])).rows[0];
         if(replay) {
           if(!replay.request_sha256.equals(requestHash)||replay.revoked_at||!replay.live||replay.inviter_fingerprint!==inviter.fingerprint)
@@ -167,7 +167,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
         FROM cloud_workspace_invitations invitation WHERE invitation.id=delivery.invitation_id AND invitation.workspace_id=$1
           AND invitation.revoked_at IS NOT NULL AND delivery.state IN ('queued','sending')`,[input.workspaceId]);
       const pending = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_invitations
-        WHERE workspace_id=$1 AND revoked_at IS NULL AND accepted_at IS NULL AND expires_at>now()`,[input.workspaceId])).rows[0]!;
+        WHERE workspace_id=$1 AND revoked_at IS NULL AND accepted_at IS NULL AND expires_at>clock_timestamp()`,[input.workspaceId])).rows[0]!;
       if (Number(pending.count)>=100) throw new HttpError(409,"cloud_workspace_invitation_limit","Workspace invitation limit reached");
       const row = (await tx.query<{expires_at:Date}>(`INSERT INTO cloud_workspace_invitations
         (id,workspace_id,org_id,recipient_email_sha256,token_hash,role,invited_by,expires_at,inviter_fingerprint,idempotency_key,request_sha256)
@@ -202,7 +202,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       const invitation = (await tx.query<{id:string;role:"viewer"|"prompter"|"developer";accepted_at:Date|null;accepted_by:string|null;guest_grant_id:string|null;invited_by:string|null;inviter_fingerprint:string}>(`SELECT invitation.id,invitation.role,invitation.accepted_at,invitation.accepted_by,invitation.guest_grant_id,invitation.invited_by,invitation.inviter_fingerprint
         FROM cloud_workspace_invitations invitation
         JOIN cloud_workspaces workspace ON workspace.id=invitation.workspace_id AND NOT workspace.single_member_mode
-        WHERE invitation.token_hash=$1 AND invitation.revoked_at IS NULL AND invitation.expires_at>now()
+        WHERE invitation.token_hash=$1 AND invitation.revoked_at IS NULL AND invitation.expires_at>clock_timestamp()
           AND cloud_workspace_pro_user_live($2)
           AND EXISTS (SELECT 1 FROM user_identities identity WHERE identity.user_id=$2 AND identity.status='active' AND identity.email_verified_at IS NOT NULL
             AND identity.provider=$3 AND identity.provider_sub=$4)
@@ -211,7 +211,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       if (!invitation) unavailable();
       if (invitation.accepted_at) {
         if (invitation.accepted_by!==input.actorUserId) unavailable();
-        const live = await tx.query(`SELECT 1 FROM cloud_workspace_guest_grants WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>now()`,[invitation.guest_grant_id,input.actorUserId]);
+        const live = await tx.query(`SELECT 1 FROM cloud_workspace_guest_grants WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp()`,[invitation.guest_grant_id,input.actorUserId]);
         if (live.rowCount!==1) unavailable();
         return {...binding,grantId:invitation.guest_grant_id!,replayed:true};
       }
@@ -221,7 +221,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       const inviter = await authorizeCloudWorkspaceActor(tx,{...binding,actorUserId:invitation.invited_by,capability:"manage"});
       if (inviter.fingerprint!==invitation.inviter_fingerprint) unavailable();
       await tx.query(`UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1 AND user_id=$2 AND revoked_at IS NULL`,[scope.workspace_id,input.actorUserId]);
-      const count = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>now()`,[scope.workspace_id])).rows[0]!;
+      const count = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp()`,[scope.workspace_id])).rows[0]!;
       if (Number(count.count)>=100) throw new HttpError(409,"cloud_workspace_guest_limit","Workspace guest limit reached");
       const grantId = randomUUID();
       await tx.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,created_by,expires_at)
@@ -270,7 +270,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
     await tx.query(`UPDATE cloud_workspace_invitation_deliveries delivery
       SET state='cancelled',nonce=NULL,ciphertext=NULL,auth_tag=NULL,lease_id=NULL,lease_expires_at=NULL
       FROM cloud_workspace_invitations invitation WHERE invitation.id=delivery.invitation_id AND invitation.workspace_id=$1
-        AND (invitation.revoked_at IS NOT NULL OR invitation.accepted_at IS NOT NULL OR invitation.expires_at<=now())
+        AND (invitation.revoked_at IS NOT NULL OR invitation.accepted_at IS NOT NULL OR invitation.expires_at<=clock_timestamp())
         AND delivery.state IN ('queued','sending')`,[workspaceId]);
   }
 
@@ -279,10 +279,10 @@ export class DatabaseCloudWorkspaceCollaborationService {
       await lockWorkspace(tx,input);
       const authority=await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
       const guests=await tx.query<{id:string;user_id:string;role:string;revision:string;expires_at:Date}>(`SELECT id,user_id,role,revision,expires_at
-        FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at,id LIMIT 100`,[input.workspaceId]);
+        FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY created_at,id LIMIT 100`,[input.workspaceId]);
       const invitations=await tx.query<{id:string;role:string;expires_at:Date;state:string|null}>(`SELECT invitation.id,invitation.role,invitation.expires_at,delivery.state
         FROM cloud_workspace_invitations invitation LEFT JOIN cloud_workspace_invitation_deliveries delivery ON delivery.invitation_id=invitation.id
-        WHERE invitation.workspace_id=$1 AND invitation.revoked_at IS NULL AND invitation.accepted_at IS NULL AND invitation.expires_at>now()
+        WHERE invitation.workspace_id=$1 AND invitation.revoked_at IS NULL AND invitation.accepted_at IS NULL AND invitation.expires_at>clock_timestamp()
         ORDER BY invitation.created_at,invitation.id LIMIT 100`,[input.workspaceId]);
       return {accessRevision:authority.accessRevision,guests:guests.rows.map(row=>({id:row.id,userId:row.user_id,role:row.role,revision:Number(row.revision),expiresAt:row.expires_at.toISOString()})),
         invitations:invitations.rows.map(row=>({id:row.id,role:row.role,expiresAt:row.expires_at.toISOString(),deliveryState:row.state??"unavailable"}))};

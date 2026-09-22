@@ -56,7 +56,7 @@ Core environment variables:
 
 | Variable                 | Purpose                                                                                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `DATABASE_URL`           | PostgreSQL connection string; use Railway's private-network URL in production                                                                    |
+| `DATABASE_URL`           | Restricted PostgreSQL application connection; hosted channels use PlanetScale with `sslmode=verify-full`                                         |
 | `AUTH_PROVIDER`          | `auth0` during compatibility rollout, or `workos` after client cutover                                                                           |
 | `AUTH_AUDIENCE`          | Expected access-token audience                                                                                                                   |
 | `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                   |
@@ -215,8 +215,8 @@ is absent. CI supplies PostgreSQL and verifies that those suites did not skip.
 
 ### Clean authentication cutover reset
 
-Prefer attaching a fresh channel-local Postgres service and running migrations.
-When Alpha or Beta must be reset in place, `reset:database` provides a guarded
+Preserve existing channel data during authentication and database migrations.
+For an explicitly disposable Alpha or Beta database, `reset:database` provides a guarded
 full-schema reset. It never supports Production, is read-only by default, and
 does not print the database URL.
 
@@ -256,22 +256,24 @@ Configure the Railway service root as `apps/control-plane`. The colocated
 Dockerfile builder.
 
 Use one Railway project with persistent `alpha`, `beta`, and `production`
-environments. Each environment has its own control-plane instance, Postgres,
+environments. Each environment has its own control-plane instance, PlanetScale Postgres database,
 authentication contract, GitHub App, feedback destinations, and public domain.
 Production autodeploy stays disabled; only Alpha tracks `main`.
 
 Before a production deployment:
 
-1. Provision PostgreSQL with backups and a pinned supported major version.
+1. Provision PlanetScale Postgres with backups and a qualified supported major version.
 2. Set `DATABASE_URL`, the selected provider's complete `AUTH_*` block, and
    `NODE_ENV=production` in Railway. WorkOS mode additionally requires
    `APP_ORIGIN`, `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and
    `WORKOS_WEBHOOK_SECRET`. None belongs in Pages or a desktop build.
-3. Use the private PostgreSQL service URL, not a public database endpoint.
+3. Use the channel's verified PlanetScale TLS endpoint and separate restricted
+   application and migration-owner credentials. Keep `DATABASE_MIGRATIONS_ON_BOOT=false`.
 4. Run the verification commands below against the exact commit being
    deployed.
-5. Confirm startup migrations complete before directing traffic to the new
-   instance. Use expand/contract migrations for ordinary rolling deploys.
+5. Apply migrations through the guarded one-shot operator, then confirm the
+   application's read-only schema verification passes before directing traffic
+   to the new instance. Use expand/contract migrations for ordinary rolling deploys.
 
 The authoritative topology, variable matrix, promotion flow, and migration
 runbook live in
@@ -778,7 +780,7 @@ pnpm check:licenses
 
 For a release candidate, also run the database-backed suites with
 `TEST_DATABASE_URL` and exercise authentication, invitations, optional GitHub
-flows, health checks, and migration startup in a disposable staging
+flows, health checks, guarded migrations and startup ledger verification in a disposable staging
 environment.
 
 Individual Pro grants and revocations during the staff pilot use the explicit

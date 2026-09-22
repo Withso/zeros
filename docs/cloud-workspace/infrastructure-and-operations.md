@@ -165,6 +165,16 @@ writes append-only owner evidence. Quota provisioning is independent of
 `CLOUD_WORKSPACES_ENABLED` and
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
 
+`CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED=false` makes a process an API-only
+replica: cloud reconciliation, access retirement, checkpoint/fork, object
+maintenance, operations/outbox, invitation and setup loops do not start.
+`/healthz` reports `cloudWorkspaces.backgroundWorkers=paused`. The default is
+`true`. Running workspaces require an enabled worker replica; the flag is not a
+provider kill switch for explicitly invoked API operations. Isolated account
+and collaboration qualification can use it with setup disabled while compute
+qualification is paused. Authentication and current-authority checks remain
+active on API requests.
+
 Durable object-storage limits are a second, independent owner-managed boundary.
 Provision or change them with
 `pnpm --dir apps/control-plane cloud-object-storage:manage`, using the same

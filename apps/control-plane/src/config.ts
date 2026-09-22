@@ -194,6 +194,8 @@ export type CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: number;
   autoArchiveMinutes: number;
   reconcileIntervalMs: number;
+  /** API replicas can leave background work to a separate worker replica. */
+  backgroundWorkersEnabled?: boolean;
   /** Envelope keys used only by the coordinator for delegated provider
    * credentials. An empty keyring keeps hosted-provider mode available. */
   providerCredentialKeys: Readonly<Record<number, string>>;
@@ -310,6 +312,7 @@ export type Config = {
 
 const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
+  CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
   CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("daytona"),
   DAYTONA_API_KEY: z.string().trim().min(16).max(4096).optional(),
   DAYTONA_API_URL: z.string().url().default("https://app.daytona.io/api"),
@@ -347,6 +350,7 @@ const CloudWorkspaceEnvSchema = z.object({
   BOAT_SECONDS_PER_DOLLAR: z.string().regex(/^[1-9][0-9]{0,12}$/).transform(Number)
     .pipe(z.number().int().max(1_000_000_000_000)).optional(),
   DAYTONA_BYO_ENABLED: z.enum(["true", "false"]).optional(),
+  DAYTONA_CONNECTIONS_ENABLED: z.enum(["true", "false"]).default("false"),
   ZEROS_CLOUD_IMAGE_ARCHITECTURE: z
     .enum(["linux/amd64", "linux/arm64"])
     .default("linux/amd64"),
@@ -999,6 +1003,10 @@ function loadCloudWorkspaceConfig(
   github: GithubBackendConfig | null,
 ): CloudWorkspaceBackendConfig | null {
   const enabled = env.CLOUD_WORKSPACES_ENABLED?.trim().toLowerCase();
+  const backgroundEnabled = env.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED?.trim().toLowerCase();
+  if (backgroundEnabled && backgroundEnabled !== "true" && backgroundEnabled !== "false") {
+    throw new Error("Invalid environment: CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED must be true or false");
+  }
   const setupEnabled =
     env.CLOUD_WORKSPACE_SETUP_WORKER_ENABLED?.trim().toLowerCase();
   if (setupEnabled && setupEnabled !== "true" && setupEnabled !== "false") {
@@ -1049,6 +1057,7 @@ function loadCloudWorkspaceConfig(
         }
       : {}),
     CLOUD_WORKSPACES_ENABLED: enabled,
+    CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: backgroundEnabled || undefined,
   });
   if (!parsed.success) {
     throw new Error(
@@ -1518,9 +1527,9 @@ function loadCloudWorkspaceConfig(
             requestMarginSeconds:value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS+5},
         }
       : {}),
-    ...(daytonaByoProfile
+    ...(daytonaByoProfile ? { providerProfiles: { daytona: daytonaByoProfile } } : {}),
+    ...(daytonaByoProfile || value.DAYTONA_CONNECTIONS_ENABLED === "true"
       ? {
-          providerProfiles: { daytona: daytonaByoProfile },
           daytonaConnection: {
             apiUrl: daytonaApiUrl,
             target: value.DAYTONA_TARGET,
@@ -1553,6 +1562,7 @@ function loadCloudWorkspaceConfig(
     operationTimeoutSeconds: value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS,
     autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
+    backgroundWorkersEnabled: value.CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED === "true",
     providerCredentialKeys,
     settingsSecretEncryptionKeys,
     ...(codexRefreshFingerprints?{codexRefreshFingerprints}:{}),

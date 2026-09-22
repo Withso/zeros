@@ -6,6 +6,7 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { seedReadyCloudWorkspace, type ReadyCloudWorkspaceFixture } from "./test-fixtures.js";
 import type { CloudCommandEngineScope } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
+import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
 
 const suite = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 suite("durable cloud decision and steering receipts", () => {
@@ -21,6 +22,19 @@ suite("durable cloud decision and steering receipts", () => {
   });
   const input = () => ({ kind: "begin", admissible: true, action: { operationId: randomUUID(), conversationId: "chat",
     executionId: "execution", kind: "permission", requestId: randomUUID(), payload: { response: { outcome: "cancelled" } } } });
+
+  it.each(["read","replay","settle","settled-replay","insert"] as const)("rejects engine expiry at the receipt %s lock boundary",async operation=>{
+    const begin=input(),receipt=operation==="insert"?null:await service.request(scope,begin);
+    const settle={kind:"settle",operationId:receipt?.operationId,claimId:receipt?.claimId,outcome:"delivered",turnId:null};
+    if(operation==="settled-replay")await service.request(scope,settle);
+    const controlled=withAuthorityDeadlineBarrier(pool,operation==="insert"?/INSERT INTO cloud_workspace_action_receipts/:/SELECT \* FROM cloud_workspace_action_receipts[\s\S]+FOR UPDATE/,async client=>{
+      await client.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1",[scope.engineInstanceId]);
+    });
+    const waiting=new DatabaseCloudWorkspaceActionService({pool:controlled});
+    const request=operation==="read"?{kind:"read",operationId:receipt!.operationId}:operation==="settle"||operation==="settled-replay"?settle:begin;
+    await expect(waiting.request(scope,request)).rejects.toThrow("authority");
+    if(operation==="insert")expect((await pool.query("SELECT 1 FROM cloud_workspace_action_receipts")).rowCount).toBe(0);
+  });
 
   it("stores intent before delivery and binds all retries to identical content", async () => {
     const request = input(); const first = await service.request(scope, request);

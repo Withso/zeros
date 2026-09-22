@@ -154,6 +154,14 @@ Daytona API key is required or used for BYO. The runtime registry refuses missin
 historic managed accounts; a default-provider migration must drain or retain
 the former provider deployment before removing its credentials.
 
+`DAYTONA_CONNECTIONS_ENABLED=true` permits credential onboarding independently
+of the compute profile. It uses `DAYTONA_API_URL`, `DAYTONA_TARGET` and the
+provider credential encryption key for bounded, read-only key verification and
+encrypted storage. It does not register a Daytona provisioning profile or enable
+allocation. This supports staff API qualification while host isolation remains
+unqualified. Enabling a complete BYO compute profile also enables onboarding;
+both controls default off beside managed Boat.
+
 Boat allocation accepts only the storage size declared by its qualified image
 profile. The provider API has no disk-resize parameter; accepting another size
 would misrepresent the reservation. Configuration alone does not prove capacity:

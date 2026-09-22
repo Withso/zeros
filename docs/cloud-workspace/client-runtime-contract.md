@@ -61,11 +61,14 @@ the running native session without receiving its credentials.
 
 After allocation loss, restored native conversation history is independent of
 authentication. Fresh provider execution requires supported authentication again.
-The current backend does not automatically copy desktop subscription files,
-refresh a cloud subscription from another device, or provide a provider-account
-vault/rebinding API. Headless CLI login and private qualification transfers are
-not evidence that a production account-connection flow is implemented. Agent
-authentication, licensing and redistribution remain separate release gates.
+The backend provides owner-scoped encrypted provider credentials and explicit
+workspace/member/model delegations through `/v1/cloud-agent-credentials`. Native
+Codex cache import and serialized subscription renewal are implemented; access
+material alone reaches a currently authorized execution. Desktop subscription
+files are never copied implicitly or shared between independent refresh writers.
+See [agent authentication](agent-authentication-and-language-tools.md). Deployed
+account-connection qualification, client UI and redistribution review remain
+separate release gates.
 
 ## Commands and decisions
 
@@ -289,7 +292,8 @@ Forks get fresh workspace identities and credentials; replicas remain receive-on
 ## Portable runtime ingress
 
 Engine admission can include an additive `bridgeUrl` pointing to
-`/v1/cloud-workspaces/bridge`. Connect with the one-use `zws_` grant in
+`/v1/cloud-workspaces/bridge`. Actor-aware runtimes use a one-use `zwa_` grant;
+legacy untouched owner-only runtimes retain `zws_` compatibility. Carry the grant in
 `x-zeros-cloud-token`, or browser WebSocket subprotocols `zeros-v1` and
 `zeros-cloud-token.<base64url(grant)>`. Query-string credentials are rejected.
 The exact engine consumes admission; the coordinator relay only authenticates

@@ -94,7 +94,8 @@ External exit evidence:
 ## Phase 1 — Identity, authorization, settings, and paid authority
 
 Repository status: implemented by forward migrations 0026–0027, 0041–0047,
-and 0053–0062, plus their control-plane services and tests.
+and subsequent authority migrations, including individual Pro funding and
+actor/delegation authority, plus their control-plane services and tests.
 
 - WorkOS is the identity and Organization-membership source. Zeros maps WorkOS
   identities to canonical database UUIDs and remains authoritative for Team,
@@ -125,7 +126,8 @@ and 0053–0062, plus their control-plane services and tests.
 - Tenant relations use forced RLS and composite tenant foreign keys. Runtime
   authorization does not trust WorkOS JWT role claims as billing authority.
 
-Phase 6A owns active ownership transfer and member collaboration. Persisting
+Active ownership transfer remains deferred; member collaboration has backend
+implementation and separate release qualification. Persisting
 their safe data model now does not enable those workflows.
 
 ## Phase 2 — Secure cloud execution and access
@@ -260,10 +262,11 @@ release approval open.
 - Organization cloud creation, lifecycle, settings, repository,
   provider connection, quota, usage, checkpoint, export, replica, access,
   retention, and deletion APIs share the same authorization spine.
-- Phase 5 runtime is owner-only even when an Organization has other members.
-  Other Team members cannot list or read the owner's workspace record and
-  cannot connect, prompt, sync, mint access, or spend the owner's cloud/agent
-  budget. Organization-level policy metadata is separate from workspace data.
+- The original Phase 5 owner-only boundary remains for legacy private
+  single-member workspaces. The implemented collaboration boundary adds exact
+  member/guest roles, device sessions and individual Pro eligibility. Sharing
+  code never implicitly shares an agent credential; the credential owner must
+  delegate it explicitly. Public collaboration launch remains gated.
 - Current entitlement or provider authority loss freezes new paid work and
   retires runtime access. Existing durable data remains owner-exportable after
   paid compute cancellation.
@@ -299,9 +302,11 @@ Production exit evidence:
 - finish the deferred cloud UI and its E2E tests; and
 - only then enable the setup-worker and customer-facing feature flags.
 
-## Phase 6A — deferred Organization multiplayer
+## Collaboration expansion and remaining release work
 
-Phase 6A is not part of this execution. It owns:
+Workspace roles, member/guest admission, device authority, credential delegation
+and replica/export authorization are implemented behind staff-only gates.
+Deployed Batch 4 qualification and later client release tests cover:
 
 - workspace-role permissions for viewers, prompters, developers, managers, and
   owners;
