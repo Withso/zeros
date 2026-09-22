@@ -39,7 +39,7 @@ jobs:
       - name: Verify publisher before registry authentication
         run: |
           pnpm install --frozen-lockfile
-          pnpm exec vitest run scripts/__tests__/cloud-vm-snapshot.test.ts scripts/__tests__/cloud-runtime-publication.test.ts scripts/__tests__/cloud-publication-disk-budget.test.ts scripts/__tests__/cloud-publication-process.test.ts
+          pnpm exec vitest run scripts/__tests__/cloud-vm-snapshot.test.ts scripts/__tests__/cloud-runtime-publication.test.ts scripts/__tests__/cloud-publication-disk-budget.test.ts scripts/__tests__/cloud-publication-process.test.ts scripts/__tests__/cloud-publication-registry-auth.test.ts
       - name: Bind immutable publication identity
         env:
           REPOSITORY: ${{ github.repository }}
@@ -107,12 +107,17 @@ jobs:
       - name: Validate publication receipt
         id: receipt
         run: pnpm tsx scripts/cloud-workspace-validation/publication-receipt.ts
+      - name: Prepare isolated registry credentials for attestation
+        run: pnpm tsx scripts/cloud-workspace-validation/publication-registry-auth.ts stage
       - name: Attest image source provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.ZEROS_CLOUD_VM_REGISTRY_REPOSITORY }}
           subject-digest: ${{ steps.receipt.outputs.digest }}
           push-to-registry: true
+      - name: Restore prior default registry configuration
+        if: always()
+        run: pnpm tsx scripts/cloud-workspace-validation/publication-registry-auth.ts restore
       - name: Verify published provenance
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -140,6 +145,7 @@ jobs:
         if: always()
         run: |
           cleanup_status=0
+          pnpm tsx scripts/cloud-workspace-validation/publication-registry-auth.ts restore || cleanup_status=$?
           if [ -n "${BUILDX_BUILDER:-}" ]; then
             timeout --kill-after=5s 30s docker buildx rm --force "$BUILDX_BUILDER" || cleanup_status=$?
           fi
