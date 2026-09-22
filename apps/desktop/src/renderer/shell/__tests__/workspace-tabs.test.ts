@@ -88,6 +88,18 @@ describe("top-bar horizontal overflow", () => {
 });
 
 describe("repository workspace restoration", () => {
+  it("never invents a root workspace for a fresh project, including a cold list", () => {
+    for (const cachedWorkspaces of [undefined, []]) {
+      expect(
+        resolveRepoWorkspaceDestination({
+          project,
+          rememberedFolder: null,
+          cachedWorkspaces,
+        }),
+      ).toBeNull();
+    }
+  });
+
   it("preserves a chat rooted in a main-checkout subdirectory", () => {
     expect(
       resolveRepoWorkspaceDestination({
@@ -161,17 +173,13 @@ describe("repository workspace restoration", () => {
     });
   });
 
-  it("falls back to main only after a confirmed list invalidates the memory", () => {
+  it("returns to the project when the confirmed list invalidates the only workspace", () => {
     const resolved = resolveRepoWorkspaceDestination({
       project,
       rememberedFolder: "/worktrees/deleted",
       cachedWorkspaces: [],
     });
-    expect(resolved).toMatchObject({
-      id: "local:zeros",
-      path: "/repo",
-      repoRoot: "/repo",
-    });
+    expect(resolved).toBeNull();
   });
 
   it("preserves a cold remembered design path like any other folder (mode model)", () => {
@@ -206,7 +214,6 @@ describe("repository workspace restoration", () => {
         project,
         rememberedFolder: design.path,
         cachedWorkspaces: [design, code],
-        allowLocalMain: false,
       }),
     ).toBe(design);
   });
@@ -246,8 +253,7 @@ describe("leftmostLiveWorkspace", () => {
   });
 });
 
-// "Work in local main" off — the primary checkout stops being an offered
-// destination, so a repo switch has to land on a worktree wherever one exists.
+// New work always lands on a managed worktree; old root memories remain readable.
 describe("repository workspace restoration without local main", () => {
   const older = workspace("older", {
     path: "/worktrees/older",
@@ -268,7 +274,6 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: "/repo",
         cachedWorkspaces: [newer, older],
-        allowLocalMain: false,
       }),
     ).toBe(older);
   });
@@ -279,7 +284,6 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: "/repo/packages/app",
         cachedWorkspaces: [older],
-        allowLocalMain: false,
       }),
     ).toBe(older);
   });
@@ -290,7 +294,6 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: "/worktrees/deleted",
         cachedWorkspaces: [older],
-        allowLocalMain: false,
       }),
     ).toBe(older);
   });
@@ -305,12 +308,11 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: "/repo",
         cachedWorkspaces: [archived, older],
-        allowLocalMain: false,
       }),
     ).toBe(older);
   });
 
-  it("still lands on main when the repo has no worktree to offer", () => {
+  it("preserves an explicit legacy root memory when no worktrees remain", () => {
     // Nowhere else to go — a repo whose only checkout is the trunk has to
     // resolve somewhere, and "+" is the top bar's call to action from there.
     expect(
@@ -318,7 +320,6 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: "/repo",
         cachedWorkspaces: [],
-        allowLocalMain: false,
       }),
     ).toMatchObject({ id: "local:zeros", path: "/repo" });
   });
@@ -331,7 +332,6 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: "/repo",
         cachedWorkspaces: undefined,
-        allowLocalMain: false,
       }),
     ).toMatchObject({ id: "local:zeros", path: "/repo" });
   });
@@ -342,7 +342,6 @@ describe("repository workspace restoration without local main", () => {
         project,
         rememberedFolder: newer.path,
         cachedWorkspaces: [newer, older],
-        allowLocalMain: false,
       }),
     ).toBe(newer);
   });

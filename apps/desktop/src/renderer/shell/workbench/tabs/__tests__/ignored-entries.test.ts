@@ -28,6 +28,15 @@ import {
 
 const map = (entries: Array<[string, string[]]>) => new Map(entries);
 
+it("distinguishes a cold ignored listing from a confirmed empty answer", () => {
+  const cold = emptyState("/empty");
+  const confirmed = withRoots(cold, "/empty", []);
+  expect(confirmed).not.toBe(cold);
+  expect(confirmed.resolved).toBe(true);
+  expect(withRoots(confirmed, "/empty", [])).toBe(confirmed);
+  expect(warmState("/another-folder").resolved).toBe(false);
+});
+
 describe("isDirEntry / dirKey", () => {
   it("reads @pierre/trees' trailing-slash directory marker", () => {
     expect(isDirEntry("node_modules/")).toBe(true);

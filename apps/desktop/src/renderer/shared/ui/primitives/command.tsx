@@ -13,6 +13,7 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogHeader,
   DialogTitle,
@@ -54,24 +55,38 @@ function CommandDialog({
 }) {
   return (
     <Dialog {...props}>
-      <DialogHeader className="sr-only">
-        <DialogTitle>{title}</DialogTitle>
-        <DialogDescription>{description}</DialogDescription>
-      </DialogHeader>
       <DialogContent
-        className={cn("overflow-hidden p-0", className)}
+        className={cn("gap-0 overflow-hidden p-0", className)}
         showCloseButton={showCloseButton}
+        onOpenAutoFocus={(event) => {
+          // Keep typing ready in the search field ahead of the header's close.
+          const input = (event.target as HTMLElement).querySelector<HTMLInputElement>(
+            '[data-slot="command-input"]:not(:disabled)',
+          );
+          if (input) {
+            event.preventDefault();
+            input.focus();
+          }
+        }}
         // A command palette is a transient surface — click-away IS the
         // expected close, so opt back into outside-dismiss (the Dialog
         // default is now modal/no-overlay-dismiss).
         dismissable
       >
-        <Command
-          shouldFilter={shouldFilter}
-          className="[&_[cmdk-group-heading]]:text-fg2 **:data-[slot=command-input-wrapper]:h-12 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group]]:px-2 [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5"
-        >
-          {children}
-        </Command>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription className="sr-only">
+            {description}
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody className="gap-0">
+          <Command
+            shouldFilter={shouldFilter}
+            className="[&_[cmdk-group-heading]]:text-fg2 **:data-[slot=command-input-wrapper]:h-12 [&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:font-medium [&_[cmdk-group]]:px-2 [&_[cmdk-group]:not([hidden])_~[cmdk-group]]:pt-0 [&_[cmdk-input-wrapper]_svg]:h-5 [&_[cmdk-input-wrapper]_svg]:w-5 [&_[cmdk-input]]:h-12 [&_[cmdk-item]]:px-2 [&_[cmdk-item]]:py-3 [&_[cmdk-item]_svg]:h-5 [&_[cmdk-item]_svg]:w-5"
+          >
+            {children}
+          </Command>
+        </DialogBody>
       </DialogContent>
     </Dialog>
   );

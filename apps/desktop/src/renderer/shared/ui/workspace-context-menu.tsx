@@ -1,4 +1,5 @@
 import React, { useRef, type MouseEvent, type ReactNode } from "react";
+import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { Archive, Check } from "lucide-react";
 
 import {
@@ -103,6 +104,9 @@ export function WorkspaceContextMenu({
         },
       )
     : children;
+
+  // Root folders have no engine workspace row to archive or change status.
+  if (isLocalMainWorkspace(workspace)) return <>{children}</>;
 
   return (
     <ContextMenu

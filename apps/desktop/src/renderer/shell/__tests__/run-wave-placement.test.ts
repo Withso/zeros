@@ -42,7 +42,11 @@ describe("live Run wave placement", () => {
     // They no longer compete for one slot: the tab is content-sized, so it can
     // afford both, and a running workspace should still report what it changed.
     // DOM order is the visual order — counts sit to the LEFT of the wave.
-    expect(topBar).toContain("useWorkspaceChangeLines(workspace)");
+    // Plain folder tabs have no Git comparison. Managed workspace tabs keep
+    // the same independent counts and Run wave.
+    expect(topBar).toContain(
+      "useWorkspaceChangeLines(localFolder ? null : workspace)",
+    );
     expect(topBar).toMatch(
       /<WorkspaceChangeCounts \{\.\.\.changeLines\} active=\{active\} \/>[\s\S]*?<RunWave/,
     );

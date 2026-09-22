@@ -300,6 +300,17 @@ at `text-xxs` (10px).
 **Not bg3:** dialogs / sheets are full modal surfaces on `--bg1` behind a
 `bg-scrim` veil; hover-cards are raised cards on `--bg2` (+ `border-border2`).
 
+**Dialog chrome:** `DialogTitle` provides the 15px heading and top-right
+`DialogCloseButton`: a 20px square with a 12px icon and 999px corner radius.
+Custom dialog headers use that same close control. `DialogContent` has no
+padding or section gap: `DialogHeader` uses
+12px 16px 0 padding, `DialogBody` uses 24px 16px, and `DialogFooter` uses 10px
+on every side with a full-width top border. Keep form controls, lists, and
+confirmation copy inside `DialogBody`; scrolling belongs to that section when
+the dialog has a bounded height. Descriptions use 13px `--fg2`. Modal overlays
+use 50% black in both themes. The primary action explicitly uses
+`Button variant="default"`; ordinary buttons default to secondary.
+
 ### 4.8 Status messages
 
 ```

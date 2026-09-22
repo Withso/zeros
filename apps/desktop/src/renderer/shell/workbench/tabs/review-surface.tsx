@@ -7,8 +7,8 @@
 // + Create PR without a PR, the live status island with one); this body owns
 // ReviewView
 // (PR header / state / merge + Changes / Commits / Checks / Reviews sub-tabs)
-// for the active workspace's PR. ALWAYS visible — unlike the old conditional
-// "PR #N" pill it replaced, so instead of appearing/disappearing with the PR
+// for the active workspace's PR. Available for GitHub repositories even before
+// a PR exists, so instead of appearing/disappearing with the PR
 // it renders an explanatory empty state until one exists. The status island's
 // #N chip / Show-checks land here (use-open-review-tab).
 //

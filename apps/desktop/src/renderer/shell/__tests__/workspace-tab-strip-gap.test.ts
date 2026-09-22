@@ -315,7 +315,6 @@ describe("top-bar borderless navigation chrome", () => {
     for (const name of [
       "ICON_BUTTON_CLS",
       "MENU_ICON_BUTTON_CLS",
-      "MAIN_TAB_CLS",
       "PROJECT_TRIGGER_CLS",
       "WORKSPACE_TAB_CLS",
     ]) {
@@ -358,7 +357,6 @@ describe("top-bar borderless navigation chrome", () => {
     for (const name of [
       "ICON_BUTTON_CLS",
       "MENU_ICON_BUTTON_CLS",
-      "MAIN_TAB_CLS",
       "PROJECT_TRIGGER_CLS",
     ]) {
       expect(classConstant(topBar, name)).toMatch(/\brounded-md\b/);

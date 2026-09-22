@@ -13,7 +13,10 @@ import { Button, GithubIcon, Input } from "../../shared/ui";
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogBody,
   DialogDescription,
+  DialogFooter,
   DialogTitle,
 } from "../../shared/ui/primitives/dialog";
 import { toast } from "../../shared/ui/primitives/elements";
@@ -128,7 +131,7 @@ export function OpenGithubProjectDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-[520px] gap-5"
+        className="max-w-[520px]"
         onKeyDown={(e) => {
           if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && canSubmit) {
             e.preventDefault();
@@ -136,74 +139,75 @@ export function OpenGithubProjectDialog({
           }
         }}
       >
-        <div className="flex flex-col gap-1.5">
-          <DialogTitle className="inline-flex items-center gap-2 text-sm font-medium">
+        <DialogHeader>
+          <DialogTitle className="inline-flex items-center gap-2">
             <GithubIcon className="text-fg2 size-4" />
             Open GitHub project
           </DialogTitle>
-          <DialogDescription className="text-fg2 text-sm">
+          <DialogDescription className="text-fg2 text-xs">
             Clone a remote repository — `git clone` runs locally, the engine
             never proxies your credentials.
           </DialogDescription>
-        </div>
-
-        {/* URL */}
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="og-url" className="text-fg1 text-sm font-medium">
-            Repository URL
-          </label>
-          <Input
-            id="og-url"
-            autoFocus
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://github.com/owner/repo  or  git@github.com:owner/repo.git"
-            spellCheck={false}
-            className="text-xs"
-          />
-          {url.trim() && !urlIsValid && (
-            <p className="text-red-primary text-xs">
-              That doesn't look like a git URL — use https://… or
-              git@host:owner/repo.git
-            </p>
-          )}
-        </div>
-
-        {/* Parent folder */}
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="og-parent" className="text-fg1 text-sm font-medium">
-            Parent folder
-          </label>
-          <div className="flex items-center gap-2">
+        </DialogHeader>
+        <DialogBody className="gap-5">
+          {/* URL */}
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="og-url" className="text-fg1 text-sm font-medium">
+              Repository URL
+            </label>
             <Input
-              id="og-parent"
-              value={parentFolder}
-              onChange={(e) => setParentFolder(e.target.value)}
-              className="flex-1 text-xs"
+              id="og-url"
+              autoFocus
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://github.com/owner/repo  or  git@github.com:owner/repo.git"
               spellCheck={false}
-              placeholder="Click Browse to pick a folder…"
+              className="text-xs"
             />
-            <Button
-              variant="secondary"
-              size="lg"
-              onClick={handleBrowse}
-              className="shrink-0"
-            >
-              Browse
-            </Button>
+            {url.trim() && !urlIsValid && (
+              <p className="text-red-primary text-xs">
+                That doesn't look like a git URL — use https://… or
+                git@host:owner/repo.git
+              </p>
+            )}
           </div>
-          {fullPath && (
-            <p className="text-fg2 text-xs">
-              Will create{" "}
-              <span className="bg-bg2-hover text-fg1 rounded-sm px-1 text-xs">
-                {fullPath}
-              </span>
-            </p>
-          )}
-        </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 pt-1">
+          {/* Parent folder */}
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="og-parent" className="text-fg1 text-sm font-medium">
+              Parent folder
+            </label>
+            <div className="flex items-center gap-2">
+              <Input
+                id="og-parent"
+                value={parentFolder}
+                onChange={(e) => setParentFolder(e.target.value)}
+                className="flex-1 text-xs"
+                spellCheck={false}
+                placeholder="Click Browse to pick a folder…"
+              />
+              <Button
+                variant="secondary"
+                size="lg"
+                onClick={handleBrowse}
+                className="shrink-0"
+              >
+                Browse
+              </Button>
+            </div>
+            {fullPath && (
+              <p className="text-fg2 text-xs">
+                Will create{" "}
+                <span className="bg-bg2-hover text-fg1 rounded-sm px-1 text-xs">
+                  {fullPath}
+                </span>
+              </p>
+            )}
+          </div>
+
+          {/* Footer */}
+        </DialogBody>
+        <DialogFooter>
           <Button
             variant="ghost"
             size="sm"
@@ -224,7 +228,7 @@ export function OpenGithubProjectDialog({
               ⌘↩
             </kbd>
           </Button>
-        </div>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

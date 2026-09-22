@@ -4,8 +4,11 @@ import { Button } from "../../shared/ui";
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogBody,
   DialogTitle,
   DialogDescription,
+  DialogFooter,
 } from "../../shared/ui/primitives/dialog";
 import type { ConnectionMethod } from "./connection-methods";
 
@@ -54,53 +57,59 @@ export function ProviderConnectionDialog({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] w-[calc(100vw-2rem)] min-w-0 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]">
-        <DialogTitle>{name}</DialogTitle>
-        <DialogDescription>
-          Choose how to connect {name} to Zeros.
-        </DialogDescription>
-        <div
-          className="flex min-w-0 flex-col gap-3"
-          aria-label="Connection methods"
-        >
-          {methods.map((entry) => (
-            <section
-              key={entry.id}
-              className="border-border1 min-w-0 overflow-hidden rounded-lg border"
-            >
-              <Button
-                variant="ghost"
-                className="h-auto w-full justify-start gap-3 rounded-none px-4 py-3 text-left"
-                aria-pressed={method === entry.id}
-                disabled={busy}
-                onClick={() => onMethodChange(entry.id)}
+        <DialogHeader>
+          <DialogTitle>{name}</DialogTitle>
+          <DialogDescription>
+            Choose how to connect {name} to Zeros.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogBody>
+          <div
+            className="flex min-w-0 flex-col gap-3"
+            aria-label="Connection methods"
+          >
+            {methods.map((entry) => (
+              <section
+                key={entry.id}
+                className="border-border1 min-w-0 overflow-hidden rounded-lg border"
               >
-                <span
-                  aria-hidden="true"
-                  className="border-fg2 flex size-4 shrink-0 items-center justify-center rounded-full border"
+                <Button
+                  variant="ghost"
+                  className="h-auto w-full justify-start gap-3 rounded-none px-4 py-3 text-left"
+                  aria-pressed={method === entry.id}
+                  disabled={busy}
+                  onClick={() => onMethodChange(entry.id)}
                 >
-                  {method === entry.id && (
-                    <span className="bg-fg1 size-2 rounded-full" />
+                  <span
+                    aria-hidden="true"
+                    className="border-fg2 flex size-4 shrink-0 items-center justify-center rounded-full border"
+                  >
+                    {method === entry.id && (
+                      <span className="bg-fg1 size-2 rounded-full" />
+                    )}
+                  </span>
+                  <span className="flex-1">{entry.label}</span>
+                  {method === entry.id && connected && (
+                    <Check
+                      className="text-green-fg size-4"
+                      aria-label="Connected"
+                    />
                   )}
-                </span>
-                <span className="flex-1">{entry.label}</span>
-                {method === entry.id && connected && (
-                  <Check
-                    className="text-green-fg size-4"
-                    aria-label="Connected"
-                  />
+                </Button>
+                {method === entry.id && (
+                  <div className="border-border1 flex min-w-0 flex-col gap-3 border-t p-4">
+                    {entry.id !== "account" && (
+                      <p className="text-fg2 text-xs">{entry.description}</p>
+                    )}
+                    {children}
+                  </div>
                 )}
-              </Button>
-              {method === entry.id && (
-                <div className="border-border1 flex min-w-0 flex-col gap-3 border-t p-4">
-                  {entry.id !== "account" && (
-                    <p className="text-fg2 text-xs">{entry.description}</p>
-                  )}
-                  {children}
-                </div>
-              )}
-            </section>
-          ))}
-          {provider !== "cursor" && (
+              </section>
+            ))}
+          </div>
+        </DialogBody>
+        {provider !== "cursor" && (
+          <DialogFooter>
             <Button
               variant="secondary"
               disabled
@@ -108,8 +117,8 @@ export function ProviderConnectionDialog({
             >
               Custom Providers <span className="text-fg2">(Coming soon)</span>
             </Button>
-          )}
-        </div>
+          </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );

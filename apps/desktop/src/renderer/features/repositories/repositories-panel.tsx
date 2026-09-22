@@ -111,6 +111,8 @@ import {
 import {
   Dialog,
   DialogContent,
+  DialogHeader,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogTitle,
@@ -448,7 +450,9 @@ export function RepoDetail({
       return (
         <div className="flex flex-col gap-9">
           <EnvironmentSection project={project} layer={layer} root={root} />
-          <ScriptsSection project={project} layer="repo-local" root={root} />
+          {project.isGitRepository !== false && (
+            <ScriptsSection project={project} layer="repo-local" root={root} />
+          )}
           <RunActionsSection project={project} layer="repo-local" root={root} />
         </div>
       );
@@ -701,6 +705,7 @@ function EnvVarRow({
  *  repo page under "Inherited from User config" (no Override: user vars reach
  *  every repo by definition). */
 export function EnvironmentSection({
+  project,
   layer,
   root,
   mainRepoRoot,
@@ -917,7 +922,9 @@ export function EnvironmentSection({
       description={
         layer === "user"
           ? "These secrets are passed to every agent on this Mac. Stored encrypted in your Keychain."
-          : "These secrets are passed to agents in this repo, for all workspaces"
+          : project?.isGitRepository === false
+            ? "These secrets are passed to agents working in this folder"
+            : "These secrets are passed to agents in this repo, for all workspaces"
       }
       action={
         names.length > 0 ? (
@@ -1781,19 +1788,25 @@ function PathsSection({ project }: { project: Project }) {
           <SettingsRow label="Name">
             <span className="text-fg2 text-sm">{project.name}</span>
           </SettingsRow>
-          <SettingsRow label="Slug">
-            <span className="text-fg2 text-sm">{project.repoSlug || "—"}</span>
-          </SettingsRow>
-          <SettingsRow label="Origin">
-            <span
-              className={cn(
-                "text-sm",
-                project.originUrl ? "text-fg2" : "text-muted-fg italic",
-              )}
-            >
-              {project.originUrl ?? "Not set"}
-            </span>
-          </SettingsRow>
+          {project.isGitRepository !== false && (
+            <SettingsRow label="Slug">
+              <span className="text-fg2 text-sm">
+                {project.repoSlug || "—"}
+              </span>
+            </SettingsRow>
+          )}
+          {project.isGitRepository !== false && (
+            <SettingsRow label="Origin">
+              <span
+                className={cn(
+                  "text-sm",
+                  project.originUrl ? "text-fg2" : "text-muted-fg italic",
+                )}
+              >
+                {project.originUrl ?? "Not set"}
+              </span>
+            </SettingsRow>
+          )}
           <SettingsRow label="Root path">
             <Tooltip label={project.repoRoot}>
               <span className="text-fg2 max-w-[60%] truncate text-sm">
@@ -1804,53 +1817,55 @@ function PathsSection({ project }: { project: Project }) {
         </SettingsList>
       </SettingsSection>
 
-      <SettingsSection
-        title="Workspaces"
-        description="Where new worktrees are created. Personal to this Mac (.zeros/settings.local.toml, kept out of git)."
-      >
-        <SettingsField
-          htmlFor={`workspaces-${project.id}`}
-          label={
-            <span className="flex items-center gap-2">
-              Workspaces path
-              {inherited && <SourceTag source={effective.source} />}
-            </span>
-          }
+      {project.isGitRepository !== false && (
+        <SettingsSection
+          title="Workspaces"
+          description="Where new worktrees are created. Personal to this Mac (.zeros/settings.local.toml, kept out of git)."
         >
-          <div className="flex flex-row gap-2">
-            <Input
-              id={`workspaces-${project.id}`}
-              type="text"
-              spellCheck={false}
-              autoComplete="off"
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder={
-                asString(effective.value) ||
-                `~/zeros/workspaces/${project.repoSlug || "<slug>"}`
-              }
-              className="flex-1 font-mono text-sm"
-              aria-label="Workspaces path"
-            />
-            <Button
-              variant="secondary"
-              size="lg"
-              onClick={() => void handleBrowse()}
-            >
-              <FolderOpen className="size-3.5" aria-hidden="true" />
-              Browse
-            </Button>
-            <Button
-              variant="secondary"
-              size="lg"
-              onClick={() => void handleSave()}
-              disabled={local.loading || draft.trim() === repoPath}
-            >
-              Save
-            </Button>
-          </div>
-        </SettingsField>
-      </SettingsSection>
+          <SettingsField
+            htmlFor={`workspaces-${project.id}`}
+            label={
+              <span className="flex items-center gap-2">
+                Workspaces path
+                {inherited && <SourceTag source={effective.source} />}
+              </span>
+            }
+          >
+            <div className="flex flex-row gap-2">
+              <Input
+                id={`workspaces-${project.id}`}
+                type="text"
+                spellCheck={false}
+                autoComplete="off"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                placeholder={
+                  asString(effective.value) ||
+                  `~/zeros/workspaces/${project.repoSlug || "<slug>"}`
+                }
+                className="flex-1 font-mono text-sm"
+                aria-label="Workspaces path"
+              />
+              <Button
+                variant="secondary"
+                size="lg"
+                onClick={() => void handleBrowse()}
+              >
+                <FolderOpen className="size-3.5" aria-hidden="true" />
+                Browse
+              </Button>
+              <Button
+                variant="secondary"
+                size="lg"
+                onClick={() => void handleSave()}
+                disabled={local.loading || draft.trim() === repoPath}
+              >
+                Save
+              </Button>
+            </div>
+          </SettingsField>
+        </SettingsSection>
+      )}
 
       <RemoveRepositorySection project={project} />
     </div>
@@ -1874,6 +1889,7 @@ function PathsSection({ project }: { project: Project }) {
 // currently inside the repo being removed, so "Back" never lands on a dead
 // "No workspace selected" pane.
 function RemoveRepositorySection({ project }: { project: Project }) {
+  const plainFolder = project.isGitRepository === false;
   const dispatch = useWorkspaceDispatch();
   const chats = useChats();
   const activeChatId = useActiveChatId();
@@ -2062,8 +2078,12 @@ function RemoveRepositorySection({ project }: { project: Project }) {
 
   return (
     <SettingsSection
-      title="Remove repository"
-      description="Take this repo out of Zeros and delete the worktrees Zeros created for it. Your source folder is left untouched."
+      title={plainFolder ? "Remove folder" : "Remove repository"}
+      description={
+        plainFolder
+          ? "Remove this folder and its chats from Zeros. Your files stay on disk."
+          : "Take this repo out of Zeros and delete the worktrees Zeros created for it. Your source folder is left untouched."
+      }
     >
       <div>
         <Button
@@ -2072,7 +2092,7 @@ function RemoveRepositorySection({ project }: { project: Project }) {
           onClick={() => setConfirmOpen(true)}
         >
           <Trash2 className="size-3.5" aria-hidden="true" />
-          Remove repository
+          {plainFolder ? "Remove folder" : "Remove repository"}
         </Button>
       </div>
 
@@ -2083,18 +2103,24 @@ function RemoveRepositorySection({ project }: { project: Project }) {
           if (!busy) setConfirmOpen(o);
         }}
       >
-        <DialogContent className="max-w-[480px] gap-4">
-          <div className="flex flex-col gap-3">
+        <DialogContent className="max-w-[480px]">
+          <DialogHeader>
             <DialogTitle>Remove {project.name}?</DialogTitle>
+          </DialogHeader>
+          <DialogBody>
             <DialogDescription className="flex flex-col gap-3">
-              <span>All your workspaces will be permanently deleted.</span>
+              <span>
+                {plainFolder
+                  ? "This folder's chats will be permanently deleted from Zeros."
+                  : "All your workspaces will be permanently deleted."}
+              </span>
               <span>
                 The source directory{" "}
                 <span className="break-all">{project.repoRoot}</span> will not
                 be modified.
               </span>
             </DialogDescription>
-          </div>
+          </DialogBody>
           <DialogFooter>
             <Button
               variant="secondary"

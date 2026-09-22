@@ -4,6 +4,7 @@ import {
   Button,
   Dialog,
   DialogContent,
+  DialogBody,
   DialogDescription,
   DialogFooter,
   DialogHeader,
@@ -36,12 +37,14 @@ export function ChatCloseDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onCancel()}>
-      <DialogContent showCloseButton={false} className="max-w-md">
+      <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>{copy.title}</DialogTitle>
-          <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
-        <DialogFooter className="mt-2 gap-2">
+        <DialogBody>
+          <DialogDescription>{copy.description}</DialogDescription>
+        </DialogBody>
+        <DialogFooter>
           <Button autoFocus variant="secondary" size="sm" onClick={onCancel}>
             Cancel
           </Button>

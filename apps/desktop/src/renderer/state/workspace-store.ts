@@ -167,6 +167,8 @@ export type Action =
       projectId: string;
       /** Explicit deep-link view; omitted means restore this repo's memory. */
       view?: RepoPageView;
+      /** Publish a repository-filter fallback with its destination. */
+      workspaceListFilter?: WorkspaceListFilter;
     }
   | {
       type: "SET_REPO_PAGE_VIEW";
@@ -599,13 +601,13 @@ function rememberActiveFolder(next: WorkspaceState): WorkspaceState {
   };
 }
 
-/** Repository-switch destination. Main is the safe default only when that
- * repository has no remembered selection. */
+/** Absence of a saved selection is distinct from an existing root-bound chat.
+ * Callers choose a managed worktree or the repository page for a fresh owner. */
 export function selectLastWorkspaceFolderForRepo(
   s: WorkspaceState,
   repoRoot: string,
-): string {
-  return s.lastWorkspaceByRepoRoot[repoRoot] ?? repoRoot;
+): string | null {
+  return s.lastWorkspaceByRepoRoot[repoRoot] ?? null;
 }
 
 /** Repository hub view with an independent default per project. */
@@ -1015,11 +1017,14 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       const next = action.view
         ? rememberRepoPageView(state, action.projectId, action.view)
         : state;
+      const workspaceListFilter =
+        action.workspaceListFilter ?? state.workspaceListFilter;
       if (
         state.activePage === "repo" &&
         state.lastHomePage === "repo" &&
         state.activeRepoId === action.projectId &&
         state.pendingWorkspaceValidationFolder === null &&
+        state.workspaceListFilter === workspaceListFilter &&
         state === next
       ) {
         return state;
@@ -1029,6 +1034,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         activePage: "repo",
         lastHomePage: "repo",
         activeRepoId: action.projectId,
+        workspaceListFilter,
         pendingWorkspaceValidationFolder: null,
       };
     }

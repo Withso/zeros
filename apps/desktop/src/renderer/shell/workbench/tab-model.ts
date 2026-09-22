@@ -440,8 +440,8 @@ export function createChangesTab(): WorkbenchTab {
 }
 
 /** Build THE Review tab — the pinned PR review surface (ReviewView: PR header /
- *  merge + Changes / Commits / Checks / Reviews). ALWAYS
- *  visible: it renders the live PR while the workspace has one and an
+ *  merge + Changes / Commits / Checks / Reviews). GitHub repositories show
+ *  the live PR while the workspace has one and an
  *  explanatory empty state otherwise (PR creation lives in the Changes tab's
  *  PR status row). One per worktree, can't be closed. */
 export function createReviewTab(): WorkbenchTab {
@@ -501,7 +501,7 @@ export const TAB_TYPE_META: Record<WorkbenchTabType, TabTypeMeta> = {
 };
 
 // The worktree's PR review surface is THE pinned "review" home tab above
-// (ReviewSurface → ReviewView) — always visible, empty state without a PR.
+// (ReviewSurface → ReviewView) — visible for GitHub repos even without a PR.
 // The legacy secondary source panel (All Files / Changes / "PR #N") is gone;
 // those surfaces now live in the Changes / Files / Review workbench tabs.
 
