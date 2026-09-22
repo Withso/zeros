@@ -8,7 +8,7 @@ import {describe,expect,it} from "vitest";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("controlled migration service boot",()=>{
-  it.each([{install:true,maintenance:false},{install:false,maintenance:false},{install:true,maintenance:true},{install:false,maintenance:true}])("starts writers only with a complete schema outside maintenance ($install, $maintenance)",async ({install,maintenance})=>{
+  it.each([{install:true,maintenance:false,background:true},{install:false,maintenance:false,background:true},{install:true,maintenance:true,background:true},{install:false,maintenance:true,background:true},{install:true,maintenance:false,background:false}])("starts writers only with a complete schema outside maintenance ($install, $maintenance, $background)",async ({install,maintenance,background})=>{
     const pool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:1});
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await pool.end();
     const listener=createServer();listener.listen(0,"127.0.0.1");await once(listener,"listening");
@@ -28,6 +28,7 @@ d("controlled migration service boot",()=>{
         GITHUB_APP_ID:"123456",GITHUB_APP_CLIENT_ID:"Iv1.test",GITHUB_APP_CLIENT_SECRET:"test-client-secret",
         GITHUB_APP_SLUG:"zeros-test",GITHUB_OAUTH_CALLBACK_URL:"https://api.example.test/v1/github/oauth/callback",GITHUB_APP_PRIVATE_KEY:privateKey,
         CLOUD_WORKSPACES_ENABLED:"true",DAYTONA_API_KEY:"not-a-live-key-for-tests",DAYTONA_API_URL:"https://api.example.test",
+        CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:String(background),
         DAYTONA_SNAPSHOT_ID:"snap_test",ZEROS_CLOUD_SOURCE_COMMIT:"a".repeat(40),
         CLOUD_WORKSPACE_SECRET_KEY_V1:randomBytes(32).toString("base64url"),RESEND_API_KEY:"not-a-live-key",EMAIL_FROM:"test@example.test"},
     });
@@ -48,7 +49,14 @@ d("controlled migration service boot",()=>{
         const audit=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:1});
         try{expect((await audit.query("SELECT tablename FROM pg_tables WHERE schemaname='public'")).rowCount).toBe(0);}finally{await audit.end();}
       }else if(install){
-        expect(output).toContain("cloud workspace reconciliation enabled");
+        if(background)expect(output).toContain("cloud workspace reconciliation enabled");
+        else {
+          expect(output).not.toContain("cloud workspace reconciliation enabled");
+          expect(output).toContain("cloud workspace background workers paused");
+          const health=await (await fetch(`http://127.0.0.1:${port}/healthz`)).json();
+          expect(health).toMatchObject({ok:true,cloudWorkspaces:{backgroundWorkers:"paused"}});
+          expect(health).not.toHaveProperty("maintenance");
+        }
         const response=await fetch(`http://127.0.0.1:${port}/v1/auth/snapshot`);
         expect(response.status).toBe(401);
       }else{

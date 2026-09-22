@@ -680,6 +680,12 @@ describe("cloud workspace backend configuration", () => {
     ).toBeNull();
   });
 
+  it("supports API replicas without implicitly starting cloud background work", () => {
+    expect(loadConfig({...cloudEnv(), CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:"false"}).cloudWorkspaces?.backgroundWorkersEnabled).toBe(false);
+    expect(loadConfig(cloudEnv()).cloudWorkspaces?.backgroundWorkersEnabled).toBe(true);
+    for(const enabled of ["true", "false"])expect(()=>loadConfig({...cloudEnv(), CLOUD_WORKSPACES_ENABLED:enabled, CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:"typo"})).toThrow(/BACKGROUND_WORKERS_ENABLED/);
+  });
+
   it("loads one pinned Daytona provider contract behind the gate", () => {
     expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
       provider: "daytona",
@@ -696,6 +702,7 @@ describe("cloud workspace backend configuration", () => {
       operationTimeoutSeconds: 180,
       autoArchiveMinutes: 10_080,
       reconcileIntervalMs: 5_000,
+      backgroundWorkersEnabled: true,
       access: {
         allowedSshHosts: ["ssh.app.daytona.io"],
         allowedPreviewHostSuffixes: ["proxy.daytona.work"],

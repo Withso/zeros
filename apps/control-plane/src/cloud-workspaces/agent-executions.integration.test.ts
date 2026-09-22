@@ -3,7 +3,7 @@ import pg from "pg";
 import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
 import {runMigrations} from "../migrate.js";
 import {ensureUser} from "../auth.js";
-import {seedReadyCloudWorkspace} from "./test-fixtures.js";
+import {ensureCloudPilotUser,seedReadyCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {DatabaseCloudWorkspaceActorSessionService} from "./actor-sessions.js";
@@ -14,6 +14,7 @@ import {DatabaseCloudWorkspaceCollaborationService,eraseCloudWorkspaceCollaborat
 import {DatabaseCodexAuthRenewal} from "./codex-auth-renewal.js";
 import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 import {DatabaseCloudWorkspaceActionService} from "./action-receipts.js";
+import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("private provider execution leases",()=>{
@@ -60,10 +61,72 @@ d("private provider execution leases",()=>{
       VALUES('daytona','snapshot-pinned',$1,'codex-chatgpt','zeros-cloud-worker-v3',true) ON CONFLICT DO NOTHING`,["a".repeat(64)]);
     return {input,grant,request:{executionId:randomUUID(),delegationId:grant,provider:"codex" as const,model:"gpt-5.6-sol",source:{kind:"session" as const,actorSessionId}}};
   }
+  it.each(["renew", "replay", "action"] as const)("rejects lease expiry after the %s transaction starts",async operation=>{
+    const request=admission(),lease=await service.admit(engine(),request);
+    let expired:Date|undefined;
+    const controlled=withAuthorityDeadlineBarrier(pool,/SELECT id FROM organizations .*FOR SHARE/,async()=>{
+      expired=(await pool.query("UPDATE cloud_agent_execution_leases SET expires_at=clock_timestamp() WHERE id=$1 RETURNING expires_at",[lease.leaseId])).rows[0].expires_at;
+    });
+    const waiting=new DatabaseCloudAgentExecutionService(controlled,encryption,false);
+    const result=operation==="renew"?waiting.validate(engine(),lease.leaseId,true):operation==="replay"?waiting.admit(engine(),request):waiting.authorizeAction(engine(),request.executionId,actorSessionId);
+    await expect(result).rejects.toMatchObject({code:"cloud_agent_authority_rejected"});
+    expect((await pool.query("SELECT expires_at FROM cloud_agent_execution_leases WHERE id=$1",[lease.leaseId])).rows[0].expires_at).toEqual(expired);
+  });
+  it.each((["admit","rotation","action"] as const).flatMap(operation=>(["engine","source","pro","guest"] as const).map(deadline=>({operation,deadline}))))(
+    "rejects $deadline expiry during the final credential wait for $operation",async({operation,deadline})=>{
+    const guest=await ensureCloudPilotUser(pool,{provider:"workos",providerSubject:`user_${randomUUID()}`,email:`guest-${randomUUID()}@example.test`,displayName:"Guest",
+      session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
+    guest.accountRevision=Number((await pool.query("SELECT auth_revision FROM users WHERE id=$1",[guest.id])).rows[0].auth_revision);
+    await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",
+      [guest.authentication.sessionId,guest.identity.subject,guest.id]);
+    await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[guest.id]);
+    const collaboration=new DatabaseCloudWorkspaceCollaborationService(pool),invite=await collaboration.invite({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,
+      actorUserId:owner.id,email:guest.email,role:"developer"});
+    await collaboration.accept({actorUserId:guest.id,identity:guest.identity,token:invite.token});
+    const guestSession=await connectActor(guest),grant=randomUUID(),codex=operation==="rotation"?await codexCredential():null;
+    await credentials.delegate(owner.id,{id:grant,credentialId:codex?.input.credentialId??credentialId,expectedRevision:1,workspaceId:fixture.workspaceId,granteeUserId:guest.id,
+      models:[codex?"gpt-5.6-sol":"grok-4.6"],expiresAt:new Date(Date.now()+3600_000).toISOString()});
+    const request={...(codex?.request??admission()),delegationId:grant,source:{kind:"session" as const,actorSessionId:guestSession}};
+    const lease=operation==="admit"?null:await service.admit(engine(),request);
+    if(codex){
+      const renewing=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,async(_cache,dispatch)=>{
+        await dispatch();return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`,expiresAt:Math.floor(Date.now()/1000)+7200});
+      }));
+      expect(await renewing.validate(engine(),lease!.leaseId,true,1,true)).toMatchObject({credentialVersion:2,rotation:{material:{kind:"codex-chatgpt"}}});
+    }
+    let intercepted=false;
+    const controlled=withAuthorityDeadlineBarrier(pool,/FOR SHARE OF delegation,material/,async client=>{
+      intercepted=true;
+      // The engine is already locked by this transaction. Move its deadline on
+      // that connection to model elapsed time without an impossible competing
+      // writer or a timing-sensitive sleep. All changes roll back on rejection.
+      if(deadline==="engine")await client.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1",[fixture.engineInstanceId]);
+      if(deadline==="source")await pool.query("UPDATE auth_sessions SET provider_session_expires_at=clock_timestamp() WHERE provider_session_id=$1",[guest.authentication.sessionId]);
+      if(deadline==="pro")await pool.query("UPDATE account_entitlements SET valid_until=clock_timestamp() WHERE user_id=$1",[guest.id]);
+      if(deadline==="guest")await pool.query("UPDATE cloud_workspace_guest_grants SET expires_at=clock_timestamp() WHERE user_id=$1",[guest.id]);
+    });
+    const waiting=new DatabaseCloudAgentExecutionService(controlled,encryption,false);
+    const result=operation==="admit"?waiting.admit(engine(),request):operation==="rotation"?waiting.validate(engine(),lease!.leaseId,true,1):waiting.authorizeAction(engine(),request.executionId,guestSession);
+    await expect(result).rejects.toBeDefined();expect(intercepted).toBe(true);
+    expect((await pool.query("SELECT count(*)::int AS n FROM cloud_agent_execution_leases")).rows[0].n).toBe(lease?1:0);
+  });
   it("imports an expired native access token only to renew before admitting a worker",async()=>{
     const c=await codexCredential(Math.floor(Date.now()/1000)-60),renew=vi.fn(async(_cache,dispatch)=>{await dispatch();return syntheticCodexCache({refresh:`rotated-refresh-${randomUUID()}`});});
     service=new DatabaseCloudAgentExecutionService(pool,encryption,false,new DatabaseCodexAuthRenewal(pool,encryption,renew));
     expect((await service.admit(engine(),c.request)).credentialVersion).toBe(2);expect(renew).toHaveBeenCalledTimes(1);
+  });
+  it.each(["engine","session","execution","delegation"] as const)("rolls back an action receipt when %s expires during its insert",async deadline=>{
+    const request=admission(),lease=await service.admit(engine(),request);
+    const controlled=withAuthorityDeadlineBarrier(pool,/INSERT INTO cloud_workspace_action_receipts/,async client=>{
+      if(deadline==="engine")await client.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1",[fixture.engineInstanceId]);
+      if(deadline==="session")await client.query("UPDATE cloud_workspace_actor_sessions SET last_renewed_at=clock_timestamp()-interval '30 seconds' WHERE id=$1",[actorSessionId]);
+      if(deadline==="execution")await client.query("UPDATE cloud_agent_execution_leases SET expires_at=clock_timestamp() WHERE id=$1",[lease.leaseId]);
+      if(deadline==="delegation")await client.query("UPDATE cloud_agent_credential_delegations SET expires_at=clock_timestamp() WHERE id=$1",[delegationId]);
+    });
+    const actions=new DatabaseCloudWorkspaceActionService({pool:controlled});
+    await expect(actions.request({...engine(),actorSessionId},{kind:"begin",admissible:true,action:{operationId:randomUUID(),conversationId:"chat",
+      executionId:request.executionId,kind:"permission",requestId:randomUUID(),payload:{response:{outcome:"cancelled"}}}})).rejects.toBeDefined();
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_action_receipts")).rowCount).toBe(0);
   });
   it("renews native Codex material without changing consent, delegations or import receipts",async()=>{
     const expiresAt=Math.floor(Date.now()/1000)+3600;

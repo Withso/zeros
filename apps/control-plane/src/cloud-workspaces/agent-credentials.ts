@@ -94,7 +94,7 @@ export class DatabaseCloudAgentCredentialService {
       if(!key)throw new Error("Agent credential encryption is unavailable");
       const envelope=sealCloudAgentCredential(material,{credentialId:input.credentialId,ownerUserId:input.ownerUserId,kind:material.kind,version,keyVersion},key);
       if(material.kind==="codex-chatgpt"&&!nativeCache){
-        const live=await tx.query("SELECT 1 WHERE to_timestamp($1::bigint)>now()+interval '1 minute'",[material.expiresAt]);
+        const live=await tx.query("SELECT 1 WHERE to_timestamp($1::bigint)>clock_timestamp()+interval '1 minute'",[material.expiresAt]);
         if(!live.rowCount)invalid();
       }
       const row=previous?(await tx.query<Credential>(`UPDATE cloud_agent_credentials SET display_name=$2,revision=revision+1,current_version=$3,
@@ -160,9 +160,9 @@ export class DatabaseCloudAgentCredentialService {
           throw new HttpError(409,"agent_delegation_conflict","Agent delegation changed");
         return {delegation:grantMetadata(existing),replayed:true};
       }
-      const valid=await tx.query("SELECT 1 WHERE $1::timestamptz>now() AND $1::timestamptz<=now()+interval '30 days'",[input.expiresAt]);
+      const valid=await tx.query("SELECT 1 WHERE $1::timestamptz>clock_timestamp() AND $1::timestamptz<=clock_timestamp()+interval '30 days'",[input.expiresAt]);
       if(!valid.rowCount)invalid();
-      const count=(await tx.query<{n:number}>("SELECT count(*)::int AS n FROM cloud_agent_credential_delegations WHERE credential_id=$1 AND revoked_at IS NULL AND expires_at>now()",[credential.id])).rows[0]!.n;
+      const count=(await tx.query<{n:number}>("SELECT count(*)::int AS n FROM cloud_agent_credential_delegations WHERE credential_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp()",[credential.id])).rows[0]!.n;
       if(count>=100)throw new HttpError(429,"agent_delegation_limit","Agent delegation limit reached");
       const row=(await tx.query<Delegation>(`INSERT INTO cloud_agent_credential_delegations(id,credential_id,owner_user_id,credential_revision,workspace_id,org_id,
         grantee_user_id,owner_fingerprint,grantee_fingerprint,models,expires_at,compute_fingerprint,compute_trust) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
@@ -186,7 +186,7 @@ export class DatabaseCloudAgentCredentialService {
       await this.owner(tx,ownerUserId);
       if(!(await tx.query("SELECT id FROM cloud_agent_credentials WHERE id=$1 AND owner_user_id=$2",[credentialId,ownerUserId])).rowCount)unavailable();
       return {delegations:(await tx.query<Delegation>(`SELECT * FROM cloud_agent_credential_delegations
-        WHERE credential_id=$1 AND owner_user_id=$2 AND revoked_at IS NULL AND expires_at>now() ORDER BY created_at DESC,id LIMIT 100`,[credentialId,ownerUserId])).rows.map(grantMetadata)};
+        WHERE credential_id=$1 AND owner_user_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY created_at DESC,id LIMIT 100`,[credentialId,ownerUserId])).rows.map(grantMetadata)};
     });
   }
 
@@ -199,7 +199,7 @@ export class DatabaseCloudAgentCredentialService {
       const rows=await tx.query<{id:string;kind:CloudAgentCredentialKind;owner_user_id:string;models:string[];expires_at:Date}>(`SELECT delegation.id,credential.kind,credential.owner_user_id,delegation.models,delegation.expires_at
         FROM cloud_agent_credential_delegations delegation JOIN cloud_agent_credentials credential ON credential.id=delegation.credential_id
         WHERE delegation.workspace_id=$1 AND delegation.org_id=$2 AND delegation.grantee_user_id=$3
-          AND delegation.revoked_at IS NULL AND delegation.expires_at>now() AND credential.revoked_at IS NULL
+          AND delegation.revoked_at IS NULL AND delegation.expires_at>clock_timestamp() AND credential.revoked_at IS NULL
           AND credential.revision=delegation.credential_revision AND delegation.grantee_fingerprint=$4
           AND delegation.compute_fingerprint=$5 AND delegation.compute_trust=$6
           AND delegation.owner_fingerprint=cloud_workspace_actor_fingerprint($1,credential.owner_user_id)

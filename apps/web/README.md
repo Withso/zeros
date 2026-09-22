@@ -168,7 +168,7 @@ and logout origin.
 WorkOS browser sessions use authorization code plus PKCE. The browser cookie
 contains only a random 256-bit lookup ID. Railway stores only its SHA-256
 digest. OAuth state is also hashed; the one-time PKCE verifier and encrypted
-WorkOS sealed session live in the channel-local Railway Postgres database.
+WorkOS sealed session live in the channel's PlanetScale Postgres database.
 Refreshes are serialized there across service replicas, and access tokens are
 never stored as database columns.
 
@@ -334,7 +334,7 @@ apps/web/
 | Unknown path (either host)  | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`                                                                  |
 | `*.pages.dev` / localhost   | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                                                                                         |
 | Session cookies             | Still host-only on app; never widened for marketing                                                                                                                                                                                |
-| Dashboard credentials       | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only                                                                  |
+| Dashboard credentials       | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in PlanetScale behind the Railway control plane; browser boot data contains identity and organization summaries only                                      |
 | WorkOS refresh outage       | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer                                                                              |
 | WorkOS lifecycle event      | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses                                                               |
 | Account resolution          | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                                                                                       |

@@ -11,7 +11,7 @@ allocation-loss and native-session resume qualification remain release gates.
 | Remote engine transport and exact runtime registry        | Implemented, gated; signed macOS/live E2E open                                     | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
 | Provider image/lifecycle qualification                    | Harness and protected workflow implemented; live evidence open                     | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                |
 | WorkOS identity and membership projection                 | Implemented with Auth0 rollback compatibility                                      | control-plane auth migrations/services and web WorkOS session/event handlers                          |
-| Individual Pro and deferred Business funding boundaries | Implemented and database-tested                                                    | migrations `0026`, `0046`, `0059`, `0062`, `authorization.ts`, `paid-authority.ts`                    |
+| Individual Pro and deferred Business funding boundaries | Implemented and database-tested                                                    | migrations `0076`, `0079`, `authorization.ts`, `paid-authority.ts`, `compute-funding.ts`                    |
 | Reviewed entitlement, compute, and storage provisioning   | Implemented and database-tested                                                    | migrations `0054`–`0055`, `0062`, owner management commands                                           |
 | Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`, `0056`                                                       |
 | Lifecycle, setup worker, admission, and engine lease      | Implemented behind disabled setup-worker gate; live qualification open             | migrations `0020`–`0025`, setup and engine services                                                   |
@@ -20,7 +20,7 @@ allocation-loss and native-session resume qualification remain release gates.
 | Ordered durable record and content/checkpoints            | Implemented and database-tested                                                    | migrations `0028`–`0031`, durable/content/recovery services                                           |
 | Encrypted object storage, admission, rotation, deletion   | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migrations `0037`, `0055`, `0057`, `0058`, `0060`         |
 | Local→cloud and cloud→local immutable forks               | Implemented with fresh destination UUIDs                                           | `forks.ts`, desktop cloud-workspace-fork services, migrations `0032`, `0038`, `0048`, `0051`          |
-| Per-user/per-device receive-only replicas                 | Implemented owner-only for Phase 5                                                 | `replicas.ts`, desktop cloud-replica services, migrations `0033`–`0035`, `0049`–`0052`                |
+| Per-user/per-device receive-only replicas                 | Implemented with exact actor/workspace/device authorization                                                 | `replicas.ts`, desktop cloud-replica services, migrations `0033`–`0035`, `0049`–`0052`                |
 | Remote-authoritative Design routing                       | Implemented through the normal exact runtime bridge; product UI E2E open           | runtime connection registry and existing Design protocol/service                                      |
 | Management, usage, outbox, health, and self-host seams    | Implemented as APIs/services; dashboards/drills/template publication open          | `management*.ts`, `usage.ts`, `outbox.ts`, `health.ts`                                                |
 | Cloud creation/catalog/details/onboarding UI              | Deliberately deferred                                                              | final UI phase                                                                                        |
@@ -335,13 +335,14 @@ removes only exact mkdtemp-shaped one-shot SSH directories left by a prior crash
 before projecting another credential. The disposed broker/runtime cannot be
 reused, and a late provider issuance is revoked before native launch.
 
-This remains pre-production. The second setup gate must stay off until the exact
-snapshot/entrypoint/helpers are qualified in a real Daytona account. The image
-currently keeps the supervisor and engine coordinator root-owned while Git,
-setup commands, and agents run as UID/GID 10001; that exception requires threat-
-model approval or removal before the non-root Phase-2 item can close. Sandbox
-commands continue to run outside database transactions. The execution account
-is the immutable workspace owner for Phase 5 and is bound to a billing epoch.
+This remains pre-production. Setup admission requires qualification of the
+exact provider, image, worker identity and helper contract. The current image
+places the engine in a user namespace mapped to host UID/GID 10003; the fixed
+host broker remains privileged. Workspace/agent and capture identities use
+10001 and 10002. The legacy host-root engine is not a production exception; see
+[the runtime threat model](root-coordinator-threat-model.md). Sandbox commands
+run outside database transactions. The engine compute sponsor is bound to the
+workspace billing epoch; each human/agent action separately records its actor.
 Deleting or deauthorizing that account fails closed by retiring its paid
 runtime and queuing provider-verified cleanup. Organization or Team soft deletion
 similarly cancels setup/replacement work, revokes runtime/client grants, and
@@ -349,8 +350,9 @@ queues every provider generation for deletion. Membership triggers cross FORCE
 RLS only through a narrowly privileged fixed-search-path function, so a normal
 user-context self-leave cannot retain a provider bearer.
 WorkOS identity, account lifecycle, and notification migrations own `0011`
-through `0019`; cloud workspace additions resume at `0020` and continue
-forward through `0062`. The migration runner explicitly recognizes the
+through `0019`; cloud workspace additions resume at `0020`. The append-only
+ladder in `apps/control-plane/migrations/` is authoritative; do not infer the
+current schema from an old phase's final migration number. The migration runner explicitly recognizes the
 `a80ac25` `0013`–`0018` and `c2b7418` `0018`–`0050` histories as aliases for
 their canonical `0020`–`0052` equivalents. `0053` repairs the Personal
 local-only constraint for those databases.

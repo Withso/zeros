@@ -192,6 +192,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
   const invitationConfig=workspaceInvitationDeliveryConfig(cloud,config.inviteLinkBase,emailConfig);
   const invitationWorker=invitationConfig?new CloudWorkspaceInvitationDeliveryWorker(pool,invitationConfig,workspaceInvitationSender(emailConfig)):null;
   cloudWorkspaceHealthService = new DatabaseCloudWorkspaceHealthService(pool, {
+    backgroundWorkersEnabled: cloud.backgroundWorkersEnabled !== false,
     setupExecutionEnabled: cloud.setupExecution !== null,
     durabilityEnabled: cloud.durability !== null,
     outboxDeliveryEnabled: cloud.outbox !== null,
@@ -478,6 +479,10 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     });
   }
   startCloudBackground = () => {
+    if (cloud.backgroundWorkersEnabled === false) {
+      console.log("[control-plane] cloud workspace background workers paused");
+      return;
+    }
     stopCloudReconciler = startCloudWorkspaceReconciler({
       pool,
       provider,

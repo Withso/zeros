@@ -31,6 +31,7 @@ d("cloud workspace operational health", () => {
     });
     await expect(service.read()).resolves.toEqual({
       enabled: true,
+      backgroundWorkers: "enabled",
       setupExecution: "paused",
       durability: "enabled",
       outboxDelivery: "retained",

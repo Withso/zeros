@@ -11,6 +11,7 @@ import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
+import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("actor-aware cloud runtime admission",()=>{
@@ -56,6 +57,21 @@ d("actor-aware cloud runtime admission",()=>{
       prompt:[{type:"text",text:"A shared command"}],modeRevision:0}}});
   const decision = () => ({kind:"begin",admissible:true,action:{operationId:randomUUID(),conversationId:"shared-chat",
     executionId:"shared-execution",kind:"permission",requestId:randomUUID(),payload:{response:{outcome:"cancelled"}}}});
+
+  it.each(["admission", "renewal", "engine", "source", "pro", "guest"] as const)("rejects %s expiry after the transaction starts",async deadline=>{
+    const signer=await device(),grant=await service.issue({...subject(),proof:signer.proof()});
+    if(deadline!=="admission")await service.consume({...engine(),token:grant.grantToken});
+    const controlled=withAuthorityDeadlineBarrier(pool,/SELECT id FROM organizations .*FOR SHARE/,async()=>{
+      if(deadline==="admission")await pool.query("UPDATE cloud_workspace_actor_sessions SET admission_expires_at=clock_timestamp() WHERE token_hash=$1",[createHash("sha256").update(grant.grantToken).digest()]);
+      if(deadline==="renewal")await pool.query("UPDATE cloud_workspace_actor_sessions SET last_renewed_at=clock_timestamp()-interval '30 seconds' WHERE token_hash=$1",[createHash("sha256").update(grant.grantToken).digest()]);
+      if(deadline==="engine")await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1",[fixture.engineInstanceId]);
+      if(deadline==="source")await pool.query("UPDATE auth_sessions SET provider_session_expires_at=clock_timestamp() WHERE provider_session_id=$1",[guest.authentication.sessionId]);
+      if(deadline==="pro")await pool.query("UPDATE account_entitlements SET valid_until=clock_timestamp() WHERE user_id=$1",[guest.id]);
+      if(deadline==="guest")await pool.query("UPDATE cloud_workspace_guest_grants SET expires_at=clock_timestamp() WHERE user_id=$1",[guest.id]);
+    });
+    const waiting=new DatabaseCloudWorkspaceActorSessionService({pool:controlled,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false});
+    await expect(waiting.consume({...engine(),token:grant.grantToken,renew:deadline!=="admission"})).rejects.toBeDefined();
+  });
 
   it("revokes only the caller's exact actor grant without revoking a sibling device",async()=>{
     const signer=await device(),first=await service.issue({...subject(),proof:signer.proof()}),second=await service.issue({...subject(),proof:signer.proof()});

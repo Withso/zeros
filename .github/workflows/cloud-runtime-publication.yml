@@ -1,0 +1,98 @@
+name: Cloud runtime publication
+
+# Publication records an OCI digest and source provenance. Provider host/worker
+# qualification and promotion remain separate, credentialed release gates.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-runtime-publication
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.event.repository.fork == false && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    environment: cloud-runtime-publication
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout reviewed source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Setup pnpm
+        uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Verify publisher before registry authentication
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm exec vitest run scripts/__tests__/cloud-vm-snapshot.test.ts scripts/__tests__/cloud-runtime-publication.test.ts
+      - name: Bind immutable publication identity
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          umask 077
+          state_dir="$RUNNER_TEMP/cloud-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          mkdir -p "$state_dir/docker"
+          {
+            echo "DOCKER_CONFIG=$state_dir/docker"
+            echo "ZEROS_CLOUD_VM_IMAGE_RECEIPT=$state_dir/receipt.json"
+            echo "ZEROS_CLOUD_VM_REGISTRY_REPOSITORY=ghcr.io/${REPOSITORY,,}/cloud-runtime"
+            echo "ZEROS_CLOUD_VM_REGISTRY_TAG=$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+            echo "ZEROS_REPO_URL=https://github.com/$REPOSITORY.git"
+            echo "ZEROS_REPO_COMMIT=$GITHUB_SHA"
+            echo "DAYTONA_SANDBOX_CLASS=linux-vm"
+          } >> "$GITHUB_ENV"
+      - name: Publish exact runtime image
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io --username "$REGISTRY_ACTOR" --password-stdin
+          unset REGISTRY_TOKEN REGISTRY_ACTOR
+          pnpm tsx scripts/cloud-workspace-validation/publish-vm-image.ts
+      - name: Validate publication receipt
+        id: receipt
+        run: pnpm tsx scripts/cloud-workspace-validation/publication-receipt.ts
+      - name: Attest image source provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ${{ env.ZEROS_CLOUD_VM_REGISTRY_REPOSITORY }}
+          subject-digest: ${{ steps.receipt.outputs.digest }}
+          push-to-registry: true
+      - name: Verify published provenance
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PUBLISHED_IMAGE: ${{ steps.receipt.outputs.image }}
+        run: |
+          gh attestation verify "oci://$PUBLISHED_IMAGE" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/cloud-runtime-publication.yml" \
+            --source-digest "$GITHUB_SHA" --deny-self-hosted-runners
+      - name: Retain sanitized build identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cloud-runtime-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cloud-runtime-${{ github.run_id }}-${{ github.run_attempt }}/publication.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Remove registry credential store
+        if: always()
+        run: |
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf -- "$DOCKER_CONFIG"
+          fi

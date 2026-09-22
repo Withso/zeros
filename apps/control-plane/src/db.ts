@@ -68,8 +68,8 @@ export function createPool(
     // Explicit NONE retains the login's authority without ambient role choice.
     options: "-c role=none",
     max: options.maxConnections ?? 10,
-    // Railway private-network Postgres doesn't need TLS; the public proxy
-    // does. Honor sslmode in the URL rather than forcing either way.
+    // Hosted PlanetScale connections require sslmode=verify-full. Honor the
+    // validated URL so local PostgreSQL development remains supported.
     //
     // A hung query (full scan, lock wait) otherwise pins one of the 10 pool
     // slots indefinitely; 11 such queries wedge the whole backend. Cap every

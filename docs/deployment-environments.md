@@ -258,7 +258,7 @@ same-origin facade using only the common `APP_ORIGIN` and
 `WORKOS_SESSION_WORKER`, `WORKOS_WEBHOOK_SECRET`, or `AUTH_BROKER_SECRET` from
 the Pages projects. Browser credentials are host-only random cookies; their
 digests, PKCE verifier, encrypted sealed session, and serialized refresh state
-live in the channel's Railway Postgres.
+live in the channel's PlanetScale Postgres.
 
 For `zeros-ops-alpha` and `zeros-ops`, set `ZEROS_SURFACE=ops`,
 `WORKOS_BROWSER_ROUTE_PREFIX=/ops`, and the Ops hostname as `APP_ORIGIN`.

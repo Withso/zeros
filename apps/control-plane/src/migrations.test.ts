@@ -8,10 +8,10 @@
 // so the whole DB suite self-skipped.
 //
 // What makes this worth more than "does it apply to an empty database":
-// production is never empty. `runMigrations` runs at service BOOT
-// (index.ts awaits it before serve()), so a migration that throws on real data
-// is not a failed deploy — it is a crash-loop with no control plane. The
-// upgrade-path test below is the one that models that.
+// production is never empty. Hosted APIs verify the migration ledger at boot;
+// a separately authorized one-shot migrator owns DDL. Development boot may
+// apply the ladder. The upgrade-path test models existing data, independently
+// of which deployment process applies the migrations.
 //
 // Runs only when TEST_DATABASE_URL points at a THROWAWAY Postgres — every test
 // drops the public schema. CI provides one (preflight.yml `control-plane` job);

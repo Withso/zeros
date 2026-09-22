@@ -50,10 +50,8 @@ export function optEnv(name: string, fallback: string): string {
 
 // ── Daytona ───────────────────────────────────────────────
 
-/** us | eu (GPU pins us-east-1). There is no Asia-Pacific region today, so a dev
- *  outside those two continents pays a ~100 ms+ RTT on every round trip — which
- *  makes a mirrored working copy preferable to a chatty remote filesystem.
- *  Override with DAYTONA_TARGET. */
+// Qualification selects an explicit provider region. Verify availability and
+// measured latency for the exact account/image; region names are not an SLA.
 export const DAYTONA_TARGET = optEnv("DAYTONA_TARGET", "eu");
 export const DAYTONA_SANDBOX_CLASS = parseDaytonaSandboxClass(process.env.DAYTONA_SANDBOX_CLASS);
 export const DAYTONA_API_URL = optEnv(

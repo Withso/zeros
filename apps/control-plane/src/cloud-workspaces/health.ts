@@ -4,6 +4,7 @@ import { withSystemTx } from "../db.js";
 
 export type CloudWorkspaceHealth = {
   enabled: true;
+  backgroundWorkers?: "enabled" | "paused";
   setupExecution: "enabled" | "paused";
   durability: "enabled" | "disabled";
   outboxDelivery: "enabled" | "retained";
@@ -35,6 +36,7 @@ export class DatabaseCloudWorkspaceHealthService {
   constructor(
     private readonly pool: pg.Pool,
     private readonly posture: {
+      backgroundWorkersEnabled?: boolean;
       setupExecutionEnabled: boolean;
       durabilityEnabled: boolean;
       outboxDeliveryEnabled: boolean;
@@ -142,6 +144,7 @@ export class DatabaseCloudWorkspaceHealthService {
       .map(([reason]) => reason);
     return {
       enabled: true,
+      backgroundWorkers: this.posture.backgroundWorkersEnabled === false ? "paused" : "enabled",
       setupExecution: this.posture.setupExecutionEnabled ? "enabled" : "paused",
       durability: this.posture.durabilityEnabled ? "enabled" : "disabled",
       outboxDelivery: this.posture.outboxDeliveryEnabled ? "enabled" : "retained",

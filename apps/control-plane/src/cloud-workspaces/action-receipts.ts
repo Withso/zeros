@@ -2,7 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 import { z } from "zod";
 import { withSystemTx, type Tx } from "../db.js";
-import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
+import { assertCloudEngineAuthorityDeadline, assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { CloudCommandError, type CloudCommandEngineScope } from "./commands.js";
 import { assertCloudRequestActor } from "./actor-sessions.js";
 import {assertCloudAgentExecutionActor,withCloudAgentCredentialRetry} from "./agent-executions.js";
@@ -77,6 +77,14 @@ export class DatabaseCloudWorkspaceActionService {
     return withCloudAgentCredentialRetry(()=>withSystemTx(this.options.pool, async tx => {
       await this.authorize(tx, scope);
       const actor=request.kind==="settle"?null:await assertCloudRequestActor(tx,scope,request.kind==="read"?"read":"run");
+      const currentView=async(row:Row,replayed:boolean)=>{
+        // Receipt locks and mutations can wait after admission. Historical
+        // receipts require current read/action authority, not a live paid
+        // execution; settlement remains an authenticated engine operation.
+        if(request.kind!=="settle")await assertCloudRequestActor(tx,scope,request.kind==="read"?"read":"run");
+        await assertCloudEngineAuthorityDeadline(tx,scope.engineInstanceId,this.options.workosEnabled===true);
+        return view(row,replayed);
+      };
       const hash=contentHash && actor?createHash("sha256").update(contentHash).update(canonical({actorUserId:actor.actorUserId,
         deviceId:actor.deviceId,deviceKeyVersion:actor.deviceKeyVersion,fingerprint:actor.fingerprint})).digest():contentHash;
       const operationId = request.kind === "begin" ? request.action.operationId : request.operationId;
@@ -84,16 +92,16 @@ export class DatabaseCloudWorkspaceActionService {
         WHERE workspace_id=$1 AND operation_id=$2 FOR UPDATE`, [scope.workspaceId, operationId])).rows[0];
       if (request.kind === "read") {
         if (!row) throw new CloudCommandError("command_not_found", "Action is unavailable");
-        return view(row, true);
+        return currentView(row, true);
       }
       if (request.kind === "begin") {
         if (row) {
           if (row.actor_user_id!==(actor?.actorUserId??null) || row.actor_device_id!==(actor?.deviceId??null) ||
               !timingSafeEqual(row.request_sha256, hash!)) throw new CloudCommandError("command_conflict", "Action identity conflicts");
-          return view(row, true);
+          return currentView(row, true);
         }
         if (!request.admissible) throw new CloudCommandError("command_context_changed", "Action no longer has a live target");
-        if(actor)await assertCloudAgentExecutionActor(tx,scope,request.action.executionId,actor.sourceSessionId);
+        if(actor)await assertCloudAgentExecutionActor(tx,scope,request.action.executionId,actor.sourceSessionId,this.options.workosEnabled===true);
         const count = (await tx.query<{ count: string }>(`SELECT count(*) FROM cloud_workspace_action_receipts WHERE workspace_id=$1`, [scope.workspaceId])).rows[0]!;
         if (Number(count.count) >= 100000) throw new CloudCommandError("command_limit", "Action history capacity reached");
         const a = request.action;
@@ -105,6 +113,10 @@ export class DatabaseCloudWorkspaceActionService {
           a.kind === "steer" && identity.safeParse(a.payload.turnId).success ? a.payload.turnId : null,
           actor?.actorUserId??null,actor?.deviceId??null])).rows[0];
         if (!inserted) throw new CloudCommandError("command_conflict", "Another device already answered this request");
+        // A unique/FK wait can consume any lease after the initial check.
+        // Rejecting here rolls the new dispatch receipt back atomically.
+        if(actor)await assertCloudAgentExecutionActor(tx,scope,request.action.executionId,actor.sourceSessionId,this.options.workosEnabled===true);
+        else await assertCloudEngineAuthorityDeadline(tx,scope.engineInstanceId,this.options.workosEnabled===true);
         return view(inserted, false);
       }
       if (!row) throw new CloudCommandError("command_not_found", "Action is unavailable");
@@ -113,11 +125,11 @@ export class DatabaseCloudWorkspaceActionService {
       if (row.state !== "dispatching") {
         if (row.state !== "settled" || row.outcome !== request.outcome || row.turn_id !== request.turnId)
           throw new CloudCommandError("command_conflict", "Action result conflicts");
-        return view(row, true);
+        return currentView(row, true);
       }
       const updated = (await tx.query<Row>(`UPDATE cloud_workspace_action_receipts SET state='settled',outcome=$3,turn_id=$4,updated_at=now()
         WHERE workspace_id=$1 AND operation_id=$2 RETURNING *`, [scope.workspaceId, operationId, request.outcome, request.turnId])).rows[0]!;
-      return view(updated, false);
+      return currentView(updated, false);
     }));
   }
 }

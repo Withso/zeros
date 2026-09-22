@@ -1,5 +1,5 @@
 // Provider-neutral browser-session facade. Auth0 compatibility sessions remain
-// in KV; WorkOS sessions are opaque-cookie lookups into Railway/Postgres and
+// in KV; WorkOS sessions are opaque-cookie lookups through the control plane and
 // never expose refresh material to Pages or the browser.
 //
 import {
@@ -99,7 +99,7 @@ export function parseCookieHeader(
 
 /** Read the live browser session (cookie → selected provider authority), with
  *  its session id. Auth0 callers may write an updated KV session back (see
- *  refreshGrant's rotation note); WorkOS reads Railway/Postgres. Returns null
+ *  refreshGrant's rotation note); WorkOS reads the control-plane database. Returns null
  *  if signed out or the session has expired/been evicted. */
 export async function getSessionWithId(
   env: Env,
@@ -214,7 +214,7 @@ export type BrowserSessionRefreshResult =
   | { ok: false; terminal: boolean };
 
 /** Refresh the selected provider's browser session. WorkOS performs and
- * persists the serialized rotation in Railway/Postgres. Auth0 retains the
+ * persists the serialized rotation in the control-plane database. Auth0 retains the
  * released KV behavior until the compatibility provider is removed. */
 export async function refreshBrowserSession(
   env: Env,
