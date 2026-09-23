@@ -12,6 +12,7 @@ import {
   DatabaseCloudWorkspaceBlobService,
   MemoryCloudWorkspaceObjectStore,
 } from "./object-store.js";
+import { DatabaseCloudWorkspaceContentService } from "./content-record.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -1059,6 +1060,105 @@ d("workspace object maintenance", () => {
         ])
       ).rows[0],
     ).toEqual({ state: "deleted" });
+  });
+
+  const RESTORE_WINDOW_MS = 48 * 60 * 60_000;
+  const restoreScope = (fixture: Awaited<ReturnType<typeof seedReadyCloudWorkspace>>) => ({
+    workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+    engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken,
+  });
+
+  it("keeps an object for the restore window after pruning drops its last reference", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: new MemoryCloudWorkspaceObjectStore(), encryptionKeyV1: randomBytes(32).toString("base64url"),
+      workosEnabled: false, restoreWindowMs: RESTORE_WINDOW_MS,
+    });
+    const content = new DatabaseCloudWorkspaceContentService({ pool, workosEnabled: false });
+    const bytes = Buffer.from("restorable", "utf8");
+    const blob = await service.put({ ...restoreScope(fixture), bytes });
+    await content.append({ ...restoreScope(fixture), expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: null,
+      gitHeadRef: null, mutations: [{ operation: "upsert", path: "restore.txt", entryType: "file", mode: 33188,
+        blobId: blob.id, contentSha256: blob.plaintextSha256, sizeBytes: bytes.length }] });
+    const state = async () => (await pool.query<{ reference_count: string; dereferenced: boolean }>(
+      `SELECT reference_count, dereferenced_at IS NOT NULL AS dereferenced FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]!;
+    expect(await state()).toEqual({ reference_count: "2", dereferenced: false });
+    // History and checkpoint pruning delete reference rows; repair then drops the count.
+    await pool.query(`DELETE FROM workspace_blob_references WHERE blob_id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blobs SET created_at = now() - interval '30 days' WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blob_storage_reservations SET expires_at = now() - interval '1 second'
+       WHERE blob_id = $1 AND state = 'uploading'`, [blob.id]);
+    expect(await service.reconcileReferenceCounts()).toBe(1);
+    expect(await state()).toEqual({ reference_count: "0", dereferenced: true });
+    // Aged, unreferenced and unreserved: only the restore window keeps it.
+    expect(await service.collectGarbageOnce(60_000)).toBe(false);
+    expect(await service.getSystem({ blobId: blob.id, organizationId: fixture.organizationId })).toEqual(bytes);
+    await pool.query(
+      `UPDATE workspace_blobs SET dereferenced_at = now() - interval '49 hours' WHERE id = $1`, [blob.id]);
+    expect(await service.collectGarbageOnce(60_000)).toBe(true);
+    expect((await pool.query(`SELECT state FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]).toEqual({ state: "deleted" });
+  });
+
+  it("clears the dereference stamp when an object is referenced again", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: new MemoryCloudWorkspaceObjectStore(), encryptionKeyV1: randomBytes(32).toString("base64url"),
+      workosEnabled: false, restoreWindowMs: RESTORE_WINDOW_MS,
+    });
+    const blob = await service.put({ ...restoreScope(fixture), bytes: Buffer.from("again", "utf8") });
+    const stamp = async () => (await pool.query(`SELECT dereferenced_at FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]!.dereferenced_at;
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 0 WHERE id = $1`, [blob.id]);
+    expect(await stamp()).toBeInstanceOf(Date);
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 3 WHERE id = $1`, [blob.id]);
+    expect(await stamp()).toBeNull();
+  });
+
+  it("erases an unreferenced object immediately even inside the restore window", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const store = new MemoryCloudWorkspaceObjectStore();
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: store, encryptionKeyV1: randomBytes(32).toString("base64url"),
+      workosEnabled: false, restoreWindowMs: RESTORE_WINDOW_MS,
+    });
+    const blob = await service.put({ ...restoreScope(fixture), bytes: Buffer.from("erased", "utf8") });
+    const objectKey = (await pool.query<{ object_key: string }>(`SELECT object_key FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]!.object_key;
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 0 WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blob_storage_reservations SET expires_at = now() - interval '1 second'
+       WHERE blob_id = $1 AND state = 'uploading'`, [blob.id]);
+    await expect(service.deleteUnreferencedSystem({ blobId: blob.id, organizationId: fixture.organizationId }))
+      .resolves.toBe("deleted");
+    expect(await store.get(objectKey)).toBeNull();
+  });
+
+  it("retries a quarantined deletion at once inside the restore window", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: new MemoryCloudWorkspaceObjectStore(), encryptionKeyV1: randomBytes(32).toString("base64url"),
+      workosEnabled: false, restoreWindowMs: RESTORE_WINDOW_MS,
+    });
+    const blob = await service.put({ ...restoreScope(fixture), bytes: Buffer.from("failed erasure", "utf8") });
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    // An erasure's count repair stamps the dereference, then its delete fails.
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 0 WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blobs SET state = 'quarantined', created_at = now() - interval '30 days' WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blob_storage_reservations SET expires_at = now() - interval '1 second'
+       WHERE blob_id = $1 AND state = 'uploading'`, [blob.id]);
+    expect(await service.collectGarbageOnce(60_000)).toBe(true);
+    expect((await pool.query(`SELECT state FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]).toEqual({ state: "deleted" });
+  });
+
+  it("rejects an unbounded restore window", () => {
+    for (const restoreWindowMs of [-1, 30 * 24 * 60 * 60_000 + 1, 1.5])
+      expect(() => new DatabaseCloudWorkspaceBlobService({ pool, objectStore: new MemoryCloudWorkspaceObjectStore(),
+        encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false, restoreWindowMs }))
+        .toThrow(/restore window is invalid/);
   });
 
   it("retains physical quota until a detached pending object is deleted", async () => {

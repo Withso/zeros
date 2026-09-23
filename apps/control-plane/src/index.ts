@@ -279,6 +279,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
         : new FileCloudWorkspaceObjectStore(durability.objectStoreDirectory),
       encryptionKeys: durability.objectEncryptionKeys,
       keyVersion: durability.currentObjectEncryptionKeyVersion,
+      restoreWindowMs: durability.objectRestoreWindowMs,
       workosEnabled: config.auth.provider === "workos",
     });
     cloudWorkspaceForkService = new DatabaseCloudWorkspaceForkService(
