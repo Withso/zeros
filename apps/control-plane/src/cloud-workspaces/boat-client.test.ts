@@ -3,12 +3,15 @@ import { BoatApiClient } from "./boat-client.js";
 
 function fixture() {
   const fetcher = vi.fn<typeof fetch>();
+  const logger = { warn: vi.fn() };
   return {
     fetcher,
+    logger,
     client: new BoatApiClient({
       apiKey: "boat_test-only-credential",
       timeoutMs: 1000,
       fetch: fetcher,
+      logger,
     }),
   };
 }
@@ -212,6 +215,56 @@ describe("Boat API boundary", () => {
     expect(error).toMatchObject({code:"provider_rate_limited",createRejectionCode:"member_limit_reached",retryable:true});
     expect(JSON.stringify(error)).not.toContain("private member policy");
     expect(JSON.stringify(error)).not.toContain("memberMaxActiveSandboxes");
+  });
+
+  describe("uncertified create refusal diagnostics", () => {
+    const refusal = (error: Record<string, unknown>, top: Record<string, unknown> = {}) => Response.json({
+      ok: false, type: "sandbox.error", status: 429, code: error.code, requestId: "req_test_uncertified",
+      error: { status: 429, ...error }, ...top,
+    }, { status: 429 });
+    const create = (f: ReturnType<typeof fixture>) =>
+      f.client.request("/sandboxes", { method: "POST", body: {}, idempotencyKey: "diagnosed" }).catch((value: unknown) => value);
+    it("names the unrecognized diagnostic fields, never their values", async () => {
+      const f = fixture();
+      f.fetcher.mockResolvedValue(refusal({ code: "member_limit_reached", message: "private text",
+        details: { memberMaxActiveSandboxes: 0, brandNewField: "private-value", nested: { alsoNew: 1 } } }));
+      expect(await create(f)).not.toHaveProperty("createRejectionCode");
+      expect(f.logger.warn).toHaveBeenCalledOnce();
+      const line = String(f.logger.warn.mock.calls[0]![0]);
+      expect(line).toBe("[boat] create refusal not certified (member_limit_reached): unknown_detail_key:alsoNew,unknown_detail_key:brandNewField,unknown_detail_key:nested");
+      expect(line).not.toMatch(/private/);
+    });
+    it("reports unrecognized codes, identifiers and envelope changes", async () => {
+      const f = fixture();
+      f.fetcher.mockResolvedValueOnce(refusal({ code: "rate_limited" }));
+      f.fetcher.mockResolvedValueOnce(refusal({ code: "limit_reached", details: { note: "bx_23456789" } }));
+      f.fetcher.mockResolvedValueOnce(refusal({ code: "limit_reached" }, { sandbox: { id: "bx_23456789" } }));
+      await create(f); await create(f); await create(f);
+      expect(f.logger.warn.mock.calls.map(([line]) => String(line))).toEqual([
+        "[boat] create refusal not certified (rate_limited): unrecognized_code",
+        "[boat] create refusal not certified (limit_reached): identifier_in_details",
+        "[boat] create refusal not certified (limit_reached): unknown_envelope_key:sandbox",
+      ]);
+    });
+    it("bounds the report and redacts field names that are not plain identifiers", async () => {
+      const f = fixture();
+      const details = Object.fromEntries([...Array.from({ length: 12 }, (_, i) => [`extra${String(i).padStart(2, "0")}`, i]), ["bad key!", 1]]);
+      f.fetcher.mockResolvedValue(refusal({ code: "limit_reached", details }));
+      await create(f);
+      const line = String(f.logger.warn.mock.calls[0]![0]);
+      expect(line.split(":").slice(1).join(":").split(",")).toHaveLength(9);
+      expect(line).toContain("unknown_detail_key:<redacted>");
+      expect(line).toMatch(/,\+\d+ more$/);
+      expect(line).not.toContain("bad key");
+    });
+    it("stays quiet for certified refusals and for requests other than create", async () => {
+      const f = fixture();
+      f.fetcher.mockResolvedValueOnce(refusal({ code: "member_limit_reached", details: { memberMaxActiveSandboxes: 0 } }));
+      f.fetcher.mockResolvedValueOnce(refusal({ code: "rate_limited" }));
+      await create(f);
+      await f.client.request("/sandboxes/bx_23456789/resume", { method: "POST", idempotencyKey: "resume" }).catch(() => undefined);
+      expect(f.logger.warn).not.toHaveBeenCalled();
+    });
   });
 
   it("accepts the known bounded limit diagnostics without retaining their values", async () => {

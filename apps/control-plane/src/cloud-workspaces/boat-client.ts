@@ -8,6 +8,8 @@ export type BoatApiClientOptions = {
    * the account's mutable, dashboard-selected wallet. */
   billingOrg?: string;
   fetch?: typeof fetch;
+  /** Receives bounded, value-free explanations of uncertified create refusals. */
+  logger?: Pick<Console, "warn">;
 };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 /** Boat reports an organization-billed sandbox's wallet as its `team`. */
@@ -91,6 +93,53 @@ function createRejection(value: Record<string, unknown> | null): CloudProviderCr
     case "trial_compute_limit_reached": return value.code;
     default: return null;
   }
+}
+
+const DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
+const MAX_DIAGNOSTIC_REASONS = 8;
+const diagnosticName = (key: string) => DIAGNOSTIC_NAME.test(key) ? key : "<redacted>";
+
+/** Explain, for operators only, why a create 429 was not certified. It names
+ * shapes and field names, never values; certification itself stays with
+ * `createRejection`. */
+function uncertifiedRefusalReasons(value: Record<string, unknown> | null): string {
+  const reasons = new Set<string>();
+  if (!value) reasons.add("envelope_not_json");
+  else {
+    if (value.ok !== false || value.type !== "sandbox.error" || value.status !== 429) reasons.add("envelope_shape");
+    for (const key of Object.keys(value)) if (!REJECTION_FIELDS.has(key)) reasons.add(`unknown_envelope_key:${diagnosticName(key)}`);
+    if (typeof value.requestId !== "string" || !/^req_[a-zA-Z0-9_-]{1,124}$/.test(value.requestId)) reasons.add("request_id_shape");
+    const nested = value.error;
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) reasons.add("error_shape");
+    else {
+      const error = nested as Record<string, unknown>;
+      if (error.status !== 429 || error.code !== value.code) reasons.add("error_code_or_status");
+      for (const key of Object.keys(error)) if (!REJECTION_ERROR_FIELDS.has(key)) reasons.add(`unknown_error_key:${diagnosticName(key)}`);
+      for (const message of [value.message, error.message]) {
+        if (message !== undefined && typeof message !== "string") reasons.add("message_shape");
+        else if (typeof message === "string" && PROVIDER_IDENTIFIER.test(message)) reasons.add("identifier_in_message");
+      }
+      if ("details" in error) {
+        const pending: Array<{ value: unknown; depth: number }> = [{ value: error.details, depth: 0 }];
+        if (!error.details || typeof error.details !== "object" || Array.isArray(error.details)) reasons.add("details_shape");
+        for (let nodes = 0; pending.length;) {
+          const next = pending.pop()!;
+          if (++nodes > 2048 || next.depth > 8) { reasons.add("details_too_large"); break; }
+          if (typeof next.value === "string" && PROVIDER_IDENTIFIER.test(next.value)) reasons.add("identifier_in_details");
+          if (next.value && typeof next.value === "object") {
+            if (!Array.isArray(next.value))
+              for (const key of Object.keys(next.value)) if (!REJECTION_LIMIT_FIELDS.has(key)) reasons.add(`unknown_detail_key:${diagnosticName(key)}`);
+            for (const child of Object.values(next.value)) pending.push({ value: child, depth: next.depth + 1 });
+          }
+        }
+      }
+    }
+    if (!["limit_reached", "member_limit_reached", "trial_compute_limit_reached"].includes(String(value.code))) reasons.add("unrecognized_code");
+  }
+  const sorted = [...reasons].sort();
+  if (sorted.length === 0) return "unclassified";
+  const shown = sorted.slice(0, MAX_DIAGNOSTIC_REASONS);
+  return sorted.length > shown.length ? `${shown.join(",")},+${sorted.length - shown.length} more` : shown.join(",");
 }
 
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
@@ -214,9 +263,13 @@ export class BoatApiClient {
         const retrySeconds = Number(response.headers.get("retry-after"));
         const retryOptions = Number.isFinite(retrySeconds) && retrySeconds > 0
           ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {};
-        const rejected = path === "/sandboxes" && input.method === "POST" && input.idempotencyKey && response.status === 429
-          ? createRejection(value) : null;
+        const createRefusal = path === "/sandboxes" && input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
+        const rejected = createRefusal ? createRejection(value) : null;
         if (rejected) throw new BoatCreateRejectedError(code, retryable, rejected, retryOptions);
+        if (createRefusal) {
+          const refusalCode = typeof value?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value.code) ? value.code : "unknown";
+          (this.options.logger ?? console).warn(`[boat] create refusal not certified (${refusalCode}): ${uncertifiedRefusalReasons(value)}`);
+        }
         throw new CloudProviderError(
           code,
           "Boat API request did not succeed",
