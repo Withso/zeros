@@ -114,10 +114,11 @@ export async function assertCurrentCloudEngineAuthority(
     engineInstanceId: string;
     heartbeatToken: string;
     workosEnabled: boolean;
-    /** Reads, and requests that write only rows they lock themselves (event
-     * appends, device admission renewals, approval rechecks), share the same
-     * revocation fence without serializing each other. Other mutations retain
-     * exclusive workspace/engine locks by default. */
+    /** Reads share the same revocation fence without serializing readers. A
+     * mutation may share it only when its own row locks order it against
+     * concurrent peers, including creating a missing row, and no peer skips a
+     * row it locks (event appends, device admission renewals, approval
+     * rechecks). Other mutations retain exclusive workspace/engine locks. */
     lock?: "share" | "update";
   },
 ): Promise<CurrentCloudEngineAuthority> {

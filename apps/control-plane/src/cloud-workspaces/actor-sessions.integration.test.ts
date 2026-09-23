@@ -11,7 +11,7 @@ import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
-import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
+import {withAuthorityDeadlineBarrier,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("actor-aware cloud runtime admission",()=>{
@@ -47,18 +47,6 @@ d("actor-aware cloud runtime admission",()=>{
     return {id:row.id,proof:()=>{const fields={deviceId:row.id,keyVersion:1,timestampMs:Date.now(),nonce:randomBytes(24).toString("base64url")};
       return {...fields,signature:sign(null,cloudWorkspaceDeviceProofMessage({...fields,accountUserId:guest.id,action:"engine.connect",payload:{organizationId:fixture.organizationId,workspaceId:fixture.workspaceId}}),pair.privateKey).toString("base64url")};}};
   }
-  /** Run fn while another transaction holds the workspace and engine rows in
-   * `mode`; the caller's pool gives up on a lock after 250 ms. */
-  async function underHeldRows<T>(mode:"SHARE"|"UPDATE",fn:(lockPool:pg.Pool)=>Promise<T>):Promise<T> {
-    const held=await pool.connect();
-    const lockPool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:1,options:"-c lock_timeout=250ms"});
-    try {
-      await held.query("BEGIN");
-      await held.query(`SELECT id FROM cloud_workspaces WHERE id=$1 FOR ${mode}`,[fixture.workspaceId]);
-      await held.query(`SELECT id FROM cloud_workspace_engine_instances WHERE id=$1 FOR ${mode}`,[fixture.engineInstanceId]);
-      return await fn(lockPool);
-    } finally { await held.query("ROLLBACK").catch(()=>undefined); held.release(); await lockPool.end(); }
-  }
   async function actorConnection() {
     const signer=await device();const grant=await service.issue({...subject(),proof:signer.proof()});
     const admitted=await service.consume({...engine(),token:grant.grantToken});
@@ -90,8 +78,9 @@ d("actor-aware cloud runtime admission",()=>{
     await service.consume({...engine(),token:grant.grantToken});
     const renew=(lockPool:pg.Pool)=>new DatabaseCloudWorkspaceActorSessionService({pool:lockPool,enginePort:39393,
       bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false}).consume({...engine(),token:grant.grantToken,renew:true});
-    await expect(underHeldRows("SHARE",renew)).resolves.toMatchObject({admitted:true});
-    await expect(underHeldRows("UPDATE",renew)).rejects.toMatchObject({code:"55P03"});
+    const rows={workspaceId:fixture.workspaceId,engineInstanceId:fixture.engineInstanceId};
+    await expect(withHeldEngineRows(pool,rows,"SHARE",renew)).resolves.toMatchObject({admitted:true});
+    await expect(withHeldEngineRows(pool,rows,"UPDATE",renew)).rejects.toMatchObject({code:"55P03"});
   });
 
   it("revokes only the caller's exact actor grant without revoking a sibling device",async()=>{
