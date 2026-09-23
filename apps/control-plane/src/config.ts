@@ -228,6 +228,7 @@ export type CloudWorkspaceBackendConfig = {
   durability: {
     objectEncryptionKeys: Readonly<Record<number, string>>;
     currentObjectEncryptionKeyVersion: number;
+    objectRestoreWindowMs: number;
   } & (
     | { objectStoreDirectory: string; s3?: never }
     | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string } }
@@ -527,6 +528,10 @@ const CloudWorkspaceDurabilityEnvSchema = z.object({
   CLOUD_WORKSPACE_S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
   CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: z.string().trim().min(1).max(256).optional(),
+  /** Objects outlive their last reference and their rotation this long, so a
+   * point-in-time database restore finds them. Match the database's backup
+   * retention (PlanetScale: 48 hours); zero collects immediately. */
+  CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: z.coerce.number().int().min(0).max(720).default(48),
 });
 
 const CloudWorkspaceOutboxEnvSchema = z.object({
@@ -1399,6 +1404,8 @@ function loadCloudWorkspaceConfig(
     }
     const currentObjectEncryptionKeyVersion =
       parsedDurability.data.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION;
+    const objectRestoreWindowMs =
+      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS * 3_600_000;
     if (!objectEncryptionKeys[currentObjectEncryptionKeyVersion]) {
       throw new Error(
         "Invalid cloud workspace durability environment: the current object key version is not present in the keyring",
@@ -1411,7 +1418,7 @@ function loadCloudWorkspaceConfig(
       }
       if (store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY) throw new Error("Invalid cloud workspace durability environment: choose one object store");
       durability = {
-        objectEncryptionKeys, currentObjectEncryptionKeyVersion,
+        objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectRestoreWindowMs,
         s3: {
           endpoint: validatedServiceUrl(store.CLOUD_WORKSPACE_S3_ENDPOINT, "CLOUD_WORKSPACE_S3_ENDPOINT", { allowPath: false }),
           region: store.CLOUD_WORKSPACE_S3_REGION,
@@ -1427,7 +1434,7 @@ function loadCloudWorkspaceConfig(
       if (!rawObjectStoreDirectory || !path.isAbsolute(rawObjectStoreDirectory) || objectStoreDirectory === path.parse(objectStoreDirectory).root || containsAsciiControl(rawObjectStoreDirectory)) {
         throw new Error("Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path");
       }
-      durability = { objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectStoreDirectory };
+      durability = { objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectRestoreWindowMs, objectStoreDirectory };
     }
   }
   let setupExecution: CloudWorkspaceBackendConfig["setupExecution"] = null;
