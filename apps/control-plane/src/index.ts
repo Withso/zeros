@@ -15,7 +15,7 @@ import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-r
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool } from "./db.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
-import { loadEmailConfig } from "./email.js";
+import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
 import {
@@ -107,6 +107,7 @@ let stopCloudObjectMaintenanceWorker = async () => {};
 let stopCloudOperationsWorker = async () => {};
 let stopCloudOutboxWorker = async () => {};
 let stopCloudInvitationWorker = async () => {};
+let stopCloudHealthAlerts = async () => {};
 let startCloudBackground = () => {};
 let stopSecurityEventPublisher=async()=>{};
 let cloudRuntimeBridge: CloudRuntimeBridgeRelay | null = null;
@@ -162,6 +163,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     { CloudWorkspaceOperationsWorker },
     { DatabaseCloudWorkspaceHealthService },
     { CloudWorkspaceOutboxWorker, HttpCloudWorkspaceOutboxSink },
+    { CloudWorkspaceHealthAlertWorker },
   ] = await Promise.all([
     import("./cloud-workspaces/provider-deployment.js"),
     import("./cloud-workspaces/provider-resolver.js"),
@@ -187,6 +189,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     import("./cloud-workspaces/operations.js"),
     import("./cloud-workspaces/health.js"),
     import("./cloud-workspaces/outbox.js"),
+    import("./cloud-workspaces/health-alerts.js"),
   ]);
   const cloud = config.cloudWorkspaces;
   const invitationConfig=workspaceInvitationDeliveryConfig(cloud,config.inviteLinkBase,emailConfig);
@@ -504,6 +507,20 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     }
     if (outboxWorker) stopCloudOutboxWorker = outboxWorker.start();
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
+    const alertEmail = config.operationsAlertEmail;
+    if (alertEmail && emailConfig.apiKey && emailConfig.from) {
+      const health = cloudWorkspaceHealthService!;
+      const service = (process.env.RAILWAY_SERVICE_NAME ?? "")
+        .replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64) || "control-plane";
+      stopCloudHealthAlerts = new CloudWorkspaceHealthAlertWorker({
+        environment: `${config.deploymentChannel}/${service}`,
+        read: () => health.read(),
+        send: (alert) => sendEmailStrict(emailConfig, alertEmail, alert.subject, alert.html,
+          { idempotencyKey: alert.idempotencyKey }),
+      }).start();
+    } else if (alertEmail) {
+      console.warn("[control-plane] cloud health alerts disabled: RESEND_API_KEY/EMAIL_FROM unset");
+    }
     if (setupWorker) stopCloudSetupWorker = setupWorker.start();
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
@@ -571,6 +588,7 @@ function shutdown(signal: string): void {
     stopCloudOperationsWorker(),
     stopCloudOutboxWorker(),
     stopCloudInvitationWorker(),
+    stopCloudHealthAlerts(),
     stopCloudReconciler(),
     workosSync?.stop() ?? Promise.resolve(),
     securityEventBroker.stop(),

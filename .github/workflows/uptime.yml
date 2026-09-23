@@ -1,0 +1,42 @@
+name: Uptime
+
+# External reachability check for deployed control planes (repository
+# variable UPTIME_HEALTH_URLS, comma-separated HTTPS /healthz URLs). The
+# in-service health alert worker emails degraded cloud health; this job covers
+# what it cannot report — the service itself being unreachable. A failed
+# scheduled run notifies the workflow owner through GitHub Actions
+# notifications. Probes are read-only and send no credentials.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: uptime
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: control-plane health endpoints
+    if: vars.UPTIME_HEALTH_URLS != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the probe
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/uptime-probe.mjs
+          sparse-checkout-cone-mode: false
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Probe health endpoints
+        env:
+          UPTIME_HEALTH_URLS: ${{ vars.UPTIME_HEALTH_URLS }}
+        run: node scripts/uptime-probe.mjs
