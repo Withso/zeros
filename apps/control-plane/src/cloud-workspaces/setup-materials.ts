@@ -748,18 +748,15 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       throw new Error("cloud workspace recovery endpoint is invalid");
     }
     this.setupRecoveryEndpoint = parsedRecoveryEndpoint.toString();
+    const engineHeartbeatIntervalMs =
+      options.engineHeartbeatIntervalMs ?? DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS;
     if (
       !validPositiveInteger(options.engineProtocolVersion, 65_535) ||
       !validPositiveInteger(options.enginePort, 65_535) ||
       options.enginePort === 22_222 ||
-      !validPositiveInteger(
-        options.engineHeartbeatIntervalMs ??
-          DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
-        MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
-      ) ||
-      (options.engineHeartbeatIntervalMs ??
-        DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS) <
-        MIN_ENGINE_HEARTBEAT_INTERVAL_MS ||
+      !Number.isSafeInteger(engineHeartbeatIntervalMs) ||
+      engineHeartbeatIntervalMs < MIN_ENGINE_HEARTBEAT_INTERVAL_MS ||
+      engineHeartbeatIntervalMs > MAX_ENGINE_HEARTBEAT_INTERVAL_MS ||
       !validPositiveInteger(
         options.engineRegistrationTtlSeconds ??
           DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS,
@@ -823,8 +820,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     }
     this.engineProtocolVersion = options.engineProtocolVersion;
     this.enginePort = options.enginePort;
-    this.engineHeartbeatIntervalMs =
-      options.engineHeartbeatIntervalMs ?? DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS;
+    this.engineHeartbeatIntervalMs = engineHeartbeatIntervalMs;
     this.engineRegistrationTtlSeconds =
       options.engineRegistrationTtlSeconds ??
       DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS;

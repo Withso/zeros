@@ -6,6 +6,7 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import type { CloudCommandEngineScope } from "./commands.js";
 import { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
+import { interceptQueries } from "./authority-deadline-test-utils.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("bounded cloud event replay", () => {
@@ -31,22 +32,7 @@ d("bounded cloud event replay", () => {
    * held, so the hot append and replay paths keep an exact statement budget. */
   const statementLog = (target: pg.Pool) => {
     const statements: string[] = [];
-    const logged = new Proxy(target, { get(owner, property) {
-      if (property === "connect") return async () => {
-        const client = await owner.connect();
-        return new Proxy(client, { get(connection, field) {
-          if (field === "query") return (...args: unknown[]) => {
-            statements.push(String(args[0]));
-            return Reflect.apply(connection.query, connection, args);
-          };
-          const value = Reflect.get(connection, field);
-          return typeof value === "function" ? value.bind(connection) : value;
-        } });
-      };
-      const value = Reflect.get(owner, property);
-      return typeof value === "function" ? value.bind(owner) : value;
-    } });
-    return { statements, pool: logged };
+    return { statements, pool: interceptQueries(target, sql => { statements.push(sql); }) };
   };
 
   it("replays without taking exclusive workspace or stream locks", async () => {

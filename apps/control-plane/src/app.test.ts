@@ -504,6 +504,29 @@ describe("app assembly — cloud workspace internal capabilities", () => {
     expect(serviceCalls).toBe(0);
   });
 
+  it("keeps engine registration and heartbeats out of the streaming traffic budget", async () => {
+    const heartbeat = vi.fn(async () => ({ version: 1 }));
+    const redeem = vi.fn(async () => ({ version: 1 }));
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceInternalSetupService: { redeem, registerEngine: heartbeat, heartbeat },
+    });
+    const post = (path: string, token: string) => app.request(path, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "x-real-ip": "203.0.113.94" },
+      body: JSON.stringify({ workspaceId: "11111111-1111-4111-8111-111111111111",
+        organizationId: "22222222-2222-4222-8222-222222222222", generation: 1,
+        engineInstanceId: "33333333-3333-4333-8333-333333333333" }),
+    });
+    for (let attempt = 0; attempt < 600; attempt += 1)
+      await post("/internal/v1/cloud-workspaces/setup/admission", "invalid");
+    expect((await post("/internal/v1/cloud-workspaces/setup/admission", "invalid")).status).toBe(429);
+    const beat = () => post("/internal/v1/cloud-workspaces/engine/heartbeat", `zwh_${"c".repeat(43)}`);
+    for (let attempt = 0; attempt < 600; attempt += 1) expect((await beat()).status).toBe(200);
+    expect(heartbeat).toHaveBeenCalledTimes(600);
+    expect((await beat()).status).toBe(429);
+    expect(redeem).not.toHaveBeenCalled();
+  });
+
   it.each(["client-admission", "agent-execution"])("throttles valid-shape v2 %s guesses before service work", async (endpoint) => {
     const invoke = vi.fn(async () => ({ version: 1 }));
     const service = {

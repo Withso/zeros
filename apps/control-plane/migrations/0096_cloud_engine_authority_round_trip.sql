@@ -13,47 +13,37 @@ CREATE FUNCTION cloud_workspace_engine_authority_current(
   live boolean, fenced boolean
 ) LANGUAGE plpgsql VOLATILE SET search_path = pg_catalog, public, pg_temp AS $$
 DECLARE
+  -- Only the lock strength varies between readers and mutators.
+  strength text := CASE WHEN exclusive THEN 'UPDATE' ELSE 'SHARE' END;
   workspace record;
   engine record;
+  found_rows integer;
 BEGIN
   PERFORM 1 FROM organizations organization WHERE organization.id = target_org_id FOR SHARE;
-  IF exclusive THEN
+  EXECUTE format($query$
     SELECT w.current_generation, w.authority_epoch, w.desired_state, w.status
-    INTO workspace FROM cloud_workspaces w
-    WHERE w.id = target_workspace_id AND w.org_id = target_org_id AND w.deleted_at IS NULL
-      AND cloud_workspace_generation_policy_current(w.id, target_generation, w.org_id)
-    FOR UPDATE;
-  ELSE
-    SELECT w.current_generation, w.authority_epoch, w.desired_state, w.status
-    INTO workspace FROM cloud_workspaces w
-    WHERE w.id = target_workspace_id AND w.org_id = target_org_id AND w.deleted_at IS NULL
-      AND cloud_workspace_generation_policy_current(w.id, target_generation, w.org_id)
-    FOR SHARE;
-  END IF;
-  IF NOT FOUND OR workspace.current_generation <> target_generation
+    FROM cloud_workspaces w
+    WHERE w.id = $1 AND w.org_id = $2 AND w.deleted_at IS NULL
+      AND cloud_workspace_generation_policy_current(w.id, $3, w.org_id)
+    FOR %s$query$, strength)
+  INTO workspace USING target_workspace_id, target_org_id, target_generation;
+  GET DIAGNOSTICS found_rows = ROW_COUNT;
+  IF found_rows <> 1 OR workspace.current_generation <> target_generation
     OR workspace.desired_state <> 'running' OR workspace.status NOT IN ('setting_up', 'ready', 'busy') THEN
     RETURN;
   END IF;
-  IF exclusive THEN
-    SELECT instance.account_user_id, instance.heartbeat_token_hash INTO engine
+  EXECUTE format($query$
+    SELECT instance.account_user_id, instance.heartbeat_token_hash
     FROM cloud_workspace_engine_instances instance
-    WHERE instance.id = target_engine_id AND instance.workspace_id = target_workspace_id
-      AND instance.org_id = target_org_id AND instance.generation = target_generation
-      AND instance.state = 'ready' AND instance.lease_expires_at > clock_timestamp()
+    WHERE instance.id = $1 AND instance.workspace_id = $2 AND instance.org_id = $3
+      AND instance.generation = $4 AND instance.state = 'ready'
+      AND instance.lease_expires_at > clock_timestamp()
       AND cloud_workspace_runtime_authority_live(
-        instance.workspace_id, instance.generation, instance.account_user_id, require_workos)
-    FOR UPDATE;
-  ELSE
-    SELECT instance.account_user_id, instance.heartbeat_token_hash INTO engine
-    FROM cloud_workspace_engine_instances instance
-    WHERE instance.id = target_engine_id AND instance.workspace_id = target_workspace_id
-      AND instance.org_id = target_org_id AND instance.generation = target_generation
-      AND instance.state = 'ready' AND instance.lease_expires_at > clock_timestamp()
-      AND cloud_workspace_runtime_authority_live(
-        instance.workspace_id, instance.generation, instance.account_user_id, require_workos)
-    FOR SHARE;
-  END IF;
-  IF NOT FOUND THEN
+        instance.workspace_id, instance.generation, instance.account_user_id, $5)
+    FOR %s$query$, strength)
+  INTO engine USING target_engine_id, target_workspace_id, target_org_id, target_generation, require_workos;
+  GET DIAGNOSTICS found_rows = ROW_COUNT;
+  IF found_rows <> 1 THEN
     RETURN;
   END IF;
   -- SELECT ... FOR UPDATE may evaluate its predicate before waiting. Recheck

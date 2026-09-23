@@ -10,7 +10,7 @@
 // authentication session.
 // ──────────────────────────────────────────────────────────
 
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -43,6 +43,8 @@ import { createDevAuthConfigurationRoutes } from "./dev-auth-configuration.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
   createCloudWorkspaceInternalRoutes,
+  CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
+  CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
   CLOUD_WORKSPACE_INTERNAL_PATHS,
   cloudWorkspaceInternalResponseHeaders,
   type CloudWorkspaceInternalSetupService,
@@ -313,21 +315,39 @@ export function createApp(
     // qualification tunnel supplies CF-Connecting-IP. Prefer Railway's header
     // when both are present, validate either value, and collapse missing or
     // attacker-controlled garbage into one bounded bucket.
+    const internalClientIp = (c: Context) => {
+      const clientIp =
+        c.req.header("X-Real-IP")?.trim() ??
+        c.req.header("CF-Connecting-IP")?.trim() ??
+        "";
+      return isIP(clientIp) ? clientIp : "unknown";
+    };
     const internalPreAuthLimit = rateLimit(
       "cloud-workspace-internal-preauth",
       600,
       60_000,
-      (c) => {
-        const clientIp =
-          c.req.header("X-Real-IP")?.trim() ??
-          c.req.header("CF-Connecting-IP")?.trim() ??
-          "";
-        return isIP(clientIp) ? clientIp : "unknown";
-      },
+      internalClientIp,
     );
+    // An engine stops when registration or a heartbeat is rejected. Streaming
+    // event, record and command traffic from engines behind one egress
+    // address must never exhaust that budget.
+    const engineLifecyclePreAuthLimit = rateLimit(
+      "cloud-workspace-engine-lifecycle-preauth",
+      600,
+      60_000,
+      internalClientIp,
+    );
+    const engineLifecyclePaths = new Set<string>([
+      CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
+      CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
+    ]);
     for (const path of CLOUD_WORKSPACE_INTERNAL_PATHS) {
       app.use(path, cloudWorkspaceInternalResponseHeaders);
-      app.use(path, internalPreAuthLimit);
+      app.use(path, (c, next) =>
+        (engineLifecyclePaths.has(c.req.path)
+          ? engineLifecyclePreAuthLimit
+          : internalPreAuthLimit)(c, next),
+      );
     }
     app.route(
       "/",
