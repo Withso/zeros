@@ -13,11 +13,6 @@ export class CloudWorkspaceEngineAuthorityError extends Error {
   }
 }
 
-// $1 engine instance, $2 WorkOS enabled.
-const ENGINE_AUTHORITY_LIVE = `SELECT 1 FROM cloud_workspace_engine_instances
-    WHERE id=$1 AND lease_expires_at>clock_timestamp()
-      AND cloud_workspace_runtime_authority_live(workspace_id,generation,account_user_id,$2)`;
-
 /** Only after assertCurrentCloudEngineAuthority has locked this engine and its
  * parents in the same transaction. Later credential locks can consume the
  * remaining lease time even though those authority rows cannot change. */
@@ -26,7 +21,10 @@ export async function assertCloudEngineAuthorityDeadline(
   engineInstanceId: string,
   workosEnabled: boolean,
 ): Promise<void> {
-  const live = await tx.query(ENGINE_AUTHORITY_LIVE, [engineInstanceId,workosEnabled]);
+  const live = await tx.query(`SELECT 1 FROM cloud_workspace_engine_instances
+    WHERE id=$1 AND lease_expires_at>clock_timestamp()
+      AND cloud_workspace_runtime_authority_live(workspace_id,generation,account_user_id,$2)`,
+  [engineInstanceId,workosEnabled]);
   if (live.rowCount !== 1) throw new CloudWorkspaceEngineAuthorityError();
 }
 
@@ -124,88 +122,35 @@ export async function assertCurrentCloudEngineAuthority(
   if (!validIdentityInput(input)) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
-  await tx.query("SELECT id FROM organizations WHERE id=$1 FOR SHARE", [input.organizationId]);
-  const workspace = await tx.query<{
-    current_generation: number;
-    authority_epoch: string | number;
-    desired_state: string;
-    status: string;
-  }>(
-    `SELECT current_generation, authority_epoch, desired_state, status
-     FROM cloud_workspaces
-     WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL
-       AND cloud_workspace_generation_policy_current(id, $3, org_id)
-     FOR ${input.lock === "share" ? "SHARE" : "UPDATE"}`,
-    [input.workspaceId, input.organizationId, input.generation],
-  );
-  const current = workspace.rows[0];
-  if (
-    !current ||
-    current.current_generation !== input.generation ||
-    current.desired_state !== "running" ||
-    !["setting_up", "ready", "busy"].includes(current.status)
-  ) {
-    throw new CloudWorkspaceEngineAuthorityError();
-  }
-  const engine = await tx.query<{
+  // One round trip: every engine request holds these locks until it commits.
+  const authority = await tx.query<{
+    authority_epoch: string;
     account_user_id: string;
     heartbeat_token_hash: Buffer;
+    live: boolean;
+    fenced: boolean;
   }>(
-    `SELECT engine.account_user_id, engine.heartbeat_token_hash
-     FROM cloud_workspace_engine_instances engine
-     WHERE engine.id = $1
-       AND engine.workspace_id = $2
-       AND engine.org_id = $3
-       AND engine.generation = $4
-       AND engine.state = 'ready'
-       AND engine.lease_expires_at > clock_timestamp()
-       AND cloud_workspace_runtime_authority_live(
-         engine.workspace_id, engine.generation, engine.account_user_id, $5
-       )
-     FOR ${input.lock === "share" ? "SHARE" : "UPDATE"}`,
+    `SELECT authority_epoch, account_user_id, heartbeat_token_hash, live, fenced
+     FROM cloud_workspace_engine_authority_current($1, $2, $3, $4, $5, $6)`,
     [
-      input.engineInstanceId,
       input.workspaceId,
       input.organizationId,
       input.generation,
+      input.engineInstanceId,
       input.workosEnabled,
+      input.lock !== "share",
     ],
   );
-  const row = engine.rows[0];
+  const row = authority.rows[0];
   if (
     !row?.heartbeat_token_hash ||
-    !equalHash(row.heartbeat_token_hash, tokenHash(input.heartbeatToken))
+    !equalHash(row.heartbeat_token_hash, tokenHash(input.heartbeatToken)) ||
+    row.live !== true ||
+    row.fenced !== false
   ) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
-  // SELECT ... FOR UPDATE may evaluate its predicate before waiting. Once both
-  // scope and engine locks are held, one round trip rechecks the deadlines and
-  // that no completed final checkpoint has fenced this generation.
-  const fence = await tx.query<{ live: boolean; fenced: boolean }>(
-    `SELECT EXISTS (${ENGINE_AUTHORITY_LIVE}) AS live, EXISTS (
-       SELECT 1
-       FROM workspace_checkpoint_requests checkpoint_request
-       JOIN cloud_workspace_lifecycle_intents intent
-         ON intent.id = checkpoint_request.lifecycle_intent_id
-       WHERE checkpoint_request.workspace_id = $3
-         AND checkpoint_request.org_id = $4
-         AND checkpoint_request.generation = $5
-         AND checkpoint_request.state = 'succeeded'
-         AND intent.state IN ('queued', 'observing', 'dispatching')
-         AND intent.operation IN ('stop', 'archive', 'delete')
-     ) AS fenced`,
-    [
-      input.engineInstanceId,
-      input.workosEnabled,
-      input.workspaceId,
-      input.organizationId,
-      input.generation,
-    ],
-  );
-  if (fence.rows[0]?.live !== true || fence.rows[0]?.fenced !== false) {
-    throw new CloudWorkspaceEngineAuthorityError();
-  }
-  const authorityEpoch = Number(current.authority_epoch);
+  const authorityEpoch = Number(row.authority_epoch);
   if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) {
     throw new CloudWorkspaceEngineAuthorityError();
   }

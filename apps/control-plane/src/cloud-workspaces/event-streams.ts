@@ -73,29 +73,32 @@ export class DatabaseCloudWorkspaceEventService {
         }
         if (request.events[0]!.sequence !== head + 1) throw new CloudEventError("event_conflict");
         const next = request.events.at(-1)!.sequence;
+        const rows = request.events.map(e => ({ ...e, bytes: Buffer.byteLength(JSON.stringify(e.frame)) }));
         // One round trip inside the workspace lock inserts the batch, prunes
         // from the oldest end by BOTH event count and encoded bytes, and
-        // advances the stream. Sub-statements share one snapshot, so the
-        // boundary ranks the retained rows together with the new batch.
-        await tx.query(`WITH batch AS (
-            SELECT e.sequence,e.frame,e.bytes FROM jsonb_to_recordset($3::jsonb) AS e(sequence bigint,frame jsonb,bytes integer)
-          ), inserted AS (
+        // advances the stream. Sub-statements share one snapshot, so stored
+        // rows are ranked in index order behind the batch's own count and
+        // bytes. The batch itself always fits the bounds; if it ever did not,
+        // retention would keep it whole rather than record a boundary inside
+        // rows this statement cannot yet delete.
+        await tx.query(`WITH inserted AS (
             INSERT INTO cloud_workspace_stream_events(workspace_id,org_id,sequence,frame,encoded_bytes)
-            SELECT $1::uuid,$2::uuid,sequence,frame,bytes FROM batch
+            SELECT $1,$2,e.sequence,e.frame,e.bytes FROM jsonb_to_recordset($3::jsonb)
+            AS e(sequence bigint,frame jsonb,bytes integer)
           ), boundary AS (
-            SELECT min(sequence) AS first FROM (
-              SELECT sequence,row_number() OVER(ORDER BY sequence DESC) AS n,sum(bytes) OVER(ORDER BY sequence DESC) AS bytes
-              FROM (SELECT sequence,encoded_bytes AS bytes FROM cloud_workspace_stream_events WHERE workspace_id=$1::uuid
-                UNION ALL SELECT sequence,bytes FROM batch) candidate
-            ) retained WHERE n<=$4 AND bytes<=$5
+            SELECT coalesce(min(sequence),$6) AS first FROM (
+              SELECT sequence,row_number() OVER newest AS n,sum(encoded_bytes) OVER newest AS bytes
+              FROM cloud_workspace_stream_events WHERE workspace_id=$1
+              WINDOW newest AS (ORDER BY sequence DESC)
+            ) stored WHERE n+$7<=$4 AND bytes+$8<=$5
           ), pruned AS (
-            DELETE FROM cloud_workspace_stream_events WHERE workspace_id=$1::uuid AND sequence<(SELECT first FROM boundary)
+            DELETE FROM cloud_workspace_stream_events WHERE workspace_id=$1 AND sequence<(SELECT first FROM boundary)
           )
-          UPDATE cloud_workspace_event_streams SET head=$6,first_retained=(SELECT first FROM boundary),
-            last_batch_id=$7,last_batch_sha256=$8,updated_at=now()
-          WHERE workspace_id=$1::uuid`, [scope.workspaceId, scope.organizationId,
-          JSON.stringify(request.events.map(e => ({ ...e, bytes: Buffer.byteLength(JSON.stringify(e.frame)) }))),
-          RETAINED_EVENTS, RETAINED_BYTES, next, request.batchId, hash]);
+          UPDATE cloud_workspace_event_streams SET head=$9,first_retained=(SELECT first FROM boundary),
+            last_batch_id=$10,last_batch_sha256=$11,updated_at=now()
+          WHERE workspace_id=$1`, [scope.workspaceId, scope.organizationId, JSON.stringify(rows),
+          RETAINED_EVENTS, RETAINED_BYTES, request.events[0]!.sequence, rows.length,
+          rows.reduce((total, row) => total + row.bytes, 0), next, request.batchId, hash]);
         return { streamId: scope.engineInstanceId, head: next, replayed: false };
       }
       if (request.after < first - 1) throw new CloudEventError("event_cursor_expired");

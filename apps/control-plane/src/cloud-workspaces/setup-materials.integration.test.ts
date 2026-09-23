@@ -55,9 +55,10 @@ describe("cloud workspace setup material configuration", () => {
     }),
     revoke: async () => undefined,
   };
-  const construct = (jwksUrl: string) =>
+  const construct = (jwksUrl: string, engineHeartbeatIntervalMs?: number) =>
     new DatabaseCloudWorkspaceSetupMaterialService({
       pool: {} as pg.Pool,
+      ...(engineHeartbeatIntervalMs === undefined ? {} : { engineHeartbeatIntervalMs }),
       setupAudience: SETUP_AUDIENCE,
       engineRegistrationAudience: ENGINE_AUDIENCE,
       engineHeartbeatAudience: HEARTBEAT_AUDIENCE,
@@ -85,6 +86,14 @@ describe("cloud workspace setup material configuration", () => {
     expect(() =>
       construct("https://identity.example.test/.well-known/jwks.json#leak"),
     ).toThrow(/account authority/i);
+  });
+
+  it("keeps the engine heartbeat interval inside the lease", () => {
+    const jwks = "https://identity.example.test/.well-known/jwks.json";
+    for (const interval of [5_000, 30_000])
+      expect(() => construct(jwks, interval)).not.toThrow();
+    for (const interval of [4_999, 30_001, 10_000.5])
+      expect(() => construct(jwks, interval)).toThrow(/setup material options are invalid/);
   });
 
   it("opens setup material with its persisted key version", () => {

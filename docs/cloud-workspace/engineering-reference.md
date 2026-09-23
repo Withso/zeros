@@ -246,10 +246,11 @@ abort signal; the durable run fence prevents that late process from publishing.
 
 The engine consumes and erases its registration envelope, registers the exact
 instance/protocol/setup fence, and exposes private readiness only after durable
-registration. A 10-second heartbeat renews a 90-second lease; rejection or
-lease exhaustion stops the engine. Checkpoint directives ride the heartbeat, so
-its cadence bounds how long a stop, archive or rebuild waits before the final
-checkpoint begins. The root-owned GitHub projection requests a
+registration. A heartbeat (10 seconds by default,
+`CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS` 5–30 seconds) renews a
+90-second lease; rejection or lease exhaustion stops the engine. Checkpoint
+directives ride the heartbeat, so its cadence bounds how long a stop, archive
+or rebuild waits before the final checkpoint begins. The root-owned GitHub projection requests a
 replacement ten minutes before expiry (or after a credential rejection), and
 the heartbeat returns only an owner-bound replacement document. PostgreSQL and
 audit rows never contain the raw GitHub token.

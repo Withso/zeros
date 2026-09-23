@@ -869,6 +869,7 @@ describe("cloud workspace backend configuration", () => {
         setupSecretKeyV1: setupKey,
         engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
         enginePort: 39_393,
+        engineHeartbeatIntervalMs: 10_000,
         intervalMs: 1_000,
         timeoutSeconds: 1_800,
         leaseMs: 60_000,
@@ -890,6 +891,20 @@ describe("cloud workspace backend configuration", () => {
         ),
       }).cloudWorkspaces?.setupExecution?.engineProtocolVersion,
     ).toBe(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION);
+  });
+
+  it("bounds the engine heartbeat interval inside the lease", () => {
+    const interval = (value: string) =>
+      loadConfig({
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS: value,
+      }).cloudWorkspaces?.setupExecution?.engineHeartbeatIntervalMs;
+    expect(interval("30000")).toBe(30_000);
+    expect(interval("5000")).toBe(5_000);
+    for (const value of ["4999", "30001", "10000.5"])
+      expect(() => interval(value)).toThrow(
+        /CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS/,
+      );
   });
 
   it("keeps durable fork and recovery storage available while setup stays paused", () => {

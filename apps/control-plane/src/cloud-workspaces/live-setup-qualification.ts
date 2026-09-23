@@ -35,6 +35,7 @@ import {
 } from "./setup-materials.js";
 import { CloudWorkspaceSetupWorker } from "./setup-worker.js";
 import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
+import { MAX_ENGINE_HEARTBEAT_INTERVAL_MS } from "./engine-heartbeat.js";
 
 /** The qualification image runs this repository's bundled engine. Keep this
  * derived so the image/materials/registration contract cannot lag the shared
@@ -950,7 +951,10 @@ async function main(): Promise<void> {
       bridgeToken,
       accountToken,
     });
-    await new Promise((resolve) => setTimeout(resolve, 35_000));
+    // The deployment's interval is not visible here; outwait the largest.
+    await new Promise((resolve) =>
+      setTimeout(resolve, MAX_ENGINE_HEARTBEAT_INTERVAL_MS + 5_000),
+    );
     const second = await setupObservation(pool, seed);
     if (
       second.engine_instance_id !== engineInstanceId ||

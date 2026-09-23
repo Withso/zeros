@@ -61,7 +61,7 @@ d("actor-aware cloud runtime admission",()=>{
   it.each(["admission", "renewal", "engine", "source", "pro", "guest"] as const)("rejects %s expiry after the transaction starts",async deadline=>{
     const signer=await device(),grant=await service.issue({...subject(),proof:signer.proof()});
     if(deadline!=="admission")await service.consume({...engine(),token:grant.grantToken});
-    const controlled=withAuthorityDeadlineBarrier(pool,/SELECT id FROM organizations .*FOR SHARE/,async()=>{
+    const controlled=withAuthorityDeadlineBarrier(pool,/cloud_workspace_engine_authority_current/,async()=>{
       if(deadline==="admission")await pool.query("UPDATE cloud_workspace_actor_sessions SET admission_expires_at=clock_timestamp() WHERE token_hash=$1",[createHash("sha256").update(grant.grantToken).digest()]);
       if(deadline==="renewal")await pool.query("UPDATE cloud_workspace_actor_sessions SET last_renewed_at=clock_timestamp()-interval '30 seconds' WHERE token_hash=$1",[createHash("sha256").update(grant.grantToken).digest()]);
       if(deadline==="engine")await pool.query("UPDATE cloud_workspace_engine_instances SET lease_expires_at=clock_timestamp() WHERE id=$1",[fixture.engineInstanceId]);

@@ -22,6 +22,11 @@ import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
+import {
+  DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
+  MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
+  MIN_ENGINE_HEARTBEAT_INTERVAL_MS,
+} from "./cloud-workspaces/engine-heartbeat.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -244,6 +249,7 @@ export type CloudWorkspaceBackendConfig = {
     setupSecretKeyV1: string | null;
     engineProtocolVersion: number;
     enginePort: number;
+    engineHeartbeatIntervalMs: number;
     intervalMs: number;
     timeoutSeconds: number;
     leaseMs: number;
@@ -464,6 +470,12 @@ const CloudWorkspaceSetupEnvSchema = z.object({
     .min(1)
     .max(65_535)
     .default(39_393),
+  CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_ENGINE_HEARTBEAT_INTERVAL_MS)
+    .max(MAX_ENGINE_HEARTBEAT_INTERVAL_MS)
+    .default(DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS),
   CLOUD_WORKSPACE_SETUP_INTERVAL_MS: z.coerce
     .number()
     .int()
@@ -1478,6 +1490,8 @@ function loadCloudWorkspaceConfig(
       setupSecretKeyV1: settingsSecretKeyV1,
       engineProtocolVersion: setup.data.CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: setup.data.CLOUD_WORKSPACE_ENGINE_PORT,
+      engineHeartbeatIntervalMs:
+        setup.data.CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS,
       intervalMs: setup.data.CLOUD_WORKSPACE_SETUP_INTERVAL_MS,
       timeoutSeconds: setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS,
       leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,

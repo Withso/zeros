@@ -385,6 +385,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       setupRecoveryEndpoint: endpoint(CLOUD_WORKSPACE_SETUP_RECOVERY_PATH),
       engineProtocolVersion: setup.engineProtocolVersion,
       enginePort: setup.enginePort,
+      engineHeartbeatIntervalMs: setup.engineHeartbeatIntervalMs,
       engineRegistrationTtlSeconds: setup.timeoutSeconds + 60,
       setupSecretEncryptionKeys: setup.setupSecretEncryptionKeys,
       currentSetupSecretEncryptionKeyVersion:
