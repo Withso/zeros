@@ -407,7 +407,7 @@ suite("managed compute lifecycle admission", () => {
     expect(failing.state).not.toBe("settled");
     expect(Number(failing.from_now)).toBeGreaterThan(12);
   });
-  it("wakes a start of the same generation when the previous allocation settles", async () => {
+  it("wakes only a start that was refused for the unsettled allocation", async () => {
     await ready();
     await age();
     stoppedMeter();
@@ -416,26 +416,28 @@ suite("managed compute lifecycle admission", () => {
       "UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1",
       [input.intentId],
     );
-    const waiting = randomUUID();
-    await pool.query(
-      `INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,
-        state,error_code,next_attempt_at)
-      VALUES ($1,$2,1,$3,$4,'wake',$5,$6,'observing','provider_request_unavailable',now()+interval '16 seconds')`,
-      [waiting, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32)],
-    );
+    const waiting = randomUUID(), throttled = randomUUID();
+    for (const [id, code] of [[waiting, "compute_previous_lease_pending"], [throttled, "provider_rate_limited"]] as const)
+      await pool.query(
+        `INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,
+          state,error_code,next_attempt_at)
+        VALUES ($1,$2,1,$3,$4,'wake',$5,$6,'observing',$7,now()+interval '16 seconds')`,
+        [id, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32), code],
+      );
     await pool.query(
       "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '10 seconds',next_check_at=now() WHERE id=$1",
       [input.intentId],
     );
     await coordinator.runOnce();
     expect((await nextCheck()).state).toBe("settled");
-    const intent = (
+    const due = async (id: string) => (
       await pool.query<{ due: boolean }>(
         "SELECT next_attempt_at<=clock_timestamp() AS due FROM cloud_workspace_lifecycle_intents WHERE id=$1",
-        [waiting],
+        [id],
       )
-    ).rows[0]!;
-    expect(intent.due).toBe(true);
+    ).rows[0]!.due;
+    expect(await due(waiting)).toBe(true);
+    expect(await due(throttled)).toBe(false);
   });
   it("retains credit when disappearance is unconfirmed", async () => {
     await ready();

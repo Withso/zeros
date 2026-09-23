@@ -924,12 +924,13 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       );
       if (!result.rowCount)
         throw failure("compute_settlement_incomplete", true);
-      // A start refused while this allocation was unsettled may be asleep in
-      // exponential backoff; let it retry now.
+      // A start refused because this allocation was unsettled is otherwise
+      // asleep in exponential backoff; let it retry now. Other backoff (for
+      // example provider rate limits) is left alone.
       await tx.query(
         `UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=clock_timestamp(),updated_at=now()
         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation IN ('create','wake')
-          AND state='observing' AND next_attempt_at>clock_timestamp()`,
+          AND state='observing' AND error_code='compute_previous_lease_pending' AND next_attempt_at>clock_timestamp()`,
         [lease.workspace_id, lease.org_id, lease.generation],
       );
     });
