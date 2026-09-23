@@ -27,6 +27,11 @@ describe("uptime probe", () => {
     expect(await probeOnce("https://x.test/healthz", json(200, { ok: false }))).toEqual({ failure: "not_ok" });
     expect(await probeOnce("https://x.test/healthz", vi.fn(async () => { throw new TypeError("fetch failed"); })))
       .toEqual({ failure: "unreachable" });
+    expect(await probeOnce("https://x.test/healthz", vi.fn(async () => new Response("<html>", { status: 200 }))))
+      .toEqual({ failure: "invalid_body" });
+    const stalled = { status: 200, json: async () => { throw new DOMException("aborted", "TimeoutError"); } };
+    expect(await probeOnce("https://x.test/healthz", vi.fn(async () => stalled as unknown as Response)))
+      .toEqual({ failure: "timeout" });
   });
 
   it("retries a failing target before reporting it", async () => {

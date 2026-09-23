@@ -98,10 +98,13 @@ user, provider-resource or repository identifier, and neither do alerts.
 
 - **In-service alerts.** With `OPERATIONS_ALERT_EMAIL` set and Resend
   configured (`RESEND_API_KEY`, `EMAIL_FROM`), the service reads health every
-  60 seconds while background workers run. A reason set must persist for two
-  consecutive reads before it emails. An unchanged degraded set repeats every
-  six hours, and a recovery email follows each alert. Resend idempotency keys
-  make restarts and replicas send each alert once per window.
+  60 seconds, including while background workers are paused. Two consecutive
+  degraded reads open a numbered incident and email its reasons. A different
+  reason set that holds for two reads, or each new six-hour window, sends an
+  update, and two healthy reads send the recovery. Alert state is one locked
+  row (migration `0097`), so replicas and deploys agree, and a failed send is
+  retried with the same Resend idempotency key and body. An invalid mailbox
+  disables alerts with a warning rather than failing boot.
 - **External uptime.** `.github/workflows/uptime.yml` probes the HTTPS
   `/healthz` URLs in the repository variable `UPTIME_HEALTH_URLS` every ten
   minutes, with three attempts 20 seconds apart. An unreachable, non-200,

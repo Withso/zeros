@@ -48,12 +48,16 @@ describe("database authority configuration", () => {
     expect(loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: "150" }).slowRequestLogMs).toBe(150);
   });
 
-  it("sends health alerts only to one configured operator mailbox", () => {
+  it("sends health alerts only to one operator mailbox and never fails boot over it", () => {
     expect(loadConfig(baseEnv()).operationsAlertEmail).toBeNull();
-    expect(loadConfig({ ...baseEnv(), OPERATIONS_ALERT_EMAIL: " arun@zeros.build " }).operationsAlertEmail)
-      .toBe("arun@zeros.build");
-    for (const value of ["arun", "a@b.c,d@e.f", "a@b.c\nBcc: x@y.z"])
-      expect(() => loadConfig({ ...baseEnv(), OPERATIONS_ALERT_EMAIL: value })).toThrow(/OPERATIONS_ALERT_EMAIL/);
+    expect(loadConfig({ ...baseEnv(), OPERATIONS_ALERT_EMAIL: " ops@example.com " }).operationsAlertEmail)
+      .toBe("ops@example.com");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const value of ["", "ops", "a@b.c,d@e.f", "a@b.c\nBcc: x@y.z"])
+        expect(loadConfig({ ...baseEnv(), OPERATIONS_ALERT_EMAIL: value }).operationsAlertEmail).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(3);
+    } finally { warn.mockRestore(); }
   });
 
   it.each(["49", "60001", "2.5", "bad"])("rejects an unbounded slow-request threshold %s", (value) => {

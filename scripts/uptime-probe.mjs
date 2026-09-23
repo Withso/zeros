@@ -30,19 +30,30 @@ export function parseTargets(value) {
 }
 
 /** One attempt: `failure` is null when the control plane answered healthy enough. */
+const timedOut = (error) => error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+
 export async function probeOnce(url, fetchImpl = fetch) {
+  const signal = AbortSignal.timeout(15_000);
   let response;
   try {
     response = await fetchImpl(url, {
       redirect: "error",
       headers: { accept: "application/json", "user-agent": "zeros-uptime-probe" },
-      signal: AbortSignal.timeout(15_000),
+      signal,
     });
   } catch (error) {
-    return { failure: error instanceof Error && error.name === "TimeoutError" ? "timeout" : "unreachable" };
+    return { failure: timedOut(error) ? "timeout" : "unreachable" };
   }
-  const body = await response.json().catch(() => null);
-  if (response.status !== 200) return { failure: `http_${response.status}` };
+  if (response.status !== 200) {
+    await response.body?.cancel().catch(() => undefined);
+    return { failure: `http_${response.status}` };
+  }
+  let body;
+  try {
+    body = await response.json();
+  } catch (error) {
+    return { failure: timedOut(error) || signal.aborted ? "timeout" : "invalid_body" };
+  }
   if (!body || body.ok !== true) return { failure: "not_ok" };
   const cloud = body.cloudWorkspaces;
   if (!cloud) return { failure: null, cloud: "disabled", reasons: [] };

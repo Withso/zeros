@@ -46,8 +46,6 @@ const EnvSchema = z.object({
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
   SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
-  /** One operator mailbox for aggregate cloud health alerts (via Resend). */
-  OPERATIONS_ALERT_EMAIL: z.string().trim().max(254).email().optional(),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
@@ -1688,6 +1686,17 @@ function validateRailwayEnvironment(
   }
 }
 
+/** Alerting is optional: an unusable mailbox disables it with a warning
+ * instead of failing boot. */
+function loadOperationsAlertEmail(env: NodeJS.ProcessEnv): string | null {
+  const raw = env.OPERATIONS_ALERT_EMAIL?.trim();
+  if (!raw) return null;
+  const parsed = z.string().max(254).email().safeParse(raw);
+  if (parsed.success) return parsed.data;
+  console.warn("[config] OPERATIONS_ALERT_EMAIL is not one email address; cloud health alerts are disabled");
+  return null;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -1751,7 +1760,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
-    operationsAlertEmail: e.OPERATIONS_ALERT_EMAIL ?? null,
+    operationsAlertEmail: loadOperationsAlertEmail(env),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,

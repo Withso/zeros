@@ -108,6 +108,7 @@ let stopCloudOperationsWorker = async () => {};
 let stopCloudOutboxWorker = async () => {};
 let stopCloudInvitationWorker = async () => {};
 let stopCloudHealthAlerts = async () => {};
+let startCloudHealthAlerts = () => {};
 let startCloudBackground = () => {};
 let stopSecurityEventPublisher=async()=>{};
 let cloudRuntimeBridge: CloudRuntimeBridgeRelay | null = null;
@@ -482,6 +483,27 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       executionTimeoutMs: (setup.timeoutSeconds + 15) * 1_000,
     });
   }
+  // Alerts also run while background workers are paused: stalled work is
+  // exactly what a paused environment should report.
+  const alertEmail = config.operationsAlertEmail;
+  const health = cloudWorkspaceHealthService;
+  startCloudHealthAlerts = () => {
+    if (!alertEmail) return;
+    if (!emailConfig.apiKey || !emailConfig.from) {
+      console.warn("[control-plane] cloud health alerts disabled: RESEND_API_KEY/EMAIL_FROM unset");
+      return;
+    }
+    const service = (process.env.RAILWAY_SERVICE_NAME ?? "")
+      .replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64) || "control-plane";
+    stopCloudHealthAlerts = new CloudWorkspaceHealthAlertWorker({
+      pool,
+      environment: `${config.deploymentChannel}/${service}`,
+      read: () => health.read(),
+      send: (alert) => sendEmailStrict(emailConfig, alertEmail, alert.subject, alert.html,
+        { idempotencyKey: alert.idempotencyKey }),
+    }).start();
+    console.log("[control-plane] cloud health alerts enabled");
+  };
   startCloudBackground = () => {
     if (cloud.backgroundWorkersEnabled === false) {
       console.log("[control-plane] cloud workspace background workers paused");
@@ -507,20 +529,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     }
     if (outboxWorker) stopCloudOutboxWorker = outboxWorker.start();
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
-    const alertEmail = config.operationsAlertEmail;
-    if (alertEmail && emailConfig.apiKey && emailConfig.from) {
-      const health = cloudWorkspaceHealthService!;
-      const service = (process.env.RAILWAY_SERVICE_NAME ?? "")
-        .replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64) || "control-plane";
-      stopCloudHealthAlerts = new CloudWorkspaceHealthAlertWorker({
-        environment: `${config.deploymentChannel}/${service}`,
-        read: () => health.read(),
-        send: (alert) => sendEmailStrict(emailConfig, alertEmail, alert.subject, alert.html,
-          { idempotencyKey: alert.idempotencyKey }),
-      }).start();
-    } else if (alertEmail) {
-      console.warn("[control-plane] cloud health alerts disabled: RESEND_API_KEY/EMAIL_FROM unset");
-    }
+
     if (setupWorker) stopCloudSetupWorker = setupWorker.start();
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
@@ -553,6 +562,7 @@ const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   if (shuttingDown) return;
   if(migrationResult.status.state==="current"){
     startCloudBackground();
+    startCloudHealthAlerts();
     stopSecurityEventPublisher=startSecurityEventPublisher(pool);
   }
   console.log(`[control-plane] listening on :${info.port}`);
