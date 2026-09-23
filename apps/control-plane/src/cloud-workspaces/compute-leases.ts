@@ -679,8 +679,14 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     } finally {
       await withSystemTx(this.options.pool, (tx) =>
         tx.query(
+          // A just-stopped allocation settles once its final meter can cover
+          // the first stopped observation (5 s behind the provider clock), so
+          // recheck it then instead of a full poll. Errors keep the cadence.
           `UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
-        next_check_at=clock_timestamp()+interval '15 seconds',updated_at=now() WHERE id=$1 AND lease_owner=$2`,
+        next_check_at=CASE WHEN state<>'settled' AND last_error_code IS NULL AND stopped_observed_at IS NOT NULL
+            AND stopped_observed_at>clock_timestamp()-interval '2 minutes'
+          THEN greatest(stopped_observed_at+interval '6 seconds',clock_timestamp()+interval '1 second')
+          ELSE clock_timestamp()+interval '15 seconds' END,updated_at=now() WHERE id=$1 AND lease_owner=$2`,
           [lease.id, this.workerId],
         ),
       );
@@ -912,6 +918,14 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       );
       if (!result.rowCount)
         throw failure("compute_settlement_incomplete", true);
+      // A start refused while this allocation was unsettled is otherwise asleep
+      // in exponential backoff; let it retry now.
+      await tx.query(
+        `UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=clock_timestamp(),updated_at=now()
+        WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation IN ('create','wake')
+          AND state='observing' AND error_code='compute_previous_lease_pending' AND next_attempt_at>clock_timestamp()`,
+        [lease.workspace_id, lease.org_id, lease.generation],
+      );
     });
   }
 }

@@ -348,6 +348,81 @@ suite("managed compute lifecycle admission", () => {
       ).rows[0].state,
     ).toBe("settled");
   });
+  const stoppedMeter = () => {
+    provider.inspect.mockResolvedValue({ ...resource(), state: "archived" });
+    provider.readComputeUsage.mockImplementation(async (id, window) => ({
+      resourceId: id,
+      since: window!.since.toISOString(),
+      until: window!.until!.toISOString(),
+      billableSeconds: 600,
+      secondsPerDollar: 100000,
+      listPriceMicroUsd: 6000,
+      running: false,
+    }));
+  };
+  const nextCheck = async () =>
+    (
+      await pool.query<{ after_stop: string | null; from_now: string; state: string }>(
+        `SELECT extract(epoch FROM next_check_at-stopped_observed_at) AS after_stop,
+          extract(epoch FROM next_check_at-clock_timestamp()) AS from_now, state
+        FROM managed_compute_allocation_leases WHERE id=$1`,
+        [input.intentId],
+      )
+    ).rows[0]!;
+  it("re-checks a newly stopped allocation as soon as its final meter can cover the stop", async () => {
+    await ready();
+    await age();
+    stoppedMeter();
+    await coordinator.runOnce();
+    const row = await nextCheck();
+    expect(row.state).not.toBe("settled");
+    expect(Number(row.after_stop)).toBeGreaterThanOrEqual(5);
+    expect(Number(row.after_stop)).toBeLessThan(10);
+  });
+  it("keeps the normal cadence for running allocations and failing settlement retries", async () => {
+    await ready();
+    await age();
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    expect(Number((await nextCheck()).from_now)).toBeGreaterThan(12);
+    stoppedMeter();
+    provider.readComputeUsage.mockRejectedValue(new CloudProviderError("provider_request_unavailable", "meter unavailable", true));
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    const failing = await nextCheck();
+    expect(failing.state).not.toBe("settled");
+    expect(Number(failing.from_now)).toBeGreaterThan(12);
+  });
+  it("wakes a start that was waiting for the previous allocation to settle", async () => {
+    await ready();
+    await age();
+    stoppedMeter();
+    await coordinator.runOnce();
+    await pool.query(
+      "UPDATE cloud_workspace_lifecycle_intents SET state='succeeded',completed_at=now() WHERE id=$1",
+      [input.intentId],
+    );
+    const waiting = randomUUID();
+    await pool.query(
+      `INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,
+        state,error_code,next_attempt_at)
+      VALUES ($1,$2,1,$3,$4,'wake',$5,$6,'observing','compute_previous_lease_pending',now()+interval '16 seconds')`,
+      [waiting, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32)],
+    );
+    await pool.query(
+      "UPDATE managed_compute_allocation_leases SET stopped_observed_at=now()-interval '10 seconds',next_check_at=now() WHERE id=$1",
+      [input.intentId],
+    );
+    await coordinator.runOnce();
+    expect((await nextCheck()).state).toBe("settled");
+    const intent = (
+      await pool.query<{ due: boolean }>(
+        "SELECT next_attempt_at<=clock_timestamp() AS due FROM cloud_workspace_lifecycle_intents WHERE id=$1",
+        [waiting],
+      )
+    ).rows[0]!;
+    expect(intent.due).toBe(true);
+  });
   it("retains credit when disappearance is unconfirmed", async () => {
     await ready();
     provider.inspect.mockResolvedValue(
