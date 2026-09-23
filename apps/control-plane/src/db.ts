@@ -15,7 +15,7 @@
 import pg from "pg";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import { assertWorkOSProviderLockHeld } from "./workos-provider-lock-context.js";
-import { recordTransactionTiming } from "./request-timing.js";
+import { recordPoolWait, recordTransactionTiming } from "./request-timing.js";
 
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
@@ -120,7 +120,13 @@ export async function withUserTx<T>(
 ): Promise<T> {
   assertWorkOSProviderLockHeld();
   const started = performance.now();
-  const client = await pool.connect();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    recordPoolWait(performance.now() - started);
+    throw error;
+  }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);
   let discard = false;
@@ -158,7 +164,13 @@ export async function withSystemTx<T>(
 ): Promise<T> {
   assertWorkOSProviderLockHeld();
   const started = performance.now();
-  const client = await pool.connect();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    recordPoolWait(performance.now() - started);
+    throw error;
+  }
   const acquired = performance.now();
   const connection = observeOwnedConnection(client);
   let discard = false;
