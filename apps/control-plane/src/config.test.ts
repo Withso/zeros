@@ -948,6 +948,7 @@ describe("cloud workspace backend configuration", () => {
     }).cloudWorkspaces?.durability?.objectRestoreWindowMs;
     expect(window()).toBe(48 * 3_600_000);
     expect(window("0")).toBe(0);
+    expect(window(" ")).toBe(48 * 3_600_000);
     expect(window("168")).toBe(168 * 3_600_000);
     for (const value of ["-1", "721", "1.5"]) expect(() => window(value)).toThrow(/CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS/);
   });

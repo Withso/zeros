@@ -1135,36 +1135,23 @@ d("workspace object maintenance", () => {
     expect(await store.get(objectKey)).toBeNull();
   });
 
-  it("keeps a rotated source ciphertext for the restore window through its tombstone", async () => {
+  it("retries a quarantined deletion at once inside the restore window", async () => {
     const fixture = await seedReadyCloudWorkspace(pool);
-    const key1 = randomBytes(32).toString("base64url"), key2 = randomBytes(32).toString("base64url");
-    const store = new MemoryCloudWorkspaceObjectStore();
-    const bytes = Buffer.from("rotated but restorable", "utf8");
-    const first = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: store, encryptionKeys: { 1: key1, 2: key2 }, keyVersion: 1, workosEnabled: false });
-    const blob = await first.put({ ...restoreScope(fixture), bytes });
-    const source = (await pool.query<{ object_key: string }>(`SELECT object_key FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]!.object_key;
-    const rotated = new DatabaseCloudWorkspaceBlobService({ pool, objectStore: store, encryptionKeys: { 1: key1, 2: key2 },
-      keyVersion: 2, workosEnabled: false, restoreWindowMs: RESTORE_WINDOW_MS });
-    expect(await rotated.scheduleKeyRotation()).toBe(1);
-    expect(await rotated.rotateKeyOnce({ workerId: "rotation-restore-test" })).toBe(true);
-    expect((await pool.query(`SELECT state FROM workspace_blob_rotation_jobs WHERE blob_id = $1`, [blob.id])).rows[0])
-      .toEqual({ state: "succeeded" });
-    expect(await rotated.getSystem({ blobId: blob.id, organizationId: fixture.organizationId })).toEqual(bytes);
-    // The previous ciphertext still exists, charged to the Organization, and
-    // is due only after the window.
-    expect(await store.get(source)).not.toBeNull();
-    const tombstone = (await pool.query<{ reserved_bytes: string; hours: number; fenced: boolean }>(
-      `SELECT reserved_bytes, (extract(epoch FROM next_attempt_at - now()) / 3600)::float8 AS hours, fenced_at IS NOT NULL AS fenced
-       FROM workspace_blob_object_deletions WHERE object_key = $1`, [source])).rows[0]!;
-    expect(tombstone).toMatchObject({ reserved_bytes: String(bytes.length), fenced: false });
-    expect(tombstone.hours).toBeGreaterThan(47.9);
-    expect(await rotated.collectGarbageOnce(60_000)).toBe(false);
-    expect(await store.get(source)).not.toBeNull();
-    await pool.query(`UPDATE workspace_blob_object_deletions SET next_attempt_at = now() - interval '1 second' WHERE object_key = $1`, [source]);
-    expect(await rotated.collectGarbageOnce(60_000)).toBe(true);
-    expect(await store.get(source)).toBeNull();
-    expect((await pool.query(`SELECT reserved_bytes FROM workspace_blob_object_deletions WHERE object_key = $1`, [source])).rows[0])
-      .toEqual({ reserved_bytes: "0" });
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: new MemoryCloudWorkspaceObjectStore(), encryptionKeyV1: randomBytes(32).toString("base64url"),
+      workosEnabled: false, restoreWindowMs: RESTORE_WINDOW_MS,
+    });
+    const blob = await service.put({ ...restoreScope(fixture), bytes: Buffer.from("failed erasure", "utf8") });
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    // An erasure's count repair stamps the dereference, then its delete fails.
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 0 WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blobs SET state = 'quarantined', created_at = now() - interval '30 days' WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blob_storage_reservations SET expires_at = now() - interval '1 second'
+       WHERE blob_id = $1 AND state = 'uploading'`, [blob.id]);
+    expect(await service.collectGarbageOnce(60_000)).toBe(true);
+    expect((await pool.query(`SELECT state FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]).toEqual({ state: "deleted" });
   });
 
   it("rejects an unbounded restore window", () => {

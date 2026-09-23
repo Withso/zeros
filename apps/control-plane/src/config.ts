@@ -528,10 +528,14 @@ const CloudWorkspaceDurabilityEnvSchema = z.object({
   CLOUD_WORKSPACE_S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
   CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: z.string().trim().min(1).max(256).optional(),
-  /** Objects outlive their last reference and their rotation this long, so a
-   * point-in-time database restore finds them. Match the database's backup
-   * retention (PlanetScale: 48 hours); zero collects immediately. */
-  CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: z.coerce.number().int().min(0).max(720).default(48),
+  /** Live objects outlive their last reference this long, so a point-in-time
+   * database restore finds them. Match the database's backup retention
+   * (PlanetScale: 48 hours); zero collects immediately. */
+  // A blank value keeps the default rather than coercing to zero.
+  CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(720).default(48),
+  ),
 });
 
 const CloudWorkspaceOutboxEnvSchema = z.object({

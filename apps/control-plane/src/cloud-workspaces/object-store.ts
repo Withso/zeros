@@ -928,7 +928,7 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
     if (
       !Number.isSafeInteger(olderThanMs) ||
       olderThanMs < 60_000 ||
-      olderThanMs > 30 * 24 * 60 * 60_000 ||
+      olderThanMs > MAX_MAINTENANCE_WINDOW_MS ||
       !Number.isSafeInteger(maxEntries) ||
       maxEntries < 1 ||
       maxEntries > MAX_UPLOAD_SWEEP_ENTRIES
@@ -1223,6 +1223,9 @@ export function openWorkspaceObject(
   }
 }
 
+/** Upper bound for garbage-collection grace and the restore window. */
+const MAX_MAINTENANCE_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
 export class DatabaseCloudWorkspaceBlobService {
   private readonly pool: pg.Pool;
   private readonly objectStore: CloudWorkspaceObjectStore;
@@ -1238,7 +1241,7 @@ export class DatabaseCloudWorkspaceBlobService {
     encryptionKeys?: Readonly<Record<number, string>>;
     workosEnabled: boolean;
     keyVersion?: number;
-    /** How long an object outlives its last reference or its rotation, so a
+    /** How long a live object outlives its last reference, so a
      * point-in-time database restore still finds it. The deployment passes its
      * database backup retention; zero collects immediately. */
     restoreWindowMs?: number;
@@ -1273,7 +1276,7 @@ export class DatabaseCloudWorkspaceBlobService {
     if (
       !Number.isSafeInteger(this.restoreWindowMs) ||
       this.restoreWindowMs < 0 ||
-      this.restoreWindowMs > 30 * 24 * 60 * 60_000
+      this.restoreWindowMs > MAX_MAINTENANCE_WINDOW_MS
     ) {
       throw new Error("workspace object restore window is invalid");
     }
@@ -1306,14 +1309,12 @@ export class DatabaseCloudWorkspaceBlobService {
       organizationId: string;
       objectKey: string;
       reservedBytes: number;
-      /** Defer physical deletion; garbage collection deletes it afterwards. */
-      deferMs?: number;
     },
   ): Promise<number> {
     const result = await tx.query<{ revision: string | number }>(
       `INSERT INTO workspace_blob_object_deletions (
-         org_id, blob_id, object_key, reserved_bytes, next_attempt_at
-       ) VALUES ($1, $2, $3, $4, now() + ($5::bigint * interval '1 millisecond'))
+         org_id, blob_id, object_key, reserved_bytes
+       ) VALUES ($1, $2, $3, $4)
        ON CONFLICT (object_key) DO UPDATE
        SET reserved_bytes = greatest(
              workspace_blob_object_deletions.reserved_bytes,
@@ -1324,7 +1325,7 @@ export class DatabaseCloudWorkspaceBlobService {
            last_error_code = NULL,
            next_attempt_at = least(
              workspace_blob_object_deletions.next_attempt_at,
-             EXCLUDED.next_attempt_at
+             now()
            )
        WHERE workspace_blob_object_deletions.org_id = EXCLUDED.org_id
          AND workspace_blob_object_deletions.blob_id = EXCLUDED.blob_id
@@ -1334,7 +1335,6 @@ export class DatabaseCloudWorkspaceBlobService {
         input.blobId,
         input.objectKey,
         input.reservedBytes,
-        input.deferMs ?? 0,
       ],
     );
     const revision = Number(result.rows[0]?.revision);
@@ -2697,8 +2697,8 @@ export class DatabaseCloudWorkspaceBlobService {
       if (job.source_object_key !== job.target_object_key) {
         const sourceRevision = await withSystemTx(this.pool, async (tx) => {
           await this.lockOrganizationForObjectMaintenance(tx, job.org_id);
-          const authoritative = await tx.query<{ plaintext_bytes: string | number }>(
-            `SELECT blob.plaintext_bytes
+          const authoritative = await tx.query(
+            `SELECT 1
              FROM workspace_blob_rotation_jobs job
              JOIN workspace_blobs blob
                ON blob.id = job.blob_id AND blob.org_id = job.org_id
@@ -2729,21 +2729,16 @@ export class DatabaseCloudWorkspaceBlobService {
             blobId: job.blob_id,
             organizationId: job.org_id,
             objectKey: job.source_object_key,
-            // Deleted now, the job reservation accounts for the old ciphertext
-            // until its immutable key has a durable deletion fence. Retained
-            // for a database restore, the tombstone carries that charge until
-            // garbage collection deletes it after the window.
-            reservedBytes: this.restoreWindowMs > 0 ? Number(authoritative.rows[0]!.plaintext_bytes) : 0,
-            deferMs: this.restoreWindowMs,
+            // The job reservation continues to account for the old ciphertext
+            // until its immutable key has a durable deletion fence.
+            reservedBytes: 0,
           });
         });
-        if (this.restoreWindowMs === 0) {
-          await this.deleteDetachedObject({
-            organizationId: job.org_id,
-            objectKey: job.source_object_key,
-            revision: sourceRevision,
-          });
-        }
+        await this.deleteDetachedObject({
+          organizationId: job.org_id,
+          objectKey: job.source_object_key,
+          revision: sourceRevision,
+        });
       }
       await withSystemTx(this.pool, async (tx) => {
         const completed = await tx.query(
@@ -3177,7 +3172,7 @@ export class DatabaseCloudWorkspaceBlobService {
     if (
       !Number.isSafeInteger(graceMs) ||
       graceMs < 60_000 ||
-      graceMs > 30 * 24 * 60 * 60_000
+      graceMs > MAX_MAINTENANCE_WINDOW_MS
     ) {
       throw new Error("workspace object garbage grace is invalid");
     }
@@ -3312,8 +3307,10 @@ export class DatabaseCloudWorkspaceBlobService {
                AND (blob.retention_until IS NULL OR blob.retention_until <= now())
                AND blob.created_at <=
                    now() - ($1::bigint * interval '1 millisecond')
-               AND (blob.dereferenced_at IS NULL OR blob.dereferenced_at <=
-                   now() - ($2::bigint * interval '1 millisecond'))
+               -- In-flight or failed deletions retry at once; only a live
+               -- object waits out the restore window after its last reference.
+               AND (blob.state <> 'available' OR blob.dereferenced_at IS NULL
+                 OR blob.dereferenced_at <= now() - ($2::bigint * interval '1 millisecond'))
                AND NOT EXISTS (
                  SELECT 1 FROM workspace_blob_storage_reservations reservation
                  WHERE reservation.blob_id = blob.id

@@ -253,9 +253,8 @@ Inside the production image use the supported
 read-only plan.
 The Organization byte limit covers physical tenant blobs, detached-upload
 deletion tombstones, and copy-on-write rotation reservations. Physical blobs
-include content deleted, and ciphertext superseded by rotation, within the
-restore window (48 hours by default), which keeps counting until collection;
-the workspace
+include content deleted within the restore window (48 hours by default),
+which keeps counting until collection; the workspace
 byte limit covers logical unique blob reservations and cannot exceed the
 Organization byte limit. The command
 rejects an incoherent pair or a limit below either current measure and writes

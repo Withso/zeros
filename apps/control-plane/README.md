@@ -639,6 +639,18 @@ before re-enabling object-writing clients or the rotation worker. Size the
 provider volume above the aggregate application limits for filesystem metadata,
 temporary publication files, backups, and operational response headroom.
 
+### Object restore window
+
+`CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS` (0–720, default 48) keeps a live
+object for that long after it loses its last reference, so a point-in-time
+database restore still finds every object its rows reference. Match it to the
+database backup retention (48 hours on PlanetScale); zero collects at once.
+Deleted content keeps counting toward the Organization byte limit until it is
+collected. Erasure is never delayed. Key rotation deletes superseded
+ciphertext when the new one is authoritative, so a restore to before a
+rotation finished cannot read the blobs rotated after it; keep a retired key
+at least the restore window after its rotation.
+
 ### Terminal object-key rotation recovery
 
 Normal rotation scheduling is insert-only. A terminally failed job is never
