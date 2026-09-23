@@ -64,7 +64,7 @@ d("private provider execution leases",()=>{
   it.each(["renew", "replay", "action"] as const)("rejects lease expiry after the %s transaction starts",async operation=>{
     const request=admission(),lease=await service.admit(engine(),request);
     let expired:Date|undefined;
-    const controlled=withAuthorityDeadlineBarrier(pool,/SELECT id FROM organizations .*FOR SHARE/,async()=>{
+    const controlled=withAuthorityDeadlineBarrier(pool,/cloud_workspace_engine_authority_current/,async()=>{
       expired=(await pool.query("UPDATE cloud_agent_execution_leases SET expires_at=clock_timestamp() WHERE id=$1 RETURNING expires_at",[lease.leaseId])).rows[0].expires_at;
     });
     const waiting=new DatabaseCloudAgentExecutionService(controlled,encryption,false);
