@@ -53,7 +53,8 @@ function rejectedCreate() {
     error: { status: 429, code: "trial_compute_limit_reached" },
   }, 429);
 }
-function fixture() {
+const WALLET = "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41";
+function fixture(extraOptions: { billingOrg?: string } = {}) {
   let stored: CloudProviderOperationRecord | null = null;
   const attempts = new Map<string, boolean>();
   const operations: CloudProviderOperationStore = {
@@ -125,6 +126,7 @@ function fixture() {
     qualifiedStorageMiB: INPUT.storageMiB,
     ttlSeconds: null,
     now: () => NOW,
+    ...extraOptions,
   };
   const provider = new BoatWorkspaceProvider(options);
   const allocate = async () => {
@@ -235,6 +237,40 @@ describe("Boat allocation lifecycle", () => {
     });
     expect(JSON.stringify(resource)).not.toContain("private");
     expect(f.stored().resourceId).toBe(RESOURCE);
+  });
+
+  it("bills the create to the configured wallet without changing the journaled request", async () => {
+    const f = fixture({ billingOrg: WALLET });
+    f.fetcher.mockImplementationOnce(async (_url, init) => {
+      expect(new Headers(init!.headers).get("x-boat-org")).toBe(WALLET);
+      expect(JSON.parse(String(init!.body))).not.toHaveProperty("org");
+      return json(sandbox("provisioning", { team: { id: WALLET, name: "Zeros" } }));
+    });
+    await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
+    const unscoped = fixture();
+    unscoped.fetcher.mockResolvedValueOnce(json(sandbox("provisioning")));
+    await unscoped.provider.create(INPUT);
+    expect(f.stored().requestSha256).toBe(unscoped.stored().requestSha256);
+  });
+
+  it.each([
+    ["another organization", { team: { id: "team_9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a", name: "Other" } }],
+    ["the personal wallet", { team: null }],
+  ])("keeps the cleanup identity but refuses a create billed to %s", async (_label, extra) => {
+    const f = fixture({ billingOrg: WALLET });
+    f.fetcher.mockResolvedValueOnce(json(sandbox("provisioning", extra)));
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({
+      code: "provider_billing_scope_mismatch",
+      retryable: false,
+    });
+    expect(f.stored().resourceId).toBe(RESOURCE);
+    expect(f.operations.bindResource).toHaveBeenCalledOnce();
+  });
+
+  it("does not infer a wallet mismatch when the response omits wallet details", async () => {
+    const f = fixture({ billingOrg: WALLET });
+    f.fetcher.mockResolvedValueOnce(json(sandbox("provisioning")));
+    await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
   });
 
   it("reuses the original provider key after an unknown reply, a new wake intent and a coordinator restart", async () => {

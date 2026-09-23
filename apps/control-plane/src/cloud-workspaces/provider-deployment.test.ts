@@ -24,6 +24,7 @@ function config(overrides: NodeJS.ProcessEnv = {}) {
     CLOUD_WORKSPACE_PROVIDER: "boat",
     BOAT_API_KEY: "boat-test-key-not-daytona",
     BOAT_ACCOUNT_SCOPE: "qualified-account",
+    BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
     BOAT_TTL_SECONDS: "3600",
     BOAT_COMPUTE_POLICY_ID: "qualified-rate-v1",
     BOAT_SECONDS_PER_DOLLAR: "100000",

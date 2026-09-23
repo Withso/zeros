@@ -556,6 +556,7 @@ describe("cloud workspace backend configuration", () => {
       DAYTONA_SNAPSHOT_ID: undefined,
       BOAT_API_KEY: "boat-api-key-for-control-plane-tests",
       BOAT_ACCOUNT_SCOPE: "qualification-account",
+      BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
       BOAT_SNAPSHOT_ID: "zeros-qualified-immutable-v1",
       BOAT_IMAGE_BUILD_SHA256: "c".repeat(64),
       BOAT_TTL_SECONDS: "3600",
@@ -576,7 +577,11 @@ describe("cloud workspace backend configuration", () => {
       cpuMillicores: 4000,
       memoryMiB: 8192,
       storageMiB: 40960,
-      boat: { accountScope: "qualification-account", ttlSeconds: 3600 },
+      boat: {
+        accountScope: "qualification-account",
+        ttlSeconds: 3600,
+        billingOrg: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
+      },
       computePolicy: {provider:"boat",policyId:"boat-price-v1",secondsPerDollar:100000,minimumTtlSeconds:600,maximumTtlSeconds:3600,requestMarginSeconds:185},
     });
     expect(cloud.providerProfiles).toBeUndefined();
@@ -588,6 +593,7 @@ describe("cloud workspace backend configuration", () => {
     for (const name of [
       "BOAT_API_KEY",
       "BOAT_ACCOUNT_SCOPE",
+      "BOAT_BILLING_ORG",
       "BOAT_SNAPSHOT_ID",
       "BOAT_IMAGE_BUILD_SHA256",
       "BOAT_TTL_SECONDS",
@@ -608,6 +614,9 @@ describe("cloud workspace backend configuration", () => {
       { BOAT_TTL_SECONDS: "3601" },
       { BOAT_SECONDS_PER_DOLLAR: "0" },
       { BOAT_ACCOUNT_SCOPE: "key\nvalue" },
+      { BOAT_BILLING_ORG: "Zeros" },
+      { BOAT_BILLING_ORG: "team_" },
+      { BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41\n" },
       { BOAT_SNAPSHOT_ID: "mutable/latest" },
       { ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/arm64" },
       { CLOUD_WORKSPACE_CPU_MILLICORES: "2000" },
@@ -615,6 +624,14 @@ describe("cloud workspace backend configuration", () => {
       expect(() => loadConfig({ ...env, ...overrides })).toThrow(
         /cloud workspace/i,
       );
+  });
+
+  it("accepts a personal Boat wallet as an explicit billing scope", () => {
+    const cloud = loadConfig({
+      ...boatEnv(),
+      BOAT_BILLING_ORG: "71526620-8a69-44ca-bbef-1a71267c4350",
+    }).cloudWorkspaces!;
+    expect(cloud.boat?.billingOrg).toBe("71526620-8a69-44ca-bbef-1a71267c4350");
   });
 
   it("gives Daytona BYO an independent complete image profile beside managed Boat", () => {

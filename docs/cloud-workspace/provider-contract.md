@@ -132,7 +132,7 @@ tests do not enable the production qualification gates.
 
 The existing Daytona deployment variables retain their defaults. To select
 managed Boat, set `CLOUD_WORKSPACE_PROVIDER=boat`, `BOAT_API_KEY`, a stable
-`BOAT_ACCOUNT_SCOPE`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
+`BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
 `CLOUD_WORKSPACE_STORAGE_MIB` from the measured image. Boat snapshot names are
 mutable. The stored reference is `boat:<name>@sha256:<build-metadata-digest>`;
 setup verifies the exact attested metadata digest before launching. A replaced
@@ -143,6 +143,16 @@ see [compute credits](compute-credits.md). CPU/memory default to 4000 millicores
 8192 MiB; only Boat's exact supported pairs are admitted. Architecture must be
 `linux/amd64`. Never change the account scope when rotating a key in the same
 account, or reuse an old scope for a different provider account.
+
+`BOAT_BILLING_ORG` names the Boat wallet billed for every new sandbox: an
+organization `team_…` id, or the account's own id for personal billing. Without
+it Boat bills the account's dashboard-selected wallet, which can change outside
+Zeros. The create sends it as the `X-Boat-Org` request scope, not in the body, so
+journaled request digests and idempotent replays stay byte-identical. A sandbox
+keeps its creation wallet for resume and usage. When Boat reports a different
+organization, or none, for an organization-billed create, the adapter keeps the
+bound cleanup identity and refuses the allocation. The wallet is billing scope,
+not the journal's account identity; changing it does not change the account scope.
 
 Daytona BYO beside Boat requires `DAYTONA_BYO_ENABLED=true` and independent
 `DAYTONA_BYO_SNAPSHOT_ID`, `DAYTONA_BYO_SOURCE_COMMIT`,

@@ -42,6 +42,9 @@ const SandboxSchema = z.object({
     .nullable()
     .optional(),
 });
+const BillingScopeSchema = z.object({
+  team: z.object({ id: z.string() }).nullable().optional(),
+});
 const DeletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/),
   kind: z.literal("sandbox"),
@@ -294,7 +297,18 @@ export class BoatWorkspaceProvider
       .safeParse(response.sandbox);
     if (!id.success) throw failure("provider_response_invalid");
     const bound = await this.options.operations.bindResource(input, id.data.id);
+    this.assertBillingScope(response.sandbox);
     return this.resource(bound, response.sandbox);
+  }
+
+  /** Boat reports an organization-billed sandbox's wallet. A create billed
+   * elsewhere keeps its bound cleanup identity but is never admitted. */
+  private assertBillingScope(value: unknown): void {
+    const org = this.options.billingOrg;
+    if (!org?.startsWith("team_")) return;
+    const parsed = BillingScopeSchema.safeParse(value);
+    if (!parsed.success || (parsed.data.team !== undefined && parsed.data.team?.id !== org))
+      throw failure("provider_billing_scope_mismatch");
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
