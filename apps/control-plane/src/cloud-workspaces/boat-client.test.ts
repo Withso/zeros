@@ -179,6 +179,10 @@ describe("Boat API boundary", () => {
       details: { memberMaxActiveSandboxes: { key: "bx_23456789", status: "running" } } } },
     { error: { code: "trial_compute_limit_reached", status: 429,
       details: { currentLimits: { message: "operation bdop_0123456789abcdef accepted" } } } },
+    { error: { code: "trial_compute_limit_reached", status: 429,
+      details: { currentLimits: { note: "id_bx_23456789" } } } },
+    { message: "sandbox bx_23456789 accepted" },
+    { error: { code: "trial_compute_limit_reached", status: 429, message: "operation id_bdop_0123456789abcdef" } },
   ])("does not certify ambiguous or unrelated rejection evidence: %j", async (override) => {
     const f = fixture();
     const { method = "POST", path = "/sandboxes", httpStatus = 429, ...body } = override;

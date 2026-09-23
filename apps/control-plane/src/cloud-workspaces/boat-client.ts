@@ -38,8 +38,8 @@ const REJECTION_LIMIT_FIELDS = new Set([
   "trialComputeCapSeconds", "trialLimits", "trialLine", "unlimited", "upgradeEffects",
 ]);
 
-// Refusal diagnostics never name an allocation or a deletion operation.
-const PROVIDER_IDENTIFIER = /\b(?:bx|bdop)_[A-Za-z0-9]/;
+// A refusal never names an allocation or a deletion operation.
+const PROVIDER_IDENTIFIER = /(?<![A-Za-z0-9])(?:bx|bdop)_[A-Za-z0-9]/;
 
 function qualifiedLimitDetails(details: unknown): boolean {
   if (!details || typeof details !== "object" || Array.isArray(details)) return false;
@@ -79,6 +79,8 @@ function createRejection(value: Record<string, unknown> | null): CloudProviderCr
   if (error.status !== 429 || error.code !== value.code ||
       Object.keys(error).some(key => !REJECTION_ERROR_FIELDS.has(key)) ||
       ("message" in error && typeof error.message !== "string") ||
+      [value.message, error.message].some(message =>
+        typeof message === "string" && PROVIDER_IDENTIFIER.test(message)) ||
       ("details" in error && !qualifiedLimitDetails(error.details))) return null;
   // Concurrent-allocation refusals are documented by the create endpoint.
   // The trial cap's exact error envelope is additionally live-qualified; a
