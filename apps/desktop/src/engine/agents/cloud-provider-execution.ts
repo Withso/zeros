@@ -22,6 +22,12 @@ const admitted=new WeakMap<PreparedBoundary,CloudProviderExecution>();
 export function cloudProviderExecution(boundary?:PreparedBoundary):CloudProviderExecution|null{
   return boundary?admitted.get(boundary)??null:null;
 }
+/** A cloud execution sees only the engine-minted product servers admitted with
+ * its lease, already carrying their scoped credentials. User and repository
+ * MCP registrations never enter it; other executions keep their registry. */
+export function executionMcpServers(execution:CloudProviderExecution|null,registrations:readonly McpServerRegistration[]|undefined):McpServerRegistration[]|undefined{
+  return execution?[...execution.productServers]:registrations?[...registrations]:undefined;
+}
 export interface CloudAgentExecutionFactory {
   prepare(input:{admission:CloudAgentExecutionAdmission;conversationId:string;workload:PreparedBoundary;cwd:string;signal:AbortSignal;
     providerSettings?:Record<string,string>;productTools?:{servers:McpServerRegistration[];env:Record<string,string>}}):Promise<{

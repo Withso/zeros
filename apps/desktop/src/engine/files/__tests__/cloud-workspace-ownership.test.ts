@@ -70,11 +70,13 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
 describe("cloud workspace publication contract", () => {
   it("publishes engine-authored files for every isolated worker profile, including the shipped image's", async () => {
     const { publishesCloudWorkspaceOwnership } = await import("../cloud-workspace-ownership");
-    const shipped = JSON.parse(readFileSync(path.join(__dirname, "../../../../../../scripts/cloud-workspace-validation/sandbox/cloud-worker.json"), "utf8"));
+    const { parseCloudWorkerConfiguration } = await import("../../agents/containment/cloud-worker-config");
+    const source = readFileSync(path.join(__dirname, "../../../../../../scripts/cloud-workspace-validation/sandbox/cloud-worker.json"), "utf8");
+    const shipped = parseCloudWorkerConfiguration(source);
     expect(publishesCloudWorkspaceOwnership(shipped)).toBe(true);
-    for (const version of [2, 3] as const)
-      expect(publishesCloudWorkspaceOwnership({ version, uid: 10001, gid: 10001 })).toBe(true);
-    expect(publishesCloudWorkspaceOwnership({ version: 1, uid: 10001, gid: 10001 })).toBe(false);
+    const variant = (version: number, profile: string) => parseCloudWorkerConfiguration(JSON.stringify({ ...JSON.parse(source), version, profile }));
+    expect(publishesCloudWorkspaceOwnership(variant(2, "zeros-cloud-worker-v2"))).toBe(true);
+    expect(publishesCloudWorkspaceOwnership(variant(1, "zeros-cloud-worker-v1"))).toBe(false);
     expect(publishesCloudWorkspaceOwnership(null)).toBe(false);
   });
 });

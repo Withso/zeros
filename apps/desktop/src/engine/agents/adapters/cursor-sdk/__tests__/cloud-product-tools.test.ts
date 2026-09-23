@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentAdapterContext, McpServerRegistration } from "../../../types";
 import type { PreparedBoundary } from "../../../containment/types";
 import { CursorSdkAdapter } from "../adapter";
@@ -33,7 +33,12 @@ const cloudBoundary = () => ({ status: { actor: "agent-code", backend: "cloud-wo
 const sessionOptions = () => ({ cwd: root, env: { CURSOR_API_KEY: "key", CURSOR_MODEL: "grok-4.6" }, mcpServers: [userServer, unminted], executionBoundary: cloudBoundary() });
 const configured = (options: Record<string, unknown>) => options.mcpServers as Record<string, { url: string; headers?: Record<string, string> }> | undefined;
 
-beforeAll(() => { process.env.CURSOR_RIPGREP_PATH = "/usr/bin/rg"; });
+let previousRipgrep: string | undefined, previousApiKey: string | undefined;
+beforeAll(() => { previousRipgrep = process.env.CURSOR_RIPGREP_PATH; previousApiKey = process.env.CURSOR_API_KEY; process.env.CURSOR_RIPGREP_PATH = "/usr/bin/rg"; });
+afterAll(() => {
+  if (previousRipgrep === undefined) delete process.env.CURSOR_RIPGREP_PATH; else process.env.CURSOR_RIPGREP_PATH = previousRipgrep;
+  if (previousApiKey === undefined) delete process.env.CURSOR_API_KEY; else process.env.CURSOR_API_KEY = previousApiKey;
+});
 beforeEach(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), "zeros-cursor-cloud-tools-"));
   previousDataDir = process.env.ZEROS_DATA_DIR; process.env.ZEROS_DATA_DIR = path.join(root, "engine");

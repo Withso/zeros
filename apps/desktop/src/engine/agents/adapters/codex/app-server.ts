@@ -55,7 +55,7 @@ import {
 } from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
 import type { PreparedBoundary } from "../../containment/types";
-import {cloudProviderExecution} from "../../cloud-provider-execution";
+import {cloudProviderExecution,executionMcpServers} from "../../cloud-provider-execution";
 import {CloudCodexExecServer} from "./cloud-exec-server";
 import {cloudCodexRequest,cloudCodexToolCall,CLOUD_CODEX_CONFIG} from "./cloud-policy";
 import { hasKernelExecutionBoundary } from "../../containment/status";
@@ -600,7 +600,7 @@ export async function bootCodexAppServerRuntime(
     ? [process.execPath, [binarySource.path]]
     : [binarySource.path, []];
 
-  const mcpArgs = buildMcpServerOverrides((cloud?cloud.productServers:opts.mcpServers ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s));
+  const mcpArgs = buildMcpServerOverrides((executionMcpServers(cloud, opts.mcpServers) ?? []).map((s) => s.transport === "stdio" && s.cwd ? { ...s, cwd: mcpWorkingDirectory(s.cwd, opts.cwd) } : s));
 
   // Feature overrides (per-process `-c`, no ~/.codex/config.toml mutation):
   //   • default_mode_request_user_input — codex only puts the
