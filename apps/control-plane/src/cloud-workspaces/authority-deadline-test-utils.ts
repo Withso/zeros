@@ -1,4 +1,4 @@
-import type pg from "pg";
+import pg from "pg";
 
 /** Observe every query a pool's checked-out clients send, before it is sent.
  * The hook may await to hold a real transaction at that statement. */
@@ -50,4 +50,47 @@ export function withAuthorityDeadlineBarrier(
     intercepted = true;
     await expire(client);
   });
+}
+
+/** Run `fn` while another transaction holds a workspace and its engine row in
+ * `mode`. `fn` receives a one-connection pool that gives up on any lock after
+ * 250 ms, so a request that must wait fails with 55P03 instead of hanging. */
+export async function withHeldEngineRows<T>(
+  pool: pg.Pool,
+  rows: { workspaceId: string; engineInstanceId: string },
+  mode: "SHARE" | "UPDATE",
+  fn: (lockPool: pg.Pool) => Promise<T>,
+): Promise<T> {
+  const held = await pool.connect();
+  const lockPool = new pg.Pool({
+    connectionString: (pool as unknown as { options: pg.PoolConfig }).options.connectionString,
+    max: 1,
+    options: "-c lock_timeout=250ms",
+  });
+  try {
+    await held.query("BEGIN");
+    await held.query(`SELECT id FROM cloud_workspaces WHERE id = $1 FOR ${mode}`, [rows.workspaceId]);
+    await held.query(`SELECT id FROM cloud_workspace_engine_instances WHERE id = $1 FOR ${mode}`, [rows.engineInstanceId]);
+    return await fn(lockPool);
+  } finally {
+    await held.query("ROLLBACK").catch(() => undefined);
+    held.release();
+    await lockPool.end();
+  }
+}
+
+/** A barrier that holds one transaction just before a matching statement. */
+export function pauseBeforeQuery(pool: pg.Pool, query: RegExp) {
+  let reached!: () => void;
+  let release!: () => void;
+  const atBarrier = new Promise<void>((resolve) => { reached = resolve; });
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let paused = false;
+  const controlled = interceptQueries(pool, async (sql) => {
+    if (paused || !query.test(sql)) return;
+    paused = true;
+    reached();
+    await released;
+  });
+  return { pool: controlled, atBarrier, release };
 }

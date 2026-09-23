@@ -6,7 +6,7 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import type { CloudCommandEngineScope } from "./commands.js";
 import { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
-import { interceptQueries } from "./authority-deadline-test-utils.js";
+import { interceptQueries, pauseBeforeQuery, withHeldEngineRows } from "./authority-deadline-test-utils.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("bounded cloud event replay", () => {
@@ -49,22 +49,26 @@ d("bounded cloud event replay", () => {
     } finally { await held.query("ROLLBACK"); held.release(); await readPool.end(); }
   });
 
-  it("keeps appends exclusive against a held workspace or engine share lock", async () => {
+  it("appends beside other engine work but waits behind a revocation", async () => {
     await service.request(scope, batch());
-    const lockPool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, options: "-c lock_timeout=250ms" });
-    try {
-      for (const table of ["cloud_workspaces", "cloud_workspace_engine_instances"]) {
-        const held = await pool.connect();
-        try {
-          await held.query("BEGIN");
-          await held.query(`SELECT id FROM ${table} WHERE id=$1 FOR SHARE`,
-            [table === "cloud_workspaces" ? scope.workspaceId : scope.engineInstanceId]);
-          await expect(new DatabaseCloudWorkspaceEventService({ pool: lockPool }).request(scope, batch(3)))
-            .rejects.toMatchObject({ code: "55P03" });
-        } finally { await held.query("ROLLBACK"); held.release(); }
-      }
-    } finally { await lockPool.end(); }
-    expect(await service.request(scope, batch(3))).toMatchObject({ head: 4, replayed: false });
+    const rows = { workspaceId: scope.workspaceId, engineInstanceId: scope.engineInstanceId };
+    const append = (start: number) => (lockPool: pg.Pool) => new DatabaseCloudWorkspaceEventService({ pool: lockPool }).request(scope, batch(start));
+    await expect(withHeldEngineRows(pool, rows, "SHARE", append(3))).resolves.toMatchObject({ head: 4, replayed: false });
+    await expect(withHeldEngineRows(pool, rows, "UPDATE", append(5))).rejects.toMatchObject({ code: "55P03" });
+    expect(await service.request(scope, batch(5))).toMatchObject({ head: 6, replayed: false });
+  });
+
+  it("resolves a retried first append that overlaps the original", async () => {
+    const first = batch();
+    const barrier = pauseBeforeQuery(pool, /WITH inserted AS/);
+    const original = new DatabaseCloudWorkspaceEventService({ pool: barrier.pool }).request(scope, first);
+    await barrier.atBarrier;
+    const retry = service.request(scope, first);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    barrier.release();
+    await expect(original).resolves.toMatchObject({ head: 2, replayed: false });
+    await expect(retry).resolves.toMatchObject({ head: 2, replayed: true });
+    expect(await replay()).toMatchObject({ head: 2, cursor: 2, events: first.events });
   });
 
   it("does not create stream state merely to replay an empty generation", async () => {

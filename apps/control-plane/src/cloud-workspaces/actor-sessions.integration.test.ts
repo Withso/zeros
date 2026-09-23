@@ -11,7 +11,7 @@ import { DatabaseCloudWorkspaceCommandService } from "./commands.js";
 import { DatabaseCloudWorkspaceActionService } from "./action-receipts.js";
 import {DatabaseCloudAgentCredentialService} from "./agent-credentials.js";
 import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
-import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
+import {withAuthorityDeadlineBarrier,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("actor-aware cloud runtime admission",()=>{
@@ -71,6 +71,16 @@ d("actor-aware cloud runtime admission",()=>{
     });
     const waiting=new DatabaseCloudWorkspaceActorSessionService({pool:controlled,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false});
     await expect(waiting.consume({...engine(),token:grant.grantToken,renew:deadline!=="admission"})).rejects.toBeDefined();
+  });
+
+  it("renews an admission beside other engine work but waits behind a revocation",async()=>{
+    const signer=await device();const grant=await service.issue({...subject(),proof:signer.proof()});
+    await service.consume({...engine(),token:grant.grantToken});
+    const renew=(lockPool:pg.Pool)=>new DatabaseCloudWorkspaceActorSessionService({pool:lockPool,enginePort:39393,
+      bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false}).consume({...engine(),token:grant.grantToken,renew:true});
+    const rows={workspaceId:fixture.workspaceId,engineInstanceId:fixture.engineInstanceId};
+    await expect(withHeldEngineRows(pool,rows,"SHARE",renew)).resolves.toMatchObject({admitted:true});
+    await expect(withHeldEngineRows(pool,rows,"UPDATE",renew)).rejects.toMatchObject({code:"55P03"});
   });
 
   it("revokes only the caller's exact actor grant without revoking a sibling device",async()=>{

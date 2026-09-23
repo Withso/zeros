@@ -36,18 +36,29 @@ export class DatabaseCloudWorkspaceEventService {
   constructor(private readonly options: { pool: pg.Pool; workosEnabled?: boolean }) {}
 
   private async stream(tx: Tx, scope: CloudCommandEngineScope, readOnly: boolean): Promise<Stream> {
-    await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true,
-      ...(readOnly ? { lock: "share" as const } : {}) });
+    // The stream row lock orders appends; appends write no workspace or
+    // engine row, so they share the revocation fence with other engine work.
+    await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true, lock: "share" });
     const old = (await tx.query<Stream>(`SELECT engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256
       FROM cloud_workspace_event_streams WHERE workspace_id=$1 FOR ${readOnly ? "SHARE" : "UPDATE"}`, [scope.workspaceId])).rows[0];
     if (old?.engine_instance_id === scope.engineInstanceId) return old;
     // A new generation has no replay until its first append. Never expose the
     // previous engine's frames or mutate stream state while holding read locks.
     if (readOnly) return { engine_instance_id: scope.engineInstanceId, head: "0", first_retained: "1", last_batch_id: null, last_batch_sha256: null };
-    if (old) await tx.query(`DELETE FROM cloud_workspace_event_streams WHERE workspace_id=$1`, [scope.workspaceId]);
-    return (await tx.query<Stream>(`INSERT INTO cloud_workspace_event_streams(workspace_id,org_id,generation,engine_instance_id)
-      VALUES($1,$2,$3,$4) RETURNING engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256`,
-    [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId])).rows[0]!;
+    // Shared authority does not order two first appends from this engine (a
+    // retried batch) or a replacement racing its predecessor's DELETE: create
+    // idempotently, then lock whichever row this engine's stream now is.
+    if (old) await tx.query(`DELETE FROM cloud_workspace_event_streams WHERE workspace_id=$1 AND engine_instance_id<>$2`,
+      [scope.workspaceId, scope.engineInstanceId]);
+    const created = (await tx.query<Stream>(`INSERT INTO cloud_workspace_event_streams(workspace_id,org_id,generation,engine_instance_id)
+      VALUES($1,$2,$3,$4) ON CONFLICT (workspace_id) DO NOTHING
+      RETURNING engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256`,
+    [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId])).rows[0];
+    if (created) return created;
+    const current = (await tx.query<Stream>(`SELECT engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256
+      FROM cloud_workspace_event_streams WHERE workspace_id=$1 FOR UPDATE`, [scope.workspaceId])).rows[0];
+    if (current?.engine_instance_id !== scope.engineInstanceId) throw new CloudEventError("event_conflict");
+    return current;
   }
 
   async request(scope: CloudCommandEngineScope, value: unknown) {

@@ -14,7 +14,7 @@ import {DatabaseCloudWorkspaceCollaborationService,eraseCloudWorkspaceCollaborat
 import {DatabaseCodexAuthRenewal} from "./codex-auth-renewal.js";
 import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 import {DatabaseCloudWorkspaceActionService} from "./action-receipts.js";
-import {withAuthorityDeadlineBarrier} from "./authority-deadline-test-utils.js";
+import {withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
 d("private provider execution leases",()=>{
@@ -198,6 +198,33 @@ d("private provider execution leases",()=>{
     await pool.query("UPDATE cloud_agent_runtime_qualifications SET enabled=true,runtime_contract_sha256=$1",["b".repeat(64)]);
     await expect(service.admit(engine(),admission())).rejects.toMatchObject({status:403});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
+  });
+  it("authorizes an approval beside other engine work but waits behind a revocation",async()=>{
+    const request=admission();await service.admit(engine(),request);
+    const rows={workspaceId:fixture.workspaceId,engineInstanceId:fixture.engineInstanceId};
+    const authorize=(lockPool:pg.Pool)=>new DatabaseCloudAgentExecutionService(lockPool,encryption,false).authorizeAction(engine(),request.executionId,actorSessionId);
+    await expect(withHeldEngineRows(pool,rows,"SHARE",authorize)).resolves.toEqual({authorized:true,executionId:request.executionId,actorSessionId});
+    await expect(withHeldEngineRows(pool,rows,"UPDATE",authorize)).rejects.toMatchObject({code:"55P03"});
+  });
+  it("authorizes an approval while that device's admission renewal holds its session",async()=>{
+    const pair=generateKeyPairSync("ed25519"),publicKey=Buffer.from(pair.publicKey.export({format:"jwk"}).x!,"base64url");
+    const device=(await pool.query<{id:string}>("INSERT INTO devices(user_id,label,platform,public_key,key_fingerprint) VALUES($1,'Renewing device','macos',$2,$3) RETURNING id",
+      [owner.id,publicKey,createHash("sha256").update(publicKey).digest()])).rows[0]!;
+    const fields={deviceId:device.id,keyVersion:1,timestampMs:Date.now(),nonce:randomBytes(24).toString("base64url")};
+    const proof={...fields,signature:sign(null,cloudWorkspaceDeviceProofMessage({...fields,accountUserId:owner.id,action:"engine.connect",payload:{organizationId:fixture.organizationId,workspaceId:fixture.workspaceId}}),pair.privateKey).toString("base64url")};
+    const sessions=new DatabaseCloudWorkspaceActorSessionService({pool,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false});
+    const grant=await sessions.issue({...engine(),actorUserId:owner.id,authenticatedUser:owner,proof});
+    const renewing=(await sessions.consume({...engine(),token:grant.grantToken})).actorSessionId;
+    const request={...admission(),source:{kind:"session" as const,actorSessionId:renewing}};await service.admit(engine(),request);
+    // Hold the renewal after it has locked the session row.
+    const barrier=pauseBeforeQuery(pool,/UPDATE cloud_workspace_actor_sessions\s+SET consumed_at/);
+    const renewal=new DatabaseCloudWorkspaceActorSessionService({pool:barrier.pool,enginePort:39393,bridgeUrl:"wss://api.example.test/v1/cloud-workspaces/bridge",workosEnabled:false})
+      .consume({...engine(),token:grant.grantToken,renew:true});
+    await barrier.atBarrier;
+    try {
+      await expect(service.authorizeAction(engine(),request.executionId,renewing)).resolves.toEqual({authorized:true,executionId:request.executionId,actorSessionId:renewing});
+    } finally { barrier.release(); }
+    await expect(renewal).resolves.toMatchObject({admitted:true});
   });
   it("requires current actor and credential-owner consent at every tool authorization",async()=>{
     const lease=await service.admit(engine(),admission());await credentials.revokeDelegation(owner.id,delegationId);
