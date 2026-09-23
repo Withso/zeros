@@ -15,9 +15,10 @@ export const BOAT_BILLING_ORG_PATTERN =
   /^team_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REJECTION_FIELDS = new Set(["ok", "type", "status", "code", "message", "error", "requestId"]);
 const REJECTION_ERROR_FIELDS = new Set(["code", "message", "status", "details"]);
-// This is the account-limit document observed with the qualified trial refusal.
-// Unknown diagnostic fields leave the dispatch uncertain, rather than allowing
-// a newly introduced allocation/operation receipt to masquerade as a refusal.
+// This is the account-limit document observed with the qualified trial and
+// member concurrent-cap refusals. Unknown diagnostic fields leave the dispatch
+// uncertain, rather than allowing a newly introduced allocation/operation
+// receipt to masquerade as a refusal.
 const REJECTION_LIMIT_FIELDS = new Set([
   "accessTier", "accountPlan", "activeSandboxes", "activeStates", "billingStatus", "billingUrl",
   "blockedReason", "canCreate", "canStart", "checkoutRequired", "contactMessage",
@@ -26,7 +27,8 @@ const REJECTION_LIMIT_FIELDS = new Set([
   "creditUsedSeconds", "currentLimits", "displayPrice", "dollars", "endTrialOrFirstPayment",
   "error", "giftLimit", "hasPaymentHistory", "hasSeatPlan", "hasSubscription", "includedSeconds",
   "key", "last24hUsageSeconds", "liveUsageSeconds", "maxActiveSandboxes", "maxCreationRequestsPerDay",
-  "maxCreationRequestsPerMinute", "message", "note", "pack", "packBalanceDollars", "packBalanceHours",
+  "maxCreationRequestsPerMinute", "memberMaxActiveSandboxes", "message", "note", "pack",
+  "packBalanceDollars", "packBalanceHours",
   "packBalanceSeconds", "package", "perDay", "perHour", "perMinute", "persistsAcrossMonths",
   "plan", "planName", "purchasable", "sandboxPlanDollars", "sandboxPlanKey", "sandboxPlanTiers",
   "seconds", "secondsPerDollar", "serviceAccount", "standardLimits", "startBlockedReason",
@@ -36,6 +38,9 @@ const REJECTION_LIMIT_FIELDS = new Set([
   "trialComputeCapSeconds", "trialLimits", "trialLine", "unlimited", "upgradeEffects",
 ]);
 
+// A refusal never names an allocation or a deletion operation.
+const PROVIDER_IDENTIFIER = /(?<![A-Za-z0-9])(?:bx|bdop)_[A-Za-z0-9]/;
+
 function qualifiedLimitDetails(details: unknown): boolean {
   if (!details || typeof details !== "object" || Array.isArray(details)) return false;
   const pending: Array<{ value: unknown; depth: number }> = [{ value: details, depth: 0 }];
@@ -43,6 +48,7 @@ function qualifiedLimitDetails(details: unknown): boolean {
   while (pending.length) {
     const { value, depth } = pending.pop()!;
     if (++nodes > 2048 || depth > 8) return false;
+    if (typeof value === "string" && PROVIDER_IDENTIFIER.test(value)) return false;
     if (value && typeof value === "object") {
       if (!Array.isArray(value) && Object.keys(value).some(key => !REJECTION_LIMIT_FIELDS.has(key))) return false;
       for (const child of Object.values(value)) pending.push({ value: child, depth: depth + 1 });
@@ -73,6 +79,8 @@ function createRejection(value: Record<string, unknown> | null): CloudProviderCr
   if (error.status !== 429 || error.code !== value.code ||
       Object.keys(error).some(key => !REJECTION_ERROR_FIELDS.has(key)) ||
       ("message" in error && typeof error.message !== "string") ||
+      [value.message, error.message].some(message =>
+        typeof message === "string" && PROVIDER_IDENTIFIER.test(message)) ||
       ("details" in error && !qualifiedLimitDetails(error.details))) return null;
   // Concurrent-allocation refusals are documented by the create endpoint.
   // The trial cap's exact error envelope is additionally live-qualified; a

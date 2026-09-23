@@ -57,6 +57,17 @@ function rejectedCreate() {
     error: { status: 429, code: "trial_compute_limit_reached" },
   }, 429);
 }
+// Member concurrent-cap refusal as observed from Boat on 2026-09-23.
+function memberCapRefusal() {
+  return json({
+    ok: false, type: "sandbox.error", status: 429, code: "member_limit_reached", message: "member policy",
+    requestId: "req_test_member_limit",
+    error: { code: "member_limit_reached", message: "member policy", status: 429, details: {
+      accessTier: "standard", maxActiveSandboxes: 100, canStart: true, status: "blocked",
+      error: "member_limit_reached", activeSandboxes: 0, memberMaxActiveSandboxes: 0,
+    } },
+  }, 429);
+}
 const walletOf = (init?: RequestInit) => new Headers(init?.headers).get("x-boat-org");
 const unreported = { team: undefined };
 function fixture(extraOptions: { billingOrg?: string } = {}) {
@@ -160,6 +171,16 @@ describe("Boat allocation lifecycle", () => {
     expect(f.stored().resourceId).toBeNull();
     expect(f.stored().deletedAt).toBeNull();
     await expect(restarted.create(INPUT)).rejects.toMatchObject({ code: "provider_generation_retired" });
+    expect(f.fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("closes a create refused by the member concurrent-sandbox cap", async () => {
+    const f = fixture();
+    f.fetcher.mockResolvedValueOnce(memberCapRefusal());
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_rate_limited", retryable: true });
+    expect(await new BoatWorkspaceProvider(f.options).verifyAbsence(INPUT)).toBe(true);
+    expect(f.stored().resourceId).toBeNull();
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_generation_retired" });
     expect(f.fetcher).toHaveBeenCalledOnce();
   });
 
