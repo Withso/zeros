@@ -170,6 +170,9 @@ d("operator-attested provider absence", () => {
         VALUES ($1,$2,$3,'upgrade',1,1,2,'draining',$4)`, [randomUUID(), fixture.workspaceId, fixture.organizationId, drain]);
     });
     await expect(manageCloudProviderAbsence(pool, request({ generations: "2" }), await inventory())).rejects.toThrow("generation transition");
+    // A rollback abandons its candidate; its cleanup must be able to close it.
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_generation_transitions SET state='rolling_back' WHERE candidate_generation=2"));
+    await expect(manageCloudProviderAbsence(pool, request({ generations: "2" }), await inventory())).resolves.toMatchObject({ state: "planned" });
   });
 
   it("refuses stale or future inventories, recent dispatches and active starts", async () => {
@@ -243,6 +246,8 @@ describe("provider absence request and inventory", () => {
     expect(() => validateCloudProviderAbsenceRequest({ ...base, generations: "3,3" })).toThrow("repeat");
     expect(() => validateCloudProviderAbsenceRequest({ ...base, generations: "0" })).toThrow("positive generations");
     expect(() => validateCloudProviderAbsenceRequest({ ...base, knownResources: "bx_0000000l" })).toThrow("KNOWN_RESOURCES");
+    const many = Array.from({ length: 65 }, (_, i) => `bx_k${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}x2345`.replace(/[ilo]/g, "z")).join(",");
+    expect(() => validateCloudProviderAbsenceRequest({ ...base, knownResources: many })).toThrow("at most 64");
     expect(() => validateCloudProviderAbsenceRequest({ ...base, reason: "too short" })).toThrow("REASON");
     expect(() => validateCloudProviderAbsenceRequest({ ...base, expectedProviderAccount: undefined })).toThrow("EXPECTED_ACCOUNT");
   });

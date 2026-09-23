@@ -72,7 +72,9 @@ REVOKE ALL ON FUNCTION guard_cloud_provider_absence_attestation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION reject_cloud_provider_absence_attestation_truncate() FROM PUBLIC;
 
 -- Whether a create, wake or generation transition can still dispatch for the
--- generation. Shared by the closure rule and the attestation operator.
+-- generation. A transition that is rolling back abandons its candidate, which
+-- its cleanup must be able to close. Shared by the closure rule and the
+-- attestation operator.
 CREATE FUNCTION cloud_provider_create_dispatch_active(target_workspace_id uuid, target_generation integer)
 RETURNS boolean LANGUAGE sql STABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
@@ -83,7 +85,7 @@ SET search_path = pg_catalog, public, pg_temp AS $$
   ) OR EXISTS (
     SELECT 1 FROM cloud_workspace_generation_transitions transition
     WHERE transition.workspace_id = target_workspace_id AND transition.candidate_generation = target_generation
-      AND transition.state IN ('draining', 'provisioning', 'setting_up', 'rolling_back')
+      AND transition.state IN ('draining', 'provisioning', 'setting_up')
   )
 $$;
 

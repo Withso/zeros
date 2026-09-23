@@ -145,8 +145,8 @@ export function validateCloudProviderAbsenceRequest(
   if (!/^[A-Za-z0-9._@:+-]{1,256}$/.test(expectedProviderAccount))
     fail("CONTROL_PLANE_PROVIDER_ABSENCE_EXPECTED_ACCOUNT must name the Boat account that owns this scope");
   const knownResources = (input.knownResources ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  if (knownResources.some((value) => !BOAT_RESOURCE_ID_PATTERN.test(value)))
-    fail("CONTROL_PLANE_PROVIDER_ABSENCE_KNOWN_RESOURCES must list Boat sandbox ids");
+  if (knownResources.length > 64 || knownResources.some((value) => !BOAT_RESOURCE_ID_PATTERN.test(value)))
+    fail("CONTROL_PLANE_PROVIDER_ABSENCE_KNOWN_RESOURCES must list at most 64 Boat sandbox ids");
   const reason = z.string().trim().min(16).max(512).safeParse(input.reason);
   if (!reason.success) fail("CONTROL_PLANE_PROVIDER_ABSENCE_REASON must contain 16 to 512 characters");
   return {
