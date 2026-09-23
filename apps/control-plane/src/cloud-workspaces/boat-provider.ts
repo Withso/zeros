@@ -80,6 +80,8 @@ const UsageSchema = z.object({
 });
 
 export type BoatWorkspaceProviderOptions = BoatApiClientOptions & {
+  /** Managed compute is always billed to, and verified against, this wallet. */
+  billingOrg: string;
   operations: CloudProviderOperationStore;
   /** Zeros-owned access revocation is required before stopping an allocation. */
   access: CloudWorkspaceAccessProvider;
@@ -274,11 +276,8 @@ export class BoatWorkspaceProvider
     if (dispatch.resourceId) return this.allocatableResource(dispatch);
     let response: Record<string, unknown>;
     try {
-      // Boat matches an idempotent create on account, key and body; the wallet
-      // scope only selects the balance for a create that has not happened yet.
       response = await this.client.request("/sandboxes", {
         method: "POST", body, idempotencyKey: record.idempotencyKey,
-        ...(this.options.billingOrg ? { billingScope: true } : {}),
       });
     } catch (error) {
       if (error instanceof BoatCreateRejectedError)
@@ -295,12 +294,11 @@ export class BoatWorkspaceProvider
     return this.allocatableResource(bound, response.sandbox);
   }
 
-  private billingScope(value: unknown): "match" | "mismatch" | "invalid" {
-    const org = this.options.billingOrg;
-    if (!org) return "match";
+  private billingScope(value: unknown): "match" | "mismatch" | "unconfirmed" | "invalid" {
     const parsed = BillingScopeSchema.safeParse(value);
     if (!parsed.success) return "invalid";
-    return parsed.data.team?.id === org ? "match" : "mismatch";
+    if (parsed.data.team === undefined) return "unconfirmed";
+    return parsed.data.team?.id === this.options.billingOrg ? "match" : "mismatch";
   }
 
   /** Compute is granted only to an allocation positively billed to the
@@ -314,7 +312,7 @@ export class BoatWorkspaceProvider
     const resource = this.resource(record, sandbox);
     const scope = this.billingScope(sandbox);
     if (scope === "invalid") throw failure("provider_response_invalid");
-    if (scope === "mismatch") throw failure("provider_billing_scope_mismatch");
+    if (scope !== "match") throw failure(`provider_billing_scope_${scope}`);
     return resource;
   }
 
@@ -434,7 +432,7 @@ export class BoatWorkspaceProvider
     this.assertFiniteLease(ttlSeconds);
     const record = await this.owned(resourceId);
     if (record.deletionRequestedAt || record.deletedAt) throw failure("provider_generation_retired");
-    if (this.options.billingOrg) await this.allocatableResource(record);
+    await this.allocatableResource(record);
     const response = await this.client.request(`/sandboxes/${resourceId}`, { method: "PATCH", body: { ttlSeconds } });
     const parsed = SandboxSchema.safeParse(response.sandbox);
     const expiresAt = parsed.success && parsed.data.archiveAfter ? Date.parse(parsed.data.archiveAfter) : NaN;

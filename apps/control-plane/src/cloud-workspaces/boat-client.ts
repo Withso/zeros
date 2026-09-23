@@ -113,8 +113,6 @@ export class BoatApiClient {
       body?: unknown;
       idempotencyKey?: string;
       confirmDelete?: string;
-      /** Bill this sandbox creation to the configured wallet. */
-      billingScope?: boolean;
       signal?: AbortSignal;
     } = {},
   ): Promise<Record<string, unknown>> {
@@ -134,13 +132,10 @@ export class BoatApiClient {
       headers.set("idempotency-key", input.idempotencyKey);
     if (input.confirmDelete)
       headers.set("x-ascii-confirm-delete", input.confirmDelete);
-    // A sandbox keeps the wallet chosen at creation. The request scope bills
-    // the create without changing its body.
-    if (input.billingScope) {
-      if (!this.options.billingOrg || path !== "/sandboxes" || input.method !== "POST")
-        throw new Error("Invalid Boat billing scope");
+    // A sandbox keeps the wallet chosen at creation. Boat matches idempotent
+    // creates on account, key and body, so the scope never changes a replay.
+    if (this.options.billingOrg && path === "/sandboxes" && input.method === "POST")
       headers.set("x-boat-org", this.options.billingOrg);
-    }
     const signal = AbortSignal.any([
       AbortSignal.timeout(this.options.timeoutMs),
       ...(input.signal ? [input.signal] : []),

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { BoatWorkspaceProvider } from "./boat-provider.js";
 import type {
@@ -19,6 +20,8 @@ const INPUT: CloudProviderCreateInput = {
   storageMiB: 20480,
   idempotencyKey: "original-create-intent",
 };
+const WALLET = "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41";
+const OTHER_WALLET = "team_9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a";
 function sandbox(state = "ready", extra: Record<string, unknown> = {}) {
   return {
     ok: true,
@@ -27,6 +30,7 @@ function sandbox(state = "ready", extra: Record<string, unknown> = {}) {
       state,
       type: "default",
       snapshotAvailable: true,
+      team: { id: WALLET, name: "Zeros" },
       ...extra,
     },
   };
@@ -53,9 +57,8 @@ function rejectedCreate() {
     error: { status: 429, code: "trial_compute_limit_reached" },
   }, 429);
 }
-const WALLET = "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41";
-const OTHER_WALLET = "team_9d8c7b6a-5f4e-4d3c-8b2a-1f0e9d8c7b6a";
 const walletOf = (init?: RequestInit) => new Headers(init?.headers).get("x-boat-org");
+const unreported = { team: undefined };
 function fixture(extraOptions: { billingOrg?: string } = {}) {
   let stored: CloudProviderOperationRecord | null = null;
   const attempts = new Map<string, boolean>();
@@ -127,6 +130,7 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
     imageRef: INPUT.imageRef,
     qualifiedStorageMiB: INPUT.storageMiB,
     ttlSeconds: null,
+    billingOrg: WALLET,
     now: () => NOW,
     ...extraOptions,
   };
@@ -242,81 +246,68 @@ describe("Boat allocation lifecycle", () => {
   });
 
   it("bills every create dispatch to the configured wallet without changing its journaled request", async () => {
-    const f = fixture({ billingOrg: WALLET });
-    f.fetcher.mockImplementationOnce(async (_url, init) => {
-      expect(walletOf(init)).toBe(WALLET);
-      expect(JSON.parse(String(init!.body))).not.toHaveProperty("org");
-      return json(sandbox("provisioning", { team: { id: WALLET, name: "Zeros" } }));
-    });
-    await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
-    const unscoped = fixture();
-    unscoped.fetcher.mockResolvedValueOnce(json(sandbox("provisioning")));
-    await unscoped.provider.create(INPUT);
-    expect(f.stored().requestSha256).toBe(unscoped.stored().requestSha256);
-  });
-
-  it("replays an earlier dispatch with the same key and body under the configured wallet", async () => {
     const f = fixture();
     f.fetcher.mockRejectedValueOnce(new TypeError("reply lost"));
     await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_request_unavailable" });
-    const firstBody = String(f.fetcher.mock.calls[0]![1]!.body);
-    const scoped = new BoatWorkspaceProvider({ ...f.options, billingOrg: WALLET });
-    f.fetcher.mockImplementationOnce(async (_url, init) => {
+    const restarted = new BoatWorkspaceProvider(f.options);
+    f.fetcher.mockResolvedValueOnce(json(sandbox("provisioning")));
+    await expect(restarted.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
+    const [first, retry] = f.fetcher.mock.calls.map(([, init]) => init!);
+    for (const init of [first!, retry!]) {
       expect(walletOf(init)).toBe(WALLET);
-      expect(new Headers(init!.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
-      expect(String(init!.body)).toBe(firstBody);
-      return json(sandbox("provisioning", { team: { id: WALLET, name: "Zeros" } }));
-    });
-    await expect(scoped.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
+      expect(new Headers(init.headers).get("idempotency-key")).toBe(INPUT.idempotencyKey);
+      expect(JSON.parse(String(init.body))).not.toHaveProperty("org");
+    }
+    expect(retry!.body).toBe(first!.body);
+    const body = JSON.parse(String(first!.body));
+    expect(f.stored().requestSha256).toBe(createHash("sha256")
+      .update(JSON.stringify({ imageRef: INPUT.imageRef, body, createAttemptJournalVersion: 1 })).digest("hex"));
   });
 
   it("does not let a changed wallet claim an allocation billed to the previous one", async () => {
-    const f = fixture({ billingOrg: WALLET });
-    f.fetcher.mockResolvedValueOnce(json(sandbox("provisioning", { team: { id: WALLET, name: "Zeros" } })));
-    await f.provider.create(INPUT);
+    const f = fixture();
+    await f.allocate();
     const moved = new BoatWorkspaceProvider({ ...f.options, billingOrg: OTHER_WALLET });
-    f.fetcher.mockResolvedValueOnce(json(sandbox("running", { team: { id: WALLET, name: "Zeros" } })));
+    f.fetcher.mockResolvedValueOnce(json(sandbox("running")));
     await expect(moved.create(INPUT)).rejects.toMatchObject({ code: "provider_billing_scope_mismatch" });
     expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
   });
 
   it.each([
-    ["another organization", { team: { id: OTHER_WALLET, name: "Other" } }],
-    ["the personal wallet", { team: null }],
-    ["an unreported wallet", {}],
-  ])("keeps the cleanup identity but refuses a create billed to %s", async (_label, extra) => {
-    const f = fixture({ billingOrg: WALLET });
+    ["another organization", { team: { id: OTHER_WALLET, name: "Other" } }, "provider_billing_scope_mismatch"],
+    ["the personal wallet", { team: null }, "provider_billing_scope_mismatch"],
+    ["an unreported wallet", unreported, "provider_billing_scope_unconfirmed"],
+  ])("keeps the cleanup identity but refuses a create billed to %s", async (_label, extra, code) => {
+    const f = fixture();
     f.fetcher
       .mockResolvedValueOnce(json(sandbox("provisioning", extra)))
       .mockResolvedValueOnce(json(sandbox("provisioning", extra)));
-    await expect(f.provider.create(INPUT)).rejects.toMatchObject({
-      code: "provider_billing_scope_mismatch",
-      retryable: false,
-    });
+    await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code, retryable: false });
     expect(String(f.fetcher.mock.calls[1]![0])).toBe(`https://boat.dev/api/v1/sandboxes/${RESOURCE}`);
     expect(f.stored().resourceId).toBe(RESOURCE);
     expect(f.operations.bindResource).toHaveBeenCalledOnce();
   });
 
-  it.each([{}, { team: null }])("reads back an unconfirmed create wallet once before admitting it: %j", async (extra) => {
-    const f = fixture({ billingOrg: WALLET });
+  it.each([unreported, { team: null }])("reads back an unconfirmed create wallet once before admitting it: %j", async (extra) => {
+    const f = fixture();
     f.fetcher
       .mockResolvedValueOnce(json(sandbox("provisioning", extra)))
-      .mockResolvedValueOnce(json(sandbox("provisioning", { team: { id: WALLET, name: "Zeros" } })));
+      .mockResolvedValueOnce(json(sandbox("provisioning")));
     await expect(f.provider.create(INPUT)).resolves.toMatchObject({ resourceId: RESOURCE });
     expect(f.fetcher).toHaveBeenCalledTimes(2);
   });
 
   it("reports a malformed wallet as an invalid provider response", async () => {
-    const f = fixture({ billingOrg: WALLET });
-    const malformed = json(sandbox("provisioning", { team: { id: 7 } }));
-    f.fetcher.mockResolvedValueOnce(malformed).mockResolvedValueOnce(json(sandbox("provisioning", { team: { id: 7 } })));
+    const f = fixture();
+    f.fetcher
+      .mockResolvedValueOnce(json(sandbox("provisioning", { team: { id: 7 } })))
+      .mockResolvedValueOnce(json(sandbox("provisioning", { team: { id: 7 } })));
     await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_response_invalid" });
     expect(f.stored().resourceId).toBe(RESOURCE);
   });
 
   it("never grants compute to a mis-billed allocation on a create retry, resume or renewal", async () => {
-    const f = fixture({ billingOrg: WALLET });
+    const f = fixture();
     const misbilled = (state: string) => json(sandbox(state, { team: { id: OTHER_WALLET, name: "Other" } }));
     f.fetcher.mockResolvedValueOnce(misbilled("provisioning")).mockResolvedValueOnce(misbilled("provisioning"));
     await expect(f.provider.create(INPUT)).rejects.toMatchObject({ code: "provider_billing_scope_mismatch" });
@@ -628,7 +619,7 @@ describe('Boat compute metering and lease authority', () => {
   it('renews an exact owned resource with a finite auto-stop deadline', async () => {
     const f = fixture(); await f.allocate();
     const expiresAt = new Date(NOW + 3600_000).toISOString();
-    f.fetcher.mockResolvedValueOnce(json(sandbox('running', { archiveAfter: expiresAt })));
+    f.fetcher.mockResolvedValueOnce(json(sandbox('running'))).mockResolvedValueOnce(json(sandbox('running', { archiveAfter: expiresAt })));
     expect(await f.provider.renewComputeLease(RESOURCE, 3600)).toEqual({ expiresAt });
     expect(f.fetcher.mock.calls.at(-1)![1]).toMatchObject({ method: 'PATCH', body: JSON.stringify({ ttlSeconds: 3600 }) });
   });
@@ -637,7 +628,8 @@ describe('Boat compute metering and lease authority', () => {
     expect(f.fetcher).not.toHaveBeenCalled();
   });
   it.each([null, new Date(NOW - 1).toISOString(), new Date(NOW + 3700_000).toISOString()])('does not confirm a missing or excessive deadline: %s', async archiveAfter => {
-    const f = fixture(); await f.allocate(); f.fetcher.mockResolvedValueOnce(json(sandbox('running', { archiveAfter })));
+    const f = fixture(); await f.allocate();
+    f.fetcher.mockResolvedValueOnce(json(sandbox('running'))).mockResolvedValueOnce(json(sandbox('running', { archiveAfter })));
     await expect(f.provider.renewComputeLease(RESOURCE, 3600)).rejects.toMatchObject({ code: 'provider_lease_unconfirmed' });
   });
   it('refuses lease renewal after deletion has been accepted', async () => {

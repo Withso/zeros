@@ -52,7 +52,7 @@ describe("Boat API boundary", () => {
     }
     expect(f.fetcher).toHaveBeenCalledOnce();
   });
-  it("scopes only an explicitly billed sandbox creation to the configured wallet", async () => {
+  it("bills only sandbox creation to the configured wallet, outside the request body", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ok: true }));
     const client = new BoatApiClient({
       apiKey: "boat_test-only-credential",
@@ -60,21 +60,18 @@ describe("Boat API boundary", () => {
       billingOrg: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
       fetch: fetcher,
     });
-    await client.request("/sandboxes", { method: "POST", body: { noEnv: true }, billingScope: true });
     await client.request("/sandboxes", { method: "POST", body: { noEnv: true } });
+    await client.request("/sandboxes/bx_23456789");
     await client.request("/sandboxes/bx_23456789/resume", { method: "POST", body: { ttlSeconds: 600 } });
     const headers = fetcher.mock.calls.map(([, init]) => new Headers(init!.headers));
     expect(headers[0]!.get("x-boat-org")).toBe("team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41");
     expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual({ noEnv: true });
     expect(headers[1]!.has("x-boat-org")).toBe(false);
     expect(headers[2]!.has("x-boat-org")).toBe(false);
-    await expect(
-      client.request("/sandboxes/bx_23456789/resume", { method: "POST", billingScope: true }),
-    ).rejects.toThrow("Invalid Boat billing scope");
-    await expect(
-      fixture().client.request("/sandboxes", { method: "POST", billingScope: true }),
-    ).rejects.toThrow("Invalid Boat billing scope");
-    expect(fetcher).toHaveBeenCalledTimes(3);
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: true }));
+    await f.client.request("/sandboxes", { method: "POST", body: { noEnv: true } });
+    expect(new Headers(f.fetcher.mock.calls[0]![1]!.headers).has("x-boat-org")).toBe(false);
   });
   it.each([
     "Zeros",
