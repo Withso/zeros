@@ -302,6 +302,8 @@ export type Config = {
   databasePoolMax?: number;
   /** Requests at least this slow are logged once by route template. */
   slowRequestLogMs?: number;
+  /** Receives aggregate cloud health alerts; null disables them. */
+  operationsAlertEmail?: string | null;
   /** All application routes and background writers are disabled during cutover. */
   databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
@@ -1684,6 +1686,17 @@ function validateRailwayEnvironment(
   }
 }
 
+/** Alerting is optional: an unusable mailbox disables it with a warning
+ * instead of failing boot. */
+function loadOperationsAlertEmail(env: NodeJS.ProcessEnv): string | null {
+  const raw = env.OPERATIONS_ALERT_EMAIL?.trim();
+  if (!raw) return null;
+  const parsed = z.string().max(254).email().safeParse(raw);
+  if (parsed.success) return parsed.data;
+  console.warn("[config] OPERATIONS_ALERT_EMAIL is not one email address; cloud health alerts are disabled");
+  return null;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -1747,6 +1760,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
     slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
+    operationsAlertEmail: loadOperationsAlertEmail(env),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,

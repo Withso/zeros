@@ -90,6 +90,55 @@ Do not set public reliability or latency promises until measurements exist from
 representative regions, repositories, agents, stop/wake cycles, and long-lived
 connections.
 
+## Health alerts
+
+`/healthz` reports aggregate cloud health: `operationalState` is `healthy` or
+`degraded`, with machine-readable `reasons`. It carries no tenant, workspace,
+user, provider-resource or repository identifier, and neither do alerts.
+
+- **In-service alerts.** With `OPERATIONS_ALERT_EMAIL` set and Resend
+  configured (`RESEND_API_KEY`, `EMAIL_FROM`), the service reads health every
+  60 seconds, including while background workers are paused. Two consecutive
+  degraded reads open a numbered incident and email its reasons. A different
+  reason set that holds for two reads, or each new six-hour window, sends an
+  update, and two healthy reads send the recovery. Alert state is one locked
+  row (migration `0097`), so replicas and deploys agree, and a failed send is
+  retried with the same Resend idempotency key and body. An invalid mailbox
+  disables alerts with a warning rather than failing boot.
+- **External uptime.** `.github/workflows/uptime.yml` probes the HTTPS
+  `/healthz` URLs in the repository variable `UPTIME_HEALTH_URLS` every ten
+  minutes, with three attempts 20 seconds apart. An unreachable, non-200,
+  `ok: false` or unreadable-health target fails the run, and GitHub Actions
+  notifies the workflow owner. Route that account's Actions notifications to
+  the operator mailbox. Degraded cloud health appears in the run summary
+  without failing it, because the in-service worker already emails it.
+
+## Health alert runbooks
+
+Each reason names the exact `/healthz` condition. Start from the reason, not
+from a single workspace: several workspaces can share one cause. Operator
+commands below run from a database-owner shell, print a read-only plan with a
+target-bound approval, and change nothing until rerun unchanged with
+`--execute` and that approval.
+
+| Reason | Condition | First response |
+| --- | --- | --- |
+| `lifecycle_stalled` | A queued or observing lifecycle intent has not advanced for 15 minutes. | Confirm background workers run, then read the intent `error_code` (for example provider rate limits, `compute_previous_lease_pending` or `provider_absence_unconfirmed`). Fix the provider or credential cause. For a create the provider can no longer certify, prove absence from the full account inventory with `cloud-provider-absence:manage`. |
+| `setup_lease_expired` | A running setup run's lease expired. | The setup worker or its provider exec died mid-run. Check the setup worker log and the provider; recovery re-admits the generation. Repeats point to a crash loop or an exec that exceeds the setup timeout. |
+| `engine_lease_expired` | A ready engine missed its 90-second heartbeat lease. | Check the sandbox at the provider and the engine log. A healthy engine that cannot reach the control plane (network, TLS or a 429 on registration or heartbeat) stops itself when its lease runs out. |
+| `access_revocation_stalled` | A client access grant failed or waited more than 15 minutes for revocation. | Check the provider's revoke API and credential. The worker retries; a failed grant needs the provider cause fixed first. |
+| `outbox_stalled` | A cloud outbox entry is dead, or queued or processing for 15 minutes. | Check the configured outbox sink's reachability and signing secret. |
+| `deletion_jobs_failed` | A workspace deletion job failed. | Read the job error and resolve it through the staff deletion operations; never purge around a provider that has not confirmed deletion. |
+| `deletion_provider_stalled` | A deletion waited more than 24 hours for the provider. | Look up the provider deletion receipt (Boat `bdop_*`). A receipt stuck in `blocked` needs the provider; keep the job waiting. |
+| `object_rotation_failed` | A blob rotation failed, or cleanup is stuck for 15 minutes or three attempts. | Fix the object-store or key cause, then queue a fresh target with `cloud-object-rotation:retry`. |
+| `object_deletion_stalled` | An unfenced blob deletion is 15 minutes old or failed three times. | Check object-store credentials, reachability and the bucket's retention settings. |
+| `provider_orphans_stalled` | A provider orphan has been unverified for an hour. | Compare the provider inventory for the account scope with the bindings and remove the orphan through the provider after confirming it is not bound. |
+| `durability_stalled` | A ready or busy workspace has had non-durable content or record state for 15 minutes. | Check the engine's checkpoint uploads, object-store health and the byte limits (`cloud-object-storage:manage`). |
+| `compute_settlement_stalled` | An unsettled compute lease has had an error for 5 minutes, or its next check is 5 minutes overdue. | Read the lease `last_error_code`. Meter or provider errors need provider access fixed; `compute_absence_unconfirmed` means the create journal cannot close until absence is proven with `cloud-provider-absence:manage`. |
+| `compute_lease_expired` | An active or draining lease is 5 minutes past its provider expiry. | Check renewal, the Organization's credit (`cloud-compute:grant`) and the provider's TTL. A sandbox may be running unfunded. |
+| `compute_platform_exposure` | Provider overrun was recorded as platform exposure in the last 24 hours. | Reconcile the provider meter against the ledger and review the affected credit period. |
+| `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
+
 ## Provider portability
 
 The provider interface owns compute/image identifiers, endpoint grants,
