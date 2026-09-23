@@ -21,6 +21,7 @@ import { validateDatabaseConnections } from "./database-config.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
 import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
+import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -39,6 +40,7 @@ const EnvSchema = z.object({
   DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
@@ -292,6 +294,8 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
+  /** Requests at least this slow are logged once by route template. */
+  slowRequestLogMs?: number;
   /** All application routes and background writers are disabled during cutover. */
   databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
@@ -1728,6 +1732,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(migrationRole ? {databaseMigrationRole: migrationRole} : {}),
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
+    slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,

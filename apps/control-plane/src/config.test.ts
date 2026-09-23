@@ -43,6 +43,15 @@ describe("database authority configuration", () => {
     expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow();
   });
 
+  it("logs slow requests from one second by default and accepts a bounded override", () => {
+    expect(loadConfig(baseEnv()).slowRequestLogMs).toBe(1000);
+    expect(loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: "150" }).slowRequestLogMs).toBe(150);
+  });
+
+  it.each(["49", "60001", "2.5", "bad"])("rejects an unbounded slow-request threshold %s", (value) => {
+    expect(() => loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: value })).toThrow();
+  });
+
   it.each(["1", "2"])("reserves both lock and callback capacity alongside shared LISTEN (max %s)", max => {
     expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow(/DATABASE_POOL_MAX/);
   });

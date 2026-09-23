@@ -15,6 +15,7 @@
 import pg from "pg";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import { assertWorkOSProviderLockHeld } from "./workos-provider-lock-context.js";
+import { recordPoolWait, recordTransactionTiming } from "./request-timing.js";
 
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
@@ -118,7 +119,15 @@ export async function withUserTx<T>(
   fn: (tx: Tx) => Promise<T>,
 ): Promise<T> {
   assertWorkOSProviderLockHeld();
-  const client = await pool.connect();
+  const started = performance.now();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    recordPoolWait(performance.now() - started);
+    throw error;
+  }
+  const acquired = performance.now();
   const connection = observeOwnedConnection(client);
   let discard = false;
   try {
@@ -143,6 +152,7 @@ export async function withUserTx<T>(
     throw err;
   } finally {
     connection.release(discard);
+    recordTransactionTiming(acquired - started, performance.now() - started);
   }
 }
 
@@ -153,7 +163,15 @@ export async function withSystemTx<T>(
   options: { consistentRead?: boolean } = {},
 ): Promise<T> {
   assertWorkOSProviderLockHeld();
-  const client = await pool.connect();
+  const started = performance.now();
+  let client: pg.PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (error) {
+    recordPoolWait(performance.now() - started);
+    throw error;
+  }
+  const acquired = performance.now();
   const connection = observeOwnedConnection(client);
   let discard = false;
   try {
@@ -176,5 +194,6 @@ export async function withSystemTx<T>(
     throw err;
   } finally {
     connection.release(discard);
+    recordTransactionTiming(acquired - started, performance.now() - started);
   }
 }

@@ -64,6 +64,7 @@ import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 import type { MigrationStatus } from "./migrate.js";
 import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
 import { createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
+import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming } from "./request-timing.js";
 
 export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
@@ -110,6 +111,7 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): Hono {
   const app = new Hono();
+  app.use("*", requestTiming({ slowMs: config.slowRequestLogMs ?? DEFAULT_SLOW_REQUEST_LOG_MS }));
   if (config.databaseMaintenanceMode) {
     // A restored database may contain deliverable outboxes and live sessions.
     // Do not even assemble provider/auth routers while fencing its writers.
