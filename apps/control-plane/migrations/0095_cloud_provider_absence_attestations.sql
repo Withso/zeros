@@ -76,8 +76,7 @@ REVOKE ALL ON FUNCTION reject_cloud_provider_absence_attestation_truncate() FROM
 -- its cleanup must be able to close. Shared by the closure rule and the
 -- attestation operator.
 CREATE FUNCTION cloud_provider_create_dispatch_active(target_workspace_id uuid, target_generation integer)
-RETURNS boolean LANGUAGE sql STABLE
-SET search_path = pg_catalog, public, pg_temp AS $$
+RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT EXISTS (
     SELECT 1 FROM cloud_workspace_lifecycle_intents intent
     WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
@@ -96,8 +95,7 @@ $$;
 CREATE FUNCTION cloud_provider_create_dispatch_horizon(
   target_provider text, target_account_scope text, target_workspace_id uuid,
   target_generation integer, attempts_tracked boolean
-) RETURNS timestamptz LANGUAGE sql STABLE
-SET search_path = pg_catalog, public, pg_temp AS $$
+) RETURNS timestamptz LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT greatest(
     (SELECT operation.created_at FROM cloud_workspace_provider_operations operation
      WHERE operation.provider = target_provider AND operation.account_scope = target_account_scope
@@ -121,8 +119,7 @@ $$;
 CREATE FUNCTION cloud_provider_create_absence_confirmed(
   target_provider text, target_account_scope text, target_workspace_id uuid,
   target_generation integer, attempts_tracked boolean
-) RETURNS boolean LANGUAGE sql STABLE
-SET search_path = pg_catalog, public, pg_temp AS $$
+) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT
     NOT cloud_provider_create_dispatch_active(target_workspace_id, target_generation)
     AND NOT EXISTS (
