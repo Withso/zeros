@@ -28,7 +28,7 @@ isolation is still unqualified. See
 | 1. Contracts | Portable client/runtime, provider, command, checkpoint and security contracts; Organization ownership and Personal-local enforcement | Keep advertised capabilities within this matrix |
 | 2. Provider registry | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions; isolated deployed Daytona onboarding, distinct valid-key rotation, replay, rejected rotation and revocation | Qualification with an enabled compute profile |
 | 3. Secure Linux / Boat | Pinned native image, unprivileged engine/worker separation, setup, admission, heartbeat, lifecycle and finite provider lease; live authorized Boat create/readiness | Exact production deployment, remaining provider deletion proof and host-security release review |
-| 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat | Production agent-account connection/authentication flow and declared tooling gaps below |
+| 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat | Production agent-account connection/authentication flow, Codex on the current image and declared tooling gaps below |
 | 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat | Fleet/region load qualification and later native client release tests |
 | 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue | Literal provider-host destruction, target PlanetScale database plus offsite object-store recovery and reviewed RPO/RTO |
 | 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes | Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
@@ -43,7 +43,7 @@ do not clear Daytona or production operations gates.
 | --- | --- | --- |
 | Files, search, Git, process execution and PTY | Existing Zeros engine over authenticated portable bridge | Boat |
 | Code and Design with one agent conversation | Mode revisions, cloud API authoring, directory lifecycle, capture and durable recovery | Boat |
-| Claude, Cursor and Codex native sessions | Existing provider adapters; explicit model credentials remain tenant scoped | Boat with test-authorized credentials; production account connection remains open |
+| Claude, Cursor and Codex native sessions | Existing provider adapters; explicit model credentials remain tenant scoped | Boat with test-authorized credentials: Claude and Cursor on the current image, Codex on the previous image only; production account connection remains open |
 | SSH / SFTP / TCP forwarding | Zeros runtime SSH inside the admitted engine namespace; independent device/service grants and descendant retirement | Boat, including PTY dimensions, stderr/exit, file/tunnel roundtrips and revocation |
 | HTTP and HMR previews | Private scoped relay with current authority checks | Boat |
 | Ordered live streams, replay and Stop/approval receipts | Shared schemas, durable receipts, bounded buffers, per-device authority | Boat headless clients, including late and suspended receivers |
@@ -67,9 +67,10 @@ do not clear Daytona or production operations gates.
   account metadata and duplicate refresh-seed rejection; and independent staff
   and Pro withdrawal checks. A disposable private repository passed scoped
   GitHub App token issue, a real Git fetch, token revocation and anonymous denial.
-  These checks do not claim a provider-host clone, current-image agent turn or
-  interactive native sign-in ceremony. A membership created directly at the
-  identity provider is projected but never materialized as a Zeros grant.
+  Batch 6 later cloned that repository on the provider host and ran Claude and
+  Cursor turns on the current image; no interactive native sign-in ceremony is
+  claimed. A membership created directly at the identity provider is projected
+  but never materialized as a Zeros grant.
 - Deployed Daytona connection checks verified the supplied key without allocating
   compute. Personal onboarding and guest provider administration were denied;
   a stored valid key could not create a workspace while its compute profile was
