@@ -250,25 +250,20 @@ export class BoatWorkspaceProvider
       noEnv: true,
       env: {},
     };
-    const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-    const unscoped = digest({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 });
-    // The wallet is part of the journaled request: a retry replays the scope
-    // it was first sent with, and a changed wallet conflicts before dispatch.
-    const billingOrg = this.options.billingOrg;
-    const scoped = billingOrg
-      ? digest({ imageRef: input.imageRef, body, billingOrg, createAttemptJournalVersion: 2 })
-      : unscoped;
     const record = await this.options.operations.prepareCreate({
       workspaceId: input.workspaceId,
       generation: input.generation,
       idempotencyKey: input.idempotencyKey,
-      requestSha256: scoped,
-      ...(billingOrg ? { compatibleRequestSha256: unscoped } : {}),
-      legacyRequestSha256: digest({ imageRef: input.imageRef, body }),
+      requestSha256: createHash("sha256")
+        .update(JSON.stringify({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 }))
+        .digest("hex"),
+      legacyRequestSha256: createHash("sha256")
+        .update(JSON.stringify({ imageRef: input.imageRef, body }))
+        .digest("hex"),
     });
     if (record.deletionRequestedAt || record.deletedAt || record.createClosedAt)
       throw failure("provider_generation_retired");
-    if (record.resourceId) return this.allocatableResource(record.resourceId);
+    if (record.resourceId) return this.allocatableResource(record);
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
@@ -276,12 +271,14 @@ export class BoatWorkspaceProvider
     // another request using the same key receives a definite refusal later.
     const attemptId = randomUUID();
     const dispatch = await this.options.operations.beginCreateAttempt(input, attemptId);
-    if (dispatch.resourceId) return this.allocatableResource(dispatch.resourceId);
+    if (dispatch.resourceId) return this.allocatableResource(dispatch);
     let response: Record<string, unknown>;
     try {
+      // Boat matches an idempotent create on account, key and body; the wallet
+      // scope only selects the balance for a create that has not happened yet.
       response = await this.client.request("/sandboxes", {
         method: "POST", body, idempotencyKey: record.idempotencyKey,
-        ...(billingOrg && record.requestSha256 === scoped ? { billingScope: true } : {}),
+        ...(this.options.billingOrg ? { billingScope: true } : {}),
       });
     } catch (error) {
       if (error instanceof BoatCreateRejectedError)
@@ -294,32 +291,31 @@ export class BoatWorkspaceProvider
       .object({ id: z.string().regex(RESOURCE_ID) })
       .safeParse(response.sandbox);
     if (!id.success) throw failure("provider_response_invalid");
-    await this.options.operations.bindResource(input, id.data.id);
-    return this.allocatableResource(id.data.id, response.sandbox);
+    const bound = await this.options.operations.bindResource(input, id.data.id);
+    return this.allocatableResource(bound, response.sandbox);
   }
 
-  private billingScope(value: unknown): "match" | "mismatch" | "unknown" {
+  private billingScope(value: unknown): "match" | "mismatch" | "invalid" {
     const org = this.options.billingOrg;
     if (!org) return "match";
     const parsed = BillingScopeSchema.safeParse(value);
-    if (!parsed.success) return "mismatch";
-    if (parsed.data.team === undefined) return "unknown";
+    if (!parsed.success) return "invalid";
     return parsed.data.team?.id === org ? "match" : "mismatch";
   }
 
   /** Compute is granted only to an allocation positively billed to the
-   * configured wallet. A mismatch keeps its bound cleanup identity; inspection,
+   * configured wallet: create, create retry, resume and renewal. Anything else
+   * is read back once. A mismatch keeps its bound cleanup identity; inspection,
    * Stop and deletion never depend on the wallet. */
-  private async allocatableResource(resourceId: string, value?: unknown): Promise<CloudProviderResource> {
-    const record = await this.owned(resourceId);
-    if (record.deletionRequestedAt || record.deletedAt)
-      throw failure("provider_generation_retired");
+  private async allocatableResource(record: CloudProviderOperationRecord, value?: unknown): Promise<CloudProviderResource> {
     let sandbox = value;
-    if (sandbox === undefined || this.billingScope(sandbox) === "unknown")
-      sandbox = (await this.client.request(`/sandboxes/${resourceId}`)).sandbox;
-    if (this.billingScope(sandbox) !== "match")
-      throw failure("provider_billing_scope_mismatch");
-    return this.resource(record, sandbox);
+    if (sandbox === undefined || this.billingScope(sandbox) !== "match")
+      sandbox = (await this.client.request(`/sandboxes/${record.resourceId}`)).sandbox;
+    const resource = this.resource(record, sandbox);
+    const scope = this.billingScope(sandbox);
+    if (scope === "invalid") throw failure("provider_response_invalid");
+    if (scope === "mismatch") throw failure("provider_billing_scope_mismatch");
+    return resource;
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
@@ -384,7 +380,7 @@ export class BoatWorkspaceProvider
     const record = await this.owned(resourceId);
     if (record.deletionRequestedAt || record.deletedAt)
       throw failure("provider_generation_retired");
-    const current = await this.allocatableResource(resourceId);
+    const current = await this.allocatableResource(record);
     if (current.state === "running" || current.state === "provisioning")
       return current;
     if (current.state === "archiving")
@@ -438,6 +434,7 @@ export class BoatWorkspaceProvider
     this.assertFiniteLease(ttlSeconds);
     const record = await this.owned(resourceId);
     if (record.deletionRequestedAt || record.deletedAt) throw failure("provider_generation_retired");
+    if (this.options.billingOrg) await this.allocatableResource(record);
     const response = await this.client.request(`/sandboxes/${resourceId}`, { method: "PATCH", body: { ttlSeconds } });
     const parsed = SandboxSchema.safeParse(response.sandbox);
     const expiresAt = parsed.success && parsed.data.archiveAfter ? Date.parse(parsed.data.archiveAfter) : NaN;

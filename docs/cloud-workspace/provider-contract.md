@@ -146,17 +146,18 @@ account, or reuse an old scope for a different provider account.
 
 `BOAT_BILLING_ORG` names the Boat organization wallet (`team_…`) billed for every
 new sandbox. Without it Boat bills the account's dashboard-selected wallet, which
-can change outside Zeros. A create sends it as the `X-Boat-Org` request scope; the
-body is unchanged. The wallet is part of the journaled request digest, so a retry
-replays exactly the scope it was first sent with. Creates journaled before the
-wallet was configured replay without it, and a changed wallet conflicts before
-another dispatch. A sandbox keeps its creation wallet for resume and usage.
-Compute is granted only after Boat reports the configured organization for the
-allocation, on a fresh create, a create retry and every resume. An unreported
-wallet is read back once and otherwise refused. A mismatch keeps the bound
-cleanup identity and requests a managed Stop; inspection, Stop and deletion never
-depend on the wallet. The wallet is billing scope, not the journal's account
-identity, so changing it does not change `BOAT_ACCOUNT_SCOPE`.
+can change outside Zeros. Every create dispatch sends it as the `X-Boat-Org`
+request scope; the body and journaled request digest are unchanged. Boat matches
+an idempotent create on account, key and body, so a retry returns an earlier
+allocation with whatever wallet it was billed to. A sandbox keeps its creation
+wallet for resume and usage. Compute is granted only after Boat reports the
+configured organization for the allocation: on a fresh create, a create retry,
+every resume and every lease renewal. An unconfirmed wallet is read back once and
+otherwise refused. A mismatch keeps the bound cleanup identity and requests a
+managed Stop; inspection, Stop and deletion never depend on the wallet. An
+allocation billed elsewhere is not resumed; recover its workspace into a fresh
+generation. The wallet is billing scope, not the journal's account identity, so
+changing it does not change `BOAT_ACCOUNT_SCOPE`.
 
 Daytona BYO beside Boat requires `DAYTONA_BYO_ENABLED=true` and independent
 `DAYTONA_BYO_SNAPSHOT_ID`, `DAYTONA_BYO_SOURCE_COMMIT`,

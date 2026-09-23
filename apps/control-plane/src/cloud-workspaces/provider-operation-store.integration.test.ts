@@ -233,28 +233,6 @@ d("provider operation journal", () => {
     }
   });
 
-  it("returns the earlier request a tracked row retains when that digest is declared compatible", async () => {
-    const identity = input();
-    await store.prepareCreate(identity);
-    const replay = await store.prepareCreate({ ...identity, requestSha256: "c".repeat(64), compatibleRequestSha256: identity.requestSha256 });
-    expect(replay.requestSha256).toBe(identity.requestSha256);
-    expect(replay.idempotencyKey).toBe(identity.idempotencyKey);
-    await expect(
-      store.prepareCreate({ ...identity, requestSha256: "c".repeat(64), compatibleRequestSha256: "d".repeat(64) }),
-    ).rejects.toMatchObject({ code: "provider_operation_conflict" });
-  });
-  it("does not apply a compatible tracked digest to a legacy journal", async () => {
-    const identity = input();
-    await pool.query(`INSERT INTO cloud_workspace_provider_operations
-      (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4,false)`,
-    [identity.workspaceId, fixture.organizationId, identity.idempotencyKey, "b".repeat(64)]);
-    await expect(
-      store.prepareCreate({ ...identity, requestSha256: "c".repeat(64), compatibleRequestSha256: "b".repeat(64) }),
-    ).rejects.toMatchObject({ code: "provider_operation_conflict" });
-    const legacy = await store.prepareCreate({ ...identity, requestSha256: "c".repeat(64), compatibleRequestSha256: "d".repeat(64), legacyRequestSha256: "b".repeat(64) });
-    expect(legacy.requestSha256).toBe("b".repeat(64));
-  });
   it.each(["legacy","tracked"] as const)("fences mixed-version writers when the %s insert wins", async winner => {
     const identity=input(), legacyHash="b".repeat(64);
     let inserted!:()=>void, release!:()=>void;
