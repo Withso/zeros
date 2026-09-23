@@ -521,8 +521,9 @@ describe("app assembly — cloud workspace internal capabilities", () => {
       await post("/internal/v1/cloud-workspaces/setup/admission", "invalid");
     expect((await post("/internal/v1/cloud-workspaces/setup/admission", "invalid")).status).toBe(429);
     const beat = () => post("/internal/v1/cloud-workspaces/engine/heartbeat", `zwh_${"c".repeat(43)}`);
-    for (let attempt = 0; attempt < 600; attempt += 1) expect((await beat()).status).toBe(200);
-    expect(heartbeat).toHaveBeenCalledTimes(600);
+    // 300 engines per address at the default 10-second cadence.
+    for (let attempt = 0; attempt < 1_800; attempt += 1) expect((await beat()).status).toBe(200);
+    expect(heartbeat).toHaveBeenCalledTimes(1_800);
     expect((await beat()).status).toBe(429);
     expect(redeem).not.toHaveBeenCalled();
   });

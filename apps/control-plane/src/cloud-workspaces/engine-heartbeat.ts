@@ -6,3 +6,9 @@
 export const MIN_ENGINE_HEARTBEAT_INTERVAL_MS = 5_000;
 export const MAX_ENGINE_HEARTBEAT_INTERVAL_MS = 30_000;
 export const DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS = 10_000;
+
+/** Registration and heartbeat requests admitted per egress address each
+ * minute: room for 300 engines behind one address at the given cadence. */
+export function engineLifecycleRequestsPerMinute(intervalMs: number): number {
+  return Math.ceil((300 * 60_000) / intervalMs);
+}

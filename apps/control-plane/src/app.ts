@@ -67,6 +67,10 @@ import type { MigrationStatus } from "./migrate.js";
 import type { DatabaseCloudRuntimeServiceAccess } from "./cloud-workspaces/runtime-services.js";
 import { createCloudRuntimeServiceRoutes } from "./cloud-workspaces/runtime-service-routes.js";
 import { DEFAULT_SLOW_REQUEST_LOG_MS, requestTiming } from "./request-timing.js";
+import {
+  DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
+  engineLifecycleRequestsPerMinute,
+} from "./cloud-workspaces/engine-heartbeat.js";
 
 export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
@@ -333,7 +337,10 @@ export function createApp(
     // address must never exhaust that budget.
     const engineLifecyclePreAuthLimit = rateLimit(
       "cloud-workspace-engine-lifecycle-preauth",
-      600,
+      engineLifecycleRequestsPerMinute(
+        config.cloudWorkspaces?.setupExecution?.engineHeartbeatIntervalMs ??
+          DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
+      ),
       60_000,
       internalClientIp,
     );
