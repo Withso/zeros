@@ -714,6 +714,16 @@ suite("managed compute lifecycle admission", () => {
     expect(provider.createWithComputeLease).toHaveBeenCalledTimes(1);
     expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
   });
+  it("stops an allocation billed to another wallet instead of running it to its TTL", async () => {
+    await grant();
+    provider.find.mockResolvedValue([]);
+    provider.createWithComputeLease.mockRejectedValueOnce(new CloudProviderError("provider_billing_scope_mismatch", "Wrong wallet", false));
+    await expect(coordinator.allocate(input, asProvider(), null)).rejects.toMatchObject({ code: "provider_billing_scope_mismatch" });
+    const lease = (await pool.query("SELECT state,stop_intent_id FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0];
+    expect(lease.state).toBe("draining");
+    expect(lease.stop_intent_id).not.toBeNull();
+    expect(provider.createWithComputeLease).toHaveBeenCalledTimes(1);
+  });
   it("preserves funded wake retries while the existing VM is still archived", async () => {
     await grant();
     await pool.query("UPDATE cloud_workspace_lifecycle_intents SET operation='wake' WHERE id=$1", [input.intentId]);

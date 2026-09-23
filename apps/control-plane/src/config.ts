@@ -20,6 +20,7 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
+import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -332,10 +333,7 @@ const CloudWorkspaceEnvSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/)
     .optional(),
-  BOAT_BILLING_ORG: z
-    .string()
-    .regex(/^(?:team_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-    .optional(),
+  BOAT_BILLING_ORG: z.string().regex(BOAT_BILLING_ORG_PATTERN).optional(),
   BOAT_SNAPSHOT_ID: z
     .string()
     .regex(

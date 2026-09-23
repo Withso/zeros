@@ -1,6 +1,19 @@
 import { generateKeyPairSync } from "node:crypto";
 import type pg from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const boatClients = vi.hoisted(() => [] as Array<{ billingOrg?: string }>);
+vi.mock("./boat-client.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./boat-client.js")>();
+  class RecordingBoatApiClient extends actual.BoatApiClient {
+    constructor(options: ConstructorParameters<typeof actual.BoatApiClient>[0]) {
+      super(options);
+      boatClients.push({ billingOrg: options.billingOrg });
+    }
+  }
+  return { ...actual, BoatApiClient: RecordingBoatApiClient };
+});
+
 import { loadConfig } from "../config.js";
 import { createCloudProviderDeployment } from "./provider-deployment.js";
 import { BoatSetupCommandRunner } from "./boat-setup-runner.js";
@@ -61,6 +74,14 @@ describe("production cloud provider composition", () => {
       throw new Error("unexpected database access");
     }),
   } as unknown as pg.Pool;
+  it("gives every managed Boat client the configured billing wallet", () => {
+    boatClients.length = 0;
+    createCloudProviderDeployment(pool, config());
+    expect(boatClients.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(boatClients.map((client) => client.billingOrg))).toEqual(
+      new Set(["team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41"]),
+    );
+  });
   it("does not contact providers at startup and keeps managed Boat out of Daytona BYO", async () => {
     const fetcher = vi.fn(() => {
       throw new Error("unexpected provider request");

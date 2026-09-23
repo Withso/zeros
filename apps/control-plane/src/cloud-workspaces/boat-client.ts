@@ -4,13 +4,15 @@ import type { CloudProviderCreateRejectionCode } from "./provider-operation-stor
 export type BoatApiClientOptions = {
   apiKey: string;
   timeoutMs: number;
-  /** Boat wallet billed for new sandboxes: an organization id or the account's
-   * own personal id. Without it Boat uses the account's mutable active wallet. */
+  /** Boat organization wallet billed for new sandboxes. Without it Boat uses
+   * the account's mutable, dashboard-selected wallet. */
   billingOrg?: string;
   fetch?: typeof fetch;
 };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
-const BILLING_ORG = /^(?:team_)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** Boat reports an organization-billed sandbox's wallet as its `team`. */
+export const BOAT_BILLING_ORG_PATTERN =
+  /^team_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REJECTION_FIELDS = new Set(["ok", "type", "status", "code", "message", "error", "requestId"]);
 const REJECTION_ERROR_FIELDS = new Set(["code", "message", "status", "details"]);
 // This is the account-limit document observed with the qualified trial refusal.
@@ -99,7 +101,7 @@ export class BoatApiClient {
       options.timeoutMs > 610_000
     )
       throw new Error("Invalid Boat request deadline");
-    if (options.billingOrg !== undefined && !BILLING_ORG.test(options.billingOrg))
+    if (options.billingOrg !== undefined && !BOAT_BILLING_ORG_PATTERN.test(options.billingOrg))
       throw new Error("Invalid Boat billing organization");
     this.fetcher = options.fetch ?? fetch;
   }
@@ -111,6 +113,8 @@ export class BoatApiClient {
       body?: unknown;
       idempotencyKey?: string;
       confirmDelete?: string;
+      /** Bill this sandbox creation to the configured wallet. */
+      billingScope?: boolean;
       signal?: AbortSignal;
     } = {},
   ): Promise<Record<string, unknown>> {
@@ -131,9 +135,12 @@ export class BoatApiClient {
     if (input.confirmDelete)
       headers.set("x-ascii-confirm-delete", input.confirmDelete);
     // A sandbox keeps the wallet chosen at creation. The request scope bills
-    // the create without changing its body, so journaled digests still replay.
-    if (this.options.billingOrg && path === "/sandboxes" && input.method === "POST")
+    // the create without changing its body.
+    if (input.billingScope) {
+      if (!this.options.billingOrg || path !== "/sandboxes" || input.method !== "POST")
+        throw new Error("Invalid Boat billing scope");
       headers.set("x-boat-org", this.options.billingOrg);
+    }
     const signal = AbortSignal.any([
       AbortSignal.timeout(this.options.timeoutMs),
       ...(input.signal ? [input.signal] : []),

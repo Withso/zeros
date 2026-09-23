@@ -617,6 +617,7 @@ describe("cloud workspace backend configuration", () => {
       { BOAT_BILLING_ORG: "Zeros" },
       { BOAT_BILLING_ORG: "team_" },
       { BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41\n" },
+      { BOAT_BILLING_ORG: "71526620-8a69-44ca-bbef-1a71267c4350" },
       { BOAT_SNAPSHOT_ID: "mutable/latest" },
       { ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/arm64" },
       { CLOUD_WORKSPACE_CPU_MILLICORES: "2000" },
@@ -624,14 +625,6 @@ describe("cloud workspace backend configuration", () => {
       expect(() => loadConfig({ ...env, ...overrides })).toThrow(
         /cloud workspace/i,
       );
-  });
-
-  it("accepts a personal Boat wallet as an explicit billing scope", () => {
-    const cloud = loadConfig({
-      ...boatEnv(),
-      BOAT_BILLING_ORG: "71526620-8a69-44ca-bbef-1a71267c4350",
-    }).cloudWorkspaces!;
-    expect(cloud.boat?.billingOrg).toBe("71526620-8a69-44ca-bbef-1a71267c4350");
   });
 
   it("gives Daytona BYO an independent complete image profile beside managed Boat", () => {

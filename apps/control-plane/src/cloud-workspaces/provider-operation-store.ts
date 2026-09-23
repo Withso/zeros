@@ -28,6 +28,9 @@ export interface CloudProviderOperationStore {
     input: CloudProviderIdentity & {
       idempotencyKey: string;
       requestSha256: string;
+      /** An existing tracked row may retain this earlier request digest; the
+       * returned record's requestSha256 identifies which request it holds. */
+      compatibleRequestSha256?: string;
       /** Old/untracked rows retain their exact original digest and key. */
       legacyRequestSha256?: string;
     },
@@ -134,11 +137,13 @@ export class DatabaseCloudProviderOperationStore implements CloudProviderOperati
     input: CloudProviderIdentity & {
       idempotencyKey: string;
       requestSha256: string;
+      compatibleRequestSha256?: string;
       legacyRequestSha256?: string;
     },
   ): Promise<CloudProviderOperationRecord> {
     if (
       !/^[a-f0-9]{64}$/.test(input.requestSha256) ||
+      (input.compatibleRequestSha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.compatibleRequestSha256)) ||
       (input.legacyRequestSha256 !== undefined && !/^[a-f0-9]{64}$/.test(input.legacyRequestSha256)) ||
       !/^[a-zA-Z0-9._:-]{1,255}$/.test(input.idempotencyKey)
     )
@@ -168,8 +173,10 @@ export class DatabaseCloudProviderOperationStore implements CloudProviderOperati
         [this.provider, this.accountScope, input.workspaceId, input.generation],
       );
       const row = result.rows[0];
-      const expected = row?.create_attempts_tracked ? input.requestSha256 : (input.legacyRequestSha256 ?? input.requestSha256);
-      if (!row || row.request_sha256 !== expected) throw conflict();
+      const accepted = row?.create_attempts_tracked
+        ? [input.requestSha256, input.compatibleRequestSha256]
+        : [input.legacyRequestSha256 ?? input.requestSha256];
+      if (!row || !accepted.includes(row.request_sha256)) throw conflict();
       // A new wake intent may retry the same allocation. Its key must never
       // replace the original provider key, even when the original reply was lost.
       return document(row);

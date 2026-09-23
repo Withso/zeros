@@ -144,15 +144,19 @@ see [compute credits](compute-credits.md). CPU/memory default to 4000 millicores
 `linux/amd64`. Never change the account scope when rotating a key in the same
 account, or reuse an old scope for a different provider account.
 
-`BOAT_BILLING_ORG` names the Boat wallet billed for every new sandbox: an
-organization `team_…` id, or the account's own id for personal billing. Without
-it Boat bills the account's dashboard-selected wallet, which can change outside
-Zeros. The create sends it as the `X-Boat-Org` request scope, not in the body, so
-journaled request digests and idempotent replays stay byte-identical. A sandbox
-keeps its creation wallet for resume and usage. When Boat reports a different
-organization, or none, for an organization-billed create, the adapter keeps the
-bound cleanup identity and refuses the allocation. The wallet is billing scope,
-not the journal's account identity; changing it does not change the account scope.
+`BOAT_BILLING_ORG` names the Boat organization wallet (`team_…`) billed for every
+new sandbox. Without it Boat bills the account's dashboard-selected wallet, which
+can change outside Zeros. A create sends it as the `X-Boat-Org` request scope; the
+body is unchanged. The wallet is part of the journaled request digest, so a retry
+replays exactly the scope it was first sent with. Creates journaled before the
+wallet was configured replay without it, and a changed wallet conflicts before
+another dispatch. A sandbox keeps its creation wallet for resume and usage.
+Compute is granted only after Boat reports the configured organization for the
+allocation, on a fresh create, a create retry and every resume. An unreported
+wallet is read back once and otherwise refused. A mismatch keeps the bound
+cleanup identity and requests a managed Stop; inspection, Stop and deletion never
+depend on the wallet. The wallet is billing scope, not the journal's account
+identity, so changing it does not change `BOAT_ACCOUNT_SCOPE`.
 
 Daytona BYO beside Boat requires `DAYTONA_BYO_ENABLED=true` and independent
 `DAYTONA_BYO_SNAPSHOT_ID`, `DAYTONA_BYO_SOURCE_COMMIT`,

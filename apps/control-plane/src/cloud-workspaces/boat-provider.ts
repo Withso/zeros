@@ -250,24 +250,25 @@ export class BoatWorkspaceProvider
       noEnv: true,
       env: {},
     };
+    const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+    const unscoped = digest({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 });
+    // The wallet is part of the journaled request: a retry replays the scope
+    // it was first sent with, and a changed wallet conflicts before dispatch.
+    const billingOrg = this.options.billingOrg;
+    const scoped = billingOrg
+      ? digest({ imageRef: input.imageRef, body, billingOrg, createAttemptJournalVersion: 2 })
+      : unscoped;
     const record = await this.options.operations.prepareCreate({
       workspaceId: input.workspaceId,
       generation: input.generation,
       idempotencyKey: input.idempotencyKey,
-      requestSha256: createHash("sha256")
-        .update(JSON.stringify({ imageRef: input.imageRef, body, createAttemptJournalVersion: 1 }))
-        .digest("hex"),
-      legacyRequestSha256: createHash("sha256")
-        .update(JSON.stringify({ imageRef: input.imageRef, body }))
-        .digest("hex"),
+      requestSha256: scoped,
+      ...(billingOrg ? { compatibleRequestSha256: unscoped } : {}),
+      legacyRequestSha256: digest({ imageRef: input.imageRef, body }),
     });
     if (record.deletionRequestedAt || record.deletedAt || record.createClosedAt)
       throw failure("provider_generation_retired");
-    if (record.resourceId) {
-      const existing = await this.inspect(record.resourceId);
-      if (!existing) throw failure("provider_generation_retired");
-      return existing;
-    }
+    if (record.resourceId) return this.allocatableResource(record.resourceId);
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
       throw failure("provider_create_outcome_unknown");
@@ -275,15 +276,12 @@ export class BoatWorkspaceProvider
     // another request using the same key receives a definite refusal later.
     const attemptId = randomUUID();
     const dispatch = await this.options.operations.beginCreateAttempt(input, attemptId);
-    if (dispatch.resourceId) {
-      const existing = await this.inspect(dispatch.resourceId);
-      if (!existing) throw failure("provider_generation_retired");
-      return existing;
-    }
+    if (dispatch.resourceId) return this.allocatableResource(dispatch.resourceId);
     let response: Record<string, unknown>;
     try {
       response = await this.client.request("/sandboxes", {
         method: "POST", body, idempotencyKey: record.idempotencyKey,
+        ...(billingOrg && record.requestSha256 === scoped ? { billingScope: true } : {}),
       });
     } catch (error) {
       if (error instanceof BoatCreateRejectedError)
@@ -296,19 +294,32 @@ export class BoatWorkspaceProvider
       .object({ id: z.string().regex(RESOURCE_ID) })
       .safeParse(response.sandbox);
     if (!id.success) throw failure("provider_response_invalid");
-    const bound = await this.options.operations.bindResource(input, id.data.id);
-    this.assertBillingScope(response.sandbox);
-    return this.resource(bound, response.sandbox);
+    await this.options.operations.bindResource(input, id.data.id);
+    return this.allocatableResource(id.data.id, response.sandbox);
   }
 
-  /** Boat reports an organization-billed sandbox's wallet. A create billed
-   * elsewhere keeps its bound cleanup identity but is never admitted. */
-  private assertBillingScope(value: unknown): void {
+  private billingScope(value: unknown): "match" | "mismatch" | "unknown" {
     const org = this.options.billingOrg;
-    if (!org?.startsWith("team_")) return;
+    if (!org) return "match";
     const parsed = BillingScopeSchema.safeParse(value);
-    if (!parsed.success || (parsed.data.team !== undefined && parsed.data.team?.id !== org))
+    if (!parsed.success) return "mismatch";
+    if (parsed.data.team === undefined) return "unknown";
+    return parsed.data.team?.id === org ? "match" : "mismatch";
+  }
+
+  /** Compute is granted only to an allocation positively billed to the
+   * configured wallet. A mismatch keeps its bound cleanup identity; inspection,
+   * Stop and deletion never depend on the wallet. */
+  private async allocatableResource(resourceId: string, value?: unknown): Promise<CloudProviderResource> {
+    const record = await this.owned(resourceId);
+    if (record.deletionRequestedAt || record.deletedAt)
+      throw failure("provider_generation_retired");
+    let sandbox = value;
+    if (sandbox === undefined || this.billingScope(sandbox) === "unknown")
+      sandbox = (await this.client.request(`/sandboxes/${resourceId}`)).sandbox;
+    if (this.billingScope(sandbox) !== "match")
       throw failure("provider_billing_scope_mismatch");
+    return this.resource(record, sandbox);
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
@@ -373,8 +384,7 @@ export class BoatWorkspaceProvider
     const record = await this.owned(resourceId);
     if (record.deletionRequestedAt || record.deletedAt)
       throw failure("provider_generation_retired");
-    const current = await this.inspect(resourceId);
-    if (!current) throw failure("provider_generation_retired");
+    const current = await this.allocatableResource(resourceId);
     if (current.state === "running" || current.state === "provisioning")
       return current;
     if (current.state === "archiving")
