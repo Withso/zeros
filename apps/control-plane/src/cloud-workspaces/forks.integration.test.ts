@@ -246,7 +246,8 @@ d("cloud workspace immutable forks", () => {
     await assertDatabaseLockOrder(pool, {
       parentSql: 'SELECT id FROM organizations WHERE id=$1 FOR UPDATE', parentId: fixture.organizationId,
       childSql: 'SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE', childId: fixture.workspaceId,
-      parentQuery: /FROM organizations|INSERT INTO workspace_content_heads/,
+      // The engine authority function takes the organization lock first.
+      parentQuery: /cloud_workspace_engine_authority_current|FROM organizations|INSERT INTO workspace_content_heads/,
       action: controlled => new DatabaseCloudWorkspaceContentService({pool: controlled, workosEnabled: false}).append({
         ...engine(), expectedRevision: 0, idempotencyKey: randomUUID(), gitBaseCommit: null, gitHeadRef: null,
         mutations: [{operation: 'upsert', path: 'scope.txt', entryType: 'file', mode: 33188,
