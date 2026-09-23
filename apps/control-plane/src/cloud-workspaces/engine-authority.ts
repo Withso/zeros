@@ -114,8 +114,10 @@ export async function assertCurrentCloudEngineAuthority(
     engineInstanceId: string;
     heartbeatToken: string;
     workosEnabled: boolean;
-    /** Pure reads share the same revocation fence without serializing readers.
-     * Mutations retain exclusive workspace/engine locks by default. */
+    /** Reads, and requests that write only rows they lock themselves (event
+     * appends, device admission renewals, approval rechecks), share the same
+     * revocation fence without serializing each other. Other mutations retain
+     * exclusive workspace/engine locks by default. */
     lock?: "share" | "update";
   },
 ): Promise<CurrentCloudEngineAuthority> {

@@ -155,7 +155,9 @@ export class DatabaseCloudWorkspaceActorSessionService {
   async consume(input:CloudActorEngineScope & {token:string;renew?:boolean}) {
     if (!CLOUD_ACTOR_TOKEN_PATTERN.test(input.token)) rejected();
     return withSystemTx(this.options.pool,async tx=>{
-      const engine = await assertCurrentCloudEngineAuthority(tx,{...input,workosEnabled:this.options.workosEnabled});
+      // Each device renews every few seconds and writes only its session row,
+      // so admissions share the revocation fence instead of queueing engine work.
+      const engine = await assertCurrentCloudEngineAuthority(tx,{...input,workosEnabled:this.options.workosEnabled,lock:"share"});
       const row = (await tx.query<Session>(`SELECT session.* FROM cloud_workspace_actor_sessions session
         JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id AND engine.actor_protocol_version=2
         WHERE session.token_hash=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4

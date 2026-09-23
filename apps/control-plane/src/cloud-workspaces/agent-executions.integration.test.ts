@@ -199,6 +199,23 @@ d("private provider execution leases",()=>{
     await expect(service.admit(engine(),admission())).rejects.toMatchObject({status:403});
     expect((await pool.query("SELECT 1 FROM cloud_agent_execution_leases")).rowCount).toBe(0);
   });
+  it("authorizes an approval beside other engine work but waits behind a revocation",async()=>{
+    const request=admission();await service.admit(engine(),request);
+    const lockPool=new pg.Pool({connectionString:process.env.TEST_DATABASE_URL,max:1,options:"-c lock_timeout=250ms"});
+    const under=async(mode:"SHARE"|"UPDATE")=>{
+      const held=await pool.connect();
+      try {
+        await held.query("BEGIN");
+        await held.query(`SELECT id FROM cloud_workspaces WHERE id=$1 FOR ${mode}`,[fixture.workspaceId]);
+        await held.query(`SELECT id FROM cloud_workspace_engine_instances WHERE id=$1 FOR ${mode}`,[fixture.engineInstanceId]);
+        return await new DatabaseCloudAgentExecutionService(lockPool,encryption,false).authorizeAction(engine(),request.executionId,actorSessionId);
+      } finally { await held.query("ROLLBACK"); held.release(); }
+    };
+    try {
+      await expect(under("SHARE")).resolves.toEqual({authorized:true,executionId:request.executionId,actorSessionId});
+      await expect(under("UPDATE")).rejects.toMatchObject({code:"55P03"});
+    } finally { await lockPool.end(); }
+  });
   it("requires current actor and credential-owner consent at every tool authorization",async()=>{
     const lease=await service.admit(engine(),admission());await credentials.revokeDelegation(owner.id,delegationId);
     await expect(service.validate(engine(),lease.leaseId)).rejects.toMatchObject({status:403});

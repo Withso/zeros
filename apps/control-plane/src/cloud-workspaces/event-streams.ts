@@ -36,8 +36,9 @@ export class DatabaseCloudWorkspaceEventService {
   constructor(private readonly options: { pool: pg.Pool; workosEnabled?: boolean }) {}
 
   private async stream(tx: Tx, scope: CloudCommandEngineScope, readOnly: boolean): Promise<Stream> {
-    await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true,
-      ...(readOnly ? { lock: "share" as const } : {}) });
+    // The stream row lock orders appends; appends write no workspace or
+    // engine row, so they share the revocation fence with other engine work.
+    await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true, lock: "share" });
     const old = (await tx.query<Stream>(`SELECT engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256
       FROM cloud_workspace_event_streams WHERE workspace_id=$1 FOR ${readOnly ? "SHARE" : "UPDATE"}`, [scope.workspaceId])).rows[0];
     if (old?.engine_instance_id === scope.engineInstanceId) return old;

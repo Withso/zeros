@@ -49,22 +49,23 @@ d("bounded cloud event replay", () => {
     } finally { await held.query("ROLLBACK"); held.release(); await readPool.end(); }
   });
 
-  it("keeps appends exclusive against a held workspace or engine share lock", async () => {
+  it("appends beside other engine work but waits behind a revocation", async () => {
     await service.request(scope, batch());
     const lockPool = new pg.Pool({ connectionString: process.env.TEST_DATABASE_URL, max: 1, options: "-c lock_timeout=250ms" });
+    const hold = async (mode: "SHARE" | "UPDATE", start: number) => {
+      const held = await pool.connect();
+      try {
+        await held.query("BEGIN");
+        await held.query(`SELECT id FROM cloud_workspaces WHERE id=$1 FOR ${mode}`, [scope.workspaceId]);
+        await held.query(`SELECT id FROM cloud_workspace_engine_instances WHERE id=$1 FOR ${mode}`, [scope.engineInstanceId]);
+        return await new DatabaseCloudWorkspaceEventService({ pool: lockPool }).request(scope, batch(start));
+      } finally { await held.query("ROLLBACK"); held.release(); }
+    };
     try {
-      for (const table of ["cloud_workspaces", "cloud_workspace_engine_instances"]) {
-        const held = await pool.connect();
-        try {
-          await held.query("BEGIN");
-          await held.query(`SELECT id FROM ${table} WHERE id=$1 FOR SHARE`,
-            [table === "cloud_workspaces" ? scope.workspaceId : scope.engineInstanceId]);
-          await expect(new DatabaseCloudWorkspaceEventService({ pool: lockPool }).request(scope, batch(3)))
-            .rejects.toMatchObject({ code: "55P03" });
-        } finally { await held.query("ROLLBACK"); held.release(); }
-      }
+      await expect(hold("SHARE", 3)).resolves.toMatchObject({ head: 4, replayed: false });
+      await expect(hold("UPDATE", 5)).rejects.toMatchObject({ code: "55P03" });
     } finally { await lockPool.end(); }
-    expect(await service.request(scope, batch(3))).toMatchObject({ head: 4, replayed: false });
+    expect(await service.request(scope, batch(5))).toMatchObject({ head: 6, replayed: false });
   });
 
   it("does not create stream state merely to replay an empty generation", async () => {
