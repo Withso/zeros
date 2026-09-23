@@ -252,7 +252,9 @@ Inside the production image use the supported
 `--execute` only after copying the exact target-bound approval from the
 read-only plan.
 The Organization byte limit covers physical tenant blobs, detached-upload
-deletion tombstones, and copy-on-write rotation reservations; the workspace
+deletion tombstones, and copy-on-write rotation reservations. Physical blobs
+include content deleted within the 48-hour restore window, which keeps
+counting until collection; the workspace
 byte limit covers logical unique blob reservations and cannot exceed the
 Organization byte limit. The command
 rejects an incoherent pair or a limit below either current measure and writes

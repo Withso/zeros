@@ -272,7 +272,11 @@ the Organization. A unique abandoned upload keeps both its logical reservation
 and Organization physical charge until physical collection succeeds.
 Maintenance also repairs stale reference reservations, reconciles reference
 counts, and applies the existing age/retention/legal-hold garbage-collection
-rules.
+rules. When a blob loses its last reference, including through a count repair,
+migration `0098` sets `retention_until` at least 48 hours ahead, matching the
+PlanetScale backup retention that bounds point-in-time restore. A restore to
+any recoverable point therefore still finds every object its rows reference.
+Erasure paths that mark a blob deleted are not retained.
 
 Key rotation reserves one additional physical object before conditionally
 writing the target ciphertext. A failed or crashed attempt keeps that

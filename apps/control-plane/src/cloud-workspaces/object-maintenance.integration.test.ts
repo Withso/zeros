@@ -1051,6 +1051,13 @@ d("workspace object maintenance", () => {
       [blob.id],
     );
     expect(await service.reconcileReferenceCounts()).toBe(1);
+    // A repaired count that reaches zero also keeps the object for the
+    // database restore window before collection.
+    expect(await service.collectGarbageOnce(60_000)).toBe(false);
+    await pool.query(
+      `UPDATE workspace_blobs SET retention_until = now() - interval '1 second' WHERE id = $1`,
+      [blob.id],
+    );
     expect(await service.collectGarbageOnce(60_000)).toBe(true);
     expect(
       (
@@ -1059,6 +1066,71 @@ d("workspace object maintenance", () => {
         ])
       ).rows[0],
     ).toEqual({ state: "deleted" });
+  });
+
+  it("keeps a dereferenced object for the 48-hour database restore window", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const store = new MemoryCloudWorkspaceObjectStore();
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: store, encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false,
+    });
+    const scope = {
+      workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+      engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken,
+    };
+    const bytes = Buffer.from("restorable", "utf8");
+    const blob = await service.put({ ...scope, bytes });
+    // Any path that drops the last reference (history pruning, checkpoint
+    // expiry, repair) passes through the same row transition.
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 2 WHERE id = $1`, [blob.id]);
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    expect((await pool.query(`SELECT retention_until FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0])
+      .toEqual({ retention_until: null });
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 0 WHERE id = $1`, [blob.id]);
+    const retained = (await pool.query<{ reference_count: string; hours: number }>(
+      `SELECT reference_count, (extract(epoch FROM retention_until - now()) / 3600)::float8 AS hours
+       FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0]!;
+    expect(retained.reference_count).toBe("0");
+    expect(retained.hours).toBeGreaterThan(47.9);
+    expect(retained.hours).toBeLessThanOrEqual(48);
+    await pool.query(
+      `UPDATE workspace_blobs SET created_at = now() - interval '30 days' WHERE id = $1`,
+      [blob.id],
+    );
+    await pool.query(
+      `UPDATE workspace_blob_storage_reservations SET expires_at = now() - interval '1 second'
+       WHERE blob_id = $1 AND state = 'uploading'`,
+      [blob.id],
+    );
+    // Aged, unreferenced and unreserved: only the restore window keeps it.
+    expect(await service.collectGarbageOnce(60_000)).toBe(false);
+    expect(await service.getSystem({ blobId: blob.id, organizationId: fixture.organizationId })).toEqual(bytes);
+    // Referencing it again and dropping it once more extends, never shortens.
+    await pool.query(`UPDATE workspace_blobs SET retention_until = now() + interval '72 hours' WHERE id = $1`, [blob.id]);
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 0 WHERE id = $1`, [blob.id]);
+    expect((await pool.query(`SELECT (extract(epoch FROM retention_until - now()) / 3600)::float8 AS hours
+      FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0].hours).toBeGreaterThan(71.9);
+    await pool.query(`UPDATE workspace_blobs SET retention_until = now() - interval '1 second' WHERE id = $1`, [blob.id]);
+    expect(await service.collectGarbageOnce(60_000)).toBe(true);
+  });
+
+  it("does not retain an object that an erasure marks deleted", async () => {
+    const fixture = await seedReadyCloudWorkspace(pool);
+    const service = new DatabaseCloudWorkspaceBlobService({
+      pool, objectStore: new MemoryCloudWorkspaceObjectStore(), encryptionKeyV1: randomBytes(32).toString("base64url"), workosEnabled: false,
+    });
+    const blob = await service.put({
+      workspaceId: fixture.workspaceId, organizationId: fixture.organizationId, generation: 1,
+      engineInstanceId: fixture.engineInstanceId, heartbeatToken: fixture.heartbeatToken, bytes: Buffer.from("erased", "utf8"),
+    });
+    await pool.query(`UPDATE workspace_blobs SET reference_count = 1 WHERE id = $1`, [blob.id]);
+    await pool.query(
+      `UPDATE workspace_blobs SET state = 'deleted', deleted_at = now(), reference_count = 0 WHERE id = $1`,
+      [blob.id],
+    );
+    expect((await pool.query(`SELECT retention_until FROM workspace_blobs WHERE id = $1`, [blob.id])).rows[0])
+      .toEqual({ retention_until: null });
   });
 
   it("retains physical quota until a detached pending object is deleted", async () => {
