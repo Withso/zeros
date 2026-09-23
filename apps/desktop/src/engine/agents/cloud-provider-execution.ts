@@ -26,7 +26,8 @@ export function cloudProviderExecution(boundary?:PreparedBoundary):CloudProvider
  * its lease, already carrying their scoped credentials. User and repository
  * MCP registrations never enter it; other executions keep their registry. */
 export function executionMcpServers(execution:CloudProviderExecution|null,registrations:readonly McpServerRegistration[]|undefined):McpServerRegistration[]|undefined{
-  return execution?[...execution.productServers]:registrations?[...registrations]:undefined;
+  // A deep copy keeps the lease-scoped admitted snapshot immutable to callers.
+  return execution?structuredClone([...(execution.productServers??[])]):registrations?[...registrations]:undefined;
 }
 export interface CloudAgentExecutionFactory {
   prepare(input:{admission:CloudAgentExecutionAdmission;conversationId:string;workload:PreparedBoundary;cwd:string;signal:AbortSignal;

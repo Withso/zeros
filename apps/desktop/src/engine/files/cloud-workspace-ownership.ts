@@ -2,8 +2,8 @@ import { closeSync, constants, fchownSync, fstatSync, openSync, realpathSync } f
 import path from "node:path";
 import { loadCloudWorkerConfiguration, type CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 
-// Fixed by the isolated (v2 and later) image layout, outside the engine's
-// private state/home roots.
+// Fixed by the isolated (v2/v3) image layout, outside the engine's private
+// state/home roots.
 const WORKSPACE_ROOT = "/srv/zeros/workspace";
 type Identity = { uid: number; gid: number };
 
@@ -46,12 +46,13 @@ export class CloudWorkspaceOwnership {
   }
 }
 
-/** Every isolated worker profile (v2 and later) runs the tenant as its own
- * identity, so engine-authored checkout files must be published to it. */
+/** Isolated worker profiles run the tenant as its own identity, so
+ * engine-authored checkout files must be published to it. A new profile opts
+ * in here; the contract test pins the shipped image profile to publication. */
 export function publishesCloudWorkspaceOwnership(
   worker: CloudWorkerConfiguration | null | undefined,
 ): worker is CloudWorkerConfiguration {
-  return !!worker && worker.version >= 2;
+  return worker?.version === 2 || worker?.version === 3;
 }
 
 let ownership: CloudWorkspaceOwnership | null | undefined;
