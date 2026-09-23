@@ -24,6 +24,30 @@ d("bounded cloud event replay", () => {
       cloudStream: { streamId: scope.engineInstanceId, sequence } } });
   const batch = (start = 1, count = 2) => ({ kind: "append" as const, batchId: randomUUID(), events: Array.from({ length: count }, (_, i) => event(start + i)) });
   const replay = (after = 0, streamId = scope.engineInstanceId) => service.request(scope, { kind: "replay", streamId, after });
+  const retained = async () => (await withSystemTx(pool, tx => tx.query<{ count: number; first: string; stream_first: string }>(
+    `SELECT count(*)::integer AS count,min(sequence) AS first,(SELECT first_retained FROM cloud_workspace_event_streams
+      WHERE workspace_id=$1) AS stream_first FROM cloud_workspace_stream_events WHERE workspace_id=$1`, [scope.workspaceId]))).rows[0]!;
+  /** Every engine request crosses a database round trip per statement while
+   * it holds the workspace lock, so the append path keeps an exact budget. */
+  const statementLog = (target: pg.Pool) => {
+    const statements: string[] = [];
+    const logged = new Proxy(target, { get(owner, property) {
+      if (property === "connect") return async () => {
+        const client = await owner.connect();
+        return new Proxy(client, { get(connection, field) {
+          if (field === "query") return (...args: unknown[]) => {
+            statements.push(String(args[0]));
+            return Reflect.apply(connection.query, connection, args);
+          };
+          const value = Reflect.get(connection, field);
+          return typeof value === "function" ? value.bind(connection) : value;
+        } });
+      };
+      const value = Reflect.get(owner, property);
+      return typeof value === "function" ? value.bind(owner) : value;
+    } });
+    return { statements, pool: logged };
+  };
 
   it("replays without taking exclusive workspace or stream locks", async () => {
     await service.request(scope, batch());
@@ -70,6 +94,25 @@ d("bounded cloud event replay", () => {
     expect(await replay()).toMatchObject({ head: 1, cursor: 1, events: current.events });
   });
 
+  it("appends a batch in one statement after the authority fence", async () => {
+    await service.request(scope, batch());
+    const log = statementLog(pool);
+    await expect(new DatabaseCloudWorkspaceEventService({ pool: log.pool }).request(scope, batch(3)))
+      .resolves.toMatchObject({ head: 4, replayed: false });
+    // BEGIN, parent, workspace and engine locks, one fence, the stream lock,
+    // one write, COMMIT.
+    expect(log.statements).toHaveLength(8);
+    expect(await replay()).toMatchObject({ head: 4, cursor: 4 });
+  });
+
+  it("prunes by event count and records the oldest retained sequence exactly", async () => {
+    let next = 1;
+    for (let i = 0; i < 79; i++) { await service.request(scope, batch(next, 128)); next += 128; }
+    expect(await retained()).toEqual({ count: 10000, first: "113", stream_first: "113" });
+    await expect(replay(111)).rejects.toMatchObject({ code: "event_cursor_expired" });
+    expect(await replay(112)).toMatchObject({ head: 10112, firstRetained: 113, cursor: 240 });
+  });
+
   it("commits contiguous batches and resolves lost acknowledgements without duplicating events", async () => {
     const b = batch(); expect(await service.request(scope, b)).toMatchObject({ head: 2, replayed: false });
     expect(await service.request(scope, b)).toMatchObject({ head: 2, replayed: true });
@@ -100,6 +143,9 @@ d("bounded cloud event replay", () => {
       FROM cloud_workspace_stream_events WHERE workspace_id=$1`, [scope.workspaceId]));
     expect(Number(rows.rows[0].bytes)).toBeLessThanOrEqual(16 * 1024 * 1024);
     expect(Number(rows.rows[0].count)).toBeLessThan(72);
+    const bounded = await retained();
+    expect(bounded.stream_first).toBe(bounded.first);
+    expect(Number(bounded.first) + bounded.count - 1).toBe(72);
     await expect(replay()).rejects.toMatchObject({ code: "event_cursor_expired" });
     const result = await replay(70);
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024 * 1024 + 2048);

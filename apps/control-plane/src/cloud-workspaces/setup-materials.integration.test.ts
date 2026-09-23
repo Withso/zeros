@@ -679,7 +679,7 @@ d("cloud workspace setup material redemption", () => {
       audience: "zeros-cloud-workspace-engine-registration-v1",
       engineInstanceId: materials.engine.instanceId,
       durableRecordConnected: true,
-      heartbeat: { endpoint: HEARTBEAT_AUDIENCE, intervalMs: 30_000 },
+      heartbeat: { endpoint: HEARTBEAT_AUDIENCE, intervalMs: 10_000 },
     });
     expect(registration.heartbeat.token).toMatch(/^zwh_[A-Za-z0-9_-]{43}$/);
 

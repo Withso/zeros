@@ -13,6 +13,11 @@ export class CloudWorkspaceEngineAuthorityError extends Error {
   }
 }
 
+// $1 engine instance, $2 WorkOS enabled.
+const ENGINE_AUTHORITY_LIVE = `SELECT 1 FROM cloud_workspace_engine_instances
+    WHERE id=$1 AND lease_expires_at>clock_timestamp()
+      AND cloud_workspace_runtime_authority_live(workspace_id,generation,account_user_id,$2)`;
+
 /** Only after assertCurrentCloudEngineAuthority has locked this engine and its
  * parents in the same transaction. Later credential locks can consume the
  * remaining lease time even though those authority rows cannot change. */
@@ -21,10 +26,7 @@ export async function assertCloudEngineAuthorityDeadline(
   engineInstanceId: string,
   workosEnabled: boolean,
 ): Promise<void> {
-  const live = await tx.query(`SELECT 1 FROM cloud_workspace_engine_instances
-    WHERE id=$1 AND lease_expires_at>clock_timestamp()
-      AND cloud_workspace_runtime_authority_live(workspace_id,generation,account_user_id,$2)`,
-  [engineInstanceId,workosEnabled]);
+  const live = await tx.query(ENGINE_AUTHORITY_LIVE, [engineInstanceId,workosEnabled]);
   if (live.rowCount !== 1) throw new CloudWorkspaceEngineAuthorityError();
 }
 
@@ -176,26 +178,33 @@ export async function assertCurrentCloudEngineAuthority(
   ) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
-  const completedFinalCheckpoint = await tx.query(
-    `SELECT 1
-     FROM workspace_checkpoint_requests checkpoint_request
-     JOIN cloud_workspace_lifecycle_intents intent
-       ON intent.id = checkpoint_request.lifecycle_intent_id
-     WHERE checkpoint_request.workspace_id = $1
-       AND checkpoint_request.org_id = $2
-       AND checkpoint_request.generation = $3
-       AND checkpoint_request.state = 'succeeded'
-       AND intent.state IN ('queued', 'observing', 'dispatching')
-       AND intent.operation IN ('stop', 'archive', 'delete')
-     LIMIT 1`,
-    [input.workspaceId, input.organizationId, input.generation],
+  // SELECT ... FOR UPDATE may evaluate its predicate before waiting. Once both
+  // scope and engine locks are held, one round trip rechecks the deadlines and
+  // that no completed final checkpoint has fenced this generation.
+  const fence = await tx.query<{ live: boolean; fenced: boolean }>(
+    `SELECT EXISTS (${ENGINE_AUTHORITY_LIVE}) AS live, EXISTS (
+       SELECT 1
+       FROM workspace_checkpoint_requests checkpoint_request
+       JOIN cloud_workspace_lifecycle_intents intent
+         ON intent.id = checkpoint_request.lifecycle_intent_id
+       WHERE checkpoint_request.workspace_id = $3
+         AND checkpoint_request.org_id = $4
+         AND checkpoint_request.generation = $5
+         AND checkpoint_request.state = 'succeeded'
+         AND intent.state IN ('queued', 'observing', 'dispatching')
+         AND intent.operation IN ('stop', 'archive', 'delete')
+     ) AS fenced`,
+    [
+      input.engineInstanceId,
+      input.workosEnabled,
+      input.workspaceId,
+      input.organizationId,
+      input.generation,
+    ],
   );
-  if ((completedFinalCheckpoint.rowCount ?? 0) !== 0) {
+  if (fence.rows[0]?.live !== true || fence.rows[0]?.fenced !== false) {
     throw new CloudWorkspaceEngineAuthorityError();
   }
-  // SELECT ... FOR UPDATE may evaluate its predicate before waiting. Recheck
-  // deadlines after both scope and engine locks have actually been acquired.
-  await assertCloudEngineAuthorityDeadline(tx,input.engineInstanceId,input.workosEnabled);
   const authorityEpoch = Number(current.authority_epoch);
   if (!Number.isSafeInteger(authorityEpoch) || authorityEpoch < 1) {
     throw new CloudWorkspaceEngineAuthorityError();
