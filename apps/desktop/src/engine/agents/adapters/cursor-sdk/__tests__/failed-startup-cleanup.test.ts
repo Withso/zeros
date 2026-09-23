@@ -145,7 +145,7 @@ afterEach(async () => {
 
 describe("CursorSdkAdapter — failed contained startup cleanup", () => {
   it("refuses to replace missing cloud history with a fresh native agent", async () => {
-    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({} as cloudExecution.CloudProviderExecution);
+    vi.spyOn(cloudExecution,"cloudProviderExecution").mockReturnValue({productServers:[]} as unknown as cloudExecution.CloudProviderExecution);
     resumeSpy.mockRejectedValueOnce(new Error("Agent prior-agent-id not found"));
     const adapter=new CursorSdkAdapter(makeCtx());
     try {

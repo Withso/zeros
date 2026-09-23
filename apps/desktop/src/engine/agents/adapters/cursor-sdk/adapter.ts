@@ -1659,7 +1659,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
     const runtime = await this.createSessionRuntime(opts);
-    const catalog = this.mcpCatalog(opts.mcpServers);
+    const mcpSource = this.sessionMcpSource(opts.mcpServers, opts.executionBoundary);
+    const catalog = this.mcpCatalog(mcpSource);
     // Fire-and-forget, and BEFORE the awaits below on purpose: the whole point
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
@@ -1733,7 +1734,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       activeRun: null,
       cancelRequested: false,
       env: opts.env,
-      mcpServers: opts.mcpServers,
+      mcpServers: mcpSource,
       settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
@@ -1777,7 +1778,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
     const runtime = await this.createSessionRuntime(opts);
-    const catalog = this.mcpCatalog(opts.mcpServers);
+    const mcpSource = this.sessionMcpSource(opts.mcpServers, opts.executionBoundary);
+    const catalog = this.mcpCatalog(mcpSource);
     // Same overlap as newSession: a reopened chat pays the identical cold
     // workspace/backend cost on its first turn, so warm it while the catalog
     // and `Agent.resume` are still in flight.
@@ -1920,7 +1922,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       activeRun: null,
       cancelRequested: false,
       env: opts.env,
-      mcpServers: opts.mcpServers,
+      mcpServers: mcpSource,
       settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
@@ -2769,6 +2771,17 @@ export class CursorSdkAdapter implements AgentAdapter {
   /** Only an engine-owned, exact-endpoint revision may partition the SDK
    * cache. This header contains no credentials and is neither persisted nor
    * forwarded to backend MCP servers. Preserve the user's registry verbatim. */
+  /** A cloud execution exposes only the engine-minted product tools admitted
+   *  with its lease, already carrying their scoped credentials. The session's
+   *  registry and user MCP never enter it, matching the Codex and Claude paths. */
+  private sessionMcpSource(
+    override: McpServerRegistration[] | undefined,
+    boundary: PreparedBoundary | undefined,
+  ): McpServerRegistration[] | undefined {
+    const cloud = cloudProviderExecution(boundary);
+    return cloud ? [...cloud.productServers] : override;
+  }
+
   private mcpCatalog(override?: McpServerRegistration[]): { key: string; servers: McpServerRegistration[] } {
     const revisions: Array<[string, string, string]> = [];
     const servers = (override ?? this.ctx.mcpServers).map((server) => {

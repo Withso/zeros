@@ -45,13 +45,21 @@ export class CloudWorkspaceOwnership {
   }
 }
 
+/** Every isolated worker profile (v2 and later) runs the tenant as its own
+ * identity, so engine-authored checkout files must be published to it. */
+export function publishesCloudWorkspaceOwnership(
+  worker: { version: number; uid: number; gid: number } | null | undefined,
+): boolean {
+  return !!worker && worker.version >= 2;
+}
+
 let ownership: CloudWorkspaceOwnership | null | undefined;
 export function publishCloudWorkspacePath(target: string, descriptor?: number): void {
   if (!path.resolve(target).startsWith(WORKSPACE_ROOT + path.sep)) return;
   if (ownership === undefined) {
     const worker = loadCloudWorkerConfiguration();
-    ownership = worker?.version === 2
-      ? new CloudWorkspaceOwnership(WORKSPACE_ROOT, worker)
+    ownership = publishesCloudWorkspaceOwnership(worker)
+      ? new CloudWorkspaceOwnership(WORKSPACE_ROOT, worker!)
       : null;
   }
   ownership?.publish(target, descriptor);
