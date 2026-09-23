@@ -89,6 +89,14 @@ d("cloud health alerts", () => {
     expect(sent[0]!.idempotencyKey).not.toBe(sent[1]!.idempotencyKey);
   });
 
+  it("reminds with the last reported set when a window opens on an unconfirmed change", async () => {
+    await run(2, ["lifecycle_stalled"]);
+    clock += 6 * 60 * 60_000;
+    expect(await run(1, ["lifecycle_stalled", "outbox_stalled"])).toEqual(["alerted"]);
+    expect(await run(2, ["lifecycle_stalled"])).toEqual(["unchanged", "unchanged"]);
+    expect(sent.map(alert => alert.subject.split(": ")[1])).toEqual(["lifecycle_stalled", "lifecycle_stalled"]);
+  });
+
   it("delivers a return to an earlier reason set as a new update", async () => {
     await run(2, ["lifecycle_stalled"]);
     await run(2, ["outbox_stalled"]);

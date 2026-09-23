@@ -154,10 +154,10 @@ export class CloudWorkspaceHealthAlertWorker {
       let alerted = state.alerted_reasons;
       let alertedWindow = state.alerted_window === null ? null : Number(state.alerted_window);
       let outcome: "healthy" | "pending" | "alerted" | "unchanged" | "recovered";
-      const update = async () => {
+      const update = async (report: string[]) => {
         sequence += 1;
-        await this.options.send(this.degraded(incident, sequence, reasons, window));
-        alerted = reasons;
+        await this.options.send(this.degraded(incident, sequence, report, window));
+        alerted = report;
         alertedWindow = window;
         outcome = "alerted";
       };
@@ -175,13 +175,13 @@ export class CloudWorkspaceHealthAlertWorker {
         else {
           incident += 1;
           sequence = 0;
-          await update();
+          await update(reasons);
         }
-      } else if (
-        alertedWindow !== window ||
-        (!same(alerted, reasons) && observedReads >= 2)
-      ) {
-        await update();
+      } else if (!same(alerted, reasons) && observedReads >= 2) {
+        await update(reasons);
+      } else if (alertedWindow !== window) {
+        // A reminder never reports a set that has not held for two reads.
+        await update(alerted);
       } else {
         outcome = "unchanged";
       }
