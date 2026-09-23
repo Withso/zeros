@@ -86,6 +86,7 @@ function fixture(extraOptions: { billingOrg?: string } = {}) {
         deletedAt: null,
         createAttemptsTracked: true,
         createClosedAt: null,
+        lostAt: null,
       };
       return { ...stored };
     }),
@@ -552,6 +553,36 @@ describe("Boat allocation lifecycle", () => {
     await expect(f.provider.inspect(RESOURCE)).rejects.toMatchObject({
       code: "provider_response_invalid",
     });
+  });
+
+  it("treats an attested lost allocation as absent without provider I/O or access", async () => {
+    const f = fixture();
+    await f.allocate();
+    f.stored().lostAt = new Date(NOW);
+    f.fetcher.mockClear();
+    const restarted = new BoatWorkspaceProvider(f.options);
+    await expect(restarted.inspect(RESOURCE)).resolves.toBeNull();
+    await expect(restarted.find(INPUT)).resolves.toEqual([]);
+    expect(await restarted.verifyAbsence(INPUT)).toBe(true);
+    const observed = [];
+    for await (const resource of restarted.listManaged()) observed.push(resource);
+    expect(observed).toEqual([]);
+    for (const action of [
+      () => restarted.start(RESOURCE),
+      () => restarted.startWithComputeLease(RESOURCE, 600),
+      () => restarted.create(INPUT),
+      () => restarted.renewComputeLease(RESOURCE, 600),
+      () => restarted.readComputeUsage(RESOURCE),
+      () => restarted.createSshAccess(RESOURCE, 5),
+      () => restarted.getPreviewEndpoint(RESOURCE, 3000),
+    ])
+      await expect(action()).rejects.toMatchObject({ code: "provider_resource_lost" });
+    // Nothing remains to delete, and no deletion bookkeeping may start.
+    await expect(restarted.delete(RESOURCE)).resolves.toBeUndefined();
+    expect(f.operations.beginDelete).not.toHaveBeenCalled();
+    expect(f.fetcher).not.toHaveBeenCalled();
+    expect(f.access.createSshAccess).not.toHaveBeenCalled();
+    expect(f.access.getPreviewEndpoint).not.toHaveBeenCalled();
   });
 
   it("does not report durable archive success after a failed snapshot", async () => {

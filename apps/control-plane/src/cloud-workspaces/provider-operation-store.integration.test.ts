@@ -268,6 +268,56 @@ d("provider operation journal", () => {
     expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_absence_attestations")).rowCount).toBe(0);
   });
 
+  // The database owner records loss attestations for an exact bound resource.
+  const attestLoss = (identity: { workspaceId: string }, resourceId: string) =>
+    pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4,'postgres','0123456789abcdef','Batch 7 regression loss attestation',
+        'fixture-account',$5,now(),0,now())`,
+    [identity.workspaceId, resourceId, randomUUID(), fixture.userId, Buffer.alloc(32)]);
+  const markLost = () => withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp()"));
+
+  it("records a loss only for the attested bound resource, then retires it without deletion", async () => {
+    const identity = input();
+    await store.prepareCreate(identity);
+    await expect(attestLoss(identity, "resource-1")).rejects.toThrow("not bound");
+    await store.bindResource(identity, "resource-1");
+    await expect(markLost()).rejects.toThrow("loss is not attested");
+    await expect(attestLoss(identity, "resource-2")).rejects.toThrow("not bound");
+    await expect(withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+      VALUES ('daytona','qualified-account-1',$1,1,'resource-1',$2,$3,'zeros_app','0123456789abcdef','self-issued loss attempt',
+        'fixture-account',$4,now(),0,now())`,
+    [fixture.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]))).rejects.toThrow(/permission denied/);
+    await attestLoss(identity, "resource-1");
+    await markLost();
+    expect((await store.find(identity))!.lostAt).toBeInstanceOf(Date);
+    await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET lost_at=lost_at+interval '1 second'")))
+      .rejects.toThrow("immutable");
+    await expect(store.beginDelete("resource-1")).rejects.toThrow("nothing to delete");
+    await expect(store.beginCreateAttempt(identity, randomUUID())).rejects.toMatchObject({ code: "provider_generation_retired" });
+    const records = [];
+    for await (const record of store.list()) records.push(record);
+    expect(records).toEqual([]);
+    await expect(pool.query("UPDATE cloud_workspace_provider_loss_attestations SET reason='rewritten loss attestation'")).rejects.toThrow("append-only");
+    await expect(pool.query("DELETE FROM cloud_workspace_provider_loss_attestations")).rejects.toThrow("append-only");
+    await expect(pool.query("TRUNCATE cloud_workspace_provider_loss_attestations")).rejects.toThrow("append-only");
+    // A lost journal is terminal: the organization purge consumes it and its attestation.
+    await withSystemTx(pool, tx => tx.query("DELETE FROM cloud_workspace_provider_operations"));
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_loss_attestations")).rowCount).toBe(0);
+  });
+
+  it("does not record a loss once Zeros has started deleting the allocation", async () => {
+    const identity = input();
+    await store.prepareCreate(identity);
+    await store.bindResource(identity, "resource-1");
+    await store.beginDelete("resource-1");
+    await expect(attestLoss(identity, "resource-1")).rejects.toThrow("not bound");
+    await expect(markLost()).rejects.toThrow("loss is not attested");
+  });
+
   it("fences request identity and immutable rejection outcomes", async () => {
     const identity = input(), attempt = randomUUID();
     await store.prepareCreate(identity);

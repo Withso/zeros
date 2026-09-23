@@ -79,6 +79,7 @@ type Reservation = {
 export type ComputeCreditFinalReason =
   | "allocation_stopped"
   | "allocation_deleted"
+  | "allocation_lost"
   | "never_allocated"
   | "period_ended";
 export type ComputeCreditReservation = {
@@ -560,7 +561,7 @@ export class DatabaseManagedComputeCreditLedger {
     reservationId: string;
     periodId: string;
     usage: CloudProviderComputeUsage;
-    finalReason?: Exclude<ComputeCreditFinalReason, "never_allocated">;
+    finalReason?: Exclude<ComputeCreditFinalReason, "never_allocated" | "allocation_lost">;
     allocationLeaseClaim?: { owner: string };
   }): Promise<ComputeCreditReservation> {
     identity(input.reservationId, input.periodId);
@@ -705,6 +706,45 @@ export class DatabaseManagedComputeCreditLedger {
           billableSeconds: 0,
           through: row.meter_through,
           finalReason: input.reason,
+        });
+      },
+      input.allocationLeaseClaim,
+    );
+  }
+
+  /** Finalize at the last provider meter after an operator attested that the
+   * provider lost the exact bound allocation, and with it the usage meter.
+   * Unmetered time is never billed: the remaining hold is released. */
+  async finalizeLost(input: {
+    reservationId: string;
+    periodId: string;
+    resourceId: string;
+    allocationLeaseClaim?: { owner: string };
+  }): Promise<ComputeCreditReservation> {
+    identity(input.reservationId, input.periodId);
+    return this.mutateMeter(
+      input.reservationId,
+      input.periodId,
+      async (tx, row) => {
+        const lost = await tx.query(
+          `SELECT 1 FROM cloud_workspace_provider_bindings binding
+           JOIN cloud_workspace_provider_operations operation ON operation.workspace_id=binding.workspace_id
+             AND operation.generation=binding.generation AND operation.org_id=binding.org_id
+             AND operation.resource_id=binding.provider_resource_id AND operation.lost_at IS NOT NULL
+           WHERE binding.workspace_id=$1 AND binding.generation=$2 AND binding.org_id=$3 AND binding.provider_resource_id=$4`,
+          [row.workspace_id, row.generation, row.org_id, input.resourceId],
+        );
+        if (!lost.rowCount) deny("compute_credit_conflict");
+        if (row.state === "final") {
+          if (row.final_reason !== "allocation_lost")
+            deny("compute_credit_conflict");
+          return document(row);
+        }
+        return this.applyMeter(tx, row, {
+          actual: integer(row.actual_micro_usd),
+          billableSeconds: integer(row.billable_seconds),
+          through: row.meter_through,
+          finalReason: "allocation_lost",
         });
       },
       input.allocationLeaseClaim,

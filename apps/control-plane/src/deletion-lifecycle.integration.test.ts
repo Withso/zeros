@@ -1943,7 +1943,7 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({ rows: [{ lease_owner: null }] });
   });
 
-  it.each(["object", "provider", "rejected-create"])(
+  it.each(["object", "provider", "rejected-create", "lost-allocation"])(
     "does not purge an Organization until %s deletion is durably confirmed",
     async (kind) => {
       const owner = await signup("OrgFencePurge");
@@ -1958,6 +1958,11 @@ d("account, organization, and operator deletion lifecycle", () => {
           (provider,account_scope,workspace_id,generation,attempt_id)
           SELECT provider,account_scope,workspace_id,generation,$2
           FROM cloud_workspace_provider_operations WHERE org_id=$1`,[organizationId,randomUUID()]);
+      } else if (kind === "lost-allocation") {
+        await pool.query(`INSERT INTO cloud_workspace_provider_operations
+          (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id)
+          VALUES ('boat','test-account',$1,1,$2,$3,$4,'bx_34567892')`,
+        [randomUUID(),organizationId,randomUUID(),"a".repeat(64)]);
       } else if (kind === "provider") {
         await pool.query(
           `INSERT INTO cloud_workspace_provider_operations
@@ -2025,6 +2030,15 @@ d("account, organization, and operator deletion lifecycle", () => {
           SET rejection_code='limit_reached',rejected_at=now() WHERE workspace_id IN
           (SELECT workspace_id FROM cloud_workspace_provider_operations WHERE org_id=$1)`,[organizationId]);
         await pool.query("UPDATE cloud_workspace_provider_operations SET create_closed_at=now() WHERE org_id=$1",[organizationId]);
+      } else if (kind === "lost-allocation") {
+        // An attested provider loss is terminal: nothing remains to delete.
+        await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+          (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+           provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+          SELECT provider,account_scope,workspace_id,generation,resource_id,$2,$3,'postgres','0123456789abcdef',
+            'Batch 7 host loss regression','fixture-account',$4,now(),0,now()
+          FROM cloud_workspace_provider_operations WHERE org_id=$1`,[organizationId,randomUUID(),owner.id,Buffer.alloc(32)]);
+        await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=now() WHERE org_id=$1",[organizationId]);
       } else if (kind === "provider") {
         await pool.query(
           "UPDATE cloud_workspace_provider_operations SET deleted_at = now() WHERE org_id = $1",

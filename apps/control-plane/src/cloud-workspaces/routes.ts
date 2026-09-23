@@ -3009,7 +3009,7 @@ export function createCloudWorkspaceRoutes(
         const closedAllocation = await tx.query(
           `SELECT 1 FROM cloud_workspace_provider_operations
            WHERE workspace_id=$1 AND generation=$2 AND org_id=$3
-             AND create_closed_at IS NOT NULL`,
+             AND (create_closed_at IS NOT NULL OR lost_at IS NOT NULL)`,
           [workspaceId, workspace.current_generation, orgId],
         );
         if (closedAllocation.rowCount) {

@@ -455,6 +455,83 @@ suite("managed compute lifecycle admission", () => {
       ).rows[0].state,
     ).toBe("draining");
   });
+  it("finalizes an attested lost allocation at its last provider meter", async () => {
+    await ready();
+    await age();
+    const journal = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
+    await journal.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
+    await journal.bindResource(input, resource().resourceId);
+    await coordinator.runOnce();
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000 });
+    // The provider loses the allocation together with its usage meter.
+    provider.inspect.mockResolvedValue(null as unknown as CloudProviderResource);
+    provider.verifyAbsence.mockResolvedValue(true);
+    provider.readComputeUsage.mockRejectedValue(new CloudProviderError("provider_not_found", "Allocation lost", false));
+    const lease = () => pool.query("SELECT state,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId]);
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    // A missing allocation alone is not a final meter.
+    expect((await lease()).rows[0]).toEqual({ state: "draining", last_error_code: "compute_final_meter_unavailable" });
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+    await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+      VALUES ('daytona','credit-journal-test',$1,1,$2,$3,$4,'postgres','0123456789abcdef','Batch 7 host loss regression',
+        'fixture-account',$5,now(),0,now())`,
+    [f.workspaceId, resource().resourceId, randomUUID(), f.userId, Buffer.alloc(32)]);
+    await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp() WHERE workspace_id=$1", [f.workspaceId]);
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    expect((await lease()).rows[0]).toEqual({ state: "settled", last_error_code: null });
+    // Only metered usage is billed; the unmetered remainder is released.
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 6000, reservedMicroUsd: 0, availableMicroUsd: 14000 });
+    expect((await pool.query("SELECT state,final_reason FROM managed_compute_credit_reservations WHERE id=$1", [input.intentId])).rows)
+      .toEqual([{ state: "final", final_reason: "allocation_lost" }]);
+    expect(provider.readComputeUsage).toHaveBeenCalledTimes(1);
+  });
+  it("does not finalize an allocation from a loss recorded for a different resource", async () => {
+    await ready();
+    const other = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
+    await other.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
+    await other.bindResource(input, "sandbox-some-other-allocation");
+    await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+      VALUES ('daytona','credit-journal-test',$1,1,'sandbox-some-other-allocation',$2,$3,'postgres','0123456789abcdef','Batch 7 host loss regression',
+        'fixture-account',$4,now(),0,now())`,
+    [f.workspaceId, randomUUID(), f.userId, Buffer.alloc(32)]);
+    await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp() WHERE workspace_id=$1", [f.workspaceId]);
+    await pool.query("UPDATE managed_compute_allocation_leases SET provider_resource_id=$2 WHERE id=$1", [input.intentId, resource().resourceId]);
+    provider.inspect.mockResolvedValue(null as unknown as CloudProviderResource);
+    provider.verifyAbsence.mockResolvedValue(true);
+    await coordinator.runOnce();
+    expect((await pool.query("SELECT state,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+      .toEqual({ state: "draining", last_error_code: "compute_final_meter_unavailable" });
+    expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
+  });
+  it("backs off a persistently failing reconciliation instead of requesting a stop every poll", async () => {
+    await ready();
+    provider.inspect.mockRejectedValue(new CloudProviderError("provider_not_found", "Allocation lost", false));
+    const stops = async () => Number((await pool.query(
+      "SELECT count(*) AS n FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='stop'", [f.workspaceId],
+    )).rows[0].n);
+    await coordinator.runOnce();
+    expect(Number((await nextCheck()).from_now)).toBeLessThan(16);
+    expect(await stops()).toBe(1);
+    await pool.query("UPDATE managed_compute_allocation_leases SET first_error_at=clock_timestamp()-interval '2 minutes',next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    const backedOff = Number((await nextCheck()).from_now);
+    expect(backedOff).toBeGreaterThan(110);
+    expect(backedOff).toBeLessThan(125);
+    await pool.query("UPDATE managed_compute_allocation_leases SET first_error_at=clock_timestamp()-interval '1 hour',next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    const capped = Number((await nextCheck()).from_now);
+    expect(capped).toBeGreaterThan(290);
+    expect(capped).toBeLessThanOrEqual(300);
+    // Nothing else re-checks the lease while it waits.
+    expect(await coordinator.runOnce()).toBe(false);
+    expect(await stops()).toBeLessThanOrEqual(3);
+  });
   it("reports a persistent settlement failure even while retries refresh the lease", async () => {
     await ready();
     await pool.query(

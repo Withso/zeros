@@ -1271,6 +1271,30 @@ d("cloud workspace API contracts", () => {
     expect((await pool.query("SELECT create_closed_at FROM cloud_workspace_provider_operations WHERE workspace_id=$1", [workspaceId])).rows[0].create_closed_at).not.toBeNull();
   });
 
+  it("requires checkpoint recovery instead of a wake after an attested provider loss", async () => {
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId = created.body.workspace.id;
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='failed',completed_at=now() WHERE workspace_id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspaces SET status='failed',desired_state='stopped' WHERE id=$1", [workspaceId]);
+      await tx.query(`INSERT INTO cloud_workspace_provider_operations
+        (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,resource_id)
+        VALUES ('daytona','test-account',$1,1,$2,$3,$4,true,'lost-resource-1')`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
+    });
+    // The database owner records the loss evidence and marks the journal.
+    await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+      VALUES ('daytona','test-account',$1,1,'lost-resource-1',$2,$3,'postgres','0123456789abcdef','Batch 7 host loss regression',
+        'fixture-account',$4,now(),0,now())`, [workspaceId, randomUUID(), owner.id, Buffer.alloc(32)]);
+    await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp() WHERE workspace_id=$1", [workspaceId]);
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, {method:"POST",key:randomUUID()});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({error:{code:"cloud_workspace_recreate_required"}});
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspaceId])).rowCount).toBe(0);
+  });
+
   it("rebinds a renewed entitlement before waking a stopped generation", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;

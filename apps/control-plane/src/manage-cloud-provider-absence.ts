@@ -20,13 +20,13 @@ import { z } from "zod";
 
 import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./cloud-workspaces/boat-client.js";
 
-const CHANNELS = ["development", "alpha", "beta", "production"] as const;
+export const CHANNELS = ["development", "alpha", "beta", "production"] as const;
 /** An allocation made by a covered dispatch must have been observable for at
  * least the longest provider lease plus a margin before it can be ruled out. */
 export const MIN_DISPATCH_AGE_MS = 2 * 60 * 60_000;
 const MAX_INVENTORY_PAGES = 100;
 /** The inventory must be fresh by the database clock when it is attested. */
-const MAX_INVENTORY_AGE_MS = 15 * 60_000;
+export const MAX_INVENTORY_AGE_MS = 15 * 60_000;
 
 export type ProviderInventory = {
   /** Database clock read before the first page was requested. */
@@ -92,7 +92,8 @@ function fail(message: string): never {
   throw new CloudProviderAbsenceManagementError(message);
 }
 
-function targetFingerprint(databaseUrl: string, channel: string): string {
+/** Binds an operator approval to one database target and channel. */
+export function targetFingerprint(databaseUrl: string, channel: string, purpose = "provider-absence"): string {
   let parsed: URL;
   try {
     parsed = parseDatabaseTarget(databaseUrl);
@@ -102,7 +103,7 @@ function targetFingerprint(databaseUrl: string, channel: string): string {
   if ((parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") || !parsed.hostname || parsed.pathname === "/")
     fail("Invalid configuration: DATABASE_URL must identify one PostgreSQL database");
   const target = [
-    "zeros-control-plane-provider-absence.v1",
+    `zeros-control-plane-${purpose}.v1`,
     channel,
     parsed.hostname.toLowerCase(),
     parsed.port || "5432",
@@ -256,16 +257,7 @@ export async function manageCloudProviderAbsence(
       });
     }
 
-    // The key must belong to the account that holds this scope's history.
-    const receipts = (await client.query<{ proven: boolean; any_receipt: boolean }>(
-      `SELECT EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE provider = 'boat' AND account_scope = $1
-                        AND deletion_operation_id = $2 AND resource_id = $3) AS proven,
-              EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE provider = 'boat' AND account_scope = $1
-                        AND deletion_operation_id IS NOT NULL) AS any_receipt`,
-      [request.accountScope, inventory.accountProof?.deletionOperationId ?? null, inventory.accountProof?.targetId ?? null],
-    )).rows[0]!;
-    if (receipts.any_receipt && !receipts.proven)
-      fail("Provider inventory cannot be proven to belong to this account scope: read back one of its deletion receipts");
+    await assertInventoryAccount(client, request.accountScope, inventory);
     const listed = [...new Set(inventory.resources.map((resource) => resource.id))];
     const bound = new Set((await client.query<{ resource_id: string }>(
       `SELECT resource_id FROM cloud_workspace_provider_operations
@@ -280,7 +272,7 @@ export async function manageCloudProviderAbsence(
     const missing = (await client.query<{ resource_id: string }>(
       `SELECT resource_id FROM cloud_workspace_provider_operations
        WHERE provider = 'boat' AND account_scope = $1 AND resource_id IS NOT NULL
-         AND deletion_requested_at IS NULL AND deleted_at IS NULL AND NOT (resource_id = ANY($2::text[]))
+         AND deletion_requested_at IS NULL AND deleted_at IS NULL AND lost_at IS NULL AND NOT (resource_id = ANY($2::text[]))
        ORDER BY resource_id LIMIT 20`,
       [request.accountScope, listed],
     )).rows.map((row) => row.resource_id);
@@ -328,6 +320,42 @@ export async function manageCloudProviderAbsence(
     throw error;
   } finally {
     client.release();
+  }
+}
+
+/** The listing's key must belong to the account that holds this scope's
+ * history: it must have read back one of the scope's deletion receipts. */
+export async function assertInventoryAccount(
+  client: pg.PoolClient, accountScope: string, inventory: ProviderInventory,
+): Promise<void> {
+  const receipts = (await client.query<{ proven: boolean; any_receipt: boolean }>(
+    `SELECT EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE provider = 'boat' AND account_scope = $1
+                      AND deletion_operation_id = $2 AND resource_id = $3) AS proven,
+            EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE provider = 'boat' AND account_scope = $1
+                      AND deletion_operation_id IS NOT NULL) AS any_receipt`,
+    [accountScope, inventory.accountProof?.deletionOperationId ?? null, inventory.accountProof?.targetId ?? null],
+  )).rows[0]!;
+  if (receipts.any_receipt && !receipts.proven)
+    fail("Provider inventory cannot be proven to belong to this account scope: read back one of its deletion receipts");
+}
+
+/** One of the scope's deletion receipts, for the inventory's account proof. */
+export async function readAccountScopeReceipt(
+  pool: pg.Pool, accountScope: string,
+): Promise<{ deletionOperationId: string; targetId: string } | null> {
+  const lookup = await pool.connect();
+  try {
+    await lookup.query("BEGIN READ ONLY");
+    await lookup.query("SELECT set_config('app.system', 'on', true)");
+    const receipt = (await lookup.query<{ deletion_operation_id: string; resource_id: string }>(
+      `SELECT deletion_operation_id, resource_id FROM cloud_workspace_provider_operations
+       WHERE provider = 'boat' AND account_scope = $1 AND deletion_operation_id IS NOT NULL
+       ORDER BY deletion_requested_at DESC LIMIT 1`, [accountScope],
+    )).rows[0];
+    return receipt ? { deletionOperationId: receipt.deletion_operation_id, targetId: receipt.resource_id } : null;
+  } finally {
+    await lookup.query("ROLLBACK").catch(() => {});
+    lookup.release();
   }
 }
 
@@ -403,22 +431,8 @@ async function runCli(): Promise<void> {
     // Stamp the inventory with the database clock before the first page, and
     // pick one of the scope's deletion receipts to prove account ownership.
     const observedAt = (await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
-    const lookup = await pool.connect();
-    let receipt: { deletion_operation_id: string; resource_id: string } | undefined;
-    try {
-      await lookup.query("BEGIN READ ONLY");
-      await lookup.query("SELECT set_config('app.system', 'on', true)");
-      receipt = (await lookup.query<{ deletion_operation_id: string; resource_id: string }>(
-        `SELECT deletion_operation_id, resource_id FROM cloud_workspace_provider_operations
-         WHERE provider = 'boat' AND account_scope = $1 AND deletion_operation_id IS NOT NULL
-         ORDER BY deletion_requested_at DESC LIMIT 1`, [request.accountScope],
-      )).rows[0];
-    } finally {
-      await lookup.query("ROLLBACK").catch(() => {});
-      lookup.release();
-    }
     const inventory = await listBoatInventory(new BoatApiClient({ apiKey, timeoutMs: 30_000 }), observedAt,
-      receipt ? { deletionOperationId: receipt.deletion_operation_id, targetId: receipt.resource_id } : null);
+      await readAccountScopeReceipt(pool, request.accountScope));
     const result = await manageCloudProviderAbsence(pool, request, inventory);
     console.log(
       `[provider-absence] state=${result.state} channel=${request.channel} target=${request.targetFingerprint} ` +
