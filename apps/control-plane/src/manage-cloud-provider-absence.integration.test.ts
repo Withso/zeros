@@ -65,12 +65,12 @@ d("operator-attested provider absence", () => {
     validateCloudProviderAbsenceRequest({
       databaseUrl: url!, channel: "alpha", execute: false,
       organizationId: fixture.organizationId, expectedOrganizationSlug: slug, actorUserId: fixture.userId,
-      workspaceId: fixture.workspaceId, generations: "1", accountScope: SCOPE, knownResources: BUILDER,
+      workspaceId: fixture.workspaceId, generations: "1", accountScope: SCOPE, expectedProviderAccount: "boat-user-qualified", knownResources: BUILDER,
       reason: "Batch 7 regression: provider inventory proves absence", ...overrides,
     });
   const inventory = async (resources: ProviderInventory["resources"] = [{ id: BUILDER, state: "archived" }], shift = "0 seconds"): Promise<ProviderInventory> => ({
     observedAt: (await pool.query<{ at: Date }>("SELECT clock_timestamp()-$1::interval AS at", [shift])).rows[0]!.at,
-    providerAccount: "boat-user-qualified", resources,
+    providerAccount: "boat-user-qualified", accountProof: null, resources,
   });
   const attestations = async () => (await pool.query("SELECT * FROM cloud_workspace_provider_absence_attestations ORDER BY covers_dispatches_through")).rows;
 
@@ -133,9 +133,43 @@ d("operator-attested provider absence", () => {
     const plan = await manageCloudProviderAbsence(pool, request(), await inventory());
     await expect(manageCloudProviderAbsence(pool, request({ execute: true, approval: plan.approval!, knownResources: `${BUILDER},${ORPHAN}` }),
       await inventory([{ id: BUILDER, state: "archived" }, { id: ORPHAN, state: "archived" }]))).rejects.toThrow("does not match");
-    await expect(manageCloudProviderAbsence(pool, request({ execute: true, approval: plan.approval! }),
+    await expect(manageCloudProviderAbsence(pool, request({ execute: true, approval: plan.approval!, expectedProviderAccount: "another-boat-user" }),
       { ...await inventory(), providerAccount: "another-boat-user" })).rejects.toThrow("does not match");
+    await expect(manageCloudProviderAbsence(pool, request(), { ...await inventory(), providerAccount: "another-boat-user" }))
+      .rejects.toThrow("different account");
     expect(await attestations()).toHaveLength(0);
+  });
+
+  it("proves the listing's account through one of the scope's deletion receipts", async () => {
+    await journal();
+    await dispatch();
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_operations
+      (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,
+       resource_id,deletion_requested_at,deletion_operation_id)
+      VALUES ('boat',$1,$2,3,$3,$4,$5,true,'bx_dtd23456',now(),'bdop_receipt1')`,
+    [SCOPE, fixture.workspaceId, fixture.organizationId, randomUUID(), "a".repeat(64)]));
+    await expect(manageCloudProviderAbsence(pool, request(), await inventory())).rejects.toThrow("cannot be proven");
+    await expect(manageCloudProviderAbsence(pool, request(), { ...await inventory(), accountProof: { deletionOperationId: "bdop_receipt1", targetId: "bx_other234" } }))
+      .rejects.toThrow("cannot be proven");
+    await expect(manageCloudProviderAbsence(pool, request(), { ...await inventory(), accountProof: { deletionOperationId: "bdop_receipt1", targetId: "bx_dtd23456" } }))
+      .resolves.toMatchObject({ state: "planned" });
+  });
+
+  it("refuses a generation that an active transition is still creating", async () => {
+    await journal(2);
+    await dispatch("3 hours", 2);
+    // While the source drains, the candidate has no create intent yet.
+    const drain = randomUUID();
+    await pool.query(`CREATE TEMP TABLE candidate AS SELECT * FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1;
+      UPDATE candidate SET generation=2; INSERT INTO cloud_workspace_generations SELECT * FROM candidate; DROP TABLE candidate`.replace("$1", `'${fixture.workspaceId}'`));
+    await withSystemTx(pool, async tx => {
+      await tx.query(`INSERT INTO cloud_workspace_lifecycle_intents (id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256)
+        VALUES ($1,$2,1,$3,'stop',$4,$5)`, [drain, fixture.workspaceId, fixture.organizationId, randomUUID(), Buffer.alloc(32)]);
+      await tx.query(`INSERT INTO cloud_workspace_generation_transitions
+        (id,workspace_id,org_id,operation,source_generation,template_generation,candidate_generation,state,drain_intent_id)
+        VALUES ($1,$2,$3,'upgrade',1,1,2,'draining',$4)`, [randomUUID(), fixture.workspaceId, fixture.organizationId, drain]);
+    });
+    await expect(manageCloudProviderAbsence(pool, request({ generations: "2" }), await inventory())).rejects.toThrow("generation transition");
   });
 
   it("refuses stale or future inventories, recent dispatches and active starts", async () => {
@@ -146,7 +180,7 @@ d("operator-attested provider absence", () => {
     await dispatch("5 minutes");
     await expect(manageCloudProviderAbsence(pool, request(), await inventory())).rejects.toThrow("too recently");
     await intent({ ago: "1 minute", state: "observing", operation: "wake" });
-    await expect(manageCloudProviderAbsence(pool, request(), await inventory())).rejects.toThrow("active create or wake");
+    await expect(manageCloudProviderAbsence(pool, request(), await inventory())).rejects.toThrow("active create, wake or generation transition");
     expect(await attestations()).toHaveLength(0);
   });
 
@@ -198,7 +232,8 @@ describe("provider absence request and inventory", () => {
   const base = {
     databaseUrl: "postgres://owner@db.test:5432/zeros", channel: "alpha", execute: false,
     organizationId: randomUUID(), expectedOrganizationSlug: "org", actorUserId: randomUUID(), workspaceId: randomUUID(),
-    generations: "3,4,5", accountScope: SCOPE, reason: "Batch 7 regression: provider inventory proves absence",
+    generations: "3,4,5", accountScope: SCOPE, expectedProviderAccount: "boat-user-qualified",
+    reason: "Batch 7 regression: provider inventory proves absence",
   };
   it("validates the channel, generations, known resources and reason", () => {
     expect(validateCloudProviderAbsenceRequest(base)).toMatchObject({ generations: [3, 4, 5], knownResources: [] });
@@ -209,17 +244,23 @@ describe("provider absence request and inventory", () => {
     expect(() => validateCloudProviderAbsenceRequest({ ...base, generations: "0" })).toThrow("positive generations");
     expect(() => validateCloudProviderAbsenceRequest({ ...base, knownResources: "bx_0000000l" })).toThrow("KNOWN_RESOURCES");
     expect(() => validateCloudProviderAbsenceRequest({ ...base, reason: "too short" })).toThrow("REASON");
+    expect(() => validateCloudProviderAbsenceRequest({ ...base, expectedProviderAccount: undefined })).toThrow("EXPECTED_ACCOUNT");
   });
   it("reads the account and every page of its sandboxes, refusing an incomplete listing", async () => {
     const observedAt = new Date("2026-09-23T12:00:00.000Z");
     const responses: Record<string, unknown> = {
       "/me": { ok: true, user: { id: "boat-user-qualified" } },
-      "/sandboxes?limit=100": { ok: true, sandboxes: [{ id: "bx_frst2345", state: "archived" }], pageInfo: { nextCursor: "c+2/=", hasMore: true } },
-      "/sandboxes?limit=100&cursor=c%2B2%2F%3D": { ok: true, sandboxes: [{ id: "bx_scnd2345", state: "running" }], pageInfo: { nextCursor: null, hasMore: false } },
+      "/deletion-operations/bdop_receipt1": { ok: true, operation: { id: "bdop_receipt1", targetId: "bx_dtd23456", status: "completed" } },
+      "/sandboxes?limit=100": { ok: true, sandboxes: [{ id: "bx_frst2345", state: "archived" }], pageInfo: { nextCursor: "c+2/=~*", hasMore: true } },
+      "/sandboxes?limit=100&cursor=c%2B2%2F%3D%7E%2A": { ok: true, sandboxes: [{ id: "bx_scnd2345", state: "running" }], pageInfo: { nextCursor: null, hasMore: false } },
     };
-    const listed = await listBoatInventory({ request: async (requestPath: string) => responses[requestPath]! } as never, observedAt);
+    const client = { request: async (requestPath: string) => responses[requestPath]! } as never;
+    const listed = await listBoatInventory(client, observedAt, { deletionOperationId: "bdop_receipt1", targetId: "bx_dtd23456" });
     expect(listed).toEqual({ observedAt, providerAccount: "boat-user-qualified",
+      accountProof: { deletionOperationId: "bdop_receipt1", targetId: "bx_dtd23456" },
       resources: [{ id: "bx_frst2345", state: "archived" }, { id: "bx_scnd2345", state: "running" }] });
+    await expect(listBoatInventory(client, observedAt, { deletionOperationId: "bdop_receipt1", targetId: "bx_other234" }))
+      .rejects.toThrow("cannot read the account scope's deletion receipt");
     const pages = (page: unknown) => ({ request: async (requestPath: string) => requestPath === "/me" ? responses["/me"] : page }) as never;
     await expect(listBoatInventory(pages({ ok: true, sandboxes: [], pageInfo: { hasMore: true } }), observedAt)).rejects.toThrow("without a cursor");
     await expect(listBoatInventory(pages({ ok: true, items: [] }), observedAt)).rejects.toThrow("unrecognized sandbox listing");

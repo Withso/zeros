@@ -27,13 +27,15 @@ export const MIN_DISPATCH_AGE_MS = 2 * 60 * 60_000;
 const MAX_INVENTORY_PAGES = 100;
 /** The inventory must be fresh by the database clock when it is attested. */
 const MAX_INVENTORY_AGE_MS = 15 * 60_000;
-const RESOURCE_ID = BOAT_RESOURCE_ID_PATTERN;
 
 export type ProviderInventory = {
   /** Database clock read before the first page was requested. */
   observedAt: Date;
   /** The provider account the listing belongs to. */
   providerAccount: string;
+  /** A deletion receipt from this account scope's journal, read back with the
+   * same key: proof the listing's account owns the scope's history. */
+  accountProof: { deletionOperationId: string; targetId: string } | null;
   resources: Array<{ id: string; state: string }>;
 };
 
@@ -50,6 +52,7 @@ export interface CloudProviderAbsenceRequestInput {
   workspaceId: string | undefined;
   generations: string | undefined;
   accountScope: string | undefined;
+  expectedProviderAccount: string | undefined;
   knownResources?: string | undefined;
   reason: string | undefined;
 }
@@ -64,6 +67,7 @@ export interface ValidatedCloudProviderAbsenceRequest {
   workspaceId: string;
   generations: number[];
   accountScope: string;
+  expectedProviderAccount: string;
   knownResources: string[];
   reason: string;
   targetFingerprint: string;
@@ -137,8 +141,11 @@ export function validateCloudProviderAbsenceRequest(
   if (uniqueGenerations.length !== generations.length) fail("CONTROL_PLANE_PROVIDER_ABSENCE_GENERATIONS must not repeat a generation");
   const accountScope = input.accountScope?.trim() ?? "";
   if (!/^[A-Za-z0-9._:-]{1,128}$/.test(accountScope)) fail("BOAT_ACCOUNT_SCOPE must be the stable provider account scope");
+  const expectedProviderAccount = input.expectedProviderAccount?.trim() ?? "";
+  if (!/^[A-Za-z0-9._@:+-]{1,256}$/.test(expectedProviderAccount))
+    fail("CONTROL_PLANE_PROVIDER_ABSENCE_EXPECTED_ACCOUNT must name the Boat account that owns this scope");
   const knownResources = (input.knownResources ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  if (knownResources.some((value) => !RESOURCE_ID.test(value)))
+  if (knownResources.some((value) => !BOAT_RESOURCE_ID_PATTERN.test(value)))
     fail("CONTROL_PLANE_PROVIDER_ABSENCE_KNOWN_RESOURCES must list Boat sandbox ids");
   const reason = z.string().trim().min(16).max(512).safeParse(input.reason);
   if (!reason.success) fail("CONTROL_PLANE_PROVIDER_ABSENCE_REASON must contain 16 to 512 characters");
@@ -152,6 +159,7 @@ export function validateCloudProviderAbsenceRequest(
     workspaceId: workspaceId.data,
     generations: uniqueGenerations,
     accountScope,
+    expectedProviderAccount,
     knownResources: [...new Set(knownResources)].sort(),
     reason: reason.data,
     targetFingerprint: targetFingerprint(input.databaseUrl, channel),
@@ -163,7 +171,6 @@ type OperationRow = {
   create_closed_at: Date | null;
   deleted_at: Date | null;
   create_attempts_tracked: boolean;
-  created_at_exact: string;
   closable: boolean;
 };
 
@@ -174,9 +181,10 @@ export async function manageCloudProviderAbsence(
   request: ValidatedCloudProviderAbsenceRequest,
   inventory: ProviderInventory,
 ): Promise<CloudProviderAbsenceResult> {
-  if (inventory.resources.some((resource) => !RESOURCE_ID.test(resource.id)))
+  if (inventory.resources.some((resource) => !BOAT_RESOURCE_ID_PATTERN.test(resource.id)))
     fail("Provider inventory contains an unrecognized resource identifier");
-  if (!/^[A-Za-z0-9._@:+-]{1,256}$/.test(inventory.providerAccount)) fail("Provider inventory has no account identity");
+  if (inventory.providerAccount !== request.expectedProviderAccount)
+    fail("Provider inventory belongs to a different account than CONTROL_PLANE_PROVIDER_ABSENCE_EXPECTED_ACCOUNT");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -213,7 +221,7 @@ export async function manageCloudProviderAbsence(
     const evidence: Array<{ generation: number; tracked: boolean; latest: Date; latestExact: string; attempts: unknown[] }> = [];
     for (const generation of request.generations) {
       const row = (await client.query<OperationRow>(
-        `SELECT resource_id, create_closed_at, deleted_at, create_attempts_tracked, created_at::text AS created_at_exact,
+        `SELECT resource_id, create_closed_at, deleted_at, create_attempts_tracked,
                 cloud_provider_create_absence_confirmed(provider, account_scope, workspace_id, generation, create_attempts_tracked) AS closable
          FROM cloud_workspace_provider_operations
          WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3 AND org_id = $4 FOR UPDATE`,
@@ -222,12 +230,10 @@ export async function manageCloudProviderAbsence(
       if (!row) fail(`Generation ${generation} has no Boat journal in this account scope`);
       if (row.create_closed_at !== null || row.deleted_at !== null) continue;
       if (row.resource_id !== null) fail(`Generation ${generation} is bound to a provider resource; use its deletion evidence instead`);
-      const active = await client.query(
-        `SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id = $1 AND generation = $2
-           AND operation IN ('create', 'wake') AND state IN ('queued', 'dispatching', 'observing')`,
-        [request.workspaceId, generation],
-      );
-      if (active.rowCount) fail(`Generation ${generation} still has an active create or wake`);
+      const active = (await client.query<{ active: boolean }>(
+        "SELECT cloud_provider_create_dispatch_active($1, $2) AS active", [request.workspaceId, generation],
+      )).rows[0]!.active;
+      if (active) fail(`Generation ${generation} still has an active create, wake or generation transition`);
       // Already covered, or every dispatch certified: the service can close it.
       if (row.closable) continue;
       const attempts = (await client.query<{ attempt_id: string; dispatched_exact: string; rejection_code: string | null }>(
@@ -235,20 +241,12 @@ export async function manageCloudProviderAbsence(
          WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3 ORDER BY dispatched_at, attempt_id`,
         [request.accountScope, request.workspaceId, generation],
       )).rows;
-      // Computed in SQL at full precision: a millisecond Date would round the
-      // instant below the microsecond dispatch it must cover. An untracked
-      // journal records no dispatches; any create/wake of the generation may
-      // have dispatched until it finished.
+      // The shared dispatch horizon, kept at database precision: a millisecond
+      // Date would round the instant below the microsecond dispatch it covers.
       const covered = (await client.query<{ latest: Date; latest_exact: string }>(
-        `SELECT latest, latest::text AS latest_exact FROM (SELECT greatest(
-           $4::timestamptz,
-           (SELECT max(dispatched_at) FROM cloud_workspace_provider_create_attempts
-            WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3),
-           CASE WHEN $5::boolean THEN NULL ELSE (
-             SELECT max(greatest(created_at, updated_at, coalesce(completed_at, created_at)))
-             FROM cloud_workspace_lifecycle_intents WHERE workspace_id = $2 AND generation = $3 AND operation IN ('create', 'wake')
-           ) END) AS latest) coverage`,
-        [request.accountScope, request.workspaceId, generation, row.created_at_exact, row.create_attempts_tracked],
+        `SELECT horizon AS latest, horizon::text AS latest_exact
+         FROM (SELECT cloud_provider_create_dispatch_horizon('boat', $1, $2, $3, $4) AS horizon) coverage`,
+        [request.accountScope, request.workspaceId, generation, row.create_attempts_tracked],
       )).rows[0]!;
       if (inventory.observedAt.getTime() - covered.latest.getTime() < MIN_DISPATCH_AGE_MS)
         fail(`Generation ${generation} dispatched too recently for its absence to be observable`);
@@ -258,6 +256,16 @@ export async function manageCloudProviderAbsence(
       });
     }
 
+    // The key must belong to the account that holds this scope's history.
+    const receipts = (await client.query<{ proven: boolean; any_receipt: boolean }>(
+      `SELECT EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE provider = 'boat' AND account_scope = $1
+                        AND deletion_operation_id = $2 AND resource_id = $3) AS proven,
+              EXISTS (SELECT 1 FROM cloud_workspace_provider_operations WHERE provider = 'boat' AND account_scope = $1
+                        AND deletion_operation_id IS NOT NULL) AS any_receipt`,
+      [request.accountScope, inventory.accountProof?.deletionOperationId ?? null, inventory.accountProof?.targetId ?? null],
+    )).rows[0]!;
+    if (receipts.any_receipt && !receipts.proven)
+      fail("Provider inventory cannot be proven to belong to this account scope: read back one of its deletion receipts");
     const listed = [...new Set(inventory.resources.map((resource) => resource.id))];
     const bound = new Set((await client.query<{ resource_id: string }>(
       `SELECT resource_id FROM cloud_workspace_provider_operations
@@ -328,22 +336,40 @@ const SandboxListSchema = z.object({
   pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
 }).passthrough();
 
-/** Every sandbox the Zeros Boat account created, all states included. Boat
- * listings are creator-private, so organization-billed sandboxes appear
- * without an organization scope. `observedAt` is the database clock read
- * before the first request. */
-export async function listBoatInventory(client: Pick<BoatApiClient, "request">, observedAt: Date): Promise<ProviderInventory> {
+// The API path accepts only [A-Za-z0-9_=&%.-] in a query; escape the rest.
+const encodeCursor = (cursor: string) =>
+  encodeURIComponent(cursor).replace(/[!'()*~]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+
+/** Every sandbox the Zeros Boat account created. Boat listings are
+ * creator-private, so organization-billed sandboxes appear without an
+ * organization scope, and the default listing includes archived sandboxes
+ * (observed live on 2026-09-23). `observedAt` is the database clock read before
+ * the first request; `receipt` is a deletion receipt from the account scope's
+ * journal to read back as proof of account ownership. */
+export async function listBoatInventory(
+  client: Pick<BoatApiClient, "request">, observedAt: Date,
+  receipt: { deletionOperationId: string; targetId: string } | null = null,
+): Promise<ProviderInventory> {
   const account = z.object({ user: z.object({ id: z.string().min(1).max(256) }).passthrough() }).passthrough().safeParse(await client.request("/me"));
   if (!account.success) fail("Boat returned no account identity");
+  let accountProof: ProviderInventory["accountProof"] = null;
+  if (receipt) {
+    if (!/^bdop_[A-Za-z0-9]{1,64}$/.test(receipt.deletionOperationId)) fail("The account-scope deletion receipt is malformed");
+    const operation = z.object({ operation: z.object({ id: z.string(), targetId: z.string() }).passthrough() }).passthrough()
+      .safeParse(await client.request(`/deletion-operations/${receipt.deletionOperationId}`));
+    if (!operation.success || operation.data.operation.id !== receipt.deletionOperationId || operation.data.operation.targetId !== receipt.targetId)
+      fail("This Boat key cannot read the account scope's deletion receipt");
+    accountProof = receipt;
+  }
   const resources: ProviderInventory["resources"] = [];
   let cursor: string | null = null;
   for (let page = 0; page < MAX_INVENTORY_PAGES; page++) {
     const parsed = SandboxListSchema.safeParse(
-      await client.request(`/sandboxes?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`),
+      await client.request(`/sandboxes?limit=100${cursor ? `&cursor=${encodeCursor(cursor)}` : ""}`),
     );
     if (!parsed.success) fail("Boat returned an unrecognized sandbox listing");
     resources.push(...parsed.data.sandboxes.map((sandbox) => ({ id: sandbox.id, state: sandbox.state })));
-    if (!parsed.data.pageInfo.hasMore) return { observedAt, providerAccount: account.data.user.id, resources };
+    if (!parsed.data.pageInfo.hasMore) return { observedAt, providerAccount: account.data.user.id, accountProof, resources };
     cursor = parsed.data.pageInfo.nextCursor ?? null;
     if (!cursor) fail("Boat reported more sandboxes without a cursor");
   }
@@ -368,14 +394,31 @@ async function runCli(): Promise<void> {
     workspaceId: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_WORKSPACE_ID,
     generations: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_GENERATIONS,
     accountScope: process.env.BOAT_ACCOUNT_SCOPE,
+    expectedProviderAccount: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_EXPECTED_ACCOUNT,
     knownResources: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_KNOWN_RESOURCES,
     reason: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_REASON,
   });
   const pool = createMigrationPool(databaseUrl, { maxConnections: 1 });
   try {
-    // Stamp the inventory with the database clock before the first page.
+    // Stamp the inventory with the database clock before the first page, and
+    // pick one of the scope's deletion receipts to prove account ownership.
     const observedAt = (await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
-    const inventory = await listBoatInventory(new BoatApiClient({ apiKey, timeoutMs: 30_000 }), observedAt);
+    const lookup = await pool.connect();
+    let receipt: { deletion_operation_id: string; resource_id: string } | undefined;
+    try {
+      await lookup.query("BEGIN READ ONLY");
+      await lookup.query("SELECT set_config('app.system', 'on', true)");
+      receipt = (await lookup.query<{ deletion_operation_id: string; resource_id: string }>(
+        `SELECT deletion_operation_id, resource_id FROM cloud_workspace_provider_operations
+         WHERE provider = 'boat' AND account_scope = $1 AND deletion_operation_id IS NOT NULL
+         ORDER BY deletion_requested_at DESC LIMIT 1`, [request.accountScope],
+      )).rows[0];
+    } finally {
+      await lookup.query("ROLLBACK").catch(() => {});
+      lookup.release();
+    }
+    const inventory = await listBoatInventory(new BoatApiClient({ apiKey, timeoutMs: 30_000 }), observedAt,
+      receipt ? { deletionOperationId: receipt.deletion_operation_id, targetId: receipt.resource_id } : null);
     const result = await manageCloudProviderAbsence(pool, request, inventory);
     console.log(
       `[provider-absence] state=${result.state} channel=${request.channel} target=${request.targetFingerprint} ` +

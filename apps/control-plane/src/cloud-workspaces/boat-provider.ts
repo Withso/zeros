@@ -17,9 +17,8 @@ import {
   type CloudWorkspaceProvider,
 } from "./provider.js";
 
-const RESOURCE_ID = BOAT_RESOURCE_ID_PATTERN;
 const SandboxSchema = z.object({
-  id: z.string().regex(RESOURCE_ID),
+  id: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   state: z.enum([
     "init",
     "provisioning",
@@ -46,7 +45,7 @@ const BillingTeamSchema = z.object({ id: z.string() });
 const DeletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/),
   kind: z.literal("sandbox"),
-  targetId: z.string().regex(RESOURCE_ID),
+  targetId: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   status: z.enum(["pending", "processing", "blocked", "completed"]),
   completedAt: z.string().datetime({ offset: true }).nullable(),
 });
@@ -70,7 +69,7 @@ const STATES: Record<
 const CREATE_RETRY_WINDOW_MS = 23 * 60 * 60_000;
 
 const UsageSchema = z.object({
-  type: z.literal("sandbox.usage"), sandboxId: z.string().regex(RESOURCE_ID),
+  type: z.literal("sandbox.usage"), sandboxId: z.string().regex(BOAT_RESOURCE_ID_PATTERN),
   sandboxType: z.enum(["small", "default", "large"]), billingMultiplier: z.number(),
   since: z.string().datetime({ offset: true }), until: z.string().datetime({ offset: true }),
   seconds: z.number().int().nonnegative().safe(), secondsPerDollar: z.number().int().positive().safe(),
@@ -149,7 +148,7 @@ export class BoatWorkspaceProvider
   private async owned(
     resourceId: string,
   ): Promise<CloudProviderOperationRecord> {
-    if (!RESOURCE_ID.test(resourceId))
+    if (!BOAT_RESOURCE_ID_PATTERN.test(resourceId))
       throw failure("provider_identity_mismatch");
     const record = await this.options.operations.get(resourceId);
     if (!record || record.resourceId !== resourceId)
@@ -290,7 +289,7 @@ export class BoatWorkspaceProvider
     // Record a syntactically valid resource id even if the remaining response
     // is malformed: cleanup must retain the allocation's identity.
     const id = z
-      .object({ id: z.string().regex(RESOURCE_ID) })
+      .object({ id: z.string().regex(BOAT_RESOURCE_ID_PATTERN) })
       .safeParse(response.sandbox);
     if (!id.success) throw failure("provider_response_invalid");
     const bound = await this.options.operations.bindResource(input, id.data.id);

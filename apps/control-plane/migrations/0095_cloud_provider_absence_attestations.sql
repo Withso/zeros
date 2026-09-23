@@ -4,7 +4,7 @@
 -- exhaustive provider-inventory evidence gathered by a staff operator. It
 -- never erases or rewrites the attempts it covers, covers only dispatches up
 -- to a recorded instant, and can close only an unallocated generation with no
--- active create/wake intent. A later uncovered dispatch needs a later
+-- active create, wake or generation transition. A later uncovered dispatch needs a later
 -- attestation. Attestations are append-only; the organization purge that
 -- consumes their journal row removes them by cascade.
 
@@ -71,18 +71,59 @@ CREATE TRIGGER cloud_provider_absence_attestation_no_truncate
 REVOKE ALL ON FUNCTION guard_cloud_provider_absence_attestation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION reject_cloud_provider_absence_attestation_truncate() FROM PUBLIC;
 
--- The single closure rule shared by the journal guard and the application.
--- Every unrejected dispatch needs a certified rejection or attestation
--- coverage. An untracked journal records no dispatches, so it also needs an
--- attestation newer than every create/wake of the generation. No create or
--- wake may still be able to dispatch.
+-- Whether a create, wake or generation transition can still dispatch for the
+-- generation. Shared by the closure rule and the attestation operator.
+CREATE FUNCTION cloud_provider_create_dispatch_active(target_workspace_id uuid, target_generation integer)
+RETURNS boolean LANGUAGE sql STABLE
+SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+    WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
+      AND intent.operation IN ('create', 'wake') AND intent.state IN ('queued', 'dispatching', 'observing')
+  ) OR EXISTS (
+    SELECT 1 FROM cloud_workspace_generation_transitions transition
+    WHERE transition.workspace_id = target_workspace_id AND transition.candidate_generation = target_generation
+      AND transition.state IN ('draining', 'provisioning', 'setting_up', 'rolling_back')
+  )
+$$;
+
+-- The latest instant at which the generation's journal may have dispatched a
+-- create: its own creation, every recorded dispatch and, for an untracked
+-- journal that records none, the completion of every create/wake. An
+-- attestation must cover this horizon.
+CREATE FUNCTION cloud_provider_create_dispatch_horizon(
+  target_provider text, target_account_scope text, target_workspace_id uuid,
+  target_generation integer, attempts_tracked boolean
+) RETURNS timestamptz LANGUAGE sql STABLE
+SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT greatest(
+    (SELECT operation.created_at FROM cloud_workspace_provider_operations operation
+     WHERE operation.provider = target_provider AND operation.account_scope = target_account_scope
+       AND operation.workspace_id = target_workspace_id AND operation.generation = target_generation),
+    (SELECT max(attempt.dispatched_at) FROM cloud_workspace_provider_create_attempts attempt
+     WHERE attempt.provider = target_provider AND attempt.account_scope = target_account_scope
+       AND attempt.workspace_id = target_workspace_id AND attempt.generation = target_generation),
+    CASE WHEN attempts_tracked THEN NULL ELSE (
+      SELECT max(coalesce(intent.completed_at, intent.updated_at, intent.created_at))
+      FROM cloud_workspace_lifecycle_intents intent
+      WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
+        AND intent.operation IN ('create', 'wake')
+    ) END
+  )
+$$;
+
+-- The single closure rule shared by the journal guard and the application:
+-- nothing can still dispatch; every unrejected dispatch has a certified
+-- rejection or attestation coverage; and an untracked journal, which records
+-- no dispatches, has an attestation covering its whole dispatch horizon.
 CREATE FUNCTION cloud_provider_create_absence_confirmed(
   target_provider text, target_account_scope text, target_workspace_id uuid,
   target_generation integer, attempts_tracked boolean
 ) RETURNS boolean LANGUAGE sql STABLE
 SET search_path = pg_catalog, public, pg_temp AS $$
   SELECT
-    NOT EXISTS (
+    NOT cloud_provider_create_dispatch_active(target_workspace_id, target_generation)
+    AND NOT EXISTS (
       SELECT 1 FROM cloud_workspace_provider_create_attempts attempt
       WHERE attempt.provider = target_provider AND attempt.account_scope = target_account_scope
         AND attempt.workspace_id = target_workspace_id AND attempt.generation = target_generation
@@ -94,28 +135,19 @@ SET search_path = pg_catalog, public, pg_temp AS $$
             AND attempt.dispatched_at <= attestation.covers_dispatches_through
         )
     )
-    AND (attempts_tracked OR NOT EXISTS (
-      SELECT 1 FROM cloud_workspace_lifecycle_intents intent
-      WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
-        AND intent.operation IN ('create', 'wake')
-        AND greatest(intent.created_at, intent.updated_at, coalesce(intent.completed_at, intent.created_at)) > coalesce((
-          SELECT max(attestation.covers_dispatches_through) FROM cloud_workspace_provider_absence_attestations attestation
-          WHERE attestation.provider = target_provider AND attestation.account_scope = target_account_scope
-            AND attestation.workspace_id = target_workspace_id AND attestation.generation = target_generation
-        ), '-infinity'::timestamptz)
-    ))
-    AND (attempts_tracked OR EXISTS (
-      SELECT 1 FROM cloud_workspace_provider_absence_attestations attestation
+    AND (attempts_tracked OR coalesce((
+      SELECT max(attestation.covers_dispatches_through) FROM cloud_workspace_provider_absence_attestations attestation
       WHERE attestation.provider = target_provider AND attestation.account_scope = target_account_scope
         AND attestation.workspace_id = target_workspace_id AND attestation.generation = target_generation
-    ))
-    AND NOT EXISTS (
-      SELECT 1 FROM cloud_workspace_lifecycle_intents intent
-      WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
-        AND intent.operation IN ('create', 'wake') AND intent.state IN ('queued', 'dispatching', 'observing')
-    )
+    ) >= cloud_provider_create_dispatch_horizon(
+      target_provider, target_account_scope, target_workspace_id, target_generation, attempts_tracked
+    ), false))
 $$;
+REVOKE ALL ON FUNCTION cloud_provider_create_dispatch_active(uuid, integer) FROM PUBLIC;
+REVOKE ALL ON FUNCTION cloud_provider_create_dispatch_horizon(text, text, uuid, integer, boolean) FROM PUBLIC;
 REVOKE ALL ON FUNCTION cloud_provider_create_absence_confirmed(text, text, uuid, integer, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cloud_provider_create_dispatch_active(uuid, integer) TO zeros_app;
+GRANT EXECUTE ON FUNCTION cloud_provider_create_dispatch_horizon(text, text, uuid, integer, boolean) TO zeros_app;
 GRANT EXECUTE ON FUNCTION cloud_provider_create_absence_confirmed(text, text, uuid, integer, boolean) TO zeros_app;
 
 -- Closure no longer requires a tracked journal by constraint; the guard below

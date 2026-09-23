@@ -192,7 +192,10 @@ d("provider operation journal", () => {
 
   // The database owner (here the test superuser) records attestations; the
   // application role can only read them.
-  const attest = (identity: { workspaceId: string }, covers = "(SELECT coalesce(max(dispatched_at),now()-interval '1 second') FROM cloud_workspace_provider_create_attempts)") =>
+  // By default the attestation covers every dispatch and the journal's own creation.
+  const attest = (identity: { workspaceId: string }, covers = `(SELECT greatest(
+      (SELECT max(dispatched_at) FROM cloud_workspace_provider_create_attempts),
+      (SELECT max(created_at) FROM cloud_workspace_provider_operations)))`) =>
     pool.query(`INSERT INTO cloud_workspace_provider_absence_attestations
       (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
        provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
