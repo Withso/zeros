@@ -20,6 +20,7 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
+import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -178,7 +179,7 @@ export type CloudWorkspaceBackendConfig = {
   /** Customer Daytona onboarding is independent of the managed provider. The
    * legacy flat endpoint/target is used only when Daytona is the default. */
   daytonaConnection?: { apiUrl: string; target: string };
-  boat?: { accountScope: string; ttlSeconds: number | null };
+  boat?: { accountScope: string; ttlSeconds: number | null; billingOrg: string };
   computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
   apiKey: string;
   apiUrl: string;
@@ -332,6 +333,7 @@ const CloudWorkspaceEnvSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/)
     .optional(),
+  BOAT_BILLING_ORG: z.string().regex(BOAT_BILLING_ORG_PATTERN).optional(),
   BOAT_SNAPSHOT_ID: z
     .string()
     .regex(
@@ -1033,6 +1035,7 @@ function loadCloudWorkspaceConfig(
       ? [
           "BOAT_API_KEY",
           "BOAT_ACCOUNT_SCOPE",
+          "BOAT_BILLING_ORG",
           "BOAT_SNAPSHOT_ID",
           "BOAT_IMAGE_BUILD_SHA256",
           "BOAT_TTL_SECONDS",
@@ -1521,6 +1524,7 @@ function loadCloudWorkspaceConfig(
           boat: {
             accountScope: value.BOAT_ACCOUNT_SCOPE!,
             ttlSeconds: value.BOAT_TTL_SECONDS!,
+            billingOrg: value.BOAT_BILLING_ORG!,
           },
           computePolicy:{provider:"boat",policyId:value.BOAT_COMPUTE_POLICY_ID!,secondsPerDollar:value.BOAT_SECONDS_PER_DOLLAR!,
             minimumTtlSeconds:Math.min(600,value.BOAT_TTL_SECONDS!),maximumTtlSeconds:value.BOAT_TTL_SECONDS!,

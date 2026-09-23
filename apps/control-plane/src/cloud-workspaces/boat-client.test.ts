@@ -52,6 +52,40 @@ describe("Boat API boundary", () => {
     }
     expect(f.fetcher).toHaveBeenCalledOnce();
   });
+  it("bills only sandbox creation to the configured wallet, outside the request body", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ ok: true }));
+    const client = new BoatApiClient({
+      apiKey: "boat_test-only-credential",
+      timeoutMs: 1000,
+      billingOrg: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
+      fetch: fetcher,
+    });
+    await client.request("/sandboxes", { method: "POST", body: { noEnv: true } });
+    await client.request("/sandboxes/bx_23456789");
+    await client.request("/sandboxes/bx_23456789/resume", { method: "POST", body: { ttlSeconds: 600 } });
+    const headers = fetcher.mock.calls.map(([, init]) => new Headers(init!.headers));
+    expect(headers[0]!.get("x-boat-org")).toBe("team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41");
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]!.body))).toEqual({ noEnv: true });
+    expect(headers[1]!.has("x-boat-org")).toBe(false);
+    expect(headers[2]!.has("x-boat-org")).toBe(false);
+    const f = fixture();
+    f.fetcher.mockResolvedValue(Response.json({ ok: true }));
+    await f.client.request("/sandboxes", { method: "POST", body: { noEnv: true } });
+    expect(new Headers(f.fetcher.mock.calls[0]![1]!.headers).has("x-boat-org")).toBe(false);
+  });
+  it.each([
+    "Zeros",
+    "team_",
+    "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41\n",
+    "TEAM_0F5C2A9E-4B1D-4C8E-9A70-3D2B1E6F8C41",
+    "71526620-8a69-44ca-bbef-1a71267c4350",
+  ])("rejects a malformed or personal billing wallet before any request: %j", (billingOrg) => {
+    const fetcher = vi.fn<typeof fetch>();
+    expect(
+      () => new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 1000, billingOrg, fetch: fetcher }),
+    ).toThrow("Invalid Boat billing organization");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
   it("bounds streamed response bytes", async () => {
     const f = fixture();
     f.fetcher.mockResolvedValue(new Response("x".repeat(1024 * 1024 + 1)));

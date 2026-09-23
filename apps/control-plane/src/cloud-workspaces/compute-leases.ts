@@ -424,6 +424,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           "compute_policy_changed",
           "compute_credit_scope_rejected",
           "compute_allocation_retry_expired",
+          // Not billed to the configured wallet: stop it rather than run to its TTL.
+          "provider_billing_scope_mismatch",
+          "provider_billing_scope_unconfirmed",
         ].includes(error.code)
       )
         await requestManagedComputeStop(this.options.pool, {

@@ -132,7 +132,7 @@ tests do not enable the production qualification gates.
 
 The existing Daytona deployment variables retain their defaults. To select
 managed Boat, set `CLOUD_WORKSPACE_PROVIDER=boat`, `BOAT_API_KEY`, a stable
-`BOAT_ACCOUNT_SCOPE`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
+`BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
 `CLOUD_WORKSPACE_STORAGE_MIB` from the measured image. Boat snapshot names are
 mutable. The stored reference is `boat:<name>@sha256:<build-metadata-digest>`;
 setup verifies the exact attested metadata digest before launching. A replaced
@@ -143,6 +143,24 @@ see [compute credits](compute-credits.md). CPU/memory default to 4000 millicores
 8192 MiB; only Boat's exact supported pairs are admitted. Architecture must be
 `linux/amd64`. Never change the account scope when rotating a key in the same
 account, or reuse an old scope for a different provider account.
+
+`BOAT_BILLING_ORG` names the Boat organization wallet (`team_…`) billed for every
+new sandbox. Without it Boat bills the account's dashboard-selected wallet, which
+can change outside Zeros. Every create dispatch sends it as the `X-Boat-Org`
+request scope; the body and journaled request digest are unchanged. Boat matches
+an idempotent create on account, key and body, so a retry returns an earlier
+allocation with whatever wallet it was billed to. A sandbox keeps its creation
+wallet for resume and usage. Compute is granted only after Boat reports the
+configured organization for the allocation, on a fresh create, a create retry,
+every resume and every lease renewal; any other answer is read back once. Boat's
+`team` field carries the wallet: `null` is the personal wallet, and an absent or
+malformed value is unconfirmed. Inspection never reports a sandbox on a
+mismatched or unconfirmed wallet as running or provisioning, so no lifecycle or
+metering path can admit or renew it, while Stop and deletion still work. A
+refused create keeps its bound cleanup identity and requests a managed Stop. An
+allocation billed elsewhere is not resumed; recover its workspace into a fresh
+generation. The wallet is billing scope, not the journal's account identity, so
+changing it does not change `BOAT_ACCOUNT_SCOPE`.
 
 Daytona BYO beside Boat requires `DAYTONA_BYO_ENABLED=true` and independent
 `DAYTONA_BYO_SNAPSHOT_ID`, `DAYTONA_BYO_SOURCE_COMMIT`,
