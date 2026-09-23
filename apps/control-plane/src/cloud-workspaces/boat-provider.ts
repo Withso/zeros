@@ -42,9 +42,7 @@ const SandboxSchema = z.object({
     .nullable()
     .optional(),
 });
-const BillingScopeSchema = z.object({
-  team: z.object({ id: z.string() }).nullable().optional(),
-});
+const BillingTeamSchema = z.object({ id: z.string() });
 const DeletionSchema = z.object({
   id: z.string().regex(/^bdop_[a-f0-9]{32}$/),
   kind: z.literal("sandbox"),
@@ -172,19 +170,24 @@ export class BoatWorkspaceProvider
     if (!parsed.success || parsed.data.id !== record.resourceId)
       throw failure("provider_response_invalid");
     const sandbox = parsed.data;
+    const state =
+      sandbox.state === "archived" &&
+      (sandbox.snapshotAvailable !== true ||
+        sandbox.lastSnapshotStatus !== "completed")
+        ? (["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "") ? "archiving" : "failed")
+        : STATES[sandbox.state];
+    // Live compute on an unconfirmed wallet is never reported as usable, so no
+    // lifecycle or metering path can admit or renew it. Stop still applies.
+    const billingScope = this.billingScope(value);
     return {
       workspaceId: record.workspaceId,
       generation: record.generation,
       resourceId: sandbox.id,
-      state:
-        sandbox.state === "archived" &&
-        (sandbox.snapshotAvailable !== true ||
-          sandbox.lastSnapshotStatus !== "completed")
-          ? (["queued", "in_progress"].includes(sandbox.lastSnapshotStatus ?? "") ? "archiving" : "failed")
-          : STATES[sandbox.state],
+      state: billingScope !== "match" && (state === "running" || state === "provisioning") ? "failed" : state,
       computeStopped: sandbox.state === "archived",
       target: null,
       metadata: {
+        ...(billingScope !== "match" ? { billingScope } : {}),
         ...(sandbox.archiveAfter !== undefined ? { archiveAfter: sandbox.archiveAfter, computeLeaseExpiresAt: sandbox.archiveAfter } : {}),
         ...(sandbox.type ? { machineType: sandbox.type } : {}),
         ...(sandbox.vcpu ? { vcpu: sandbox.vcpu } : {}),
@@ -294,26 +297,30 @@ export class BoatWorkspaceProvider
     return this.allocatableResource(bound, response.sandbox);
   }
 
-  private billingScope(value: unknown): "match" | "mismatch" | "unconfirmed" | "invalid" {
-    const parsed = BillingScopeSchema.safeParse(value);
-    if (!parsed.success) return "invalid";
-    if (parsed.data.team === undefined) return "unconfirmed";
-    return parsed.data.team?.id === this.options.billingOrg ? "match" : "mismatch";
+  /** Boat reports an organization-billed sandbox's wallet as `team`; null is
+   * the personal wallet. An absent or malformed wallet is unconfirmed. */
+  private billingScope(value: unknown): "match" | "mismatch" | "unconfirmed" {
+    const team = value && typeof value === "object" ? (value as { team?: unknown }).team : undefined;
+    if (team === null) return "mismatch";
+    const parsed = BillingTeamSchema.safeParse(team);
+    if (!parsed.success) return "unconfirmed";
+    return parsed.data.id.toLowerCase() === this.options.billingOrg ? "match" : "mismatch";
   }
 
   /** Compute is granted only to an allocation positively billed to the
    * configured wallet: create, create retry, resume and renewal. Anything else
-   * is read back once. A mismatch keeps its bound cleanup identity; inspection,
+   * is read back once. A refusal keeps the bound cleanup identity; inspection,
    * Stop and deletion never depend on the wallet. */
   private async allocatableResource(record: CloudProviderOperationRecord, value?: unknown): Promise<CloudProviderResource> {
     let sandbox = value;
     if (sandbox === undefined || this.billingScope(sandbox) !== "match")
       sandbox = (await this.client.request(`/sandboxes/${record.resourceId}`)).sandbox;
-    const resource = this.resource(record, sandbox);
     const scope = this.billingScope(sandbox);
-    if (scope === "invalid") throw failure("provider_response_invalid");
-    if (scope !== "match") throw failure(`provider_billing_scope_${scope}`);
-    return resource;
+    if (scope !== "match") {
+      this.resource(record, sandbox);
+      throw failure(`provider_billing_scope_${scope}`);
+    }
+    return this.resource(record, sandbox);
   }
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
@@ -432,8 +439,10 @@ export class BoatWorkspaceProvider
     this.assertFiniteLease(ttlSeconds);
     const record = await this.owned(resourceId);
     if (record.deletionRequestedAt || record.deletedAt) throw failure("provider_generation_retired");
-    await this.allocatableResource(record);
     const response = await this.client.request(`/sandboxes/${resourceId}`, { method: "PATCH", body: { ttlSeconds } });
+    // Metering renews only a sandbox inspected as running, which requires a
+    // confirmed wallet; confirm it again on the renewed allocation.
+    await this.allocatableResource(record, response.sandbox);
     const parsed = SandboxSchema.safeParse(response.sandbox);
     const expiresAt = parsed.success && parsed.data.archiveAfter ? Date.parse(parsed.data.archiveAfter) : NaN;
     if (!parsed.success || parsed.data.id !== resourceId || STATES[parsed.data.state] !== "running" ||
