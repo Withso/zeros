@@ -3,15 +3,15 @@ import { BoatApiClient } from "./boat-client.js";
 
 function fixture() {
   const fetcher = vi.fn<typeof fetch>();
-  const logger = { warn: vi.fn() };
+  const diagnostics = vi.fn<(line: string) => void>();
   return {
     fetcher,
-    logger,
+    diagnostics,
     client: new BoatApiClient({
       apiKey: "boat_test-only-credential",
       timeoutMs: 1000,
       fetch: fetcher,
-      logger,
+      diagnostics,
     }),
   };
 }
@@ -229,8 +229,8 @@ describe("Boat API boundary", () => {
       f.fetcher.mockResolvedValue(refusal({ code: "member_limit_reached", message: "private text",
         details: { memberMaxActiveSandboxes: 0, brandNewField: "private-value", nested: { alsoNew: 1 } } }));
       expect(await create(f)).not.toHaveProperty("createRejectionCode");
-      expect(f.logger.warn).toHaveBeenCalledOnce();
-      const line = String(f.logger.warn.mock.calls[0]![0]);
+      expect(f.diagnostics).toHaveBeenCalledOnce();
+      const line = String(f.diagnostics.mock.calls[0]![0]);
       expect(line).toBe("[boat] create refusal not certified (member_limit_reached): unknown_detail_key:alsoNew,unknown_detail_key:brandNewField,unknown_detail_key:nested");
       expect(line).not.toMatch(/private/);
     });
@@ -240,7 +240,7 @@ describe("Boat API boundary", () => {
       f.fetcher.mockResolvedValueOnce(refusal({ code: "limit_reached", details: { note: "bx_23456789" } }));
       f.fetcher.mockResolvedValueOnce(refusal({ code: "limit_reached" }, { sandbox: { id: "bx_23456789" } }));
       await create(f); await create(f); await create(f);
-      expect(f.logger.warn.mock.calls.map(([line]) => String(line))).toEqual([
+      expect(f.diagnostics.mock.calls.map(([line]) => String(line))).toEqual([
         "[boat] create refusal not certified (rate_limited): unrecognized_code",
         "[boat] create refusal not certified (limit_reached): identifier_in_details",
         "[boat] create refusal not certified (limit_reached): unknown_envelope_key:sandbox",
@@ -248,14 +248,50 @@ describe("Boat API boundary", () => {
     });
     it("bounds the report and redacts field names that are not plain identifiers", async () => {
       const f = fixture();
-      const details = Object.fromEntries([...Array.from({ length: 12 }, (_, i) => [`extra${String(i).padStart(2, "0")}`, i]), ["bad key!", 1]]);
+      const details = Object.fromEntries([...Array.from({ length: 12 }, (_, i) => [`extra${String.fromCharCode(65 + i)}`, i]), ["bad key!", 1]]);
       f.fetcher.mockResolvedValue(refusal({ code: "limit_reached", details }));
       await create(f);
-      const line = String(f.logger.warn.mock.calls[0]![0]);
+      const line = String(f.diagnostics.mock.calls[0]![0]);
       expect(line.split(":").slice(1).join(":").split(",")).toHaveLength(9);
       expect(line).toContain("unknown_detail_key:<redacted>");
       expect(line).toMatch(/,\+\d+ more$/);
       expect(line).not.toContain("bad key");
+    });
+    it("cannot change a refusal's classification when diagnostics fail", async () => {
+      const fetcher = vi.fn<typeof fetch>();
+      const client = new BoatApiClient({ apiKey: "boat_test-only-credential", timeoutMs: 1000, fetch: fetcher,
+        diagnostics: () => { throw new Error("sink closed"); } });
+      fetcher.mockResolvedValue(refusal({ code: "trial_compute_limit_reached", details: { brandNewField: 1 } }));
+      const error = await client.request("/sandboxes", { method: "POST", body: {}, idempotencyKey: "diagnosed" }).catch((value: unknown) => value);
+      expect(error).toMatchObject({ code: "provider_budget_exhausted", retryable: false });
+      expect(error).not.toHaveProperty("createRejectionCode");
+    });
+    it("redacts identifier- or token-shaped field names and codes it cannot name", async () => {
+      const f = fixture();
+      f.fetcher.mockResolvedValue(refusal({ code: "bx_2345abcd", details: { bx_23456789abcd: 1, sk_live_secret: 2 } }));
+      await create(f);
+      const line = String(f.diagnostics.mock.calls[0]![0]);
+      expect(line).toBe("[boat] create refusal not certified (other): unrecognized_code,unknown_detail_key:<redacted>");
+    });
+    it("orders reasons by severity before truncating", async () => {
+      const f = fixture();
+      const details = Object.fromEntries(Array.from({ length: 9 }, (_, i) => [`field${String.fromCharCode(65 + i)}`, i]));
+      f.fetcher.mockResolvedValue(refusal({ code: "limit_reached", details }, { sandbox: { state: "created" } }));
+      await create(f);
+      expect(String(f.diagnostics.mock.calls[0]![0])).toMatch(/^\[boat\] create refusal not certified \(limit_reached\): unknown_envelope_key:sandbox,unknown_detail_key:fieldA,/);
+    });
+    it("reports a repeated explanation once", async () => {
+      const f = fixture();
+      f.fetcher.mockImplementation(async () => refusal({ code: "rate_limited" }));
+      await create(f); await create(f);
+      expect(f.diagnostics).toHaveBeenCalledOnce();
+    });
+    it("explains a top-level identifier even when the error object is malformed", async () => {
+      const f = fixture();
+      f.fetcher.mockResolvedValue(Response.json({ ok: false, type: "sandbox.error", status: 429, code: "limit_reached",
+        requestId: "req_test_uncertified", message: "see bx_abc123", error: null }, { status: 429 }));
+      await create(f);
+      expect(String(f.diagnostics.mock.calls[0]![0])).toBe("[boat] create refusal not certified (limit_reached): error_shape,identifier_in_message");
     });
     it("stays quiet for certified refusals and for requests other than create", async () => {
       const f = fixture();
@@ -263,7 +299,7 @@ describe("Boat API boundary", () => {
       f.fetcher.mockResolvedValueOnce(refusal({ code: "rate_limited" }));
       await create(f);
       await f.client.request("/sandboxes/bx_23456789/resume", { method: "POST", idempotencyKey: "resume" }).catch(() => undefined);
-      expect(f.logger.warn).not.toHaveBeenCalled();
+      expect(f.diagnostics).not.toHaveBeenCalled();
     });
   });
 

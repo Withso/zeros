@@ -8,8 +8,9 @@ export type BoatApiClientOptions = {
    * the account's mutable, dashboard-selected wallet. */
   billingOrg?: string;
   fetch?: typeof fetch;
-  /** Receives bounded, value-free explanations of uncertified create refusals. */
-  logger?: Pick<Console, "warn">;
+  /** Receives bounded, value-free explanations of uncertified create
+   * refusals. Defaults to console.warn; delivery failures are ignored. */
+  diagnostics?: (line: string) => void;
 };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 /** Boat reports an organization-billed sandbox's wallet as its `team`. */
@@ -42,21 +43,69 @@ const REJECTION_LIMIT_FIELDS = new Set([
 
 // A refusal never names an allocation or a deletion operation.
 const PROVIDER_IDENTIFIER = /(?<![A-Za-z0-9])(?:bx|bdop)_[A-Za-z0-9]/;
+// Concurrent-allocation refusals are documented by the create endpoint. The
+// trial cap's exact error envelope is additionally live-qualified; a generic
+// 429, budget error, malformed envelope or later retry is not proof.
+const CERTIFIED_CREATE_REJECTIONS = new Set<string>(["limit_reached", "member_limit_reached", "trial_compute_limit_reached"]);
+// Documented refusal codes that are safe to name in operator diagnostics.
+const NAMEABLE_REFUSAL_CODES = new Set<string>([...CERTIFIED_CREATE_REJECTIONS, "rate_limited", "daily_limit_reached"]);
+// Diagnostics name only plain camelCase field names; anything that could carry
+// an identifier or token is redacted.
+const NAMEABLE_FIELD = /^[a-z][A-Za-z]{0,39}$/;
+const MAX_SHOWN_REASONS = 8, MAX_COLLECTED_REASONS = 32;
 
-function qualifiedLimitDetails(details: unknown): boolean {
-  if (!details || typeof details !== "object" || Array.isArray(details)) return false;
-  const pending: Array<{ value: unknown; depth: number }> = [{ value: details, depth: 0 }];
-  let nodes = 0;
-  while (pending.length) {
-    const { value, depth } = pending.pop()!;
-    if (++nodes > 2048 || depth > 8) return false;
-    if (typeof value === "string" && PROVIDER_IDENTIFIER.test(value)) return false;
-    if (value && typeof value === "object") {
-      if (!Array.isArray(value) && Object.keys(value).some(key => !REJECTION_LIMIT_FIELDS.has(key))) return false;
-      for (const child of Object.values(value)) pending.push({ value: child, depth: depth + 1 });
+type RefusalReason = { rank: number; text: string };
+type CreateRefusalAssessment = { code: CloudProviderCreateRejectionCode | null; reasons: RefusalReason[] };
+
+/** The single certification rule for a create 429: every structural check
+ * that failed is a reason, and only a refusal without reasons is certified.
+ * Reasons carry shapes and plain field names, never values. */
+function assessCreateRefusal(value: Record<string, unknown> | null): CreateRefusalAssessment {
+  const reasons = new Map<string, number>();
+  const add = (rank: number, text: string) => { if (reasons.size < MAX_COLLECTED_REASONS && !reasons.has(text)) reasons.set(text, rank); };
+  const field = (key: string) => NAMEABLE_FIELD.test(key) && !PROVIDER_IDENTIFIER.test(key) ? key : "<redacted>";
+  const message = (candidate: unknown) => {
+    if (candidate === undefined) return;
+    if (typeof candidate !== "string") add(0, "message_shape");
+    else if (PROVIDER_IDENTIFIER.test(candidate)) add(1, "identifier_in_message");
+  };
+  if (!value) add(0, "envelope_not_json");
+  else {
+    if (value.ok !== false || value.type !== "sandbox.error" || value.status !== 429) add(0, "envelope_shape");
+    for (const key of Object.keys(value)) if (!REJECTION_FIELDS.has(key)) add(1, `unknown_envelope_key:${field(key)}`);
+    if (typeof value.requestId !== "string" || !/^req_[a-zA-Z0-9_-]{1,124}$/.test(value.requestId)) add(0, "request_id_shape");
+    if (typeof value.code !== "string" || !CERTIFIED_CREATE_REJECTIONS.has(value.code)) add(0, "unrecognized_code");
+    message(value.message);
+    const nested = value.error;
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) add(0, "error_shape");
+    else {
+      const error = nested as Record<string, unknown>;
+      if (error.status !== 429 || error.code !== value.code) add(0, "error_code_or_status");
+      for (const key of Object.keys(error)) if (!REJECTION_ERROR_FIELDS.has(key)) add(1, `unknown_error_key:${field(key)}`);
+      message(error.message);
+      if ("details" in error) {
+        if (!error.details || typeof error.details !== "object" || Array.isArray(error.details)) add(0, "details_shape");
+        else {
+          const pending: Array<{ value: unknown; depth: number }> = [{ value: error.details, depth: 0 }];
+          for (let nodes = 0; pending.length;) {
+            const next = pending.pop()!;
+            if (++nodes > 2048 || next.depth > 8) { add(0, "details_too_large"); break; }
+            if (typeof next.value === "string" && PROVIDER_IDENTIFIER.test(next.value)) add(1, "identifier_in_details");
+            if (next.value && typeof next.value === "object") {
+              if (!Array.isArray(next.value))
+                for (const key of Object.keys(next.value)) if (!REJECTION_LIMIT_FIELDS.has(key)) add(2, `unknown_detail_key:${field(key)}`);
+              for (const child of Object.values(next.value)) pending.push({ value: child, depth: next.depth + 1 });
+            }
+          }
+        }
+      }
     }
   }
-  return true;
+  const ordered = [...reasons].map(([text, rank]) => ({ rank, text }))
+    .sort((a, b) => a.rank - b.rank || (a.text < b.text ? -1 : a.text > b.text ? 1 : 0));
+  return ordered.length === 0
+    ? { code: value!.code as CloudProviderCreateRejectionCode, reasons: [] }
+    : { code: null, reasons: ordered };
 }
 
 /** Only qualified admission rejections, never arbitrary vendor error text. */
@@ -68,78 +117,6 @@ export class BoatCreateRejectedError extends CloudProviderError {
   ) {
     super(code, "Boat API request did not succeed", retryable, options);
   }
-}
-
-function createRejection(value: Record<string, unknown> | null): CloudProviderCreateRejectionCode | null {
-  const nested = value?.error;
-  if (value?.ok !== false || value.type !== "sandbox.error" || value.status !== 429 ||
-      Object.keys(value).some(key => !REJECTION_FIELDS.has(key)) ||
-      ("message" in value && typeof value.message !== "string") ||
-      typeof value.requestId !== "string" || !/^req_[a-zA-Z0-9_-]{1,124}$/.test(value.requestId) ||
-      !nested || typeof nested !== "object" || Array.isArray(nested)) return null;
-  const error = nested as Record<string, unknown>;
-  if (error.status !== 429 || error.code !== value.code ||
-      Object.keys(error).some(key => !REJECTION_ERROR_FIELDS.has(key)) ||
-      ("message" in error && typeof error.message !== "string") ||
-      [value.message, error.message].some(message =>
-        typeof message === "string" && PROVIDER_IDENTIFIER.test(message)) ||
-      ("details" in error && !qualifiedLimitDetails(error.details))) return null;
-  // Concurrent-allocation refusals are documented by the create endpoint.
-  // The trial cap's exact error envelope is additionally live-qualified; a
-  // generic 429, budget error, malformed envelope or later retry is not proof.
-  switch (value.code) {
-    case "limit_reached":
-    case "member_limit_reached":
-    case "trial_compute_limit_reached": return value.code;
-    default: return null;
-  }
-}
-
-const DIAGNOSTIC_NAME = /^[A-Za-z][A-Za-z0-9_]{0,63}$/;
-const MAX_DIAGNOSTIC_REASONS = 8;
-const diagnosticName = (key: string) => DIAGNOSTIC_NAME.test(key) ? key : "<redacted>";
-
-/** Explain, for operators only, why a create 429 was not certified. It names
- * shapes and field names, never values; certification itself stays with
- * `createRejection`. */
-function uncertifiedRefusalReasons(value: Record<string, unknown> | null): string {
-  const reasons = new Set<string>();
-  if (!value) reasons.add("envelope_not_json");
-  else {
-    if (value.ok !== false || value.type !== "sandbox.error" || value.status !== 429) reasons.add("envelope_shape");
-    for (const key of Object.keys(value)) if (!REJECTION_FIELDS.has(key)) reasons.add(`unknown_envelope_key:${diagnosticName(key)}`);
-    if (typeof value.requestId !== "string" || !/^req_[a-zA-Z0-9_-]{1,124}$/.test(value.requestId)) reasons.add("request_id_shape");
-    const nested = value.error;
-    if (!nested || typeof nested !== "object" || Array.isArray(nested)) reasons.add("error_shape");
-    else {
-      const error = nested as Record<string, unknown>;
-      if (error.status !== 429 || error.code !== value.code) reasons.add("error_code_or_status");
-      for (const key of Object.keys(error)) if (!REJECTION_ERROR_FIELDS.has(key)) reasons.add(`unknown_error_key:${diagnosticName(key)}`);
-      for (const message of [value.message, error.message]) {
-        if (message !== undefined && typeof message !== "string") reasons.add("message_shape");
-        else if (typeof message === "string" && PROVIDER_IDENTIFIER.test(message)) reasons.add("identifier_in_message");
-      }
-      if ("details" in error) {
-        const pending: Array<{ value: unknown; depth: number }> = [{ value: error.details, depth: 0 }];
-        if (!error.details || typeof error.details !== "object" || Array.isArray(error.details)) reasons.add("details_shape");
-        for (let nodes = 0; pending.length;) {
-          const next = pending.pop()!;
-          if (++nodes > 2048 || next.depth > 8) { reasons.add("details_too_large"); break; }
-          if (typeof next.value === "string" && PROVIDER_IDENTIFIER.test(next.value)) reasons.add("identifier_in_details");
-          if (next.value && typeof next.value === "object") {
-            if (!Array.isArray(next.value))
-              for (const key of Object.keys(next.value)) if (!REJECTION_LIMIT_FIELDS.has(key)) reasons.add(`unknown_detail_key:${diagnosticName(key)}`);
-            for (const child of Object.values(next.value)) pending.push({ value: child, depth: next.depth + 1 });
-          }
-        }
-      }
-    }
-    if (!["limit_reached", "member_limit_reached", "trial_compute_limit_reached"].includes(String(value.code))) reasons.add("unrecognized_code");
-  }
-  const sorted = [...reasons].sort();
-  if (sorted.length === 0) return "unclassified";
-  const shown = sorted.slice(0, MAX_DIAGNOSTIC_REASONS);
-  return sorted.length > shown.length ? `${shown.join(",")},+${sorted.length - shown.length} more` : shown.join(",");
 }
 
 /** Credentials are sent only to the provider's pinned API origin. Redirects,
@@ -161,6 +138,24 @@ export class BoatApiClient {
     if (options.billingOrg !== undefined && !BOAT_BILLING_ORG_PATTERN.test(options.billingOrg))
       throw new Error("Invalid Boat billing organization");
     this.fetcher = options.fetch ?? fetch;
+  }
+
+  private readonly reported = new Map<string, number>();
+
+  /** At most one report per distinct explanation per ten minutes. Reporting
+   * never changes how the refusal itself is classified. */
+  private reportUncertifiedRefusal(value: Record<string, unknown> | null, reasons: RefusalReason[]): void {
+    try {
+      const refusal = typeof value?.code === "string" && NAMEABLE_REFUSAL_CODES.has(value.code) ? value.code : "other";
+      const shown = reasons.slice(0, MAX_SHOWN_REASONS).map(reason => reason.text);
+      const hidden = reasons.length - shown.length;
+      const line = `[boat] create refusal not certified (${refusal}): ${shown.join(",")}${hidden > 0 ? `,+${hidden} more` : ""}`;
+      const now = Date.now(), last = this.reported.get(line);
+      if (last !== undefined && now - last < 10 * 60_000) return;
+      if (this.reported.size >= 64) this.reported.delete(this.reported.keys().next().value!);
+      this.reported.delete(line); this.reported.set(line, now);
+      (this.options.diagnostics ?? (message => console.warn(message)))(line);
+    } catch { /* diagnostics are best effort */ }
   }
 
   async request(
@@ -264,12 +259,9 @@ export class BoatApiClient {
         const retryOptions = Number.isFinite(retrySeconds) && retrySeconds > 0
           ? { retryAfterMs: Math.min(retrySeconds * 1000, 300_000) } : {};
         const createRefusal = path === "/sandboxes" && input.method === "POST" && Boolean(input.idempotencyKey) && response.status === 429;
-        const rejected = createRefusal ? createRejection(value) : null;
-        if (rejected) throw new BoatCreateRejectedError(code, retryable, rejected, retryOptions);
-        if (createRefusal) {
-          const refusalCode = typeof value?.code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(value.code) ? value.code : "unknown";
-          (this.options.logger ?? console).warn(`[boat] create refusal not certified (${refusalCode}): ${uncertifiedRefusalReasons(value)}`);
-        }
+        const assessment = createRefusal ? assessCreateRefusal(value) : null;
+        if (assessment?.code) throw new BoatCreateRejectedError(code, retryable, assessment.code, retryOptions);
+        if (assessment) this.reportUncertifiedRefusal(value, assessment.reasons);
         throw new CloudProviderError(
           code,
           "Boat API request did not succeed",
