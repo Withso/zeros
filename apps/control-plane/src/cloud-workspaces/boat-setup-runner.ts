@@ -4,14 +4,13 @@ import { BlockList, isIP } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { BoatApiClient } from "./boat-client.js";
+import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./boat-client.js";
 import { CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND } from "./daytona-setup-executor.js";
 import {
   CloudProviderError,
   type CloudWorkspaceCommandRunner,
 } from "./provider.js";
 
-const RESOURCE_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 const SETUP_ENV = "ZEROS_CLOUD_WORKSPACE_SETUP_B64";
 const HOST_KEY_COMMAND =
   "/usr/bin/sudo -n /usr/bin/cat /etc/ssh/ssh_host_ed25519_key.pub";
@@ -421,7 +420,7 @@ export class BoatSetupCommandRunner implements CloudWorkspaceCommandRunner {
   ): Promise<CommandResult> {
     const encoded = input.env?.[SETUP_ENV];
     if (
-      !RESOURCE_ID.test(input.resourceId) ||
+      !BOAT_RESOURCE_ID_PATTERN.test(input.resourceId) ||
       input.command !== CLOUD_WORKSPACE_LINUX_SETUP_HELPER_COMMAND ||
       (input.cwd !== undefined && input.cwd !== "/") ||
       !encoded ||

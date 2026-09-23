@@ -190,6 +190,84 @@ d("provider operation journal", () => {
     await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET create_attempts_tracked=true"))).rejects.toThrow("immutable");
   });
 
+  // The database owner (here the test superuser) records attestations; the
+  // application role can only read them.
+  // By default the attestation covers every dispatch and the journal's own creation.
+  const attest = (identity: { workspaceId: string }, covers = `(SELECT greatest(
+      (SELECT max(dispatched_at) FROM cloud_workspace_provider_create_attempts),
+      (SELECT max(created_at) FROM cloud_workspace_provider_operations)))`) =>
+    pool.query(`INSERT INTO cloud_workspace_provider_absence_attestations
+      (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
+      SELECT 'daytona','qualified-account-1',$1,1,$2,$3,'postgres','0123456789abcdef','Batch 7 regression attestation fixture',
+        'fixture-account',$4,covers+interval '1 second',0,covers FROM (SELECT ${covers} AS covers) evidence`,
+    [identity.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]);
+
+  it("closes an attested journal whose uncertified dispatches the attestation covers", async () => {
+    const identity = input();
+    await store.prepareCreate(identity);
+    await store.beginCreateAttempt(identity, randomUUID());
+    expect(await store.closeUnallocatedCreate(identity)).toBe(false);
+    await attest(identity);
+    expect(await store.closeUnallocatedCreate(identity)).toBe(true);
+    await expect(store.beginCreateAttempt(identity, randomUUID())).rejects.toMatchObject({ code: "provider_generation_retired" });
+  });
+
+  it("does not cover a dispatch that follows the attested inventory", async () => {
+    const identity = input();
+    await store.prepareCreate(identity);
+    await store.beginCreateAttempt(identity, randomUUID());
+    await attest(identity);
+    await store.beginCreateAttempt(identity, randomUUID());
+    expect(await store.closeUnallocatedCreate(identity)).toBe(false);
+  });
+
+  it("closes an untracked legacy journal only when attested", async () => {
+    const identity = input();
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_operations
+      (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256)
+      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4)`,
+    [fixture.workspaceId, fixture.organizationId, identity.idempotencyKey, identity.requestSha256]));
+    expect(await store.closeUnallocatedCreate(identity)).toBe(false);
+    await expect(withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET create_closed_at=clock_timestamp()")))
+      .rejects.toThrow("absence is not confirmed");
+    await attest(identity);
+    expect(await store.closeUnallocatedCreate(identity)).toBe(true);
+  });
+
+  it("keeps an attested generation open while a create or wake can still dispatch", async () => {
+    const identity = input(), intent = randomUUID();
+    await store.prepareCreate(identity);
+    await store.beginCreateAttempt(identity, randomUUID());
+    await attest(identity);
+    await withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_lifecycle_intents
+      (id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256)
+      VALUES ($1,$2,1,$3,'wake',$5,$4)`, [intent, fixture.workspaceId, fixture.organizationId, Buffer.alloc(32), randomUUID()]));
+    expect(await store.closeUnallocatedCreate(identity)).toBe(false);
+    await withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='failed',completed_at=now() WHERE id=$1", [intent]));
+    expect(await store.closeUnallocatedCreate(identity)).toBe(true);
+  });
+
+  it("lets the application read attestations but never create or change them", async () => {
+    const identity = input();
+    await store.prepareCreate(identity);
+    await store.beginCreateAttempt(identity, randomUUID());
+    await expect(withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_absence_attestations
+      (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
+      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,'zeros_app','0123456789abcdef','self-issued attestation attempt','fixture-account',$4,now(),0,now()-interval '1 second')`,
+    [fixture.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]))).rejects.toThrow(/permission denied/);
+    await attest(identity);
+    expect((await withSystemTx(pool, tx => tx.query("SELECT 1 FROM cloud_workspace_provider_absence_attestations"))).rowCount).toBe(1);
+    await expect(pool.query("UPDATE cloud_workspace_provider_absence_attestations SET reason='rewritten attestation reason'")).rejects.toThrow("append-only");
+    await expect(pool.query("DELETE FROM cloud_workspace_provider_absence_attestations")).rejects.toThrow("append-only");
+    await expect(pool.query("TRUNCATE cloud_workspace_provider_absence_attestations")).rejects.toThrow("append-only");
+    expect(await store.closeUnallocatedCreate(identity)).toBe(true);
+    // The organization purge that consumes a closed journal also removes its attestation.
+    await withSystemTx(pool, tx => tx.query("DELETE FROM cloud_workspace_provider_operations"));
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_provider_absence_attestations")).rowCount).toBe(0);
+  });
+
   it("fences request identity and immutable rejection outcomes", async () => {
     const identity = input(), attempt = randomUUID();
     await store.prepareCreate(identity);

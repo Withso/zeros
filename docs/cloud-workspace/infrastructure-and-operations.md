@@ -165,6 +165,25 @@ writes append-only owner evidence. Quota provisioning is independent of
 `CLOUD_WORKSPACES_ENABLED` and
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
 
+A Boat create journal whose outcome can never be certified (a pre-0093
+untracked journal, or dispatches whose refusal was not recognized) keeps its
+reservation open and blocks deletion and purge. Resolve it only through
+`pnpm --dir apps/control-plane cloud-provider-absence:manage` (or
+`node dist/manage-cloud-provider-absence.js`) with the same plan-then-execute
+approval, from a database-owner shell holding the deployment's `BOAT_API_KEY`
+and `BOAT_ACCOUNT_SCOPE`. Name the workspace, generations, the Boat account that
+owns the scope and any known non-workspace sandboxes, such as an image builder,
+in `CONTROL_PLANE_PROVIDER_ABSENCE_*`. The command reads the complete Boat
+account inventory, proves the key owns the scope by reading back one of its
+deletion receipts, and refuses a listing that omits a sandbox the scope still
+holds, any listed sandbox not bound in that scope's journal, dispatches newer
+than two hours, and an active create, wake or generation transition.
+Generations the service can already close are reported unchanged. Its
+append-only attestation covers dispatches only up to a recorded instant; the
+service then closes each generation and releases its reservation through the
+ordinary absence check. Attest untracked journals only after every pre-0093
+writer has been retired.
+
 `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED=false` makes a process an API-only
 replica: cloud reconciliation, access retirement, checkpoint/fork, object
 maintenance, operations/outbox, invitation and setup loops do not start.

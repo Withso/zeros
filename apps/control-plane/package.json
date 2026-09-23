@@ -14,6 +14,7 @@
     "cloud-entitlement:manage": "tsx src/manage-cloud-workspace-entitlement.ts",
     "account-pro:manage": "tsx src/manage-account-pro.ts",
     "cloud-quota:manage": "tsx src/manage-cloud-workspace-quota.ts",
+    "cloud-provider-absence:manage": "tsx src/manage-cloud-provider-absence.ts",
     "cloud-compute:grant": "tsx src/manage-cloud-compute-credit.ts",
     "cloud-object-storage:manage": "tsx src/manage-cloud-workspace-object-storage.ts",
     "cloud-object-rotation:retry": "tsx src/manage-cloud-workspace-object-rotation.ts",
