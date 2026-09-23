@@ -648,8 +648,10 @@ database backup retention (48 hours on PlanetScale); zero collects at once.
 Deleted content keeps counting toward the Organization byte limit until it is
 collected. Erasure is never delayed. Key rotation deletes superseded
 ciphertext when the new one is authoritative, so a restore to before a
-rotation finished cannot read the blobs rotated after it; keep a retired key
-at least the restore window after its rotation.
+rotation finished cannot read the blobs rotated after that point. Take a
+restore point after each rotation completes, and keep the old key while any
+restorable point predates the rotation: blobs not yet rotated at that point
+still need it.
 
 ### Terminal object-key rotation recovery
 
