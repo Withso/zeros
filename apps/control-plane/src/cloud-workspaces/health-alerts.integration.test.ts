@@ -39,9 +39,12 @@ d("cloud health alerts", () => {
       return { reasons: next ?? [] };
     },
   });
+  /** One read per minute, as the worker's timer would space them. */
   const run = async (count: number, reasons: string[] | Error, alerts = worker()) => {
     const outcomes: string[] = [];
-    for (let i = 0; i < count; i++) { readings.push(reasons); outcomes.push(await alerts.runOnce()); }
+    for (let i = 0; i < count; i++) {
+      clock += 60_000; readings.push(reasons); outcomes.push(await alerts.runOnce());
+    }
     return outcomes;
   };
 
@@ -62,8 +65,8 @@ d("cloud health alerts", () => {
       "[Zeros alpha/zeros-control-plane] Cloud health recovered",
     ]);
     expect(sent[0]!.html).toContain("#health-alert-runbooks");
-    expect(sent[0]!.idempotencyKey).toMatch(/^cloud-health\/alpha\.zeros-control-plane\/1\/degraded\/[a-f0-9]{16}\/\d+$/);
-    expect(sent[1]!.idempotencyKey).toMatch(/^cloud-health\/alpha\.zeros-control-plane\/1\/recovered\//);
+    expect(sent[0]!.idempotencyKey).toMatch(/^cloud-health\/alpha\.zeros-control-plane\/1\/1\/degraded\/[a-f0-9]{16}\/\d+$/);
+    expect(sent[1]!.idempotencyKey).toMatch(/^cloud-health\/alpha\.zeros-control-plane\/1\/1\/recovered\//);
   });
 
   it("survives a restart mid-incident and still sends the recovery", async () => {
@@ -76,14 +79,34 @@ d("cloud health alerts", () => {
   it("opens despite a flapping secondary reason and updates only for a set that holds", async () => {
     const alerts = worker();
     const both = ["lifecycle_stalled", "outbox_stalled"];
-    readings.push(["lifecycle_stalled"], both, ["lifecycle_stalled"], both, ["lifecycle_stalled"], ["lifecycle_stalled"]);
     const outcomes = [];
-    for (let i = 0; i < 6; i++) outcomes.push(await alerts.runOnce());
+    for (const reasons of [["lifecycle_stalled"], both, ["lifecycle_stalled"], both, ["lifecycle_stalled"], ["lifecycle_stalled"]])
+      outcomes.push(...await run(1, reasons, alerts));
     expect(outcomes).toEqual(["pending", "alerted", "unchanged", "unchanged", "unchanged", "alerted"]);
     expect(sent.map(alert => alert.subject.split(": ")[1])).toEqual([
       "lifecycle_stalled, outbox_stalled", "lifecycle_stalled",
     ]);
     expect(sent[0]!.idempotencyKey).not.toBe(sent[1]!.idempotencyKey);
+  });
+
+  it("delivers a return to an earlier reason set as a new update", async () => {
+    await run(2, ["lifecycle_stalled"]);
+    await run(2, ["outbox_stalled"]);
+    await run(2, ["lifecycle_stalled"]);
+    expect(sent.map(alert => alert.subject.split(": ")[1])).toEqual(["lifecycle_stalled", "outbox_stalled", "lifecycle_stalled"]);
+    expect(new Set(sent.map(alert => alert.idempotencyKey)).size).toBe(3);
+    expect(sent[2]!.html).toContain("update 3");
+  });
+
+  it("does not count replica reads that land within half an interval", async () => {
+    const [first, second] = [worker(), worker()];
+    clock += 60_000;
+    readings.push(["outbox_stalled"], ["outbox_stalled"]);
+    expect(await first.runOnce()).toBe("pending");
+    clock += 5_000;
+    expect(await second.runOnce()).toBe("skipped");
+    expect(await run(1, [], second)).toEqual(["healthy"]);
+    expect(sent).toEqual([]);
   });
 
   it("repeats once per window and numbers a new incident after recovery", async () => {
@@ -94,8 +117,8 @@ d("cloud health alerts", () => {
     expect(await run(1, ["outbox_stalled"])).toEqual(["alerted"]);
     await run(2, []);
     await run(2, ["outbox_stalled"]);
-    expect(sent.map(alert => alert.idempotencyKey.split("/")[2]! + "/" + alert.idempotencyKey.split("/")[3])).toEqual([
-      "1/degraded", "1/degraded", "1/recovered", "2/degraded",
+    expect(sent.map(alert => alert.idempotencyKey.split("/").slice(2, 5).join("/"))).toEqual([
+      "1/1/degraded", "1/2/degraded", "1/2/recovered", "2/1/degraded",
     ]);
     expect(new Set(sent.map(alert => alert.idempotencyKey)).size).toBe(4);
   });
@@ -103,7 +126,7 @@ d("cloud health alerts", () => {
   it("rolls back a failed send and retries the identical alert", async () => {
     send.mockRejectedValueOnce(new EmailDeliveryError("resend_500", true, 500));
     await run(1, new Error("down"));
-    readings.push(new Error("down"));
+    clock += 60_000; readings.push(new Error("down"));
     await expect(worker().runOnce()).rejects.toThrow("resend_500");
     expect(await run(1, new Error("down"))).toEqual(["alerted"]);
     expect(send).toHaveBeenCalledTimes(2);

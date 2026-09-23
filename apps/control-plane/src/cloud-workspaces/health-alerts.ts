@@ -19,8 +19,10 @@ type State = {
   observed_reads: number;
   degraded_reads: number;
   incident: string;
+  alert_sequence: string;
   alerted_reasons: string[] | null;
   alerted_window: string | null;
+  last_read_ms: string;
 };
 
 const DEFAULT_INTERVAL_MS = 60_000;
@@ -44,7 +46,8 @@ export function describeAlertFailure(error: unknown): string {
  * tenant identifiers, so neither do alerts. Two consecutive degraded reads
  * open an incident; a changed reason set that holds for two reads, or a new
  * repeat window, sends an update; two healthy reads close the incident with a
- * recovery. State lives in one locked row, so replicas and deploys agree. */
+ * recovery. State lives in one locked row, so replicas and deploys agree, and
+ * reads closer than half an interval apart do not count twice. */
 export class CloudWorkspaceHealthAlertWorker {
   private readonly intervalMs: number;
   private readonly repeatMs: number;
@@ -117,7 +120,7 @@ export class CloudWorkspaceHealthAlertWorker {
   /** A failed send rolls the tick back, so the next read retries the same
    * deterministic alert under the same key. */
   async runOnce(): Promise<
-    "healthy" | "pending" | "alerted" | "unchanged" | "recovered"
+    "healthy" | "pending" | "alerted" | "unchanged" | "recovered" | "skipped"
   > {
     let reasons: string[];
     try {
@@ -125,7 +128,8 @@ export class CloudWorkspaceHealthAlertWorker {
     } catch {
       reasons = ["health_query_failed"];
     }
-    const window = Math.floor(this.now() / this.repeatMs);
+    const now = this.now();
+    const window = Math.floor(now / this.repeatMs);
     return withSystemTx(this.options.pool, async (tx) => {
       await tx.query(
         "INSERT INTO cloud_health_alert_state (scope) VALUES ('cloud') ON CONFLICT DO NOTHING",
@@ -133,24 +137,35 @@ export class CloudWorkspaceHealthAlertWorker {
       const state = (
         await tx.query<State>(
           `SELECT observed_reasons, observed_reads, degraded_reads, incident,
-                  alerted_reasons, alerted_window
+                  alert_sequence, alerted_reasons, alerted_window, last_read_ms
            FROM cloud_health_alert_state WHERE scope = 'cloud' FOR UPDATE`,
         )
       ).rows[0]!;
+      // Another replica (or this one's immediate start-up read) just counted.
+      const since = now - Number(state.last_read_ms);
+      if (since < this.intervalMs / 2) return "skipped";
       const observedReads = same(state.observed_reasons, reasons)
         ? Math.min(state.observed_reads + 1, MAX_READS)
         : 1;
       const degradedReads =
         reasons.length === 0 ? 0 : Math.min(state.degraded_reads + 1, MAX_READS);
       let incident = Number(state.incident);
+      let sequence = Number(state.alert_sequence);
       let alerted = state.alerted_reasons;
       let alertedWindow = state.alerted_window === null ? null : Number(state.alerted_window);
       let outcome: "healthy" | "pending" | "alerted" | "unchanged" | "recovered";
+      const update = async () => {
+        sequence += 1;
+        await this.options.send(this.degraded(incident, sequence, reasons, window));
+        alerted = reasons;
+        alertedWindow = window;
+        outcome = "alerted";
+      };
       if (reasons.length === 0) {
         if (!alerted) outcome = "healthy";
         else if (observedReads < 2) outcome = "pending";
         else {
-          await this.options.send(this.recovery(incident, alerted, alertedWindow!));
+          await this.options.send(this.recovery(incident, sequence, alerted, alertedWindow!));
           alerted = null;
           alertedWindow = null;
           outcome = "recovered";
@@ -159,63 +174,59 @@ export class CloudWorkspaceHealthAlertWorker {
         if (degradedReads < 2) outcome = "pending";
         else {
           incident += 1;
-          await this.options.send(this.degraded(incident, reasons, window));
-          alerted = reasons;
-          alertedWindow = window;
-          outcome = "alerted";
+          sequence = 0;
+          await update();
         }
       } else if (
         alertedWindow !== window ||
         (!same(alerted, reasons) && observedReads >= 2)
       ) {
-        await this.options.send(this.degraded(incident, reasons, window));
-        alerted = reasons;
-        alertedWindow = window;
-        outcome = "alerted";
+        await update();
       } else {
         outcome = "unchanged";
       }
       await tx.query(
         `UPDATE cloud_health_alert_state
          SET observed_reasons = $1, observed_reads = $2, degraded_reads = $3,
-             incident = $4, alerted_reasons = $5, alerted_window = $6,
-             updated_at = now()
+             incident = $4, alert_sequence = $5, alerted_reasons = $6,
+             alerted_window = $7, last_read_ms = $8
          WHERE scope = 'cloud'`,
-        [reasons, observedReads, degradedReads, incident, alerted, alertedWindow],
+        [reasons, observedReads, degradedReads, incident, sequence, alerted, alertedWindow, now],
       );
-      return outcome;
+      return outcome!;
     });
   }
 
-  private key(kind: string, incident: number, reasons: readonly string[], window: number): string {
+  /** Incident and update sequence make every distinct email its own key. */
+  private key(kind: string, incident: number, sequence: number, reasons: readonly string[], window: number): string {
     const environment = this.options.environment.replaceAll("/", ".");
     const digest = createHash("sha256").update(reasons.join(","), "utf8").digest("hex").slice(0, 16);
-    return `cloud-health/${environment}/${incident}/${kind}/${digest}/${window}`;
+    return `cloud-health/${environment}/${incident}/${sequence}/${kind}/${digest}/${window}`;
   }
 
   private windowStart(window: number): string {
     return new Date(window * this.repeatMs).toISOString();
   }
 
-  private degraded(incident: number, reasons: string[], window: number): CloudWorkspaceHealthAlert {
+  private degraded(incident: number, sequence: number, reasons: string[], window: number): CloudWorkspaceHealthAlert {
     return {
       subject: `[Zeros ${this.options.environment}] Cloud health degraded: ${reasons.join(", ")}`,
       html:
-        `<p>Cloud workspace health on <b>${escape(this.options.environment)}</b> is degraded (incident ${incident}).</p>` +
+        `<p>Cloud workspace health on <b>${escape(this.options.environment)}</b> is degraded (incident ${incident}, update ${sequence}).</p>` +
         `<ul>${reasons.map((reason) => `<li><code>${escape(reason)}</code></li>`).join("")}</ul>` +
         `<p>Reported for the window starting ${this.windowStart(window)}; it repeats each window while degraded. ` +
         `Each reason has a response in the <a href="${RUNBOOK}">health alert runbooks</a>.</p>`,
-      idempotencyKey: this.key("degraded", incident, reasons, window),
+      idempotencyKey: this.key("degraded", incident, sequence, reasons, window),
     };
   }
 
-  private recovery(incident: number, reasons: string[], window: number): CloudWorkspaceHealthAlert {
+  private recovery(incident: number, sequence: number, reasons: string[], window: number): CloudWorkspaceHealthAlert {
     return {
       subject: `[Zeros ${this.options.environment}] Cloud health recovered`,
       html:
         `<p>Cloud workspace health on <b>${escape(this.options.environment)}</b> is healthy again (incident ${incident}).</p>` +
         `<p>Last reported: <code>${escape(reasons.join(", "))}</code> in the window starting ${this.windowStart(window)}.</p>`,
-      idempotencyKey: this.key("recovered", incident, reasons, window),
+      idempotencyKey: this.key("recovered", incident, sequence, reasons, window),
     };
   }
 }
