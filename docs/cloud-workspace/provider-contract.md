@@ -61,6 +61,9 @@ The exact error envelope must agree on status and code and contain no allocation
 `limit_reached` and `member_limit_reached` are documented allocation refusals;
 the strict `trial_compute_limit_reached` envelope is an observed live contract,
 not an explicit preallocation guarantee in the public provider documentation.
+The `member_limit_reached` envelope, including its `memberMaxActiveSandboxes`
+diagnostic, was also observed live under an owner-set concurrent cap. Any
+diagnostic field the adapter does not recognize leaves that attempt unknown.
 Other 4xx responses, malformed replies, transport failures and timeouts retain
 an unknown outcome. A later rejected retry cannot clear an earlier unknown or
 in-flight dispatch.

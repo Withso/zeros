@@ -182,6 +182,24 @@ describe("Boat API boundary", () => {
     expect(error).not.toHaveProperty("createRejectionCode");
   });
 
+  it("certifies the live member concurrent-cap refusal and its member diagnostics", async () => {
+    // Shape observed from Boat on 2026-09-23 when an organization owner set a
+    // member's concurrent-sandbox cap to 0.
+    const f=fixture();
+    f.fetcher.mockResolvedValue(Response.json({
+      ok:false,type:"sandbox.error",status:429,code:"member_limit_reached",message:"private member policy",requestId:"req_test_member_limit",
+      error:{code:"member_limit_reached",message:"private member policy",status:429,details:{
+        accessTier:"standard",blockedReason:null,currentLimits:{activeSandboxes:100,creationRatePerMinute:12},
+        maxActiveSandboxes:100,canStart:true,startBlockedReason:null,error:"member_limit_reached",status:"blocked",
+        activeSandboxes:0,memberMaxActiveSandboxes:0,message:"private member policy",
+      }},
+    },{status:429}));
+    const error=await f.client.request("/sandboxes",{method:"POST",idempotencyKey:"member-limit"}).catch((value:unknown)=>value);
+    expect(error).toMatchObject({code:"provider_rate_limited",createRejectionCode:"member_limit_reached",retryable:true});
+    expect(JSON.stringify(error)).not.toContain("private member policy");
+    expect(JSON.stringify(error)).not.toContain("memberMaxActiveSandboxes");
+  });
+
   it("accepts the known bounded limit diagnostics without retaining their values", async () => {
     const f=fixture();
     f.fetcher.mockResolvedValue(Response.json({

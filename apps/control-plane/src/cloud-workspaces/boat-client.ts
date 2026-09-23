@@ -15,9 +15,10 @@ export const BOAT_BILLING_ORG_PATTERN =
   /^team_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REJECTION_FIELDS = new Set(["ok", "type", "status", "code", "message", "error", "requestId"]);
 const REJECTION_ERROR_FIELDS = new Set(["code", "message", "status", "details"]);
-// This is the account-limit document observed with the qualified trial refusal.
-// Unknown diagnostic fields leave the dispatch uncertain, rather than allowing
-// a newly introduced allocation/operation receipt to masquerade as a refusal.
+// This is the account-limit document observed with the qualified trial and
+// member concurrent-cap refusals. Unknown diagnostic fields leave the dispatch
+// uncertain, rather than allowing a newly introduced allocation/operation
+// receipt to masquerade as a refusal.
 const REJECTION_LIMIT_FIELDS = new Set([
   "accessTier", "accountPlan", "activeSandboxes", "activeStates", "billingStatus", "billingUrl",
   "blockedReason", "canCreate", "canStart", "checkoutRequired", "contactMessage",
@@ -26,14 +27,15 @@ const REJECTION_LIMIT_FIELDS = new Set([
   "creditUsedSeconds", "currentLimits", "displayPrice", "dollars", "endTrialOrFirstPayment",
   "error", "giftLimit", "hasPaymentHistory", "hasSeatPlan", "hasSubscription", "includedSeconds",
   "key", "last24hUsageSeconds", "liveUsageSeconds", "maxActiveSandboxes", "maxCreationRequestsPerDay",
-  "maxCreationRequestsPerMinute", "message", "note", "pack", "packBalanceDollars", "packBalanceHours",
-  "packBalanceSeconds", "package", "perDay", "perHour", "perMinute", "persistsAcrossMonths",
-  "plan", "planName", "purchasable", "sandboxPlanDollars", "sandboxPlanKey", "sandboxPlanTiers",
-  "seconds", "secondsPerDollar", "serviceAccount", "standardLimits", "startBlockedReason",
-  "startLimits", "startTrial", "startsPerDay", "startsPerHour", "startsPerMinute", "status",
-  "subscriptionCancelAtPeriodEnd", "subscriptionCurrentPeriodEnd", "subscriptionQuotaSeconds",
-  "subscriptionRemainingSeconds", "subscriptionStatus", "subscriptionTrialEndsAt",
-  "trialComputeCapSeconds", "trialLimits", "trialLine", "unlimited", "upgradeEffects",
+  "maxCreationRequestsPerMinute", "memberMaxActiveSandboxes", "message", "note", "pack",
+  "packBalanceDollars", "packBalanceHours", "packBalanceSeconds", "package", "perDay", "perHour",
+  "perMinute", "persistsAcrossMonths", "plan", "planName", "purchasable", "sandboxPlanDollars",
+  "sandboxPlanKey", "sandboxPlanTiers", "seconds", "secondsPerDollar", "serviceAccount",
+  "standardLimits", "startBlockedReason", "startLimits", "startTrial", "startsPerDay",
+  "startsPerHour", "startsPerMinute", "status", "subscriptionCancelAtPeriodEnd",
+  "subscriptionCurrentPeriodEnd", "subscriptionQuotaSeconds", "subscriptionRemainingSeconds",
+  "subscriptionStatus", "subscriptionTrialEndsAt", "trialComputeCapSeconds", "trialLimits",
+  "trialLine", "unlimited", "upgradeEffects",
 ]);
 
 function qualifiedLimitDetails(details: unknown): boolean {
