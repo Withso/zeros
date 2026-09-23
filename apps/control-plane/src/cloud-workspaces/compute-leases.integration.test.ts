@@ -379,6 +379,20 @@ suite("managed compute lifecycle admission", () => {
     expect(Number(row.after_stop)).toBeGreaterThanOrEqual(5);
     expect(Number(row.after_stop)).toBeLessThan(10);
   });
+  it("re-checks a draining allocation after a managed Stop as soon as it can settle", async () => {
+    await ready();
+    await age();
+    await requestManagedComputeStop(pool, { leaseId: input.intentId, reason: "compute_scope_unavailable", force: true });
+    expect((await pool.query("SELECT state,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId])).rows[0])
+      .toMatchObject({ state: "draining", last_error_code: "compute_scope_unavailable" });
+    stoppedMeter();
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    const row = await nextCheck();
+    expect(row.state).not.toBe("settled");
+    expect(Number(row.after_stop)).toBeGreaterThanOrEqual(5);
+    expect(Number(row.after_stop)).toBeLessThan(10);
+  });
   it("keeps the normal cadence for running allocations and failing settlement retries", async () => {
     await ready();
     await age();
@@ -393,7 +407,7 @@ suite("managed compute lifecycle admission", () => {
     expect(failing.state).not.toBe("settled");
     expect(Number(failing.from_now)).toBeGreaterThan(12);
   });
-  it("wakes a start that was waiting for the previous allocation to settle", async () => {
+  it("wakes a start of the same generation when the previous allocation settles", async () => {
     await ready();
     await age();
     stoppedMeter();
@@ -406,7 +420,7 @@ suite("managed compute lifecycle admission", () => {
     await pool.query(
       `INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,requested_by,operation,idempotency_key,request_sha256,
         state,error_code,next_attempt_at)
-      VALUES ($1,$2,1,$3,$4,'wake',$5,$6,'observing','compute_previous_lease_pending',now()+interval '16 seconds')`,
+      VALUES ($1,$2,1,$3,$4,'wake',$5,$6,'observing','provider_request_unavailable',now()+interval '16 seconds')`,
       [waiting, f.workspaceId, f.organizationId, f.userId, randomUUID(), randomBytes(32)],
     );
     await pool.query(

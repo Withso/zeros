@@ -98,6 +98,9 @@ const money = (value: number | string): number => {
 // follows a moving funded_until/updated_at deadline or the provider's much
 // longer idempotency retention window.
 const ALLOCATION_RETRY_WINDOW_MS = 45 * 60_000;
+/** A final meter queries this far behind the provider clock, so it can cover
+ * the first stopped observation only once this much time has passed. */
+const FINAL_METER_LAG_MS = 5000;
 
 /** Owns spending authority around provider calls. It never accepts an engine's
  * CPU meter as compute billing, and a failed request never releases a hold. */
@@ -648,8 +651,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         ).rows[0],
     );
     if (!lease) return false;
+    let recheckAt: Date | null = null;
     try {
-      await this.reconcile(lease);
+      recheckAt = await this.reconcile(lease);
       await withSystemTx(this.options.pool, (tx) =>
         tx.query(
           `UPDATE managed_compute_allocation_leases SET last_error_code=NULL,first_error_at=NULL
@@ -680,21 +684,21 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await withSystemTx(this.options.pool, (tx) =>
         tx.query(
           // A just-stopped allocation settles once its final meter can cover
-          // the first stopped observation (5 s behind the provider clock), so
-          // recheck it then instead of a full poll. Errors keep the cadence.
+          // the stop; recheck then instead of after a full poll.
           `UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
-        next_check_at=CASE WHEN state<>'settled' AND last_error_code IS NULL AND stopped_observed_at IS NOT NULL
-            AND stopped_observed_at>clock_timestamp()-interval '2 minutes'
-          THEN greatest(stopped_observed_at+interval '6 seconds',clock_timestamp()+interval '1 second')
-          ELSE clock_timestamp()+interval '15 seconds' END,updated_at=now() WHERE id=$1 AND lease_owner=$2`,
-          [lease.id, this.workerId],
+        next_check_at=CASE WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
+          ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END,updated_at=now()
+        WHERE id=$1 AND lease_owner=$2`,
+          [lease.id, this.workerId, recheckAt],
         ),
       );
     }
     return true;
   }
 
-  private async reconcile(lease: Lease): Promise<void> {
+  /** Returns when a just-stopped allocation can next settle, or null to keep
+   * the regular cadence. */
+  private async reconcile(lease: Lease): Promise<Date | null> {
     const identity = this.identity(lease);
     const resolved = this.options.providerResolver
       ? (
@@ -713,7 +717,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       : assertSingleProviderResource(await provider.find(identity), identity);
     await this.stillClaimed(lease);
     if (!resource || resource.state === "deleted") {
-      if (await this.pendingAllocationRetry(lease)) return;
+      if (await this.pendingAllocationRetry(lease)) return null;
       // Missing list/inspect entries are not proof. The provider must attest
       // its journal has no outstanding allocation/deletion outcome.
       if (!provider.verifyAbsence || !(await provider.verifyAbsence(identity)))
@@ -738,13 +742,13 @@ export class CloudWorkspaceComputeLeaseCoordinator {
           allocationLeaseClaim: { owner: this.workerId },
         });
       await this.settle(lease);
-      return;
+      return null;
     }
     assertProviderResourceIdentity(resource, identity);
     // An unchanged stopped VM may be a retryable wake. Its already-stopped
     // usage is not proof that this pending start reservation can be released.
     if ((resource.state === "stopped" || resource.state === "archived") &&
-        await this.pendingAllocationRetry(lease)) return;
+        await this.pendingAllocationRetry(lease)) return null;
     if (
       lease.provider_resource_id &&
       lease.provider_resource_id !== resource.resourceId
@@ -785,7 +789,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     if (!observed) throw failure("compute_lease_superseded");
     // Query behind the provider clock. A final meter must also cover the first
     // independent stopped observation, not truncate the last seconds of use.
-    const untilMs = observed.now.getTime() - 5000;
+    const untilMs = observed.now.getTime() - FINAL_METER_LAG_MS;
     const finalStopped =
       stopped &&
       observed.stopped_observed_at !== null &&
@@ -845,9 +849,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     }
     if (finalStopped) {
       await this.settle(lease);
-      return;
+      return null;
     }
-    if (stopped) return;
+    if (stopped)
+      return new Date(observed.stopped_observed_at!.getTime() + FINAL_METER_LAG_MS + 1000);
     const scope = await this.scope(identity);
     if (
       lease.state === "draining" ||
@@ -858,9 +863,9 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       money(scope.billing_epoch) !== money(lease.billing_epoch)
     ) {
       await this.stopAtBudget(lease, "compute_scope_unavailable");
-      return;
+      return null;
     }
-    if (resource.state !== "running") return;
+    if (resource.state !== "running") return null;
     await this.observeRunning(identity, provider, resource);
     const expiry = Date.parse(String(resource.metadata.computeLeaseExpiresAt));
     // Leave ample time for checkpoint/stop and avoid a PATCH per meter poll.
@@ -868,11 +873,11 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       30_000,
       (this.options.policy?.maximumTtlSeconds ?? 900) * 500,
     );
-    if (expiry - observed.now.getTime() > renewWhenMs) return;
+    if (expiry - observed.now.getTime() > renewWhenMs) return null;
     const plan = await this.plan(lease);
     if (!plan) {
       await this.stopAtBudget(lease, "compute_credit_exhausted");
-      return;
+      return null;
     }
     await this.fund(lease, plan, this.workerId);
     await this.stillClaimed(lease);
@@ -886,7 +891,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     )
       throw failure("compute_lease_superseded");
     // The request cannot shorten an already confirmed funded lease.
-    if (observed.now.getTime() + plan.ttlSeconds * 1000 <= expiry) return;
+    if (observed.now.getTime() + plan.ttlSeconds * 1000 <= expiry) return null;
     const renewed = await provider.renewComputeLease(
       resource.resourceId,
       plan.ttlSeconds,
@@ -906,6 +911,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         [lease.id, this.workerId, new Date(deadline)],
       ),
     );
+    return null;
   }
 
   private async settle(lease: Lease): Promise<void> {
@@ -918,12 +924,12 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       );
       if (!result.rowCount)
         throw failure("compute_settlement_incomplete", true);
-      // A start refused while this allocation was unsettled is otherwise asleep
-      // in exponential backoff; let it retry now.
+      // A start refused while this allocation was unsettled may be asleep in
+      // exponential backoff; let it retry now.
       await tx.query(
         `UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=clock_timestamp(),updated_at=now()
         WHERE workspace_id=$1 AND org_id=$2 AND generation=$3 AND operation IN ('create','wake')
-          AND state='observing' AND error_code='compute_previous_lease_pending' AND next_attempt_at>clock_timestamp()`,
+          AND state='observing' AND next_attempt_at>clock_timestamp()`,
         [lease.workspace_id, lease.org_id, lease.generation],
       );
     });

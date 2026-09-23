@@ -40,9 +40,7 @@ const MAX_SETUP_COMMANDS = 32;
 const MAX_SETUP_COMMAND_BYTES = 16 * 1024;
 const DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS = 3_660;
 const ENGINE_HEARTBEAT_LEASE_MS = 90_000;
-// Heartbeats also deliver pending checkpoint directives (Stop, archive,
-// delete), so the interval bounds how long a public Stop waits to begin.
-const ENGINE_HEARTBEAT_INTERVAL_MS = 10_000;
+const ENGINE_HEARTBEAT_INTERVAL_MS = 30_000;
 const REPOSITORY_REFRESH_CLAIM_INTERVAL_MS = 5 * 60_000;
 const SETUP_RECOVERY_PATH =
   "/internal/v1/cloud-workspaces/setup/recovery" as const;
