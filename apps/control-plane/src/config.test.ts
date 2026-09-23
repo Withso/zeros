@@ -868,6 +868,7 @@ describe("cloud workspace backend configuration", () => {
       durability: {
         objectEncryptionKeys: { 1: setupKey },
         currentObjectEncryptionKeyVersion: 1,
+        objectRestoreWindowMs: 172_800_000,
         objectStoreDirectory: "/var/lib/zeros/workspace-objects",
       },
       setupExecution: {
@@ -932,8 +933,23 @@ describe("cloud workspace backend configuration", () => {
     expect(cloud?.durability).toEqual({
       objectEncryptionKeys: { 1: objectKey },
       currentObjectEncryptionKeyVersion: 1,
+      objectRestoreWindowMs: 172_800_000,
       objectStoreDirectory: "/var/lib/zeros/workspace-objects",
     });
+  });
+
+  it("keeps objects for a bounded database restore window", () => {
+    const window = (value?: string) => loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_WORKSPACE_OBJECT_KEY_V1: randomBytes(32).toString("base64url"),
+      CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/var/lib/zeros/workspace-objects",
+      ...(value === undefined ? {} : { CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: value }),
+    }).cloudWorkspaces?.durability?.objectRestoreWindowMs;
+    expect(window()).toBe(48 * 3_600_000);
+    expect(window("0")).toBe(0);
+    expect(window("168")).toBe(168 * 3_600_000);
+    for (const value of ["-1", "721", "1.5"]) expect(() => window(value)).toThrow(/CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS/);
   });
 
   it("keeps encrypted cloud settings available while setup stays paused", () => {
@@ -966,6 +982,7 @@ describe("cloud workspace backend configuration", () => {
     ).toEqual({
       objectEncryptionKeys: { 1: oldKey, 2: newKey },
       currentObjectEncryptionKeyVersion: 2,
+      objectRestoreWindowMs: 172_800_000,
       objectStoreDirectory: "/var/lib/zeros/workspace-objects",
     });
   });
