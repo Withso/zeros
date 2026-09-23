@@ -175,6 +175,10 @@ describe("Boat API boundary", () => {
       details: { memberMaxActiveSandboxes: 0, newProviderField: true } } },
     { code: "member_limit_reached", error: { code: "limit_reached", status: 429,
       details: { memberMaxActiveSandboxes: 0 } } },
+    { error: { code: "trial_compute_limit_reached", status: 429,
+      details: { memberMaxActiveSandboxes: { key: "bx_23456789", status: "running" } } } },
+    { error: { code: "trial_compute_limit_reached", status: 429,
+      details: { currentLimits: { message: "operation bdop_0123456789abcdef accepted" } } } },
   ])("does not certify ambiguous or unrelated rejection evidence: %j", async (override) => {
     const f = fixture();
     const { method = "POST", path = "/sandboxes", httpStatus = 429, ...body } = override;

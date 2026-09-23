@@ -38,6 +38,9 @@ const REJECTION_LIMIT_FIELDS = new Set([
   "trialComputeCapSeconds", "trialLimits", "trialLine", "unlimited", "upgradeEffects",
 ]);
 
+// Refusal diagnostics never name an allocation or a deletion operation.
+const PROVIDER_IDENTIFIER = /\b(?:bx|bdop)_[A-Za-z0-9]/;
+
 function qualifiedLimitDetails(details: unknown): boolean {
   if (!details || typeof details !== "object" || Array.isArray(details)) return false;
   const pending: Array<{ value: unknown; depth: number }> = [{ value: details, depth: 0 }];
@@ -45,6 +48,7 @@ function qualifiedLimitDetails(details: unknown): boolean {
   while (pending.length) {
     const { value, depth } = pending.pop()!;
     if (++nodes > 2048 || depth > 8) return false;
+    if (typeof value === "string" && PROVIDER_IDENTIFIER.test(value)) return false;
     if (value && typeof value === "object") {
       if (!Array.isArray(value) && Object.keys(value).some(key => !REJECTION_LIMIT_FIELDS.has(key))) return false;
       for (const child of Object.values(value)) pending.push({ value: child, depth: depth + 1 });
