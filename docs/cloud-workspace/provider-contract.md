@@ -80,6 +80,15 @@ If a durable checkpoint exists, the existing recovery API can restore it to a
 fresh generation. Neither action reopens the closed journal. Attempt rows cannot be deleted independently of an authorized
 terminal journal purge.
 
+A journal whose dispatches can never be certified closes only with an operator
+absence attestation (migration 0095). It records exhaustive provider-account
+inventory evidence: every listed sandbox is bound in the same account scope's
+journal or named as a known non-workspace resource, and every covered dispatch
+is at least two hours older than the inventory. An attestation covers
+dispatches only up to its recorded instant, never erases attempts, cannot close
+a bound generation or one with an active create or wake, and is append-only.
+The application role can read attestations but cannot create them.
+
 Historical journals remain untracked and cannot infer absence from new receipts.
 New journals use a versioned local request digest; an older writer's digest
 cannot match them, so it fails before dispatch. The provider HTTP body and
