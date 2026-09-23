@@ -28,14 +28,14 @@ const REJECTION_LIMIT_FIELDS = new Set([
   "error", "giftLimit", "hasPaymentHistory", "hasSeatPlan", "hasSubscription", "includedSeconds",
   "key", "last24hUsageSeconds", "liveUsageSeconds", "maxActiveSandboxes", "maxCreationRequestsPerDay",
   "maxCreationRequestsPerMinute", "memberMaxActiveSandboxes", "message", "note", "pack",
-  "packBalanceDollars", "packBalanceHours", "packBalanceSeconds", "package", "perDay", "perHour",
-  "perMinute", "persistsAcrossMonths", "plan", "planName", "purchasable", "sandboxPlanDollars",
-  "sandboxPlanKey", "sandboxPlanTiers", "seconds", "secondsPerDollar", "serviceAccount",
-  "standardLimits", "startBlockedReason", "startLimits", "startTrial", "startsPerDay",
-  "startsPerHour", "startsPerMinute", "status", "subscriptionCancelAtPeriodEnd",
-  "subscriptionCurrentPeriodEnd", "subscriptionQuotaSeconds", "subscriptionRemainingSeconds",
-  "subscriptionStatus", "subscriptionTrialEndsAt", "trialComputeCapSeconds", "trialLimits",
-  "trialLine", "unlimited", "upgradeEffects",
+  "packBalanceDollars", "packBalanceHours",
+  "packBalanceSeconds", "package", "perDay", "perHour", "perMinute", "persistsAcrossMonths",
+  "plan", "planName", "purchasable", "sandboxPlanDollars", "sandboxPlanKey", "sandboxPlanTiers",
+  "seconds", "secondsPerDollar", "serviceAccount", "standardLimits", "startBlockedReason",
+  "startLimits", "startTrial", "startsPerDay", "startsPerHour", "startsPerMinute", "status",
+  "subscriptionCancelAtPeriodEnd", "subscriptionCurrentPeriodEnd", "subscriptionQuotaSeconds",
+  "subscriptionRemainingSeconds", "subscriptionStatus", "subscriptionTrialEndsAt",
+  "trialComputeCapSeconds", "trialLimits", "trialLine", "unlimited", "upgradeEffects",
 ]);
 
 function qualifiedLimitDetails(details: unknown): boolean {

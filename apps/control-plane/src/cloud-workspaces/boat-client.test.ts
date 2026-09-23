@@ -169,6 +169,12 @@ describe("Boat API boundary", () => {
     { error: { code: "trial_compute_limit_reached", status: 429, sandbox: { id: "bx_23456789" } } },
     { error: { code: "trial_compute_limit_reached", status: 429, message: { operation: "accepted" } } },
     { error: { code: "trial_compute_limit_reached", status: 429, details: { newProviderField: true } } },
+    { code: "member_limit_reached", error: { code: "member_limit_reached", status: 429,
+      details: { memberMaxActiveSandboxes: 0, sandboxId: "bx_23456789" } } },
+    { code: "member_limit_reached", error: { code: "member_limit_reached", status: 429,
+      details: { memberMaxActiveSandboxes: 0, newProviderField: true } } },
+    { code: "member_limit_reached", error: { code: "limit_reached", status: 429,
+      details: { memberMaxActiveSandboxes: 0 } } },
   ])("does not certify ambiguous or unrelated rejection evidence: %j", async (override) => {
     const f = fixture();
     const { method = "POST", path = "/sandboxes", httpStatus = 429, ...body } = override;
@@ -194,7 +200,7 @@ describe("Boat API boundary", () => {
         activeSandboxes:0,memberMaxActiveSandboxes:0,message:"private member policy",
       }},
     },{status:429}));
-    const error=await f.client.request("/sandboxes",{method:"POST",idempotencyKey:"member-limit"}).catch((value:unknown)=>value);
+    const error=await f.client.request("/sandboxes",{method:"POST",body:{},idempotencyKey:"member-limit"}).catch((value:unknown)=>value);
     expect(error).toMatchObject({code:"provider_rate_limited",createRejectionCode:"member_limit_reached",retryable:true});
     expect(JSON.stringify(error)).not.toContain("private member policy");
     expect(JSON.stringify(error)).not.toContain("memberMaxActiveSandboxes");
