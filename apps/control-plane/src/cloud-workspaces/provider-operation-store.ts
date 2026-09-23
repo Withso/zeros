@@ -218,25 +218,13 @@ export class DatabaseCloudProviderOperationStore implements CloudProviderOperati
       [this.provider, this.accountScope, identity.workspaceId, identity.generation])).rows[0];
       if (!row || row.resource_id !== null) return false;
       if (row.create_closed_at) return true;
-      // Every dispatch needs a certified rejection, or coverage by an operator
-      // absence attestation; an untracked journal closes only when attested.
-      const closed = await tx.query(`UPDATE cloud_workspace_provider_operations operation
+      // The database's single closure rule (shared with the journal guard):
+      // certified rejections or operator attestation coverage, and no create or
+      // wake that can still dispatch.
+      const closed = await tx.query(`UPDATE cloud_workspace_provider_operations
         SET create_closed_at=clock_timestamp()
-        WHERE provider=$1 AND account_scope=$2 AND workspace_id=$3 AND generation=$4
-          AND (operation.create_attempts_tracked OR EXISTS (SELECT 1 FROM cloud_workspace_provider_absence_attestations attestation
-            WHERE attestation.provider=operation.provider AND attestation.account_scope=operation.account_scope
-              AND attestation.workspace_id=operation.workspace_id AND attestation.generation=operation.generation))
-          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_provider_create_attempts attempt
-            WHERE attempt.provider=operation.provider AND attempt.account_scope=operation.account_scope
-              AND attempt.workspace_id=operation.workspace_id AND attempt.generation=operation.generation
-              AND attempt.rejected_at IS NULL
-              AND NOT EXISTS (SELECT 1 FROM cloud_workspace_provider_absence_attestations attestation
-                WHERE attestation.provider=attempt.provider AND attestation.account_scope=attempt.account_scope
-                  AND attestation.workspace_id=attempt.workspace_id AND attestation.generation=attempt.generation
-                  AND attempt.dispatched_at<=attestation.covers_dispatches_through))
-          AND NOT EXISTS (SELECT 1 FROM cloud_workspace_lifecycle_intents intent
-            WHERE intent.workspace_id=operation.workspace_id AND intent.generation=operation.generation
-              AND intent.operation IN ('create','wake') AND intent.state IN ('queued','dispatching','observing'))`,
+        WHERE provider=$1 AND account_scope=$2 AND workspace_id=$3 AND generation=$4 AND resource_id IS NULL
+          AND cloud_provider_create_absence_confirmed(provider,account_scope,workspace_id,generation,create_attempts_tracked)`,
       [this.provider, this.accountScope, identity.workspaceId, identity.generation]);
       return closed.rowCount === 1;
     });

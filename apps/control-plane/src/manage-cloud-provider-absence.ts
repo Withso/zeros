@@ -18,17 +18,22 @@ import path from "node:path";
 import pg from "pg";
 import { z } from "zod";
 
-import { BoatApiClient } from "./cloud-workspaces/boat-client.js";
+import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./cloud-workspaces/boat-client.js";
 
 const CHANNELS = ["development", "alpha", "beta", "production"] as const;
 /** An allocation made by a covered dispatch must have been observable for at
  * least the longest provider lease plus a margin before it can be ruled out. */
 export const MIN_DISPATCH_AGE_MS = 2 * 60 * 60_000;
 const MAX_INVENTORY_PAGES = 100;
-const RESOURCE_ID = /^bx_[a-z0-9]{8,32}$/;
+/** The inventory must be fresh by the database clock when it is attested. */
+const MAX_INVENTORY_AGE_MS = 15 * 60_000;
+const RESOURCE_ID = BOAT_RESOURCE_ID_PATTERN;
 
 export type ProviderInventory = {
+  /** Database clock read before the first page was requested. */
   observedAt: Date;
+  /** The provider account the listing belongs to. */
+  providerAccount: string;
   resources: Array<{ id: string; state: string }>;
 };
 
@@ -67,6 +72,7 @@ export interface ValidatedCloudProviderAbsenceRequest {
 export interface CloudProviderAbsenceResult {
   state: "planned" | "attested" | "unchanged";
   approval: string | null;
+  /** Generations that need an attestation; closable ones are omitted. */
   generations: Array<{ generation: number; coversDispatchesThrough: string; tracked: boolean }>;
   inventoryResourceCount: number;
 }
@@ -153,13 +159,12 @@ export function validateCloudProviderAbsenceRequest(
 }
 
 type OperationRow = {
-  generation: number;
   resource_id: string | null;
   create_closed_at: Date | null;
-  deletion_requested_at: Date | null;
   deleted_at: Date | null;
   create_attempts_tracked: boolean;
   created_at_exact: string;
+  closable: boolean;
 };
 
 /** Plan (default) or record attestations. The inventory must be taken before
@@ -171,64 +176,65 @@ export async function manageCloudProviderAbsence(
 ): Promise<CloudProviderAbsenceResult> {
   if (inventory.resources.some((resource) => !RESOURCE_ID.test(resource.id)))
     fail("Provider inventory contains an unrecognized resource identifier");
+  if (!/^[A-Za-z0-9._@:+-]{1,256}$/.test(inventory.providerAccount)) fail("Provider inventory has no account identity");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout = '10s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
     await client.query("SELECT set_config('app.system', 'on', true)");
-    const owner = (await client.query<{ principal: string; owns: boolean; can_insert: boolean }>(
-      `SELECT current_user AS principal,
+    const owner = (await client.query<{ principal: string; owns: boolean; can_insert: boolean; now: Date }>(
+      `SELECT current_user AS principal, clock_timestamp() AS now,
               pg_get_userbyid(relowner) = current_user AS owns,
               has_table_privilege(current_user, 'public.cloud_workspace_provider_absence_attestations', 'INSERT') AS can_insert
        FROM pg_class WHERE oid = 'public.cloud_workspace_provider_absence_attestations'::regclass`,
     )).rows[0];
     if (!owner || owner.principal === "zeros_app" || !owner.owns || !owner.can_insert)
       fail("Provider absence attestations require the database/migration owner; the application role is refused");
+    const inventoryAge = owner.now.getTime() - inventory.observedAt.getTime();
+    if (inventoryAge < 0 || inventoryAge > MAX_INVENTORY_AGE_MS)
+      fail("Provider inventory must be observed by the database clock within the last 15 minutes");
     const actor = (await client.query<{ auth_status: string; deleted_at: Date | null; staff_role: string | null }>(
       "SELECT auth_status, deleted_at, staff_role FROM users WHERE id = $1", [request.actorUserId],
     )).rows[0];
     if (!actor || actor.auth_status !== "active" || actor.deleted_at !== null || actor.staff_role !== "platform_owner")
       fail("Provider absence actor must be one active Zeros platform owner");
+    // Parent-before-journal lock order, as in the journal store and erasure.
     const organization = (await client.query<{ slug: string }>(
-      "SELECT slug::text FROM organizations WHERE id = $1", [request.organizationId],
+      "SELECT slug::text FROM organizations WHERE id = $1 FOR SHARE", [request.organizationId],
     )).rows[0];
     if (!organization || organization.slug.toLowerCase() !== request.expectedOrganizationSlug)
       fail("Provider absence Organization does not match the expected slug");
-    const workspace = await client.query("SELECT 1 FROM cloud_workspaces WHERE id = $1 AND org_id = $2", [request.workspaceId, request.organizationId]);
+    const workspace = await client.query("SELECT 1 FROM cloud_workspaces WHERE id = $1 AND org_id = $2 FOR SHARE", [request.workspaceId, request.organizationId]);
     if (!workspace.rowCount) fail("Provider absence workspace is not in the Organization");
+    await client.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id = $1 AND generation = ANY($2::integer[]) FOR SHARE",
+      [request.workspaceId, request.generations]);
 
     const evidence: Array<{ generation: number; tracked: boolean; latest: Date; latestExact: string; attempts: unknown[] }> = [];
     for (const generation of request.generations) {
       const row = (await client.query<OperationRow>(
-        `SELECT generation, resource_id, create_closed_at, deletion_requested_at, deleted_at, create_attempts_tracked,
-                created_at::text AS created_at_exact
+        `SELECT resource_id, create_closed_at, deleted_at, create_attempts_tracked, created_at::text AS created_at_exact,
+                cloud_provider_create_absence_confirmed(provider, account_scope, workspace_id, generation, create_attempts_tracked) AS closable
          FROM cloud_workspace_provider_operations
          WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3 AND org_id = $4 FOR UPDATE`,
         [request.accountScope, request.workspaceId, generation, request.organizationId],
       )).rows[0];
       if (!row) fail(`Generation ${generation} has no Boat journal in this account scope`);
-      const attested = await client.query(
-        `SELECT 1 FROM cloud_workspace_provider_absence_attestations
-         WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3`,
-        [request.accountScope, request.workspaceId, generation],
-      );
-      if (attested.rowCount) continue;
+      if (row.create_closed_at !== null || row.deleted_at !== null) continue;
       if (row.resource_id !== null) fail(`Generation ${generation} is bound to a provider resource; use its deletion evidence instead`);
-      if (row.create_closed_at !== null || row.deleted_at !== null) fail(`Generation ${generation} is already closed or deleted`);
       const active = await client.query(
         `SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id = $1 AND generation = $2
            AND operation IN ('create', 'wake') AND state IN ('queued', 'dispatching', 'observing')`,
         [request.workspaceId, generation],
       );
       if (active.rowCount) fail(`Generation ${generation} still has an active create or wake`);
+      // Already covered, or every dispatch certified: the service can close it.
+      if (row.closable) continue;
       const attempts = (await client.query<{ attempt_id: string; dispatched_exact: string; rejection_code: string | null }>(
         `SELECT attempt_id, dispatched_at::text AS dispatched_exact, rejection_code FROM cloud_workspace_provider_create_attempts
          WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3 ORDER BY dispatched_at, attempt_id`,
         [request.accountScope, request.workspaceId, generation],
       )).rows;
-      if (row.create_attempts_tracked && attempts.every((attempt) => attempt.rejection_code !== null))
-        fail(`Generation ${generation} has no uncertified dispatch; the service can close it without an attestation`);
       // Computed in SQL at full precision: a millisecond Date would round the
       // instant below the microsecond dispatch it must cover. An untracked
       // journal records no dispatches; any create/wake of the generation may
@@ -261,14 +267,28 @@ export async function manageCloudProviderAbsence(
     const unaccounted = listed.filter((id) => !bound.has(id) && !request.knownResources.includes(id)).sort();
     if (unaccounted.length)
       fail(`Provider inventory has unaccounted resources: ${unaccounted.slice(0, 20).join(",")}${unaccounted.length > 20 ? ",..." : ""}`);
+    // A listing from another account, or a partial one, omits sandboxes this
+    // scope still holds. Resources being deleted may already be unlisted.
+    const missing = (await client.query<{ resource_id: string }>(
+      `SELECT resource_id FROM cloud_workspace_provider_operations
+       WHERE provider = 'boat' AND account_scope = $1 AND resource_id IS NOT NULL
+         AND deletion_requested_at IS NULL AND deleted_at IS NULL AND NOT (resource_id = ANY($2::text[]))
+       ORDER BY resource_id LIMIT 20`,
+      [request.accountScope, listed],
+    )).rows.map((row) => row.resource_id);
+    if (missing.length)
+      fail(`Provider inventory is incomplete or belongs to another account: bound resources not listed: ${missing.join(",")}`);
 
     const generations = evidence.map((item) => ({ generation: item.generation, coversDispatchesThrough: item.latestExact, tracked: item.tracked }));
     if (evidence.length === 0) {
       await client.query("ROLLBACK");
       return { state: "unchanged", approval: null, generations, inventoryResourceCount: listed.length };
     }
-    const historyDigest = digest(evidence.map((item) => [item.generation, item.tracked, item.latestExact, item.attempts]))
-      .toString("hex").slice(0, 16);
+    const excused = request.knownResources.filter((id) => listed.includes(id));
+    const historyDigest = digest([
+      evidence.map((item) => [item.generation, item.tracked, item.latestExact, item.attempts]),
+      request.knownResources, inventory.providerAccount,
+    ]).toString("hex").slice(0, 16);
     const approval = [
       "provider-absence", request.channel, request.targetFingerprint, request.organizationId, request.actorUserId,
       request.workspaceId, request.accountScope, evidence.map((item) => item.generation).join("+"), historyDigest,
@@ -280,17 +300,17 @@ export async function manageCloudProviderAbsence(
     }
     if (request.approval !== approval) fail("CONTROL_PLANE_PROVIDER_ABSENCE_APPROVAL does not match the current target-bound plan");
     const inventoryDigest = digest({
-      accountScope: request.accountScope, observedAt: inventory.observedAt.toISOString(),
+      accountScope: request.accountScope, providerAccount: inventory.providerAccount, observedAt: inventory.observedAt.toISOString(),
       resources: inventory.resources.map((resource) => [resource.id, resource.state]).sort(),
     });
     for (const item of evidence) {
       await client.query(
         `INSERT INTO cloud_workspace_provider_absence_attestations
-           (provider, account_scope, workspace_id, generation, id, attested_by, database_principal, target_fingerprint,
-            reason, inventory_sha256, inventory_observed_at, inventory_resource_count, covers_dispatches_through)
-         VALUES ('boat', $1, $2, $3, $4, $5, current_user, $6, $7, $8, $9, $10, $11::timestamptz)`,
-        [request.accountScope, request.workspaceId, item.generation, randomUUID(), request.actorUserId, request.targetFingerprint,
-          request.reason, inventoryDigest, inventory.observedAt, listed.length, item.latestExact],
+           (id, provider, account_scope, workspace_id, generation, attested_by, database_principal, target_fingerprint, reason,
+            provider_account, excused_resources, inventory_sha256, inventory_observed_at, inventory_resource_count, covers_dispatches_through)
+         VALUES ($1, 'boat', $2, $3, $4, $5, current_user, $6, $7, $8, $9, $10, $11, $12, $13::timestamptz)`,
+        [randomUUID(), request.accountScope, request.workspaceId, item.generation, request.actorUserId, request.targetFingerprint,
+          request.reason, inventory.providerAccount, excused, inventoryDigest, inventory.observedAt, listed.length, item.latestExact],
       );
     }
     await client.query("COMMIT");
@@ -308,8 +328,13 @@ const SandboxListSchema = z.object({
   pageInfo: z.object({ nextCursor: z.string().nullable().optional(), hasMore: z.boolean() }).passthrough(),
 }).passthrough();
 
-/** Every sandbox visible to the Zeros Boat account, all states included. */
-export async function listBoatInventory(client: Pick<BoatApiClient, "request">): Promise<ProviderInventory> {
+/** Every sandbox the Zeros Boat account created, all states included. Boat
+ * listings are creator-private, so organization-billed sandboxes appear
+ * without an organization scope. `observedAt` is the database clock read
+ * before the first request. */
+export async function listBoatInventory(client: Pick<BoatApiClient, "request">, observedAt: Date): Promise<ProviderInventory> {
+  const account = z.object({ user: z.object({ id: z.string().min(1).max(256) }).passthrough() }).passthrough().safeParse(await client.request("/me"));
+  if (!account.success) fail("Boat returned no account identity");
   const resources: ProviderInventory["resources"] = [];
   let cursor: string | null = null;
   for (let page = 0; page < MAX_INVENTORY_PAGES; page++) {
@@ -318,7 +343,7 @@ export async function listBoatInventory(client: Pick<BoatApiClient, "request">):
     );
     if (!parsed.success) fail("Boat returned an unrecognized sandbox listing");
     resources.push(...parsed.data.sandboxes.map((sandbox) => ({ id: sandbox.id, state: sandbox.state })));
-    if (!parsed.data.pageInfo.hasMore) return { observedAt: new Date(), resources };
+    if (!parsed.data.pageInfo.hasMore) return { observedAt, providerAccount: account.data.user.id, resources };
     cursor = parsed.data.pageInfo.nextCursor ?? null;
     if (!cursor) fail("Boat reported more sandboxes without a cursor");
   }
@@ -346,9 +371,11 @@ async function runCli(): Promise<void> {
     knownResources: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_KNOWN_RESOURCES,
     reason: process.env.CONTROL_PLANE_PROVIDER_ABSENCE_REASON,
   });
-  const inventory = await listBoatInventory(new BoatApiClient({ apiKey, timeoutMs: 30_000 }));
   const pool = createMigrationPool(databaseUrl, { maxConnections: 1 });
   try {
+    // Stamp the inventory with the database clock before the first page.
+    const observedAt = (await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
+    const inventory = await listBoatInventory(new BoatApiClient({ apiKey, timeoutMs: 30_000 }), observedAt);
     const result = await manageCloudProviderAbsence(pool, request, inventory);
     console.log(
       `[provider-absence] state=${result.state} channel=${request.channel} target=${request.targetFingerprint} ` +

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
-import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions } from "./boat-client.js";
+import { BoatApiClient, BoatCreateRejectedError, type BoatApiClientOptions, BOAT_RESOURCE_ID_PATTERN } from "./boat-client.js";
 import { computeMicroUsd, type CloudProviderComputeUsage, type CloudWorkspaceComputeProvider } from "./provider-compute.js";
 import type {
   CloudProviderOperationRecord,
@@ -17,7 +17,7 @@ import {
   type CloudWorkspaceProvider,
 } from "./provider.js";
 
-const RESOURCE_ID = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
+const RESOURCE_ID = BOAT_RESOURCE_ID_PATTERN;
 const SandboxSchema = z.object({
   id: z.string().regex(RESOURCE_ID),
   state: z.enum([

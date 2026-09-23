@@ -4,25 +4,28 @@
 -- exhaustive provider-inventory evidence gathered by a staff operator. It
 -- never erases or rewrites the attempts it covers, covers only dispatches up
 -- to a recorded instant, and can close only an unallocated generation with no
--- active create/wake intent. It is append-only; the organization purge that
--- consumes its journal row removes it by cascade.
+-- active create/wake intent. A later uncovered dispatch needs a later
+-- attestation. Attestations are append-only; the organization purge that
+-- consumes their journal row removes them by cascade.
 
 CREATE TABLE cloud_workspace_provider_absence_attestations (
+  id uuid PRIMARY KEY,
   provider text NOT NULL,
   account_scope text NOT NULL,
   workspace_id uuid NOT NULL,
   generation integer NOT NULL,
-  id uuid NOT NULL UNIQUE,
   attested_by uuid NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
   database_principal text NOT NULL CHECK (length(database_principal) BETWEEN 1 AND 128),
   target_fingerprint text NOT NULL CHECK (target_fingerprint ~ '^[a-f0-9]{16}$'),
   reason text NOT NULL CHECK (length(reason) BETWEEN 16 AND 512),
+  provider_account text NOT NULL CHECK (length(provider_account) BETWEEN 1 AND 256),
+  excused_resources text[] NOT NULL DEFAULT '{}' CHECK (cardinality(excused_resources) <= 64),
   inventory_sha256 bytea NOT NULL CHECK (octet_length(inventory_sha256) = 32),
   inventory_observed_at timestamptz NOT NULL,
   inventory_resource_count integer NOT NULL CHECK (inventory_resource_count >= 0),
   covers_dispatches_through timestamptz NOT NULL,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
-  PRIMARY KEY (provider, account_scope, workspace_id, generation),
+  UNIQUE (provider, account_scope, workspace_id, generation, covers_dispatches_through),
   FOREIGN KEY (provider, account_scope, workspace_id, generation)
     REFERENCES cloud_workspace_provider_operations ON DELETE CASCADE,
   CHECK (covers_dispatches_through < inventory_observed_at)
@@ -68,9 +71,55 @@ CREATE TRIGGER cloud_provider_absence_attestation_no_truncate
 REVOKE ALL ON FUNCTION guard_cloud_provider_absence_attestation() FROM PUBLIC;
 REVOKE ALL ON FUNCTION reject_cloud_provider_absence_attestation_truncate() FROM PUBLIC;
 
+-- The single closure rule shared by the journal guard and the application.
+-- Every unrejected dispatch needs a certified rejection or attestation
+-- coverage. An untracked journal records no dispatches, so it also needs an
+-- attestation newer than every create/wake of the generation. No create or
+-- wake may still be able to dispatch.
+CREATE FUNCTION cloud_provider_create_absence_confirmed(
+  target_provider text, target_account_scope text, target_workspace_id uuid,
+  target_generation integer, attempts_tracked boolean
+) RETURNS boolean LANGUAGE sql STABLE
+SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT
+    NOT EXISTS (
+      SELECT 1 FROM cloud_workspace_provider_create_attempts attempt
+      WHERE attempt.provider = target_provider AND attempt.account_scope = target_account_scope
+        AND attempt.workspace_id = target_workspace_id AND attempt.generation = target_generation
+        AND attempt.rejected_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM cloud_workspace_provider_absence_attestations attestation
+          WHERE attestation.provider = attempt.provider AND attestation.account_scope = attempt.account_scope
+            AND attestation.workspace_id = attempt.workspace_id AND attestation.generation = attempt.generation
+            AND attempt.dispatched_at <= attestation.covers_dispatches_through
+        )
+    )
+    AND (attempts_tracked OR NOT EXISTS (
+      SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+      WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
+        AND intent.operation IN ('create', 'wake')
+        AND greatest(intent.created_at, intent.updated_at, coalesce(intent.completed_at, intent.created_at)) > coalesce((
+          SELECT max(attestation.covers_dispatches_through) FROM cloud_workspace_provider_absence_attestations attestation
+          WHERE attestation.provider = target_provider AND attestation.account_scope = target_account_scope
+            AND attestation.workspace_id = target_workspace_id AND attestation.generation = target_generation
+        ), '-infinity'::timestamptz)
+    ))
+    AND (attempts_tracked OR EXISTS (
+      SELECT 1 FROM cloud_workspace_provider_absence_attestations attestation
+      WHERE attestation.provider = target_provider AND attestation.account_scope = target_account_scope
+        AND attestation.workspace_id = target_workspace_id AND attestation.generation = target_generation
+    ))
+    AND NOT EXISTS (
+      SELECT 1 FROM cloud_workspace_lifecycle_intents intent
+      WHERE intent.workspace_id = target_workspace_id AND intent.generation = target_generation
+        AND intent.operation IN ('create', 'wake') AND intent.state IN ('queued', 'dispatching', 'observing')
+    )
+$$;
+REVOKE ALL ON FUNCTION cloud_provider_create_absence_confirmed(text, text, uuid, integer, boolean) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cloud_provider_create_absence_confirmed(text, text, uuid, integer, boolean) TO zeros_app;
+
 -- Closure no longer requires a tracked journal by constraint; the guard below
--- requires either tracked, certified rejections or an attestation covering
--- every unrejected dispatch.
+-- applies the shared rule, which requires an attestation for untracked journals.
 ALTER TABLE cloud_workspace_provider_operations
   DROP CONSTRAINT cloud_provider_create_closed_unallocated,
   ADD CONSTRAINT cloud_provider_create_closed_unallocated CHECK (
@@ -102,27 +151,8 @@ BEGIN
     RAISE EXCEPTION 'Cloud provider operation identity and accepted evidence are immutable';
   END IF;
   IF OLD.create_closed_at IS NULL AND NEW.create_closed_at IS NOT NULL THEN
-    IF NEW.resource_id IS NOT NULL OR NOT (
-      NEW.create_attempts_tracked OR EXISTS (
-        SELECT 1 FROM cloud_workspace_provider_absence_attestations
-        WHERE provider = NEW.provider AND account_scope = NEW.account_scope
-          AND workspace_id = NEW.workspace_id AND generation = NEW.generation
-      )
-    ) OR EXISTS (
-      SELECT 1 FROM cloud_workspace_provider_create_attempts attempt
-      WHERE attempt.provider = NEW.provider AND attempt.account_scope = NEW.account_scope
-        AND attempt.workspace_id = NEW.workspace_id AND attempt.generation = NEW.generation
-        AND attempt.rejected_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM cloud_workspace_provider_absence_attestations attestation
-          WHERE attestation.provider = attempt.provider AND attestation.account_scope = attempt.account_scope
-            AND attestation.workspace_id = attempt.workspace_id AND attestation.generation = attempt.generation
-            AND attempt.dispatched_at <= attestation.covers_dispatches_through
-        )
-    ) OR EXISTS (
-      SELECT 1 FROM cloud_workspace_lifecycle_intents
-      WHERE workspace_id = NEW.workspace_id AND generation = NEW.generation
-        AND operation IN ('create', 'wake') AND state IN ('queued', 'dispatching', 'observing')
+    IF NEW.resource_id IS NOT NULL OR NOT cloud_provider_create_absence_confirmed(
+      NEW.provider, NEW.account_scope, NEW.workspace_id, NEW.generation, NEW.create_attempts_tracked
     ) THEN
       RAISE EXCEPTION 'Cloud provider allocation absence is not confirmed';
     END IF;

@@ -14,6 +14,8 @@ export type BoatApiClientOptions = {
 };
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 /** Boat reports an organization-billed sandbox's wallet as its `team`. */
+/** Boat sandbox identifiers use a fixed-length unambiguous alphabet. */
+export const BOAT_RESOURCE_ID_PATTERN = /^bx_[23456789abcdefghjkmnpqrstuvwxyz]{8}$/;
 export const BOAT_BILLING_ORG_PATTERN =
   /^team_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const REJECTION_FIELDS = new Set(["ok", "type", "status", "code", "message", "error", "requestId"]);

@@ -195,9 +195,9 @@ d("provider operation journal", () => {
   const attest = (identity: { workspaceId: string }, covers = "(SELECT coalesce(max(dispatched_at),now()-interval '1 second') FROM cloud_workspace_provider_create_attempts)") =>
     pool.query(`INSERT INTO cloud_workspace_provider_absence_attestations
       (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
-       inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
       SELECT 'daytona','qualified-account-1',$1,1,$2,$3,'postgres','0123456789abcdef','Batch 7 regression attestation fixture',
-        $4,covers+interval '1 second',0,covers FROM (SELECT ${covers} AS covers) evidence`,
+        'fixture-account',$4,covers+interval '1 second',0,covers FROM (SELECT ${covers} AS covers) evidence`,
     [identity.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]);
 
   it("closes an attested journal whose uncertified dispatches the attestation covers", async () => {
@@ -251,8 +251,8 @@ d("provider operation journal", () => {
     await store.beginCreateAttempt(identity, randomUUID());
     await expect(withSystemTx(pool, tx => tx.query(`INSERT INTO cloud_workspace_provider_absence_attestations
       (provider,account_scope,workspace_id,generation,id,attested_by,database_principal,target_fingerprint,reason,
-       inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,'zeros_app','0123456789abcdef','self-issued attestation attempt',$4,now(),0,now()-interval '1 second')`,
+       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,covers_dispatches_through)
+      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,'zeros_app','0123456789abcdef','self-issued attestation attempt','fixture-account',$4,now(),0,now()-interval '1 second')`,
     [fixture.workspaceId, randomUUID(), fixture.userId, Buffer.alloc(32)]))).rejects.toThrow(/permission denied/);
     await attest(identity);
     expect((await withSystemTx(pool, tx => tx.query("SELECT 1 FROM cloud_workspace_provider_absence_attestations"))).rowCount).toBe(1);
