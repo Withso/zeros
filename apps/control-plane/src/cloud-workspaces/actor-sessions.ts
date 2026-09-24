@@ -3,7 +3,7 @@ import type pg from "pg";
 import type {AuthedUser} from "../auth.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
-import { authorizeCloudWorkspaceActor, type CloudWorkspaceActorRole, type CloudWorkspaceActorScope, type CloudWorkspaceCapability } from "./actors.js";
+import { authorizeCloudWorkspaceActor, authorizeRecordedCloudWorkspaceActor, type CloudWorkspaceActorRole, type CloudWorkspaceActorScope, type CloudWorkspaceCapability } from "./actors.js";
 import { assertCurrentCloudEngineAuthority } from "./engine-authority.js";
 import { consumeCloudWorkspaceDeviceProof, type CloudWorkspaceDeviceProof } from "./replicas.js";
 import type { CloudEngineRelayGrant } from "./engine-client-admission.js";
@@ -36,19 +36,19 @@ function recordedActor(row:Session):CloudRecordedActor {
 export async function assertRecordedCloudActor(
   tx:Tx,input:CloudWorkspaceActorScope & {actor:CloudRecordedActor;capability:CloudWorkspaceCapability},
 ) {
+  return recordedActorAuthority(tx,input,false);
+}
+
+/** Authority, source session and device in one round trip, checked in that order. */
+async function recordedActorAuthority(
+  tx:Tx,input:CloudWorkspaceActorScope & {actor:CloudRecordedActor;capability:CloudWorkspaceCapability},currentSession:boolean,
+) {
   if (input.actor.actorUserId!==input.actorUserId || !uuid.test(input.actor.deviceId) || !uuid.test(input.actor.sourceSessionId) ||
       !Number.isSafeInteger(input.actor.deviceKeyVersion) || input.actor.deviceKeyVersion<1 ||
       !/^[a-f0-9]{64}$/.test(input.actor.fingerprint)) rejected();
-  const authority = await authorizeCloudWorkspaceActor(tx,input);
-  const source=await tx.query(`SELECT 1 FROM cloud_workspace_actor_sessions session WHERE session.id=$1
-    AND session.workspace_id=$2 AND session.org_id=$3 AND session.actor_user_id=$4
-    AND session.device_id=$5 AND session.device_key_version=$6 AND session.actor_fingerprint=$7
-    AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)`,
-  [input.actor.sourceSessionId,input.workspaceId,input.organizationId,input.actorUserId,input.actor.deviceId,input.actor.deviceKeyVersion,input.actor.fingerprint]);
-  if(source.rowCount!==1)rejected();
-  const device = await tx.query(`SELECT 1 FROM devices WHERE id=$1 AND user_id=$2
-    AND key_version=$3 AND trust_state='trusted' AND revoked_at IS NULL`,[input.actor.deviceId,input.actorUserId,input.actor.deviceKeyVersion]);
-  if (device.rowCount!==1 || !timingSafeEqual(Buffer.from(authority.fingerprint,"hex"),Buffer.from(input.actor.fingerprint,"hex"))) rejected();
+  const {authority,sourceLive,deviceLive} = await authorizeRecordedCloudWorkspaceActor(tx,{...input,currentSession});
+  if (!sourceLive) rejected();
+  if (!deviceLive || !timingSafeEqual(Buffer.from(authority.fingerprint,"hex"),Buffer.from(input.actor.fingerprint,"hex"))) rejected();
   return authority;
 }
 
@@ -67,11 +67,8 @@ export async function assertCloudActorSession(
   [actorSessionId,scope.workspaceId,scope.organizationId,scope.generation,scope.engineInstanceId])).rows[0];
   if (!row) rejected();
   const actor = recordedActor(row);
-  const authority = await assertRecordedCloudActor(tx,{...scope,actorUserId:actor.actorUserId,actor,capability});
-  const current = await tx.query(`SELECT 1 FROM cloud_workspace_actor_sessions WHERE id=$1
-    AND revoked_at IS NULL AND session_expires_at>clock_timestamp()
-    AND last_renewed_at>clock_timestamp()-interval '30 seconds'`,[row.id]);
-  if (current.rowCount!==1) rejected();
+  // The same statement confirms the session is still current after authorization.
+  const authority = await recordedActorAuthority(tx,{...scope,actorUserId:actor.actorUserId,actor,capability},true);
   return {...actor,role:authority.role,sessionId:row.id};
 }
 
