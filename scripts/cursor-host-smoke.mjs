@@ -51,8 +51,8 @@
 // still RESOLVES against the account's catalog. A `liveRequired` compatibility
 // row is allowed to be absent because availability is account-dependent, but is
 // still verified when offered. Without a key the check SKIPS — loudly, never
-// silently — and `--require-models` turns that skip into a failure so a scheduled
-// job holding the secret cannot quietly degrade into testing nothing.
+// silently — and `--require-models` turns that skip into a failure so a run
+// meant to verify models cannot quietly degrade into testing nothing.
 //
 // "Resolves", not "is offered verbatim": the catalog curates `grok-4.5` as a
 // LEVEL-FREE base, and the adapter completes such a base against this same live
