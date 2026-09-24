@@ -10,10 +10,10 @@ import { z } from "zod";
 import { BOAT_RESOURCE_ID_PATTERN, type BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { parseDatabaseTarget } from "./database-target.js";
 
-export const CHANNELS = ["development", "alpha", "beta", "production"] as const;
+const CHANNELS = ["development", "alpha", "beta", "production"] as const;
 const MAX_INVENTORY_PAGES = 100;
 /** Provider evidence must be fresh by the database clock when it is attested. */
-export const MAX_INVENTORY_AGE_MS = 15 * 60_000;
+const MAX_INVENTORY_AGE_MS = 15 * 60_000;
 
 export type ProviderInventory = {
   /** Database clock read before the first page was requested. */
@@ -48,7 +48,7 @@ export const digest = (value: unknown) => createHash("sha256").update(JSON.strin
 export const reasonDigest = (reason: string) => createHash("sha256").update(reason, "utf8").digest("hex").slice(0, 12);
 
 /** Binds an operator approval to one database target and channel. */
-export function targetFingerprint(databaseUrl: string, channel: string, operator: Pick<ProviderOperator, "noun">): string {
+function targetFingerprint(databaseUrl: string, channel: string, operator: Pick<ProviderOperator, "noun">): string {
   let parsed: URL;
   try {
     parsed = parseDatabaseTarget(databaseUrl);

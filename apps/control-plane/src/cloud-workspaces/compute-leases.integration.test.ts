@@ -500,6 +500,28 @@ suite("managed compute lifecycle admission", () => {
       .toEqual({ state: "draining", last_error_code: "compute_final_meter_unavailable" });
     expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
   });
+  it("settles an attested lost allocation that its lease never recorded", async () => {
+    await ready();
+    const journal = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
+    await journal.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
+    await journal.bindResource(input, resource().resourceId);
+    // The allocation was bound before its draining lease recorded it, then lost.
+    await pool.query("UPDATE managed_compute_allocation_leases SET state='draining',provider_resource_id=NULL,provider_expires_at=NULL WHERE id=$1",
+      [input.intentId]);
+    provider.find.mockResolvedValue([]);
+    provider.verifyAbsence.mockResolvedValue(true);
+    const lease = () => pool.query("SELECT state,last_error_code FROM managed_compute_allocation_leases WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    expect((await lease()).rows[0]).toMatchObject({ last_error_code: "compute_final_meter_unavailable" });
+    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
+      resourceId: resource().resourceId, attestedBy: f.userId });
+    await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
+    await coordinator.runOnce();
+    expect((await lease()).rows[0]).toEqual({ state: "settled", last_error_code: null });
+    expect((await pool.query("SELECT state,final_reason FROM managed_compute_credit_reservations WHERE id=$1", [input.intentId])).rows)
+      .toEqual([{ state: "final", final_reason: "allocation_lost" }]);
+    expect((await balance())[0]).toMatchObject({ debitedMicroUsd: 0, reservedMicroUsd: 0 });
+  });
   it("backs off a persistently failing reconciliation instead of requesting a stop every poll", async () => {
     await ready();
     provider.inspect.mockRejectedValue(new CloudProviderError("provider_not_found", "Allocation lost", false));
