@@ -30,11 +30,12 @@ import {
   vi,
 } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import {withSystemTx} from "./db.js";
+import { seedReadyCloudWorkspace } from "./cloud-workspaces/test-fixtures.js";
 import {
   migrationChecksum,
   renamedMigrationAliasesFor,
@@ -509,6 +510,40 @@ d("migration ladder", () => {
         [usageId],
       ),
     ).rejects.toMatchObject({ code: "55000" });
+  });
+
+  it("restores deletion verification that a later absent stop result cleared", async () => {
+    const repairIndex = LADDER.indexOf("0100_cloud_deletion_verification_repair.sql");
+    await applyThrough(repairIndex);
+    const fixture = await seedReadyCloudWorkspace(pool);
+    for (const generation of [2, 3, 4]) {
+      await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
+          provider_connection_id,provider_connection_version,retired_at)
+        SELECT workspace_id,$2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
+          provider_connection_id,provider_connection_version,now()
+        FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [fixture.workspaceId, generation]);
+      await pool.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider,observed_state)
+        SELECT workspace_id,$2,org_id,provider,'absent' FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=1`,
+      [fixture.workspaceId, generation]);
+    }
+    // Generations 2 and 3 had a succeeded cleanup delete; 3's journal still holds an allocation.
+    for (const generation of [2, 3])
+      await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,state,affects_workspace,completed_at)
+        VALUES($1,$2,$3,$4,'delete',$5,$6,'succeeded',false,now())`,
+      [randomUUID(), fixture.workspaceId, generation, fixture.organizationId, randomUUID(), randomBytes(32)]);
+    await pool.query(`INSERT INTO cloud_workspace_provider_operations(provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,resource_id)
+      VALUES ('daytona','repair-scope',$1,3,$2,$3,$4,true,'still-allocated')`,
+    [fixture.workspaceId, fixture.organizationId, randomUUID(), "a".repeat(64)]);
+
+    await applyAndRecord(LADDER[repairIndex]!);
+
+    expect((await pool.query(`SELECT generation, observed_state, deletion_verified_at IS NOT NULL AS verified
+      FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation > 1 ORDER BY generation`, [fixture.workspaceId])).rows)
+      .toEqual([
+        { generation: 2, observed_state: "deleted", verified: true },
+        { generation: 3, observed_state: "absent", verified: false },
+        { generation: 4, observed_state: "absent", verified: false },
+      ]);
   });
 
   it("cascades a workspace whose transition and lifecycle intent reference each other", async () => {

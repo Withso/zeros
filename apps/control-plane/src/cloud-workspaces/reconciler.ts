@@ -736,14 +736,21 @@ export class CloudWorkspaceReconciler {
       const observedState =
         resource?.state ??
         (intent.operation === "delete" ? "deleted" : "absent");
+      // A later stop or archive that finds a deleted generation absent must
+      // not clear its deletion verification; only a live resource can.
       await tx.query(
         `UPDATE cloud_workspace_provider_bindings
          SET provider_resource_id = coalesce($3, provider_resource_id),
              provider_target = coalesce($4, provider_target),
-             observed_state = $5, observed_metadata = $6::jsonb,
+             observed_state = CASE
+               WHEN $3::text IS NULL AND deletion_verified_at IS NOT NULL THEN 'deleted' ELSE $5
+             END,
+             observed_metadata = $6::jsonb,
              last_observed_at = now(), updated_at = now(),
              deletion_verified_at = CASE
-               WHEN $5 = 'deleted' THEN now() ELSE NULL
+               WHEN $5 = 'deleted' THEN now()
+               WHEN $3::text IS NULL THEN deletion_verified_at
+               ELSE NULL
              END
          WHERE workspace_id = $1 AND generation = $2`,
         [

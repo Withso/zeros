@@ -1720,6 +1720,35 @@ d("cloud workspace reconciliation", () => {
       .toEqual({current_generation:1,desired_state:"running",status:"ready"});
   });
 
+  it("keeps a retired generation's verified deletion when a later stop observes it absent", async () => {
+    const seeded = await seedWorkspace({status:"ready",intentState:"succeeded",providerResourceId:"current-resource",observedState:"running"});
+    await pool.query(`INSERT INTO cloud_workspace_generations(workspace_id,generation,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
+      provider_connection_id,provider_connection_version,retired_at)
+      SELECT workspace_id,2,org_id,provider,image_ref,architecture,cpu_millicores,memory_mib,storage_mib,
+        provider_connection_id,provider_connection_version,now()
+      FROM cloud_workspace_generations WHERE workspace_id=$1 AND generation=1`, [seeded.workspaceId]);
+    await pool.query(`INSERT INTO cloud_workspace_provider_bindings(workspace_id,generation,org_id,provider)
+      VALUES($1,2,$2,'daytona')`, [seeded.workspaceId,orgId]);
+    // A compute stop queued earlier finishes only after the cleanup delete.
+    const deleteId = randomUUID(), stopId = randomUUID();
+    await pool.query(`INSERT INTO cloud_workspace_lifecycle_intents(id,workspace_id,generation,org_id,operation,idempotency_key,request_sha256,affects_workspace,next_attempt_at)
+      VALUES($1,$3,2,$4,'delete',$5,$6,false,now()),($2,$3,2,$4,'stop',$7,$8,false,now()+interval '1 hour')`,
+    [deleteId,stopId,seeded.workspaceId,orgId,randomUUID(),randomBytes(32),randomUUID(),randomBytes(32)]);
+    const provider = new FakeProvider(); provider.verifyAbsence = async () => true;
+    const worker = reconciler(provider);
+    const binding = async () => (await pool.query(
+      "SELECT observed_state, deletion_verified_at IS NOT NULL AS verified FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=2",
+      [seeded.workspaceId])).rows[0];
+    await worker.runOnce();
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [deleteId])).rows[0].state).toBe("succeeded");
+    expect(await binding()).toEqual({observed_state:"deleted",verified:true});
+    await pool.query("UPDATE cloud_workspace_lifecycle_intents SET next_attempt_at=now() WHERE id=$1", [stopId]);
+    await worker.runOnce();
+    expect((await pool.query("SELECT state FROM cloud_workspace_lifecycle_intents WHERE id=$1", [stopId])).rows[0].state).toBe("succeeded");
+    // The workspace deletion job can only start once every generation stays verified.
+    expect(await binding()).toEqual({observed_state:"deleted",verified:true});
+  });
+
   it.each(["drift", "wake"])("requires a fresh recovery generation after confirmed allocation loss during %s", async trigger => {
     const seeded = await seedWorkspace({ status: trigger === "drift" ? "ready" : "waking", intentState: trigger === "drift" ? "succeeded" : "queued",
       operation: trigger === "drift" ? "create" : "wake", providerResourceId: "lost-resource", observedState: "running" });
