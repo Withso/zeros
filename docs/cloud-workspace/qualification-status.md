@@ -1,6 +1,6 @@
 # Cloud backend qualification status
 
-Reviewed September 23, 2026. This matrix distinguishes implemented behavior,
+Reviewed September 24, 2026. This matrix distinguishes implemented behavior,
 live evidence and release qualification. Both production cloud execution flags
 remain disabled. Desktop cloud creation UI is outside this backend change.
 
@@ -17,8 +17,9 @@ application remains on Railway. All three cutovers passed source fencing, data
 comparison, forward migrations, runtime-role and public API checks. Normal app
 access is restored; cloud execution remains disabled. Batch 4 covers deployed
 account connection, collaboration and image publication. Batch 6 requalified
-managed Boat through the isolated deployment's public API; Daytona worker
-isolation is still unqualified. See
+managed Boat through the isolated deployment's public API, and Batch 7
+exercised recovery, fault injection, sustained load and operations there.
+Daytona worker isolation is still unqualified. See
 [database qualification](database-qualification.md).
 
 ## Current eight-step execution
@@ -29,10 +30,10 @@ isolation is still unqualified. See
 | 2. Provider registry | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions; isolated deployed Daytona onboarding, distinct valid-key rotation, replay, rejected rotation and revocation | Qualification with an enabled compute profile |
 | 3. Secure Linux / Boat | Pinned native image, unprivileged engine/worker separation, setup, admission, heartbeat, lifecycle and finite provider lease; live authorized Boat create/readiness | Exact production deployment, remaining provider deletion proof and host-security release review |
 | 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat | Production agent-account connection/authentication flow, Codex on the current image and declared tooling gaps below |
-| 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat | Fleet/region load qualification and later native client release tests |
-| 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue | Literal provider-host destruction, target PlanetScale database plus offsite object-store recovery and reviewed RPO/RTO |
+| 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat; a 30-minute two-workspace, six-device soak with complete replay after a disconnect | Multi-region and fleet-scale load, and later native client release tests |
+| 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue; a workspace whose provider host was destroyed recovered from its last durable checkpoint after an operator loss attestation; a point-in-time database restore with every referenced object verified and measured RPO/RTO | Cross-region recovery, and recovery after losing the object store itself |
 | 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes | Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
-| 8. Spend and operations | Credit grants, reservations, cumulative meter, live Boat rejected-create closure and settlement, ledger-to-provider meter reconciliation, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha/Beta/Production PlanetScale cutovers, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence | Production deployment, provider deletion completion, operational alerts and sustained load/soak; customer billing deferred |
+| 8. Spend and operations | Credit grants, reservations, cumulative meter, live Boat rejected-create closure and settlement, ledger-to-provider meter reconciliation, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha/Beta/Production PlanetScale cutovers, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence; operator-attested loss settlement, emailed health alerts, an external uptime probe, a measured load baseline and object-key rotation | Production deployment and provider deletion completion; customer billing deferred |
 
 The eight steps are not all complete. Local tests and a successful Boat runtime
 do not clear Daytona or production operations gates.
@@ -54,9 +55,19 @@ do not clear Daytona or production operations gates.
 
 ## Evidence limits
 
-- Runtime loss testing retired the engine, erased its writable roots and restored
-  into another provider allocation without a final checkpoint. It did not
-  simulate the provider's physical host disappearing.
+- Batch 7 destroyed a running Boat sandbox at the provider. The control plane
+  marked the workspace failed once the provider reported it gone, and never
+  treated the 404 as deletion or as a final meter. After an operator loss
+  attestation, compute settled at the last meter and the owner recovered the
+  last durable checkpoint into a new generation: a file written before that
+  checkpoint came back and a file written after it did not.
+- Batch 7 also killed the engine mid-command, replaced and crashed the control
+  plane, restored the database to an exact point in time with every referenced
+  object decrypted, rotated the object-encryption key across every object and
+  ran a 30-minute multi-device soak. The killed command's receipt became
+  uncertain and was never re-dispatched. Everything ran in one region against
+  the isolated deployment; measured limits are in
+  [infrastructure and operations](infrastructure-and-operations.md#recovery-drills-and-measured-limits).
 - Concurrent headless clients exercise the platform-independent protocol. They
   do not qualify native iOS, iPadOS, Windows or signed macOS applications.
 - Earlier engine qualification used fixture identity issuance. Subsequent
@@ -82,7 +93,7 @@ do not clear Daytona or production operations gates.
   and denied API access while another user's session remained valid. Revocation
   took about 60 seconds through the isolated deployment's event-polling fallback.
   This proves session isolation, not instant revocation or native-device behavior.
-- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remains disabled. Encrypted backup recovery has separate evidence. Full regional recovery and runtime recovery remain open.
+- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remains disabled. Encrypted backup recovery has separate evidence. Batch 7 added a same-region restore drill of the database with its objects; regional recovery remains open.
 - Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
   connection fencing, dropped-column and enum restore compatibility, sequence
   ownership, role drift, cancellation and uncertain fence acknowledgements.
