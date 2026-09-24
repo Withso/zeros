@@ -2,8 +2,8 @@
 // cursor-curated-ids — does a curated cursor model id still resolve?
 // ──────────────────────────────────────────────────────────
 //
-// Used by cursor-host-smoke.mjs's `--require-models` check (the scheduled
-// `cursor-models` job), which compares catalogs/models-v1.json's `families.cursor`
+// Used by cursor-host-smoke.mjs's `--require-models` check (run manually with a
+// real CURSOR_API_KEY), which compares catalogs/models-v1.json's `families.cursor`
 // against the ids `Cursor.models.list` reports for a real account. Its own module
 // so the rule below — which mirrors engine logic and will drift with it — is unit
 // testable; the smoke itself spawns a subprocess at import time and so cannot be
