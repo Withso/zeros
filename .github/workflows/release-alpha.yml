@@ -100,6 +100,12 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install control-plane contract dependencies
+        # Contract tests exercise the real control-plane HTTP validators across
+        # both independent package graphs.
+        working-directory: apps/control-plane
+        run: pnpm install --frozen-lockfile
+
       - name: Install contained-execution runtime
         uses: ./.github/actions/contained-execution-runtime
 
