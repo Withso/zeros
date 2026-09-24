@@ -5,14 +5,14 @@
 // The global "+" destination opens this inside the Home shell. It unifies the
 // new-workspace / open-project / clone flows behind one surface:
 //
-//                                                   ┌ ‹/› ✎ ┐  (mode)
-//   ┌ project pill ▾ · + folder menu ··· Create from… ▾ ┐     (top bar)
+//     project ▾ · source ▾                    ┌ ‹/› ✎ ┐  (context + mode)
+//   ┌──────────────────────────────────────────────────┐
 //   │  What do you want to work on?                     │     (composer)
 //   │  model · fast · effort · plan        📎  Create ↵ │     (toolbar)
 //   └──────────────────────────────────────────────────┘
 //
-// The Code/Design toggle above the card's right edge (the same control every
-// workspace's chat strip carries) picks which MODE the new workspace opens in:
+// The Code/Design toggle shares the project/source row above the card (the same
+// control every workspace's chat strip carries) and picks the new workspace mode:
 //
 //   Code   → creates a worktree in the selected project
 //            (optionally off a chosen PR/branch base) and lands a fresh chat
@@ -32,9 +32,9 @@
 // ──────────────────────────────────────────────────────────
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, FolderOpen, FolderPlus, Plus } from "lucide-react";
+import { ChevronDown, FolderOpen, Plus } from "lucide-react";
 
-import { GithubIcon } from "../../shared/ui";
+import { Button, GithubIcon } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import {
   DropdownMenu,
@@ -86,7 +86,14 @@ import {
   DispatcherComposer,
   type DispatcherCreatePayload,
 } from "./dispatcher-composer";
-import { CreateFromSource, type DispatcherBase } from "./create-from-source";
+import {
+  CreateFromSource,
+  warmCreateSourceProject,
+} from "./create-from-source";
+import {
+  sourceForProject,
+  type DispatcherSourceSelection,
+} from "./dispatcher-source";
 import {
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
@@ -110,7 +117,7 @@ interface DispatcherPageProps {
   active: boolean;
   /** Repository context supplied by the global top bar, when available. */
   initialProjectId?: string | null;
-  /** Shared add-project flows (from AddProjectProvider) for the + folder menu. */
+  /** Shared add-project flows (from AddProjectProvider) inside the project picker. */
   onOpenProject: () => void;
   onOpenGithubProject: () => void;
   onQuickStart: () => void;
@@ -153,7 +160,9 @@ export function DispatcherPage({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
-  const [base, setBase] = useState<DispatcherBase | null>(null);
+  const [sourceSelection, setSourceSelection] =
+    useState<DispatcherSourceSelection | null>(null);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [designBusy, setDesignBusy] = useState(false);
   // Which mode the NEXT workspace opens in. Renderer-local intent, kept across
@@ -205,13 +214,15 @@ export function DispatcherPage({
   );
 
   const needsGitSetup = selectedProject?.isGitRepository === false;
+  const base = needsGitSetup
+    ? null
+    : sourceForProject(sourceSelection, selectedProject);
   const canCreateDesign = designWorkspaceCreationAvailable;
   const mode: WorkspaceMode = canCreateDesign ? requestedMode : "code";
 
-  // A branch selection belongs to the selected repository's Git capability.
   useEffect(() => {
-    setBase(null);
-  }, [selectedProjectId]);
+    if (!active) setProjectMenuOpen(false);
+  }, [active]);
 
   // What Design entry would do to the selected repository's main checkout
   // (open its design folder, or create "<repo> - Design"). Warmed while the
@@ -432,20 +443,7 @@ export function DispatcherPage({
       aria-describedby="create-workspace-description"
     >
       <div className="flex w-full max-w-[640px] flex-col gap-2">
-        {/* Workspace mode is page-level intent, not composer content. Keep it
-            outside the card and align it with the card's right edge. */}
-        {canCreateDesign && (
-          <div data-dispatcher-mode-switcher="" className="flex self-end">
-            <WorkspaceModeToggleView
-              mode={mode}
-              disabled={busy || designBusy}
-              switching={false}
-              onModeChange={setRequestedMode}
-            />
-          </div>
-        )}
-
-        <section className="border-border1 bg-bg2 w-full overflow-visible rounded-lg border shadow-[var(--shadow-xl)]">
+        <div className="flex min-w-0 flex-col gap-2">
           <h1 id="create-workspace-title" className="sr-only">
             Create a workspace
           </h1>
@@ -453,33 +451,31 @@ export function DispatcherPage({
             Pick a repository and describe a task, or create a design workspace.
           </p>
 
-          {/* Top bar — project pill · + folder menu · Create from…. One
-            continuous surface with the composer below: same card background,
-            no separator line. */}
-          <div className="flex items-center gap-1.5 px-4 pt-3 pb-1">
+          {/* Keep project, source and mode together above the prompt. Labels
+              truncate in narrow windows while the mode toggle stays visible. */}
+          <div
+            data-dispatcher-context=""
+            className="flex min-w-0 items-center gap-1 px-1"
+          >
             {/* Project selector */}
-            <DropdownMenu>
+            <DropdownMenu
+              open={active && projectMenuOpen}
+              onOpenChange={setProjectMenuOpen}
+            >
               <Tooltip label="Choose project">
                 <DropdownMenuTrigger asChild>
-                  <button
+                  <Button
                     type="button"
-                    className="text-fg1 hover:bg-bg2-hover inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-sm font-medium transition-colors"
+                    variant="ghost"
+                    aria-label="Choose project"
+                    disabled={busy || designBusy}
+                    className="text-fg2 h-7 min-w-0 gap-1.5 px-2 text-sm font-normal hover:bg-transparent"
                   >
-                    <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                      {selectedProject ? (
-                        <RepositoryIcon
-                          project={selectedProject}
-                          className="size-full rounded-sm"
-                        />
-                      ) : (
-                        "·"
-                      )}
-                    </span>
                     <span className="max-w-[180px] truncate">
-                      {selectedProject?.name ?? "Select a project"}
+                      {selectedProject?.name ?? "Add project"}
                     </span>
                     <ChevronDown size={12} className="text-fg2 opacity-70" />
-                  </button>
+                  </Button>
                 </DropdownMenuTrigger>
               </Tooltip>
               <DropdownMenuContent
@@ -494,6 +490,8 @@ export function DispatcherPage({
                   <DropdownMenuItem
                     key={p.id}
                     data-selected={p.id === selectedProjectId || undefined}
+                    onPointerEnter={() => warmCreateSourceProject(p)}
+                    onFocus={() => warmCreateSourceProject(p)}
                     onSelect={() => setSelectedProjectId(p.id)}
                   >
                     <span className="bg-bg2-hover inline-flex size-3.5 items-center justify-center rounded-sm text-xs">
@@ -505,27 +503,7 @@ export function DispatcherPage({
                     <span className="truncate">{p.name}</span>
                   </DropdownMenuItem>
                 ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-
-            {/* Add a project (open / clone / quick start) */}
-            <DropdownMenu>
-              <Tooltip label="Add a project">
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type="button"
-                    className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex size-7 items-center justify-center rounded-sm transition-colors"
-                    aria-label="Add a project"
-                  >
-                    <FolderPlus size={15} strokeWidth={1.5} />
-                  </button>
-                </DropdownMenuTrigger>
-              </Tooltip>
-              <DropdownMenuContent
-                align="start"
-                sideOffset={4}
-                className="min-w-[200px]"
-              >
+                <DropdownMenuSeparator />
                 <DropdownMenuItem onSelect={() => onOpenProject()}>
                   <FolderOpen className="text-fg2" strokeWidth={1.5} />
                   <span>Open project</span>
@@ -542,36 +520,60 @@ export function DispatcherPage({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            <div className="flex-1" />
-
-            {/* Create from… — pick a PR/branch base (right-aligned, matching
-              the shared design). Cloud toggle is intentionally omitted. */}
+            {/* Source selection is metadata until Create is pressed. */}
             {!needsGitSetup && (
               <CreateFromSource
+                key={JSON.stringify([
+                  selectedProject?.id,
+                  selectedProject?.repoRoot,
+                  selectedProject?.originUrl,
+                ])}
                 project={selectedProject}
                 value={base}
-                onChange={setBase}
+                active={active}
+                disabled={busy || designBusy}
+                onChange={(next) =>
+                  setSourceSelection(
+                    next && selectedProject
+                      ? { owner: selectedProject, base: next }
+                      : null,
+                  )
+                }
               />
+            )}
+
+            {canCreateDesign && (
+              <div
+                data-dispatcher-mode-switcher=""
+                className="ml-auto flex shrink-0"
+              >
+                <WorkspaceModeToggleView
+                  mode={mode}
+                  disabled={busy || designBusy}
+                  switching={false}
+                  onModeChange={setRequestedMode}
+                />
+              </div>
             )}
           </div>
 
-          {/* Composer — flush, full-width (no card, no outer padding); its own
-            px-4 inset aligns the text + pills with the top row. */}
-          <DispatcherComposer
-            agents={agents}
-            cwd={selectedProject?.repoRoot ?? null}
-            originUrl={selectedProject?.originUrl ?? null}
-            onCreate={handleCreate}
-            busy={busy || designBusy}
-            mode={mode}
-            design={{
-              projectName: selectedProject?.name ?? null,
-              target: designTarget.data,
-              loading: designTarget.loading,
-              onCreate: () => void handleCreateDesign(),
-            }}
-          />
-        </section>
+          <section aria-label="Workspace prompt">
+            <DispatcherComposer
+              agents={agents}
+              cwd={selectedProject?.repoRoot ?? null}
+              originUrl={selectedProject?.originUrl ?? null}
+              onCreate={handleCreate}
+              busy={busy || designBusy || !selectedProject}
+              mode={mode}
+              design={{
+                projectName: selectedProject?.name ?? null,
+                target: designTarget.data,
+                loading: designTarget.loading,
+                onCreate: () => void handleCreateDesign(),
+              }}
+            />
+          </section>
+        </div>
       </div>
     </main>
   );

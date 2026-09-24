@@ -11,8 +11,8 @@
 // permission posture are held locally (seeded from the default agent's
 // new-chat born defaults), so "Create" can stamp the fresh chat.
 //
-// Borderless + full-width by design: the Create page card is one continuous surface (no
-// card chrome, no separator), so this renders flush with consistent px-4 inset.
+// The prompt shares the workspace composer's 106px resting height and 18px
+// corners. Project/source context is outside this card, owned by Create.
 //
 // Empty composer → Create still works: the parent creates the workspace on the
 // chosen agent/model with no first turn. Non-empty → seed + auto-send.
@@ -65,7 +65,11 @@ import {
 } from "../../features/agent/new-chat-defaults";
 import { resolveModelConfiguration } from "../../features/agent/model-preferences";
 import { pickAgentForNewChat } from "../../features/settings/default-agent";
-import { COMPOSER_FILE_ACCEPT } from "../../features/agent/composer-shell";
+import {
+  COMPOSER_FILE_ACCEPT,
+  COMPOSER_SURFACE_RADIUS,
+} from "../../features/agent/composer-shell";
+import { cn } from "../../shared/ui/cn";
 import { AddedDirectories } from "../../features/agent/added-directories";
 import { WorkspaceDirectoryPicker } from "../../features/agent/workspace-directory-picker";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
@@ -296,14 +300,21 @@ export function DispatcherComposer({
 
   return (
     <div
-      className="relative flex w-full min-w-0 flex-col"
+      data-dispatcher-composer=""
+      className={cn(
+        "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs",
+        COMPOSER_SURFACE_RADIUS,
+      )}
       {...(designMode ? {} : (dragHandlers ?? {}))}
     >
       {/* @ / # / slash pickers anchor to this surface (position: relative). */}
       {!designMode && suggestionPopup}
       {!designMode && dragActive && (
         <div
-          className="bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs"
+          className={cn(
+            "bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs",
+            COMPOSER_SURFACE_RADIUS,
+          )}
           aria-hidden="true"
         >
           <Paperclip size={18} />
@@ -323,7 +334,7 @@ export function DispatcherComposer({
           {designMode && (
             <div
               data-dispatcher-design-summary=""
-              className="text-fg2 flex min-h-[96px] flex-col gap-1.5 px-4 pt-3 text-sm"
+              className="text-fg2 flex min-h-[44px] flex-col gap-1 text-sm"
             >
               <span className="text-fg1 inline-flex items-center gap-2 font-medium">
                 <PenTool size={14} strokeWidth={1.5} aria-hidden="true" />
@@ -345,7 +356,7 @@ export function DispatcherComposer({
             {/* Linked workspaces (Claude /add-dir) — removable chips above the
               editor, same as the chat composer. */}
             {linkedDirs.length > 0 && (
-              <div className="px-4 pt-3">
+              <div className="pb-2">
                 <AddedDirectories
                   dirs={linkedDirs}
                   onRemove={(dir) =>
@@ -354,17 +365,15 @@ export function DispatcherComposer({
                 />
               </div>
             )}
-            {/* TipTap editor — tall body so it reads as a "what do you want to
-              work on?" canvas. Full-width with an px-4 text inset. */}
-            <div className="min-h-[96px] px-4 pt-3">{editorContent}</div>
+            {editorContent}
           </div>
-          <PromptInputToolbar className="min-w-0 gap-1.5 px-4 pt-1.5 pb-3">
+          <PromptInputToolbar className="min-w-0 flex-nowrap gap-1.5 px-0 pt-1 pb-1">
             {/* gap-0.5: exactly 2px between + / configured model / permission,
                 matching the chat composer. The agent pills are Code's; Design
                 keeps only the Create button (hidden + inert, same reasoning as
                 the editor above). */}
             <PromptInputTools
-              className={designMode ? "hidden" : "gap-0.5"}
+              className={designMode ? "hidden" : "min-w-0 flex-nowrap gap-0.5"}
               {...(designMode ? { inert: "" } : {})}
             >
               {/* "+" menu — add an attachment, link a workspace, or set the

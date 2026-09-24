@@ -91,6 +91,38 @@ describe("repository base branch × workspace lifecycle", () => {
     await rm(workdir, { recursive: true, force: true }).catch(() => {});
   });
 
+  it("keeps local and remote source picks distinct while persisting a plain base name", async () => {
+    // Local main has unpushed work, and a local branch even shadows origin/main.
+    await git(repoRoot, "commit", "--allow-empty", "-qm", "local only");
+    const localTip = await git(repoRoot, "rev-parse", "HEAD");
+    await git(repoRoot, "branch", "origin/main", "release/2026");
+    const remote = await createWorkspace({
+      repoRoot,
+      repoSlug: "lifecycle-repo",
+      baseBranch: "refs/remotes/origin/main",
+    });
+    const local = await createWorkspace({
+      repoRoot,
+      repoSlug: "lifecycle-repo",
+      baseBranch: "refs/heads/main",
+    });
+    expect(await git(remote.path, "rev-parse", "HEAD")).toBe(mainTip);
+    expect(await git(local.path, "rev-parse", "HEAD")).toBe(localTip);
+    expect(getWorkspace(remote.workspaceId).baseBranch).toBe("main");
+    expect(getWorkspace(local.workspaceId).baseBranch).toBe("main");
+  });
+
+  it("preserves branch slashes when a selected remote name also contains a slash", async () => {
+    await git(repoRoot, "remote", "rename", "origin", "team/upstream");
+    const created = await createWorkspace({
+      repoRoot,
+      repoSlug: "lifecycle-repo",
+      baseBranch: "refs/remotes/team/upstream/release/2026",
+    });
+    expect(await git(created.path, "rev-parse", "HEAD")).toBe(releaseTip);
+    expect(getWorkspace(created.workspaceId).baseBranch).toBe("release/2026");
+  });
+
   it("pins each workspace to the base it actually used while create, archive, and restore overlap", async () => {
     setBaseBranch("main");
     const first = await createWorkspace({

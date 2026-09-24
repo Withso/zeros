@@ -391,8 +391,29 @@ async function resolveWorktreeBase(
     // A mutable branch could advance between export and materialization.
     return { baseRef: commit, baseBranch: commit };
   }
-  // Explicit caller base wins (relay contract / future picker) — verbatim, no fetch.
+  // Explicit caller base wins, without fetching. The source picker uses full
+  // refs to distinguish an unpushed local branch from its remote namesake.
+  // Keep the persisted base plain for downstream diff/PR/settings consumers;
+  // legacy shorthand refs and commit IDs retain their existing behavior.
   if (input.baseBranch) {
+    if (input.baseBranch.startsWith("refs/heads/")) {
+      return {
+        baseRef: input.baseBranch,
+        baseBranch: input.baseBranch.slice("refs/heads/".length),
+      };
+    }
+    if (input.baseBranch.startsWith("refs/remotes/")) {
+      const { stdout } = await runGit(input.repoRoot, ["remote"]);
+      const remote = stdout.trim().split("\n").filter(Boolean)
+        .sort((a, b) => b.length - a.length)
+        .find((name) => input.baseBranch!.startsWith(`refs/remotes/${name}/`));
+      if (remote) {
+        return {
+          baseRef: input.baseBranch,
+          baseBranch: input.baseBranch.slice(`refs/remotes/${remote}/`.length),
+        };
+      }
+    }
     return { baseRef: input.baseBranch, baseBranch: input.baseBranch };
   }
 

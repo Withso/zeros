@@ -16,6 +16,7 @@ import type {
   Branch,
   GithubOwner,
   PR,
+  RepoBranchCatalog,
   WorkingDirectoriesWire,
   Workspace,
 } from "../platform/git";
@@ -77,6 +78,21 @@ export const remoteBranchesCache = new KeyedAsyncCache<Branch[]>(32);
 
 /** Keyed by repo slug — all local+remote branches for create-from pickers. */
 export const allBranchesCache = new KeyedAsyncCache<Branch[]>(32);
+
+/** Create's local rows include the checkout path: two clones of the same slug
+ * must never share branch availability. Key is JSON([repoRoot, repoSlug]). */
+export const createLocalBranchesCache = new KeyedAsyncCache<Branch[]>(32);
+/** Separate fast/offline and network snapshots let a slow fetch keep confirmed
+ * rows visible. Both keys are JSON([repoRoot, originUrl]); a confirmed remote
+ * change immediately leaves the old capability snapshot behind. */
+export const createBranchCatalogCache = new KeyedAsyncCache<RepoBranchCatalog>(32);
+export const createRemoteCatalogCache = new KeyedAsyncCache<RepoBranchCatalog>(32);
+
+function invalidateCreateSourceCaches(network = true): void {
+  createLocalBranchesCache.invalidateAll();
+  createBranchCatalogCache.invalidateAll();
+  if (network) createRemoteCatalogCache.invalidateAll();
+}
 
 /** Keyed by origin URL — open PRs for create-from pickers. */
 export const openPrsCache = new KeyedAsyncCache<PR[]>(32);
@@ -310,6 +326,7 @@ export function invalidateFilesToCopyForRepo(repoRoot: string): void {
  *  wholesale; the next open of a base picker refetches behind its cached
  *  rows. */
 export function invalidateRepoReadCaches(repoSlug: string | "*"): void {
+  invalidateCreateSourceCaches(false);
   if (repoSlug === "*") {
     allBranchesCache.invalidateAll();
     pickerWorkspacesCache.invalidateAll();
@@ -327,6 +344,9 @@ export function invalidateRepoReadCaches(repoSlug: string | "*"): void {
 export function invalidateExternalGitRefCaches(
   workspaceIds?: readonly string[],
 ): void {
+  // A fetch can cause this very signal. Re-read its local refs without
+  // triggering another network fetch; intent/Refresh/reconnect own that read.
+  invalidateCreateSourceCaches(false);
   if (!workspaceIds || workspaceIds.length === 0) {
     remoteBranchesCache.invalidateAll();
   } else {
@@ -362,6 +382,7 @@ export function invalidateDesignDirectoryTargetReadCache(): void {
  *  the reconnect call site in use-git-refresh-key) so adding a cache above and
  *  enrolling it in the reconnect boundary is one edit in one file. */
 export function invalidateAllEngineReadCaches(): void {
+  invalidateCreateSourceCaches();
   invalidateDesignReviewCache();
   attachmentTextPreviewsCache.invalidateAll();
   remoteBranchesCache.invalidateAll();

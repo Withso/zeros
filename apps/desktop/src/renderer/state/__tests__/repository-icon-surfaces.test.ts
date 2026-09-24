@@ -29,7 +29,7 @@ describe("repository icon surface coverage", () => {
     );
   });
 
-  it("uses the shared icon in both workspace creation project pickers", () => {
+  it("uses shared icons inside creation menus and a text-only project trigger", () => {
     const dispatcher = source(
       "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
@@ -37,7 +37,7 @@ describe("repository icon surface coverage", () => {
       "apps/desktop/src/renderer/shell/dispatcher/create-from-source.tsx",
     );
 
-    expect(dispatcher).toMatch(/<RepositoryIcon\s+project=\{selectedProject\}/);
+    expect(dispatcher).not.toMatch(/<RepositoryIcon\s+project=\{selectedProject\}/);
     expect(dispatcher).toMatch(/<RepositoryIcon\s+project=\{p\}/);
     expect(dispatcher).not.toMatch(/(?:selectedProject\?\.name|p\.name)\[0\]/);
     expect(createFromSource).toMatch(/<RepositoryIcon\s+project=\{project\}/);
