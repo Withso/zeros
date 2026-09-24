@@ -486,6 +486,13 @@ describe("repository layout contracts", () => {
     expect(licenses).not.toMatch(
       /@(?:anthropic-ai\/claude-agent-sdk|cursor\/sdk|vscode\/ripgrep)-linux-/,
     );
+    // pyright's darwin-only file watcher is installed, and therefore packed,
+    // only on a macOS host. Every host must record it from the reviewed copy,
+    // or Linux preflight and the macOS release disagree about a current bundle.
+    expect(licenses).toMatch(
+      /^fsevents@2\.3\.3\n  License: MIT\n  Surfaces: desktop packaged runtime \(macOS arm64\)\n/m,
+    );
+    expect(existsSync("third_party/fsevents/LICENSE")).toBe(true);
     // The independently deployed control plane now runs the native auth keeper.
     expect(licenses).toContain("@openai/codex@0.154.0-linux-x64");
     expect(licenses).toContain("control plane native runtime (Linux x64)");
