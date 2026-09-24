@@ -160,6 +160,12 @@ available.
   [`third_party/gsap/LICENSE`](third_party/gsap/LICENSE) and reproduced in the
   generated bundle. Marketing uses the public `gsap` package only (no Club
   plugins).
+- **fsevents (macOS desktop):** MIT. `pyright` installs this file watcher as a
+  darwin-only optional dependency, so only a macOS host installs it and packs
+  it into the app. The unmodified `LICENSE` from the `fsevents@2.3.3` archive,
+  whose integrity matches `pnpm-lock.yaml`, is stored at
+  [`third_party/fsevents/LICENSE`](third_party/fsevents/LICENSE) so every host
+  reproduces it in the generated bundle.
 
 ### Cloud Design capture
 

@@ -54,6 +54,20 @@ const PACKAGED_PLATFORM_PACKAGES = [
   },
 ];
 
+// A darwin-only optional package is installed, and therefore packed into the
+// app, only on a macOS host. Record it on every host from its locked version
+// and the exact LICENSE of its lockfile-verified archive, kept under
+// third_party/, so Linux preflight and the macOS release agree on the bundle.
+const PACKAGED_MACOS_ONLY_PACKAGES = [
+  {
+    parentName: "pyright",
+    name: "fsevents",
+    license: "MIT",
+    repository: "https://github.com/fsevents/fsevents",
+    termsDirectory: "third_party/fsevents",
+  },
+];
+
 /** Version suffix npm's Codex platform aliases carry (`0.146.0-darwin-arm64`).
  *  Their package NAME stays `@openai/codex`, so the platform variant can only
  *  be told apart from the JS wrapper by this suffix. */
@@ -242,12 +256,73 @@ function resolvePlatformIdentity(target, spec) {
   };
 }
 
+const lockfileEntries = (lockfile) => lockfile.split(/\n(?=  \S)/);
+const lockfileEntryKey = (entry) => /^  '?([^'(:]+)/.exec(entry)?.[1];
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The exact version the lockfile resolved for one of `parent`'s optional
+ *  dependencies. The installed parent manifest declares only a range. */
+function lockedOptionalVersion(lockfile, parent, name) {
+  const snapshot = lockfileEntries(lockfile).find(
+    (entry) =>
+      lockfileEntryKey(entry) === `${parent.name}@${parent.version}` &&
+      entry.includes("\n    optionalDependencies:\n"),
+  );
+  const optional = snapshot?.split("\n    optionalDependencies:\n")[1] ?? "";
+  return (
+    new RegExp(`^      '?${escapeRegExp(name)}'?: ([^\\s(]+)`, "m").exec(
+      optional,
+    )?.[1] ?? null
+  );
+}
+
+const lockedDarwinOnly = (lockfile, key) =>
+  lockfileEntries(lockfile).some(
+    (entry) =>
+      lockfileEntryKey(entry) === key && /^    os: \[darwin\]$/m.test(entry),
+  );
+
 function normalizePackagedPlatformRecords(records, {
   targets = PACKAGED_PLATFORM_PACKAGES,
+  macosOnly = PACKAGED_MACOS_ONLY_PACKAGES,
   lockfile = ROOT_LOCKFILE,
   surface = `desktop packaged runtime (${PACKAGED_DESKTOP_PLATFORM})`,
 } = {}) {
-  const normalized = records.filter((record) => !isHostPlatformRecord(record));
+  const macosOnlyRecords = macosOnly.map((target) => {
+    const parent = records.find((record) => record.name === target.parentName);
+    if (!parent) {
+      throw new Error(
+        `${target.parentName}: parent package is missing from the production inventory`,
+      );
+    }
+    const version = lockedOptionalVersion(lockfile, parent, target.name);
+    if (!version || !lockedDarwinOnly(lockfile, `${target.name}@${version}`)) {
+      throw new Error(
+        `${target.name}: ${parent.name}@${parent.version} no longer locks a darwin-only optional version`,
+      );
+    }
+    return {
+      name: target.name,
+      version,
+      license: target.license,
+      author: "",
+      homepage: target.repository,
+      repository: target.repository,
+      repositoryKey: target.repository.toLowerCase(),
+      packagePath: join(ROOT, target.termsDirectory),
+      surfaces: new Set([surface]),
+      documentIds: [],
+    };
+  });
+  // Replace only the exact locked version a macOS host installs. Any other
+  // version stays host-dependent, so the release check fails until reviewed.
+  const normalized = records.filter(
+    (record) =>
+      !isHostPlatformRecord(record) &&
+      !macosOnlyRecords.some(
+        (pkg) => pkg.name === record.name && pkg.version === record.version,
+      ),
+  );
 
   for (const target of targets) {
     const parent = normalized.find(
@@ -288,6 +363,7 @@ function normalizePackagedPlatformRecords(records, {
     });
   }
 
+  normalized.push(...macosOnlyRecords);
   return normalized;
 }
 
@@ -435,6 +511,7 @@ const controlPlaneRecords = normalizePackagedPlatformRecords(runPnpmLicenseInven
   "control plane",
 ), {
   targets: [{ parentName: "@openai/codex", packageName: "@openai/codex-linux-x64", license: "Apache-2.0" }],
+  macosOnly: [],
   lockfile: readFileSync(join(ROOT, "apps/control-plane/pnpm-lock.yaml"), "utf8"),
   surface: "control plane native runtime (Linux x64)",
 });
@@ -594,7 +671,8 @@ const lines = [
   "JavaScript dependencies are included. Host-native optional packages are",
   "normalized to the macOS arm64 desktop and Linux x64 control-plane",
   "release contents: the staged Claude runtime, the staged Codex runtime, the",
-  "packaged Cursor runtime, and the packaged ripgrep binary are all included.",
+  "packaged Cursor runtime, the packaged ripgrep binary, and the macOS-only",
+  "fsevents watcher are all included.",
   "Electron's distribution also carries its Chromium notices",
   "file. See THIRD-PARTY-NOTICES.md for the vendor release requirements.",
   "",
