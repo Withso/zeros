@@ -519,6 +519,17 @@ stapling.
    desktop workflow from that branch. Confirm all three report the recorded SHA.
 6. Verify `/healthz`, login, dashboard API, feedback, and deployment commit IDs.
 
+Hosted control planes boot with `DATABASE_MIGRATIONS_ON_BOOT=false` and refuse
+to start while the ledger has a pending or unknown migration. Railway waits for
+a healthy `/healthz` before replacing a deployment, so when a merge adds a
+migration, Alpha's new deployment fails and the previous one keeps serving.
+Apply the migration with the separately authorized migrator, then promptly
+redeploy the same commit: the previous deployment cannot restart against a
+ledger that records a migration it does not know. Railway also skips a `main`
+deployment whose CI check suite failed, including the Release (alpha) desktop
+workflow. A later merge that changes no watched path does not retry the skipped
+deployment; deploy the current `main` commit explicitly.
+
 `pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
 closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish
 the exact `origin/main` SHA in `/zeros-deployment.json`. Cloudflare Pages
