@@ -14,9 +14,11 @@ import {DatabaseCloudWorkspaceCollaborationService,eraseCloudWorkspaceCollaborat
 import {DatabaseCodexAuthRenewal} from "./codex-auth-renewal.js";
 import {syntheticCodexCache} from "./codex-auth-test-fixture.js";
 import {DatabaseCloudWorkspaceActionService} from "./action-receipts.js";
-import {withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldEngineRows} from "./authority-deadline-test-utils.js";
+import {interceptQueries,withAuthorityDeadlineBarrier,pauseBeforeQuery,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
+// Measured budgets for the approval path (see the statement-budget test).
+const APPROVAL_BEGIN_STATEMENTS=59,APPROVAL_RECHECK_STATEMENTS=28,LEASE_VALIDATION_STATEMENTS=15;
 d("private provider execution leases",()=>{
   let pool:pg.Pool,fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>,owner:Awaited<ReturnType<typeof ensureUser>>;
   let credentials:DatabaseCloudAgentCredentialService,service:DatabaseCloudAgentExecutionService,actorSessionId:string,credentialId:string,delegationId:string;
@@ -205,6 +207,22 @@ d("private provider execution leases",()=>{
     const authorize=(lockPool:pg.Pool)=>new DatabaseCloudAgentExecutionService(lockPool,encryption,false).authorizeAction(engine(),request.executionId,actorSessionId);
     await expect(withHeldEngineRows(pool,rows,"SHARE",authorize)).resolves.toEqual({authorized:true,executionId:request.executionId,actorSessionId});
     await expect(withHeldEngineRows(pool,rows,"UPDATE",authorize)).rejects.toMatchObject({code:"55P03"});
+  });
+  it("begins an approval and rechecks its actor within a fixed statement budget",async()=>{
+    // Every statement is a database round trip while the approval holds the
+    // workspace and engine rows, so the approval path keeps an exact budget.
+    const request=admission(),lease=await service.admit(engine(),request);
+    const statements:string[]=[],counted=interceptQueries(pool,sql=>{statements.push(sql);});
+    const begun=await new DatabaseCloudWorkspaceActionService({pool:counted}).request({...engine(),actorSessionId},{kind:"begin",admissible:true,
+      action:{operationId:randomUUID(),conversationId:"chat",executionId:request.executionId,kind:"permission",requestId:randomUUID(),payload:{response:{outcome:"cancelled"}}}});
+    expect(begun).toMatchObject({state:"dispatching",replayed:false});
+    const beginStatements=statements.length;statements.length=0;
+    const executions=new DatabaseCloudAgentExecutionService(counted,encryption,false);
+    await expect(executions.authorizeAction(engine(),request.executionId,actorSessionId)).resolves.toMatchObject({authorized:true});
+    const authorizeStatements=statements.length;statements.length=0;
+    await expect(executions.validate(engine(),lease.leaseId)).resolves.toMatchObject({leaseId:lease.leaseId});
+    expect({begin:beginStatements,authorize:authorizeStatements,validate:statements.length})
+      .toEqual({begin:APPROVAL_BEGIN_STATEMENTS,authorize:APPROVAL_RECHECK_STATEMENTS,validate:LEASE_VALIDATION_STATEMENTS});
   });
   it("authorizes an approval while that device's admission renewal holds its session",async()=>{
     const pair=generateKeyPairSync("ed25519"),publicKey=Buffer.from(pair.publicKey.export({format:"jwk"}).x!,"base64url");

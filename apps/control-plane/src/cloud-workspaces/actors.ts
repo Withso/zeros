@@ -28,18 +28,38 @@ function validateScope(scope:CloudWorkspaceActorScope): void {
 }
 
 /** Exact workspace authority. Never broaden organization RLS for a guest. */
+type ActorAuthorityRow = {
+  owner_user_id:string;team_id:string;access_revision:string;role:CloudWorkspaceActorRole|null;fingerprint:string;
+};
+// $1 workspace, $2 Organization, $3 actor.
+const ACTOR_AUTHORITY_COLUMNS = `workspace.owner_user_id,workspace.team_id,workspace.access_revision,
+      cloud_workspace_actor_role(workspace.id,$3) AS role,
+      cloud_workspace_actor_fingerprint(workspace.id,$3) AS fingerprint`;
+const ACTOR_WORKSPACE = `FROM cloud_workspaces workspace
+    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL AND app_is_system()`;
+
+function assertCapability(capability:CloudWorkspaceCapability): void {
+  if (!Object.hasOwn(capabilities,capability)) throw new HttpError(422,"invalid_input","Unknown workspace capability");
+}
+
+function actorAuthority(
+  input:CloudWorkspaceActorScope & {capability:CloudWorkspaceCapability},row:ActorAuthorityRow,role:CloudWorkspaceActorRole|null,
+):CloudWorkspaceActorAuthority {
+  if (!role || !Object.hasOwn(roles,role)) unavailable();
+  if (roles[role] < capabilities[input.capability]) throw new HttpError(403,"cloud_workspace_capability_required","This workspace role cannot perform the operation");
+  const accessRevision = Number(row.access_revision);
+  if (!Number.isSafeInteger(accessRevision) || accessRevision<1) throw new Error("Workspace access revision is invalid");
+  return {workspaceId:input.workspaceId,organizationId:input.organizationId,actorUserId:input.actorUserId,
+    sponsorUserId:row.owner_user_id,role,accessRevision,fingerprint:row.fingerprint};
+}
+
 export async function authorizeCloudWorkspaceActor(
   tx:Tx,input:CloudWorkspaceActorScope & {capability:CloudWorkspaceCapability;allowOwnerDataRecovery?:boolean},
 ):Promise<CloudWorkspaceActorAuthority> {
   validateScope(input);
-  if (!Object.hasOwn(capabilities,input.capability)) throw new HttpError(422,"invalid_input","Unknown workspace capability");
-  const row = (await tx.query<{
-    owner_user_id:string;team_id:string;access_revision:string;role:CloudWorkspaceActorRole|null;fingerprint:string;
-  }>(`SELECT workspace.owner_user_id,workspace.team_id,workspace.access_revision,
-      cloud_workspace_actor_role(workspace.id,$3) AS role,
-      cloud_workspace_actor_fingerprint(workspace.id,$3) AS fingerprint
-    FROM cloud_workspaces workspace
-    WHERE workspace.id=$1 AND workspace.org_id=$2 AND workspace.deleted_at IS NULL AND app_is_system()`,
+  assertCapability(input.capability);
+  const row = (await tx.query<ActorAuthorityRow>(`SELECT ${ACTOR_AUTHORITY_COLUMNS}
+    ${ACTOR_WORKSPACE}`,
   [input.workspaceId,input.organizationId,input.actorUserId])).rows[0];
   if (!row) unavailable();
   let role = row.role;
@@ -50,12 +70,37 @@ export async function authorizeCloudWorkspaceActor(
       actorUserId:input.actorUserId,ownerUserId:row.owner_user_id,requireWorkspaceOwner:true});
     role = "owner";
   }
-  if (!role || !Object.hasOwn(roles,role)) unavailable();
-  if (roles[role] < capabilities[input.capability]) throw new HttpError(403,"cloud_workspace_capability_required","This workspace role cannot perform the operation");
-  const accessRevision = Number(row.access_revision);
-  if (!Number.isSafeInteger(accessRevision) || accessRevision<1) throw new Error("Workspace access revision is invalid");
-  return {workspaceId:input.workspaceId,organizationId:input.organizationId,actorUserId:input.actorUserId,
-    sponsorUserId:row.owner_user_id,role,accessRevision,fingerprint:row.fingerprint};
+  return actorAuthority(input,row,role);
+}
+
+/** The recorded source of a persisted action: its device session and key. */
+export type CloudWorkspaceRecordedActorSource = {sourceSessionId:string;deviceId:string;deviceKeyVersion:number;fingerprint:string};
+
+/** Workspace authority for a recorded actor together with whether its source
+ * session and trusted device still stand, in one round trip. Approvals run
+ * this several times while holding the workspace and engine rows. With
+ * `currentSession`, the source session must also be unrevoked, unexpired and
+ * renewed within 30 seconds. Callers apply the checks in authority, source,
+ * device order. */
+export async function authorizeRecordedCloudWorkspaceActor(
+  tx:Tx,input:CloudWorkspaceActorScope & {capability:CloudWorkspaceCapability;actor:CloudWorkspaceRecordedActorSource;currentSession:boolean},
+):Promise<{authority:CloudWorkspaceActorAuthority;sourceLive:boolean;deviceLive:boolean}> {
+  validateScope(input);
+  assertCapability(input.capability);
+  const actor=input.actor;
+  const row = (await tx.query<ActorAuthorityRow & {source_live:boolean;device_live:boolean}>(`SELECT ${ACTOR_AUTHORITY_COLUMNS},
+      EXISTS (SELECT 1 FROM cloud_workspace_actor_sessions session WHERE session.id=$4
+        AND session.workspace_id=$1 AND session.org_id=$2 AND session.actor_user_id=$3
+        AND session.device_id=$5 AND session.device_key_version=$6 AND session.actor_fingerprint=$7
+        AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)
+        AND (NOT $8::boolean OR (session.revoked_at IS NULL AND session.session_expires_at>clock_timestamp()
+          AND session.last_renewed_at>clock_timestamp()-interval '30 seconds'))) AS source_live,
+      EXISTS (SELECT 1 FROM devices device WHERE device.id=$5 AND device.user_id=$3
+        AND device.key_version=$6 AND device.trust_state='trusted' AND device.revoked_at IS NULL) AS device_live
+    ${ACTOR_WORKSPACE}`,
+  [input.workspaceId,input.organizationId,input.actorUserId,actor.sourceSessionId,actor.deviceId,actor.deviceKeyVersion,actor.fingerprint,input.currentSession])).rows[0];
+  if (!row) unavailable();
+  return {authority:actorAuthority(input,row,row.role),sourceLive:row.source_live,deviceLive:row.device_live};
 }
 
 /** Resource withdrawal never requires purchasing compute. This narrow authority
