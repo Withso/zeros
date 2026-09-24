@@ -22,6 +22,31 @@ exercised recovery, fault injection, sustained load and operations there.
 Daytona worker isolation is still unqualified. See
 [database qualification](database-qualification.md).
 
+## Release state
+
+Batch 8 closed the staff backend milestone on September 24, 2026.
+
+| Channel | Backend | Migration ledger | Cloud execution |
+| --- | --- | --- | --- |
+| Alpha | current `main`, deployed automatically | through `0100` | off |
+| Beta | September 21 release (`release/0.1.18`) | through `0093` | off |
+| Production | September 21 release (`release/0.1.18`) | through `0093` | off |
+
+- Managed Boat Linux VMs are the default provider. Daytona remains a separate
+  adapter, used only when explicitly selected: its worker isolation is
+  unqualified, and it is kept for a future Windows sandbox.
+- Beta and Production move to the current backend at the next release cut.
+  Apply `0094`–`0100` with the separately authorized migrator, then promote the
+  frozen release as described in [deployment environments](../deployment-environments.md).
+  Their Pages production deployments and the Beta desktop publisher stay held
+  until then.
+- The isolated qualification deployment used for Batches 4–8 is retired. Its
+  evidence is summarized here and in
+  [infrastructure and operations](infrastructure-and-operations.md#recovery-drills-and-measured-limits).
+- Enabling cloud execution on Alpha for desktop UI wiring needs its own Boat,
+  object-store, keyring and operator configuration. That is the first step of
+  the UI wiring phase, not a backend gap.
+
 ## Current eight-step execution
 
 | Step | Repository implementation and evidence | Open exit condition |
@@ -32,7 +57,7 @@ Daytona worker isolation is still unqualified. See
 | 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat | Production agent-account connection/authentication flow, Codex on the current image and declared tooling gaps below |
 | 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat; a 30-minute two-workspace, six-device soak with complete replay after a disconnect | Multi-region and fleet-scale load, and later native client release tests |
 | 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue; a workspace whose provider host was destroyed recovered from its last durable checkpoint after an operator loss attestation; a point-in-time database restore with every referenced object verified and measured RPO/RTO | Cross-region recovery, and recovery after losing the object store itself |
-| 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes | Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
+| 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes; off by default, selected only explicitly | Deferred. Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
 | 8. Spend and operations | Credit grants, reservations, cumulative meter, live Boat rejected-create closure and settlement, ledger-to-provider meter reconciliation, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha/Beta/Production PlanetScale cutovers, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence; operator-attested loss settlement, emailed health alerts, an external uptime probe, a measured load baseline and object-key rotation | Production deployment and provider deletion completion; customer billing deferred |
 
 The eight steps are not all complete. Local tests and a successful Boat runtime

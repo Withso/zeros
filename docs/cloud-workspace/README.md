@@ -22,8 +22,9 @@ has separate implementation and qualification work remaining:
   commands, immutable readiness attestation, engine registration/heartbeats,
   credential rotation, and drain-first generation replacement/rollback.
 - PostgreSQL stores the ordered durable record and content projections.
-  Encrypted blobs and checkpoints use the object-store abstraction; the hosted
-  filesystem adapter is hardened for a private mounted Railway volume.
+  Encrypted blobs and checkpoints use the object-store abstraction. Its S3
+  adapter was qualified against a private R2 bucket; a filesystem adapter serves
+  a private mounted volume.
 - Local-to-cloud and cloud-to-local are immutable copy/fork workflows. The
   destination always receives a new workspace UUID and the source remains
   unchanged. Each authorized member/device receive-only replica may mirror a
@@ -45,11 +46,12 @@ operations until their separate release gates pass.
 End-user cloud creation/catalog/details UI is deliberately not wired yet.
 Organization sharing and individually entitled external collaborators have
 backend contracts, regression coverage and isolated deployed API evidence.
-Provider runtime and native client qualification remain open. Presence UI,
-ownership transfer execution, mobile apps, and a published customer-managed
-Railway template are later work. Documents in
-this folder distinguish implemented repository behavior from release
-qualification and deferred product surfaces.
+Managed Boat runtime passed qualification on the isolated deployment, apart
+from the open items in [qualification status](qualification-status.md); Daytona
+and native client qualification remain open. Presence UI, ownership transfer
+execution, mobile apps, and a published customer-managed Railway template are
+later work. Documents in this folder distinguish implemented repository
+behavior from release qualification and deferred product surfaces.
 
 ## Documents
 

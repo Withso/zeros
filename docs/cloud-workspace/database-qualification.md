@@ -5,8 +5,10 @@ Each cutover preserved its own source data, applied forward migrations, verified
 runtime roles and API behavior, and retained the old writer fence. Normal app
 access is restored. A same-region point-in-time restore drill of the isolated
 deployment verified its rows and every referenced object; it does not complete
-regional disaster recovery or sustained production-load qualification. The
-control-plane application stays on Railway. Existing SQL, workspace identities,
+regional disaster recovery or sustained production-load qualification. Alpha
+applied `0094`–`0100` on September 24 after an on-demand backup; Beta and
+Production stay at `0093` until their next release. The control-plane
+application stays on Railway. Existing SQL, workspace identities,
 RLS, migrations and portable client contracts remain authoritative. The compute
 providers remain independent of database hosting.
 
@@ -123,7 +125,7 @@ not performance sizing recommendations.
 ## Recovery and cutover
 
 Database backups do not include the encrypted workspace blobs stored by the
-separate object-store adapter. The isolated qualification deployment keeps
+separate object-store adapter. The isolated qualification deployment kept
 them in a private R2 bucket through the S3 adapter; a mounted filesystem volume
 is the other supported adapter. Either way, the object store's offsite copies,
 integrity checks, deletion tombstones, key recovery and retention must cover the
