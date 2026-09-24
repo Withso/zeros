@@ -19,6 +19,12 @@
 //      all. Alpha stayed red for 5 consecutive runs and both the Beta and
 //      Production gates for v0.1.10 failed on it.
 //
+//   3. The control-plane package graph. Contract tests under scripts/ import
+//      control-plane sources, whose dependencies live in apps/control-plane's
+//      own lockfile, not the root one. preflight.yml installed that graph; the
+//      three release gates did not, so the same suite failed there with
+//      "Cannot find package 'hono'".
+//
 // Asserting the whole prerequisite set against EVERY job that runs the suite is
 // what makes that class of drift impossible to reintroduce quietly.
 
@@ -113,6 +119,19 @@ describe("Vitest CI provisioning", () => {
       expect(body.indexOf("pnpm install --frozen-lockfile")).toBeLessThan(
         runtime,
       );
+    },
+  );
+
+  it.each(jobs)(
+    "installs the control-plane package graph before $file:$job runs Vitest",
+    ({ body }) => {
+      const install = body.search(
+        /working-directory: apps\/control-plane\n\s+run: pnpm install --frozen-lockfile/,
+      );
+      const test = body.search(VITEST_COMMAND);
+
+      expect(install).toBeGreaterThanOrEqual(0);
+      expect(install).toBeLessThan(test);
     },
   );
 
