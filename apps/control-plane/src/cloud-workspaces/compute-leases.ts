@@ -923,11 +923,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
   }
 
   private async attestedLost(lease: Lease, resourceId: string): Promise<boolean> {
-    return withSystemTx(this.options.pool, async (tx) => (await tx.query(
-      `SELECT 1 FROM cloud_workspace_provider_operations
-       WHERE workspace_id=$1 AND generation=$2 AND org_id=$3 AND resource_id=$4 AND lost_at IS NOT NULL`,
+    return withSystemTx(this.options.pool, async (tx) => (await tx.query<{ lost: boolean }>(
+      "SELECT cloud_provider_allocation_lost($1,$2,$3,$4) AS lost",
       [lease.workspace_id, lease.generation, lease.org_id, resourceId],
-    )).rowCount === 1);
+    )).rows[0]!.lost);
   }
 
   private async settle(lease: Lease): Promise<void> {

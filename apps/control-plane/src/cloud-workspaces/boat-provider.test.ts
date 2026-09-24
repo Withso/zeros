@@ -575,6 +575,7 @@ describe("Boat allocation lifecycle", () => {
       () => restarted.readComputeUsage(RESOURCE),
       () => restarted.createSshAccess(RESOURCE, 5),
       () => restarted.getPreviewEndpoint(RESOURCE, 3000),
+      () => restarted.getEngineEndpoint(RESOURCE, 7777),
     ])
       await expect(action()).rejects.toMatchObject({ code: "provider_resource_lost" });
     // Nothing remains to delete, and no deletion bookkeeping may start.

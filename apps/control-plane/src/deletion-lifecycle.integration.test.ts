@@ -14,6 +14,7 @@ import {
   createDeletionLifecycleRoutes,
   DeletionLifecycleProcessor,
 } from "./deletion-lifecycle.js";
+import { seedProviderLossAttestation } from "./cloud-workspaces/test-fixtures.js";
 import { runMigrations } from "./migrate.js";
 import { createOpsRoutes } from "./ops.js";
 import {
@@ -1948,7 +1949,7 @@ d("account, organization, and operator deletion lifecycle", () => {
     async (kind) => {
       const owner = await signup("OrgFencePurge");
       const organizationId = await createOrganization(owner, "Fence Company");
-      const blobId = randomUUID();
+      const blobId = randomUUID(), lostWorkspaceId = randomUUID();
       if (kind === "rejected-create") {
         await pool.query(`INSERT INTO cloud_workspace_provider_operations
           (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked)
@@ -1962,7 +1963,7 @@ d("account, organization, and operator deletion lifecycle", () => {
         await pool.query(`INSERT INTO cloud_workspace_provider_operations
           (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id)
           VALUES ('boat','test-account',$1,1,$2,$3,$4,'bx_34567892')`,
-        [randomUUID(),organizationId,randomUUID(),"a".repeat(64)]);
+        [lostWorkspaceId,organizationId,randomUUID(),"a".repeat(64)]);
       } else if (kind === "provider") {
         await pool.query(
           `INSERT INTO cloud_workspace_provider_operations
@@ -2032,13 +2033,8 @@ d("account, organization, and operator deletion lifecycle", () => {
         await pool.query("UPDATE cloud_workspace_provider_operations SET create_closed_at=now() WHERE org_id=$1",[organizationId]);
       } else if (kind === "lost-allocation") {
         // An attested provider loss is terminal: nothing remains to delete.
-        await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
-          (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
-           provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
-          SELECT provider,account_scope,workspace_id,generation,resource_id,$2,$3,'postgres','0123456789abcdef',
-            'Batch 7 host loss regression','fixture-account',$4,now(),0,now()
-          FROM cloud_workspace_provider_operations WHERE org_id=$1`,[organizationId,randomUUID(),owner.id,Buffer.alloc(32)]);
-        await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=now() WHERE org_id=$1",[organizationId]);
+        await seedProviderLossAttestation(pool, { provider: "boat", accountScope: "test-account", workspaceId: lostWorkspaceId,
+          resourceId: "bx_34567892", attestedBy: owner.id });
       } else if (kind === "provider") {
         await pool.query(
           "UPDATE cloud_workspace_provider_operations SET deleted_at = now() WHERE org_id = $1",

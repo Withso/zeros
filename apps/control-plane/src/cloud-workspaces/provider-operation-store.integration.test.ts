@@ -5,6 +5,7 @@ import { withSystemTx, withUserTx, type Tx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import { DatabaseCloudProviderOperationStore } from "./provider-operation-store.js";
 import {
+  seedProviderLossAttestation,
   seedReadyCloudWorkspace,
   type ReadyCloudWorkspaceFixture,
 } from "./test-fixtures.js";
@@ -270,12 +271,8 @@ d("provider operation journal", () => {
 
   // The database owner records loss attestations for an exact bound resource.
   const attestLoss = (identity: { workspaceId: string }, resourceId: string) =>
-    pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
-      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
-       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
-      VALUES ('daytona','qualified-account-1',$1,1,$2,$3,$4,'postgres','0123456789abcdef','Batch 7 regression loss attestation',
-        'fixture-account',$5,now(),0,now())`,
-    [identity.workspaceId, resourceId, randomUUID(), fixture.userId, Buffer.alloc(32)]);
+    seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "qualified-account-1", workspaceId: identity.workspaceId,
+      resourceId, attestedBy: fixture.userId, markLost: false });
   const markLost = () => withSystemTx(pool, tx => tx.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp()"));
 
   it("records a loss only for the attested bound resource, then retires it without deletion", async () => {

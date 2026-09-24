@@ -69,17 +69,10 @@ $$;
 CREATE TRIGGER cloud_provider_loss_attestation_append_only
   BEFORE INSERT OR UPDATE OR DELETE ON cloud_workspace_provider_loss_attestations
   FOR EACH ROW EXECUTE FUNCTION guard_cloud_provider_loss_attestation();
-CREATE FUNCTION reject_cloud_provider_loss_attestation_truncate() RETURNS trigger
-LANGUAGE plpgsql SET search_path = pg_catalog, public, pg_temp AS $$
-BEGIN
-  RAISE EXCEPTION 'Cloud provider loss attestations are append-only' USING ERRCODE = '55000';
-END;
-$$;
 CREATE TRIGGER cloud_provider_loss_attestation_no_truncate
   BEFORE TRUNCATE ON cloud_workspace_provider_loss_attestations
-  FOR EACH STATEMENT EXECUTE FUNCTION reject_cloud_provider_loss_attestation_truncate();
+  FOR EACH STATEMENT EXECUTE FUNCTION guard_cloud_provider_loss_attestation();
 REVOKE ALL ON FUNCTION guard_cloud_provider_loss_attestation() FROM PUBLIC;
-REVOKE ALL ON FUNCTION reject_cloud_provider_loss_attestation_truncate() FROM PUBLIC;
 
 -- Set once, only for the attested bound resource, and only while Zeros has
 -- not started deleting it. A lost allocation has nothing left to delete.
@@ -133,6 +126,24 @@ BEGIN
   RETURN NEW;
 END;
 $$;
+
+-- The single rule compute settlement uses: the generation's bound resource is
+-- exactly the journal's attested lost allocation.
+CREATE FUNCTION cloud_provider_allocation_lost(
+  target_workspace_id uuid, target_generation integer, target_org_id uuid, target_resource_id text
+) RETURNS boolean LANGUAGE sql STABLE SET search_path = pg_catalog, public, pg_temp AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM cloud_workspace_provider_bindings binding
+    JOIN cloud_workspace_provider_operations operation
+      ON operation.workspace_id = binding.workspace_id AND operation.generation = binding.generation
+     AND operation.org_id = binding.org_id AND operation.resource_id = binding.provider_resource_id
+    WHERE binding.workspace_id = target_workspace_id AND binding.generation = target_generation
+      AND binding.org_id = target_org_id AND binding.provider_resource_id = target_resource_id
+      AND operation.lost_at IS NOT NULL
+  )
+$$;
+REVOKE ALL ON FUNCTION cloud_provider_allocation_lost(uuid, integer, uuid, text) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION cloud_provider_allocation_lost(uuid, integer, uuid, text) TO zeros_app;
 
 -- A lost allocation's reservations finalize at the last provider meter.
 ALTER TABLE managed_compute_credit_reservations

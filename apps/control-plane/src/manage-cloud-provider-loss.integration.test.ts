@@ -90,7 +90,8 @@ d("operator-attested provider loss", () => {
     await leases();
     const plan = await manageCloudProviderLoss(pool, request(), await inventory(), await lookup());
     expect(plan).toMatchObject({ state: "planned", inventoryResourceCount: 0 });
-    expect(plan.approval).toMatch(new RegExp(`^provider-loss:alpha:[a-f0-9]{16}:.*:1:${LOST}:boat-user-qualified:[a-f0-9]{12}$`));
+    expect(plan.approval).toMatch(new RegExp(`^provider-loss:alpha:[a-f0-9]{16}:.*:1:${LOST}:[a-f0-9]{16}:[a-f0-9]{12}$`));
+    expect(plan.approval).not.toContain("boat-user-qualified");
     expect(await attestations()).toHaveLength(0);
     await expect(manageCloudProviderLoss(pool, request({ execute: true, approval: `${plan.approval}x` }), await inventory(), await lookup()))
       .rejects.toThrow("does not match");

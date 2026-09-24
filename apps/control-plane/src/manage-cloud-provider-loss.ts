@@ -11,60 +11,44 @@
 // allocation as absent: its compute reservations finalize at the last meter
 // and its owner can recover the durable checkpoint into a new generation.
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import pg from "pg";
-import { z } from "zod";
+import type pg from "pg";
 
 import { BOAT_RESOURCE_ID_PATTERN, BoatApiClient } from "./cloud-workspaces/boat-client.js";
 import { CloudProviderError } from "./cloud-workspaces/provider.js";
-import { createMigrationPool } from "./db.js";
 import {
-  CHANNELS,
-  MAX_INVENTORY_AGE_MS,
   assertInventoryAccount,
-  listBoatInventory,
-  readAccountScopeReceipt,
-  targetFingerprint,
+  assertInventoryComplete,
+  assertInventoryShape,
+  beginProviderAttestation,
+  databaseClock,
+  digest,
+  inventoryDigest,
+  readBoatInventory,
+  reasonDigest,
+  validateProviderOperatorRequest,
   type ProviderInventory,
-} from "./manage-cloud-provider-absence.js";
+  type ProviderOperator,
+  type ProviderOperatorRequest,
+  type ProviderOperatorRequestInput,
+} from "./cloud-provider-evidence.js";
+import { createMigrationPool } from "./db.js";
+
+const OPERATOR: ProviderOperator = { env: "LOSS", noun: "loss", table: "cloud_workspace_provider_loss_attestations" };
 
 /** A direct lookup of the exact resource, stamped with the database clock. */
 export type ProviderLookup = { resourceId: string; observedAt: Date; notFound: boolean };
 
-export interface CloudProviderLossRequestInput {
-  databaseUrl: string;
-  channel: string | undefined;
-  railwayEnvironmentName?: string | undefined;
-  execute: boolean;
-  productionConfirmed?: string | undefined;
-  approval?: string | undefined;
-  organizationId: string | undefined;
-  expectedOrganizationSlug: string | undefined;
-  actorUserId: string | undefined;
-  workspaceId: string | undefined;
+export interface CloudProviderLossRequestInput extends ProviderOperatorRequestInput {
   generation: string | undefined;
   resourceId: string | undefined;
-  accountScope: string | undefined;
-  expectedProviderAccount: string | undefined;
-  reason: string | undefined;
 }
 
-export interface ValidatedCloudProviderLossRequest {
-  channel: (typeof CHANNELS)[number];
-  execute: boolean;
-  approval: string | null;
-  organizationId: string;
-  expectedOrganizationSlug: string;
-  actorUserId: string;
-  workspaceId: string;
+export interface ValidatedCloudProviderLossRequest extends ProviderOperatorRequest {
   generation: number;
   resourceId: string;
-  accountScope: string;
-  expectedProviderAccount: string;
-  reason: string;
-  targetFingerprint: string;
 }
 
 export interface CloudProviderLossResult {
@@ -87,55 +71,12 @@ function fail(message: string): never {
 }
 
 export function validateCloudProviderLossRequest(input: CloudProviderLossRequestInput): ValidatedCloudProviderLossRequest {
-  const channel = input.channel?.trim().toLowerCase() ?? "";
-  if (!CHANNELS.includes(channel as (typeof CHANNELS)[number]))
-    fail("CONTROL_PLANE_PROVIDER_LOSS_CHANNEL must be development, alpha, beta, or production");
-  const railwayEnvironment = input.railwayEnvironmentName?.trim().toLowerCase();
-  if (railwayEnvironment && railwayEnvironment !== channel)
-    fail("Provider loss channel does not match RAILWAY_ENVIRONMENT_NAME");
-  if (input.execute && channel === "production" && input.productionConfirmed !== "true")
-    fail("CONTROL_PLANE_PROVIDER_LOSS_PRODUCTION_CONFIRMED=true is required for production");
-  const uuid = z.string().uuid();
-  const organizationId = uuid.safeParse(input.organizationId);
-  const actorUserId = uuid.safeParse(input.actorUserId);
-  const workspaceId = uuid.safeParse(input.workspaceId);
-  if (!organizationId.success) fail("CONTROL_PLANE_PROVIDER_LOSS_ORGANIZATION_ID must be one exact UUID");
-  if (!actorUserId.success) fail("CONTROL_PLANE_PROVIDER_LOSS_ACTOR_USER_ID must be one exact UUID");
-  if (!workspaceId.success) fail("CONTROL_PLANE_PROVIDER_LOSS_WORKSPACE_ID must be one exact UUID");
-  const slug = z.string().trim().min(1).max(255).safeParse(input.expectedOrganizationSlug);
-  if (!slug.success) fail("CONTROL_PLANE_PROVIDER_LOSS_EXPECTED_ORGANIZATION_SLUG is required");
+  const base = validateProviderOperatorRequest(input, OPERATOR);
   const generation = input.generation?.trim() ?? "";
   if (!/^[1-9][0-9]{0,8}$/.test(generation)) fail("CONTROL_PLANE_PROVIDER_LOSS_GENERATION must be one positive generation");
   const resourceId = input.resourceId?.trim() ?? "";
   if (!BOAT_RESOURCE_ID_PATTERN.test(resourceId)) fail("CONTROL_PLANE_PROVIDER_LOSS_RESOURCE_ID must be one Boat sandbox id");
-  const accountScope = input.accountScope?.trim() ?? "";
-  if (!/^[A-Za-z0-9._:-]{1,128}$/.test(accountScope)) fail("BOAT_ACCOUNT_SCOPE must be the stable provider account scope");
-  const expectedProviderAccount = input.expectedProviderAccount?.trim() ?? "";
-  if (!/^[A-Za-z0-9._@:+-]{1,256}$/.test(expectedProviderAccount))
-    fail("CONTROL_PLANE_PROVIDER_LOSS_EXPECTED_ACCOUNT must name the Boat account that owns this scope");
-  const reason = z.string().trim().min(16).max(512).safeParse(input.reason);
-  if (!reason.success) fail("CONTROL_PLANE_PROVIDER_LOSS_REASON must contain 16 to 512 characters");
-  let fingerprint: string;
-  try {
-    fingerprint = targetFingerprint(input.databaseUrl, channel, "provider-loss");
-  } catch (error) {
-    fail(error instanceof Error ? error.message : "Invalid configuration: DATABASE_URL");
-  }
-  return {
-    channel: channel as (typeof CHANNELS)[number],
-    execute: input.execute,
-    approval: input.approval?.trim() || null,
-    organizationId: organizationId.data,
-    expectedOrganizationSlug: slug.data.toLowerCase(),
-    actorUserId: actorUserId.data,
-    workspaceId: workspaceId.data,
-    generation: Number(generation),
-    resourceId,
-    accountScope,
-    expectedProviderAccount,
-    reason: reason.data,
-    targetFingerprint: fingerprint,
-  };
+  return { ...base, generation: Number(generation), resourceId };
 }
 
 type OperationRow = {
@@ -145,8 +86,6 @@ type OperationRow = {
   lost_at: Date | null;
 };
 
-const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value), "utf8").digest();
-
 /** Plan (default) or record the loss. Inventory and lookup are read before
  * this call and are checked against the journal inside the transaction. */
 export async function manageCloudProviderLoss(
@@ -155,48 +94,16 @@ export async function manageCloudProviderLoss(
   inventory: ProviderInventory,
   lookup: ProviderLookup,
 ): Promise<CloudProviderLossResult> {
-  if (inventory.resources.some((resource) => !BOAT_RESOURCE_ID_PATTERN.test(resource.id)))
-    fail("Provider inventory contains an unrecognized resource identifier");
-  if (inventory.providerAccount !== request.expectedProviderAccount)
-    fail("Provider inventory belongs to a different account than CONTROL_PLANE_PROVIDER_LOSS_EXPECTED_ACCOUNT");
+  assertInventoryShape(inventory, request, OPERATOR);
   if (lookup.resourceId !== request.resourceId || !lookup.notFound)
     fail("The provider still resolves the resource; a lookup must return not found");
   const listed = [...new Set(inventory.resources.map((resource) => resource.id))];
   if (listed.includes(request.resourceId)) fail("Provider inventory still lists the resource");
   const client = await pool.connect();
   try {
-    await client.query("BEGIN");
-    await client.query("SET LOCAL lock_timeout = '10s'");
-    await client.query("SET LOCAL statement_timeout = '30s'");
-    await client.query("SELECT set_config('app.system', 'on', true)");
-    const owner = (await client.query<{ principal: string; owns: boolean; can_insert: boolean; now: Date }>(
-      `SELECT current_user AS principal, clock_timestamp() AS now,
-              pg_get_userbyid(relowner) = current_user AS owns,
-              has_table_privilege(current_user, 'public.cloud_workspace_provider_loss_attestations', 'INSERT') AS can_insert
-       FROM pg_class WHERE oid = 'public.cloud_workspace_provider_loss_attestations'::regclass`,
-    )).rows[0];
-    if (!owner || owner.principal === "zeros_app" || !owner.owns || !owner.can_insert)
-      fail("Provider loss attestations require the database/migration owner; the application role is refused");
-    for (const observedAt of [inventory.observedAt, lookup.observedAt]) {
-      const age = owner.now.getTime() - observedAt.getTime();
-      if (age < 0 || age > MAX_INVENTORY_AGE_MS)
-        fail("Provider inventory and lookup must be observed by the database clock within the last 15 minutes");
-    }
-    const actor = (await client.query<{ auth_status: string; deleted_at: Date | null; staff_role: string | null }>(
-      "SELECT auth_status, deleted_at, staff_role FROM users WHERE id = $1", [request.actorUserId],
-    )).rows[0];
-    if (!actor || actor.auth_status !== "active" || actor.deleted_at !== null || actor.staff_role !== "platform_owner")
-      fail("Provider loss actor must be one active Zeros platform owner");
-    // Parent-before-journal lock order, as in the journal store and erasure.
-    const organization = (await client.query<{ slug: string }>(
-      "SELECT slug::text FROM organizations WHERE id = $1 FOR SHARE", [request.organizationId],
-    )).rows[0];
-    if (!organization || organization.slug.toLowerCase() !== request.expectedOrganizationSlug)
-      fail("Provider loss Organization does not match the expected slug");
-    const workspace = await client.query("SELECT 1 FROM cloud_workspaces WHERE id = $1 AND org_id = $2 FOR SHARE", [request.workspaceId, request.organizationId]);
-    if (!workspace.rowCount) fail("Provider loss workspace is not in the Organization");
-    await client.query("SELECT 1 FROM cloud_workspace_generations WHERE workspace_id = $1 AND generation = $2 FOR SHARE",
-      [request.workspaceId, request.generation]);
+    await beginProviderAttestation(client, {
+      operator: OPERATOR, request, generations: [request.generation], observedAt: [inventory.observedAt, lookup.observedAt],
+    });
     const row = (await client.query<OperationRow>(
       `SELECT resource_id, deletion_requested_at, deleted_at, lost_at FROM cloud_workspace_provider_operations
        WHERE provider = 'boat' AND account_scope = $1 AND workspace_id = $2 AND generation = $3 AND org_id = $4 FOR UPDATE`,
@@ -219,40 +126,26 @@ export async function manageCloudProviderLoss(
     );
     if (engine.rowCount) fail("A live engine still holds this allocation's authority");
     await assertInventoryAccount(client, request.accountScope, inventory);
-    // A listing from another account, or a partial one, omits sandboxes this
-    // scope still holds. Resources being deleted may already be unlisted.
-    const missing = (await client.query<{ resource_id: string }>(
-      `SELECT resource_id FROM cloud_workspace_provider_operations
-       WHERE provider = 'boat' AND account_scope = $1 AND resource_id IS NOT NULL AND resource_id <> $3
-         AND deletion_requested_at IS NULL AND deleted_at IS NULL AND lost_at IS NULL AND NOT (resource_id = ANY($2::text[]))
-       ORDER BY resource_id LIMIT 20`,
-      [request.accountScope, listed, request.resourceId],
-    )).rows.map((missingRow) => missingRow.resource_id);
-    if (missing.length)
-      fail(`Provider inventory is incomplete or belongs to another account: bound resources not listed: ${missing.join(",")}`);
+    await assertInventoryComplete(client, request.accountScope, listed, request.resourceId);
 
+    const evidence = digest([request.generation, request.resourceId, inventory.providerAccount]).toString("hex").slice(0, 16);
     const approval = [
       "provider-loss", request.channel, request.targetFingerprint, request.organizationId, request.actorUserId,
-      request.workspaceId, request.accountScope, request.generation, request.resourceId, inventory.providerAccount,
-      createHash("sha256").update(request.reason, "utf8").digest("hex").slice(0, 12),
+      request.workspaceId, request.accountScope, request.generation, request.resourceId, evidence, reasonDigest(request.reason),
     ].join(":");
     if (!request.execute) {
       await client.query("ROLLBACK");
       return { state: "planned", approval, inventoryResourceCount: listed.length, settlingLeases: 0 };
     }
     if (request.approval !== approval) fail("CONTROL_PLANE_PROVIDER_LOSS_APPROVAL does not match the current target-bound plan");
-    const inventoryDigest = digest({
-      accountScope: request.accountScope, providerAccount: inventory.providerAccount, observedAt: inventory.observedAt.toISOString(),
-      resources: inventory.resources.map((resource) => [resource.id, resource.state]).sort(),
-    });
     await client.query(
       `INSERT INTO cloud_workspace_provider_loss_attestations
          (id, provider, account_scope, workspace_id, generation, resource_id, attested_by, database_principal, target_fingerprint,
           reason, provider_account, inventory_sha256, inventory_observed_at, inventory_resource_count, lookup_observed_at)
        VALUES ($1, 'boat', $2, $3, $4, $5, $6, current_user, $7, $8, $9, $10, $11, $12, $13)`,
       [randomUUID(), request.accountScope, request.workspaceId, request.generation, request.resourceId, request.actorUserId,
-        request.targetFingerprint, request.reason, inventory.providerAccount, inventoryDigest, inventory.observedAt, listed.length,
-        lookup.observedAt],
+        request.targetFingerprint, request.reason, inventory.providerAccount, inventoryDigest(request.accountScope, inventory),
+        inventory.observedAt, listed.length, lookup.observedAt],
     );
     await client.query(
       `UPDATE cloud_workspace_provider_operations SET lost_at = clock_timestamp()
@@ -313,10 +206,8 @@ async function runCli(): Promise<void> {
   const pool = createMigrationPool(databaseUrl, { maxConnections: 1 });
   try {
     const boat = new BoatApiClient({ apiKey, timeoutMs: 30_000 });
-    const now = async () => (await pool.query<{ now: Date }>("SELECT clock_timestamp() AS now")).rows[0]!.now;
-    // Stamp each observation with the database clock before its first request.
-    const inventory = await listBoatInventory(boat, await now(), await readAccountScopeReceipt(pool, request.accountScope));
-    const lookup = await lookupBoatResource(boat, request.resourceId, await now());
+    const inventory = await readBoatInventory(pool, boat, request.accountScope);
+    const lookup = await lookupBoatResource(boat, request.resourceId, await databaseClock(pool));
     const result = await manageCloudProviderLoss(pool, request, inventory, lookup);
     console.log(
       `[provider-loss] state=${result.state} channel=${request.channel} target=${request.targetFingerprint} ` +

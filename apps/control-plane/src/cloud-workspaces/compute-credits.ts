@@ -726,15 +726,11 @@ export class DatabaseManagedComputeCreditLedger {
       input.reservationId,
       input.periodId,
       async (tx, row) => {
-        const lost = await tx.query(
-          `SELECT 1 FROM cloud_workspace_provider_bindings binding
-           JOIN cloud_workspace_provider_operations operation ON operation.workspace_id=binding.workspace_id
-             AND operation.generation=binding.generation AND operation.org_id=binding.org_id
-             AND operation.resource_id=binding.provider_resource_id AND operation.lost_at IS NOT NULL
-           WHERE binding.workspace_id=$1 AND binding.generation=$2 AND binding.org_id=$3 AND binding.provider_resource_id=$4`,
+        const lost = await tx.query<{ lost: boolean }>(
+          "SELECT cloud_provider_allocation_lost($1,$2,$3,$4) AS lost",
           [row.workspace_id, row.generation, row.org_id, input.resourceId],
         );
-        if (!lost.rowCount) deny("compute_credit_conflict");
+        if (!lost.rows[0]!.lost) deny("compute_credit_conflict");
         if (row.state === "final") {
           if (row.final_reason !== "allocation_lost")
             deny("compute_credit_conflict");

@@ -11,6 +11,7 @@ import {
 } from "vitest";
 import { runMigrations } from "../migrate.js";
 import {
+  seedProviderLossAttestation,
   seedReadyCloudWorkspace,
   type ReadyCloudWorkspaceFixture,
 } from "./test-fixtures.js";
@@ -473,13 +474,8 @@ suite("managed compute lifecycle admission", () => {
     // A missing allocation alone is not a final meter.
     expect((await lease()).rows[0]).toEqual({ state: "draining", last_error_code: "compute_final_meter_unavailable" });
     expect((await balance())[0]!.reservedMicroUsd).toBeGreaterThan(0);
-    await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
-      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
-       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
-      VALUES ('daytona','credit-journal-test',$1,1,$2,$3,$4,'postgres','0123456789abcdef','Batch 7 host loss regression',
-        'fixture-account',$5,now(),0,now())`,
-    [f.workspaceId, resource().resourceId, randomUUID(), f.userId, Buffer.alloc(32)]);
-    await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp() WHERE workspace_id=$1", [f.workspaceId]);
+    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
+      resourceId: resource().resourceId, attestedBy: f.userId });
     await pool.query("UPDATE managed_compute_allocation_leases SET next_check_at=now() WHERE id=$1", [input.intentId]);
     await coordinator.runOnce();
     expect((await lease()).rows[0]).toEqual({ state: "settled", last_error_code: null });
@@ -494,13 +490,8 @@ suite("managed compute lifecycle admission", () => {
     const other = new DatabaseCloudProviderOperationStore(pool, "daytona", "credit-journal-test");
     await other.prepareCreate({ ...input, requestSha256: "a".repeat(64) });
     await other.bindResource(input, "sandbox-some-other-allocation");
-    await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
-      (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
-       provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
-      VALUES ('daytona','credit-journal-test',$1,1,'sandbox-some-other-allocation',$2,$3,'postgres','0123456789abcdef','Batch 7 host loss regression',
-        'fixture-account',$4,now(),0,now())`,
-    [f.workspaceId, randomUUID(), f.userId, Buffer.alloc(32)]);
-    await pool.query("UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp() WHERE workspace_id=$1", [f.workspaceId]);
+    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "credit-journal-test", workspaceId: f.workspaceId,
+      resourceId: "sandbox-some-other-allocation", attestedBy: f.userId });
     await pool.query("UPDATE managed_compute_allocation_leases SET provider_resource_id=$2 WHERE id=$1", [input.intentId, resource().resourceId]);
     provider.inspect.mockResolvedValue(null as unknown as CloudProviderResource);
     provider.verifyAbsence.mockResolvedValue(true);

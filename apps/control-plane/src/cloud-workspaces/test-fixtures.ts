@@ -18,6 +18,28 @@ export async function withCloudFixtureOwnerTx<T>(pool:pg.Pool,fn:(tx:Tx)=>Promis
   finally{client.release(discard);}
 }
 
+/** Loss evidence as the database-owner loss operator records it for a bound
+ * journal. Unless `markLost` is false, the journal is then marked lost. */
+export async function seedProviderLossAttestation(
+  pool: pg.Pool,
+  input: {
+    provider: string; accountScope: string; workspaceId: string; generation?: number;
+    resourceId: string; attestedBy: string; markLost?: boolean;
+  },
+): Promise<void> {
+  const generation = input.generation ?? 1;
+  await pool.query(`INSERT INTO cloud_workspace_provider_loss_attestations
+    (provider,account_scope,workspace_id,generation,resource_id,id,attested_by,database_principal,target_fingerprint,reason,
+     provider_account,inventory_sha256,inventory_observed_at,inventory_resource_count,lookup_observed_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,current_user,'0123456789abcdef','Provider loss regression fixture',
+      'fixture-account',$8,now(),0,now())`,
+  [input.provider, input.accountScope, input.workspaceId, generation, input.resourceId, randomUUID(), input.attestedBy, Buffer.alloc(32)]);
+  if (input.markLost !== false)
+    await pool.query(`UPDATE cloud_workspace_provider_operations SET lost_at=clock_timestamp()
+      WHERE provider=$1 AND account_scope=$2 AND workspace_id=$3 AND generation=$4`,
+    [input.provider, input.accountScope, input.workspaceId, generation]);
+}
+
 /** Only the disposable database owner assigns staff; application transactions
  * deliberately cannot promote their own users. */
 export async function ensureCloudPilotUser(
