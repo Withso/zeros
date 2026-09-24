@@ -15,7 +15,7 @@ import { DatabaseCloudWorkspaceActionService } from "./cloud-workspaces/action-r
 import { loadConfig } from "./config.js";
 import { createPool, createMigrationPool } from "./db.js";
 import { runServiceBootMigrations, verifyMigrations, type ServiceBootMigrationResult } from "./migrate.js";
-import { loadEmailConfig } from "./email.js";
+import { loadEmailConfig, sendEmailStrict } from "./email.js";
 import { startGithubOauthCleanup } from "./github.js";
 import { createApp } from "./app.js";
 import {
@@ -107,6 +107,8 @@ let stopCloudObjectMaintenanceWorker = async () => {};
 let stopCloudOperationsWorker = async () => {};
 let stopCloudOutboxWorker = async () => {};
 let stopCloudInvitationWorker = async () => {};
+let stopCloudHealthAlerts = async () => {};
+let startCloudHealthAlerts = () => {};
 let startCloudBackground = () => {};
 let stopSecurityEventPublisher=async()=>{};
 let cloudRuntimeBridge: CloudRuntimeBridgeRelay | null = null;
@@ -162,6 +164,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     { CloudWorkspaceOperationsWorker },
     { DatabaseCloudWorkspaceHealthService },
     { CloudWorkspaceOutboxWorker, HttpCloudWorkspaceOutboxSink },
+    { CloudWorkspaceHealthAlertWorker },
   ] = await Promise.all([
     import("./cloud-workspaces/provider-deployment.js"),
     import("./cloud-workspaces/provider-resolver.js"),
@@ -187,6 +190,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     import("./cloud-workspaces/operations.js"),
     import("./cloud-workspaces/health.js"),
     import("./cloud-workspaces/outbox.js"),
+    import("./cloud-workspaces/health-alerts.js"),
   ]);
   const cloud = config.cloudWorkspaces;
   const invitationConfig=workspaceInvitationDeliveryConfig(cloud,config.inviteLinkBase,emailConfig);
@@ -275,6 +279,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
         : new FileCloudWorkspaceObjectStore(durability.objectStoreDirectory),
       encryptionKeys: durability.objectEncryptionKeys,
       keyVersion: durability.currentObjectEncryptionKeyVersion,
+      restoreWindowMs: durability.objectRestoreWindowMs,
       workosEnabled: config.auth.provider === "workos",
     });
     cloudWorkspaceForkService = new DatabaseCloudWorkspaceForkService(
@@ -385,6 +390,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       setupRecoveryEndpoint: endpoint(CLOUD_WORKSPACE_SETUP_RECOVERY_PATH),
       engineProtocolVersion: setup.engineProtocolVersion,
       enginePort: setup.enginePort,
+      engineHeartbeatIntervalMs: setup.engineHeartbeatIntervalMs,
       engineRegistrationTtlSeconds: setup.timeoutSeconds + 60,
       setupSecretEncryptionKeys: setup.setupSecretEncryptionKeys,
       currentSetupSecretEncryptionKeyVersion:
@@ -478,6 +484,27 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       executionTimeoutMs: (setup.timeoutSeconds + 15) * 1_000,
     });
   }
+  // Alerts also run while background workers are paused: stalled work is
+  // exactly what a paused environment should report.
+  const alertEmail = config.operationsAlertEmail;
+  const health = cloudWorkspaceHealthService;
+  startCloudHealthAlerts = () => {
+    if (!alertEmail) return;
+    if (!emailConfig.apiKey || !emailConfig.from) {
+      console.warn("[control-plane] cloud health alerts disabled: RESEND_API_KEY/EMAIL_FROM unset");
+      return;
+    }
+    const service = (process.env.RAILWAY_SERVICE_NAME ?? "")
+      .replace(/[^A-Za-z0-9._-]+/g, "-").slice(0, 64) || "control-plane";
+    stopCloudHealthAlerts = new CloudWorkspaceHealthAlertWorker({
+      pool,
+      environment: `${config.deploymentChannel}/${service}`,
+      read: () => health.read(),
+      send: (alert) => sendEmailStrict(emailConfig, alertEmail, alert.subject, alert.html,
+        { idempotencyKey: alert.idempotencyKey }),
+    }).start();
+    console.log("[control-plane] cloud health alerts enabled");
+  };
   startCloudBackground = () => {
     if (cloud.backgroundWorkersEnabled === false) {
       console.log("[control-plane] cloud workspace background workers paused");
@@ -503,6 +530,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     }
     if (outboxWorker) stopCloudOutboxWorker = outboxWorker.start();
     if (invitationWorker) stopCloudInvitationWorker=invitationWorker.start();
+
     if (setupWorker) stopCloudSetupWorker = setupWorker.start();
     console.log(
       `[control-plane] cloud workspace reconciliation enabled (${provider.name}/${cloud.target}); setup=${setupWorker ? "enabled" : "paused"}; durability=${blobService ? "enabled" : "disabled"}; outbox=${outboxWorker ? "enabled" : "queued"}`,
@@ -535,6 +563,7 @@ const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
   if (shuttingDown) return;
   if(migrationResult.status.state==="current"){
     startCloudBackground();
+    startCloudHealthAlerts();
     stopSecurityEventPublisher=startSecurityEventPublisher(pool);
   }
   console.log(`[control-plane] listening on :${info.port}`);
@@ -570,6 +599,7 @@ function shutdown(signal: string): void {
     stopCloudOperationsWorker(),
     stopCloudOutboxWorker(),
     stopCloudInvitationWorker(),
+    stopCloudHealthAlerts(),
     stopCloudReconciler(),
     workosSync?.stop() ?? Promise.resolve(),
     securityEventBroker.stop(),

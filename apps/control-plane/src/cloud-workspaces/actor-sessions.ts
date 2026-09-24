@@ -155,7 +155,11 @@ export class DatabaseCloudWorkspaceActorSessionService {
   async consume(input:CloudActorEngineScope & {token:string;renew?:boolean}) {
     if (!CLOUD_ACTOR_TOKEN_PATTERN.test(input.token)) rejected();
     return withSystemTx(this.options.pool,async tx=>{
-      const engine = await assertCurrentCloudEngineAuthority(tx,{...input,workosEnabled:this.options.workosEnabled});
+      // Each device renews every few seconds and writes only non-key columns of
+      // its session row, so admissions share the revocation fence instead of
+      // queueing engine work. NO KEY UPDATE stays compatible with the KEY SHARE
+      // an approval recheck takes on the same session.
+      const engine = await assertCurrentCloudEngineAuthority(tx,{...input,workosEnabled:this.options.workosEnabled,lock:"share"});
       const row = (await tx.query<Session>(`SELECT session.* FROM cloud_workspace_actor_sessions session
         JOIN cloud_workspace_engine_instances engine ON engine.id=session.engine_instance_id AND engine.actor_protocol_version=2
         WHERE session.token_hash=$1 AND session.workspace_id=$2 AND session.org_id=$3 AND session.generation=$4
@@ -163,7 +167,7 @@ export class DatabaseCloudWorkspaceActorSessionService {
           AND cloud_workspace_actor_auth_live(session.actor_user_id,session.auth_provider,session.auth_subject,session.auth_session_id,session.auth_session_created_at)
           AND ((NOT $7::boolean AND session.consumed_at IS NULL AND session.admission_expires_at>clock_timestamp())
             OR ($7::boolean AND session.consumed_at IS NOT NULL AND session.last_renewed_at>clock_timestamp()-interval '30 seconds'))
-        FOR UPDATE OF session`,[hash(input.token),input.workspaceId,input.organizationId,input.generation,input.engineInstanceId,engine.authorityEpoch,input.renew===true])).rows[0];
+        FOR NO KEY UPDATE OF session`,[hash(input.token),input.workspaceId,input.organizationId,input.generation,input.engineInstanceId,engine.authorityEpoch,input.renew===true])).rows[0];
       if (!row) rejected();
       const actor = recordedActor(row);
       const authority = await assertRecordedCloudActor(tx,{...input,actorUserId:actor.actorUserId,actor,capability:"read"});

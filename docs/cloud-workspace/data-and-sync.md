@@ -272,7 +272,17 @@ the Organization. A unique abandoned upload keeps both its logical reservation
 and Organization physical charge until physical collection succeeds.
 Maintenance also repairs stale reference reservations, reconciles reference
 counts, and applies the existing age/retention/legal-hold garbage-collection
-rules.
+rules. Migration `0098` stamps `dereferenced_at` when a blob loses its last
+reference (including through a count repair) and clears it when the blob is
+referenced again. Collection of a live object then waits for the deployment's
+restore window (`CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS`, 48 hours by
+default to match the PlanetScale backup retention that bounds point-in-time
+restore), so a restore to any recoverable point still finds every object its
+rows reference. Erasure and deletions already in flight do not wait. Key
+rotation still deletes each superseded ciphertext once the new one is
+authoritative: a restore to a point before a rotation finished cannot read the
+blobs rotated after it, so take the restore point after the rotation, or keep
+the old key and restore before rotating.
 
 Key rotation reserves one additional physical object before conditionally
 writing the target ciphertext. A failed or crashed attempt keeps that

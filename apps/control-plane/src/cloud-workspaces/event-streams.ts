@@ -36,18 +36,29 @@ export class DatabaseCloudWorkspaceEventService {
   constructor(private readonly options: { pool: pg.Pool; workosEnabled?: boolean }) {}
 
   private async stream(tx: Tx, scope: CloudCommandEngineScope, readOnly: boolean): Promise<Stream> {
-    await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true,
-      ...(readOnly ? { lock: "share" as const } : {}) });
+    // The stream row lock orders appends; appends write no workspace or
+    // engine row, so they share the revocation fence with other engine work.
+    await assertCurrentCloudEngineAuthority(tx, { ...scope, workosEnabled: this.options.workosEnabled === true, lock: "share" });
     const old = (await tx.query<Stream>(`SELECT engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256
       FROM cloud_workspace_event_streams WHERE workspace_id=$1 FOR ${readOnly ? "SHARE" : "UPDATE"}`, [scope.workspaceId])).rows[0];
     if (old?.engine_instance_id === scope.engineInstanceId) return old;
     // A new generation has no replay until its first append. Never expose the
     // previous engine's frames or mutate stream state while holding read locks.
     if (readOnly) return { engine_instance_id: scope.engineInstanceId, head: "0", first_retained: "1", last_batch_id: null, last_batch_sha256: null };
-    if (old) await tx.query(`DELETE FROM cloud_workspace_event_streams WHERE workspace_id=$1`, [scope.workspaceId]);
-    return (await tx.query<Stream>(`INSERT INTO cloud_workspace_event_streams(workspace_id,org_id,generation,engine_instance_id)
-      VALUES($1,$2,$3,$4) RETURNING engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256`,
-    [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId])).rows[0]!;
+    // Shared authority does not order two first appends from this engine (a
+    // retried batch) or a replacement racing its predecessor's DELETE: create
+    // idempotently, then lock whichever row this engine's stream now is.
+    if (old) await tx.query(`DELETE FROM cloud_workspace_event_streams WHERE workspace_id=$1 AND engine_instance_id<>$2`,
+      [scope.workspaceId, scope.engineInstanceId]);
+    const created = (await tx.query<Stream>(`INSERT INTO cloud_workspace_event_streams(workspace_id,org_id,generation,engine_instance_id)
+      VALUES($1,$2,$3,$4) ON CONFLICT (workspace_id) DO NOTHING
+      RETURNING engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256`,
+    [scope.workspaceId, scope.organizationId, scope.generation, scope.engineInstanceId])).rows[0];
+    if (created) return created;
+    const current = (await tx.query<Stream>(`SELECT engine_instance_id,head,first_retained,last_batch_id,last_batch_sha256
+      FROM cloud_workspace_event_streams WHERE workspace_id=$1 FOR UPDATE`, [scope.workspaceId])).rows[0];
+    if (current?.engine_instance_id !== scope.engineInstanceId) throw new CloudEventError("event_conflict");
+    return current;
   }
 
   async request(scope: CloudCommandEngineScope, value: unknown) {
@@ -72,21 +83,33 @@ export class DatabaseCloudWorkspaceEventService {
           return { streamId: scope.engineInstanceId, head, replayed: true };
         }
         if (request.events[0]!.sequence !== head + 1) throw new CloudEventError("event_conflict");
-        await tx.query(`INSERT INTO cloud_workspace_stream_events(workspace_id,org_id,sequence,frame,encoded_bytes)
-          SELECT $1,$2,e.sequence,e.frame,e.bytes FROM jsonb_to_recordset($3::jsonb)
-          AS e(sequence bigint,frame jsonb,bytes integer)`, [scope.workspaceId, scope.organizationId,
-          JSON.stringify(request.events.map(e => ({ ...e, bytes: Buffer.byteLength(JSON.stringify(e.frame)) })))]);
         const next = request.events.at(-1)!.sequence;
-        // Prune from the oldest end by BOTH event count and encoded bytes.
-        const boundary = await tx.query<{ first: string }>(`SELECT min(sequence) AS first FROM (
-          SELECT sequence,row_number() OVER(ORDER BY sequence DESC) AS n,
-            sum(encoded_bytes) OVER(ORDER BY sequence DESC) AS bytes
-          FROM cloud_workspace_stream_events WHERE workspace_id=$1
-        ) retained WHERE n<=$2 AND bytes<=$3`, [scope.workspaceId, RETAINED_EVENTS, RETAINED_BYTES]);
-        const firstRetained = Number(boundary.rows[0]!.first);
-        await tx.query(`DELETE FROM cloud_workspace_stream_events WHERE workspace_id=$1 AND sequence<$2`, [scope.workspaceId, firstRetained]);
-        await tx.query(`UPDATE cloud_workspace_event_streams SET head=$2,first_retained=$3,last_batch_id=$4,last_batch_sha256=$5,updated_at=now()
-          WHERE workspace_id=$1`, [scope.workspaceId, next, firstRetained, request.batchId, hash]);
+        const rows = request.events.map(e => ({ ...e, bytes: Buffer.byteLength(JSON.stringify(e.frame)) }));
+        // One round trip inside the workspace lock inserts the batch, prunes
+        // from the oldest end by BOTH event count and encoded bytes, and
+        // advances the stream. Sub-statements share one snapshot, so stored
+        // rows are ranked in index order behind the batch's own count and
+        // bytes. The batch itself always fits the bounds; if it ever did not,
+        // retention would keep it whole rather than record a boundary inside
+        // rows this statement cannot yet delete.
+        await tx.query(`WITH inserted AS (
+            INSERT INTO cloud_workspace_stream_events(workspace_id,org_id,sequence,frame,encoded_bytes)
+            SELECT $1,$2,e.sequence,e.frame,e.bytes FROM jsonb_to_recordset($3::jsonb)
+            AS e(sequence bigint,frame jsonb,bytes integer)
+          ), boundary AS (
+            SELECT coalesce(min(sequence),$6) AS first FROM (
+              SELECT sequence,row_number() OVER newest AS n,sum(encoded_bytes) OVER newest AS bytes
+              FROM cloud_workspace_stream_events WHERE workspace_id=$1
+              WINDOW newest AS (ORDER BY sequence DESC)
+            ) stored WHERE n+$7<=$4 AND bytes+$8<=$5
+          ), pruned AS (
+            DELETE FROM cloud_workspace_stream_events WHERE workspace_id=$1 AND sequence<(SELECT first FROM boundary)
+          )
+          UPDATE cloud_workspace_event_streams SET head=$9,first_retained=(SELECT first FROM boundary),
+            last_batch_id=$10,last_batch_sha256=$11,updated_at=now()
+          WHERE workspace_id=$1`, [scope.workspaceId, scope.organizationId, JSON.stringify(rows),
+          RETAINED_EVENTS, RETAINED_BYTES, request.events[0]!.sequence, rows.length,
+          rows.reduce((total, row) => total + row.bytes, 0), next, request.batchId, hash]);
         return { streamId: scope.engineInstanceId, head: next, replayed: false };
       }
       if (request.after < first - 1) throw new CloudEventError("event_cursor_expired");

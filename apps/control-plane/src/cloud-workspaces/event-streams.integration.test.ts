@@ -6,6 +6,7 @@ import { withSystemTx, withUserTx } from "../db.js";
 import { seedReadyCloudWorkspace } from "./test-fixtures.js";
 import type { CloudCommandEngineScope } from "./commands.js";
 import { DatabaseCloudWorkspaceEventService } from "./event-streams.js";
+import { interceptQueries, pauseBeforeQuery, withHeldEngineRows } from "./authority-deadline-test-utils.js";
 
 const d = process.env.TEST_DATABASE_URL ? describe : describe.skip;
 d("bounded cloud event replay", () => {
@@ -24,6 +25,15 @@ d("bounded cloud event replay", () => {
       cloudStream: { streamId: scope.engineInstanceId, sequence } } });
   const batch = (start = 1, count = 2) => ({ kind: "append" as const, batchId: randomUUID(), events: Array.from({ length: count }, (_, i) => event(start + i)) });
   const replay = (after = 0, streamId = scope.engineInstanceId) => service.request(scope, { kind: "replay", streamId, after });
+  const retained = async () => (await withSystemTx(pool, tx => tx.query<{ count: number; first: string; stream_first: string }>(
+    `SELECT count(*)::integer AS count,min(sequence) AS first,(SELECT first_retained FROM cloud_workspace_event_streams
+      WHERE workspace_id=$1) AS stream_first FROM cloud_workspace_stream_events WHERE workspace_id=$1`, [scope.workspaceId]))).rows[0]!;
+  /** Every statement is a database round trip while the workspace lock is
+   * held, so the hot append and replay paths keep an exact statement budget. */
+  const statementLog = (target: pg.Pool) => {
+    const statements: string[] = [];
+    return { statements, pool: interceptQueries(target, sql => { statements.push(sql); }) };
+  };
 
   it("replays without taking exclusive workspace or stream locks", async () => {
     await service.request(scope, batch());
@@ -37,6 +47,28 @@ d("bounded cloud event replay", () => {
       await expect(new DatabaseCloudWorkspaceEventService({ pool: readPool }).request(scope,
         { kind: "replay", streamId: scope.engineInstanceId, after: 0 })).resolves.toMatchObject({ head: 2, cursor: 2 });
     } finally { await held.query("ROLLBACK"); held.release(); await readPool.end(); }
+  });
+
+  it("appends beside other engine work but waits behind a revocation", async () => {
+    await service.request(scope, batch());
+    const rows = { workspaceId: scope.workspaceId, engineInstanceId: scope.engineInstanceId };
+    const append = (start: number) => (lockPool: pg.Pool) => new DatabaseCloudWorkspaceEventService({ pool: lockPool }).request(scope, batch(start));
+    await expect(withHeldEngineRows(pool, rows, "SHARE", append(3))).resolves.toMatchObject({ head: 4, replayed: false });
+    await expect(withHeldEngineRows(pool, rows, "UPDATE", append(5))).rejects.toMatchObject({ code: "55P03" });
+    expect(await service.request(scope, batch(5))).toMatchObject({ head: 6, replayed: false });
+  });
+
+  it("resolves a retried first append that overlaps the original", async () => {
+    const first = batch();
+    const barrier = pauseBeforeQuery(pool, /WITH inserted AS/);
+    const original = new DatabaseCloudWorkspaceEventService({ pool: barrier.pool }).request(scope, first);
+    await barrier.atBarrier;
+    const retry = service.request(scope, first);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    barrier.release();
+    await expect(original).resolves.toMatchObject({ head: 2, replayed: false });
+    await expect(retry).resolves.toMatchObject({ head: 2, replayed: true });
+    expect(await replay()).toMatchObject({ head: 2, cursor: 2, events: first.events });
   });
 
   it("does not create stream state merely to replay an empty generation", async () => {
@@ -70,6 +102,28 @@ d("bounded cloud event replay", () => {
     expect(await replay()).toMatchObject({ head: 1, cursor: 1, events: current.events });
   });
 
+  it("appends and replays in three statements inside the transaction", async () => {
+    await service.request(scope, batch());
+    const log = statementLog(pool);
+    const counted = new DatabaseCloudWorkspaceEventService({ pool: log.pool });
+    const inside = () => log.statements.slice(1, -1);
+    await expect(counted.request(scope, batch(3))).resolves.toMatchObject({ head: 4, replayed: false });
+    // The authority fence, the stream lock and one write.
+    expect(inside()).toHaveLength(3);
+    log.statements.length = 0;
+    await expect(counted.request(scope, { kind: "replay", streamId: scope.engineInstanceId, after: 0 }))
+      .resolves.toMatchObject({ head: 4, cursor: 4 });
+    expect(inside()).toHaveLength(3);
+  });
+
+  it("prunes by event count and records the oldest retained sequence exactly", async () => {
+    let next = 1;
+    for (let i = 0; i < 79; i++) { await service.request(scope, batch(next, 128)); next += 128; }
+    expect(await retained()).toEqual({ count: 10000, first: "113", stream_first: "113" });
+    await expect(replay(111)).rejects.toMatchObject({ code: "event_cursor_expired" });
+    expect(await replay(112)).toMatchObject({ head: 10112, firstRetained: 113, cursor: 240 });
+  });
+
   it("commits contiguous batches and resolves lost acknowledgements without duplicating events", async () => {
     const b = batch(); expect(await service.request(scope, b)).toMatchObject({ head: 2, replayed: false });
     expect(await service.request(scope, b)).toMatchObject({ head: 2, replayed: true });
@@ -100,6 +154,9 @@ d("bounded cloud event replay", () => {
       FROM cloud_workspace_stream_events WHERE workspace_id=$1`, [scope.workspaceId]));
     expect(Number(rows.rows[0].bytes)).toBeLessThanOrEqual(16 * 1024 * 1024);
     expect(Number(rows.rows[0].count)).toBeLessThan(72);
+    const bounded = await retained();
+    expect(bounded.stream_first).toBe(bounded.first);
+    expect(Number(bounded.first) + bounded.count - 1).toBe(72);
     await expect(replay()).rejects.toMatchObject({ code: "event_cursor_expired" });
     const result = await replay(70);
     expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1024 * 1024 + 2048);

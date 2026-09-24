@@ -83,6 +83,7 @@ export function createCloudProviderDeployment(
     const clientOptions = {
       apiKey: cloud.apiKey,
       timeoutMs: cloud.operationTimeoutSeconds * 1000,
+      billingOrg: cloud.boat.billingOrg,
     };
     const client = new BoatApiClient(clientOptions);
     const enginePort = cloud.setupExecution?.enginePort ?? 39393;

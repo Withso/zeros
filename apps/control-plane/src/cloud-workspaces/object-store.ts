@@ -928,7 +928,7 @@ export class FileCloudWorkspaceObjectStore implements CloudWorkspaceObjectStore 
     if (
       !Number.isSafeInteger(olderThanMs) ||
       olderThanMs < 60_000 ||
-      olderThanMs > 30 * 24 * 60 * 60_000 ||
+      olderThanMs > MAX_MAINTENANCE_WINDOW_MS ||
       !Number.isSafeInteger(maxEntries) ||
       maxEntries < 1 ||
       maxEntries > MAX_UPLOAD_SWEEP_ENTRIES
@@ -1223,12 +1223,16 @@ export function openWorkspaceObject(
   }
 }
 
+/** Upper bound for garbage-collection grace and the restore window. */
+const MAX_MAINTENANCE_WINDOW_MS = 30 * 24 * 60 * 60_000;
+
 export class DatabaseCloudWorkspaceBlobService {
   private readonly pool: pg.Pool;
   private readonly objectStore: CloudWorkspaceObjectStore;
   private readonly encodedKeys: ReadonlyMap<number, string>;
   private readonly keyVersion: number;
   private readonly workosEnabled: boolean;
+  private readonly restoreWindowMs: number;
 
   constructor(input: {
     pool: pg.Pool;
@@ -1237,6 +1241,10 @@ export class DatabaseCloudWorkspaceBlobService {
     encryptionKeys?: Readonly<Record<number, string>>;
     workosEnabled: boolean;
     keyVersion?: number;
+    /** How long a live object outlives its last reference, so a
+     * point-in-time database restore still finds it. The deployment passes its
+     * database backup retention; zero collects immediately. */
+    restoreWindowMs?: number;
   }) {
     const encodedKeys = new Map<number, string>();
     if (input.encryptionKeyV1) encodedKeys.set(1, input.encryptionKeyV1);
@@ -1264,6 +1272,14 @@ export class DatabaseCloudWorkspaceBlobService {
     }
     this.encodedKeys = encodedKeys;
     this.workosEnabled = input.workosEnabled;
+    this.restoreWindowMs = input.restoreWindowMs ?? 0;
+    if (
+      !Number.isSafeInteger(this.restoreWindowMs) ||
+      this.restoreWindowMs < 0 ||
+      this.restoreWindowMs > MAX_MAINTENANCE_WINDOW_MS
+    ) {
+      throw new Error("workspace object restore window is invalid");
+    }
   }
 
   private key(version: number): string {
@@ -3156,7 +3172,7 @@ export class DatabaseCloudWorkspaceBlobService {
     if (
       !Number.isSafeInteger(graceMs) ||
       graceMs < 60_000 ||
-      graceMs > 30 * 24 * 60 * 60_000
+      graceMs > MAX_MAINTENANCE_WINDOW_MS
     ) {
       throw new Error("workspace object garbage grace is invalid");
     }
@@ -3291,6 +3307,10 @@ export class DatabaseCloudWorkspaceBlobService {
                AND (blob.retention_until IS NULL OR blob.retention_until <= now())
                AND blob.created_at <=
                    now() - ($1::bigint * interval '1 millisecond')
+               -- In-flight or failed deletions retry at once; only a live
+               -- object waits out the restore window after its last reference.
+               AND (blob.state <> 'available' OR blob.dereferenced_at IS NULL
+                 OR blob.dereferenced_at <= now() - ($2::bigint * interval '1 millisecond'))
                AND NOT EXISTS (
                  SELECT 1 FROM workspace_blob_storage_reservations reservation
                  WHERE reservation.blob_id = blob.id
@@ -3302,7 +3322,7 @@ export class DatabaseCloudWorkspaceBlobService {
              FOR UPDATE SKIP LOCKED LIMIT 1
            )
            RETURNING id, org_id, object_key`,
-          [graceMs],
+          [graceMs, this.restoreWindowMs],
         )
       ).rows[0];
       return available ? { ...available, pending: false as const } : null;

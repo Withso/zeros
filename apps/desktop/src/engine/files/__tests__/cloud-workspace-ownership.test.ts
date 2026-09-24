@@ -66,3 +66,17 @@ describe.runIf(process.platform === "linux")("cloud workspace file publication",
     } finally { closeSync(fd); }
   });
 });
+
+describe("cloud workspace publication contract", () => {
+  it("publishes engine-authored files for every isolated worker profile, including the shipped image's", async () => {
+    const { publishesCloudWorkspaceOwnership } = await import("../cloud-workspace-ownership");
+    const { parseCloudWorkerConfiguration } = await import("../../agents/containment/cloud-worker-config");
+    const source = readFileSync(path.join(__dirname, "../../../../../../scripts/cloud-workspace-validation/sandbox/cloud-worker.json"), "utf8");
+    const shipped = parseCloudWorkerConfiguration(source);
+    expect(publishesCloudWorkspaceOwnership(shipped)).toBe(true);
+    const variant = (version: number, profile: string) => parseCloudWorkerConfiguration(JSON.stringify({ ...JSON.parse(source), version, profile }));
+    expect(publishesCloudWorkspaceOwnership(variant(2, "zeros-cloud-worker-v2"))).toBe(true);
+    expect(publishesCloudWorkspaceOwnership(variant(1, "zeros-cloud-worker-v1"))).toBe(false);
+    expect(publishesCloudWorkspaceOwnership(null)).toBe(false);
+  });
+});

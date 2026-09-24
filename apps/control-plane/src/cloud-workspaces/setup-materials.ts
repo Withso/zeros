@@ -16,6 +16,11 @@ import {
   normalizeCloudWorkspaceGrantAudience,
 } from "./grants.js";
 import { deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
+import {
+  DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
+  MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
+  MIN_ENGINE_HEARTBEAT_INTERVAL_MS,
+} from "./engine-heartbeat.js";
 import { issueWorkspaceSetupRecoveryGrant } from "./setup-recovery.js";
 
 const SETUP_MATERIALS_AUDIENCE =
@@ -40,7 +45,6 @@ const MAX_SETUP_COMMANDS = 32;
 const MAX_SETUP_COMMAND_BYTES = 16 * 1024;
 const DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS = 3_660;
 const ENGINE_HEARTBEAT_LEASE_MS = 90_000;
-const ENGINE_HEARTBEAT_INTERVAL_MS = 30_000;
 const REPOSITORY_REFRESH_CLAIM_INTERVAL_MS = 5 * 60_000;
 const SETUP_RECOVERY_PATH =
   "/internal/v1/cloud-workspaces/setup/recovery" as const;
@@ -95,6 +99,7 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
   setupRecoveryEndpoint?: string;
   engineProtocolVersion: number;
   enginePort: number;
+  engineHeartbeatIntervalMs?: number;
   /** Must outlive the bounded provider setup command. Live setup authority is
    * still rechecked at redemption, so this is only a coarse outer ceiling. */
   engineRegistrationTtlSeconds?: number;
@@ -708,6 +713,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
   private readonly setupRecoveryEndpoint: string;
   private readonly engineProtocolVersion: number;
   private readonly enginePort: number;
+  private readonly engineHeartbeatIntervalMs: number;
   private readonly engineRegistrationTtlSeconds: number;
   private readonly setupSecretEncryptionKeys: Readonly<Record<number, string>>;
   private readonly github: CloudWorkspaceRepositoryCredentialBroker;
@@ -742,10 +748,15 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       throw new Error("cloud workspace recovery endpoint is invalid");
     }
     this.setupRecoveryEndpoint = parsedRecoveryEndpoint.toString();
+    const engineHeartbeatIntervalMs =
+      options.engineHeartbeatIntervalMs ?? DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS;
     if (
       !validPositiveInteger(options.engineProtocolVersion, 65_535) ||
       !validPositiveInteger(options.enginePort, 65_535) ||
       options.enginePort === 22_222 ||
+      !Number.isSafeInteger(engineHeartbeatIntervalMs) ||
+      engineHeartbeatIntervalMs < MIN_ENGINE_HEARTBEAT_INTERVAL_MS ||
+      engineHeartbeatIntervalMs > MAX_ENGINE_HEARTBEAT_INTERVAL_MS ||
       !validPositiveInteger(
         options.engineRegistrationTtlSeconds ??
           DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS,
@@ -809,6 +820,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     }
     this.engineProtocolVersion = options.engineProtocolVersion;
     this.enginePort = options.enginePort;
+    this.engineHeartbeatIntervalMs = engineHeartbeatIntervalMs;
     this.engineRegistrationTtlSeconds =
       options.engineRegistrationTtlSeconds ??
       DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS;
@@ -1430,7 +1442,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         heartbeat: {
           endpoint: this.engineHeartbeatAudience,
           token: heartbeatToken,
-          intervalMs: ENGINE_HEARTBEAT_INTERVAL_MS,
+          intervalMs: this.engineHeartbeatIntervalMs,
         },
       };
     });

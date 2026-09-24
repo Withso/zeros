@@ -61,6 +61,10 @@ The exact error envelope must agree on status and code and contain no allocation
 `limit_reached` and `member_limit_reached` are documented allocation refusals;
 the strict `trial_compute_limit_reached` envelope is an observed live contract,
 not an explicit preallocation guarantee in the public provider documentation.
+The `member_limit_reached` envelope, including its `memberMaxActiveSandboxes`
+diagnostic, was also observed live under an owner-set concurrent cap. All three
+codes share one diagnostic-field allowlist. An unrecognized field, or any value
+naming a sandbox or deletion operation, leaves that attempt unknown.
 Other 4xx responses, malformed replies, transport failures and timeouts retain
 an unknown outcome. A later rejected retry cannot clear an earlier unknown or
 in-flight dispatch.
@@ -75,6 +79,15 @@ or checkpoint for the ordinary rebuild flow: create a new workspace to retry.
 If a durable checkpoint exists, the existing recovery API can restore it to a
 fresh generation. Neither action reopens the closed journal. Attempt rows cannot be deleted independently of an authorized
 terminal journal purge.
+
+A journal whose dispatches can never be certified closes only with an operator
+absence attestation (migration 0095). It records exhaustive provider-account
+inventory evidence: every listed sandbox is bound in the same account scope's
+journal or named as a known non-workspace resource, and every covered dispatch
+is at least two hours older than the inventory. An attestation covers
+dispatches only up to its recorded instant, never erases attempts, cannot close
+a bound generation or one with an active create or wake, and is append-only.
+The application role can read attestations but cannot create them.
 
 Historical journals remain untracked and cannot infer absence from new receipts.
 New journals use a versioned local request digest; an older writer's digest
@@ -132,7 +145,7 @@ tests do not enable the production qualification gates.
 
 The existing Daytona deployment variables retain their defaults. To select
 managed Boat, set `CLOUD_WORKSPACE_PROVIDER=boat`, `BOAT_API_KEY`, a stable
-`BOAT_ACCOUNT_SCOPE`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
+`BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
 `CLOUD_WORKSPACE_STORAGE_MIB` from the measured image. Boat snapshot names are
 mutable. The stored reference is `boat:<name>@sha256:<build-metadata-digest>`;
 setup verifies the exact attested metadata digest before launching. A replaced
@@ -143,6 +156,24 @@ see [compute credits](compute-credits.md). CPU/memory default to 4000 millicores
 8192 MiB; only Boat's exact supported pairs are admitted. Architecture must be
 `linux/amd64`. Never change the account scope when rotating a key in the same
 account, or reuse an old scope for a different provider account.
+
+`BOAT_BILLING_ORG` names the Boat organization wallet (`team_…`) billed for every
+new sandbox. Without it Boat bills the account's dashboard-selected wallet, which
+can change outside Zeros. Every create dispatch sends it as the `X-Boat-Org`
+request scope; the body and journaled request digest are unchanged. Boat matches
+an idempotent create on account, key and body, so a retry returns an earlier
+allocation with whatever wallet it was billed to. A sandbox keeps its creation
+wallet for resume and usage. Compute is granted only after Boat reports the
+configured organization for the allocation, on a fresh create, a create retry,
+every resume and every lease renewal; any other answer is read back once. Boat's
+`team` field carries the wallet: `null` is the personal wallet, and an absent or
+malformed value is unconfirmed. Inspection never reports a sandbox on a
+mismatched or unconfirmed wallet as running or provisioning, so no lifecycle or
+metering path can admit or renew it, while Stop and deletion still work. A
+refused create keeps its bound cleanup identity and requests a managed Stop. An
+allocation billed elsewhere is not resumed; recover its workspace into a fresh
+generation. The wallet is billing scope, not the journal's account identity, so
+changing it does not change `BOAT_ACCOUNT_SCOPE`.
 
 Daytona BYO beside Boat requires `DAYTONA_BYO_ENABLED=true` and independent
 `DAYTONA_BYO_SNAPSHOT_ID`, `DAYTONA_BYO_SOURCE_COMMIT`,

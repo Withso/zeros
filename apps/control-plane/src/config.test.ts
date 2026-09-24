@@ -43,6 +43,27 @@ describe("database authority configuration", () => {
     expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow();
   });
 
+  it("logs slow requests from one second by default and accepts a bounded override", () => {
+    expect(loadConfig(baseEnv()).slowRequestLogMs).toBe(1000);
+    expect(loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: "150" }).slowRequestLogMs).toBe(150);
+  });
+
+  it("sends health alerts only to one operator mailbox and never fails boot over it", () => {
+    expect(loadConfig(baseEnv()).operationsAlertEmail).toBeNull();
+    expect(loadConfig({ ...baseEnv(), OPERATIONS_ALERT_EMAIL: " ops@example.com " }).operationsAlertEmail)
+      .toBe("ops@example.com");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      for (const value of ["", "ops", "a@b.c,d@e.f", "a@b.c\nBcc: x@y.z"])
+        expect(loadConfig({ ...baseEnv(), OPERATIONS_ALERT_EMAIL: value }).operationsAlertEmail).toBeNull();
+      expect(warn).toHaveBeenCalledTimes(3);
+    } finally { warn.mockRestore(); }
+  });
+
+  it.each(["49", "60001", "2.5", "bad"])("rejects an unbounded slow-request threshold %s", (value) => {
+    expect(() => loadConfig({ ...baseEnv(), SLOW_REQUEST_LOG_MS: value })).toThrow();
+  });
+
   it.each(["1", "2"])("reserves both lock and callback capacity alongside shared LISTEN (max %s)", max => {
     expect(() => loadConfig({ ...baseEnv(), DATABASE_POOL_MAX: max })).toThrow(/DATABASE_POOL_MAX/);
   });
@@ -556,6 +577,7 @@ describe("cloud workspace backend configuration", () => {
       DAYTONA_SNAPSHOT_ID: undefined,
       BOAT_API_KEY: "boat-api-key-for-control-plane-tests",
       BOAT_ACCOUNT_SCOPE: "qualification-account",
+      BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
       BOAT_SNAPSHOT_ID: "zeros-qualified-immutable-v1",
       BOAT_IMAGE_BUILD_SHA256: "c".repeat(64),
       BOAT_TTL_SECONDS: "3600",
@@ -576,7 +598,11 @@ describe("cloud workspace backend configuration", () => {
       cpuMillicores: 4000,
       memoryMiB: 8192,
       storageMiB: 40960,
-      boat: { accountScope: "qualification-account", ttlSeconds: 3600 },
+      boat: {
+        accountScope: "qualification-account",
+        ttlSeconds: 3600,
+        billingOrg: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41",
+      },
       computePolicy: {provider:"boat",policyId:"boat-price-v1",secondsPerDollar:100000,minimumTtlSeconds:600,maximumTtlSeconds:3600,requestMarginSeconds:185},
     });
     expect(cloud.providerProfiles).toBeUndefined();
@@ -588,6 +614,7 @@ describe("cloud workspace backend configuration", () => {
     for (const name of [
       "BOAT_API_KEY",
       "BOAT_ACCOUNT_SCOPE",
+      "BOAT_BILLING_ORG",
       "BOAT_SNAPSHOT_ID",
       "BOAT_IMAGE_BUILD_SHA256",
       "BOAT_TTL_SECONDS",
@@ -608,6 +635,10 @@ describe("cloud workspace backend configuration", () => {
       { BOAT_TTL_SECONDS: "3601" },
       { BOAT_SECONDS_PER_DOLLAR: "0" },
       { BOAT_ACCOUNT_SCOPE: "key\nvalue" },
+      { BOAT_BILLING_ORG: "Zeros" },
+      { BOAT_BILLING_ORG: "team_" },
+      { BOAT_BILLING_ORG: "team_0f5c2a9e-4b1d-4c8e-9a70-3d2b1e6f8c41\n" },
+      { BOAT_BILLING_ORG: "71526620-8a69-44ca-bbef-1a71267c4350" },
       { BOAT_SNAPSHOT_ID: "mutable/latest" },
       { ZEROS_CLOUD_IMAGE_ARCHITECTURE: "linux/arm64" },
       { CLOUD_WORKSPACE_CPU_MILLICORES: "2000" },
@@ -837,6 +868,7 @@ describe("cloud workspace backend configuration", () => {
       durability: {
         objectEncryptionKeys: { 1: setupKey },
         currentObjectEncryptionKeyVersion: 1,
+        objectRestoreWindowMs: 172_800_000,
         objectStoreDirectory: "/var/lib/zeros/workspace-objects",
       },
       setupExecution: {
@@ -850,6 +882,7 @@ describe("cloud workspace backend configuration", () => {
         setupSecretKeyV1: setupKey,
         engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
         enginePort: 39_393,
+        engineHeartbeatIntervalMs: 10_000,
         intervalMs: 1_000,
         timeoutSeconds: 1_800,
         leaseMs: 60_000,
@@ -873,6 +906,20 @@ describe("cloud workspace backend configuration", () => {
     ).toBe(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION);
   });
 
+  it("bounds the engine heartbeat interval inside the lease", () => {
+    const interval = (value: string) =>
+      loadConfig({
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS: value,
+      }).cloudWorkspaces?.setupExecution?.engineHeartbeatIntervalMs;
+    expect(interval("30000")).toBe(30_000);
+    expect(interval("5000")).toBe(5_000);
+    for (const value of ["4999", "30001", "10000.5"])
+      expect(() => interval(value)).toThrow(
+        /CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS/,
+      );
+  });
+
   it("keeps durable fork and recovery storage available while setup stays paused", () => {
     const objectKey = randomBytes(32).toString("base64url");
     const cloud = loadConfig({
@@ -886,8 +933,24 @@ describe("cloud workspace backend configuration", () => {
     expect(cloud?.durability).toEqual({
       objectEncryptionKeys: { 1: objectKey },
       currentObjectEncryptionKeyVersion: 1,
+      objectRestoreWindowMs: 172_800_000,
       objectStoreDirectory: "/var/lib/zeros/workspace-objects",
     });
+  });
+
+  it("keeps objects for a bounded database restore window", () => {
+    const window = (value?: string) => loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_WORKSPACE_OBJECT_KEY_V1: randomBytes(32).toString("base64url"),
+      CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/var/lib/zeros/workspace-objects",
+      ...(value === undefined ? {} : { CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: value }),
+    }).cloudWorkspaces?.durability?.objectRestoreWindowMs;
+    expect(window()).toBe(48 * 3_600_000);
+    expect(window("0")).toBe(0);
+    expect(window(" ")).toBe(48 * 3_600_000);
+    expect(window("168")).toBe(168 * 3_600_000);
+    for (const value of ["-1", "721", "1.5"]) expect(() => window(value)).toThrow(/CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS/);
   });
 
   it("keeps encrypted cloud settings available while setup stays paused", () => {
@@ -920,6 +983,7 @@ describe("cloud workspace backend configuration", () => {
     ).toEqual({
       objectEncryptionKeys: { 1: oldKey, 2: newKey },
       currentObjectEncryptionKeyVersion: 2,
+      objectRestoreWindowMs: 172_800_000,
       objectStoreDirectory: "/var/lib/zeros/workspace-objects",
     });
   });

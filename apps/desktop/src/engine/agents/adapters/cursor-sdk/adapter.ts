@@ -22,7 +22,7 @@ import { isDevRuntime } from "../../../runtime";
 import modelCatalogJson from "../../../../../../../catalogs/models-v1.json";
 
 import { AgentFailureError } from "../../types";
-import { cloudProviderExecution } from "../../cloud-provider-execution";
+import { cloudProviderExecution, executionMcpServers } from "../../cloud-provider-execution";
 import { mcpWorkingDirectory } from "../../mcp-working-directory";
 import { materializeMcpServerRegistrations } from "../../mcp-registration";
 import { normalizeProviderError, providerErrorFailure } from "../shared/provider-error";
@@ -1659,7 +1659,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     const apiKey = this.resolveApiKey(opts.env);
     const settingSources = cursorSettingSources(opts.executionBoundary);
     const runtime = await this.createSessionRuntime(opts);
-    const catalog = this.mcpCatalog(opts.mcpServers);
+    const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
+    const catalog = this.mcpCatalog(mcpSource);
     // Fire-and-forget, and BEFORE the awaits below on purpose: the whole point
     // is to overlap the workspace/backend warm-up with model discovery and
     // `Agent.create` rather than serialize behind them.
@@ -1733,7 +1734,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       activeRun: null,
       cancelRequested: false,
       env: opts.env,
-      mcpServers: opts.mcpServers,
+      mcpServers: mcpSource,
       settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
@@ -1777,7 +1778,8 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
     }
     const runtime = await this.createSessionRuntime(opts);
-    const catalog = this.mcpCatalog(opts.mcpServers);
+    const mcpSource = executionMcpServers(cloudProviderExecution(opts.executionBoundary), opts.mcpServers);
+    const catalog = this.mcpCatalog(mcpSource);
     // Same overlap as newSession: a reopened chat pays the identical cold
     // workspace/backend cost on its first turn, so warm it while the catalog
     // and `Agent.resume` are still in flight.
@@ -1920,7 +1922,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       activeRun: null,
       cancelRequested: false,
       env: opts.env,
-      mcpServers: opts.mcpServers,
+      mcpServers: mcpSource,
       settingSources,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
       prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),

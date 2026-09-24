@@ -183,7 +183,8 @@ export class DatabaseCloudAgentExecutionService {
 
   async authorizeAction(scope:EngineScope,executionId:string,actorSessionId:string){
     return this.transaction(async tx=>{
-      await assertCurrentCloudEngineAuthority(tx,{...scope,workosEnabled:this.workosEnabled});
+      // A pure recheck on the approval path: share the revocation fence.
+      await assertCurrentCloudEngineAuthority(tx,{...scope,workosEnabled:this.workosEnabled,lock:"share"});
       await assertCloudAgentExecutionActor(tx,scope,executionId,actorSessionId,this.workosEnabled);
       return {authorized:true as const,executionId,actorSessionId};
     });

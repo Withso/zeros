@@ -20,6 +20,13 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 import { validateDatabaseConnections } from "./database-config.js";
 import {parseDatabaseTarget, validateMigrationRole} from "./database-target.js";
 import type { CloudWorkspaceProviderName } from "./cloud-workspaces/provider.js";
+import { BOAT_BILLING_ORG_PATTERN } from "./cloud-workspaces/boat-client.js";
+import { DEFAULT_SLOW_REQUEST_LOG_MS } from "./request-timing.js";
+import {
+  DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS,
+  MAX_ENGINE_HEARTBEAT_INTERVAL_MS,
+  MIN_ENGINE_HEARTBEAT_INTERVAL_MS,
+} from "./cloud-workspaces/engine-heartbeat.js";
 
 function containsAsciiControl(value: string): boolean {
   for (const character of value) {
@@ -38,6 +45,7 @@ const EnvSchema = z.object({
   DATABASE_MIGRATIONS_ON_BOOT: z.enum(["true", "false"]).default("true"),
   DATABASE_MAINTENANCE_MODE: z.enum(["true", "false"]).default("false"),
   DATABASE_POOL_MAX: z.coerce.number().int().min(1).max(100).default(10),
+  SLOW_REQUEST_LOG_MS: z.coerce.number().int().min(50).max(60_000).default(DEFAULT_SLOW_REQUEST_LOG_MS),
   AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
   AUTH0_DOMAIN: z.string().trim().min(1).optional(),
@@ -178,7 +186,7 @@ export type CloudWorkspaceBackendConfig = {
   /** Customer Daytona onboarding is independent of the managed provider. The
    * legacy flat endpoint/target is used only when Daytona is the default. */
   daytonaConnection?: { apiUrl: string; target: string };
-  boat?: { accountScope: string; ttlSeconds: number | null };
+  boat?: { accountScope: string; ttlSeconds: number | null; billingOrg: string };
   computePolicy?: import("./cloud-workspaces/compute-leases.js").ManagedComputePolicy;
   apiKey: string;
   apiUrl: string;
@@ -220,6 +228,7 @@ export type CloudWorkspaceBackendConfig = {
   durability: {
     objectEncryptionKeys: Readonly<Record<number, string>>;
     currentObjectEncryptionKeyVersion: number;
+    objectRestoreWindowMs: number;
   } & (
     | { objectStoreDirectory: string; s3?: never }
     | { objectStoreDirectory?: never; s3: { endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string } }
@@ -241,6 +250,7 @@ export type CloudWorkspaceBackendConfig = {
     setupSecretKeyV1: string | null;
     engineProtocolVersion: number;
     enginePort: number;
+    engineHeartbeatIntervalMs: number;
     intervalMs: number;
     timeoutSeconds: number;
     leaseMs: number;
@@ -291,6 +301,10 @@ export type Config = {
   databaseMigrationRole?: string;
   databaseMigrationsOnBoot?: boolean;
   databasePoolMax?: number;
+  /** Requests at least this slow are logged once by route template. */
+  slowRequestLogMs?: number;
+  /** Receives aggregate cloud health alerts; null disables them. */
+  operationsAlertEmail?: string | null;
   /** All application routes and background writers are disabled during cutover. */
   databaseMaintenanceMode?: boolean;
   auth: AuthBackendConfig;
@@ -332,6 +346,7 @@ const CloudWorkspaceEnvSchema = z.object({
     .string()
     .regex(/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/)
     .optional(),
+  BOAT_BILLING_ORG: z.string().regex(BOAT_BILLING_ORG_PATTERN).optional(),
   BOAT_SNAPSHOT_ID: z
     .string()
     .regex(
@@ -458,6 +473,12 @@ const CloudWorkspaceSetupEnvSchema = z.object({
     .min(1)
     .max(65_535)
     .default(39_393),
+  CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(MIN_ENGINE_HEARTBEAT_INTERVAL_MS)
+    .max(MAX_ENGINE_HEARTBEAT_INTERVAL_MS)
+    .default(DEFAULT_ENGINE_HEARTBEAT_INTERVAL_MS),
   CLOUD_WORKSPACE_SETUP_INTERVAL_MS: z.coerce
     .number()
     .int()
@@ -507,6 +528,14 @@ const CloudWorkspaceDurabilityEnvSchema = z.object({
   CLOUD_WORKSPACE_S3_BUCKET: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
   CLOUD_WORKSPACE_S3_ACCESS_KEY_ID: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_S3_SECRET_ACCESS_KEY: z.string().trim().min(1).max(256).optional(),
+  /** Live objects outlive their last reference this long, so a point-in-time
+   * database restore finds them. Match the database's backup retention
+   * (PlanetScale: 48 hours); zero collects immediately. */
+  // A blank value keeps the default rather than coercing to zero.
+  CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).max(720).default(48),
+  ),
 });
 
 const CloudWorkspaceOutboxEnvSchema = z.object({
@@ -1033,6 +1062,7 @@ function loadCloudWorkspaceConfig(
       ? [
           "BOAT_API_KEY",
           "BOAT_ACCOUNT_SCOPE",
+          "BOAT_BILLING_ORG",
           "BOAT_SNAPSHOT_ID",
           "BOAT_IMAGE_BUILD_SHA256",
           "BOAT_TTL_SECONDS",
@@ -1378,6 +1408,8 @@ function loadCloudWorkspaceConfig(
     }
     const currentObjectEncryptionKeyVersion =
       parsedDurability.data.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION;
+    const objectRestoreWindowMs =
+      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_RESTORE_WINDOW_HOURS * 3_600_000;
     if (!objectEncryptionKeys[currentObjectEncryptionKeyVersion]) {
       throw new Error(
         "Invalid cloud workspace durability environment: the current object key version is not present in the keyring",
@@ -1390,7 +1422,7 @@ function loadCloudWorkspaceConfig(
       }
       if (store.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY) throw new Error("Invalid cloud workspace durability environment: choose one object store");
       durability = {
-        objectEncryptionKeys, currentObjectEncryptionKeyVersion,
+        objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectRestoreWindowMs,
         s3: {
           endpoint: validatedServiceUrl(store.CLOUD_WORKSPACE_S3_ENDPOINT, "CLOUD_WORKSPACE_S3_ENDPOINT", { allowPath: false }),
           region: store.CLOUD_WORKSPACE_S3_REGION,
@@ -1406,7 +1438,7 @@ function loadCloudWorkspaceConfig(
       if (!rawObjectStoreDirectory || !path.isAbsolute(rawObjectStoreDirectory) || objectStoreDirectory === path.parse(objectStoreDirectory).root || containsAsciiControl(rawObjectStoreDirectory)) {
         throw new Error("Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path");
       }
-      durability = { objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectStoreDirectory };
+      durability = { objectEncryptionKeys, currentObjectEncryptionKeyVersion, objectRestoreWindowMs, objectStoreDirectory };
     }
   }
   let setupExecution: CloudWorkspaceBackendConfig["setupExecution"] = null;
@@ -1471,6 +1503,8 @@ function loadCloudWorkspaceConfig(
       setupSecretKeyV1: settingsSecretKeyV1,
       engineProtocolVersion: setup.data.CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: setup.data.CLOUD_WORKSPACE_ENGINE_PORT,
+      engineHeartbeatIntervalMs:
+        setup.data.CLOUD_WORKSPACE_ENGINE_HEARTBEAT_INTERVAL_MS,
       intervalMs: setup.data.CLOUD_WORKSPACE_SETUP_INTERVAL_MS,
       timeoutSeconds: setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS,
       leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
@@ -1521,6 +1555,7 @@ function loadCloudWorkspaceConfig(
           boat: {
             accountScope: value.BOAT_ACCOUNT_SCOPE!,
             ttlSeconds: value.BOAT_TTL_SECONDS!,
+            billingOrg: value.BOAT_BILLING_ORG!,
           },
           computePolicy:{provider:"boat",policyId:value.BOAT_COMPUTE_POLICY_ID!,secondsPerDollar:value.BOAT_SECONDS_PER_DOLLAR!,
             minimumTtlSeconds:Math.min(600,value.BOAT_TTL_SECONDS!),maximumTtlSeconds:value.BOAT_TTL_SECONDS!,
@@ -1662,6 +1697,17 @@ function validateRailwayEnvironment(
   }
 }
 
+/** Alerting is optional: an unusable mailbox disables it with a warning
+ * instead of failing boot. */
+function loadOperationsAlertEmail(env: NodeJS.ProcessEnv): string | null {
+  const raw = env.OPERATIONS_ALERT_EMAIL?.trim();
+  if (!raw) return null;
+  const parsed = z.string().max(254).email().safeParse(raw);
+  if (parsed.success) return parsed.data;
+  console.warn("[config] OPERATIONS_ALERT_EMAIL is not one email address; cloud health alerts are disabled");
+  return null;
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -1724,6 +1770,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...(migrationRole ? {databaseMigrationRole: migrationRole} : {}),
     databaseMigrationsOnBoot: e.DATABASE_MIGRATIONS_ON_BOOT === "true",
     databasePoolMax: e.DATABASE_POOL_MAX,
+    slowRequestLogMs: e.SLOW_REQUEST_LOG_MS,
+    operationsAlertEmail: loadOperationsAlertEmail(env),
     databaseMaintenanceMode: e.DATABASE_MAINTENANCE_MODE === "true",
     auth,
     workos,
