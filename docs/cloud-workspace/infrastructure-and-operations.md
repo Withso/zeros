@@ -134,7 +134,7 @@ target-bound approval, and change nothing until rerun unchanged with
 | `object_deletion_stalled` | An unfenced blob deletion is 15 minutes old or failed three times. | Check object-store credentials, reachability and the bucket's retention settings. |
 | `provider_orphans_stalled` | A provider orphan has been unverified for an hour. | Compare the provider inventory for the account scope with the bindings and remove the orphan through the provider after confirming it is not bound. |
 | `durability_stalled` | A ready or busy workspace has had non-durable content or record state for 15 minutes. | Check the engine's checkpoint uploads, object-store health and the byte limits (`cloud-object-storage:manage`). |
-| `compute_settlement_stalled` | An unsettled compute lease has had an error for 5 minutes, or its next check is 5 minutes overdue. | Read the lease `last_error_code`. Meter or provider errors need provider access fixed; `compute_absence_unconfirmed` means the create journal cannot close until absence is proven with `cloud-provider-absence:manage`. |
+| `compute_settlement_stalled` | An unsettled compute lease has had an error for 5 minutes, or its next check is 5 minutes overdue. | Read the lease `last_error_code`; failing leases retry with backoff up to five minutes. Meter or provider errors need provider access fixed; `compute_absence_unconfirmed` means the create journal cannot close until absence is proven with `cloud-provider-absence:manage`. `provider_not_found` or `compute_final_meter_unavailable` on a bound allocation the provider lost needs `cloud-provider-loss:manage`. |
 | `compute_lease_expired` | An active or draining lease is 5 minutes past its provider expiry. | Check renewal, the Organization's credit (`cloud-compute:grant`) and the provider's TTL. A sandbox may be running unfunded. |
 | `compute_platform_exposure` | Provider overrun was recorded as platform exposure in the last 24 hours. | Reconcile the provider meter against the ledger and review the affected credit period. |
 | `health_query_failed` | The aggregate health query itself failed. | Check database connectivity, pool saturation and whether a migration is pending. |
@@ -232,6 +232,22 @@ append-only attestation covers dispatches only up to a recorded instant; the
 service then closes each generation and releases its reservation through the
 ordinary absence check. Attest untracked journals only after every pre-0093
 writer has been retired.
+
+A bound Boat allocation the provider lost (its sandbox and usage meter return
+404) leaves the workspace `failed` with `provider_not_found` and its compute
+lease draining; `compute_settlement_stalled` alerts after five minutes. First
+confirm the loss with the provider. Then run
+`pnpm --dir apps/control-plane cloud-provider-loss:manage` (or
+`node dist/manage-cloud-provider-loss.js`) with the same plan-then-execute
+approval and credentials, naming the workspace, generation, exact sandbox id and
+Boat account in `CONTROL_PLANE_PROVIDER_LOSS_*`. The command reads the complete
+account inventory and looks the sandbox up directly. It refuses a listing that
+still contains the sandbox or omits another sandbox the scope holds, any lookup
+other than not found, an allocation Zeros is already deleting, and a live
+engine. Its append-only attestation marks the journal lost and asks the lease to
+settle now: reservations finalize at the last meter and the health reason
+clears. The owner then recovers the workspace's durable checkpoint into a new
+generation; work after that checkpoint is lost with the allocation.
 
 `CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED=false` makes a process an API-only
 replica: cloud reconciliation, access retirement, checkpoint/fork, object

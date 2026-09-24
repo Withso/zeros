@@ -156,6 +156,14 @@ export class BoatWorkspaceProvider
     return record;
   }
 
+  /** Compute, access and new provider work need a live allocation. An
+   * attested provider loss is final; its checkpoint recovers elsewhere. */
+  private usable(record: CloudProviderOperationRecord): void {
+    if (record.lostAt) throw failure("provider_resource_lost");
+    if (record.deletionRequestedAt || record.deletedAt)
+      throw failure("provider_generation_retired");
+  }
+
   async verifyManagedResourceOwnership(resource: CloudProviderResource): Promise<boolean> {
     const record = await this.owned(resource.resourceId);
     return record.workspaceId === resource.workspaceId && record.generation === resource.generation;
@@ -208,7 +216,7 @@ export class BoatWorkspaceProvider
 
   async verifyAbsence(identity: CloudProviderIdentity): Promise<boolean> {
     const record = await this.options.operations.find(identity);
-    if (record === null || record.deletedAt !== null || record.createClosedAt !== null) return true;
+    if (record === null || record.deletedAt !== null || record.createClosedAt !== null || record.lostAt !== null) return true;
     return this.options.operations.closeUnallocatedCreate(identity);
   }
 
@@ -265,8 +273,8 @@ export class BoatWorkspaceProvider
         .update(JSON.stringify({ imageRef: input.imageRef, body }))
         .digest("hex"),
     });
-    if (record.deletionRequestedAt || record.deletedAt || record.createClosedAt)
-      throw failure("provider_generation_retired");
+    if (record.createClosedAt) throw failure("provider_generation_retired");
+    this.usable(record);
     if (record.resourceId) return this.allocatableResource(record);
     const age = this.now() - record.createdAt.getTime();
     if (!Number.isFinite(age) || age < -60_000 || age >= CREATE_RETRY_WINDOW_MS)
@@ -324,7 +332,8 @@ export class BoatWorkspaceProvider
 
   async inspect(resourceId: string): Promise<CloudProviderResource | null> {
     const record = await this.owned(resourceId);
-    if (record.deletedAt) return null;
+    // Loss is attested only for a bound allocation Zeros never began deleting.
+    if (record.deletedAt || record.lostAt) return null;
     if (record.deletionRequestedAt) {
       // A lost DELETE reply is retried only to recover its receipt. A 404 is
       // never converted into successful deletion.
@@ -382,8 +391,7 @@ export class BoatWorkspaceProvider
 
   private async startAllocation(resourceId: string, ttlSeconds: number | null): Promise<CloudProviderResource> {
     const record = await this.owned(resourceId);
-    if (record.deletionRequestedAt || record.deletedAt)
-      throw failure("provider_generation_retired");
+    this.usable(record);
     const current = await this.allocatableResource(record);
     if (current.state === "running" || current.state === "provisioning")
       return current;
@@ -409,6 +417,7 @@ export class BoatWorkspaceProvider
         (window.until !== undefined && (!Number.isFinite(requestedUntil) || requestedUntil! < requestedSince! || requestedUntil! > this.now()))))
       throw failure("provider_usage_invalid");
     const record = await this.owned(resourceId);
+    if (record.lostAt) throw failure("provider_resource_lost");
     if (record.deletedAt) throw failure("provider_usage_unavailable");
     const query = new URLSearchParams();
     if (window) query.set("since", window.since.toISOString());
@@ -437,7 +446,7 @@ export class BoatWorkspaceProvider
   async renewComputeLease(resourceId: string, ttlSeconds: number): Promise<{ expiresAt: string }> {
     this.assertFiniteLease(ttlSeconds);
     const record = await this.owned(resourceId);
-    if (record.deletionRequestedAt || record.deletedAt) throw failure("provider_generation_retired");
+    this.usable(record);
     const response = await this.client.request(`/sandboxes/${resourceId}`, { method: "PATCH", body: { ttlSeconds } });
     // Metering renews only a sandbox inspected as running, which requires a
     // confirmed wallet; confirm it again on the renewed allocation.
@@ -495,7 +504,8 @@ export class BoatWorkspaceProvider
 
   async delete(resourceId: string): Promise<void> {
     const owned = await this.owned(resourceId);
-    if (owned.deletedAt) return;
+    // A lost allocation has nothing left to delete; its journal is terminal.
+    if (owned.deletedAt || owned.lostAt) return;
     // Record intent before sending DELETE, but only after access revocation.
     // Retrying after a lost response must not need a running VM to drain again.
     if (!owned.deletionRequestedAt) await this.revokeSshAccess(resourceId);
@@ -525,9 +535,7 @@ export class BoatWorkspaceProvider
   }
 
   async createSshAccess(resourceId: string, expiresInMinutes: number) {
-    const record = await this.owned(resourceId);
-    if (record.deletionRequestedAt || record.deletedAt)
-      throw failure("provider_generation_retired");
+    this.usable(await this.owned(resourceId));
     return this.options.access.createSshAccess(resourceId, expiresInMinutes);
   }
   async revokeSshAccess(resourceId: string): Promise<void> {
@@ -539,15 +547,11 @@ export class BoatWorkspaceProvider
     port: number,
     access?: CloudProviderPreviewAccess,
   ) {
-    const record = await this.owned(resourceId);
-    if (record.deletionRequestedAt || record.deletedAt)
-      throw failure("provider_generation_retired");
+    this.usable(await this.owned(resourceId));
     return this.options.access.getPreviewEndpoint(resourceId, port, access);
   }
   async getEngineEndpoint(resourceId: string, port: number) {
-    const record = await this.owned(resourceId);
-    if (record.deletionRequestedAt || record.deletedAt)
-      throw failure("provider_generation_retired");
+    this.usable(await this.owned(resourceId));
     if (!this.options.access.getEngineEndpoint)
       throw failure("provider_access_unavailable");
     return this.options.access.getEngineEndpoint(resourceId, port);

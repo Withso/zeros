@@ -651,7 +651,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         ).rows[0],
     );
     if (!lease) return false;
-    let recheckAt: Date | null = null;
+    let recheckAt: Date | null = null, failed = false;
     try {
       recheckAt = await this.reconcile(lease);
       await withSystemTx(this.options.pool, (tx) =>
@@ -662,6 +662,7 @@ export class CloudWorkspaceComputeLeaseCoordinator {
         ),
       );
     } catch (error) {
+      failed = true;
       const code =
         error instanceof CloudProviderError &&
         /^[a-z][a-z0-9_]{0,127}$/.test(error.code)
@@ -684,12 +685,17 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       await withSystemTx(this.options.pool, (tx) =>
         tx.query(
           // A just-stopped allocation settles once its final meter can cover
-          // the stop; recheck then instead of after a full poll.
+          // the stop; recheck then instead of after a full poll. A persistent
+          // failure (for example an unattested provider loss) backs off to
+          // five minutes rather than requesting another stop every poll.
           `UPDATE managed_compute_allocation_leases SET lease_owner=NULL,lease_expires_at=NULL,
-        next_check_at=CASE WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
+        next_check_at=CASE
+          WHEN $4 THEN clock_timestamp()+least(interval '5 minutes',
+            greatest(interval '15 seconds',clock_timestamp()-coalesce(first_error_at,clock_timestamp())))
+          WHEN $3::timestamptz IS NULL THEN clock_timestamp()+interval '15 seconds'
           ELSE greatest($3::timestamptz,clock_timestamp()+interval '1 second') END,updated_at=now()
         WHERE id=$1 AND lease_owner=$2`,
-          [lease.id, this.workerId, recheckAt],
+          [lease.id, this.workerId, recheckAt, failed],
         ),
       );
     }
@@ -723,7 +729,10 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       if (!provider.verifyAbsence || !(await provider.verifyAbsence(identity)))
         throw failure("compute_absence_unconfirmed", true);
       await this.stillClaimed(lease);
-      if (lease.provider_resource_id)
+      const bound = await this.boundAllocation(lease);
+      // A bound allocation settles without a final meter only after an
+      // operator attested that the provider lost it; the ledger checks again.
+      if (bound && !bound.lost)
         throw failure("compute_final_meter_unavailable", true);
       const reservations = await withSystemTx(
         this.options.pool,
@@ -735,12 +744,11 @@ export class CloudWorkspaceComputeLeaseCoordinator {
             )
           ).rows,
       );
-      for (const row of reservations)
-        await this.ledger.releaseUnallocated({
-          reservationId: lease.id,
-          periodId: row.period_id,
-          allocationLeaseClaim: { owner: this.workerId },
-        });
+      for (const row of reservations) {
+        const claim = { reservationId: lease.id, periodId: row.period_id, allocationLeaseClaim: { owner: this.workerId } };
+        if (bound) await this.ledger.finalizeLost({ ...claim, resourceId: bound.resourceId });
+        else await this.ledger.releaseUnallocated(claim);
+      }
       await this.settle(lease);
       return null;
     }
@@ -912,6 +920,23 @@ export class CloudWorkspaceComputeLeaseCoordinator {
       ),
     );
     return null;
+  }
+
+  /** The generation's bound allocation, which the lease may not have recorded
+   * yet, and whether an operator attested that the provider lost it. */
+  private async boundAllocation(lease: Lease): Promise<{ resourceId: string; lost: boolean } | null> {
+    return withSystemTx(this.options.pool, async (tx) => {
+      const resourceId = lease.provider_resource_id ?? (await tx.query<{ provider_resource_id: string | null }>(
+        "SELECT provider_resource_id FROM cloud_workspace_provider_bindings WHERE workspace_id=$1 AND generation=$2 AND org_id=$3",
+        [lease.workspace_id, lease.generation, lease.org_id],
+      )).rows[0]?.provider_resource_id ?? null;
+      if (!resourceId) return null;
+      const lost = (await tx.query<{ lost: boolean }>(
+        "SELECT cloud_provider_allocation_lost($1,$2,$3,$4) AS lost",
+        [lease.workspace_id, lease.generation, lease.org_id, resourceId],
+      )).rows[0]!.lost;
+      return { resourceId, lost };
+    });
   }
 
   private async settle(lease: Lease): Promise<void> {

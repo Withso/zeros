@@ -79,6 +79,7 @@ type Reservation = {
 export type ComputeCreditFinalReason =
   | "allocation_stopped"
   | "allocation_deleted"
+  | "allocation_lost"
   | "never_allocated"
   | "period_ended";
 export type ComputeCreditReservation = {
@@ -560,7 +561,7 @@ export class DatabaseManagedComputeCreditLedger {
     reservationId: string;
     periodId: string;
     usage: CloudProviderComputeUsage;
-    finalReason?: Exclude<ComputeCreditFinalReason, "never_allocated">;
+    finalReason?: Exclude<ComputeCreditFinalReason, "never_allocated" | "allocation_lost">;
     allocationLeaseClaim?: { owner: string };
   }): Promise<ComputeCreditReservation> {
     identity(input.reservationId, input.periodId);
@@ -705,6 +706,41 @@ export class DatabaseManagedComputeCreditLedger {
           billableSeconds: 0,
           through: row.meter_through,
           finalReason: input.reason,
+        });
+      },
+      input.allocationLeaseClaim,
+    );
+  }
+
+  /** Finalize at the last provider meter after an operator attested that the
+   * provider lost the exact bound allocation, and with it the usage meter.
+   * Unmetered time is never billed: the remaining hold is released. */
+  async finalizeLost(input: {
+    reservationId: string;
+    periodId: string;
+    resourceId: string;
+    allocationLeaseClaim?: { owner: string };
+  }): Promise<ComputeCreditReservation> {
+    identity(input.reservationId, input.periodId);
+    return this.mutateMeter(
+      input.reservationId,
+      input.periodId,
+      async (tx, row) => {
+        const lost = await tx.query<{ lost: boolean }>(
+          "SELECT cloud_provider_allocation_lost($1,$2,$3,$4) AS lost",
+          [row.workspace_id, row.generation, row.org_id, input.resourceId],
+        );
+        if (!lost.rows[0]!.lost) deny("compute_credit_conflict");
+        if (row.state === "final") {
+          if (row.final_reason !== "allocation_lost")
+            deny("compute_credit_conflict");
+          return document(row);
+        }
+        return this.applyMeter(tx, row, {
+          actual: integer(row.actual_micro_usd),
+          billableSeconds: integer(row.billable_seconds),
+          through: row.meter_through,
+          finalReason: "allocation_lost",
         });
       },
       input.allocationLeaseClaim,

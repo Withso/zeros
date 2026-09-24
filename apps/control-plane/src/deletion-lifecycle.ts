@@ -296,7 +296,8 @@ async function assertOrganizationCloudPurgeReady(
 ): Promise<void> {
   const retainedProviderOperation = await tx.query(
     `SELECT 1 FROM cloud_workspace_provider_operations
-     WHERE org_id = $1 AND deleted_at IS NULL AND create_closed_at IS NULL LIMIT 1 FOR UPDATE`,
+     WHERE org_id = $1 AND deleted_at IS NULL AND create_closed_at IS NULL AND lost_at IS NULL
+     LIMIT 1 FOR UPDATE`,
     [organizationId],
   );
   if (retainedProviderOperation.rows[0]) {
@@ -352,7 +353,7 @@ async function assertOrganizationCloudPurgeReady(
   if (consumeFencedDeletions) {
     await tx.query(
       `DELETE FROM cloud_workspace_provider_operations WHERE org_id = $1
-       AND (deleted_at IS NOT NULL OR create_closed_at IS NOT NULL)`,
+       AND (deleted_at IS NOT NULL OR create_closed_at IS NOT NULL OR lost_at IS NOT NULL)`,
       [organizationId],
     );
     await tx.query(

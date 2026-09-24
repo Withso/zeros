@@ -89,6 +89,21 @@ dispatches only up to its recorded instant, never erases attempts, cannot close
 a bound generation or one with an active create or wake, and is append-only.
 The application role can read attestations but cannot create them.
 
+A provider can also lose a bound allocation outright (host loss or
+provider-side deletion). Its sandbox and usage meter then return not found,
+which alone never proves deletion or a final meter, so lifecycle stops and
+compute settlement retry with backoff. Only an operator loss attestation
+(migration 0099) resolves it. It names the exact bound resource, records an
+account inventory that omits it but lists every other allocation the scope
+still holds, and a not-found lookup; it is refused once Zeros has started
+deleting the allocation or while an engine still holds its authority. The
+journal then records `lost_at`: inspection reports the allocation absent, start,
+renewal, metering and access refuse `provider_resource_lost`, wake returns
+`cloud_workspace_recreate_required`, deletion bookkeeping cannot start, and
+organization purge may consume the journal. Compute reservations finalize as
+`allocation_lost` at the last provider meter; unmetered time is released, not
+billed. The owner recovers the durable checkpoint into a new generation.
+
 Historical journals remain untracked and cannot infer absence from new receipts.
 New journals use a versioned local request digest; an older writer's digest
 cannot match them, so it fails before dispatch. The provider HTTP body and

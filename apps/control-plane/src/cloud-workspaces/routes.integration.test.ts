@@ -1,4 +1,4 @@
-import {withCloudFixtureOwnerTx} from "./test-fixtures.js";
+import {seedProviderLossAttestation,withCloudFixtureOwnerTx} from "./test-fixtures.js";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   afterAll,
@@ -1269,6 +1269,25 @@ d("cloud workspace API contracts", () => {
     expect(retry.response.status).toBe(202);
     expect(retry.body.workspace.id).not.toBe(workspaceId);
     expect((await pool.query("SELECT create_closed_at FROM cloud_workspace_provider_operations WHERE workspace_id=$1", [workspaceId])).rows[0].create_closed_at).not.toBeNull();
+  });
+
+  it("requires checkpoint recovery instead of a wake after an attested provider loss", async () => {
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId = created.body.workspace.id;
+    await withSystemTx(pool, async tx => {
+      await tx.query("UPDATE cloud_workspace_lifecycle_intents SET state='failed',completed_at=now() WHERE workspace_id=$1", [workspaceId]);
+      await tx.query("UPDATE cloud_workspaces SET status='failed',desired_state='stopped' WHERE id=$1", [workspaceId]);
+      await tx.query(`INSERT INTO cloud_workspace_provider_operations
+        (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked,resource_id)
+        VALUES ('daytona','test-account',$1,1,$2,$3,$4,true,'lost-resource-1')`, [workspaceId,orgId,randomUUID(),"a".repeat(64)]);
+    });
+    await seedProviderLossAttestation(pool, { provider: "daytona", accountScope: "test-account", workspaceId,
+      resourceId: "lost-resource-1", attestedBy: owner.id });
+    const response = await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`, {method:"POST",key:randomUUID()});
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({error:{code:"cloud_workspace_recreate_required"}});
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_lifecycle_intents WHERE workspace_id=$1 AND operation='wake'", [workspaceId])).rowCount).toBe(0);
   });
 
   it("rebinds a renewed entitlement before waking a stopped generation", async () => {

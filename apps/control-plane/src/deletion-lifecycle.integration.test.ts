@@ -14,6 +14,7 @@ import {
   createDeletionLifecycleRoutes,
   DeletionLifecycleProcessor,
 } from "./deletion-lifecycle.js";
+import { seedProviderLossAttestation } from "./cloud-workspaces/test-fixtures.js";
 import { runMigrations } from "./migrate.js";
 import { createOpsRoutes } from "./ops.js";
 import {
@@ -1943,12 +1944,12 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({ rows: [{ lease_owner: null }] });
   });
 
-  it.each(["object", "provider", "rejected-create"])(
+  it.each(["object", "provider", "rejected-create", "lost-allocation"])(
     "does not purge an Organization until %s deletion is durably confirmed",
     async (kind) => {
       const owner = await signup("OrgFencePurge");
       const organizationId = await createOrganization(owner, "Fence Company");
-      const blobId = randomUUID();
+      const blobId = randomUUID(), lostWorkspaceId = randomUUID();
       if (kind === "rejected-create") {
         await pool.query(`INSERT INTO cloud_workspace_provider_operations
           (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,create_attempts_tracked)
@@ -1958,6 +1959,11 @@ d("account, organization, and operator deletion lifecycle", () => {
           (provider,account_scope,workspace_id,generation,attempt_id)
           SELECT provider,account_scope,workspace_id,generation,$2
           FROM cloud_workspace_provider_operations WHERE org_id=$1`,[organizationId,randomUUID()]);
+      } else if (kind === "lost-allocation") {
+        await pool.query(`INSERT INTO cloud_workspace_provider_operations
+          (provider,account_scope,workspace_id,generation,org_id,idempotency_key,request_sha256,resource_id)
+          VALUES ('boat','test-account',$1,1,$2,$3,$4,'bx_34567892')`,
+        [lostWorkspaceId,organizationId,randomUUID(),"a".repeat(64)]);
       } else if (kind === "provider") {
         await pool.query(
           `INSERT INTO cloud_workspace_provider_operations
@@ -2025,6 +2031,10 @@ d("account, organization, and operator deletion lifecycle", () => {
           SET rejection_code='limit_reached',rejected_at=now() WHERE workspace_id IN
           (SELECT workspace_id FROM cloud_workspace_provider_operations WHERE org_id=$1)`,[organizationId]);
         await pool.query("UPDATE cloud_workspace_provider_operations SET create_closed_at=now() WHERE org_id=$1",[organizationId]);
+      } else if (kind === "lost-allocation") {
+        // An attested provider loss is terminal: nothing remains to delete.
+        await seedProviderLossAttestation(pool, { provider: "boat", accountScope: "test-account", workspaceId: lostWorkspaceId,
+          resourceId: "bx_34567892", attestedBy: owner.id });
       } else if (kind === "provider") {
         await pool.query(
           "UPDATE cloud_workspace_provider_operations SET deleted_at = now() WHERE org_id = $1",

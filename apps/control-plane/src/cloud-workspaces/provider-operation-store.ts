@@ -16,6 +16,9 @@ export type CloudProviderOperationRecord = CloudProviderIdentity & {
   deletedAt: Date | null;
   createAttemptsTracked: boolean;
   createClosedAt: Date | null;
+  /** Operator-attested provider loss of the bound resource: nothing remains
+   * to inspect, meter, start or delete. */
+  lostAt: Date | null;
 };
 
 export type CloudProviderCreateRejectionCode =
@@ -62,10 +65,11 @@ type RecordRow = {
   deleted_at: Date | null;
   create_attempts_tracked: boolean;
   create_closed_at: Date | null;
+  lost_at: Date | null;
 };
 const COLUMNS = `workspace_id, generation, idempotency_key, request_sha256,
   created_at, resource_id, deletion_requested_at, deletion_operation_id, deleted_at,
-  create_attempts_tracked, create_closed_at`;
+  create_attempts_tracked, create_closed_at, lost_at`;
 function document(row: RecordRow): CloudProviderOperationRecord {
   return {
     workspaceId: row.workspace_id,
@@ -79,6 +83,7 @@ function document(row: RecordRow): CloudProviderOperationRecord {
     deletedAt: row.deleted_at,
     createAttemptsTracked: row.create_attempts_tracked,
     createClosedAt: row.create_closed_at,
+    lostAt: row.lost_at,
   };
 }
 function conflict(): CloudProviderError {
@@ -184,7 +189,7 @@ export class DatabaseCloudProviderOperationStore implements CloudProviderOperati
         WHERE provider=$1 AND account_scope=$2 AND workspace_id=$3 AND generation=$4 FOR UPDATE`,
       [this.provider, this.accountScope, identity.workspaceId, identity.generation])).rows[0];
       if (!row) throw conflict();
-      if (row.create_closed_at || row.deletion_requested_at || row.deleted_at)
+      if (row.create_closed_at || row.deletion_requested_at || row.deleted_at || row.lost_at)
         throw new CloudProviderError("provider_generation_retired", "Provider generation cannot allocate again", false);
       if (row.resource_id) return document(row);
       const inserted = await tx.query(`INSERT INTO cloud_workspace_provider_create_attempts
@@ -332,7 +337,7 @@ export class DatabaseCloudProviderOperationStore implements CloudProviderOperati
             await tx.query<RecordRow>(
               `SELECT ${COLUMNS} FROM cloud_workspace_provider_operations
            WHERE provider = $1 AND account_scope = $2 AND resource_id IS NOT NULL
-             AND deleted_at IS NULL
+             AND deleted_at IS NULL AND lost_at IS NULL
              AND ($3::uuid IS NULL OR (workspace_id, generation) > ($3::uuid, $4::integer))
            ORDER BY workspace_id, generation LIMIT 200`,
               [
