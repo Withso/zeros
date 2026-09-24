@@ -114,6 +114,7 @@ function cloudEnv(): NodeJS.ProcessEnv {
     ...validEnv(),
     GITHUB_APP_PRIVATE_KEY: privateKey,
     CLOUD_WORKSPACES_ENABLED: "true",
+    CLOUD_WORKSPACE_PROVIDER: "daytona",
     DAYTONA_API_KEY: "daytona-api-key-for-control-plane-tests",
     DAYTONA_SNAPSHOT_ID: "snap_immutable_123",
     ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
@@ -586,6 +587,15 @@ describe("cloud workspace backend configuration", () => {
       CLOUD_WORKSPACE_STORAGE_MIB: "40960",
     };
   }
+
+  it("defaults the managed provider to Boat and never implies Daytona", () => {
+    const cloud = loadConfig({ ...boatEnv(), CLOUD_WORKSPACE_PROVIDER: undefined }).cloudWorkspaces!;
+    expect(cloud).toMatchObject({ provider: "boat", cpuMillicores: 4000, memoryMiB: 8192 });
+    expect(cloud.providerProfiles).toBeUndefined();
+    expect(cloud.daytonaConnection).toBeUndefined();
+    // A Daytona credential alone neither selects Daytona nor satisfies Boat.
+    expect(() => loadConfig({ ...cloudEnv(), CLOUD_WORKSPACE_PROVIDER: undefined })).toThrow(/BOAT_API_KEY/);
+  });
 
   it("configures managed Boat without a managed Daytona credential", () => {
     const cloud = loadConfig(boatEnv()).cloudWorkspaces!;
@@ -1079,7 +1089,7 @@ describe("cloud workspace backend configuration", () => {
         ...validEnv(),
         CLOUD_WORKSPACES_ENABLED: "true",
       }),
-    ).toThrow(/DAYTONA_API_KEY/);
+    ).toThrow(/BOAT_API_KEY/);
 
     const env = cloudEnv();
     delete env.GITHUB_APP_PRIVATE_KEY;

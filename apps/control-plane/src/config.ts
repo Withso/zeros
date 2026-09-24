@@ -327,7 +327,8 @@ export type Config = {
 const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED: z.enum(["true", "false"]).default("true"),
-  CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("daytona"),
+  // Managed Boat Linux VMs are the default; Daytona must be selected explicitly.
+  CLOUD_WORKSPACE_PROVIDER: z.enum(["daytona", "boat"]).default("boat"),
   DAYTONA_API_KEY: z.string().trim().min(16).max(4096).optional(),
   DAYTONA_API_URL: z.string().url().default("https://app.daytona.io/api"),
   DAYTONA_TARGET: z
@@ -1057,8 +1058,9 @@ function loadCloudWorkspaceConfig(
     return null;
   }
 
+  const managedBoat = (env.CLOUD_WORKSPACE_PROVIDER ?? "boat") === "boat";
   const requiredProviderFields =
-    env.CLOUD_WORKSPACE_PROVIDER === "boat"
+    managedBoat
       ? [
           "BOAT_API_KEY",
           "BOAT_ACCOUNT_SCOPE",
@@ -1079,7 +1081,7 @@ function loadCloudWorkspaceConfig(
   }
   const parsed = CloudWorkspaceEnvSchema.safeParse({
     ...env,
-    ...(env.CLOUD_WORKSPACE_PROVIDER === "boat"
+    ...(managedBoat
       ? {
           CLOUD_WORKSPACE_CPU_MILLICORES:
             env.CLOUD_WORKSPACE_CPU_MILLICORES ?? "4000",

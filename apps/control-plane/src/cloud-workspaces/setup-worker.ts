@@ -1220,9 +1220,3 @@ export class CloudWorkspaceSetupWorker {
   }
 }
 
-export function startCloudWorkspaceSetupWorker(
-  options: CloudWorkspaceSetupWorkerOptions,
-): { worker: CloudWorkspaceSetupWorker; stop: () => Promise<void> } {
-  const worker = new CloudWorkspaceSetupWorker(options);
-  return { worker, stop: worker.start() };
-}

@@ -624,37 +624,3 @@ export class DatabaseDaytonaProviderResolver extends DatabaseCloudWorkspaceProvi
     });
   }
 }
-
-export class StaticCloudWorkspaceProviderResolver implements CloudWorkspaceProviderResolver {
-  constructor(
-    private readonly provider: CloudWorkspaceProvider &
-      CloudWorkspaceAccessProvider,
-  ) {}
-
-  async resolve(): Promise<CloudWorkspaceProviderResolution> {
-    return {
-      provider: this.provider,
-      connectionId: "00000000-0000-0000-0000-000000000000",
-      connectionVersion: 1,
-      credentialSource: "hosted",
-    };
-  }
-
-  async cleanupScopes(): Promise<{
-    scopes: CloudWorkspaceProviderCleanupScope[];
-    unavailable: number;
-  }> {
-    return {
-      scopes: [
-        {
-          provider: this.provider,
-          organizationId: null,
-          connectionId: null,
-          connectionVersion: null,
-          credentialSource: "hosted",
-        },
-      ],
-      unavailable: 0,
-    };
-  }
-}

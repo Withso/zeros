@@ -86,8 +86,6 @@ export async function requireOrganizationRole(
 }
 
 /** Compatibility aliases for modules shipped during the flat-Team era. */
-export const requireMembership = requireOrganizationMembership;
-export const requireRole = requireOrganizationRole;
 
 /** Require one exact product-wide capability. Staff roles are deliberately
  * not ranked: developer tooling and support account recovery are different
