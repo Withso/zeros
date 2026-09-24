@@ -44,14 +44,6 @@ export class WorkOSProviderLockAbortedError extends Error {
   }
 }
 
-export class WorkOSProviderErasureNotReadyError extends Error {
-  readonly code = "workos_provider_erasure_reconciliation_pending";
-
-  constructor() {
-    super("WorkOS provider-erasure reconciliation is not ready");
-    this.name = "WorkOSProviderErasureNotReadyError";
-  }
-}
 
 type PermitWaiter = {
   settled: boolean;
@@ -370,17 +362,6 @@ export async function workOSProviderErasureFenceStatus(
   )
     ? "unfenced"
     : "not_ready";
-}
-
-export async function workOSProviderErasureFenced(
-  tx: Tx,
-  subjects: readonly WorkOSProviderSubject[],
-): Promise<boolean> {
-  const status = await workOSProviderErasureFenceStatus(tx, subjects);
-  if (status === "not_ready") {
-    throw new WorkOSProviderErasureNotReadyError();
-  }
-  return status === "fenced";
 }
 
 export function workOSOrganizationProviderLockKey(

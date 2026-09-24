@@ -158,10 +158,13 @@ Boat has live scoped SSH, PTY, SFTP, forwarding and retirement evidence. Daytona
 must pass the same tests on a compatible host. Provider configuration and local
 tests do not enable the production qualification gates.
 
-The existing Daytona deployment variables retain their defaults. To select
-managed Boat, set `CLOUD_WORKSPACE_PROVIDER=boat`, `BOAT_API_KEY`, a stable
-`BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`, `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and
-`CLOUD_WORKSPACE_STORAGE_MIB` from the measured image. Boat snapshot names are
+Managed Boat Linux VMs are the default provider: an unset
+`CLOUD_WORKSPACE_PROVIDER` means `boat`, and Daytona must be selected
+explicitly with `CLOUD_WORKSPACE_PROVIDER=daytona`. Customer Daytona
+connections stay off unless `DAYTONA_BYO_ENABLED=true`. Managed Boat requires
+`BOAT_API_KEY`, a stable `BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`,
+`BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and `CLOUD_WORKSPACE_STORAGE_MIB`
+from the measured image. Boat snapshot names are
 mutable. The stored reference is `boat:<name>@sha256:<build-metadata-digest>`;
 setup verifies the exact attested metadata digest before launching. A replaced
 name cannot silently select a different qualified build.

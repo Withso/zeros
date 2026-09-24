@@ -27,7 +27,7 @@ d("controlled migration service boot",()=>{
           WORKOS_COOKIE_PASSWORD:"test-cookie-password".repeat(3),WORKOS_WEBHOOK_SECRET:"test-webhook-secret"}:{}),
         GITHUB_APP_ID:"123456",GITHUB_APP_CLIENT_ID:"Iv1.test",GITHUB_APP_CLIENT_SECRET:"test-client-secret",
         GITHUB_APP_SLUG:"zeros-test",GITHUB_OAUTH_CALLBACK_URL:"https://api.example.test/v1/github/oauth/callback",GITHUB_APP_PRIVATE_KEY:privateKey,
-        CLOUD_WORKSPACES_ENABLED:"true",DAYTONA_API_KEY:"not-a-live-key-for-tests",DAYTONA_API_URL:"https://api.example.test",
+        CLOUD_WORKSPACES_ENABLED:"true",CLOUD_WORKSPACE_PROVIDER:"daytona",DAYTONA_API_KEY:"not-a-live-key-for-tests",DAYTONA_API_URL:"https://api.example.test",
         CLOUD_WORKSPACE_BACKGROUND_WORKERS_ENABLED:String(background),
         DAYTONA_SNAPSHOT_ID:"snap_test",ZEROS_CLOUD_SOURCE_COMMIT:"a".repeat(40),
         CLOUD_WORKSPACE_SECRET_KEY_V1:randomBytes(32).toString("base64url"),RESEND_API_KEY:"not-a-live-key",EMAIL_FROM:"test@example.test"},
