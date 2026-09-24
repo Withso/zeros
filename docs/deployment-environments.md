@@ -527,7 +527,8 @@ Apply the migration with the separately authorized migrator, then promptly
 redeploy the same commit: the previous deployment cannot restart against a
 ledger that records a migration it does not know. Railway also skips a `main`
 deployment whose CI check suite failed, including the Release (alpha) desktop
-workflow.
+workflow. A later merge that changes no watched path does not retry the skipped
+deployment; deploy the current `main` commit explicitly.
 
 `pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
 closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish
