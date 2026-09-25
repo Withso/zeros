@@ -36,7 +36,7 @@ Batch 8 closed the staff backend milestone on September 24, 2026.
   adapter, used only when explicitly selected: its worker isolation is
   unqualified, and it is kept for a future Windows sandbox.
 - Beta and Production move to the current backend at the next release cut.
-  Apply `0094`–`0100` with the separately authorized migrator, then promote the
+  Apply `0094`–`0100` with `release-migration:manage`, then promote the
   frozen release as described in [deployment environments](../deployment-environments.md).
   Their Pages production deployments and the Beta desktop publisher stay held
   until then.

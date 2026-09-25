@@ -36,17 +36,19 @@ yarn-debug.log*
 yarn-error.log*
 
 # Environment variables — every .env variant, at any depth, is machine-local.
-# `.env.example` is the ONE exception: the templates are tracked on purpose
-# (scripts/check-vite-env-sync.mjs reads .env.example to prove the VITE_* set
-# is documented, and apps/control-plane/README tells you to `cp .env.example .env`), so
-# they are negated back in. The `.env.*` wildcard is what catches the variants
-# an enumerated list keeps missing — .env.production, .env.development, .env.test.
+# The templates are the exceptions, tracked on purpose:
+# scripts/check-vite-env-sync.mjs reads .env.example to prove the VITE_* set is
+# documented, apps/control-plane/README tells you to `cp .env.example .env`, and
+# .env.agent.example documents the agent credentials file, so they are negated
+# back in. The `.env.*` wildcard is what catches the variants an enumerated list
+# keeps missing — .env.production, .env.development, .env.test, .env.agent.
 .env
 .env.*
 **/.env
 **/.env.*
 !.env.example
 !**/.env.example
+!/.env.agent.example
 
 # Cloudflare Workers local secrets (`wrangler dev`) — plaintext service keys,
 # must NEVER be committed. A `.dev.vars.example` template is exempted so one
