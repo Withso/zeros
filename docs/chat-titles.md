@@ -70,6 +70,10 @@ that a user's app is wired: the running desktop includes the title request, its
 configured control plane includes `/v1/chat-titles`, and that service has the
 server key. Pulling `origin/main` does not install unmerged workspace changes.
 
+Install the control plane's separate dependencies with
+`pnpm --dir apps/control-plane install --frozen-lockfile` before the browser
+suite; the UI smoke CI job does this explicitly.
+
 `pnpm test:ui-smoke` also checks the real renderer request, HTTP title router,
 workspace state update, and visible chat tab, including delayed sign-in and the
 input/output limits. Authentication and OpenAI output are fixtures,

@@ -711,6 +711,8 @@ jobs:
           cache: pnpm
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
+      - name: Install control-plane dependencies for title smoke
+        run: pnpm --dir apps/control-plane install --frozen-lockfile
       - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
       - name: Composer model-menu interaction contract
