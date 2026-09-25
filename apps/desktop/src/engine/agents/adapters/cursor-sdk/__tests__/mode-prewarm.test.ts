@@ -177,22 +177,6 @@ describe("Cursor executor prewarm across a mode change", () => {
     await adapter.dispose();
   });
 
-  it("keeps native MCP and plugin sources out of background title helpers", async () => {
-    const adapter = new CursorSdkAdapter(makeCtx());
-    await adapter.generateText({
-      model: "auto",
-      systemPrompt: "Name this chat.",
-      prompt: "Work on the repository",
-      env: { CURSOR_API_KEY: "key_test" },
-    });
-    expect(localOf(createSpy.mock.calls[0])).toMatchObject({
-      settingSources: [],
-    });
-    expect(createSpy.mock.calls[0][0].mcpServers).toBeUndefined();
-    expect(createSpy.mock.calls[0][0].tools).toEqual([]);
-    await adapter.dispose();
-  });
-
   it("warms the born-default Auto shape at session start", async () => {
     await startSession();
     expect(prewarmSpy).toHaveBeenCalledTimes(1);

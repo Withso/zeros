@@ -10,6 +10,7 @@
     "node": ">=22"
   },
   "scripts": {
+    "smoke:chat-titles": "tsx src/chat-titles-smoke.ts",
     "auth:probe": "tsx src/auth-contract-probe.ts",
     "cloud-entitlement:manage": "tsx src/manage-cloud-workspace-entitlement.ts",
     "account-pro:manage": "tsx src/manage-account-pro.ts",

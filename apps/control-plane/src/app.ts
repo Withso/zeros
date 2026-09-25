@@ -20,6 +20,7 @@ import type pg from "pg";
 import type { Config } from "./config.js";
 import { createAuthMiddleware } from "./auth.js";
 import { rateLimit } from "./ratelimit.js";
+import { createChatTitleRoutes } from "./chat-titles.js";
 import { createRoutes } from "./routes.js";
 import { HttpError } from "./authz.js";
 import type { EmailConfig } from "./email.js";
@@ -519,6 +520,7 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
+  app.route("/", createChatTitleRoutes(config.chatTitleApiKey));
   if (dependencies.cloudRuntimeServiceAccess && !pendingMigration) {
     app.route("/", createCloudRuntimeServiceRoutes(dependencies.cloudRuntimeServiceAccess));
   }

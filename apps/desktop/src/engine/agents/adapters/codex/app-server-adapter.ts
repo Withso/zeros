@@ -642,7 +642,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  none"; the user's native `~/.codex/config.toml` servers still load, since
    *  Zeros never relocates CODEX_HOME (shared/config-isolation.ts). An
    *  operation added here that DOES start a thread must disable them
-   *  explicitly — see generateText for the pattern. */
+   *  explicitly in the thread configuration. */
   private async withMemoryRuntime<T>(
     opts: {
       cwd: string;
@@ -2016,115 +2016,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
       return null;
     } finally {
       // Dispose whatever booted — even if the race above timed out waiting.
-      void boot.then((h) => h.dispose()).catch(() => {});
-    }
-  }
-
-  /** Background one-shot text generation (the AI chat-title call). Boots a
-   *  throwaway app-server (same pattern as getAccountInfo), runs ONE
-   *  read-only never-approve turn on a fresh thread, accumulates the
-   *  agentMessage text from `item/completed`, and disposes. The system
-   *  instruction is prepended to the input text — the app-server protocol
-   *  has no per-turn system-prompt field.
-   *
-   *  `mcpServers: []` only says "Zeros injects none" — it does NOT stop the
-   *  user's native servers, because Zeros deliberately never relocates
-   *  CODEX_HOME (see shared/config-isolation.ts). Native pass-through is right
-   *  for a real chat and wrong here: naming a chat never calls a tool, so
-   *  every native MCP server was being spawned — and failing, for anyone whose
-   *  set has a broken or unauthenticated entry — once per title. The thread
-   *  starts with all of them disabled instead, config-declared and
-   *  plugin-provided alike (an OAuth connector installed from the Codex
-   *  desktop sidebar is a plugin, and is the common case). */
-  async generateText(opts: {
-    model: string;
-    systemPrompt: string;
-    prompt: string;
-    env?: Record<string, string>;
-    timeoutMs?: number;
-    executionBoundary?: PreparedBoundary;
-  }): Promise<string> {
-    const boot = bootCodexAppServerRuntime({
-      cwd: this.ctx.projectRoot,
-      clientInfo: CLIENT_INFO,
-      mcpServers: [],
-      logTag: "codex-app-server:title",
-      ...(opts.env ? { env: opts.env } : {}),
-      ...(opts.executionBoundary
-        ? { executionBoundary: opts.executionBoundary }
-        : {}),
-    });
-    try {
-      const runtime = await Promise.race([
-        boot,
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("boot timeout")), 10_000),
-        ),
-      ]);
-      const { approvalPolicy, sandboxMode, sandboxPolicy } =
-        modePolicyFor("read-only");
-      // The caller can retain its fallback title if configuration is unreadable.
-      // Starting an unrestricted thread here would reconnect unimported MCP.
-      const nativeMcp = await readNativeMcpSurface(
-        runtime,
-        this.ctx.projectRoot,
-        { requireConfig: true, codexHome: opts.env?.CODEX_HOME },
-      );
-      // Raced like boot/runTurn: a server that boots but wedges on
-      // thread/start must not suspend this call forever (the finally below
-      // only runs once the try block settles — an unraced hang would leak
-      // the throwaway app-server process for the life of the engine).
-      const { threadId } = await Promise.race([
-        runtime.startThread({
-          cwd: this.ctx.projectRoot,
-          model: opts.model,
-          approvalPolicy,
-          sandbox: sandboxMode,
-          config: mcpDisabledThreadConfig(nativeMcp),
-        }),
-        new Promise<never>((_, reject) =>
-          setTimeout(
-            () => reject(new Error("title thread-start timeout")),
-            10_000,
-          ),
-        ),
-      ]);
-      let text = "";
-      const off = runtime.onNotification("item/completed", (params) => {
-        const item = (params as { item?: { type?: string; text?: string } })
-          ?.item;
-        if (item?.type === "agentMessage" && typeof item.text === "string") {
-          text += item.text;
-        }
-      });
-      try {
-        await Promise.race([
-          runtime.runTurn({
-            threadId,
-            input: [
-              {
-                type: "text",
-                text: `${opts.systemPrompt}\n\n${opts.prompt}`,
-                text_elements: [],
-              },
-            ],
-            model: opts.model,
-            approvalPolicy,
-            sandboxPolicy,
-          }),
-          new Promise<never>((_, reject) =>
-            setTimeout(
-              () => reject(new Error("title turn timeout")),
-              opts.timeoutMs ?? 30_000,
-            ),
-          ),
-        ]);
-      } finally {
-        off();
-      }
-      return text;
-    } finally {
-      // Dispose whatever booted — even if a race above timed out waiting.
       void boot.then((h) => h.dispose()).catch(() => {});
     }
   }

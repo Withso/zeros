@@ -469,6 +469,8 @@ const modelsSchema = z
       .describe(
         "Bounded per-agent permission-mode memory. Exact native ids preserve modes that share the same coarse posture.",
       ),
+    // Retired selection, readable for settings compatibility. The renderer
+    // ignores it and removes it on the next model-preference save.
     chat_title_model: z
       .string()
       .describe("Model used to generate chat titles."),

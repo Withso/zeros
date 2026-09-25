@@ -1,11 +1,12 @@
-// The AI chat-title reply is used VERBATIM as the tab title, so the
-// sanitizer is the last line of defense for the 2–3 word contract: strip
-// quote wrapping / trailing punctuation / extra lines, clamp to 3 words,
-// and reject unusable replies (null ⇒ the snippet title stays).
+// First-message admission, Unicode-safe input limits, and 3–5 word titles.
 
 import { describe, expect, it } from "vitest";
 
-import { sanitizeAiTitle, settledFirstPromptForTitle } from "../chat-title";
+import {
+  compactTitlePrompt,
+  sanitizeAiTitle,
+  settledFirstPromptForTitle,
+} from "../chat-title";
 
 const userMessage = (queued = false, text = "hi") => ({
   id: "first-user-message",
@@ -61,28 +62,48 @@ describe("settledFirstPromptForTitle", () => {
   });
 });
 
+describe("compactTitlePrompt", () => {
+  it("keeps short text and exactly 500 characters intact", () => {
+    expect(compactTitlePrompt("  Fix login  ")).toBe("Fix login");
+    expect(compactTitlePrompt("a".repeat(500))).toBe("a".repeat(500));
+  });
+  it("sends exactly the first 400 and last 100 characters of long input", () => {
+    expect(
+      compactTitlePrompt("a".repeat(400) + "omitted" + "z".repeat(100)),
+    ).toBe("a".repeat(400) + "z".repeat(100));
+  });
+  it("counts Unicode characters without cutting surrogate pairs", () => {
+    const prompt = "😀".repeat(400) + "omitted" + "終".repeat(100);
+    expect(compactTitlePrompt(prompt)).toBe(
+      "😀".repeat(400) + "終".repeat(100),
+    );
+  });
+});
+
 describe("sanitizeAiTitle", () => {
-  it("passes a clean 2–3 word title through unchanged", () => {
+  it("passes a clean 3–5 word title through unchanged", () => {
     expect(sanitizeAiTitle("Fix login bug")).toBe("Fix login bug");
-    expect(sanitizeAiTitle("Deep research")).toBe("Deep research");
+    expect(sanitizeAiTitle("Research the new API")).toBe(
+      "Research the new API",
+    );
   });
 
   it("strips wrapping quotes, backticks, and trailing punctuation", () => {
     expect(sanitizeAiTitle('"Fix login bug"')).toBe("Fix login bug");
-    expect(sanitizeAiTitle("`Deep research`")).toBe("Deep research");
-    expect(sanitizeAiTitle("Deep research.")).toBe("Deep research");
-    expect(sanitizeAiTitle("“Project audit”")).toBe("Project audit");
+    expect(sanitizeAiTitle("`Research the API`")).toBe("Research the API");
+    expect(sanitizeAiTitle("Research the API.")).toBe("Research the API");
+    expect(sanitizeAiTitle("“Audit the project”")).toBe("Audit the project");
   });
 
   it("keeps only the first line of a multi-line reply", () => {
-    expect(sanitizeAiTitle("Deep research\n\nHere is why…")).toBe(
-      "Deep research",
+    expect(sanitizeAiTitle("Research the API\n\nHere is why…")).toBe(
+      "Research the API",
     );
   });
 
-  it("clamps a rambling reply to 3 words", () => {
+  it("clamps a rambling reply to 5 words", () => {
     expect(sanitizeAiTitle("Fix the login bug in the auth module")).toBe(
-      "Fix the login",
+      "Fix the login bug in",
     );
   });
 
@@ -94,6 +115,8 @@ describe("sanitizeAiTitle", () => {
     expect(sanitizeAiTitle("")).toBeNull();
     expect(sanitizeAiTitle("   \n  ")).toBeNull();
     expect(sanitizeAiTitle('"…"')).toBeNull();
+    expect(sanitizeAiTitle("Hi")).toBeNull();
+    expect(sanitizeAiTitle("Deep research")).toBeNull();
   });
 
   it("rejects provider diagnostics instead of naming the chat after them", () => {

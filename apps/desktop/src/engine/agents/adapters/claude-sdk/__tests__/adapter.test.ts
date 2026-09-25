@@ -1188,26 +1188,6 @@ describe("Claude cloud connector inventory", () => {
     }
   });
 
-  it("keeps background title generation free of native connectors, plugins, and tools", async () => {
-    const { queryFn, captured } = makeScriptedQuery([
-      [resultOk("title-session")],
-    ]);
-    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
-    await adapter.generateText({
-      model: "claude-haiku-4-5",
-      systemPrompt: "Name this chat.",
-      prompt: "Work on the repository",
-    });
-    expect(captured[0]).toMatchObject({
-      tools: [],
-      strictMcpConfig: true,
-      settingSources: [],
-      settings: { disableAllHooks: true },
-      persistSession: false,
-    });
-    await adapter.dispose();
-  });
-
   it("discovers connectors in a disposable contained query with no prompt, hooks, or transcript", async () => {
     const close = vi.fn();
     const status = vi

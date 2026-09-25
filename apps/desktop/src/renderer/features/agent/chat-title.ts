@@ -1,54 +1,23 @@
-// ──────────────────────────────────────────────────────────
-// chat-title — background AI title for a chat's first prompt
-// ──────────────────────────────────────────────────────────
-//
-// Fire-and-forget: after the FIRST user message of an "Untitled" chat has
-// actually been admitted and its turn settles, this module asks the chat-title model (Settings → Models →
-// "Custom models") for a 2–3 word title over the engine bridge
-// (AGENT_GENERATE_TITLE) and renames the tab when it lands. There is
-// deliberately no instant prompt-snippet stage: the tab
-// stays "Untitled" until the AI title arrives — slow is acceptable, the
-// raw prompt text is not.
-//
-// Invisible-by-design contract:
-//   - Never blocks or delays the real turn — the request runs entirely in
-//     the background and every failure path leaves the seeded title (loud
-//     in DevTools only).
-//   - Never clobbers the user: the swap is a compare-and-swap dispatch
-//     (UPDATE_CHAT_TITLE_IF) that only applies while the tab still shows
-//     the exact title this call raced (the seeded "Untitled").
-//   - Rides the same auth as a normal chat spawn (deriveProviderEnv), so
-//     if the user can chat with the provider at all, the title call works.
-// ──────────────────────────────────────────────────────────
-
+// Cosmetic naming uses the authenticated control plane, independently of the
+// chat provider. Only the first admitted prompt's bounded display text leaves
+// the renderer. Missing credentials, offline service, and bad replies are quiet.
 import type { AgentMessage } from "@zeros/protocol/agent-messages";
-
-import { getActiveBridge } from "../../platform/bridge/active-bridge";
-import { deriveProviderEnv } from "../settings/provider-prefs";
-import { getAgentsSnapshot } from "./agents-cache";
-import { isRunnableAgent } from "./agent-runnable";
-import { agentFamily } from "./model-catalog";
-import {
-  CHAT_TITLE_SYSTEM_PROMPT,
-  resolveChatTitleModel,
-} from "./new-chat-defaults";
-import type { AgentTitleGeneratedMessage } from "../../platform/bridge/messages";
-import type { Action } from "../../state/workspace-store";
+import { getSession, onAuthStateChange } from "../auth/auth-store";
+import { CONTROL_PLANE_URL } from "../team/control-plane";
+import { useWorkspaceStore, type Action } from "../../state/workspace-store";
 import type { SessionStatus } from "./use-agent-session";
-import { scheduleChatTitleWork } from "./chat-title-scheduler";
 
-/** Ceiling on the prompt text sent to the title model — a title needs the
- *  gist, not a 100k-char paste, and small models are faster on less. */
-const MAX_PROMPT_CHARS = 4_000;
+const REQUEST_TIMEOUT_MS = 15_000;
+const MAX_ATTEMPTS = 1_000;
+const attempts = new Map<string, { pending: boolean; requested: boolean }>();
 
-/** Bridge round-trip budget. Codex boots a short-lived app-server (~2-5s)
- *  before its turn, so this is deliberately roomier than the UI feels. */
-const REQUEST_TIMEOUT_MS = 45_000;
-
-/** A provider can occasionally return its own failure text through a nominal
- * success/result channel. Never persist that diagnostic as the chat title. */
-const PROVIDER_DIAGNOSTIC_TITLE_RX =
-  /^(?:error\b|fatal\b|failed\s+to\b|(?:user\s+)?authentication\s+(?:failed|error)\b|unauthori[sz]ed\b|please\s+(?:sign|log)\s+in\b|request\s+(?:failed|timed\s+out|timeout)\b|connection\s+(?:closed|failed|refused|reset)\b)/i;
+/** Code points, not UTF-16 halves. No separator expands the 500-character cap. */
+export function compactTitlePrompt(prompt: string): string {
+  const chars = Array.from(prompt.trim());
+  return chars.length <= 500
+    ? chars.join("")
+    : chars.slice(0, 400).join("") + chars.slice(-100).join("");
+}
 
 /** Select the first real user prompt only after admission and turn teardown
  * have returned the session to ready. A queued placeholder is renderer-local
@@ -67,95 +36,147 @@ export function settledFirstPromptForTitle(input: {
   return null;
 }
 
-/** The model's reply is used as the tab title — enforce the 2–3 word
- *  contract defensively (small models occasionally add quotes, a trailing
- *  period, or a second line). Null = unusable reply, keep the snippet. */
+/** Defensive response validation; the backend owns generation and sanitation. */
 export function sanitizeAiTitle(raw: string): string | null {
-  let t = (raw.split("\n")[0] ?? "").trim();
-  // Strip wrapping quotes/backticks and trailing sentence punctuation.
-  t = t
-    .replace(/^["'`“”‘’]+/, "")
-    .replace(/["'`“”‘’.!?:…]+$/, "")
+  const title = (raw.trim().split(/\r?\n/)[0] ?? "")
+    .replace(/^["'`“”‘’]+|["'`“”‘’.!?:…]+$/g, "")
     .trim();
-  if (PROVIDER_DIAGNOSTIC_TITLE_RX.test(t)) return null;
-  const words = t.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return null;
-  // Clamp to 3 words; the rejoin also collapses internal whitespace.
-  t = words.slice(0, 3).join(" ");
-  if (t.length > 60) t = t.slice(0, 60).trimEnd();
-  // A title needs at least one letter or digit — a bare "…" is not one.
-  return /[\p{L}\p{N}]/u.test(t) ? t : null;
+  if (
+    /^(?:error\b|fatal\b|failed to\b|(?:user )?authentication (?:failed|error)\b|unauthori[sz]ed\b|please (?:sign|log) in\b|request (?:failed|timed out|timeout)\b|connection (?:closed|failed|refused|reset)\b)/i.test(
+      title,
+    )
+  )
+    return null;
+  const words = title.split(/\s+/).filter(Boolean).slice(0, 5);
+  const result = words.join(" ");
+  return words.length >= 3 &&
+    Array.from(result).length <= 80 &&
+    words.every((word) => /[\p{L}\p{N}]/u.test(word)) &&
+    !/[\p{Cc}\p{Cf}<>\[\]{}*`]/u.test(result)
+    ? result
+    : null;
 }
 
-/** Queue the background AI title for a chat's settled first prompt.
- *  Synchronous and non-throwing by contract. Returns true only when work was
- *  scheduled, allowing the caller to retain an exact-message
- *  single-flight guard without suppressing a later bridge-ready retry. */
-export function requestAiChatTitle(args: {
-  chatId: string;
-  agentId: string | null;
-  /** The first user message's display text. */
-  prompt: string;
-  /** The title the tab currently shows (the seeded "Untitled") — the CAS
-   *  expectation; a manual rename while generating wins. */
-  expectedTitle: string;
-  dispatch: (action: Action) => void;
-}): boolean {
-  // Connectivity snapshot → the resolver's fallback chain (Haiku → Luna →
-  // Composer 2.5). Null (registry not loaded yet) = trust the saved pick.
-  const agents = getAgentsSnapshot();
-  const connectedFamilies = agents
-    ? new Set(
-        agents
-          .filter(isRunnableAgent)
-          .map((a) => agentFamily(a.id))
-          .filter((f) => f !== ""),
-      )
-    : null;
-  const resolved = resolveChatTitleModel(args.agentId, connectedFamilies);
-  if (!resolved || !args.prompt.trim()) return false;
-  if (!getActiveBridge()) return false;
-  scheduleChatTitleWork(args.chatId, async () => {
-    const bridge = getActiveBridge();
-    if (!bridge) return;
-    // Family === engine agent id (claude/codex/cursor) — the same identity
-    // mapping new-chat-defaults' settings mirror relies on.
-    const env = await deriveProviderEnv(resolved.family);
-    const resp = await bridge.request<AgentTitleGeneratedMessage>(
-      {
-        type: "AGENT_GENERATE_TITLE",
-        agentId: resolved.family,
-        model: resolved.model,
-        systemPrompt: CHAT_TITLE_SYSTEM_PROMPT,
-        prompt: args.prompt.slice(0, MAX_PROMPT_CHARS),
-        ...(Object.keys(env).length > 0 ? { env } : {}),
-      },
-      REQUEST_TIMEOUT_MS,
+/** One HTTP attempt per chat/message, including remounts. Both the exact owner and
+ * seeded title must still match after the response; a manual rename wins. */
+export function requestAiChatTitle(
+  args: {
+    chatId: string;
+    messageId: string;
+    prompt: string;
+    expectedTitle: string;
+    dispatch: (action: Action) => void;
+  },
+  authChanged = false,
+): boolean {
+  if (!CONTROL_PLANE_URL || !args.prompt.trim()) return false;
+  const original = useWorkspaceStore
+    .getState()
+    .chats.find((chat) => chat.id === args.chatId);
+  if (!original || original.title !== args.expectedTitle) return false;
+  const { folder, createdAt } = original;
+  const current = () => {
+    const chat = useWorkspaceStore
+      .getState()
+      .chats.find((chat) => chat.id === args.chatId);
+    return (
+      chat &&
+      chat.folder === folder &&
+      chat.createdAt === createdAt &&
+      chat.title === args.expectedTitle
     );
-    if (resp.type !== "AGENT_TITLE_GENERATED") return;
-    if (!resp.title) {
-      // Silent for the user (the tab keeps "Untitled") but LOUD in DevTools —
-      // otherwise "failed" and "still generating" are indistinguishable.
-      console.warn(
-        `[chat-title] ${resolved.family}/${resolved.model} returned no title` +
-          (resp.error ? `: ${resp.error}` : ""),
-      );
-      return;
+  };
+  const key = JSON.stringify([args.chatId, folder, createdAt, args.messageId]);
+  const existing = attempts.get(key);
+  // A sign-in may overtake an older native session lookup. Supersede only
+  // unpaid auth work; an HTTP request is never restarted by an auth event.
+  if (existing && !(authChanged && existing.pending && !existing.requested))
+    return true;
+  if (!existing && attempts.size >= MAX_ATTEMPTS) {
+    const oldest = [...attempts].find(([, entry]) => !entry.pending);
+    if (!oldest) return false;
+    attempts.delete(oldest[0]);
+  }
+  const entry = { pending: true, requested: false };
+  attempts.set(key, entry);
+  // Bound the display text before any remote call.
+  const prompt = compactTitlePrompt(args.prompt);
+  void (async () => {
+    try {
+      const session = await getSession();
+      if (!session?.access_token || attempts.get(key) !== entry || !current())
+        return;
+      entry.requested = true;
+      const response = await fetch(`${CONTROL_PLANE_URL}/v1/chat-titles`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${session.access_token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          chatId: args.chatId,
+          messageId: args.messageId,
+          prompt,
+        }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        redirect: "error",
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return;
+      }
+      const result: unknown = await response.json();
+      if (
+        !result ||
+        typeof result !== "object" ||
+        !("title" in result) ||
+        typeof result.title !== "string"
+      )
+        return;
+      const title = sanitizeAiTitle(result.title);
+      if (!title || !current()) return;
+      const liveSession = await getSession();
+      if (
+        !liveSession ||
+        liveSession.user.sub !== session.user.sub ||
+        liveSession.user.provider !== session.user.provider ||
+        !current()
+      )
+        return;
+      args.dispatch({
+        type: "UPDATE_CHAT_TITLE_IF",
+        id: args.chatId,
+        title,
+        expectedTitle: args.expectedTitle,
+      });
+    } catch {
+      // Cosmetic failure: keep the seeded title. Never log prompt or response.
+    } finally {
+      entry.pending = false;
+      // Session restoration/sign-in can finish after the first eligible render.
+      // No server request happened, so a later auth event may still name the chat.
+      if (!entry.requested && attempts.get(key) === entry) attempts.delete(key);
     }
-    const title = sanitizeAiTitle(resp.title);
-    if (!title) {
-      console.warn(
-        `[chat-title] unusable reply from ${resolved.family}/${resolved.model}:`,
-        JSON.stringify(resp.title.slice(0, 120)),
-      );
-      return;
-    }
-    args.dispatch({
-      type: "UPDATE_CHAT_TITLE_IF",
-      id: args.chatId,
-      title,
-      expectedTitle: args.expectedTitle,
-    });
-  });
+  })();
   return true;
+}
+
+/** Start from an active chat effect and wake once auth becomes available.
+ * The returned cleanup keeps retained hidden chats inert. Paid requests remain
+ * deduplicated by requestAiChatTitle, even across repeated auth notifications. */
+export function startChatTitleRequest(
+  args: Parameters<typeof requestAiChatTitle>[0],
+): () => void {
+  let active = true;
+  const request = (authChanged = false) => {
+    if (active) requestAiChatTitle(args, authChanged);
+  };
+  const unsubscribe = onAuthStateChange((session) => {
+    if (session) request(true);
+  });
+  request();
+  return () => {
+    active = false;
+    unsubscribe();
+  };
 }

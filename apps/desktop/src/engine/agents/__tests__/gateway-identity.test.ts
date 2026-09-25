@@ -1,5 +1,4 @@
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -58,15 +57,7 @@ function gatewayWith(adapter: AgentAdapter) {
       binding: ProviderBinding,
       opts: { cwd: string },
     ): Promise<ProviderBinding>;
-    generateTitle(
-      agentId: string,
-      opts: {
-        model: string;
-        systemPrompt: string;
-        prompt: string;
-        env?: Record<string, string>;
-      },
-    ): Promise<{ title: string | null; error?: string }>;
+    listSessions(agentId: string, opts: { cwd: string }): Promise<{ sessions: unknown[] }>;
   };
   gateway.adapters.set(adapter.agentId, adapter);
   return gateway;
@@ -153,7 +144,7 @@ describe("AgentGateway identity lifecycle", () => {
     await gateway.dispose();
   });
 
-  it("prepares and retires a ZSR boundary for a one-shot title process", async () => {
+  it("prepares and retires a ZSR boundary for one-shot session discovery", async () => {
     let preparedRequest: BoundaryRequest | undefined;
     let receivedBoundary: PreparedBoundary | undefined;
     const root = fixtureRoot;
@@ -173,46 +164,20 @@ describe("AgentGateway identity lifecycle", () => {
       },
     }) as unknown as {
       adapters: Map<string, AgentAdapter>;
-      generateTitle(
-        agentId: string,
-        opts: {
-          model: string;
-          systemPrompt: string;
-          prompt: string;
-          env?: Record<string, string>;
-        },
-      ): Promise<{ title: string | null; error?: string }>;
+      listSessions(agentId: string, opts: { cwd: string }): Promise<{ sessions: unknown[] }>;
       dispose(): Promise<void>;
     };
     gateway.adapters.set("future-agent", {
       agentId: "future-agent",
-      generateText: async (opts: { executionBoundary?: PreparedBoundary }) => {
+      listSessions: async (opts: { executionBoundary?: PreparedBoundary }) => {
         receivedBoundary = opts.executionBoundary;
-        return "Contained title";
+        return { sessions: [] };
       },
       dispose: async () => {},
     } as unknown as AgentAdapter);
 
-    const toolchain = await mkdtemp(
-      path.join(os.tmpdir(), "zeros-title-toolchain-"),
-    );
-    await symlink(process.execPath, path.join(toolchain, "docker"));
-
-    try {
-      await expect(
-        gateway.generateTitle("future-agent", {
-          model: "model-1",
-          systemPrompt: "Title this conversation",
-          prompt: "Hello",
-          env: {
-            PATH: toolchain,
-            TEST_TITLE_CREDENTIAL: "credential",
-          },
-        }),
-      ).resolves.toEqual({ title: "Contained title" });
-    } finally {
-      await rm(toolchain, { recursive: true, force: true });
-    }
+    await expect(gateway.listSessions("future-agent", { cwd: root }))
+      .resolves.toEqual({ sessions: [] });
     expect(preparedRequest).toMatchObject({
       actor: "agent-code",
       providerId: "future-agent",
@@ -252,14 +217,7 @@ describe("AgentGateway identity lifecycle", () => {
       },
     }) as unknown as {
       adapters: Map<string, AgentAdapter>;
-      generateTitle(
-        agentId: string,
-        opts: {
-          model: string;
-          systemPrompt: string;
-          prompt: string;
-        },
-      ): Promise<{ title: string | null; error?: string }>;
+      listSessions(agentId: string, opts: { cwd: string }): Promise<{ sessions: unknown[] }>;
       newSession(
         agentId: string,
         opts: { cwd: string },
@@ -268,7 +226,7 @@ describe("AgentGateway identity lifecycle", () => {
     };
     gateway.adapters.set("future-agent", {
       agentId: "future-agent",
-      generateText: async () => "must not be published",
+      listSessions: async () => ({ sessions: [] }),
       newSession: async (opts: { executionId?: string }) => ({
         session: {
           executionId: opts.executionId!,
@@ -279,15 +237,11 @@ describe("AgentGateway identity lifecycle", () => {
     } as unknown as AgentAdapter);
 
     // Teardown is no longer attempted per call — the boundary is pooled — so the
-    // title itself is published: nothing has failed at this point, and a healthy
+    // result itself is published: nothing has failed at this point, and a healthy
     // live boundary is exactly what the pool is holding.
     await expect(
-      gateway.generateTitle("future-agent", {
-        model: "model-1",
-        systemPrompt: "Title this conversation",
-        prompt: "Hello",
-      }),
-    ).resolves.toEqual({ title: "must not be published" });
+      gateway.listSessions("future-agent", { cwd: fixtureRoot }),
+    ).resolves.toEqual({ sessions: [] });
     // The failed boundary remains fenced and independently retried, but its
     // teardown state is not global product state.
     await expect(gateway.retirePooledUtilityBoundaries()).rejects.toThrow(
@@ -297,12 +251,8 @@ describe("AgentGateway identity lifecycle", () => {
       gateway.newSession("future-agent", { cwd: fixtureRoot }),
     ).resolves.toMatchObject({ executionId: expect.any(String) });
     await expect(
-      gateway.generateTitle("future-agent", {
-        model: "model-1",
-        systemPrompt: "Title this conversation",
-        prompt: "Hello",
-      }),
-    ).resolves.toMatchObject({ title: "must not be published" });
+      gateway.listSessions("future-agent", { cwd: fixtureRoot }),
+    ).resolves.toMatchObject({ sessions: [] });
   });
 
   it("publishes and cleans up a newly minted route around adapter startup", async () => {

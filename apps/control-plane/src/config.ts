@@ -78,6 +78,8 @@ const EnvSchema = z.object({
   PORT: z.coerce.number().int().positive().default(8080),
   /** "production" tightens error bodies; anything else is dev-friendly. */
   NODE_ENV: z.string().default("development"),
+  /** Optional server-only key; never projected into desktop or cloud agents. */
+  CHAT_TITLE_OPENAI_API_KEY: z.string().trim().max(512).refine((value) => !/\s/.test(value)).optional(),
 });
 
 // ──────────────────────────────────────────────────────────
@@ -319,6 +321,8 @@ export type Config = {
   github: GithubBackendConfig | null;
   /** Null when neither feedback destination is configured. */
   feedback: FeedbackBackendConfig | null;
+  /** Dedicated server credential for automatic titles; absent disables titles. */
+  chatTitleApiKey?: string | null;
   /** Null unless the explicit paid-resource gate and complete provider block
    * are present. Merely setting a Daytona API key never enables creation. */
   cloudWorkspaces: CloudWorkspaceBackendConfig | null;
@@ -1792,6 +1796,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     })(),
     github,
     feedback: loadFeedbackConfig(env),
+    chatTitleApiKey: e.CHAT_TITLE_OPENAI_API_KEY || null,
     cloudWorkspaces: loadCloudWorkspaceConfig(env, github),
   };
 }

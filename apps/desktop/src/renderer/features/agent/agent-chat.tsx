@@ -204,8 +204,7 @@ import {
   sendSessionRecoveryMode,
   unreadableTranscriptSendAction,
 } from "./session-reload-lifecycle";
-import { requestAiChatTitle, settledFirstPromptForTitle } from "./chat-title";
-import { noteInteractiveAgentActivity } from "./chat-title-scheduler";
+import { startChatTitleRequest, settledFirstPromptForTitle } from "./chat-title";
 import { permissionModeIdForDisplay } from "./permission-mode-display";
 import {
   newChatBornDefaults,
@@ -367,10 +366,6 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
-  const titleRequestRef = useRef<{
-    chatId: string;
-    messageId: string;
-  } | null>(null);
   const browserConfirmation = useBrowserConfirmation(chatId);
   const workflows = session.workflows;
   const activeWorkflow = useMemo(
@@ -506,15 +501,10 @@ export function AgentChat({
   const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
-  // Switching into a chat is interactive intent even before Send. Keep a
-  // queued cosmetic title provider out of the user's typing/startup window;
-  // the Send edge below refreshes the same quiet window once more.
-  useEffect(() => {
-    if (interactive) noteInteractiveAgentActivity();
-  }, [chatId, interactive]);
   useEffect(() => {
     if (
       readOnly ||
+      !surfaceActive ||
       !chatId ||
       !chatThread ||
       backgroundContinuationActive ||
@@ -526,23 +516,17 @@ export function AgentChat({
       messages: session.messages,
     });
     if (!candidate) return;
-    const prior = titleRequestRef.current;
-    if (prior?.chatId === chatId && prior.messageId === candidate.messageId) {
-      return;
-    }
-    const launched = requestAiChatTitle({
+    return startChatTitleRequest({
       chatId,
-      agentId: chatThread.agentId ?? session.agentId ?? null,
+      messageId: candidate.messageId,
       prompt: candidate.prompt,
       expectedTitle: chatThread.title,
       dispatch,
     });
-    if (launched) {
-      titleRequestRef.current = { chatId, messageId: candidate.messageId };
-    }
   }, [
     readOnly,
     backgroundContinuationActive,
+    surfaceActive,
     chatId,
     chatThread,
     dispatch,
@@ -3787,10 +3771,6 @@ export function AgentChat({
   ): Promise<void> => {
     if (readOnly || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
-    // Title generation is cosmetic and may boot another provider process.
-    // Postpone queued title work before the first await in this send so it
-    // cannot compete with admission, provider startup, or the user's turn.
-    noteInteractiveAgentActivity();
     try {
       await runSend(override, extras, recordActivity);
     } catch (error) {

@@ -19,6 +19,14 @@ function baseEnv(): NodeJS.ProcessEnv {
   };
 }
 
+describe("chat title credentials", () => {
+  it("uses only the dedicated server key, and is optional", () => {
+    expect(loadConfig(baseEnv()).chatTitleApiKey).toBeNull();
+    expect(loadConfig({ ...baseEnv(), OPENAI_API_KEY: "unrelated-provider-key" }).chatTitleApiKey).toBeNull();
+    expect(loadConfig({ ...baseEnv(), CHAT_TITLE_OPENAI_API_KEY: " synthetic-title-key " }).chatTitleApiKey).toBe("synthetic-title-key");
+  });
+});
+
 describe("database authority configuration", () => {
   it("supports a dedicated direct event listener using runtime privileges", () => {
     const config = loadConfig({...baseEnv(), DATABASE_URL: "postgres://app@primary.test:5432/zeros",

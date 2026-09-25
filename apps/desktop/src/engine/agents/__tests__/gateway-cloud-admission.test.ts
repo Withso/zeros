@@ -8,18 +8,6 @@ import type {AgentAdapter,AgentGatewayOptions} from "../types";
 import {testExecutionBoundary} from "./helpers/test-execution-boundary";
 
 describe("cloud gateway admission",()=>{
-  it("does not put a caller's title-generation key into a utility workload",async()=>{
-    const root=await realpath(await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-title-")));
-    const workload=testExecutionBoundary(),prepare=vi.fn(workload.prepare.bind(workload)),native=vi.fn(async()=>({text:"unsafe"}));
-    const factory={prepare:vi.fn()};
-    const gateway=new AgentGateway({projectRoot:root,executionBoundary:{...workload,prepare,backend:"cloud-worker"},cloudAgentExecutionFactory:factory,
-      events:{onSessionUpdate(){},onPermissionRequest(){},onQuestionRequest(){},onAgentStderr(){},onAgentExit(){}}});
-    (gateway as unknown as {adapters:Map<string,AgentAdapter>}).adapters.set("claude",{agentId:"claude",generateText:native,dispose:async()=>{}} as unknown as AgentAdapter);
-    try{
-      expect(await gateway.generateTitle("claude",{model:"haiku",systemPrompt:"test",prompt:"title",env:{ANTHROPIC_API_KEY:"synthetic-unadmitted-key"}})).toMatchObject({title:null});
-      expect(prepare).not.toHaveBeenCalled();expect(factory.prepare).not.toHaveBeenCalled();expect(native).not.toHaveBeenCalled();
-    }finally{await gateway.dispose();await rm(root,{recursive:true,force:true});}
-  });
   it.each(["newSession","loadSession","forkProviderBinding"] as const)("requires a credential grant before %s can touch a native provider",async stage=>{
     const root=await realpath(await mkdtemp(path.join(os.tmpdir(),"zeros-cloud-admit-")));
     const native=vi.fn();
