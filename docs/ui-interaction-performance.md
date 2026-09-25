@@ -112,6 +112,8 @@ Catalog keys include the checkout root and observed origin; local branch keys
 include the checkout root and repository slug. Intent warms local metadata;
 only the selected project refreshes its remote catalog. Ref-change signals
 refresh local metadata without recursively triggering another network fetch.
+The shell's persistent settings listener invalidates both catalogs even while
+Create is unmounted; inactive catalogs wait for their next consumer to refresh.
 
 An explicit source selection belongs to its project/root/origin and cannot
 carry over to a different owner. Branch selections send fully qualified Git

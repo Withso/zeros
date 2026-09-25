@@ -13,6 +13,7 @@
 // the board into History (archived is the orthogonal `archivedAt` flag).
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
 import {
   Archive as ArchiveIcon,
   ArrowUp,
@@ -102,6 +103,7 @@ import {
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
 import type { Project } from "../../state/projects-store";
+import { selectWorkspaceHistory } from "../../state/workspace-history";
 
 const REPO_CHIP_CLS =
   "inline-flex size-5 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium leading-none text-fg2";
@@ -294,12 +296,12 @@ export function DashboardPage() {
         : dedupedPending,
     [dedupedPending, repoFilter],
   );
-  // Only authoritatively archived rows enter this column. The archive commit
-  // atomically removes the live card and inserts this row, so there is no
-  // disappear/rollback bounce on a concrete failure.
+  // Confirmed archived and missing rows share this column. Archive intent
+  // alone never inserts a row; its confirmed commit removes the live card
+  // and publishes history atomically.
   const archivedRows = useMemo(
     () =>
-      archivedWorkspaces
+      selectWorkspaceHistory(accessibleLiveWorkspaces, archivedWorkspaces)
         .map((workspace) => ({
           ...toRow(workspace),
           hidden: workspaceIsHidden(
@@ -316,6 +318,7 @@ export function DashboardPage() {
         ),
     [
       archivedWorkspaces,
+      accessibleLiveWorkspaces,
       toRow,
       visibility,
       autoHide,
@@ -551,6 +554,7 @@ function ArchivedCard({
   showRepoChip: boolean;
   active: boolean;
 }) {
+  const warmHistory = useWarmWorkspaceHistory();
   const w = row.workspace;
   const [restoring, setRestoring] = useState(false);
   const [snapshotToDelete, setSnapshotToDelete] = useState<{
@@ -604,10 +608,25 @@ function ArchivedCard({
       onRestored: (result) => openWorkspace(result.workspace),
     });
   };
-  // Not clickable-to-open — the worktree is gone until restored. Outlined, no
+  // Opens saved chats directly. Outlined, no
   // fill (just a border1) so archived reads as distinct from the filled live cards.
   return (
-    <div className="border-border1 flex flex-col rounded-lg border p-3 text-left select-none">
+    <div
+      role="button"
+      tabIndex={0}
+      aria-label={`Open ${row.title} history`}
+      onPointerEnter={() => warmHistory(w)}
+      onFocus={() => warmHistory(w)}
+      onClick={() => openWorkspace(w)}
+      onKeyDown={(event) => {
+        if (event.target !== event.currentTarget) return;
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          openWorkspace(w);
+        }
+      }}
+      className="border-border1 hover:bg-bg1-hover flex cursor-pointer flex-col rounded-lg border p-3 text-left select-none"
+    >
       <div className="flex items-center gap-2">
         {showRepoChip && (
           <DashboardRepositoryIcon project={row.project} name={row.repoName} />
@@ -621,18 +640,26 @@ function ArchivedCard({
       <div className="text-fg1 mt-1.5 truncate text-sm font-medium">
         {row.title}
       </div>
-      <div className="mt-2.5 flex items-center gap-2">
-        <Tooltip label="Unarchive">
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={unarchive}
-            disabled={restoring || deletingSnapshot}
-          >
-            {restoring && <ZerosSpinner size={14} />}
-            <span>{restoring ? "Restoring…" : "Unarchive"}</span>
-          </Button>
-        </Tooltip>
+      <div className="text-fg2 mt-1 text-xs">
+        {w.archivedAt == null ? "Folder missing" : "Archived"}
+      </div>
+      <div
+        className="mt-2.5 flex items-center gap-2"
+        onClick={(event) => event.stopPropagation()}
+      >
+        {w.archivedAt != null && (
+          <Tooltip label="Unarchive">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={unarchive}
+              disabled={restoring || deletingSnapshot}
+            >
+              {restoring && <ZerosSpinner size={14} />}
+              <span>{restoring ? "Restoring…" : "Unarchive"}</span>
+            </Button>
+          </Tooltip>
+        )}
         {row.hidden && (
           <Tooltip label="Hidden workspace">
             <span
@@ -644,40 +671,42 @@ function ArchivedCard({
             </span>
           </Tooltip>
         )}
-        <DropdownMenu open={active && menuOpen} onOpenChange={setMenuOpen}>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon-sm"
-              aria-label={`Options for ${row.title}`}
-              disabled={restoring || deletingSnapshot}
-            >
-              <Ellipsis size={14} aria-hidden="true" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            <DropdownMenuItem
-              onSelect={() => setWorkspaceHidden(w, !row.hidden)}
-            >
-              {row.hidden ? <Eye /> : <EyeOff />}
-              {row.hidden ? "Unhide" : "Hide"}
-            </DropdownMenuItem>
-            <DropdownMenuItem
-              className="text-red-primary focus:text-red-primary"
-              disabled={!w.archiveSnapshot}
-              onSelect={() => {
-                if (w.archiveSnapshot && w.archivedAt != null)
-                  setSnapshotToDelete({
-                    archiveSnapshot: w.archiveSnapshot,
-                    archivedAt: w.archivedAt,
-                  });
-              }}
-            >
-              <Trash2 />
-              Delete saved snapshot…
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+        {w.archivedAt != null && (
+          <DropdownMenu open={active && menuOpen} onOpenChange={setMenuOpen}>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label={`Options for ${row.title}`}
+                disabled={restoring || deletingSnapshot}
+              >
+                <Ellipsis size={14} aria-hidden="true" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start">
+              <DropdownMenuItem
+                onSelect={() => setWorkspaceHidden(w, !row.hidden)}
+              >
+                {row.hidden ? <Eye /> : <EyeOff />}
+                {row.hidden ? "Unhide" : "Hide"}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                className="text-red-primary focus:text-red-primary"
+                disabled={!w.archiveSnapshot}
+                onSelect={() => {
+                  if (w.archiveSnapshot && w.archivedAt != null)
+                    setSnapshotToDelete({
+                      archiveSnapshot: w.archiveSnapshot,
+                      archivedAt: w.archivedAt,
+                    });
+                }}
+              >
+                <Trash2 />
+                Delete saved snapshot…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         <span className="text-fg2 ml-auto text-xs tabular-nums">
           {formatCompactAge(w.archivedAt ?? w.createdAt)}
         </span>
@@ -688,7 +717,10 @@ function ArchivedCard({
           if (!open && !deletingSnapshot) setSnapshotToDelete(null);
         }}
       >
-        <DialogContent showCloseButton={!deletingSnapshot}>
+        <DialogContent
+          showCloseButton={!deletingSnapshot}
+          onClick={(event) => event.stopPropagation()}
+        >
           <DialogHeader>
             <DialogTitle>
               Delete the saved snapshot for “{row.title}”?
@@ -726,6 +758,7 @@ function ArchivedCard({
 /** A non-clickable Backlog placeholder for an in-flight optimistic create —
  *  shown until the real workspace row lands (then deduped away). NOT a synthetic
  *  Workspace, so it never enters toRow / byStatus / the lazy change probe. */
+
 function PendingDashboardCard({
   label,
   project,

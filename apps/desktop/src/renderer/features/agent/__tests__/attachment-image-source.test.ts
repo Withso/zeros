@@ -79,10 +79,11 @@ describe("AttachmentImageSourceCache", () => {
     expect(read("apps/desktop/src/renderer/features/agent/turn-container.tsx")).toContain(
       "attachmentImagesActive: surfaceActive",
     );
-    expect(
-      read("apps/desktop/src/renderer/features/agent/agent-chat.tsx").match(
-        /attachmentImagesActive: surfaceActive/g,
-      ),
-    ).toHaveLength(2);
+    const chat = read("apps/desktop/src/renderer/features/agent/agent-chat.tsx");
+    // History keeps saved message images readable while the absent composer
+    // must not acquire leases for a parked draft's attachments.
+    expect(chat).toContain("attachmentImagesActive: surfaceActive");
+    expect(chat).toContain("attachmentImagesActive: interactive");
+    expect(chat).toContain("const interactive = surfaceActive && !readOnly");
   });
 });

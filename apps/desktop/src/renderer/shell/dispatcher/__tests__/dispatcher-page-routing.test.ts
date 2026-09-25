@@ -48,7 +48,7 @@ describe("Create Workspace page routing", () => {
     expect(shell).toContain("<HomeSidebar />");
     expect(shell).toContain("<DispatcherPage");
     expect(shell).toContain(
-      'useNewTabHotkeys(activePage === "workspace")',
+      'useNewTabHotkeys(activePage === "workspace" && workspaceToolsAvailable)',
     );
   });
 });

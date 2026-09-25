@@ -25,7 +25,7 @@
 
 import type { Project } from "./projects-store";
 import {
-  adoptedWorktreeSlug,
+  findAdoptedWorktree,
   isAdoptedWorktreePath,
 } from "./adopted-worktrees";
 
@@ -281,8 +281,8 @@ export function repoRootForCwd<T extends { path: string; repoRoot: string }>(
  *
  *  Strategy:
  *    1. Exact match against project.repoRoot.
- *    2. Managed/adopted worktree identity.
- *    3. Most-specific path-prefix match (folder is under the project's repo).
+ *    2. Managed worktree identity.
+ *    3. Most-specific adopted worktree or registered checkout root.
  *
  *  Returns null when no project matches — e.g. the folder is an
  *  un-tracked path (chat from before backfill, foreign worktree).
@@ -300,9 +300,10 @@ export function findProjectForFolder(
   const f = normalizePath(folder);
   const exact = projects.find((p) => normalizePath(p.repoRoot) === f);
   if (exact) return exact;
-  // Managed/adopted worktree identities are more specific than a broad
+  // Managed worktree identities are more specific than a broad
   // checkout prefix. A worktree may physically live below another registered
-  // repo root; its embedded/recorded owner must win before prefix matching.
+  // repo root; its embedded owner must win before prefix matching.
+  // Adopted roots are compared with registered checkout roots below.
   const slug = repoSlugFromWorktreePath(folder);
   if (slug) {
     // Old layout: directory === repoSlug. New layout: directory === sanitized
@@ -322,14 +323,6 @@ export function findProjectForFolder(
       basenameMatches.length === 1 ? (basenameMatches[0] ?? null) : null;
     if (managed) return managed;
   }
-  // 4. Foreign worktree adopted in place: its external path matches no managed
-  //    root, so resolve via the recorded path → slug map (written at "Add local
-  //    project" time).
-  const adoptedSlug = adoptedWorktreeSlug(folder);
-  if (adoptedSlug) {
-    const adopted = projects.find((p) => p.repoSlug === adoptedSlug);
-    if (adopted) return adopted;
-  }
   // Nested repositories are legal. Pick the most-specific checkout root, not
   // whichever parent happened to appear first in the registry.
   let prefixed: Project | null = null;
@@ -340,6 +333,13 @@ export function findProjectForFolder(
     if (length <= prefixLength) continue;
     prefixed = project;
     prefixLength = length;
+  }
+  // An adopted worktree beats a containing checkout, but a separately
+  // registered repository inside that worktree owns its own descendants.
+  const adopted = findAdoptedWorktree(folder);
+  if (adopted && adopted.path.length > prefixLength) {
+    const owner = projects.find((p) => p.repoSlug === adopted.repoSlug);
+    if (owner) return owner;
   }
   return prefixed;
 }

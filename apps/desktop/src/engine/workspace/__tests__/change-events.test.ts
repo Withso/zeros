@@ -20,12 +20,15 @@ describe("dbChangedKinds", () => {
   });
 
   it.each([
-    "project.upsert",
     "project.remove",
     "project.rename",
-    "project.bulkUpsert",
   ])("classifies %s as project server state", (op) => {
     expect(dbChangedKinds(op)).toEqual(["projects"]);
+  });
+
+  it.each(["project.upsert", "project.bulkUpsert"])("refreshes reconciled workspace history for %s, including the caller", (op) => {
+    expect(dbChangedKinds(op)).toEqual(["projects", "workspaces"]);
+    expect(dbChangedIncludesOriginator(op)).toBe(true);
   });
 
   it.each(["settings.write", "settings.writeRaw", "settings.migrateLegacy"])(
@@ -74,8 +77,8 @@ describe("dbChangedKinds", () => {
     expect(dbChangedKinds(op)).toEqual(["workspaces"]);
   });
 
-  it("publishes both workspace and chat state when restore can rebind folders", () => {
-    expect(dbChangedKinds("workspace.restore")).toEqual([
+  it.each(["workspace.restore", "workspace.recover", "workspace.locate"])("publishes both workspace and chat state when %s can rebind folders", (op) => {
+    expect(dbChangedKinds(op)).toEqual([
       "workspaces",
       "chats",
     ]);

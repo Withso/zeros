@@ -22,11 +22,18 @@ import {
 } from "react";
 import { unstable_batchedUpdates } from "react-dom";
 import {
+  recordAdoptedWorktree,
+  forgetAdoptedWorktreesForRepo,
+} from "./adopted-worktrees";
+import {
   loadProjects,
   syncProjectsToEngine,
   type Project,
 } from "./projects-store";
-import { findProjectForFolder } from "./workspace-resolution";
+import {
+  findProjectForFolder,
+  repoSlugFromWorktreePath,
+} from "./workspace-resolution";
 import {
   isGitErrorShape,
   workspaceCreateFromBranchStatus,
@@ -252,7 +259,12 @@ for (const [repoSlug, rows] of loadPersistedWorkspaceLists()) {
   workspaceCache.setData(repoSlug, rows);
   workspaceCache.invalidate(repoSlug);
   provisionalWorkspaceSlugs.add(repoSlug);
-  for (const w of rows) workspaceSlugById.set(w.id, repoSlug);
+  for (const w of rows) {
+    workspaceSlugById.set(w.id, repoSlug);
+    if (!repoSlugFromWorktreePath(w.path)) {
+      recordAdoptedWorktree(w.path, repoSlug);
+    }
+  }
 }
 
 function sameWorkspace(a: Workspace, b: Workspace): boolean {
@@ -545,7 +557,12 @@ function reindexWorkspaceSlugs(repoSlug: string, rows: Workspace[]): void {
   for (const [id, slug] of workspaceSlugById) {
     if (slug === repoSlug && !liveIds.has(id)) workspaceSlugById.delete(id);
   }
-  for (const w of rows) workspaceSlugById.set(w.id, repoSlug);
+  for (const w of rows) {
+    workspaceSlugById.set(w.id, repoSlug);
+    if (!repoSlugFromWorktreePath(w.path)) {
+      recordAdoptedWorktree(w.path, repoSlug);
+    }
+  }
 }
 
 /** Every repo slug the cross-repo live union must cover: registered projects
@@ -921,6 +938,7 @@ export function peekLiveWorkspaceUnion(): Workspace[] {
 /** Remove every renderer-side snapshot owned by a deleted repository. */
 export function forgetWorkspacesFor(repoSlug: string): void {
   if (!repoSlug) return;
+  forgetAdoptedWorktreesForRepo(repoSlug);
   provisionalWorkspaceSlugs.delete(repoSlug);
   provisionalEmptyGuardHeld.delete(repoSlug);
   forgetPersistedWorkspaceList(repoSlug);
@@ -991,6 +1009,7 @@ export function notifyWorkspacesChangedForIds(ids: readonly string[]): void {
  *  slug. */
 export function useWorkspacesFor(repoSlug: string | null): {
   workspaces: Workspace[];
+  resolved: boolean;
   loading: boolean;
   refreshing: boolean;
   error: Error | null;
@@ -1047,6 +1066,7 @@ export function useWorkspacesFor(repoSlug: string | null): {
 
   return {
     workspaces: snapshot.data ?? EMPTY_WORKSPACES,
+    resolved: snapshot.data !== undefined,
     loading: repoSlug !== null && snapshot.loading,
     refreshing: repoSlug !== null && snapshot.refreshing,
     error: snapshot.error,
@@ -1060,6 +1080,7 @@ export function useWorkspacesFor(repoSlug: string | null): {
  *  bridge (re)connect, and relevant workspace-bus notifications. */
 export function useArchivedWorkspaces(repoSlug?: string): {
   workspaces: Workspace[];
+  resolved: boolean;
   loading: boolean;
   error: Error | null;
   refresh: () => void;
@@ -1128,6 +1149,7 @@ export function useArchivedWorkspaces(repoSlug?: string): {
 
   return {
     workspaces: snapshot.data ?? EMPTY_WORKSPACES,
+    resolved: snapshot.data !== undefined,
     loading: snapshot.loading,
     error: snapshot.error,
     refresh,

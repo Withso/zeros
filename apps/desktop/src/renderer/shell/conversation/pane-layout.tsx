@@ -56,6 +56,7 @@ import {
 import { type Project } from "../../state/projects-store";
 import {
   useProjectForFolder,
+  useProjects,
   useWorkspacesFor,
 } from "../../state/use-projects";
 import { buildLocalMainWorkspace } from "../../state/local-main-workspace";
@@ -64,6 +65,7 @@ import {
   resolveWorkspacePresentationFolder,
 } from "../../state/workspace-resolution";
 import type { Workspace } from "../../platform/git";
+import { workspaceOwnsFolder } from "../../state/archive-actions";
 import { ptyKill } from "../../platform/pty";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import { useSessionsStore } from "../../features/agent/sessions-store";
@@ -189,6 +191,8 @@ function resolveWorkspaceForFolder(
 type DropZone = "center" | "right" | "down";
 
 interface PaneCtx {
+  readOnly: boolean;
+  emptyContent: ReactNode;
   folder: string;
   layout: PaneLayout;
   /** Column-level strip controls. Every pane sees them, but only the pane that
@@ -218,11 +222,17 @@ const EMPTY_CHATS: ChatThread[] = [];
 // ── Container ────────────────────────────────────────────
 
 export function ConversationPaneLayout({
+  workspace = null,
+  readOnly = false,
+  emptyContent = null,
   onMinimumSizeChange,
   stripLeading = null,
   stripTrailing = null,
   bodyAside = null,
 }: {
+  workspace?: Workspace | null;
+  readOnly?: boolean;
+  emptyContent?: ReactNode;
   onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
   /** Pinned to the leading edge of the first pane's chat strip — Code's
    *  conversation column passes its mode toggle here now that the column has no
@@ -252,6 +262,7 @@ export function ConversationPaneLayout({
     (state) => state.pendingWorkspaceValidationFolder,
   );
   const project = useProjectForFolder(activeFolder);
+  const { projects } = useProjects();
   const { workspaces } = useWorkspacesFor(project?.repoSlug ?? null);
   const activeWorkspace = useMemo(
     () => resolveWorkspaceForFolder(activeFolder, project, workspaces),
@@ -272,7 +283,7 @@ export function ConversationPaneLayout({
   // immediately without making the path usable for agent/session spawning.
   const activeWorkspacePath = resolveWorkspacePresentationFolder({
     activeFolder,
-    hasResolvedWorkspace: activeWorkspace !== null,
+    hasResolvedWorkspace: workspace !== null || activeWorkspace !== null,
     isProvisioning: activeWorkspaceProvisioning,
     pendingValidationFolder: pendingWorkspaceValidationFolder,
     hasLiveChatAtActiveFolder:
@@ -286,16 +297,36 @@ export function ConversationPaneLayout({
 
   // All chats owned by this workspace, sorted createdAt ASC (strip
   // order). Visible = live tabs, history = archived (newest first).
+  const layoutFolder =
+    readOnly && workspace ? workspace.path : activeWorkspacePath;
   const allChats = useMemo(() => {
-    if (!activeWorkspacePath) return EMPTY_CHATS;
+    if (!layoutFolder) return EMPTY_CHATS;
     return chats
-      .filter((c) => c.folder === activeWorkspacePath)
+      .filter((c) =>
+        readOnly && workspace
+          ? c.kind !== "terminal" &&
+            workspaceOwnsFolder(workspace, c.folder, projects)
+          : c.folder === layoutFolder,
+      )
       .sort((a, b) => a.createdAt - b.createdAt);
-  }, [activeWorkspacePath, chats]);
+  }, [layoutFolder, chats, readOnly, workspace, projects]);
+
+  // A closed chat may be previewed without reopening it or changing its
+  // durable archive flag. Empty history never manufactures an Untitled chat.
+  const selectedChatId = readOnly
+    ? ((
+        allChats.find((chat) => chat.id === activeChatId) ??
+        allChats.find((chat) => !chat.archived) ??
+        allChats[0]
+      )?.id ?? null)
+    : activeChatId;
 
   const visibleChats = useMemo(
-    () => allChats.filter((c) => !c.archived),
-    [allChats],
+    () =>
+      allChats.filter(
+        (c) => !c.archived || (readOnly && c.id === selectedChatId),
+      ),
+    [allChats, readOnly, selectedChatId],
   );
 
   const historyChats = useMemo(() => {
@@ -310,6 +341,7 @@ export function ConversationPaneLayout({
   // renders a dead pane for a null selection. See the original comment
   // block in conversation/chat-tabs (pre-panes) for the full history.
   useEffect(() => {
+    if (readOnly) return;
     if (
       activePage !== "workspace" ||
       !activeWorkspacePath ||
@@ -342,6 +374,7 @@ export function ConversationPaneLayout({
       dispatch({ type: "SET_ACTIVE_CHAT", id: restoreId });
     }
   }, [
+    readOnly,
     activeChatId,
     activePage,
     visibleChats,
@@ -353,7 +386,7 @@ export function ConversationPaneLayout({
   ]);
 
   // ── Pane layout + membership ─────────────────────────
-  const layout = usePaneLayout(activeWorkspacePath);
+  const layout = usePaneLayout(layoutFolder);
   const minimumSize = useMemo(
     () => paneTreeMinimumSize(layout.root),
     [layout.root],
@@ -372,7 +405,7 @@ export function ConversationPaneLayout({
    * frame from creating a split whose final tree cannot fit. */
   const canSplitAtCurrentSize = useCallback(
     (paneId: string, direction: SplitDirection, collapsedPaneId?: string) => {
-      if (!activeWorkspacePath) return false;
+      if (readOnly || !activeWorkspacePath) return false;
       const currentLayout = getPaneLayout(activeWorkspacePath);
       if (leafIds(currentLayout.root).length >= MAX_PANES) return false;
       return canSplitPaneTree({
@@ -383,7 +416,7 @@ export function ConversationPaneLayout({
         collapsedPaneId,
       });
     },
-    [activeWorkspacePath],
+    [activeWorkspacePath, readOnly],
   );
 
   const chatsByPane = useMemo(() => {
@@ -399,11 +432,11 @@ export function ConversationPaneLayout({
   }, [layout, visibleChats]);
 
   const focusedPaneId = useMemo(() => {
-    if (activeChatId && visibleChats.some((c) => c.id === activeChatId)) {
-      return paneForChat(layout, activeChatId);
+    if (selectedChatId && visibleChats.some((c) => c.id === selectedChatId)) {
+      return paneForChat(layout, selectedChatId);
     }
     return firstLeafId(layout.root);
-  }, [activeChatId, visibleChats, layout]);
+  }, [selectedChatId, visibleChats, layout]);
 
   // ── Handlers ─────────────────────────────────────────
 
@@ -415,20 +448,21 @@ export function ConversationPaneLayout({
   );
 
   const handleSelectUntitled = useCallback(() => {
-    if (!activeWorkspacePath) return;
+    if (readOnly || !activeWorkspacePath) return;
     dispatch({ type: "SET_NEW_AGENT_FOLDER", folder: activeWorkspacePath });
-  }, [activeWorkspacePath, dispatch]);
+  }, [activeWorkspacePath, dispatch, readOnly]);
 
   const handlePrefetchChat = useCallback(
     (chatId: string) => {
-      void sessions.hydrateChat(chatId);
-      prepareChatView(chatId);
+      void sessions.hydrateChat(chatId).catch(() => {});
+      if (!readOnly) prepareChatView(chatId);
     },
-    [sessions],
+    [sessions, readOnly],
   );
 
   const closeTabNow = useCallback(
     (paneId: string, chat: ChatThread) => {
+      if (readOnly) return;
       const closedFolder = chat.folder;
       // Fresh read — the pane-focus pointerdown that preceded this click
       // may have re-pointed the global selection this same tick.
@@ -515,6 +549,7 @@ export function ConversationPaneLayout({
       }
     },
     [
+      readOnly,
       chatsByPane,
       visibleChats,
       closeSession,
@@ -529,6 +564,7 @@ export function ConversationPaneLayout({
   const handleCloseTab = useCallback(
     (paneId: string, chat: ChatThread, e?: React.MouseEvent) => {
       e?.stopPropagation();
+      if (readOnly) return;
       if (chat.kind !== "terminal") {
         const activity = sessions.getCloseActivity(chat.id);
         const agentName =
@@ -541,7 +577,7 @@ export function ConversationPaneLayout({
       }
       closeTabNow(paneId, chat);
     },
-    [closeTabNow, sessions],
+    [closeTabNow, sessions, readOnly],
   );
 
   const cancelPendingChatClose = useCallback(() => {
@@ -563,6 +599,10 @@ export function ConversationPaneLayout({
   /** Restore a chat from History into the pane whose menu was used. */
   const handleRestoreChat = useCallback(
     (paneId: string, chat: ChatThread) => {
+      if (readOnly) {
+        handleSelectChat(chat.id);
+        return;
+      }
       if (chat.archived) {
         dispatch({ type: "UNARCHIVE_CHAT", id: chat.id });
       }
@@ -571,12 +611,12 @@ export function ConversationPaneLayout({
       }
       dispatch({ type: "SET_ACTIVE_CHAT", id: chat.id });
     },
-    [dispatch, activeWorkspacePath, moveChatToPane],
+    [dispatch, activeWorkspacePath, moveChatToPane, readOnly, handleSelectChat],
   );
 
   const handleSplit = useCallback(
     (paneId: string, dir: "right" | "down") => {
-      if (!activeWorkspacePath) return;
+      if (readOnly || !activeWorkspacePath) return;
       const direction: SplitDirection = dir === "right" ? "row" : "column";
       if (!canSplitAtCurrentSize(paneId, direction)) return;
       const paneChats = chatsByPane.get(paneId) ?? EMPTY_CHATS;
@@ -618,6 +658,7 @@ export function ConversationPaneLayout({
       }
     },
     [
+      readOnly,
       activeWorkspacePath,
       canSplitAtCurrentSize,
       chatsByPane,
@@ -632,7 +673,7 @@ export function ConversationPaneLayout({
 
   const handleDropOnPane = useCallback(
     (paneId: string, zone: DropZone, chatId: string) => {
-      if (!activeWorkspacePath) return;
+      if (readOnly || !activeWorkspacePath) return;
       const fromPane = paneForChat(layout, chatId);
       if (zone === "center") {
         if (fromPane !== paneId) {
@@ -676,6 +717,7 @@ export function ConversationPaneLayout({
       }
     },
     [
+      readOnly,
       activeWorkspacePath,
       layout,
       chatsByPane,
@@ -691,14 +733,16 @@ export function ConversationPaneLayout({
 
   const ctx = useMemo<PaneCtx>(
     () => ({
-      folder: activeWorkspacePath ?? "",
+      folder: layoutFolder ?? "",
+      readOnly,
+      emptyContent,
       layout,
       stripLeading,
       stripTrailing,
       bodyAside,
       chatsByPane,
       focusedPaneId,
-      globalActiveChatId: activeChatId,
+      globalActiveChatId: selectedChatId,
       historyChats,
       workspaceHasChats: visibleChats.length > 0,
       paneCount: paneCountValue,
@@ -711,14 +755,16 @@ export function ConversationPaneLayout({
       onDropOnPane: handleDropOnPane,
     }),
     [
-      activeWorkspacePath,
+      layoutFolder,
+      readOnly,
+      emptyContent,
       layout,
       stripLeading,
       stripTrailing,
       bodyAside,
       chatsByPane,
       focusedPaneId,
-      activeChatId,
+      selectedChatId,
       historyChats,
       visibleChats.length,
       paneCountValue,
@@ -736,7 +782,7 @@ export function ConversationPaneLayout({
   // is intentionally no "No workspace selected" copy: every valid workspace
   // destination owns an Untitled chat, including a prepared create's first
   // paint, and an actually empty destination needs no misleading error state.
-  if (!activeWorkspacePath) {
+  if (!layoutFolder) {
     return (
       <>
         <div ref={paneSurfaceRef} className="flex min-h-0 flex-1 flex-col">
@@ -1141,6 +1187,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   const rootRef = useRef<HTMLElement | null>(null);
   const [canSplit, setCanSplit] = useState({ right: false, down: false });
   useLayoutEffect(() => {
+    if (ctx.readOnly) return;
     const el = rootRef.current;
     if (!el) return;
     const surface = el.closest<HTMLElement>("[data-pane-layout-surface]");
@@ -1176,7 +1223,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
     const workbench = workbenchPaneFor(surface);
     if (workbench) observer.observe(workbench);
     return () => observer.disconnect();
-  }, [ctx.layout.root, paneId]);
+  }, [ctx.layout.root, paneId, ctx.readOnly]);
 
   const atPaneCap = ctx.paneCount >= MAX_PANES;
 
@@ -1222,7 +1269,10 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   // with all chats archived would otherwise show one pill per pane.
   const isFirstPane = paneId === firstLeafId(ctx.layout.root);
   const showSyntheticUntitled =
-    paneChats.length === 0 && !ctx.workspaceHasChats && isFirstPane;
+    !ctx.readOnly &&
+    paneChats.length === 0 &&
+    !ctx.workspaceHasChats &&
+    isFirstPane;
 
   // The column's own controls belong to ONE strip each, or a split would
   // duplicate them: the mode toggle rides the first pane (the column's
@@ -1233,8 +1283,8 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   const stripTrailing =
     paneId === topRightLeafId(ctx.layout.root) ? ctx.stripTrailing : null;
 
-  const splitRightAllowed = canSplit.right && !atPaneCap;
-  const splitDownAllowed = canSplit.down && !atPaneCap;
+  const splitRightAllowed = !ctx.readOnly && canSplit.right && !atPaneCap;
+  const splitDownAllowed = !ctx.readOnly && canSplit.down && !atPaneCap;
 
   return (
     <section
@@ -1254,6 +1304,7 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       )}
     >
       <ChatTabs
+        readOnly={ctx.readOnly}
         workspaceFolder={ctx.folder}
         paneId={paneId}
         chats={paneChats}
@@ -1273,6 +1324,11 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       />
       <div className="flex min-h-0 min-w-0 flex-1">
         <div className="relative min-h-0 min-w-0 flex-1">
+          {!paneActiveChatId && ctx.emptyContent && (
+            <div className="absolute inset-0 flex min-h-0 flex-col">
+              {ctx.emptyContent}
+            </div>
+          )}
           {/* Mount point for the store-owned content host. Persistent chat and
               terminal decks portal into this stable node; a replacement pane
               only reparents it, preserving the completed DOM. */}
@@ -1305,12 +1361,14 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
       )}
       {/* Drop overlay covers the WHOLE pane (strip + body) so dropping
           a dragged tab onto another pane's strip moves it there too. */}
-      <PaneDropOverlay
-        paneId={paneId}
-        ctx={ctx}
-        canSplitRight={splitRightAllowed}
-        canSplitDown={splitDownAllowed}
-      />
+      {!ctx.readOnly && (
+        <PaneDropOverlay
+          paneId={paneId}
+          ctx={ctx}
+          canSplitRight={splitRightAllowed}
+          canSplitDown={splitDownAllowed}
+        />
+      )}
     </section>
   );
 }

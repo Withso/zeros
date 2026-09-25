@@ -15,6 +15,7 @@
 
 import { useCallback } from "react";
 import { unstable_batchedUpdates } from "react-dom";
+import { forgetAdoptedWorktree, recordAdoptedWorktree } from "./adopted-worktrees";
 
 import {
   isGitErrorShape,
@@ -90,7 +91,7 @@ type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 /** Does `folder` belong to this workspace's semantic path owner? Descendant
  * chat cwd values count, but a separately registered nested repository wins
  * over the outer worktree and must not be repointed or scrubbed with it. */
-function workspaceOwnsFolder(
+export function workspaceOwnsFolder(
   workspace: Workspace,
   folder: string,
   projects: Project[] = loadProjects(),
@@ -294,6 +295,7 @@ function commitConfirmedDeletion(
     // departing agent sessions (detaching first could silently reorder it).
     detachWorkspaceRuntimeState(workspace, dispatch);
     commitWorkspaceDeleted(workspace);
+    forgetAdoptedWorktree(workspace.path);
     clearWorkspaceArchiving(workspace.id);
   });
   clearChangesFilters([workspace.id]);
@@ -672,7 +674,7 @@ interface RestoreFeedbackOptions {
 
 /** Atomically move all renderer state keyed by an adapted path before publishing
  * the confirmed live row and invoking navigation callbacks. */
-function commitConfirmedRestore(
+export function commitConfirmedRestore(
   original: Workspace,
   result: ConfirmedRestoreResult,
   opts?: RestoreFeedbackOptions,
@@ -681,6 +683,8 @@ function commitConfirmedRestore(
   unstable_batchedUpdates(() => {
     forgetWorkspaceVisibility(original.id, original.archivedAt);
     if (restored.path !== original.path) {
+      forgetAdoptedWorktree(original.path);
+      recordAdoptedWorktree(restored.path, restored.repoSlug);
       moveChatPaneFolder(original.path, restored.path, original.repoRoot);
       useWorkspaceStore.getState().dispatch({
         type: "MOVE_WORKSPACE_UI_STATE",
@@ -694,6 +698,28 @@ function commitConfirmedRestore(
     opts?.onRestored?.(result);
   });
   notifyWorkspacesChanged(original.repoSlug);
+}
+
+/** Recovery feedback must outlive the history surface that the commit closes. */
+export function commitConfirmedRestoreWithFeedback(
+  original: Workspace,
+  result: ConfirmedRestoreResult,
+  opts?: RestoreFeedbackOptions,
+): void {
+  const label = opts?.label ?? original.branch;
+  trackGitOp({ op: "workspace_restore", outcome: "ok" });
+  commitConfirmedRestore(original, result, opts);
+  if (result.conflicts.length > 0) {
+    toast.warning(`Restored "${label}" with conflicts`, {
+      description: `${result.conflicts.length} file(s) have conflict markers — resolve them in the worktree.${result.adaptations.length ? " " + result.adaptations.join(" ") : ""}`,
+    });
+  } else if (result.adaptations.length > 0) {
+    toast.success(`Restored "${label}"`, {
+      description: result.adaptations.join(" "),
+    });
+  } else {
+    toast.success(`Restored "${label}"`);
+  }
 }
 
 function inferredRestoreResult(
@@ -875,19 +901,7 @@ export async function restoreWorkspaceWithFeedback(
       ...res,
       workspace: restoredWorkspace,
     };
-    trackGitOp({ op: "workspace_restore", outcome: "ok" });
-    commitConfirmedRestore(workspace, confirmedResult, opts);
-    if (res.conflicts.length > 0) {
-      toast.warning(`Restored "${label}" with conflicts`, {
-        description: `${res.conflicts.length} file(s) have conflict markers — resolve them in the worktree.${res.adaptations.length ? " " + res.adaptations.join(" ") : ""}`,
-      });
-    } else if (res.adaptations.length > 0) {
-      toast.success(`Restored "${label}"`, {
-        description: res.adaptations.join(" "),
-      });
-    } else {
-      toast.success(`Restored "${label}"`);
-    }
+    commitConfirmedRestoreWithFeedback(workspace, confirmedResult, opts);
   } catch (err) {
     if (isWorkspaceOpStillRunning(err)) {
       settlementDeferred = true;

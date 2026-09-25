@@ -1,5 +1,5 @@
 // Create records a source; only the Create button performs a workspace action.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Check,
   ChevronDown,
@@ -41,7 +41,6 @@ import {
 } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
 import { RepositoryIcon } from "../../features/repositories/repository-icon";
-import { useSettingsChanged } from "../../features/settings/use-settings";
 import {
   branchBase,
   defaultDispatcherBase,
@@ -182,14 +181,6 @@ export function CreateFromSource({
   useEffect(() => {
     if (!active || disabled) setOpen(false);
   }, [active, disabled]);
-
-  useSettingsChanged(
-    useCallback(() => {
-      if (!active || !catalogKey) return;
-      createBranchCatalogCache.invalidate(catalogKey);
-      createRemoteCatalogCache.invalidate(catalogKey);
-    }, [active, catalogKey]),
-  );
 
   const warm = () => {
     if (!active || disabled || !catalogKey || !localKey) return;

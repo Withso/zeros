@@ -34,9 +34,10 @@
 // deep links (settings-page redirects them here).
 
 import React, { useCallback, useLayoutEffect, useMemo, useRef } from "react";
-import { ExternalLink, Folder } from "lucide-react";
+import { useWarmWorkspaceHistory } from "../../state/use-warm-workspace-history";
+import { Archive, ExternalLink, Folder, FolderX } from "lucide-react";
 
-import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { Switch, Tooltip } from "@/renderer/shared/ui/primitives";
 import { branchDisplayName } from "../../shared/lib/branch-name";
 import { Tabs, TabsList, TabsTrigger } from "../../shared/ui/primitives/tabs";
 import { StatusIcon } from "../../shared/ui/primitives/status-icon";
@@ -59,7 +60,11 @@ import {
 import type { Project } from "../../state/projects-store";
 import { isLocalMainWorkspace } from "../../state/local-main-workspace";
 import { useFolderWorkspaces } from "../../state/use-folder-workspaces";
-import { useProjects, useWorkspacesFor } from "../../state/use-projects";
+import {
+  useArchivedWorkspaces,
+  useProjects,
+  useWorkspacesFor,
+} from "../../state/use-projects";
 import {
   dedupePendingCreates,
   useLiveVisible,
@@ -71,6 +76,14 @@ import {
   useWorkspaceArchiving,
 } from "../../state/pending-workspaces";
 import { ZerosSpinner } from "../../shared/ui/loading";
+import {
+  selectWorkspaceHistory,
+  workspaceIsReadOnly,
+} from "../../state/workspace-history";
+import {
+  useRepoHistoryVisible,
+  setRepoHistoryVisible,
+} from "../../state/repo-history-preferences";
 import { useOpenWorkspace } from "../../state/use-open-workspace";
 import { useArchiveWorkspace } from "../../state/archive-actions";
 import { formatCompactAge } from "../agent/format-age";
@@ -178,67 +191,87 @@ function RepoWorkspaceRow({
   row: ListRow;
   onOpen: () => void;
 }) {
+  const warmHistory = useWarmWorkspaceHistory();
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
   const archiving = useWorkspaceArchiving(w.id);
   const stop = (e: React.MouseEvent) => e.stopPropagation();
-  return (
+  const historyOnly = workspaceIsReadOnly(w);
+  const content = (
+    <div
+      role="button"
+      tabIndex={0}
+      onPointerEnter={() => warmHistory(w)}
+      onFocus={() => warmHistory(w)}
+      onClick={() => {
+        if (!archiving) onOpen();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          if (!archiving) onOpen();
+        }
+      }}
+      aria-busy={archiving || undefined}
+      className="hover:bg-bg2 flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition-colors select-none"
+    >
+      {historyOnly ? (
+        w.archivedAt == null ? (
+          <FolderX className="text-fg2 size-3.5 shrink-0" />
+        ) : (
+          <Archive className="text-fg2 size-3.5 shrink-0" />
+        )
+      ) : isLocalMainWorkspace(w) ? (
+        <Folder className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} />
+      ) : (
+        <StatusIcon status={w.status} className="size-3.5 shrink-0" />
+      )}
+      <span className="text-fg1 min-w-0 truncate text-sm font-medium">
+        {row.title}
+      </span>
+      {row.branch !== row.title && (
+        <span className="text-muted-fg hidden min-w-0 truncate font-mono text-xs sm:block">
+          {row.branch}
+        </span>
+      )}
+      <span className="text-fg2 ml-auto flex shrink-0 items-center gap-3 text-xs tabular-nums">
+        {historyOnly && (
+          <span>{w.archivedAt == null ? "Folder missing" : "Archived"}</span>
+        )}
+        {!historyOnly && w.prNumber != null && w.prUrl && (
+          <Tooltip label="Open PR on GitHub">
+            <a
+              href={w.prUrl}
+              target="_blank"
+              rel="noreferrer"
+              onClick={stop}
+              className="hover:text-fg1 inline-flex items-center gap-0.5"
+            >
+              #{w.prNumber}
+              <ExternalLink className="size-3" />
+            </a>
+          </Tooltip>
+        )}
+        <span>{formatCompactAge(w.lastActiveAt ?? w.createdAt)}</span>
+      </span>
+    </div>
+  );
+  return historyOnly ? (
+    content
+  ) : (
     <WorkspaceContextMenu
       workspace={w}
       onArchive={() => void archiveWorkspace(w, { label: row.title })}
       archiveDisabled={archiving}
     >
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => {
-          if (!archiving) onOpen();
-        }}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            if (!archiving) onOpen();
-          }
-        }}
-        aria-busy={archiving || undefined}
-        className="hover:bg-bg2 flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition-colors select-none"
-      >
-        {isLocalMainWorkspace(w) ? (
-          <Folder className="text-fg2 size-3.5 shrink-0" strokeWidth={1.5} />
-        ) : (
-          <StatusIcon status={w.status} className="size-3.5 shrink-0" />
-        )}
-        <span className="text-fg1 min-w-0 truncate text-sm font-medium">
-          {row.title}
-        </span>
-        {row.branch !== row.title && (
-          <span className="text-muted-fg hidden min-w-0 truncate font-mono text-xs sm:block">
-            {row.branch}
-          </span>
-        )}
-        <span className="text-fg2 ml-auto flex shrink-0 items-center gap-3 text-xs tabular-nums">
-          {w.prNumber != null && w.prUrl && (
-            <Tooltip label="Open PR on GitHub">
-              <a
-                href={w.prUrl}
-                target="_blank"
-                rel="noreferrer"
-                onClick={stop}
-                className="hover:text-fg1 inline-flex items-center gap-0.5"
-              >
-                #{w.prNumber}
-                <ExternalLink className="size-3" />
-              </a>
-            </Tooltip>
-          )}
-          <span>{formatCompactAge(w.lastActiveAt ?? w.createdAt)}</span>
-        </span>
-      </div>
+      {content}
     </WorkspaceContextMenu>
   );
 }
 
-function RepoWorkspacesList({ project }: { project: Project }) {
+export function RepoWorkspacesList({ project }: { project: Project }) {
+  const showArchived = useRepoHistoryVisible(project.id);
+  const archives = useArchivedWorkspaces();
   const { workspaces: allWorkspaces, loading } = useWorkspacesFor(
     project.repoSlug,
   );
@@ -258,6 +291,24 @@ function RepoWorkspacesList({ project }: { project: Project }) {
     [activeOrganization, listedWorkspaces, project.repoRoot],
   );
   const workspaces = useLiveVisible(accessibleWorkspaces);
+  const history = useMemo(
+    () =>
+      selectWorkspaceHistory(
+        accessibleWorkspaces,
+        filterRowsForOrganization(
+          archives.workspaces.filter(
+            (row) => row.repoSlug === project.repoSlug,
+          ),
+          activeOrganization,
+        ),
+      ),
+    [
+      accessibleWorkspaces,
+      archives.workspaces,
+      project.repoSlug,
+      activeOrganization,
+    ],
+  );
   const rawPendingCreates = usePendingCreatesFor(project.repoSlug);
   const pendingCreates = useMemo(
     () => filterRowsForOrganization(rawPendingCreates, activeOrganization),
@@ -285,7 +336,7 @@ function RepoWorkspacesList({ project }: { project: Project }) {
       if (!prev || updatedAt > prev.updatedAt)
         titleByFolder.set(c.folder, { title, updatedAt });
     }
-    const rows = workspaces
+    const rows = [...workspaces, ...(showArchived ? history : [])]
       .map((w): ListRow => {
         const branch = branchDisplayName(w.branch);
         return {
@@ -303,31 +354,54 @@ function RepoWorkspacesList({ project }: { project: Project }) {
     const now = Date.now();
     const out: { label: string; rows: ListRow[] }[] = [];
     for (const row of rows) {
-      const label = dayGroupLabel(row.ts, now);
-      const last = out[out.length - 1];
-      if (last && last.label === label) last.rows.push(row);
+      const label = workspaceIsReadOnly(row.workspace)
+        ? "Archived"
+        : dayGroupLabel(row.ts, now);
+      const group = out.find((entry) => entry.label === label);
+      if (group) group.rows.push(row);
       else out.push({ label, rows: [row] });
     }
-    return out;
-  }, [workspaces, chats]);
-
-  if (loading && groups.length === 0 && pending.length === 0) {
-    return <div className="min-h-24" aria-busy="true" />;
-  }
-
-  if (groups.length === 0 && pending.length === 0) {
-    return (
-      <div className="flex flex-col items-center gap-1 py-16 text-center">
-        <span className="text-fg1 text-sm font-medium">No workspaces yet</span>
-        <span className="text-fg2 text-sm">
-          Create one with + in the top bar to start an agent on {project.name}.
-        </span>
-      </div>
-    );
-  }
+    return [
+      ...out.filter((group) => group.label !== "Archived"),
+      ...out.filter((group) => group.label === "Archived"),
+    ];
+  }, [workspaces, history, showArchived, chats]);
 
   return (
     <div className="flex flex-col">
+      <label className="text-fg2 mb-4 flex items-center justify-end gap-2 px-3 text-xs">
+        Archived
+        <Switch
+          checked={showArchived}
+          onCheckedChange={(visible) =>
+            setRepoHistoryVisible(project.id, visible)
+          }
+          aria-label="Show archived workspaces"
+        />
+      </label>
+      {loading && groups.length === 0 && pending.length === 0 ? (
+        <div className="min-h-24" aria-busy="true" />
+      ) : (
+        groups.length === 0 &&
+        pending.length === 0 && (
+          <div className="flex flex-col items-center gap-1 py-16 text-center">
+            <span className="text-fg1 text-sm font-medium">
+              {history.length > 0
+                ? "No available workspaces"
+                : "No workspaces yet"}
+            </span>
+            <span className="text-fg2 text-sm">
+              Create one with + in the top bar to start an agent on{" "}
+              {project.name}.
+            </span>
+          </div>
+        )
+      )}
+      {showArchived && archives.error && (
+        <p className="text-red-fg px-3 py-2 text-xs" role="alert">
+          Couldn’t load archived workspaces.
+        </p>
+      )}
       {pending.length > 0 && (
         <section className="flex flex-col pt-6 first:pt-0">
           <div className="flex items-baseline gap-2 px-3 pb-2">

@@ -47,6 +47,9 @@ const WORKSPACE_MUTATIONS = new Set([
   "workspace.setWorkingDirectories",
   "workspace.archive",
   "workspace.restore",
+  "workspace.recover",
+  "workspace.locate",
+  "workspace.deleteSnapshot",
   "workspace.delete",
   "workspace.createFromBranch",
   "workspace.adoptExisting",
@@ -162,6 +165,8 @@ export const LONG_LIFECYCLE_OPS = new Set([
   "workspace.create",
   "workspace.createFromBranch",
   "workspace.restore",
+  "workspace.recover",
+  "workspace.locate",
   "workspace.archive",
   "workspace.continueOnNewBranch",
 
@@ -198,6 +203,10 @@ export function dbChangedIncludesOriginator(op: string): boolean {
   return (
     LONG_LIFECYCLE_OPS.has(op) ||
     SETTINGS_MUTATIONS.has(op) ||
+    // Re-adding a removed repo reconciles its old workspace visibility in the
+    // engine. The optimistic renderer registry cannot know the outcome.
+    op === "project.upsert" ||
+    op === "project.bulkUpsert" ||
     op === "chats.setComposerMode" ||
     // The Design surface does not own a Git-status cache to update
     // optimistically. Echo its index checkpoint so a retained Code/Changes
@@ -214,13 +223,14 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   if (op === "design.transaction.apply" && result && typeof result === "object" &&
       (result as { result?: { dryRun?: boolean } }).result?.dryRun === true) return null;
   if (CHAT_MUTATIONS.has(op)) return ["chats"];
+  if (op === "project.upsert" || op === "project.bulkUpsert") return ["projects", "workspaces"];
   if (PROJECT_MUTATIONS.has(op)) return ["projects"];
   if (SETTINGS_MUTATIONS.has(op)) return ["settings"];
   // Restore can adapt to a sibling path. The engine rebinds every exact and
   // descendant chat folder in the same durable operation, so peers must refresh
   // chats as well as the workspace row or they keep spawning against the old
   // missing cwd.
-  if (op === "workspace.restore") return ["workspaces", "chats"];
+  if (op === "workspace.restore" || op === "workspace.recover" || op === "workspace.locate") return ["workspaces", "chats"];
   // Design registration changes affect main-checkout Git state and private
   // selection, so both collections re-read.
   if (

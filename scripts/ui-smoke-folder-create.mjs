@@ -104,6 +104,64 @@ export async function runFolderCreateSmoke({ page, check }) {
     "Create preserves model, effort and prompt in a new worktree and initializes Git only once",
     true,
   );
+  await runCreateSourceSettingsSmoke({ page, check });
+}
+
+export async function runCreateSourceSettingsSmoke({ page, check }) {
+  await openFixture(page, "create");
+  await page.getByRole("button", { name: "Show Create", exact: true }).click();
+  const source = page.locator("[data-create-source-trigger]");
+  await expect(source).toHaveText("main");
+  await page
+    .getByRole("button", { name: "Show dashboard", exact: true })
+    .click();
+  await expect(source).toHaveCount(0);
+  const before = await page.evaluate(async () => {
+    const { getActiveBridge } =
+      await import("/apps/desktop/src/renderer/platform/bridge/active-bridge.ts");
+    const bridge = getActiveBridge();
+    const request = bridge.request.bind(bridge);
+    bridge.request = async (...args) => {
+      const response = await request(...args);
+      if (args[0].op === "git.repoBranchCatalog") {
+        response.result.effectiveBase = "feature/local";
+        response.result.baseExplicit = true;
+      }
+      return response;
+    };
+    const before = window.folderWorkspaceRequests.filter(
+      ({ op }) => op === "git.repoBranchCatalog",
+    ).length;
+    // This transport-only fixture has no BridgeProvider. Publish through the
+    // same handler the app shell's persistent DB_CHANGED subscription owns.
+    const { triggerGitSettingsChangeForTests } =
+      await import("/apps/desktop/src/renderer/shell/use-git-refresh-key.ts");
+    triggerGitSettingsChangeForTests();
+    return before;
+  });
+  // Settings changes invalidate closed surfaces without eagerly fetching.
+  expect(
+    await page.evaluate(
+      () =>
+        window.folderWorkspaceRequests.filter(
+          ({ op }) => op === "git.repoBranchCatalog",
+        ).length,
+    ),
+  ).toBe(before);
+  await page.getByRole("button", { name: "Show Create", exact: true }).click();
+  await expect(source).toHaveText("feature/local");
+  expect(
+    await page.evaluate(
+      () =>
+        window.folderWorkspaceRequests.filter(
+          ({ op }) => op === "git.repoBranchCatalog",
+        ).length,
+    ),
+  ).toBeGreaterThan(before);
+  check(
+    "Create refreshes its default branch after settings change while the picker is unmounted",
+    true,
+  );
 }
 
 export async function runFolderDesignSetupSmoke({ page, check }) {

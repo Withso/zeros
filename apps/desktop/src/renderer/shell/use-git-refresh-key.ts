@@ -41,6 +41,7 @@ import {
 } from "./workspace-file-data-cache";
 import {
   invalidateAllEngineReadCaches,
+  invalidateCreateSourceCaches,
   invalidateDesignReviewCache,
   invalidateDesignDirectoryTargetReadCache,
   invalidateExternalGitRefCaches,
@@ -322,7 +323,11 @@ function publishRefreshForWorkspaceIds(
 
 function handleWorkspaceDbChanged(msg: unknown): void {
   const kinds = (msg as { kinds?: unknown }).kinds;
-  if (!Array.isArray(kinds) || !kinds.includes("workspaces")) return;
+  if (!Array.isArray(kinds)) return;
+  // The shell owns this listener across Create → Settings → Create. Catalogs
+  // retain confirmed rows, and only active consumers fetch their replacements.
+  if (kinds.includes("settings")) invalidateCreateSourceCaches();
+  if (!kinds.includes("workspaces")) return;
 
   const workspaceIds = (msg as { workspaceIds?: unknown }).workspaceIds;
   const changedIds = Array.isArray(workspaceIds)
@@ -543,6 +548,11 @@ export function subscribeGitRefreshForTests(
   workspaceId?: string | null,
 ): () => void {
   return subscribeRefresh(makeRefreshScope(cwd, workspaceId), listener);
+}
+
+/** Test-only settings publication through the always-mounted coordinator. */
+export function triggerGitSettingsChangeForTests(): void {
+  handleWorkspaceDbChanged({ kinds: ["settings"] });
 }
 
 /** Test-only exact opaque-id publication, mirroring scoped DB_CHANGED. */

@@ -200,6 +200,20 @@ export function removeRepoByRoot(repoRoot: string): void {
     .run(canonicalRepoRoot(repoRoot));
 }
 
+/** Explicit re-adds reconcile old workspace history before unhiding the repo. */
+export function isRemovedRepoRoot(repoRoot: string): boolean {
+  return openZerosDb()
+    .prepare("SELECT 1 FROM repos WHERE root_path = ? AND hidden = 1")
+    .get(canonicalRepoRoot(repoRoot)) != null;
+}
+
+export function listRemovedRepoRoots(): Set<string> {
+  const rows = openZerosDb().prepare<[], { root_path: string }>(
+    "SELECT root_path FROM repos WHERE hidden = 1 AND root_path IS NOT NULL",
+  ).all();
+  return new Set(rows.map((row) => row.root_path));
+}
+
 /** Root paths of every open (non-hidden) project. Read-only, no seeding side
  *  effect (unlike `listProjects`) — cheap enough to call on hot paths like the
  *  PTY cwd allowlist, which must trust a freshly-added repo's root even before

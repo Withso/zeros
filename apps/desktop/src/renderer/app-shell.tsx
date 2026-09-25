@@ -72,7 +72,7 @@ import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { useProjectCapabilitiesRefresh } from "./shell/use-project-capabilities-refresh";
-import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
+import { workspaceIsReadOnly } from "./state/workspace-history";
 import {
   AddProjectProvider,
   useAddProject,
@@ -81,8 +81,7 @@ import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./state/use-active-workspace";
-import { notifyWorkspacesChanged, useProjects } from "./state/use-projects";
-import { restoreWorkspaceWithFeedback } from "./state/archive-actions";
+import { useProjects } from "./state/use-projects";
 import { SettingsPage } from "./features/settings/settings-page";
 import { DashboardPage } from "./features/dashboard/dashboard-page";
 import { CustomizePage } from "./features/agent-extensions/customize-page";
@@ -794,6 +793,8 @@ function ShellRouter() {
   // 15 min, and on demand after settings/membership changes). Lives here
   // because it needs the bridge (BridgeProvider is inside AppShellBody).
   useTeamEngineSync();
+  const active = useActiveWorkspace();
+  const workspaceToolsAvailable = !active.loading && !workspaceIsReadOnly(active.workspace);
 
   // Workbench collapse — universal across workspaces. Single persisted
   // preference; no per-workspace overrides. Previously we force-
@@ -806,19 +807,21 @@ function ShellRouter() {
     () => getSetting<boolean>(WORKBENCH_COLLAPSED_KEY, false),
   );
   const toggleWorkbench = React.useCallback(() => {
+    if (!workspaceToolsAvailable) return;
     setWorkbenchCollapsed((prev) => {
       const next = !prev;
       setSetting(WORKBENCH_COLLAPSED_KEY, next);
       return next;
     });
-  }, []);
+  }, [workspaceToolsAvailable]);
   const revealWorkbench = React.useCallback(() => {
+    if (!workspaceToolsAvailable) return;
     setWorkbenchCollapsed((previous) => {
       if (!previous) return previous;
       setSetting(WORKBENCH_COLLAPSED_KEY, false);
       return false;
     });
-  }, []);
+  }, [workspaceToolsAvailable]);
 
   // ⌥⌘B anywhere toggles Workbench. Skipped inside editable surfaces so
   // we don't steal from native text-input bindings (if any use ⌥⌘B).
@@ -925,7 +928,7 @@ function ShellRouter() {
         workbenchCollapsed={workbenchCollapsed}
       />
       <BrowserAgentPictureInPicture
-        visible={workbenchCollapsed}
+        visible={workspaceToolsAvailable && workbenchCollapsed}
         onRestore={revealWorkbench}
       />
       {/* AddProjectProvider wraps the shell so File → Open Folder and its
@@ -946,15 +949,7 @@ function ShellRouter() {
   );
 }
 
-// 2026-05-28: when the active workspace's worktree folder has been
-// removed on disk but its DB row still exists, we hide Conversation pane +
-// Workbench and render the WorktreeMissingPanel in their place. The
-// global top bar remains visible so another workspace is always reachable.
-// Escape hatches: Delete drops the row and bounces to Local main; Refresh
-// re-stats the folder so a `git worktree add` (or Finder un-trash)
-// flips `present` back to true and the normal columns return.
-// Local main is always present:true so this path never fires
-// there — the user can never get fully stuck.
+// History retains chats while keeping workspace tools and agent admission unmounted.
 function MainShellBody({
   workbenchCollapsed,
   toggleWorkbench,
@@ -965,7 +960,7 @@ function MainShellBody({
   revealWorkbench: () => void;
 }) {
   // One renderer-wide observer catches agent completions even while Workbench
-  // is collapsed, Home is visible, or a missing-worktree panel replaces the
+  // is collapsed, Home is visible, or read-only history replaces the
   // workspace shell. Consumers remain ordinary key subscriptions.
   useGitRefreshCoordinator();
   useProjectCapabilitiesRefresh();
@@ -977,9 +972,14 @@ function MainShellBody({
     workspace: activeWorkspace,
     folder: activeWorkspaceFolder,
     project: activeProject,
+    loading: workspaceLoading,
   } = useActiveWorkspace();
+  const historyOnly = workspaceIsReadOnly(activeWorkspace);
+  const workspaceToolsAvailable = !workspaceLoading && !historyOnly;
   useOpenBrowserHotkey(
-    activePage === "workspace" && Boolean(activeWorkspaceFolder),
+    activePage === "workspace" &&
+      Boolean(activeWorkspaceFolder) &&
+      workspaceToolsAvailable,
     revealWorkbench,
   );
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -990,14 +990,12 @@ function MainShellBody({
   // Reveal a PR opened outside the engine (agent `gh pr create` / terminal): if
   // the active workspace has no recorded prNumber, detect + backfill it so the
   // Workbench PR-status island appears and the header "Create PR" button hides.
-  useWorkspacePrSync(activeWorkspace);
+  useWorkspacePrSync(workspaceToolsAvailable ? activeWorkspace : null);
   const { projects } = useProjects();
   useWarmAutomaticRepositoryIcons(projects);
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
-  useNewTabHotkeys(activePage === "workspace");
-  const worktreeMissing =
-    !!activeWorkspace && activeWorkspace.present === false;
+  useNewTabHotkeys(activePage === "workspace" && workspaceToolsAvailable);
   // Zero projects -> full-window welcome (logo + Open project / GitHub /
   // Quick start tiles) instead of the empty three-column shell.
   const showWelcome = projects.length === 0;
@@ -1052,53 +1050,20 @@ function MainShellBody({
     if (activePage === "workspace") workspaceShellRetainedRef.current = true;
   }, [activePage]);
   const renderWorkspaceShell =
+    !workspaceLoading &&
     !showWelcome &&
     (workspaceShellRetainedRef.current || activePage === "workspace");
-  // Only the workspace view swaps in the missing-worktree panel — the Home
-  // sub-pages have no active worktree content to lose, so they render normally
-  // even while the selected workspace's folder is gone.
-  if (worktreeMissing && activeWorkspace && activePage === "workspace") {
-    // Recover under the same stable workspace identity and retain its chats.
-    const handleRecover = async () => {
-      await restoreWorkspaceWithFeedback(activeWorkspace);
-    };
-
-    // The placeholder polls this on a timer to auto-detect the worktree
-    // returning: re-fetching the workspace list rechecks Git metadata on every
-    // row, so a `git worktree add` (or Finder un-trash) that recreated the
-    // folder flips `present` back to true and the columns reappear — no button.
-    const handleRefresh = () => {
-      notifyWorkspacesChanged(activeWorkspace.repoSlug);
-    };
-
-    return (
-      <div
-        ref={shellSurfaceRef}
-        className="flex min-h-0 min-w-0 flex-1 flex-col"
-      >
-        <TopBar />
-        <div className={APP_BODY_CLS}>
-          <div className="text-fg1 bg-bg1 flex min-h-0 min-w-0 flex-1 overflow-hidden font-sans text-sm antialiased">
-            <div className="bg-bg1 flex min-h-0 min-w-0 flex-1 overflow-hidden">
-              <WorktreeMissingPanel
-                workspace={activeWorkspace}
-                onRecover={handleRecover}
-                onRefresh={handleRefresh}
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div ref={shellSurfaceRef} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <TopBar />
       <div className={APP_BODY_CLS}>
         <div className="text-fg1 bg-bg1 relative flex min-h-0 min-w-0 flex-1 overflow-hidden font-sans text-sm antialiased">
-          {/* Workspace shell — always alive once projects exist. Home routes
-              hide it without removing transcript, browser, diff, or xterm DOM. */}
+          {activePage === "workspace" && workspaceLoading && (
+            <div className="flex-1" aria-label="Loading workspace" aria-busy="true" />
+          )}
+          {/* Every workspace uses the same conversation tree. Read-only
+              history keeps its tabs/transcript and unmounts workspace tools. */}
           {renderWorkspaceShell && (
             <div
               {...(isHome ? { inert: "" } : {})}
@@ -1112,16 +1077,16 @@ function MainShellBody({
             >
               <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
                 <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
-                    <ConversationPane
-                      workbenchCollapsed={workbenchCollapsed}
-                      onToggleWorkbench={toggleWorkbench}
-                      workspace={activeWorkspace}
-                    />
-                    <WorkbenchPane
-                      onToggleWorkbench={toggleWorkbench}
-                      surfaceActive={!isHome && !workbenchCollapsed}
-                      collapsed={workbenchCollapsed}
-                    />
+                  <ConversationPane
+                    workbenchCollapsed={workbenchCollapsed}
+                    onToggleWorkbench={toggleWorkbench}
+                    workspace={activeWorkspace}
+                  />
+                  {workspaceToolsAvailable && <WorkbenchPane
+                    onToggleWorkbench={toggleWorkbench}
+                    surfaceActive={!isHome && !workbenchCollapsed}
+                    collapsed={workbenchCollapsed}
+                  />}
                 </div>
               </div>
             </div>

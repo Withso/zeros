@@ -544,6 +544,7 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   "workspace.delete",
   "workspace.restore",
   "workspace.recover",
+  "workspace.locate",
 ]);
 
 /** Generic file/index operations that can alter the repository evidence from

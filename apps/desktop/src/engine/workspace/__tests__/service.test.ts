@@ -272,7 +272,7 @@ describe("WorkspaceService", () => {
   });
 
   it("keeps recovery and snapshot disposal local and validates the archive date", async () => {
-    for (const op of ["workspace.recover", "workspace.deleteSnapshot"]) {
+    for (const op of ["workspace.recover", "workspace.recoveryInfo", "workspace.locate", "workspace.deleteSnapshot"]) {
       expect(svc.isRemoteAllowed(op)).toBe(false);
     }
     await expect(

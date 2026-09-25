@@ -28,6 +28,9 @@ import { useResizeHint } from "../use-resize-hint";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
 import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import type { Workspace } from "../../platform/git";
+import { workspaceIsReadOnly } from "../../state/workspace-history";
+import { WorkspaceHistoryBar } from "../workspace-history-bar";
+import { useActivePage } from "../../state/store";
 
 import { popoverBoundaryProps } from "@/renderer/shared/ui/popover-boundary";
 import {
@@ -172,14 +175,30 @@ function useConversationRatio(sectionRef: React.RefObject<HTMLElement | null>) {
 }
 
 export function ConversationPane({
-  workbenchCollapsed = false,
+  workbenchCollapsed: requestedWorkbenchCollapsed = false,
   onToggleWorkbench,
-  workspace: _workspace = null,
+  workspace = null,
 }: {
   workbenchCollapsed?: boolean;
   onToggleWorkbench?: () => void;
   workspace?: Workspace | null;
 } = {}) {
+  const readOnly = workspaceIsReadOnly(workspace);
+  const surfaceActive = useActivePage() === "workspace";
+  const workbenchCollapsed = readOnly || requestedWorkbenchCollapsed;
+  const emptyHistory =
+    readOnly && workspace ? (
+      <>
+        <div className="text-fg2 flex flex-1 items-center justify-center text-sm">
+          No chat history.
+        </div>
+        <WorkspaceHistoryBar
+          key={workspace.id}
+          workspace={workspace}
+          surfaceActive={surfaceActive}
+        />
+      </>
+    ) : null;
   // User-resizable Conversation pane. Drag from the right edge updates conversation pane's
   // share of the row; localStorage persists across reload.
   const sectionRef = useRef<HTMLElement | null>(null);
@@ -380,7 +399,7 @@ export function ConversationPane({
           ? `min(${paneMinimumSize.width}px, 100%)`
           : `min(${paneMinimumSize.width}px, calc(100% - ${WORKBENCH_MIN_PX}px))`,
       }}
-      aria-label="Agent Workspace"
+      aria-label={readOnly ? "Workspace history" : "Agent Workspace"}
     >
       {/* 2026-09-01: the column's own h-10 workspace row is GONE. It carried
           only the branch name (the global TopBar already shows it) plus the
@@ -399,9 +418,11 @@ export function ConversationPane({
           region). The chat strip's trailing slot now owns the workbench
           expand button while the panel is collapsed. Remove the `hidden`
           wrapper to bring this legacy row back. */}
-      <div className="hidden">
-        <ConversationHeader />
-      </div>
+      {!readOnly && (
+        <div className="hidden">
+          <ConversationHeader />
+        </div>
+      )}
 
       <div className={BODY_BASE_CLS}>
         {/* Stacking container — the split-pane tree (each pane renders
@@ -411,31 +432,37 @@ export function ConversationPane({
         <div className={BODY_STACK_CLS}>
           <div className={PANE_TREE_ROOT_CLS}>
             <ConversationSummaryProvider
+              enabled={!readOnly}
               workbenchCollapsed={workbenchCollapsed}
               onRevealWorkbench={revealWorkbench}
             >
               <ConversationPaneLayout
+                workspace={workspace}
+                readOnly={readOnly}
+                emptyContent={emptyHistory}
                 onMinimumSizeChange={setPaneMinimumSize}
                 stripTrailing={
-                  <>
-                    <ConversationSummaryTrigger />
-                    {workbenchCollapsed && onToggleWorkbench ? (
-                      <WorkbenchToggleButton
-                        workbenchCollapsed
-                        onToggle={onToggleWorkbench}
-                      />
-                    ) : null}
-                  </>
+                  !readOnly && (
+                    <>
+                      <ConversationSummaryTrigger />
+                      {workbenchCollapsed && onToggleWorkbench ? (
+                        <WorkbenchToggleButton
+                          workbenchCollapsed
+                          onToggle={onToggleWorkbench}
+                        />
+                      ) : null}
+                    </>
+                  )
                 }
-                bodyAside={<ConversationSummaryIsland />}
+                bodyAside={!readOnly && <ConversationSummaryIsland />}
               />
             </ConversationSummaryProvider>
           </div>
-          <ChatDeck />
+          <ChatDeck workspace={workspace} />
           {/* Terminal-agent deck — every `kind: "terminal"` chat lives
               here. Each layer portals into the pane that owns the chat
               and shows only while it's that pane's displayed chat. */}
-          <TerminalDeck />
+          {!readOnly && <TerminalDeck />}
         </div>
       </div>
       {/* Drag handle for the right

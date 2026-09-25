@@ -564,7 +564,7 @@ async function main() {
       if (workbenchHarness && message.op === "workspace.setupInfo") return { type: "WORKSPACE_RESPONSE", result: { state: "not-configured", hasCommand: false, command: null, truncated: false, log: "" } };
       if (message.op === "design.status") return { type: "WORKSPACE_RESPONSE", result: { conflicts: new URLSearchParams(location.search).has("conflicts") ? ["North One - Design/design.toml"] : [], operation: new URLSearchParams(location.search).has("conflicts") ? "merge" : null } };
       if (message.op === "design.listDirectories") return { type: "WORKSPACE_RESPONSE", result: { directories: ["North One - Design"], directoryIds: { "North One - Design": "design_harness" }, active: "North One - Design", pointer: "North One - Design", target: { directory: "North One - Design", exists: true } } };
-      if (workbenchHarness && message.op === "workspace.list") return { type: "WORKSPACE_RESPONSE", result: workspaces };
+      if (workbenchHarness && message.op === "workspace.list") return { type: "WORKSPACE_RESPONSE", result: { workspaces: message.params?.archived === true ? [] : workspaces } };
       if (workbenchHarness && message.op === "git.status") return { type: "WORKSPACE_RESPONSE", result: { staged: [], unstaged: [], untracked: [], conflicted: [], conflictState: null, branch: workspace.branch, upstream: null, ahead: 0, behind: 0 } };
       if (workbenchHarness && message.op === "git.changeCounts") return { type: "WORKSPACE_RESPONSE", result: { all: 0, uncommitted: 0, staged: 0, unstaged: 0 } };
       if (layoutGestureHarness && message.op === "design.canvas.update") {

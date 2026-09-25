@@ -84,6 +84,8 @@ import {
   bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceRestore,
   bridgeWorkspaceRecover,
+  bridgeWorkspaceRecoveryInfo,
+  bridgeWorkspaceLocate,
   bridgeWorkspaceDeleteSnapshot,
   bridgeWorkspaceContinueOnNewBranch,
   bridgeWorkspaceAdoptExisting,
@@ -874,6 +876,27 @@ export async function workspaceRecover(args: {
   workspaceId: string;
 }): Promise<RestoreResult> {
   return bridgeWorkspaceRecover(requireBridge("recover the workspace"), args);
+}
+
+export interface WorkspaceRecoveryInfo {
+  action: "restore" | "locate" | "none";
+  snapshotAt: number | null;
+}
+
+export function workspaceRecoveryInfo(
+  workspaceId: string,
+): Promise<WorkspaceRecoveryInfo> {
+  return bridgeWorkspaceRecoveryInfo(
+    requireBridge("check workspace recovery"),
+    workspaceId,
+  );
+}
+
+export function workspaceLocate(args: {
+  workspaceId: string;
+  path: string;
+}): Promise<RestoreResult> {
+  return bridgeWorkspaceLocate(requireBridge("locate the workspace"), args);
 }
 
 export async function workspaceDeleteSnapshot(args: {

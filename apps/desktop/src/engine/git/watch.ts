@@ -581,6 +581,11 @@ export function startGitWatcher(
       pendingWorktreeTargets.delete(entry.target.root);
       pendingRecognitionTargets.delete(entry.target.root);
       trackRetiredWatcher(entry.watcher.close().catch(() => {}));
+      // A Finder deletion may remove the target before Chokidar reports it.
+      // Publish its last known identity so presence/list readers see the loss.
+      // Managed lifecycle eviction already suspends the root and publishes its
+      // own mutation; do not revive those deliberately retired notifications.
+      if (!isSuspended(entry.target.root)) scheduleWorktreeChange(entry.target, true);
     }
     for (const [key, target] of nextByKey) {
       if (rootWatchers.has(key)) continue;

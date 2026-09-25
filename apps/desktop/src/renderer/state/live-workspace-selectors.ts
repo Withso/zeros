@@ -21,13 +21,8 @@ import {
 const EMPTY_PENDING: PendingWorkspaceCreate[] = [];
 const EMPTY_ARCHIVE_INTENTS: Readonly<Record<string, number>> = {};
 
-/** The single visibility filter: drop confirmed archives and local archive
- * intents. Deliberately KEEPS `present === false` (orphaned worktree) rows so
- * every surface's SET — and therefore its count — agrees; each surface still
- * HANDLES present===false in its own rendering (Dashboard → "Worktree missing"
- * card, top-bar/repo rows → open the WorktreeMissingPanel). Returns the input
- * array unchanged when nothing is filtered, so referential identity is
- * preserved for memo bailout. */
+/** Available workspaces only. Missing records remain in the cache and appear
+ * alongside archives in history. Preserve references on unchanged reads. */
 export function selectLiveVisible(
   rows: readonly Workspace[],
   archiveIntents: Readonly<Record<string, number>> = EMPTY_ARCHIVE_INTENTS,
@@ -35,7 +30,7 @@ export function selectLiveVisible(
   let anyFiltered = false;
   const out: Workspace[] = [];
   for (const w of rows) {
-    if (w.archivedAt != null || w.id in archiveIntents) {
+    if (w.archivedAt != null || w.present === false || w.id in archiveIntents) {
       anyFiltered = true;
       continue;
     }

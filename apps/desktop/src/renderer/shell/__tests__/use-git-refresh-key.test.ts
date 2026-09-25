@@ -13,6 +13,9 @@ import {
   designDirectoryTargetCache,
   ghOwnersCache,
   remoteBranchesCache,
+  createBranchCatalogCache,
+  createRemoteCatalogCache,
+  GIT_READ_MAX_AGE_MS,
 } from "../../state/read-caches";
 import { loadAgents } from "../../features/agent/agents-cache";
 import {
@@ -27,6 +30,7 @@ import {
   triggerGitRefresh,
   triggerGitBridgeConnectionForTests,
   triggerGitRefreshForWorkspaceIdsForTests,
+  triggerGitSettingsChangeForTests,
 } from "../use-git-refresh-key";
 
 beforeEach(() => {
@@ -34,6 +38,46 @@ beforeEach(() => {
   resetGitRefreshKeysForTests();
   designDirectoryTargetCache.clear();
   workingDirectoriesCache.clear();
+  createBranchCatalogCache.clear();
+  createRemoteCatalogCache.clear();
+});
+
+it("invalidates every retained Create catalog on settings changes without a mounted picker", async () => {
+  const keys = [
+    JSON.stringify(["/repo/a", null]),
+    JSON.stringify(["/repo/b", null]),
+  ];
+  const original = {
+    effectiveBase: "main",
+  } as import("../../platform/git").RepoBranchCatalog;
+  const updated = { ...original, effectiveBase: "develop" };
+  for (const cache of [createBranchCatalogCache, createRemoteCatalogCache]) {
+    for (const key of keys) cache.setData(key, original);
+  }
+  let resolveObsolete!: (value: typeof original) => void;
+  const obsolete = createRemoteCatalogCache.load(
+    keys[0],
+    () =>
+      new Promise<typeof original>((resolve) => {
+        resolveObsolete = resolve;
+      }),
+    { force: true },
+  );
+  await Promise.resolve();
+
+  triggerGitSettingsChangeForTests();
+  resolveObsolete({ ...original, effectiveBase: "obsolete" });
+  await obsolete;
+  for (const cache of [createBranchCatalogCache, createRemoteCatalogCache]) {
+    for (const key of keys) {
+      expect(cache.getSnapshot(key).data).toBe(original);
+      const read = vi.fn(async () => updated);
+      await cache.load(key, read, { maxAgeMs: GIT_READ_MAX_AGE_MS });
+      expect(read).toHaveBeenCalledOnce();
+      expect(cache.getSnapshot(key).data).toBe(updated);
+    }
+  }
+  expect(notifyWorkspacesChanged).not.toHaveBeenCalled();
 });
 
 describe("finishedStreamingChatIds", () => {

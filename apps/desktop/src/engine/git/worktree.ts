@@ -55,6 +55,7 @@ import {
   getWorkspaceByPath,
   getWorkspaceLifecycle,
   getWorkspaceMeta,
+  listWorkspaceIdsWithMeta,
   setWorkspaceMeta,
   insertWorkspaceWithLifecycle,
   listWorkspaceLifecycles,
@@ -104,7 +105,7 @@ import {
   restoreWorkspaceSettings,
   removeWorkspaceSettingsBackup,
 } from "../settings/workspace-settings-backup";
-import { isKnownRepoRoot, listKnownRepoRoots } from "../db/projects";
+import { isKnownRepoRoot, listKnownRepoRoots, listRemovedRepoRoots } from "../db/projects";
 import { deleteChat, getChat, rebindChatsFolder } from "../db/chats";
 import {
   detectRemoteDefaultBranch,
@@ -184,6 +185,17 @@ const NO_COMMITS_MESSAGE =
 function isAdoptedWorkspace(workspaceId: string): boolean {
   return (
     getWorkspaceMeta(workspaceId, WORKSPACE_OWNERSHIP_META_KEY) === "adopted"
+  );
+}
+
+const LOCATED_WORKSPACE_PATH = "workspace.located-path.v1";
+
+/** Explicit Locate keeps ownership of the original verified checkout, even
+ * when the user moved it outside the configured workspaces directory. */
+function hasManagedWorkspaceLocation(ws: Workspace): boolean {
+  return (
+    isManagedWorktreePath(ws.path) ||
+    getWorkspaceMeta(ws.id, LOCATED_WORKSPACE_PATH) === ws.path
   );
 }
 
@@ -2369,7 +2381,82 @@ function stampPresence(ws: Workspace): Workspace {
 }
 
 export function listWorkspaces(opts: ListWorkspacesOptions = {}): Workspace[] {
-  return listWorkspacesFromDb(opts).map(stampPresence);
+  const hidden = listWorkspaceIdsWithMeta(REPO_READD_HIDDEN_META, "1");
+  const removedRepos = listRemovedRepoRoots();
+  return listWorkspacesFromDb(opts)
+    .filter((workspace) => !removedRepos.has(workspace.repoRoot))
+    .map(stampPresence)
+    .filter((workspace) => {
+      if (!hidden.has(workspace.id)) return true;
+      if (workspace.present === false) return false;
+      // Once a folder returns it is an available workspace again. A later
+      // deletion while the repo stays registered must retain its history.
+      setWorkspaceMeta(workspace.id, REPO_READD_HIDDEN_META, "0");
+      return true;
+    });
+}
+
+// Durable visibility only: omitting an unrecoverable old owner on repo re-add
+// must not erase its chats, identity, or any surviving recovery metadata.
+const REPO_READD_HIDDEN_META = "repository.readd-hidden.v1";
+
+export async function reconcileReaddedRepoWorkspaces(
+  repoRoot: string,
+): Promise<void> {
+  const root = await canonicalExistingPath(repoRoot);
+  const rows = listWorkspacesFromDb();
+  for (const row of rows) {
+    if ((await canonicalExistingPath(row.repoRoot)) !== root) continue;
+    const workspace = stampPresence(row);
+    let recoverable = workspace.present !== false;
+    if (!recoverable && hasManagedWorkspaceLocation(workspace) && !isAdoptedWorkspace(workspace.id)) {
+      try {
+        // A saved SHA/branch name is not enough: verify every object needed
+        // to restore the snapshot. A stale worktree registration is likewise
+        // not evidence that the original folder still exists.
+        recoverable =
+          (workspace.archivedAt != null || !existsSync(workspace.path)) &&
+          !!workspace.archiveSnapshot &&
+          await readableWorkspaceSnapshot(
+            workspace.repoRoot,
+            workspace.archiveSnapshot,
+          );
+        if (!recoverable && workspace.archivedAt == null) {
+          const registrations = await listWorktreeRegistrations(
+            workspace.repoRoot,
+            { strict: true },
+          );
+          for (const [candidatePath, branch] of registrations) {
+            if (branch !== workspace.branch || !existsSync(candidatePath)) continue;
+            const owner = getWorkspaceByPath(candidatePath);
+            if (owner && owner.id !== workspace.id) continue;
+            // Locate accepts an original linked checkout, never the primary
+            // repository or another workspace that now owns this branch.
+            const pointer = readWorktreeGitMetadata(path.join(candidatePath, ".git"));
+            if (!pointer?.startsWith("gitdir:")) continue;
+            if (await managedCheckoutIdentityMatches({ ...workspace, path: candidatePath })) {
+              recoverable = true;
+              break;
+            }
+          }
+        }
+      } catch {
+        // Unverifiable history stays private until another explicit re-add
+        // can verify it, or its original folder returns. Nothing is deleted.
+      }
+    }
+    const current = getWorkspaceById(row.id);
+    if (
+      !current ||
+      current.repoRoot !== row.repoRoot ||
+      current.branch !== row.branch ||
+      current.path !== row.path ||
+      current.archivedAt !== row.archivedAt ||
+      current.archiveSnapshot !== row.archiveSnapshot ||
+      getWorkspaceLifecycle(row.id)
+    ) continue;
+    setWorkspaceMeta(row.id, REPO_READD_HIDDEN_META, recoverable ? "0" : "1");
+  }
 }
 
 export function getWorkspace(workspaceId: string): Workspace {
@@ -2639,7 +2726,7 @@ export async function workspaceOwnsManagedCheckout(
   const ws = getWorkspace(workspaceId);
   if (
     isAdoptedWorkspace(ws.id) ||
-    !isManagedWorktreePath(ws.path) ||
+    !hasManagedWorkspaceLocation(ws) ||
     !existsSync(ws.path)
   ) {
     return false;
@@ -2793,7 +2880,7 @@ async function archiveWorkspaceInner(
   // which belongs to the external tool even when it happens to sit under the
   // managed root. Adopted worktrees are dropped via "remove from Zeros"
   // instead — the folder stays.
-  if (isAdoptedWorkspace(ws.id) || !isManagedWorktreePath(ws.path)) {
+  if (isAdoptedWorkspace(ws.id) || !hasManagedWorkspaceLocation(ws)) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message:
@@ -3540,6 +3627,176 @@ export function restoreWorkspace(workspaceId: string): Promise<RestoreResult> {
   });
 }
 
+/** Check the saved tree's complete object closure before promising or creating
+ * a replacement checkout. Traversing the tree does not walk repository history. */
+async function readableWorkspaceSnapshot(
+  repoRoot: string,
+  snapshot: string,
+): Promise<boolean> {
+  try {
+    if (!(await revParseCommitOrNull(repoRoot, snapshot))) return false;
+    const objects = await runGit(repoRoot, [
+      "rev-list",
+      "--objects",
+      "--missing=print",
+      `${snapshot}^{tree}`,
+    ]);
+    return !objects.stdout.split("\n").some((line) => line.startsWith("?"));
+  } catch {
+    return false;
+  }
+}
+
+/** Inspect only on recovery intent, never one Git subprocess per list row. */
+export async function getWorkspaceRecoveryInfo(workspaceId: string): Promise<{
+  action: "restore" | "locate" | "none";
+  snapshotAt: number | null;
+}> {
+  const ws = getWorkspace(workspaceId);
+  const none = { action: "none" as const, snapshotAt: null };
+  if (isAdoptedWorkspace(ws.id) || !hasManagedWorkspaceLocation(ws))
+    return none;
+  try {
+    if (!(await isRepo(ws.repoRoot))) return none;
+    if (
+      !existsSync(ws.path) &&
+      ws.archiveSnapshot &&
+      (await readableWorkspaceSnapshot(ws.repoRoot, ws.archiveSnapshot))
+    ) {
+      const date = await runGit(ws.repoRoot, [
+        "show",
+        "-s",
+        "--format=%ct",
+        ws.archiveSnapshot,
+      ]);
+      return {
+        action: "restore",
+        snapshotAt: Number(date.stdout.trim()) * 1000 || null,
+      };
+    }
+    const registrations = await listWorktreeRegistrations(ws.repoRoot, {
+      strict: true,
+    });
+    if (
+      [...registrations.values()].includes(ws.branch) ||
+      (existsSync(ws.path) &&
+        (await revParseCommitOrNull(ws.repoRoot, `refs/heads/${ws.branch}`)))
+    ) {
+      return { action: "locate", snapshotAt: null };
+    }
+  } catch {
+    // An unreadable source is not a verified recovery source. A later visible
+    // refresh can recheck it without discarding the workspace owner.
+  }
+  return none;
+}
+
+/** Reconnect the original linked checkout in place. No working file is copied,
+ * reset, or moved. Git repair is replayable if the process stops before the
+ * atomic workspace/chat rebind commits. */
+export async function locateWorkspaceFolder(
+  workspaceId: string,
+  selectedPath: string,
+): Promise<RestoreResult> {
+  if (!path.isAbsolute(selectedPath))
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Select the original workspace folder using Locate.",
+    });
+  const initial = getWorkspace(workspaceId);
+  if (
+    normalizePathForCompare(path.resolve(selectedPath)) ===
+    normalizePathForCompare(initial.path)
+  ) {
+    return recoverMissingWorkspace(workspaceId);
+  }
+  return withWorkspaceLifecycleFlight(
+    workspaceId,
+    "restore",
+    async () => {
+      const ws = getWorkspace(workspaceId);
+      const reject = () =>
+        new GitError({
+          code: "VALIDATION_FAILED",
+          message:
+            "Select the original workspace folder. The selected folder was not changed.",
+        });
+      if (
+        ws.archivedAt != null ||
+        existsSync(ws.path) ||
+        isAdoptedWorkspace(ws.id) ||
+        !hasManagedWorkspaceLocation(ws) ||
+        getWorkspaceLifecycle(ws.id) ||
+        !path.isAbsolute(selectedPath)
+      )
+        throw reject();
+      const targetPath = await realpath(selectedPath);
+      const owner = getWorkspaceByPath(targetPath);
+      if (owner && owner.id !== ws.id) throw reject();
+      const target = { ...ws, path: targetPath };
+      assertNoRegisteredNestedOwner(target);
+      if (!(await lstat(targetPath)).isDirectory()) throw reject();
+      let pointer: string | null;
+      try {
+        pointer = readWorktreeGitMetadata(path.join(targetPath, ".git"));
+      } catch {
+        throw reject();
+      }
+      const match = pointer?.match(/^gitdir:\s*(.+)$/);
+      if (!match) throw reject();
+      const common = await realpath(
+        (
+          await runGit(ws.repoRoot, [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-common-dir",
+          ])
+        ).stdout.trim(),
+      );
+      const gitdir = await realpath(path.resolve(targetPath, match[1])).catch(
+        () => "",
+      );
+      if (path.dirname(gitdir) !== path.join(common, "worktrees"))
+        throw reject();
+      const head = readWorktreeGitMetadata(path.join(gitdir, "HEAD"));
+      const backPointer = readWorktreeGitMetadata(path.join(gitdir, "gitdir"));
+      if (
+        head !== `ref: refs/heads/${ws.branch}` ||
+        !backPointer ||
+        ![ws.path, targetPath].some(
+          (folder) =>
+            normalizePathForCompare(path.resolve(path.dirname(backPointer))) ===
+            normalizePathForCompare(folder),
+        )
+      )
+        throw reject();
+      await runGit(ws.repoRoot, ["worktree", "repair", targetPath]);
+      if (!(await managedCheckoutIdentityMatches(target))) throw reject();
+      const restoredAt = Date.now();
+      finishWorkspaceLifecycle(
+        ws.id,
+        { path: targetPath, lastActiveAt: restoredAt },
+        () => {
+          setWorkspaceMeta(ws.id, LOCATED_WORKSPACE_PATH, targetPath);
+          rebindChatsFolder(ws.path, targetPath, ws.id);
+        },
+      );
+      removeWorktreeSeed(ws.path);
+      const workspace = getWorkspace(ws.id);
+      writeWorktreeSeed(workspace);
+      return {
+        workspace,
+        restoredAt,
+        path: targetPath,
+        branch: ws.branch,
+        conflicts: [],
+        adaptations: [],
+      };
+    },
+    "locate",
+  );
+}
+
 /** Recover a live workspace without deleting its durable owner. Returned files
  * are authoritative: rebuild only missing Git metadata and never overlay a
  * snapshot on them. A still-missing checkout requires a verified saved snapshot. */
@@ -3554,7 +3811,7 @@ export function recoverMissingWorkspace(
       if (
         ws.archivedAt != null ||
         isAdoptedWorkspace(ws.id) ||
-        !isManagedWorktreePath(ws.path)
+        !hasManagedWorkspaceLocation(ws)
       ) {
         throw new GitError({
           code: "VALIDATION_FAILED",
@@ -3734,7 +3991,7 @@ async function restoreWorkspaceInner(
   const savedSnapshot = journal?.archiveSnapshot ?? ws.archiveSnapshot;
   if (
     savedSnapshot &&
-    !(await revParseCommitOrNull(ws.repoRoot, savedSnapshot))
+    !(await readableWorkspaceSnapshot(ws.repoRoot, savedSnapshot))
   ) {
     throw new GitError({
       code: "STASH_FAILED",
@@ -4141,9 +4398,14 @@ async function restoreWorkspaceInner(
       ...(targetPath !== ws.path ? { path: targetPath } : {}),
       ...(targetBranch !== ws.branch ? { branch: targetBranch } : {}),
     },
-    targetPath !== journal.sourcePath
-      ? () => rebindChatsFolder(journal.sourcePath, targetPath, workspaceId)
-      : undefined,
+    () => {
+      if (targetPath !== journal.sourcePath) {
+        rebindChatsFolder(journal.sourcePath, targetPath, workspaceId);
+      }
+      if (getWorkspaceMeta(workspaceId, LOCATED_WORKSPACE_PATH)) {
+        setWorkspaceMeta(workspaceId, LOCATED_WORKSPACE_PATH, targetPath);
+      }
+    },
   );
   await clearWorkspaceBranchOwnershipMarkerFor(
     ws.repoRoot,
@@ -4331,7 +4593,7 @@ async function deleteWorkspaceInner(
     return;
   }
   if (
-    isManagedWorktreePath(ws.path) &&
+    hasManagedWorkspaceLocation(ws) &&
     existsSync(ws.path) &&
     !(await workspaceOwnsManagedCheckout(ws.id))
   ) {
@@ -4360,6 +4622,29 @@ async function deleteWorkspaceInner(
       remediation: "Restart Zeros to finish recovery, then retry.",
     });
   }
+  const absent = async (folder: string): Promise<boolean> => {
+    try {
+      await lstat(folder);
+      return false;
+    } catch (error) {
+      if (
+        ["ENOENT", "ENOTDIR"].includes(
+          (error as NodeJS.ErrnoException).code ?? "",
+        )
+      )
+        return true;
+      throw error;
+    }
+  };
+  if ((await absent(ws.path)) && (await absent(repoRoot))) {
+    // Explicit removal can retire a row whose checkout AND source repo are
+    // gone. There is no filesystem/branch cleanup to attempt; preserving the
+    // stale row here resurrected it when the same repository was added again.
+    deleteWorkspaceRow(ws.id);
+    removeWorkspaceSettingsBackup(ws.id);
+    removeWorktreeSeed(ws.path);
+    return;
+  }
   if (!journal) {
     journal = {
       workspaceId: ws.id,
@@ -4384,7 +4669,7 @@ async function deleteWorkspaceInner(
   // before reaching this path, even if another tool placed them under the
   // managed root.
   if (journal.phase !== "worktree-removed" || existsSync(ws.path)) {
-    if (isManagedWorktreePath(ws.path)) {
+    if (hasManagedWorkspaceLocation(ws)) {
       if (existsSync(ws.path)) {
         stagedWorktree = await removeManagedWorktreeForLifecycle(
           ws,
@@ -4396,7 +4681,7 @@ async function deleteWorkspaceInner(
     }
     updateWorkspaceLifecyclePhase(ws.id, "worktree-removed");
   }
-  if (journal.includeBranch && isManagedWorktreePath(ws.path)) {
+  if (journal.includeBranch && hasManagedWorkspaceLocation(ws)) {
     // Branch cleanup is subordinate to deletion. A protected/locked branch
     // must not strand a live DB row whose directory was already removed.
     try {
@@ -4454,7 +4739,10 @@ export async function migrateWorktreesToNewRoot(
   for (const ws of listWorkspacesFromDb()) {
     if (!ws.path || !ws.path.startsWith(legacyRoot + path.sep)) continue;
     if (ws.archivedAt != null) continue;
-    if (isAdoptedWorkspace(ws.id)) continue;
+    if (
+      isAdoptedWorkspace(ws.id) ||
+      getWorkspaceMeta(ws.id, LOCATED_WORKSPACE_PATH)
+    ) continue;
     // Recovery owns every path decision while a lifecycle journal exists.
     // Moving it here would leave the durable source/target pointing at a folder
     // that no longer exists and turn a recoverable crash into an orphan.

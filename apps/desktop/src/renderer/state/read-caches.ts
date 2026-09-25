@@ -88,7 +88,9 @@ export const createLocalBranchesCache = new KeyedAsyncCache<Branch[]>(32);
 export const createBranchCatalogCache = new KeyedAsyncCache<RepoBranchCatalog>(32);
 export const createRemoteCatalogCache = new KeyedAsyncCache<RepoBranchCatalog>(32);
 
-function invalidateCreateSourceCaches(network = true): void {
+/** Settings changes invalidate both catalogs even while Create is unmounted.
+ * Ref-change signals skip the network snapshot to avoid fetch event loops. */
+export function invalidateCreateSourceCaches(network = true): void {
   createLocalBranchesCache.invalidateAll();
   createBranchCatalogCache.invalidateAll();
   if (network) createRemoteCatalogCache.invalidateAll();

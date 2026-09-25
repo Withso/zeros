@@ -22,6 +22,7 @@ import type { RuntimeClient } from "./ws-client";
 import type { BridgeMessage } from "./messages";
 import type {
   Workspace,
+  WorkspaceRecoveryInfo,
   StatusResult,
   ChangeCounts,
   ChangeLineCounts,
@@ -1997,6 +1998,23 @@ export async function bridgeWorkspaceRecover(
     { ...args },
     60_000,
   )) as Awaited<ReturnType<typeof bridgeWorkspaceRestore>>;
+}
+
+export async function bridgeWorkspaceRecoveryInfo(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<WorkspaceRecoveryInfo> {
+  return (await workspaceOp(bridge, "workspace.recoveryInfo", {
+    workspaceId,
+  })) as WorkspaceRecoveryInfo;
+}
+
+export async function bridgeWorkspaceLocate(
+  bridge: RuntimeClient,
+  args: { workspaceId: string; path: string },
+): Promise<Awaited<ReturnType<typeof bridgeWorkspaceRestore>>> {
+  return (await workspaceOp(bridge, "workspace.locate", { ...args }, 60_000)) as
+    Awaited<ReturnType<typeof bridgeWorkspaceRestore>>;
 }
 
 export async function bridgeWorkspaceDeleteSnapshot(

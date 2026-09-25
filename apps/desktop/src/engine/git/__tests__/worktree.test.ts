@@ -87,6 +87,8 @@ import { withWorkspaceGitMutation } from "../mutation-lock";
 import {
   pruneOrphanArchiveSnapshots,
   recoverMissingWorkspace,
+  getWorkspaceRecoveryInfo,
+  locateWorkspaceFolder,
   deleteWorkspaceSnapshot,
   pruneOrphanWorkspaceBranchOwnershipRefs,
   resolveNewBranchPrefix,
@@ -2838,6 +2840,157 @@ printf ran > '${sentinel}'
       "saved WIP\n",
     );
     expect(result.workspace.archiveSnapshot).toBeTruthy();
+  });
+
+  it("explicitly removes a missing workspace record when its source repository is also gone", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await rm(created.path, { recursive: true });
+    await rm(repoRoot, { recursive: true });
+    await deleteWorkspace({
+      workspaceId: created.workspaceId,
+      includeBranch: false,
+    });
+    expect(listWorkspaces()).not.toContainEqual(
+      expect.objectContaining({ id: created.workspaceId }),
+    );
+    expect(() => getWorkspace(created.workspaceId)).toThrow();
+  });
+
+  it("verifies recovery sources instead of offering every missing folder Restore", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await rm(created.path, { recursive: true });
+    expect(await getWorkspaceRecoveryInfo(created.workspaceId)).toMatchObject({
+      action: "locate",
+    });
+    updateWorkspace(created.workspaceId, { archiveSnapshot: "f".repeat(40) });
+    expect(await getWorkspaceRecoveryInfo(created.workspaceId)).toMatchObject({
+      action: "locate",
+    });
+    await rm(repoRoot, { recursive: true });
+    expect(await getWorkspaceRecoveryInfo(created.workspaceId)).toMatchObject({
+      action: "none",
+    });
+  });
+
+  it("re-adding a removed repository lists only available or verifiably recoverable old workspaces", async () => {
+    const { WorkspaceService } = await import("../../workspace/service");
+    const service = new WorkspaceService(repoRoot);
+    await service.handle("project.upsert", { repoRoot, repoSlug: "repo" });
+    const available = await createWorkspace({ repoRoot });
+    const saved = await createWorkspace({ repoRoot });
+    await archiveWorkspace({ workspaceId: saved.workspaceId, stashUncommitted: true });
+    const missing = await createWorkspace({ repoRoot });
+    const missingBackup = path.join(workdir, "original-outside-registration");
+    await rename(missing.path, missingBackup);
+    const corrupt = await createWorkspace({ repoRoot });
+    await archiveWorkspace({ workspaceId: corrupt.workspaceId, stashUncommitted: true });
+    updateWorkspace(corrupt.workspaceId, { archiveSnapshot: "f".repeat(40) });
+    const moved = await createWorkspace({ repoRoot });
+    const movedPath = path.join(workdir, "moved-original");
+    await execFileAsync("git", ["worktree", "move", moved.path, movedPath], { cwd: repoRoot });
+
+    // Folder loss alone retains history, even without a recovery source.
+    expect(listWorkspaces().map((row) => row.id)).toContain(missing.workspaceId);
+    await service.handle("project.remove", { repoRoot });
+    expect(listWorkspaces()).toEqual([]);
+    await service.handle("project.upsert", { repoRoot, repoSlug: "repo" });
+    expect(listWorkspaces().map((row) => row.id).sort()).toEqual(
+      [available.workspaceId, saved.workspaceId, moved.workspaceId].sort(),
+    );
+    // Omission does not destroy the workspace identity or recovery metadata.
+    expect(getWorkspace(missing.workspaceId).present).toBe(false);
+    expect(getWorkspace(corrupt.workspaceId).archiveSnapshot).toBe("f".repeat(40));
+    await service.handle("project.remove", { repoRoot });
+    await service.handle("project.bulkUpsert", { projects: [{ repoRoot, repoSlug: "repo" }] });
+    expect(listWorkspaces().map((row) => row.id).sort()).toEqual(
+      [available.workspaceId, saved.workspaceId, moved.workspaceId].sort(),
+    );
+    await rm(available.path, { recursive: true });
+    expect(listWorkspaces().map((row) => row.id)).toContain(available.workspaceId);
+    await rename(missingBackup, missing.path);
+    expect(listWorkspaces().map((row) => row.id)).toContain(missing.workspaceId);
+    await rm(missing.path, { recursive: true });
+    expect(listWorkspaces().map((row) => row.id)).toContain(missing.workspaceId);
+  });
+
+  it("does not offer Restore when a captured file object is missing", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await writeFile(
+      path.join(created.path, "unique.txt"),
+      "unique snapshot contents\n",
+    );
+    const archived = await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+    await rm(created.path, { recursive: true });
+    const blob = (
+      await execFileAsync(
+        "git",
+        ["rev-parse", `${archived.archiveSnapshot}:unique.txt`],
+        { cwd: repoRoot },
+      )
+    ).stdout.trim();
+    await rm(
+      path.join(repoRoot, ".git", "objects", blob.slice(0, 2), blob.slice(2)),
+    );
+    expect(await getWorkspaceRecoveryInfo(created.workspaceId)).toMatchObject({
+      action: "locate",
+    });
+    await expect(
+      recoverMissingWorkspace(created.workspaceId),
+    ).rejects.toMatchObject({ code: "STASH_FAILED" });
+    expect(existsSync(created.path)).toBe(false);
+  });
+
+  it("offers Restore only for a readable snapshot and keeps newer returned files authoritative", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    await restoreWorkspace(created.workspaceId);
+    const returned = path.join(workdir, "original-folder-moved");
+    await rename(created.path, returned);
+    expect(await getWorkspaceRecoveryInfo(created.workspaceId)).toMatchObject({
+      action: "restore",
+    });
+    await writeFile(path.join(returned, "draft.txt"), "newer draft\n");
+    const result = await locateWorkspaceFolder(created.workspaceId, returned);
+    expect(result.workspace.id).toBe(created.workspaceId);
+    expect(result.workspace.present).toBe(true);
+    expect(result.path).toBe(returned);
+    expect(await readFile(path.join(returned, "draft.txt"), "utf8")).toBe(
+      "newer draft\n",
+    );
+    expect(existsSync(created.path)).toBe(false);
+    await archiveWorkspace({
+      workspaceId: created.workspaceId,
+      stashUncommitted: true,
+    });
+    const restored = await restoreWorkspace(created.workspaceId);
+    expect(restored.workspace.present).toBe(true);
+    expect(await readFile(path.join(restored.path, "draft.txt"), "utf8")).toBe(
+      "newer draft\n",
+    );
+    await deleteWorkspace({
+      workspaceId: created.workspaceId,
+      includeBranch: false,
+    });
+    expect(existsSync(restored.path)).toBe(false);
+  });
+
+  it("rejects a foreign folder during Locate without rebinding the workspace", async () => {
+    const created = await createWorkspace({ repoRoot });
+    await rm(created.path, { recursive: true });
+    await expect(
+      locateWorkspaceFolder(created.workspaceId, repoRoot),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    expect(getWorkspace(created.workspaceId).path).toBe(created.path);
+    expect(await readFile(path.join(repoRoot, "README.md"), "utf8")).toBe(
+      "# test\n",
+    );
   });
 
   it("reconnects a returned folder after Git prunes the last worktree registration", async () => {

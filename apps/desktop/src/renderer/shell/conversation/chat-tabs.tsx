@@ -243,6 +243,8 @@ function chatTabNaturalOffsetLeft(tab: HTMLDivElement): number {
 // ── Props ────────────────────────────────────────────────
 
 export interface ChatTabsProps {
+  /** Saved workspace history keeps tab navigation and transcript copying. */
+  readOnly?: boolean;
   workspaceFolder: string;
   paneId: string;
   /** This pane's visible chats, createdAt ASC (strip order). */
@@ -272,6 +274,7 @@ export interface ChatTabsProps {
 // ── Component ────────────────────────────────────────────
 
 export function ChatTabs({
+  readOnly = false,
   workspaceFolder,
   paneId,
   chats,
@@ -506,7 +509,7 @@ export function ChatTabs({
   // hide it until the preload bridge lands, and until this pane resolves a
   // workspace folder to target.
   const nativeReady = useNativeRuntime().ready;
-  const showOpenIn = nativeReady && workspaceFolder !== "";
+  const showOpenIn = !readOnly && nativeReady && workspaceFolder !== "";
 
   // ── Render ───────────────────────────────────────────
 
@@ -540,6 +543,7 @@ export function ChatTabs({
               chats.map((chat) => (
                 <TabRow
                   key={chat.id}
+                  readOnly={readOnly}
                   chat={chat}
                   paneId={paneId}
                   isActive={chat.id === activeChatId}
@@ -587,9 +591,11 @@ export function ChatTabs({
         />
       </div>
 
-      <div className={PLUS_CONTROL_CLS}>
-        <NewChatMenu workspaceFolder={workspaceFolder} paneId={paneId} />
-      </div>
+      {!readOnly && (
+        <div className={PLUS_CONTROL_CLS}>
+          <NewChatMenu workspaceFolder={workspaceFolder} paneId={paneId} />
+        </div>
+      )}
 
       <div className="min-w-0 flex-1" aria-hidden="true" />
 
@@ -677,6 +683,7 @@ function UntitledTab({ onSelect }: { onSelect: () => void }) {
 // ── Tab row (with inline rename + close + drag) ──────────
 
 interface TabRowProps {
+  readOnly: boolean;
   chat: ChatThread;
   paneId: string;
   isActive: boolean;
@@ -688,6 +695,7 @@ interface TabRowProps {
 }
 
 function TabRow({
+  readOnly,
   chat,
   paneId,
   isActive,
@@ -799,7 +807,7 @@ function TabRow({
     [chat.id],
   );
 
-  const closeAction = !renaming && (
+  const closeAction = !readOnly && !renaming && (
     <span
       className={
         showDraft ? TAB_DRAFT_ACTION_OVERLAY_CLS : TAB_HOVER_OVERLAY_CLS
@@ -830,10 +838,10 @@ function TabRow({
           aria-label={
             hasDraft ? `${chat.title || "Untitled chat"}, unsent draft` : undefined
           }
-          draggable={!renaming}
+          draggable={!readOnly && !renaming}
           onPointerEnter={() => onPrefetch(chat.id)}
           onFocus={() => onPrefetch(chat.id)}
-          onDragStart={handleDragStart}
+          onDragStart={readOnly ? undefined : handleDragStart}
           onDragEnd={handleDragEnd}
           onClick={() => {
             if (renaming) return;
@@ -869,19 +877,19 @@ function TabRow({
                 aria-hidden="true"
               />
             )
-          ) : awaitingKind === "plan" ? (
+          ) : !readOnly && awaitingKind === "plan" ? (
             <ClipboardList
               size={14}
               className="text-fg2 shrink-0"
               aria-label="Plan ready for review"
             />
-          ) : awaitingKind === "input" ? (
+          ) : !readOnly && awaitingKind === "input" ? (
             <MessageCircleQuestionMark
               size={14}
               className="text-fg2 shrink-0"
               aria-label="Agent awaiting your input"
             />
-          ) : activity ? (
+          ) : !readOnly && activity ? (
             <AgentActivityIndicator activity={activity} className="shrink-0" />
           ) : (
             <AgentIcon
@@ -931,14 +939,16 @@ function TabRow({
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={beginRename}>
-          <Pencil />
-          <span>Rename</span>
-        </ContextMenuItem>
+        {!readOnly && (
+          <ContextMenuItem onSelect={beginRename}>
+            <Pencil />
+            <span>Rename</span>
+          </ContextMenuItem>
+        )}
         {/* Terminal tabs are PTY-backed and have no agent transcript. */}
         {!isTerminal && (
           <>
-            <ContextMenuSeparator className="bg-border3" />
+            {!readOnly && <ContextMenuSeparator className="bg-border3" />}
             <ContextMenuItem onSelect={() => void copyTranscript("concise")}>
               <ClipboardList />
               <span>Copy concise transcript</span>
@@ -949,11 +959,15 @@ function TabRow({
             </ContextMenuItem>
           </>
         )}
-        <ContextMenuSeparator className="bg-border3" />
-        <ContextMenuItem onSelect={() => onClose(chat)}>
-          <X />
-          <span>Close Tab</span>
-        </ContextMenuItem>
+        {!readOnly && (
+          <>
+            <ContextMenuSeparator className="bg-border3" />
+            <ContextMenuItem onSelect={() => onClose(chat)}>
+              <X />
+              <span>Close Tab</span>
+            </ContextMenuItem>
+          </>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );
