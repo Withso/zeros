@@ -1,6 +1,6 @@
 # Cloud backend qualification status
 
-Reviewed September 24, 2026. This matrix distinguishes implemented behavior,
+Reviewed September 25, 2026. This matrix distinguishes implemented behavior,
 live evidence and release qualification. Both production cloud execution flags
 remain disabled. Desktop cloud creation UI is outside this backend change.
 
@@ -29,17 +29,18 @@ Batch 8 closed the staff backend milestone on September 24, 2026.
 | Channel | Backend | Migration ledger | Cloud execution |
 | --- | --- | --- | --- |
 | Alpha | current `main`, deployed automatically | through `0100` | off |
-| Beta | September 21 release (`release/0.1.18`) | through `0093` | off |
-| Production | September 21 release (`release/0.1.18`) | through `0093` | off |
+| Beta | September 25 release (`release/0.1.19`) | through `0100` | off |
+| Production | September 25 release (`release/0.1.19`) | through `0100` | off |
 
 - Managed Boat Linux VMs are the default provider. Daytona remains a separate
   adapter, used only when explicitly selected: its worker isolation is
   unqualified, and it is kept for a future Windows sandbox.
-- Beta and Production move to the current backend at the next release cut.
-  Apply `0094`–`0100` with `release-migration:manage`, then promote the
-  frozen release as described in [deployment environments](../deployment-environments.md).
-  Their Pages production deployments and the Beta desktop publisher stay held
-  until then.
+- Beta and Production moved to the current backend in `release/0.1.19`
+  (`c3653385`) on September 25: `release-migration:manage` applied
+  `0094`–`0100` after an on-demand backup of each database, then the API, web
+  and desktop builds were promoted as described in
+  [deployment environments](../deployment-environments.md). Beta deploys from
+  the release branch again; Production deploys stay manual.
 - The isolated qualification deployment used for Batches 4–8 is retired. Its
   evidence is summarized here and in
   [infrastructure and operations](infrastructure-and-operations.md#recovery-drills-and-measured-limits).
