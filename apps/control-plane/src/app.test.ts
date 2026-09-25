@@ -23,6 +23,19 @@ const pool = {
 
 const emailConfig = { from: null, token: null, apiUrl: "", inviteLinkBase: "" };
 
+it("requires app authentication before a paid chat title request", async () => {
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  try {
+    const app = createApp({ ...config(null), chatTitleApiKey: "synthetic-title-key" }, pool, emailConfig as never);
+    const response = await app.request("/v1/chat-titles", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chatId: "chat", messageId: "message", prompt: "Fix login redirect" }),
+    });
+    expect(response.status).toBe(401);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  } finally { fetchSpy.mockRestore(); }
+});
+
 const githubConfig: GithubBackendConfig = {
   appId: 123456,
   clientId: "Iv1.test-client",

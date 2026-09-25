@@ -190,10 +190,11 @@ describe("repository layout contracts", () => {
     const interactiveContracts = [
       "apps/desktop/src/engine/__tests__/agent-cancel-stop.test.ts",
       "apps/desktop/src/engine/__tests__/agent-session-reload.test.ts",
+      "apps/desktop/src/engine/__tests__/retired-chat-title.test.ts",
       "apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts",
       "apps/desktop/src/renderer/features/agent/__tests__/agent-prewarm-singleflight.test.ts",
       "apps/desktop/src/renderer/features/agent/__tests__/agent-registry-verification.test.ts",
-      "apps/desktop/src/renderer/features/agent/__tests__/chat-title-scheduler.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/chat-title-request.test.ts",
       "apps/desktop/src/renderer/features/agent/__tests__/composer-responsive-contract.test.ts",
       "apps/desktop/src/renderer/features/agent/__tests__/permission-mode-display.test.ts",
       "apps/desktop/src/renderer/features/agent/__tests__/session-admission-policy.test.ts",

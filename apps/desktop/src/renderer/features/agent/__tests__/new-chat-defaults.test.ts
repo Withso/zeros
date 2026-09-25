@@ -22,13 +22,11 @@ import {
 } from "../model-favorites";
 import { defaultFavoriteModelFor, resolveModelOption } from "../model-catalog";
 import {
-  getChatTitleModel,
+  hasModelDefaults,
   hydrateModelsFromSettings,
   newChatBornDefaults,
   rememberModelConfiguration,
   rememberPermissionMode,
-  resolveChatTitleModel,
-  setChatTitleModel,
   setDefaultPlanMode,
 } from "../new-chat-defaults";
 import {
@@ -125,64 +123,19 @@ describe("hydrateModelsFromSettings — default agent round-trip", () => {
   });
 });
 
-describe("chat-title model (Settings → Models → Custom models)", () => {
+describe("retired title preferences", () => {
   beforeEach(() => installLocalStorage());
   afterEach(() => {
     delete (globalThis as { localStorage?: Storage }).localStorage;
   });
 
-  const ALL = new Set(["claude", "codex", "cursor"]);
-
-  it("defaults to Haiku and round-trips a specific pick", () => {
-    expect(getChatTitleModel()).toBe("claude-haiku-4-5");
-    setChatTitleModel("gpt-5.6-luna");
-    expect(getChatTitleModel()).toBe("gpt-5.6-luna");
-  });
-
-  it("honors the saved pick when its agent is connected (or connectivity is unknown)", () => {
-    setChatTitleModel("gpt-5.6-luna");
-    expect(resolveChatTitleModel("claude", ALL)).toEqual({
-      family: "codex",
-      model: "gpt-5.6-luna",
-    });
-    // Registry not loaded yet → trust the pick.
-    expect(resolveChatTitleModel("claude", null)).toEqual({
-      family: "codex",
-      model: "gpt-5.6-luna",
-    });
-  });
-
-  it("falls down the chain when the pick's agent is disconnected", () => {
-    // Default Haiku, but Claude not connected → Luna.
-    expect(
-      resolveChatTitleModel("codex", new Set(["codex", "cursor"])),
-    ).toEqual({ family: "codex", model: "gpt-5.6-luna" });
-    // Only Cursor connected → Composer 2.5.
-    expect(resolveChatTitleModel("cursor", new Set(["cursor"]))).toEqual({
-      family: "cursor",
-      model: "composer-2.5",
-    });
-  });
-
-  it("distrusts an all-disconnected snapshot and titles through the chat's own family", () => {
-    expect(resolveChatTitleModel("cursor", new Set())).toEqual({
-      family: "cursor",
-      model: "composer-2.5",
-    });
-    // Unknown/retired agent AND nothing connected → no AI titling.
-    expect(resolveChatTitleModel("gemini", new Set())).toBeNull();
-  });
-
-  it('hydrates from settings.toml; absence, the retired "default", and garbage all mean Haiku', () => {
-    hydrateModelsFromSettings({ chat_title_model: "composer-2.5" });
-    expect(getChatTitleModel()).toBe("composer-2.5");
-    // The mirror deletes the key for the Haiku default, so absence IS the value.
-    hydrateModelsFromSettings({});
-    expect(getChatTitleModel()).toBe("claude-haiku-4-5");
-    hydrateModelsFromSettings({ chat_title_model: "default" });
-    expect(getChatTitleModel()).toBe("claude-haiku-4-5");
-    hydrateModelsFromSettings({ chat_title_model: "gpt-9-mega" });
-    expect(getChatTitleModel()).toBe("claude-haiku-4-5");
+  it("ignores saved title providers without changing new-chat defaults", () => {
+    setSetting("chat-title-model", "composer-2.5");
+    expect(hasModelDefaults()).toBe(false);
+    const before = newChatBornDefaults("claude");
+    hydrateModelsFromSettings({ chat_title_model: "gpt-5.6-luna" });
+    expect(hasModelDefaults()).toBe(false);
+    expect(newChatBornDefaults("claude")).toEqual(before);
   });
 });
 

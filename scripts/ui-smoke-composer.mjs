@@ -85,6 +85,7 @@ import { runMentionsSmoke } from "./ui-smoke-mentions.mjs";
 import { runComposerAttachmentsSmoke } from "./ui-smoke-composer-attachments.mjs";
 import { runOverlayPositioningSmoke } from "./ui-smoke-overlay-positioning.mjs";
 import { runDraftIndicatorsSmoke } from "./ui-smoke-draft-indicators.mjs";
+import { runChatTitlesSmoke } from "./ui-smoke-chat-titles.mjs";
 import { runPermissionHintsSmoke } from "./ui-smoke-permission-hints.mjs";
 import { runContextGaugeSmoke } from "./ui-smoke-context-gauge.mjs";
 import { runConversationSummarySmoke } from "./ui-smoke-conversation-summary.mjs";
@@ -139,7 +140,9 @@ const vite = spawn(
   {
     cwd: ROOT,
     stdio: ["ignore", "pipe", "pipe"],
-    env: process.env,
+    // Keep API-backed browser contracts deterministic even without a local
+    // .env. Each exercised endpoint is intercepted by its smoke test.
+    env: { ...process.env, VITE_CONTROL_PLANE_URL: "https://api.example.test" },
     detached: true,
   },
 );
@@ -170,6 +173,9 @@ try {
   const draftPage = await browser.newPage();
   await runDraftIndicatorsSmoke({ page: draftPage, check, harnessBase });
   await draftPage.close();
+  const titlePage = await browser.newPage();
+  await runChatTitlesSmoke({ page: titlePage, check, harnessBase });
+  await titlePage.close();
   const page = await browser.newPage({ viewport: { width: 900, height: 700 } });
   const consoleLines = [];
   const pageErrors = [];

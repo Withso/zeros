@@ -2,7 +2,7 @@
 // utility-boundary-pool.ts — one warm background boundary per identical request
 // ──────────────────────────────────────────────────────────
 //
-// Engine-owned one-shots — chat-title generation, provider auth/version probes,
+// Engine-owned one-shots — provider auth/version probes,
 // save-time key validation, `listSessions` — are real provider code and inherit
 // the same routed execution contract as sessions. Each one used to prepare its
 // OWN boundary and then prove it torn down: cheap for native execution, but a
@@ -48,7 +48,7 @@ import type {
 
 /** How long an idle pooled boundary is kept before it is proven torn down.
  * Long enough to serve the burst that follows a boot or a settings save (probes
- * for several providers, a title, a key validation), short enough that a warm
+ * for several providers and key validation), short enough that a warm
  * private HOME is not held open across a normal pause in activity. */
 export const UTILITY_BOUNDARY_IDLE_MS = 60_000;
 
@@ -447,7 +447,7 @@ export class UtilityBoundaryPool {
   }
 
   /** Prove every pooled boundary that depends on one managed workspace has
-   * stopped. Unrelated provider probes/titles remain warm and usable. */
+   * stopped. Unrelated provider probes remain warm and usable. */
   async disposeWorkspaceTerritory(workspaceRoot: string): Promise<void> {
     const root = path.resolve(workspaceRoot);
     const errors: unknown[] = [];

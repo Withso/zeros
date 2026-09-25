@@ -2819,8 +2819,8 @@ export class AgentGateway {
     });
   }
 
-  /** Warm background boundaries shared by engine-owned one-shots (chat titles,
-   * provider probes, key validation, session listing). See
+  /** Warm background boundaries shared by engine-owned provider probes, key
+   * validation, and session listing. See
    * containment/utility-boundary-pool.ts for the reuse contract. Created lazily
    * so a gateway that never runs a one-shot never holds one. */
   private utilityBoundariesInstance: UtilityBoundaryPool | null = null;
@@ -4619,97 +4619,6 @@ export class AgentGateway {
       };
     } catch {
       return { ok: null };
-    }
-  }
-
-  /** Background one-shot chat-title generation (AGENT_GENERATE_TITLE).
-   *  Delegates to the adapter's optional generateText; adapters without one
-   *  — or any failure — return title=null so the renderer silently keeps
-   *  the snippet title. Never throws: this is a cosmetic background call
-   *  and must not surface errors into the user's real turn. */
-  async generateTitle(
-    agentId: string,
-    opts: {
-      model: string;
-      systemPrompt: string;
-      prompt: string;
-      env?: Record<string, string>;
-    },
-  ): Promise<{ title: string | null; error?: string }> {
-    if(this.executionBoundary.backend==="cloud-worker")return {title:null,error:"Cloud titles require separate credential admission"};
-    try {
-      this.assertSelectedAccountConnected(agentId);
-      const adapter = await this.adapterFor(agentId);
-      const generateText =
-        resolveAgentCapabilityPorts(adapter).textGeneration?.generateText;
-      if (!generateText) return { title: null };
-      const cwd = path.resolve(this.projectRoot);
-      const env = applyUserProviderConfig(cwd, agentId, {
-        env: completeAgentSpawnEnv(opts.env),
-      }).env;
-      const territory = await this.prepareCodeAgentTerritory(
-        adapter,
-        cwd,
-        cwd,
-        cwd,
-        "newSession",
-      );
-      const territorySet = await this.resolveTerritorySet(
-        territory,
-        cwd,
-        cwd,
-        env,
-        "newSession",
-      );
-      // Pooled (§5.1). Every title for a given provider builds the identical
-      // request, so the second and later titles in a session reuse one warm
-      // boundary. This is where the old per-title prepare+prove-teardown showed
-      // up as five background admissions racing the user's own sends.
-      const request = await this.boundaryRequest(
-        `title-${randomUUID()}`,
-        cwd,
-        cwd,
-        territorySet.territory,
-        env,
-        adapter.agentId,
-        [],
-        territorySet.additionalRoots,
-        territorySet.additionalGitWorkspaceRoots,
-        false,
-        undefined,
-        territorySet.contextTerritories,
-      );
-      const text = await this.withUtilityBoundary(
-        adapter.agentId,
-        "newSession",
-        request,
-        territorySet.registeredDesignAuthorityIdentity,
-        territorySet.contributions,
-        async ({ boundary }) => {
-          await this.assertAdditionalTerritorySetStillCurrent(
-            territorySet,
-            adapter,
-            cwd,
-            cwd,
-            cwd,
-            env,
-            "newSession",
-          );
-          return generateText({
-            ...opts,
-            env,
-            timeoutMs: 30_000,
-            executionBoundary: boundary,
-          });
-        },
-      );
-      const title = text.trim();
-      return { title: title.length > 0 ? title : null };
-    } catch (err) {
-      return {
-        title: null,
-        error: err instanceof Error ? err.message : String(err),
-      };
     }
   }
 

@@ -478,25 +478,6 @@ const REMOTE_AGENT_ENGINE_DERIVED_ENV = new Set<string>([
 
 const PORTABLE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** AGENT_GENERATE_TITLE is intentionally not a full code session. Its renderer
- * caller sends only provider authentication/routing, so keep this a positive
- * list: a forged bridge frame cannot turn a cosmetic one-shot into a process
- * launcher via SHELL/NODE/Claude/Codex controls. */
-const TITLE_GENERATION_ENV = new Set([
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "ANTHROPIC_API_URL",
-  "OPENAI_API_KEY",
-  "CODEX_API_KEY",
-  "CODEX_ACCESS_TOKEN",
-  "OPENAI_BASE_URL",
-  "OPENAI_API_BASE",
-  "CHATGPT_BASE_URL",
-  "CURSOR_API_KEY",
-]);
-
 /** Canonicalize the one renderer-carried env value that can widen code
  * territory. The injected predicate resolves real paths and fails closed for
  * missing paths/symlink escapes. */
@@ -3877,7 +3858,7 @@ export class ZerosEngine {
     sessionIds: ReadonlySet<string>,
     options: { retirePooledUtilities?: boolean } = {},
   ): Promise<void> {
-    // A pooled background boundary (chat titles, provider probes, key
+    // A pooled background boundary (provider probes, key
     // validation) compiled its policy under the OUTGOING territory generation,
     // exactly like a session boundary. Retire the pool here too, so no one-shot
     // can keep running against the old Design authority after the pointer moves.
@@ -5104,26 +5085,12 @@ export class ZerosEngine {
           return;
         }
         case "AGENT_GENERATE_TITLE": {
-          // Background AI chat-title one-shot. Best-effort by contract:
-          // the gateway never throws, and a null title just means the
-          // renderer keeps its snippet title. The env rides the same local
-          // bridge as AGENT_NEW_SESSION.env and is never logged.
-          const result = await this.agents.generateTitle(msg.agentId, {
-            model: msg.model,
-            systemPrompt: msg.systemPrompt,
-            prompt: msg.prompt,
-            env: this.scrubTitleGenerationEnv(msg.env),
-          });
-          client.send(
-            createMessage({
-              type: "AGENT_TITLE_GENERATED",
-              source: "engine",
-              requestId: msg.id,
-              agentId: msg.agentId,
-              title: result.title,
-              ...(result.error ? { error: result.error } : {}),
-            }),
-          );
+          // Retired wire contract: older renderers receive a harmless response
+          // without starting a provider process or consuming provider credentials.
+          client.send(createMessage({
+            type: "AGENT_TITLE_GENERATED", source: "engine", requestId: msg.id,
+            agentId: msg.agentId, title: null,
+          }));
           return;
         }
         case "AGENT_NEW_SESSION": {
@@ -7485,23 +7452,6 @@ export class ZerosEngine {
       }
       out[name] = value;
     }
-    return Object.keys(out).length > 0 ? out : undefined;
-  }
-
-  /** Cosmetic title calls accept provider credentials/routing only. They have
-   * no session boundary and no user-facing arbitrary-env contract. */
-  private scrubTitleGenerationEnv(
-    env: Record<string, string> | undefined,
-  ): Record<string, string> | undefined {
-    if (!env) return undefined;
-    const out = Object.fromEntries(
-      Object.entries(stripEngineAuthorityEnv(env)).filter(
-        ([name, value]) =>
-          TITLE_GENERATION_ENV.has(name) &&
-          PORTABLE_ENV_NAME.test(name) &&
-          !value.includes("\0"),
-      ),
-    );
     return Object.keys(out).length > 0 ? out : undefined;
   }
 

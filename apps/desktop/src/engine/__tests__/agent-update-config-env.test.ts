@@ -8,9 +8,6 @@ type RelayScrubber = {
     this: { pty: { isWithinAllowed(path: string): boolean } },
     env: Record<string, string> | undefined,
   ): Record<string, string> | undefined;
-  scrubTitleGenerationEnv(
-    env: Record<string, string> | undefined,
-  ): Record<string, string> | undefined;
   scrubRelayUpdateConfigEnv(
     this: { pty: { isWithinAllowed(path: string): boolean } },
     env: Record<string, string>,
@@ -175,24 +172,7 @@ describe("remote agent spawn env authority clamp", () => {
     });
   });
 
-  it("keeps cosmetic title calls on provider auth without process controls", () => {
-    const titleScrub = (ZerosEngine.prototype as unknown as RelayScrubber)
-      .scrubTitleGenerationEnv;
-    expect(
-      titleScrub.call({} as ZerosEngine, {
-        OPENAI_API_KEY: "provider-secret",
-        OPENAI_BASE_URL: "https://gateway.example.test",
-        NODE_OPTIONS: "--require=/private/inject.cjs",
-        SHELL: "/private/shell",
-        CLAUDE_CODE_PROCESS_WRAPPER: "/private/wrapper",
-        MCP_TOKEN: "not-used-by-title",
-        ZEROS_CLOUD_TOKEN: "engine-secret",
-      }),
-    ).toEqual({
-      OPENAI_API_KEY: "provider-secret",
-      OPENAI_BASE_URL: "https://gateway.example.test",
-    });
-  });
+
 });
 
 describe("remote agent config env allowlist", () => {

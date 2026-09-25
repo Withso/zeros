@@ -1618,7 +1618,6 @@ describe("code-agent territory resolution", () => {
     const adapter = {
       agentId: "contained",
       listSessions: vi.fn(async () => ({ sessions: [] })),
-      generateText: vi.fn(async () => "A title"),
       dispose: vi.fn(async () => {}),
     } as unknown as AgentAdapter;
     (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
@@ -1628,11 +1627,7 @@ describe("code-agent territory resolution", () => {
 
     try {
       await gw.listSessions("contained", { cwd: primary });
-      await gw.generateTitle("contained", {
-        model: "test",
-        systemPrompt: "title",
-        prompt: "conversation",
-      });
+      await gw.listSessions("contained", { cwd: primary });
       await (
         gw as unknown as {
           runProviderProbeCommand(
@@ -1649,9 +1644,9 @@ describe("code-agent territory resolution", () => {
         { timeoutMs: 5_000 },
       );
 
-      // Session discovery and title generation intentionally reuse one
+      // Repeated session discovery intentionally reuses one
       // policy-identical utility boundary; the CLI probe has its own root.
-      expect(requests).toHaveLength(3);
+      expect(requests).toHaveLength(2);
       const registeredDesign = path.join(registered, "Zeros Design");
       for (const request of requests) {
         expect(request.actor).toBe("agent-code");

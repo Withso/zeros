@@ -77,8 +77,6 @@ const DEFAULT_EFFORT_KEY = "default-effort-by-family";
 const DEFAULT_PLAN_KEY = "default-plan-mode";
 /** Legacy global Fast cache, retained only as a migration input. */
 const DEFAULT_FAST_KEY = "default-fast-mode";
-/** The model used to auto-generate chat titles (Settings → Models → "Custom models"). */
-const CHAT_TITLE_MODEL_KEY = "chat-title-model";
 
 type EffortMap = Record<string, ChatEffort>;
 
@@ -139,107 +137,6 @@ export function rememberPermissionMode(
   setPermissionPreference(agentId, modeId);
   notify();
   mirrorModelsToSettings();
-}
-
-// ── Chat-title model ("Custom models" in Settings → Models) ──
-//
-// One global pick for the cheap model that writes AI chat titles from the
-// first prompt. The dropdown contains the three title models, with Haiku as
-// the default,
-// and CONNECTIVITY drives the actual call — when the picked model's agent
-// isn't connected, resolveChatTitleModel() falls down the fixed chain
-// Haiku → Luna → Composer 2.5 to the first connected one (no Claude ⇒
-// Luna; only Cursor ⇒ Composer 2.5). The Settings dropdown disables picks
-// whose agent isn't connected; the runtime chain covers a later
-// disconnect, and any remaining failure just leaves the seeded title.
-
-export type ChatTitleModelChoice =
-  | "claude-haiku-4-5"
-  | "gpt-5.6-luna"
-  | "composer-2.5";
-
-/** The Settings dropdown rows: value + display label + the agent family
- *  the option needs connected. Order IS the runtime fallback chain. */
-export const CHAT_TITLE_MODEL_OPTIONS: ReadonlyArray<{
-  value: ChatTitleModelChoice;
-  label: string;
-  family: string;
-}> = [
-  { value: "claude-haiku-4-5", label: "Haiku", family: "claude" },
-  { value: "gpt-5.6-luna", label: "Luna", family: "codex" },
-  { value: "composer-2.5", label: "Composer 2.5", family: "cursor" },
-];
-
-const DEFAULT_CHAT_TITLE_MODEL: ChatTitleModelChoice = "claude-haiku-4-5";
-
-/** Last-resort title model per chat-agent family — used only when the
- *  connectivity snapshot rules out the whole chain (the chat's own agent
- *  must be live: it just sent a message). */
-export const DEFAULT_TITLE_MODEL_BY_FAMILY: Record<string, string> = {
-  claude: "claude-haiku-4-5",
-  codex: "gpt-5.6-luna",
-  cursor: "composer-2.5",
-};
-
-function isChatTitleModelChoice(v: unknown): v is ChatTitleModelChoice {
-  return CHAT_TITLE_MODEL_OPTIONS.some((o) => o.value === v);
-}
-
-/** The saved chat-title model choice. Unset, unknown, or the retired
- *  "default" value all resolve to Haiku. */
-export function getChatTitleModel(): ChatTitleModelChoice {
-  const v = getSetting<string | null>(CHAT_TITLE_MODEL_KEY, null);
-  return isChatTitleModelChoice(v) ? v : DEFAULT_CHAT_TITLE_MODEL;
-}
-
-export function setChatTitleModel(choice: ChatTitleModelChoice): void {
-  setSetting(CHAT_TITLE_MODEL_KEY, choice);
-  notify();
-  mirrorModelsToSettings();
-}
-
-/** The system instruction for the one-shot title-generation call. The model's
- *  reply is used VERBATIM as the chat title, so the contract is strict: name
- *  the message, never answer it, and keep it to 2–3 words so the sidebar and
- *  tab strip never truncate. */
-export const CHAT_TITLE_SYSTEM_PROMPT = [
-  "You generate a short title for a chat based on the user's first message.",
-  "Reply with ONLY the title — your entire reply is used verbatim as the chat title.",
-  "The title must be a minimum of 2 words and a maximum of 3 words.",
-  "Capture the user's intent or topic in those 2–3 words.",
-  "Use plain sentence case. No quotes, no trailing punctuation, no emojis, no markdown.",
-  "Never answer, act on, or ask about the message itself — only name it.",
-  "If the message is unclear, still produce your best 2–3 word topic name.",
-].join(" ");
-
-/** The {family, model} a title-generation call for a chat on `agentId`
- *  should use. The saved pick wins when its agent is connected; otherwise
- *  fall down the chain (Haiku → Luna → Composer 2.5) to the first
- *  connected family. `connectedFamilies` null = connectivity unknown
- *  (agents snapshot not loaded yet) — trust the pick as saved. Null result
- *  only when even the chat's own agent has no catalog family
- *  (retired/unknown agents) — skip AI titling. */
-export function resolveChatTitleModel(
-  agentId: string | null | undefined,
-  connectedFamilies: ReadonlySet<string> | null = null,
-): { family: string; model: string } | null {
-  const choice = getChatTitleModel();
-  const chain = [
-    choice,
-    ...CHAT_TITLE_MODEL_OPTIONS.map((o) => o.value).filter((v) => v !== choice),
-  ];
-  for (const value of chain) {
-    const opt = CHAT_TITLE_MODEL_OPTIONS.find((o) => o.value === value);
-    if (!opt) continue;
-    if (connectedFamilies === null || connectedFamilies.has(opt.family)) {
-      return { family: opt.family, model: opt.value };
-    }
-  }
-  // Whole chain reads disconnected — distrust the snapshot over the chat
-  // itself (it JUST sent a message) and title through its own family.
-  const fam = agentFamily(agentId ?? null);
-  const model = DEFAULT_TITLE_MODEL_BY_FAMILY[fam];
-  return model ? { family: fam, model } : null;
 }
 
 /** Move the one global default-model star (agent + model atomically) and mirror
@@ -417,12 +314,8 @@ function buildModelsTable(): Record<string, unknown> {
     default_plan_mode: getDefaultPlanMode() ? true : null,
     // Legacy global Fast was migrated onto the selected exact model.
     default_fast_mode: null,
-    // The Haiku default drops out of the file (null deletes the key) —
-    // only a non-default pick persists, keeping the table clean.
-    chat_title_model:
-      getChatTitleModel() === DEFAULT_CHAT_TITLE_MODEL
-        ? null
-        : getChatTitleModel(),
+    // Retired provider title selection: remove it on the next preference save.
+    chat_title_model: null,
     claude_code: {
       // Legacy family effort was migrated onto the selected exact model.
       default_effort_level: null,
@@ -522,13 +415,6 @@ export function hydrateModelsFromSettings(
       // default authoritative. Additive legacy reads keep the cached choice.
       setDefaultAgentId(null);
     }
-    // Authoritative like the bools: a file without the key means Haiku
-    // (the mirror deletes the key for the default, so absence IS the
-    // value; a legacy "default" string also lands here → Haiku).
-    const title = isChatTitleModelChoice(m.chat_title_model)
-      ? m.chat_title_model
-      : DEFAULT_CHAT_TITLE_MODEL;
-    if (getChatTitleModel() !== title) setChatTitleModel(title);
     const plan = m.default_plan_mode === true;
     if (getDefaultPlanMode() !== plan) setDefaultPlanMode(plan);
     const claude = (m.claude_code as Record<string, unknown> | undefined)
@@ -605,7 +491,6 @@ export function hasModelDefaults(): boolean {
   if (getDefaultPlanMode()) return true;
   if (serializeModelPreferences().length > 0) return true;
   if (serializePermissionPreferences().length > 0) return true;
-  if (getChatTitleModel() !== DEFAULT_CHAT_TITLE_MODEL) return true;
   if (getClaudeIdleTimeoutMinutes() !== DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES)
     return true;
   if (getClaudeAutoMemoryEnabled() !== DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED)
@@ -645,24 +530,4 @@ export function useDefaultPlanMode(): [boolean, (on: boolean) => void] {
   }, []);
   const set = useCallback((next: boolean) => setDefaultPlanMode(next), []);
   return [on, set];
-}
-
-/** Hook: `[choice, setChoice]` for the chat-title model ("Custom models"). */
-export function useChatTitleModel(): [
-  ChatTitleModelChoice,
-  (choice: ChatTitleModelChoice) => void,
-] {
-  const [choice, setChoice] = useState<ChatTitleModelChoice>(getChatTitleModel);
-  useEffect(() => {
-    const sync = () => setChoice(getChatTitleModel());
-    listeners.add(sync);
-    return () => {
-      listeners.delete(sync);
-    };
-  }, []);
-  const set = useCallback(
-    (next: ChatTitleModelChoice) => setChatTitleModel(next),
-    [],
-  );
-  return [choice, set];
 }

@@ -166,10 +166,8 @@ import {
   useFavoritesVersion,
 } from "../agent/model-favorites";
 import {
-  CHAT_TITLE_MODEL_OPTIONS,
   mirrorModelsToSettings,
   starFavoriteModel,
-  useChatTitleModel,
   useDefaultPlanMode,
 } from "../agent/new-chat-defaults";
 import {
@@ -1176,7 +1174,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   // family's model in the new provider's Select.
   useFavoritesVersion();
   const [planDefault, setPlanDefault] = useDefaultPlanMode();
-  const [titleModel, setTitleModel] = useChatTitleModel();
   // Claude process lifetime and memory settings.
   const [claudeAutoMemoryEnabled, setClaudeAutoMemoryEnabled] =
     useClaudeAutoMemoryEnabled();
@@ -1237,12 +1234,6 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
       setCodexMemoryBusy(false);
     }
   };
-  // Families with a connected (runnable + enabled) agent — gates which
-  // "Custom models" picks are selectable (Haiku needs Claude, Luna needs
-  // Codex, Composer 2.5 needs Cursor). At runtime a disconnected pick
-  // falls down the Haiku → Luna → Composer chain to a connected one.
-  const connectedFamilies = new Set(modelAgents.map((a) => agentFamily(a.id)));
-
   // The one model a new chat opens on. Selecting it here moves the global star.
   const agentModels = effectiveAgentId
     ? modelsForAgent(effectiveAgentId, null)
@@ -1315,32 +1306,10 @@ function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
           </div>
         </SettingsRow>
         <SettingsRow
-          label="Custom models"
-          hint="Models used for generating chat titles"
+          label="Chat titles"
+          hint="Up to 500 characters of your first message are sent to OpenAI"
         >
-          <Select
-            value={titleModel}
-            onValueChange={(v) =>
-              setTitleModel(
-                v as (typeof CHAT_TITLE_MODEL_OPTIONS)[number]["value"],
-              )
-            }
-          >
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent className="min-w-[180px]">
-              {CHAT_TITLE_MODEL_OPTIONS.map((opt) => (
-                <SelectItem
-                  key={opt.value}
-                  value={opt.value}
-                  disabled={!connectedFamilies.has(opt.family)}
-                >
-                  {opt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <span className="text-fg2 text-xs">Automatic</span>
         </SettingsRow>
       </SettingsList>
 

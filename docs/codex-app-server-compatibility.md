@@ -213,8 +213,9 @@ projection; it does not expose a generic Codex capability bridge:
   relocates CODEX_HOME; see `shared/config-isolation.ts`). Codex starts MCP
   servers per `thread/start`, so a one-shot that issues bare RPCs — the memory,
   config, and quota reads, and `account/read` — starts none by construction. A
-  one-shot that DOES start a thread must disable them in `thread/start.config`;
-  `generateText` (chat titles) is the one such caller today.
+  one-shot that DOES start a thread must disable them in `thread/start.config`.
+  Chat titles now use the control plane and never start a Codex thread; see
+  [chat title generation](chat-titles.md).
 
   Normal Codex sessions keep the account Apps bridge (`codex_apps`) and Zeros'
   injected servers. Other native MCP servers remain explicitly scoped by the

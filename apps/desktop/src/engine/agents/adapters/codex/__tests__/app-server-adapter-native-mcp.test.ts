@@ -159,57 +159,6 @@ const configOfThreadStart = (index = 0): Record<string, unknown> =>
   (rt.startThreadParams[index] as { config?: Record<string, unknown> })
     ?.config ?? {};
 
-const generateTitle = (adapter: CodexAppServerAdapter) =>
-  adapter.generateText({
-    model: "gpt-5",
-    systemPrompt: "Name this chat.",
-    prompt: "hi",
-  });
-
-describe("CodexAppServerAdapter.generateText — native MCP stays out of a title", () => {
-  it("starts the title thread with every native MCP server disabled", async () => {
-    const adapter = makeAdapter();
-    rt.mcpServers = { node_repl: { command: "node" } };
-
-    await generateTitle(adapter);
-
-    expect(rt.startThreadParams[0]).toMatchObject({
-      config: {
-        mcp_servers: {
-          node_repl: { enabled: false, command: "zeros-disabled-mcp-server" },
-          codex_apps: { enabled: false, command: "zeros-disabled-mcp-server" },
-        },
-      },
-    });
-    // Names must come from the runtime that is about to start the thread:
-    // codex rejects a `mcp_servers.<unknown>` entry with no transport.
-    expect(rt.methodOrder.indexOf("config/read")).toBeLessThan(
-      rt.methodOrder.indexOf("thread/start"),
-    );
-  });
-
-  it("still disables codex's internal servers when the user has none", async () => {
-    const adapter = makeAdapter();
-
-    await generateTitle(adapter);
-
-    expect(rt.startThreadParams[0]).toMatchObject({
-      config: {
-        mcp_servers: {
-          codex_apps: { enabled: false, command: "zeros-disabled-mcp-server" },
-        },
-      },
-    });
-  });
-
-  it("does not start native MCP for a title when its configuration cannot be read", async () => {
-    const adapter = makeAdapter();
-    rt.configReadError = new Error("config/read timed out");
-    await expect(generateTitle(adapter)).rejects.toThrow("MCP configuration");
-    expect(rt.startThreadParams).toHaveLength(0);
-  });
-});
-
 describe("CodexAppServerAdapter native extension loading", () => {
   afterEach(() => vi.unstubAllEnvs());
 
@@ -328,9 +277,9 @@ describe("CodexAppServerAdapter native extension loading", () => {
 describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
   beforeEach(() => vi.stubEnv("ZEROS_NATIVE_MCP_PASSTHROUGH", "0"));
   afterEach(() => vi.unstubAllEnvs());
-  it.each(["chat", "title"] as const)(
-    "preserves a disabled HTTP transport when a plugin claims its name on a %s thread",
-    async (kind) => {
+  it(
+    "preserves a disabled HTTP transport when a plugin claims its name on a chat thread",
+    async () => {
       const codexHome = mkdtempSync(path.join(os.tmpdir(), "zeros-codex-mcp-"));
       const previousHome = process.env.CODEX_HOME;
       const manifest = path.join(
@@ -351,8 +300,7 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
           notes: { enabled: false, url: "https://notes.example/mcp" },
         };
 
-        if (kind === "chat") await adapter.newSession({ cwd: "/tmp/proj" });
-        else await generateTitle(adapter);
+        await adapter.newSession({ cwd: "/tmp/proj" });
 
         const servers = configOfThreadStart().mcp_servers as Record<
           string,
@@ -421,22 +369,6 @@ describe("CodexAppServerAdapter explicit native MCP opt-out", () => {
     expect(servers.local_tool).toEqual({
       enabled: false,
       command: "zeros-disabled-mcp-server",
-    });
-  });
-
-  it("keeps the http url on the title thread's disable fragment too", async () => {
-    const adapter = makeAdapter();
-    rt.mcpServers = { directus: { url: "https://directus.example.com/mcp" } };
-
-    await generateTitle(adapter);
-
-    const servers = configOfThreadStart().mcp_servers as Record<
-      string,
-      Record<string, unknown>
-    >;
-    expect(servers.directus).toEqual({
-      enabled: false,
-      url: "https://directus.example.com/mcp",
     });
   });
 

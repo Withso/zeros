@@ -457,12 +457,9 @@ export interface AgentKeyValidatedMessage extends BaseMessage {
   error?: string;
 }
 
-/** Background one-shot text generation for the AI chat-title feature: the
- *  renderer fires this right after a chat's FIRST user prompt, the engine
- *  makes a single no-tools call to the chat-title model (Settings → Models
- *  → "Custom models"), and the reply's text becomes the tab title. Headless
- *  by design — no session, no UI events, best-effort (a failure just leaves
- *  the snippet title in place). */
+/** Retired title-generation wire contract, retained for older renderers.
+ * Current engines return AGENT_TITLE_GENERATED with title=null without using
+ * these inputs. New clients use the authenticated /v1/chat-titles endpoint. */
 export interface AgentGenerateTitleMessage extends BaseMessage {
   type: "AGENT_GENERATE_TITLE";
   agentId: string;
@@ -477,9 +474,8 @@ export interface AgentGenerateTitleMessage extends BaseMessage {
   env?: Record<string, string>;
 }
 
-/** Reply to AGENT_GENERATE_TITLE. `title` is the model's raw reply text
- *  (renderer sanitizes/clamps), or null when the adapter has no one-shot
- *  support or the call failed — caller keeps the snippet title. */
+/** Compatibility reply to AGENT_GENERATE_TITLE. Current engines return null;
+ * older engines may return raw text. The caller retains its existing title. */
 export interface AgentTitleGeneratedMessage extends BaseMessage {
   type: "AGENT_TITLE_GENERATED";
   requestId: string;

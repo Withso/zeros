@@ -405,17 +405,6 @@ export interface AgentConfigurationCapabilityPort {
   }): Promise<AgentConfigurationProvenance>;
 }
 
-export interface AgentTextGenerationCapabilityPort {
-  generateText?(opts: {
-    model: string;
-    systemPrompt: string;
-    prompt: string;
-    env?: Record<string, string>;
-    timeoutMs?: number;
-    executionBoundary?: PreparedBoundary;
-  }): Promise<string>;
-}
-
 export interface AgentMemoryCapabilityPort {
   readSettings(opts: {
     cwd: string;
@@ -498,7 +487,6 @@ export interface AgentCapabilityPorts {
   readonly interaction?: AgentInteractionCapabilityPort;
   readonly account?: AgentAccountCapabilityPort;
   readonly configuration?: AgentConfigurationCapabilityPort;
-  readonly textGeneration?: AgentTextGenerationCapabilityPort;
   readonly memory?: AgentMemoryCapabilityPort;
   readonly goal?: AgentGoalCapabilityPort;
   readonly safety?: AgentSafetyCapabilityPort;
@@ -658,24 +646,6 @@ export interface AgentAdapter {
       executionBoundary?: PreparedBoundary;
     },
   ): Promise<{ ok: boolean | null; error?: string }>;
-
-  /** Background one-shot text generation (the AI chat-title call): send ONE
-   *  user prompt + a plain system instruction to `model` and return the
-   *  assistant's final text. Headless by contract — no persistent session,
-   *  no tools, no emit.* events, and it must ride the same auth a normal
-   *  chat spawn would (env carries the provider key when the user is in
-   *  API-key mode). Optional — the gateway returns title=null for adapters
-   *  without it and the caller keeps its fallback title. */
-  generateText?(opts: {
-    model: string;
-    systemPrompt: string;
-    prompt: string;
-    env?: Record<string, string>;
-    timeoutMs?: number;
-    /** One-shot provider processes are still code actors. The gateway always
-     * supplies a freshly admitted boundary and retires it after the call. */
-    executionBoundary?: PreparedBoundary;
-  }): Promise<string>;
 
   /** Change the model of a LIVE session without rebuilding it. Optional —
    *  only the Claude SDK adapter implements it today (`query.setModel`).
