@@ -537,8 +537,12 @@ to take an on-demand backup first, run the strict runner (which verifies every
 recorded checksum), confirm that nothing remains pending and delete the role.
 It reads `PLANETSCALE_ORG`, `PLANETSCALE_SERVICE_TOKEN_ID` and
 `PLANETSCALE_SERVICE_TOKEN`; use a token that reaches only the target database.
-At a release cut, run it for Beta and then Production, each immediately before
-promoting that channel's build.
+Grant that database `read_database`, `read_branch`, `read_backups`,
+`write_backups`, `connect_production_branch`,
+`create_production_branch_password` and `delete_production_branch_password`.
+Without `create_production_branch_password`, PlanetScale refuses the migration
+role with HTTP 403. At a release cut, run it for Beta and then Production, each
+immediately before promoting that channel's build.
 
 `pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
 closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish
