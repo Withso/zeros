@@ -164,7 +164,9 @@ explicitly with `CLOUD_WORKSPACE_PROVIDER=daytona`. Customer Daytona
 connections stay off unless `DAYTONA_BYO_ENABLED=true`. Managed Boat requires
 `BOAT_API_KEY`, a stable `BOAT_ACCOUNT_SCOPE`, `BOAT_BILLING_ORG`,
 `BOAT_SNAPSHOT_ID`, `BOAT_IMAGE_BUILD_SHA256`, and `CLOUD_WORKSPACE_STORAGE_MIB`
-from the measured image. Boat snapshot names are
+from the measured image. The
+[Boat image kit](../../scripts/cloud-workspace-validation/boat-image/README.md)
+builds, attests and saves a new image and prints those values. Boat snapshot names are
 mutable. The stored reference is `boat:<name>@sha256:<build-metadata-digest>`;
 setup verifies the exact attested metadata digest before launching. A replaced
 name cannot silently select a different qualified build.
