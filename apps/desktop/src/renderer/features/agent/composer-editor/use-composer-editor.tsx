@@ -88,16 +88,11 @@ import type {
   ComposerAttachmentPreview,
 } from "../composer-attachments";
 
-// The empty composer holds THREE lines of text-sm/leading-snug (3lh) — the
-// default composer height per design (2026-07-12; editor py removed the same
-// day — the composer card's own padding provides the breathing room). The
-// min-height lives on the .composer-pm contenteditable itself (not the
-// <EditorContent> wrapper) so the whole default area is editor: click
-// target, caret, and placeholder all in one element.
-const EDITOR_MIN_HEIGHT_CLASS = "min-h-[3lh]";
-// Pre-mount fallback equivalent: 3 × 19.25px lines plus the 4px wrapper pb
-// below, so the card doesn't jump when the editor mounts.
-const COMPOSER_FALLBACK_MIN_HEIGHT = 61.75;
+// 40px editor + 4px wrapper gap + 36px toolbar + 24px card padding + 2px
+// border = the shared 106px resting composer. Longer drafts still grow to the
+// scroll cap below. Keep the entire empty area editable and clickable.
+const EDITOR_MIN_HEIGHT_CLASS = "min-h-[40px]";
+const COMPOSER_FALLBACK_MIN_HEIGHT = 44;
 
 // The editable area caps at 200px tall, then scrolls IN PLACE. The cap +
 // overflow MUST live on the SAME element — the .composer-pm contenteditable

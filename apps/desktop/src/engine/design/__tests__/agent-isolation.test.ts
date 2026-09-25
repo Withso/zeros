@@ -131,18 +131,19 @@ describe("design workspace agent isolation", () => {
     const workbench = read("apps/desktop/src/renderer/shell/workbench/workbench-pane.tsx");
     expect(workbench).toContain("<RetainedDesignDeck");
     expect(appShell).toContain(
-      'useNewTabHotkeys(activePage === "workspace")',
+      'useNewTabHotkeys(activePage === "workspace" && workspaceToolsAvailable)',
     );
     // Design is a public workbench destination sharing the same conversation.
     expect(appShell).not.toContain("shouldShowBlockedDesignModePlaceholder");
     expect(appShell).not.toContain("DesignModeDisabledPanel");
     expect(appShell).not.toContain("designWorkspaceBlocked");
     expect(appShell).toContain(
-      "useWorkspacePrSync(activeWorkspace)",
+      "useWorkspacePrSync(workspaceToolsAvailable ? activeWorkspace : null)",
     );
-    expect(appShell).toMatch(
-      /worktreeMissing\s*&&\s*activeWorkspace\s*&&\s*activePage === "workspace"/,
-    );
+    expect(appShell).toContain("<ConversationPane");
+    expect(appShell).not.toContain("WorkspaceHistoryView");
+    expect(appShell).toContain("workspaceToolsAvailable && <WorkbenchPane");
+    expect(appShell).toContain("const workspaceToolsAvailable = !workspaceLoading && !historyOnly");
     expect(appShell).not.toContain("designMode=");
   });
 

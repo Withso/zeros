@@ -30,6 +30,8 @@ let preparationFails = false;
 let creationFails = false;
 let resumeInit: (() => void) | null = null;
 let initGate = Promise.resolve();
+let sourcePrGate = Promise.resolve();
+let releaseSourcePrs: ((error?: string) => void) | undefined;
 const agents = [
   {
     id: "claude",
@@ -70,6 +72,15 @@ const filesReady = new URLSearchParams(location.search).has("files")
   : Promise.resolve();
 Object.assign(window, {
   folderWorkspaceRequests: requests,
+  pauseFolderPrRead: () => {
+    sourcePrGate = new Promise<void>((resolve, reject) => {
+      releaseSourcePrs = (error) => error ? reject(new Error(error)) : resolve();
+    });
+  },
+  releaseFolderPrRead: (error?: string) => {
+    releaseSourcePrs?.(error);
+    sourcePrGate = Promise.resolve();
+  },
   setFolderPreparationFails: (fail: boolean) => {
     preparationFails = fail;
   },
@@ -171,6 +182,26 @@ setActiveBridge({
     }
     if (message.op === "workspace.setupInfo")
       result = { command: null, state: null, log: "" };
+    if (message.op === "git.listAllBranches") {
+      result = ["main", "feature/local"].map((name) => ({
+        name, tipSha: "fixture-sha", lastCommitDate: 1, origin: "unknown",
+        isCheckedOut: name === "main", worktreePath: name === "main" ? folder : null, prUrl: null,
+      }));
+    }
+    if (message.op === "git.repoBranchCatalog") {
+      const connected = Boolean(inspection.originUrl);
+      result = {
+        remotes: connected ? [{ name: "origin", url: inspection.originUrl, isGitHub: true }] : [],
+        effectiveRemote: "origin", remoteExists: connected, baseExplicit: false,
+        effectiveBase: "main", detectedDefault: connected ? "main" : null,
+        listedRemote: connected ? "origin" : null, branchSource: connected ? "remote" : "local",
+        branches: ["main", connected ? "feature/remote" : "feature/local"].map((name) => ({ name, lastCommitDate: 1 })),
+      };
+    }
+    if (message.op === "gh.prList") {
+      await sourcePrGate;
+      result = [{ number: 42, title: "Improve the project picker", headBranch: "feature/remote", url: "https://github.com/example/project/pull/42" }];
+    }
     if (message.op === "settings.resolve")
       result = { effective: {}, sources: {}, warnings: [] };
     if (message.op === "settings.read")

@@ -337,6 +337,8 @@ export const TurnFilePill = memo(function TurnFilePill({
 });
 
 interface TurnFooterProps {
+  /** Archived/missing workspaces expose saved metadata and copy only. */
+  readOnly?: boolean;
   surfaceActive?: boolean;
   chatId: string;
   /** Opening user-message id = the turn id. */
@@ -373,6 +375,7 @@ interface TurnFooterProps {
 }
 
 export const TurnFooter = memo(function TurnFooter({
+  readOnly = false,
   surfaceActive = true,
   chatId,
   turnId,
@@ -509,7 +512,7 @@ export const TurnFooter = memo(function TurnFooter({
   // never silent.
   const runReset = useCallback(async () => {
     setConfirmOpen(false);
-    if (resetting) return;
+    if (resetting || readOnly) return;
     setResetting(true);
     try {
       // If a LATER turn is still streaming, this reset truncates it too — abort
@@ -576,7 +579,7 @@ export const TurnFooter = memo(function TurnFooter({
     } finally {
       setResetting(false);
     }
-  }, [chatId, turnId, resetting, doUndo, sessions]);
+  }, [chatId, turnId, resetting, readOnly, doUndo, sessions]);
 
   // While the turn is still streaming, render nothing: the working group's
   // ActivityShimmer already shows the live elapsed timer (grey, text-fg2) at the
@@ -591,7 +594,7 @@ export const TurnFooter = memo(function TurnFooter({
   // may fail, or an edit may be a no-op). Only the engine's persisted
   // pre/post-snapshot diff may produce a pill. If that record is unavailable we
   // prefer no pill over a convincing but false one.
-  const files = turnFooterFiles(turn);
+  const files = readOnly ? [] : turnFooterFiles(turn);
   const shown = files.slice(0, visible);
   const remaining = files.length - shown.length;
   // Whether this selected turn's own files have a retained checkpoint. Later
@@ -616,7 +619,7 @@ export const TurnFooter = memo(function TurnFooter({
   });
   // The below-footer Continue row (last turn only).
   const continueReason =
-    isLastTurn && onContinue
+    !readOnly && isLastTurn && onContinue
       ? continuableStopReason(turn, fallbackStopReason)
       : null;
   return (
@@ -624,8 +627,8 @@ export const TurnFooter = memo(function TurnFooter({
       {cardFailure && (
         <TurnFailureCard
           failure={cardFailure}
-          onRetry={isLastTurn ? onRetry : undefined}
-          onRetryNewChat={isLastTurn ? onRetryNewChat : undefined}
+          onRetry={!readOnly && isLastTurn ? onRetry : undefined}
+          onRetryNewChat={!readOnly && isLastTurn ? onRetryNewChat : undefined}
           onRetryNewChatIntent={onRetryNewChatIntent}
         />
       )}
@@ -655,58 +658,60 @@ export const TurnFooter = memo(function TurnFooter({
             )}
           </button>
         </Tooltip>
-        <DropdownMenu>
-          <Tooltip label="Turn actions">
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                aria-label="Turn actions"
-                className={ICON_BTN}
-              >
-                <MoreHorizontal className="size-4" strokeWidth={2} />
-              </button>
-            </DropdownMenuTrigger>
-          </Tooltip>
-          <DropdownMenuContent
-            align="start"
-            className="w-52"
-            onCloseAutoFocus={(event) => {
-              if (!forkSelectedRef.current) return;
-              forkSelectedRef.current = false;
-              // The trigger belongs to the source tab, which the fork action
-              // just hid. Keep Radix from returning focus to that inert tree;
-              // the freshly active chat owns the next composer focus pass.
-              event.preventDefault();
-            }}
-          >
-            {onFork && (
-              <DropdownMenuItem
-                disabled={!forkEnabled}
-                onPointerEnter={onForkIntent}
-                onFocus={onForkIntent}
-                onSelect={() => {
-                  forkSelectedRef.current = true;
-                  onFork();
-                }}
-              >
-                <GitFork className="size-3.5" />
-                Fork to new tab
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem
-              disabled={resetting}
-              onSelect={() => {
-                // Defer so the menu finishes closing (and returns focus) before
-                // the dialog mounts and traps focus — avoids the Radix
-                // menu→dialog race that would otherwise dismiss the dialog.
-                window.setTimeout(() => setConfirmOpen(true), 0);
+        {!readOnly && (
+          <DropdownMenu>
+            <Tooltip label="Turn actions">
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  aria-label="Turn actions"
+                  className={ICON_BTN}
+                >
+                  <MoreHorizontal className="size-4" strokeWidth={2} />
+                </button>
+              </DropdownMenuTrigger>
+            </Tooltip>
+            <DropdownMenuContent
+              align="start"
+              className="w-52"
+              onCloseAutoFocus={(event) => {
+                if (!forkSelectedRef.current) return;
+                forkSelectedRef.current = false;
+                // The trigger belongs to the source tab, which the fork action
+                // just hid. Keep Radix from returning focus to that inert tree;
+                // the freshly active chat owns the next composer focus pass.
+                event.preventDefault();
               }}
             >
-              <RotateCcw className="size-3.5" />
-              Reset to this point
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+              {onFork && (
+                <DropdownMenuItem
+                  disabled={!forkEnabled}
+                  onPointerEnter={onForkIntent}
+                  onFocus={onForkIntent}
+                  onSelect={() => {
+                    forkSelectedRef.current = true;
+                    onFork();
+                  }}
+                >
+                  <GitFork className="size-3.5" />
+                  Fork to new tab
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem
+                disabled={resetting}
+                onSelect={() => {
+                  // Defer so the menu finishes closing (and returns focus) before
+                  // the dialog mounts and traps focus — avoids the Radix
+                  // menu→dialog race that would otherwise dismiss the dialog.
+                  window.setTimeout(() => setConfirmOpen(true), 0);
+                }}
+              >
+                <RotateCcw className="size-3.5" />
+                Reset to this point
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         {shown.map((f) => (
           <TurnFilePill
@@ -749,7 +754,7 @@ export const TurnFooter = memo(function TurnFooter({
         </div>
       )}
 
-      {confirmOpen && (
+      {!readOnly && confirmOpen && (
         <Dialog open onOpenChange={(o) => !o && setConfirmOpen(false)}>
           <DialogContent className="max-w-md">
             <DialogHeader>

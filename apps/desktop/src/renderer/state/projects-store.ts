@@ -23,6 +23,7 @@
 // keep working; users just see them grouped under their project.
 // ──────────────────────────────────────────────────────────
 
+import { forgetRepoHistoryPreference } from "./repo-history-preferences";
 import { getSetting, setSetting } from "../platform/settings";
 import { getActiveBridge } from "../platform/bridge/active-bridge";
 import { isWorktreePath } from "./workspace-resolution";
@@ -343,6 +344,7 @@ export function removeProject(projectId: string): void {
   const projects = loadProjects();
   const target = projects.find((p) => p.id === projectId);
   gitRevisions.delete(projectId);
+  forgetRepoHistoryPreference(projectId);
   const next = projects.filter((p) => p.id !== projectId);
   saveProjects(next);
   // Removing the LAST project must ALSO clear the backup. saveProjects() leaves

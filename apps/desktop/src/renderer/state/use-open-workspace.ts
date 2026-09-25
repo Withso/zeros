@@ -15,6 +15,7 @@ import { prepareChatView } from "../shell/conversation/chat-intent";
 import { resolveWorkspacePresentationKind } from "./workspace-resolution";
 import { pendingWorkspaceMode } from "./pending-workspaces";
 import type { WorkspaceListFilter } from "./workspace-list-filter";
+import { workspaceIsReadOnly } from "./workspace-history";
 
 interface OpenWorkspaceOptions {
   /** Publish a repository-filter change with the workspace destination in the
@@ -37,6 +38,7 @@ export function useOpenWorkspace(): (
   const sessions = useAgentSessions();
   return useCallback(
     (workspace: WorkspaceNavigationTarget, options?: OpenWorkspaceOptions) => {
+      const historyOnly = workspaceIsReadOnly(workspace);
       const presentationKind = resolveWorkspacePresentationKind({
         confirmedKind: workspace.kind,
         requestedKind: pendingWorkspaceMode(workspace.id),
@@ -46,8 +48,8 @@ export function useOpenWorkspace(): (
       // publishes the Design surface directly and never revives coding chat.
       // Pointer/focus intent normally starts these reads earlier; repeat here
       // for keyboard/programmatic navigation. Both paths dedupe by exact key.
-      prefetchWorkspaceSurface(workspace);
-      if (presentationKind === "design") {
+      if (!historyOnly) prefetchWorkspaceSurface(workspace);
+      if (presentationKind === "design" && !historyOnly) {
         // A previous build may have persisted coding chats for this path.
         // Keep those rows dormant and publish the design destination without a
         // chat identity so opening it can never resume the coding harness.
@@ -68,7 +70,7 @@ export function useOpenWorkspace(): (
       );
       if (fallbackId) {
         void sessions.hydrateChat(fallbackId);
-        prepareChatView(fallbackId);
+        if (!historyOnly) prepareChatView(fallbackId);
       }
       // Route + target become visible in one external-store snapshot. When no
       // chat exists yet, clearing the prior id and setting the new folder in
@@ -87,7 +89,7 @@ export function useOpenWorkspace(): (
       // A cold remembered target is visible immediately, but creating a chat
       // mutates durable data. Wait for its exact repository list to confirm the
       // worktree; Conversation pane's selection keeper spawns after resolution succeeds.
-      if (workspace.validationPending) return;
+      if (workspace.validationPending || historyOnly) return;
       void spawnDefaultChatForWorkspace({
         folder: workspace.path,
         sessions,

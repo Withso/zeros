@@ -43,6 +43,43 @@ beforeEach(() => {
 });
 
 describe("useOpenWorkspace", () => {
+  it.each([{ archivedAt: 100 }, { present: false }])(
+    "opens history without creating a chat or preparing a live surface: %j",
+    (availability) => {
+      selectChatToRestoreForFolder.mockReturnValue(null);
+      useOpenWorkspace()({
+        id: "history",
+        kind: "code",
+        path: "/workspaces/history",
+        repoRoot: "/repo",
+        ...availability,
+      });
+      expect(dispatch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "OPEN_WORKSPACE",
+          folder: "/workspaces/history",
+          chatId: null,
+        }),
+      );
+      expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
+      expect(prefetchWorkspaceSurface).not.toHaveBeenCalled();
+      expect(prepareChatView).not.toHaveBeenCalled();
+    },
+  );
+
+  it("hydrates the saved chat for a missing workspace without preparing an agent view", () => {
+    selectChatToRestoreForFolder.mockReturnValue("saved-chat");
+    useOpenWorkspace()({
+      id: "history",
+      path: "/workspaces/history",
+      repoRoot: "/repo",
+      present: false,
+    });
+    expect(hydrateChat).toHaveBeenCalledWith("saved-chat");
+    expect(prepareChatView).not.toHaveBeenCalled();
+    expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
+  });
+
   it("opens a public Design destination directly", () => {
     useOpenWorkspace()({
       id: "ws_design",

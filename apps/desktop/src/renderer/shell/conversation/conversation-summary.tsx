@@ -45,17 +45,20 @@ const SummaryContext = createContext<SummaryState | null>(null);
 /** Only the small summary consumers subscribe to presentation changes. The
  * pane tree and its portaled transcript keep their identity on every toggle. */
 export function ConversationSummaryProvider({
+  enabled = true,
   workbenchCollapsed,
   onRevealWorkbench,
   children,
 }: {
+  enabled?: boolean;
   workbenchCollapsed: boolean;
   onRevealWorkbench: () => void;
   children: React.ReactNode;
 }) {
   const { workspace, folder } = useActiveWorkspace();
   const layout = usePaneLayout(folder);
-  const active = useWorkspaceStore((state) => state.activePage === "workspace");
+  const active =
+    useWorkspaceStore((state) => state.activePage === "workspace") && enabled;
   const cwd = active ? (folder ?? "") : "";
   const [anchor, setAnchor] = useState<HTMLSpanElement | null>(null);
   const [paneWidth, setPaneWidth] = useState(0);

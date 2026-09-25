@@ -182,6 +182,36 @@ describe("repository workspace restoration", () => {
     expect(resolved).toBeNull();
   });
 
+  it.each([
+    { archivedAt: null, present: false },
+    { archivedAt: 200, present: true },
+  ])(
+    "does not reopen a remembered history row on repository switch: %j",
+    (state) => {
+      const history = workspace("history", {
+        ...state,
+        path: "/repo/.worktrees/history",
+      });
+      const available = workspace("available", { archivedAt: null });
+      for (const rememberedFolder of [history.path, `${history.path}/src`]) {
+        expect(
+          resolveRepoWorkspaceDestination({
+            project,
+            rememberedFolder,
+            cachedWorkspaces: [history],
+          }),
+        ).toBeNull();
+        expect(
+          resolveRepoWorkspaceDestination({
+            project,
+            rememberedFolder,
+            cachedWorkspaces: [history, available],
+          }),
+        ).toBe(available);
+      }
+    },
+  );
+
   it("preserves a cold remembered design path like any other folder (mode model)", () => {
     // Design-MODE rows are ordinary public destinations. The cold remembered
     // identity is kept pending validation exactly as for a code folder.
@@ -236,6 +266,21 @@ describe("leftmostLiveWorkspace", () => {
     const archived = workspace("archived", { createdAt: 1 });
     const live = workspace("live", { archivedAt: null, createdAt: 100 });
     expect(leftmostLiveWorkspace([archived, live])).toBe(live);
+  });
+
+  it("skips missing folders when a repository is re-added", () => {
+    const missing = workspace("missing", {
+      archivedAt: null,
+      present: false,
+      createdAt: 1,
+    });
+    const live = workspace("live", {
+      archivedAt: null,
+      present: true,
+      createdAt: 100,
+    });
+    expect(leftmostLiveWorkspace([missing, live])).toBe(live);
+    expect(leftmostLiveWorkspace([missing])).toBeNull();
   });
 
   it("returns null for an all-archived repo", () => {
@@ -877,6 +922,12 @@ describe("archived workspace filtering", () => {
       archivedAt: 400,
     }),
   ];
+
+  it("includes missing workspaces in archive search without changing their lifecycle", () => {
+    const missing = workspace("missing", { archivedAt: null, present: false });
+    expect(filterArchivedWorkspaces([...rows, missing], "zeros", "missing")).toEqual([missing]);
+    expect(missing.archivedAt).toBeNull();
+  });
 
   it("strips the generated branch prefix for display", () => {
     expect(workspaceLabel(rows[0]!)).toBe("older");

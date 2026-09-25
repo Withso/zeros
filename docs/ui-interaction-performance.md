@@ -100,6 +100,29 @@ Two rules that pattern enforces:
 - **Opening a surface is not an invalidation.** A dropdown open, tab switch, or component remount reads the cached snapshot and revalidates only past the key's freshness window. Only real change signals (DB change bus, `notifyWorkspacesChanged`, an explicit user Refresh, a bridge *re*connect) force a read. `onActiveBridgeConnected` reports `initial: true` for its subscribe-time fire — treat that as "revalidate if stale", never "force".
 - **Results that survive restarts should be persisted.** Expensive, rarely-changing detections (e.g. the automatic repository icon in `apps/desktop/src/renderer/features/repositories/repository-icons.ts`) persist to settings storage and revalidate at most once per app session, so a cold start renders them with zero fetches.
 
+### Create workspace source selection
+
+Create's project, source and Code/Design controls share one row above the prompt,
+with mode aligned right and long labels truncated in narrow windows. The project
+picker also owns Open project, Open GitHub project and Start from scratch. The source
+picker separates local branches from the configured remote's branches, shows
+the actual default branch, and retains each tab's confirmed rows independently
+of GitHub requests. Issues remain unavailable until issue creation is supported.
+Catalog keys include the checkout root and observed origin; local branch keys
+include the checkout root and repository slug. Intent warms local metadata;
+only the selected project refreshes its remote catalog. Ref-change signals
+refresh local metadata without recursively triggering another network fetch.
+The shell's persistent settings listener invalidates both catalogs even while
+Create is unmounted; inactive catalogs wait for their next consumer to refresh.
+
+An explicit source selection belongs to its project/root/origin and cannot
+carry over to a different owner. Branch selections send fully qualified Git
+refs to distinguish local and remote namesakes, while workspace metadata retains
+plain base branch names. Choosing the default leaves base resolution to the
+engine, preserving its fresh-remote and offline fallback behavior. Both Create
+and workspace prompt cards rest at 106px with 18px corners; longer prompts grow
+to the editor's existing 200px scrolling cap.
+
 ### 2.1 Preserve Git's index/worktree semantics
 
 Git status is a two-column state machine, not one changed-file list. Each Changes

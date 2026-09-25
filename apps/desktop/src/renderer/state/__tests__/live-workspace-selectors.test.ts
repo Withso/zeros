@@ -53,14 +53,16 @@ describe("selectLiveVisible", () => {
     expect(out.map((w) => w.id)).toEqual(["a", "c"]);
   });
 
-  it("KEEPS present === false (orphaned) so counts stay consistent", () => {
+  it("excludes missing workspaces from active lists and counts without removing their records", () => {
     const orphan = ws({ id: "o", present: false });
     const out = selectLiveVisible([orphan]);
-    expect(out.map((w) => w.id)).toEqual(["o"]);
+    expect(out).toEqual([]);
+    expect(countLiveVisibleBySlug([orphan], []).get(orphan.repoSlug)).toBe(0);
+    expect(orphan.archivedAt).toBeNull();
   });
 
   it("returns the SAME array reference when nothing is filtered", () => {
-    const rows = [ws({ id: "a" }), ws({ id: "b", present: false })];
+    const rows = [ws({ id: "a" }), ws({ id: "b", present: true })];
     expect(selectLiveVisible(rows)).toBe(rows);
     expect(selectLiveVisible(rows, { unrelated: 1 })).toBe(rows);
   });

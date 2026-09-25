@@ -216,6 +216,9 @@ import {
 import {
   deleteWorkspaceSnapshot,
   recoverMissingWorkspace,
+  getWorkspaceRecoveryInfo,
+  locateWorkspaceFolder,
+  reconcileReaddedRepoWorkspaces,
 } from "../git/worktree";
 import { readWorkspaceFile, isSensitiveRepoPath } from "../files/read-file";
 import { writeWorkspaceFile } from "../files/write-file";
@@ -291,6 +294,7 @@ import {
   renameRepoByRoot,
   bulkUpsertRepos,
   isKnownRepoRoot,
+  isRemovedRepoRoot,
   listKnownRepoRoots,
 } from "../db/projects";
 import {
@@ -2931,6 +2935,7 @@ export class WorkspaceService {
       case "project.upsert": {
         const repoRoot = reqStr(params, "repoRoot");
         assertRemoteRepoRootAllowed(repoRoot, remote);
+        if (isRemovedRepoRoot(repoRoot)) await reconcileReaddedRepoWorkspaces(repoRoot);
         upsertRepoByRoot({
           repoRoot,
           repoSlug: optStr(params, "repoSlug"),
@@ -2962,6 +2967,9 @@ export class WorkspaceService {
           .filter((p) => p.repoRoot);
         // Fail-closed: a remote batch with ANY path outside ~ is rejected whole.
         for (const r of rows) assertRemoteRepoRootAllowed(r.repoRoot, remote);
+        for (const row of rows) {
+          if (isRemovedRepoRoot(row.repoRoot)) await reconcileReaddedRepoWorkspaces(row.repoRoot);
+        }
         bulkUpsertRepos(rows);
         return { ok: true };
       }
@@ -4933,6 +4941,13 @@ export class WorkspaceService {
       }
       case "workspace.recover":
         return recoverMissingWorkspace(reqStr(params, "workspaceId"));
+      case "workspace.recoveryInfo":
+        return getWorkspaceRecoveryInfo(reqStr(params, "workspaceId"));
+      case "workspace.locate":
+        return locateWorkspaceFolder(
+          reqStr(params, "workspaceId"),
+          reqStr(params, "path"),
+        );
       case "workspace.deleteSnapshot": {
         const archivedAt = params.archivedAt;
         if (

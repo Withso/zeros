@@ -29,12 +29,7 @@
 // subprocess at composer-focus time (handled by AgentChat).
 // ──────────────────────────────────────────────────────────
 
-import React, {
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   useChatById,
   usePendingAutoSend,
@@ -92,11 +87,15 @@ export function ChatView({
   chatId,
   surfaceActive = true,
   preparing = false,
+  readOnly = false,
+  composerReplacement,
 }: {
   chatId: string;
   surfaceActive?: boolean;
   /** True only while pointer/focus intent is building a hidden cold view. */
   preparing?: boolean;
+  readOnly?: boolean;
+  composerReplacement?: React.ReactNode;
 }) {
   // Split panes (2026-07-17): the displayed chat is an explicit prop —
   // each pane passes its own — instead of the global active chat (the
@@ -117,7 +116,7 @@ export function ChatView({
   const resolvedCwd = useChatCwd();
   // A binding made before the registry answered is a guess. Correct it here —
   // this hook outlives AutoBindAgent, which unmounts the instant it binds.
-  useProvisionalBindingReconcile(active);
+  useProvisionalBindingReconcile(active, !readOnly);
 
   if (!active) {
     // EmptyComposer (the no-chat "start a new chat" landing) no longer exists
@@ -141,7 +140,7 @@ export function ChatView({
   // The hydration step in app-shell.tsx already backfills persisted
   // records, so this branch only catches edge cases (a brand-new
   // chat created elsewhere, a corrupted record bypassing migration).
-  if (!active.agentId) {
+  if (!readOnly && !active.agentId) {
     return <AutoBindAgent chat={active} />;
   }
 
@@ -152,7 +151,7 @@ export function ChatView({
   // the resolved default. Gated on a loaded registry (isRemovedAgent
   // returns false while `agents` is null) so a cold start can't flash
   // this over a still-resolving agent.
-  if (isRemovedAgent(active.agentId, agents)) {
+  if (!readOnly && active.agentId && isRemovedAgent(active.agentId, agents)) {
     return (
       <AgentRemovedPanel
         agentId={active.agentId}
@@ -178,18 +177,20 @@ export function ChatView({
   // whose folder never resolved, an all-workspaces-closed state — and
   // shows a pick-a-folder panel instead. Binding a folder flips cwd
   // non-empty and re-renders into ChatBody, which spawns normally.
-  if (!cwd) {
+  if (!readOnly && !cwd) {
     return <NoFolderPanel chatId={active.id} />;
   }
 
   return (
     <ChatBody
       chatId={active.id}
-      agentId={active.agentId}
-      agentName={active.agentName ?? active.agentId}
+      agentId={active.agentId ?? ""}
+      agentName={active.agentName ?? active.agentId ?? ""}
       cwd={cwd}
       surfaceActive={surfaceActive}
       preparing={preparing}
+      readOnly={readOnly}
+      composerReplacement={composerReplacement}
     />
   );
 }
@@ -274,7 +275,10 @@ function AutoBindAgent({ chat }: { chat: ChatThread }) {
  *  A chat that already minted a session keeps its guess: swapping the agent
  *  under a live session is worse than an imperfect first pick, and the pill
  *  lets the user move it. */
-function useProvisionalBindingReconcile(chat: ChatThread | null): void {
+function useProvisionalBindingReconcile(
+  chat: ChatThread | null,
+  enabled: boolean,
+): void {
   const dispatch = useWorkspaceDispatch();
   const { agentId: starredId } = useDefaultAgent();
   const { isEnabled } = useEnabledAgents();
@@ -297,14 +301,22 @@ function useProvisionalBindingReconcile(chat: ChatThread | null): void {
   // repeated failures keep publishing the same `[]`, which React bails out of —
   // so this retries when the array actually changes or the bridge reconnects.
   useEffect(() => {
+    if (!enabled) return;
     if (hasConfirmedAgents() || bridgeStatus !== "connected") return;
     void loadAgents((force) => sessions.listAgents(force)).catch(() => {
       /* still unconfirmed; the next snapshot or bridge flip tries again */
     });
-  }, [agents, bridgeStatus, sessions]);
+  }, [enabled, agents, bridgeStatus, sessions]);
 
   useEffect(() => {
-    if (!agents || !hasConfirmedAgents() || !chatId || !boundAgentId) return;
+    if (
+      !enabled ||
+      !agents ||
+      !hasConfirmedAgents() ||
+      !chatId ||
+      !boundAgentId
+    )
+      return;
     // The provisional record is ONE-SHOT. Reading it against a list the cache
     // never confirmed would spend a chat's only chance at repair on the very
     // registry that cannot repair anything.
@@ -331,6 +343,7 @@ function useProvisionalBindingReconcile(chat: ChatThread | null): void {
       updates: settings,
     });
   }, [
+    enabled,
     agents,
     boundAgentId,
     chatId,
@@ -348,6 +361,8 @@ function ChatBody({
   cwd,
   surfaceActive,
   preparing,
+  readOnly,
+  composerReplacement,
 }: {
   chatId: string;
   agentId: string;
@@ -355,14 +370,17 @@ function ChatBody({
   cwd: string;
   surfaceActive: boolean;
   preparing: boolean;
+  readOnly: boolean;
+  composerReplacement?: React.ReactNode;
 }) {
   const dispatch = useWorkspaceDispatch();
   const pendingAutoSend = usePendingAutoSend(chatId);
   const workspaceProvisioning = useWorkspaceProvisioning(cwd);
   const session = useChatSession(
     chatId,
-    surfaceActive || preparing || pendingAutoSend,
+    surfaceActive || (!readOnly && (preparing || pendingAutoSend)),
   );
+  const [historyError, setHistoryError] = useState<string | null>(null);
   // Keep only this persistence-critical scalar live while the expensive
   // retained transcript is parked. A session created just before a workspace
   // switch must still be linked to its chat even if the chat is never revealed
@@ -428,12 +446,12 @@ function ChatBody({
     );
   }
   useEffect(() => {
-    if (composerHasText) return;
+    if (readOnly || composerHasText) return;
     return subscribeToLiveChatDrafts((draftChatId, draft) => {
       if (draftChatId !== chatId || !liveChatDraftHasText(draft)) return;
       setComposerHasText(true);
     });
-  }, [chatId, composerHasText]);
+  }, [chatId, composerHasText, readOnly]);
 
   // Initial spawn (idempotent). ensureSession short-circuits if the
   // same (chatId, agentId) pair is already ready. When the chat has a
@@ -446,6 +464,7 @@ function ChatBody({
   // Workbench's longer presentation-only settling window is deliberately not a
   // session gate.
   useEffect(() => {
+    if (readOnly && !surfaceActive) return;
     if (!surfaceActive && !pendingAutoSend) {
       // Intent-prepared chats build transcript/composer DOM from disk, but a
       // hover must never spawn or resume an agent subprocess.
@@ -456,7 +475,7 @@ function ChatBody({
       }
       return;
     }
-    if (workspaceProvisioning) return;
+    if (!readOnly && workspaceProvisioning) return;
     let cancelled = false;
     // AWAIT the disk hydrate BEFORE spawning/resuming. loadIntoChat /
     // ensureSession reset the slot with `messages: existing?.messages ?? []`;
@@ -470,6 +489,8 @@ function ChatBody({
     void (async () => {
       await session.hydrateChat();
       if (cancelled) return;
+      setHistoryError(null);
+      if (readOnly) return;
 
       // Provider already has a live session for this chat — nothing to do.
       // Re-read fresh after the await rather than the captured snapshot.
@@ -583,7 +604,11 @@ function ChatBody({
         }
       }
       envKeyRef.current = envKey;
-    })();
+    })().catch((error) => {
+      if (!readOnly) throw error;
+      if (!cancelled && readOnly)
+        setHistoryError("Couldn't load chat history.");
+    });
     return () => {
       cancelled = true;
     };
@@ -591,6 +616,7 @@ function ChatBody({
     // on every render or when session internals shuffle.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    readOnly,
     chatId,
     agentId,
     cwd,
@@ -610,7 +636,7 @@ function ChatBody({
   // Persist only the provider binding. The Zeros execution id stays in the
   // live session store and is intentionally absent from durable chat state.
   useEffect(() => {
-    if (!chat) return;
+    if (readOnly || !chat) return;
     const binding = liveProviderBinding;
     const providerMetadataChanged =
       liveProviderMetadata !== null &&
@@ -633,7 +659,14 @@ function ChatBody({
         },
       });
     }
-  }, [chatId, liveProviderBinding, liveProviderMetadata, chat, dispatch]);
+  }, [
+    readOnly,
+    chatId,
+    liveProviderBinding,
+    liveProviderMetadata,
+    chat,
+    dispatch,
+  ]);
 
   // Respawn when the user changes model/effort — but ONLY for an agent that
   // cannot absorb the change live (see agent/live-config-support.ts).
@@ -659,7 +692,7 @@ function ChatBody({
   // never landed — see the appliedChatEnvKey stamp, which is deliberately only
   // written when the agent really applied it.
   useEffect(() => {
-    if (!surfaceActive) return;
+    if (readOnly || !surfaceActive) return;
     if (envKey === envKeyRef.current) return;
     // Bail BEFORE stamping (2026-07-13 fix): stamping first meant a change
     // that landed while `chat` was momentarily null was recorded as applied
@@ -679,7 +712,7 @@ function ChatBody({
       force: true,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [envKey, surfaceActive]);
+  }, [envKey, surfaceActive, readOnly]);
 
   // Auto-retry on bridge reconnect. The chat lands in `failed` state
   // when its initial load hits a transient bridge error (queue full
@@ -693,11 +726,13 @@ function ChatBody({
   useEffect(() => {
     const prev = lastBridgeStatusRef.current;
     lastBridgeStatusRef.current = bridgeStatus;
+    if (readOnly) return;
     if (!surfaceActive && !pendingAutoSend) return;
     if (prev === "connected" || bridgeStatus !== "connected") return;
     if (!chat) return;
     if (session.status !== "failed" && session.status !== "reconnecting")
       return;
+    let cancelled = false;
     const env = envForChat(chat, session.initialize);
     const persistedProviderBinding =
       (chat.providerBinding?.providerId === agentId
@@ -720,14 +755,18 @@ function ChatBody({
       void sessions
         .loadIntoChat(chatId, agentId, null, { agentName, cwd, env })
         .then((adopted) => {
-          if (adopted) return;
+          if (cancelled || adopted) return;
           void session.ensureSession(agentId, { agentName, cwd, env });
         });
     }
+    return () => {
+      cancelled = true;
+    };
     // We deliberately exclude `session` from deps — its identity
     // changes on every state update and would re-fire this loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    readOnly,
     bridgeStatus,
     chatId,
     agentId,
@@ -738,13 +777,22 @@ function ChatBody({
   ]);
 
   return (
-    <AgentChat
-      session={session}
-      onBack={() => session.reset()}
-      headerActions={<></>}
-      chatId={chatId}
-      surfaceActive={surfaceActive}
-      workspaceProvisioning={workspaceProvisioning}
-    />
+    <>
+      {readOnly && historyError && (
+        <p className="text-red-fg px-7 py-2 text-xs" role="alert">
+          {historyError}
+        </p>
+      )}
+      <AgentChat
+        readOnly={readOnly}
+        composerReplacement={composerReplacement}
+        session={session}
+        onBack={() => session.reset()}
+        headerActions={<></>}
+        chatId={chatId}
+        surfaceActive={surfaceActive}
+        workspaceProvisioning={workspaceProvisioning}
+      />
+    </>
   );
 }

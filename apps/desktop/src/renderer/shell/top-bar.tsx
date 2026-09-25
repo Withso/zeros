@@ -7,6 +7,12 @@
 
 // --- IMPORTS ---
 
+import { useWarmWorkspaceHistory } from "../state/use-warm-workspace-history";
+import {
+  selectWorkspaceHistory,
+  workspaceIsReadOnly,
+} from "../state/workspace-history";
+import { useActiveWorkspace } from "../state/use-active-workspace";
 import { AgentActivityIndicator } from "../features/agent/agent-activity-indicator";
 import React, {
   useCallback,
@@ -67,10 +73,7 @@ import {
   useWorkspaceDispatch,
   useWorkspaceStore,
 } from "../state/store";
-import {
-  restoreWorkspaceWithFeedback,
-  useArchiveWorkspace,
-} from "../state/archive-actions";
+import { useArchiveWorkspace } from "../state/archive-actions";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import {
   notifyProjectsChanged,
@@ -1179,17 +1182,20 @@ function archivedAge(workspace: Workspace): string {
 }
 
 function ArchivedWorkspacePicker({ project }: { project: Project }) {
+  const warmHistory = useWarmWorkspaceHistory();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [restoringId, setRestoringId] = useState<string | null>(null);
   const openWorkspace = useOpenWorkspace();
   const activeOrganization = useActiveOrganization();
-  const { workspaces, loading, error, refresh } = useArchivedWorkspaces(
-    project.repoSlug,
-  );
+  const { workspaces, loading, error, refresh } = useArchivedWorkspaces();
+  const { workspaces: live } = useWorkspacesFor(project.repoSlug);
   const accessibleWorkspaces = useMemo(
-    () => filterRowsForOrganization(workspaces, activeOrganization),
-    [activeOrganization, workspaces],
+    () =>
+      filterRowsForOrganization(
+        selectWorkspaceHistory(live, workspaces),
+        activeOrganization,
+      ),
+    [activeOrganization, live, workspaces],
   );
 
   const allForProject = useMemo(
@@ -1285,28 +1291,19 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
                   <button
                     type="button"
                     key={workspace.id}
+                    onPointerEnter={() => warmHistory(workspace)}
+                    onFocus={() => warmHistory(workspace)}
                     className={cn(
                       "hover:bg-bg2 flex w-full min-w-0 items-center gap-2 px-2 py-2 text-left disabled:pointer-events-none disabled:opacity-60",
                       MENU_ITEM_RADIUS,
                     )}
                     role="listitem"
-                    disabled={restoringId !== null}
                     onClick={() => {
-                      if (restoringId) return;
-                      setRestoringId(workspace.id);
-                      void restoreWorkspaceWithFeedback(workspace, {
-                        label: workspaceLabel(workspace),
-                        onSettled: () => setRestoringId(null),
-                        onRestored: (result) => {
-                          setOpen(false);
-                          openWorkspace(result.workspace);
-                        },
-                      });
+                      setOpen(false);
+                      openWorkspace(workspace);
                     }}
                   >
-                    {restoringId === workspace.id ? (
-                      <ZerosSpinner size={14} />
-                    ) : workspace.kind === "design" ? (
+                    {workspace.kind === "design" ? (
                       <PenTool
                         className="text-fg2 size-3.5 shrink-0"
                         strokeWidth={1.25}
@@ -1324,7 +1321,9 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
                         {workspaceLabel(workspace)}
                       </div>
                       <div className="text-fg2 truncate text-xs">
-                        {archivedAge(workspace)}
+                        {workspace.archivedAt == null
+                          ? "Folder missing"
+                          : archivedAge(workspace)}
                       </div>
                     </div>
                   </button>
@@ -1341,6 +1340,7 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
 // --- ROOT COMPONENT ---
 
 export function TopBar() {
+  const activeResolution = useActiveWorkspace();
   const chats = useChats();
   const workspaceActivityByFolder = useWorkspaceActivityByFolder();
   const activePage = useActivePage();
@@ -1657,11 +1657,13 @@ export function TopBar() {
       activeFolder === activeProject.repoRoot ||
       activeProjectLoading ||
       activeProjectRefreshing ||
+      activeResolution.loading ||
       peekWorkspacesFor(activeProject.repoSlug) === undefined
     ) {
       return;
     }
     if (
+      workspaceIsReadOnly(activeResolution.workspace) ||
       (mainWorkspace &&
         findWorkspaceForFolder(activeFolder, [mainWorkspace])) ||
       findWorkspaceForFolder(activeFolder, activeProjectAccessibleWorkspaces)
@@ -1699,6 +1701,8 @@ export function TopBar() {
   }, [
     activeFolder,
     activeFolderProvisioning,
+    activeResolution.loading,
+    activeResolution.workspace,
     activePage,
     activeProject,
     activeProjectAccessibleWorkspaces,

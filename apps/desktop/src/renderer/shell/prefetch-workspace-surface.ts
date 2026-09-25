@@ -3,6 +3,7 @@
 // urgent OPEN_WORKSPACE state change.
 
 import type { Workspace } from "@/renderer/platform/git";
+import { workspaceIsReadOnly } from "../state/workspace-history";
 import {
   workbenchScopeForFolder,
   useWorkspaceStore,
@@ -27,7 +28,7 @@ import { warmDesignWorkspaceSnapshot } from "@/renderer/features/design-workspac
 /** Complete identity needed to navigate before an authoritative workspace list
  * is warm. Engine Workspace rows satisfy this shape directly. */
 export type WorkspaceNavigationTarget = Pick<Workspace, "path" | "repoRoot"> &
-  Partial<Pick<Workspace, "id" | "kind" | "prNumber">> & {
+  Partial<Pick<Workspace, "id" | "kind" | "prNumber" | "archivedAt" | "present">> & {
     /** The target came from durable memory while its repo list was cold. */
     validationPending?: boolean;
   };
@@ -35,6 +36,7 @@ export type WorkspaceNavigationTarget = Pick<Workspace, "path" | "repoRoot"> &
 export function prefetchWorkspaceSurface(
   workspace: WorkspaceNavigationTarget,
 ): void {
+  if (workspaceIsReadOnly(workspace)) return;
   const folder = workspace.path;
   if (!folder) return;
   warmWorkspaceFiles(folder);

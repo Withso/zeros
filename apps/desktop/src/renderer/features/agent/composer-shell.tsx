@@ -6,20 +6,22 @@
 // <ComposerShell>, <ComposerTextarea>, and <ComposerToolbar>. Call sites now
 // use the canonical AI Elements `PromptInput` recipe,
 // sites, and the TipTap composer later replaced the autosize hook +
-// height constants. Only the canonical file-accept string survives.
+// height constants. The file-accept string and surface geometry live here.
 //
 // Public API:
 //   COMPOSER_FILE_ACCEPT    — canonical accept= string for the file picker
+//   COMPOSER_SURFACE_RADIUS — 18px corners for Create and workspace composers
 //   PROMPT_SURFACE_RADIUS   — 12px corners shared by the prompt surfaces
 // ──────────────────────────────────────────────────────────
 
 export const COMPOSER_FILE_ACCEPT =
   ""; // All formats are selectable; the shared policy explains excluded files.
 
-/** 12px corners for the three surfaces a user prompt lives on — the bottom
- *  composer card, the inline edit composer that replaces a sent message, and
- *  the sent user-message bubble itself. They share one radius so a prompt
- *  keeps its shape as it moves between them.
+/** Create and workspace composers use the requested 18px corner geometry.
+ * Sent messages and inline edits retain their existing prompt shape. */
+export const COMPOSER_SURFACE_RADIUS = "rounded-[18px]";
+
+/** 12px corners for sent user messages and their inline edit composer.
  *
  *  DERIVED from the radius scale (1.5 × --radius-lg) exactly like
  *  menu-surface.ts's 16px dropdown surface and settings-ui.tsx's

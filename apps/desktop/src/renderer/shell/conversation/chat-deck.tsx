@@ -26,15 +26,50 @@ import { usePanePortalsStore } from "./pane-portal-store";
 import { useRetainedViewKeySet } from "../use-retained-view-keys";
 import { usePreparedChatId } from "./chat-intent";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import type { Workspace } from "../../platform/git";
+import {
+  useArchivedWorkspaces,
+  useLiveWorkspaces,
+  useProjects,
+} from "../../state/use-projects";
+import { readOnlyWorkspaceForFolder } from "../../state/workspace-history";
+import { WorkspaceHistoryBar } from "../workspace-history-bar";
 
 const MAX_RETAINED_CHAT_VIEWS = 12;
 
-export function ChatDeck() {
+export function ChatDeck({
+  workspace = null,
+}: { workspace?: Workspace | null } = {}) {
   const sessions = useAgentSessions();
-  const chats = useWorkspaceStore(
+  const allChats = useWorkspaceStore(
     useShallow((state) =>
-      state.chats.filter((chat) => chat.kind !== "terminal" && !chat.archived),
+      state.chats.filter((chat) => chat.kind !== "terminal"),
     ),
+  );
+  const { workspaces: live } = useLiveWorkspaces();
+  const { workspaces: archived } = useArchivedWorkspaces();
+  const { projects } = useProjects();
+  const workspaceOwners = useMemo(() => {
+    const rows = new Map(archived.map((row) => [row.id, row]));
+    for (const row of live) rows.set(row.id, row);
+    // The route's authoritative owner wins over a stale aggregate response.
+    if (workspace) rows.set(workspace.id, workspace);
+    return Array.from(rows.values());
+  }, [live, archived, workspace]);
+  const historyOwners = useMemo(
+    () =>
+      new Map(
+        allChats.map((chat) => [
+          chat.id,
+          readOnlyWorkspaceForFolder(chat.folder, workspaceOwners, projects),
+        ]),
+      ),
+    [allChats, workspaceOwners, projects],
+  );
+  const chats = useMemo(
+    () =>
+      allChats.filter((chat) => !chat.archived || !!historyOwners.get(chat.id)),
+    [allChats, historyOwners],
   );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const activePage = useActivePage();
@@ -49,18 +84,30 @@ export function ChatDeck() {
   );
   const displayedChatIds = useMemo(() => {
     if (!activeFolder) return [];
-    const layout = layoutsByFolder[activeFolder] ?? DEFAULT_PANE_LAYOUT;
     return chats
-      .filter((chat) => chat.folder === activeFolder)
+      .filter(
+        (chat) =>
+          (workspace && historyOwners.get(chat.id)?.id === workspace.id) ||
+          chat.folder === activeFolder,
+      )
       .filter((chat) => {
+        const folder = historyOwners.get(chat.id)?.path ?? chat.folder;
+        const layout = layoutsByFolder[folder] ?? DEFAULT_PANE_LAYOUT;
         const paneId = paneForChat(layout, chat.id);
         return paneSlots[paneId]?.activeChatId === chat.id;
       })
       .map((chat) => chat.id);
-  }, [activeFolder, chats, layoutsByFolder, paneSlots]);
+  }, [
+    activeFolder,
+    chats,
+    historyOwners,
+    workspace,
+    layoutsByFolder,
+    paneSlots,
+  ]);
   const queuedChatIds = useMemo(
-    () => Object.keys(pendingAutoSend),
-    [pendingAutoSend],
+    () => Object.keys(pendingAutoSend).filter((id) => !historyOwners.get(id)),
+    [pendingAutoSend, historyOwners],
   );
   const chatIdsToRetain = useMemo(() => {
     // Queued prepared-workspace chats stay mounted even after the user creates
@@ -69,10 +116,11 @@ export function ChatDeck() {
     // therefore retain priority under the global bound; excess queued chats
     // drain in bounded batches and automatically make room for older intents.
     const active = [...queuedChatIds];
-    if (preparedChatId) active.push(preparedChatId);
+    if (preparedChatId && !historyOwners.get(preparedChatId))
+      active.push(preparedChatId);
     active.push(...displayedChatIds);
     return active;
-  }, [displayedChatIds, preparedChatId, queuedChatIds]);
+  }, [displayedChatIds, preparedChatId, queuedChatIds, historyOwners]);
   const retainedChatIds = useRetainedViewKeySet(
     chatIdsToRetain,
     MAX_RETAINED_CHAT_VIEWS,
@@ -100,7 +148,10 @@ export function ChatDeck() {
       {retainedChatIds.map((chatId) => {
         const chat = chatsById.get(chatId);
         if (!chat) return null;
-        const layout = layoutsByFolder[chat.folder] ?? DEFAULT_PANE_LAYOUT;
+        const historyWorkspace = historyOwners.get(chat.id);
+        const readOnly = !!historyWorkspace;
+        const layoutFolder = historyWorkspace?.path ?? chat.folder;
+        const layout = layoutsByFolder[layoutFolder] ?? DEFAULT_PANE_LAYOUT;
         const paneId = paneForChat(layout, chat.id);
         const slot = paneSlots[paneId];
         // A chat joins the deck only after its pane has committed a stable host.
@@ -110,7 +161,7 @@ export function ChatDeck() {
         // persisted TipTap document can still start and drain. Never use this
         // fallback for ordinary retained views.
         if (!slot?.host) {
-          if (pendingAutoSend[chat.id] === undefined) return null;
+          if (readOnly || pendingAutoSend[chat.id] === undefined) return null;
           return (
             <div key={chat.id} hidden {...{ inert: "" }} aria-hidden="true">
               <ChatView chatId={chat.id} surfaceActive={false} />
@@ -119,7 +170,8 @@ export function ChatDeck() {
         }
         const isActive =
           activePage === "workspace" &&
-          chat.folder === activeFolder &&
+          (chat.folder === activeFolder ||
+            (readOnly && historyWorkspace.id === workspace?.id)) &&
           slot.activeChatId === chat.id;
         const layer = (
           <div
@@ -147,7 +199,17 @@ export function ChatDeck() {
             <ChatView
               chatId={chat.id}
               surfaceActive={isActive}
-              preparing={preparedChatId === chat.id && !isActive}
+              preparing={!readOnly && preparedChatId === chat.id && !isActive}
+              readOnly={readOnly}
+              composerReplacement={
+                historyWorkspace ? (
+                  <WorkspaceHistoryBar
+                    key={historyWorkspace.id}
+                    workspace={historyWorkspace}
+                    surfaceActive={isActive}
+                  />
+                ) : null
+              }
             />
           </div>
         );

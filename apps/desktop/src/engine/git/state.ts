@@ -861,6 +861,14 @@ export function getWorkspaceMeta(
   return row ? row.value : null;
 }
 
+/** Aggregate metadata selection for list visibility; avoids a query per row. */
+export function listWorkspaceIdsWithMeta(key: string, value: string): Set<string> {
+  const rows = open().prepare<[string, string], { workspace_id: string }>(
+    "SELECT workspace_id FROM workspace_meta WHERE key = ? AND value = ?",
+  ).all(key, value);
+  return new Set(rows.map((row) => row.workspace_id));
+}
+
 // ──────────────────────────────────────────────────────────
 // Remote-access restriction (per-workspace opt-out)
 // ──────────────────────────────────────────────────────────

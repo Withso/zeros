@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { serializeDesignRegistration } from "../../design/manifest";
 
@@ -39,6 +40,26 @@ afterEach(async () => {
 });
 
 describe("startGitWatcher", () => {
+  it("announces a folder removed outside the app before retiring its watcher", async () => {
+    const parent = await mkdtemp(join(tmpdir(), "zeros-missing-watch-"));
+    roots.push(parent);
+    const root = join(parent, "checkout");
+    await mkdir(join(root, ".git"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    const changes: GitWatchChange[] = [];
+    const watcher = startGitWatcher(
+      () => existsSync(root) ? [{ root, workspaceId: "missing-folder" }] : [],
+      (change) => changes.push(change),
+      { pollIntervalMs: 25, worktreeDebounceMs: 10, usePolling: true, worktreePollIntervalMs: 10_000 },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+    changes.length = 0;
+    await rm(root, { recursive: true });
+    await waitFor(() => changes.some((change) => change.workspaceIds.includes("missing-folder")), 1500);
+    expect(changes).toContainEqual(expect.objectContaining({ workspaceIds: ["missing-folder"], coarse: false, worktreeChanged: true }));
+  });
+
   it("invalidates on a plain working-tree create that never touches .git", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-worktree-watch-"));
     roots.push(root);

@@ -45,7 +45,9 @@ export function leftmostLiveWorkspace(
   cachedWorkspaces: readonly Workspace[] | undefined,
 ): Workspace | null {
   if (!cachedWorkspaces) return null;
-  const live = cachedWorkspaces.filter((w) => w.archivedAt == null);
+  const live = cachedWorkspaces.filter(
+    (w) => w.archivedAt == null && w.present !== false,
+  );
   return orderWorkspaceTabs(live)[0] ?? null;
 }
 
@@ -69,6 +71,11 @@ export function resolveRepoWorkspaceDestination(args: {
     ? findWorkspaceForFolder(rememberedFolder, accessibleCachedWorkspaces)
     : null;
   if (matched) {
+    // Repository switches and re-adds land on available checkouts. History is
+    // opened explicitly from Archived, including for nested cwd memories.
+    if (matched.archivedAt != null || matched.present === false) {
+      return leftmostLiveWorkspace(accessibleCachedWorkspaces);
+    }
     return matched.path === rememberedFolder
       ? matched
       : { ...matched, path: rememberedFolder };
@@ -360,8 +367,8 @@ export function filterArchivedWorkspaces(
     .filter((workspace) => {
       if (
         workspace.repoSlug !== repoSlug ||
-        typeof workspace.archivedAt !== "number" ||
-        !Number.isFinite(workspace.archivedAt)
+        (workspace.present !== false &&
+          (typeof workspace.archivedAt !== "number" || !Number.isFinite(workspace.archivedAt)))
       )
         return false;
       if (terms.length === 0) return true;
@@ -374,7 +381,7 @@ export function filterArchivedWorkspaces(
     })
     .sort(
       (a, b) =>
-        (b.archivedAt ?? 0) - (a.archivedAt ?? 0) ||
+        (b.archivedAt ?? b.lastActiveAt ?? b.createdAt) - (a.archivedAt ?? a.lastActiveAt ?? a.createdAt) ||
         b.createdAt - a.createdAt ||
         a.id.localeCompare(b.id),
     );

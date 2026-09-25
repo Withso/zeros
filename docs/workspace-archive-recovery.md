@@ -105,16 +105,88 @@ prevents a later unarchive from silently recovering an old turn snapshot instead
 of honoring the deletion. Unarchive then reports that only committed files were
 restored. Git may retain unreachable objects until its own garbage collection.
 
-Missing folders retain their workspace owner and offer recovery. Presence
-requires usable Git metadata, so a returned folder with a dangling `.git` pointer
-does not masquerade as healthy. An intact returned folder is detected by the
-visible recovery panel. Explicit recovery of a returned managed folder rebuilds
-only its missing Git registration and index, after verifying its repository and
-branch. It preserves working files, including deletions and ignored files;
-previous staging distinctions are unavailable when the original index is gone.
-A still-missing folder can be recreated from its retained archive snapshot.
-Unavailable snapshot objects fail before creating another checkout. Neither
-path silently deletes the workspace or its conversations.
+Missing folders retain their workspace owner and conversations. They leave active
+workspace lists and counts and join the Dashboard's existing Archived column;
+this does not change `archivedAt`. A repository remains registered with zero
+available workspaces. The repository Workspaces page has an additive Archived
+toggle, off by default, that includes both archived and missing rows, including
+archives hidden on Dashboard. Its `repo-history-visible-v1` preference is keyed
+by project id, bounded to 256 owners, and pruned on repository removal.
 
-Recovery and snapshot disposal use the local bridge operations
-`workspace.recover` and `workspace.deleteSnapshot`.
+Re-adding an explicitly removed repository reconciles its surviving workspace
+records before unhiding the repository. Available folders remain visible;
+absent old owners require a fully readable snapshot or a verified original
+linked checkout at a registered path. A branch name, stale registration or
+corrupt snapshot alone is insufficient. Unrecoverable rows receive the durable
+`repository.readd-hidden.v1` metadata marker and are omitted from workspace
+lists without deleting their chats or recovery metadata. Another explicit
+re-add rechecks eligibility, and a confirmed return of the original folder
+clears the marker. This filter does not apply to ordinary folder loss while
+the repository remains registered. Repository upserts invalidate workspace
+collections for the originating client as well as peers.
+
+Opening an archived or missing workspace uses the same `ConversationPane`,
+`ConversationPaneLayout`, `ChatDeck`, `ChatView`/`ChatBody`, `ChatTabs`, and
+`AgentChat` as an available workspace; there is no separate history page or
+transcript renderer. Read-only mode hydrates saved messages while gating provider
+binding, admission, configuration changes and reconnect retries. Retained history
+is bounded by the normal deck and hidden views remain inert with polling paused.
+Closed chats can be previewed without changing their archive flag, and empty or
+terminal-only history never creates a chat. `AgentChat` owns its `data-zeros-root`
+style scope, so rendered Markdown keeps the same typography and spacing.
+The transcript retains its normal layout, scrolling, automatic
+older-message pagination, readable tool output, copy actions, and recorded turn
+metadata. There is no separate older-message button or summary card. Read-only
+mode leaves parked drafts and queued submissions untouched and disables agent
+preparation, chat creation, retry, edit/resubmit, Continue, reset, fork, and
+workspace-file actions. Terminal, browser, Design, and workbench surfaces remain
+unmounted. Recovery controls replace the composer:
+
+| State                                             | Message                                                 | Action    |
+| ------------------------------------------------- | ------------------------------------------------------- | --------- |
+| Archived                                          | This workspace is archived.                             | Unarchive |
+| Missing, readable saved snapshot                  | Workspace folder missing                                | Restore   |
+| Missing, original Git identity can be reconnected | Workspace folder missing. Reconnect the original folder | Locate    |
+| Missing, no verified recovery source              | Workspace folder missing. No recovery                   | None      |
+
+A cold recovery read shows the neutral missing-folder message without an action
+until verification finishes. Recovery reads are shared by exact workspace,
+path, repository and snapshot identity; pointer/focus intent warms these reads
+and the saved chat without starting workspace tools. Snapshot verification checks
+the saved tree's object closure both before offering Restore and again before
+creating a replacement checkout. The bar displays the snapshot time; it does
+not promise recovery of later edits.
+
+Presence requires usable Git metadata, so a returned folder with a dangling
+`.git` pointer does not masquerade as healthy. An intact returned folder is
+detected while its history is visible. Filesystem watcher retirement also
+publishes the vanished workspace identity, even if its target disappears before
+the native filesystem event arrives. Loss is never interpreted as deletion of
+the database owner or repository.
+
+Locate uses the native folder picker and verifies the original repository,
+branch, linked gitdir and registration before repairing the connection. It does
+not move, reset or overwrite working files. The workspace id stays stable;
+workspace path and descendant chat folders rebind in one database transaction.
+Returned files remain authoritative over an older snapshot. Recovery of a folder
+returned to its original path can rebuild a pruned Git registration, preserving
+working files; staging distinctions are unavailable when the original index is
+gone. Foreign folders fail validation without changing their files or owner.
+
+`workspace.located-path.v1` is an engine ownership receipt for the explicitly
+reconnected location, allowing subsequent archive, restore and deletion to
+verify it. Automatic workspace-root migration skips these locations. The
+renderer keeps using the compatible `adopted-worktrees-v1` path-to-repository
+registry for outside-root resolution; this does not mark the engine workspace
+as adopted. The validated map is bounded to 2,048 paths, resolves descendant
+chats by the most specific owner, and is pruned on explicit deletion/removal.
+
+Explicit workspace/repository removal can retire a workspace row when both its
+checkout and source repository are confirmed absent; failed Git cleanup must not
+resurrect that row when the repository is added again. Merely observing missing
+folders never invokes this cleanup.
+
+Recovery uses local-only bridge operations `workspace.recoveryInfo`,
+`workspace.recover`, and `workspace.locate`; snapshot disposal uses
+`workspace.deleteSnapshot`. Recovery and Locate publish both workspace and chat
+invalidations, including to the initiating client after long-running operations.

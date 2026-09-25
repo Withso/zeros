@@ -68,6 +68,12 @@ describe("cross-tool interop", () => {
   });
 
   describe("listAllBranches", () => {
+    it("keeps plain local branch names when a tag has the same name", async () => {
+      await execFileAsync("git", ["-C", repoRoot, "tag", "main"]);
+      const branches = await listAllBranches({ repoSlug: "acme-example", repoRoot });
+      expect(branches.some((branch) => branch.name === "main")).toBe(true);
+      expect(branches.some((branch) => branch.name === "heads/main")).toBe(false);
+    });
     it("detects zeros origin from .zeros/workspace.json marker", async () => {
       const created = await createWorkspace({ repoRoot });
       const branches = await listAllBranches({

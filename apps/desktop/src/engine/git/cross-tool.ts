@@ -293,14 +293,18 @@ export async function listAllBranches(
   // List all branches the repo knows about.
   const { stdout: branchOut } = await runGit(opts.repoRoot, [
     "for-each-ref",
-    "--format=%(refname:short)|%(objectname)|%(committerdate:unix)",
+    "--format=%(refname)|%(objectname)|%(committerdate:unix)",
     "refs/heads/",
   ]);
 
   const out: Branch[] = [];
   for (const line of branchOut.split("\n")) {
     if (!line) continue;
-    const [name, tipSha, commitDateStr] = line.split("|");
+    const [ref, tipSha, commitDateStr] = line.split("|");
+    // Short refs become heads/main when a tag also names main. Preserve the
+    // plain branch identity and let callers qualify it for source selection.
+    if (!ref.startsWith("refs/heads/")) continue;
+    const name = ref.slice("refs/heads/".length);
     const lastCommitDate = (parseInt(commitDateStr, 10) || 0) * 1000;
     const knownWt = byBranch.get(name);
 

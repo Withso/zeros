@@ -93,7 +93,7 @@ import { isSubmittedComposerDocument } from "./composer-submission";
 // off ComposerShell/ComposerTextarea/ComposerToolbar.
 import {
   COMPOSER_FILE_ACCEPT,
-  PROMPT_SURFACE_RADIUS,
+  COMPOSER_SURFACE_RADIUS,
 } from "./composer-shell";
 import { ComposerAttachmentMenu } from "./composer-attachment-menu";
 import { ComposerDesignTag } from "./composer-design-tag";
@@ -316,6 +316,9 @@ function labelForFailure(
 }
 
 interface AgentChatProps {
+  /** Saved workspace history shares the transcript, with all writing disabled. */
+  readOnly?: boolean;
+  composerReplacement?: React.ReactNode;
   session: AgentSessionState &
     AgentSessionControls & { hydrateChat(): Promise<void> };
   onBack: () => void;
@@ -339,6 +342,8 @@ interface AgentChatProps {
 }
 
 export function AgentChat({
+  readOnly = false,
+  composerReplacement,
   session,
   onBack,
   headerActions,
@@ -346,6 +351,7 @@ export function AgentChat({
   surfaceActive = true,
   workspaceProvisioning = false,
 }: AgentChatProps) {
+  const interactive = surfaceActive && !readOnly;
   // Hoisted so the
   // composer-draft seeding below can read state.chatComposerDrafts on
   // first render via the lazy useState initializer.
@@ -495,18 +501,20 @@ export function AgentChat({
         queuedMessages,
       };
     }, [session.messages]);
-  const pendingLocalTurnId = usePendingLocalTurnId(chatId);
-  const activity = agentActivity(session, pendingLocalTurnId);
+  const livePendingLocalTurnId = usePendingLocalTurnId(chatId);
+  const pendingLocalTurnId = readOnly ? null : livePendingLocalTurnId;
+  const activity = readOnly ? null : agentActivity(session, pendingLocalTurnId);
   const backgroundContinuationActive = agentFamily(session.agentId) === "claude" && activity !== null && session.status !== "streaming";
   const waitingForBackgroundTasks = activity === "waiting";
   // Switching into a chat is interactive intent even before Send. Keep a
   // queued cosmetic title provider out of the user's typing/startup window;
   // the Send edge below refreshes the same quiet window once more.
   useEffect(() => {
-    if (surfaceActive) noteInteractiveAgentActivity();
-  }, [chatId, surfaceActive]);
+    if (interactive) noteInteractiveAgentActivity();
+  }, [chatId, interactive]);
   useEffect(() => {
     if (
+      readOnly ||
       !chatId ||
       !chatThread ||
       backgroundContinuationActive ||
@@ -533,6 +541,7 @@ export function AgentChat({
       titleRequestRef.current = { chatId, messageId: candidate.messageId };
     }
   }, [
+    readOnly,
     backgroundContinuationActive,
     chatId,
     chatThread,
@@ -542,19 +551,21 @@ export function AgentChat({
     session.status,
   ]);
   const isStreaming =
-    agentFamily(session.agentId) === "claude"
+    !readOnly &&
+    (agentFamily(session.agentId) === "claude"
       ? activity === "running"
-      : session.status === "streaming";
+      : session.status === "streaming");
   // QuestionCard's submit hook routes through session.sendPrompt (see the
   // RendererContext contract).
   const respondToQuestion = useCallback(
     (text: string) => {
+      if (readOnly) return;
       if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.sendPrompt(text, text).catch(() => {
         /* error surfaces via session.error */
       });
     },
-    [chatThread?.folder, session],
+    [chatThread?.folder, session, readOnly],
   );
   // pendingPermission is threaded into ctx so the matching
   // tool card can render its inline Allow/Deny cluster. respondToPermission
@@ -563,10 +574,11 @@ export function AgentChat({
     (
       response: import("../../platform/bridge/agent-events").RequestPermissionResponse,
     ) => {
+      if (readOnly) return;
       if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.respondToPermission(response);
     },
-    [chatThread?.folder, session],
+    [chatThread?.folder, session, readOnly],
   );
   // Sticky-policy mutators are bound to the active chatId so
   // the InlinePermissionCluster can fire-and-forget without knowing
@@ -574,10 +586,10 @@ export function AgentChat({
   const policyChatId = chatId;
   const recordPolicy = useCallback(
     (rule: import("./policies").PolicyRule) => {
-      if (!policyChatId) return;
+      if (readOnly || !policyChatId) return;
       useSessionsStore.getState().addPolicy(policyChatId, rule);
     },
-    [policyChatId],
+    [policyChatId, readOnly],
   );
   // Surface the session's setMode through ctx so the
   // ExitPlanModeCard can apply the user's "approve and continue in
@@ -585,12 +597,12 @@ export function AgentChat({
   // wrap it so consumers don't have to handle the maybe-undefined.
   const setModeForCtx = useMemo(
     () =>
-      session.setMode
+      !readOnly && session.setMode
         ? (modeId: string) => {
             void session.setMode!(modeId);
           }
         : null,
-    [session],
+    [session, readOnly],
   );
   // Mount-flicker fix (2026-07-16): the rail publishes its scroll-spy
   // pass here so the scroll-restore layout effect below can light the
@@ -623,7 +635,7 @@ export function AgentChat({
       segments?: ComposerSegment[],
     ) => {
       const trimmed = editedText.trim();
-      if (!chatId) return;
+      if (readOnly || !chatId) return;
       if (trimmed.length === 0 && attachments.length === 0) {
         return;
       }
@@ -705,7 +717,7 @@ export function AgentChat({
           /* error surfaces via session.error */
         });
     },
-    [chatId, chatThread?.folder, session],
+    [chatId, chatThread?.folder, session, readOnly],
   );
 
   // Forward-ref to the composer hook's
@@ -727,12 +739,20 @@ export function AgentChat({
   useEffect(() => {
     openChatFileRef.current = openChatFile;
   }, [openChatFile]);
-  const warmFileThroughRef = useCallback((path: string) => warmChatFileInWorkbench(chatCwdRef.current, path), []);
+  const warmFileThroughRef = useCallback(
+    (path: string) => {
+      if (!readOnly) warmChatFileInWorkbench(chatCwdRef.current, path);
+    },
+    [readOnly],
+  );
   const openChatPreview = useOpenChatPreviewInWorkbench();
   const openPreviewUrlThroughRef = useCallback((url: string) => openChatPreview(chatCwdRef.current, url), [openChatPreview]);
-  const openFileThroughRef = useCallback((path: string) => {
-    openChatFileRef.current(chatCwdRef.current, path);
-  }, []);
+  const openFileThroughRef = useCallback(
+    (path: string) => {
+      if (!readOnly) openChatFileRef.current(chatCwdRef.current, path);
+    },
+    [readOnly],
+  );
   // A clicked link to the ACTIVE workspace's PR focuses workbench's Review tab
   // instead of the external browser. Same through-ref treatment: the hook's
   // identity changes with the workspace's PR state, but messageCtx must stay
@@ -757,11 +777,12 @@ export function AgentChat({
   const retrySafetyReviewRef = useRef(session.retrySafetyReview);
   retrySafetyReviewRef.current = session.retrySafetyReview;
   const retrySafetyReviewThroughRef = useCallback((retryId: string) => {
+    if (readOnly) return Promise.resolve();
     const retry = retrySafetyReviewRef.current;
     return retry
       ? retry(retryId)
       : Promise.reject(new Error("Safety retry is unavailable."));
-  }, []);
+  }, [readOnly]);
   const messageCtx: RendererContext = useMemo(
     () => ({
       isStreaming,
@@ -770,12 +791,14 @@ export function AgentChat({
       subagentChildren,
       editBaselines,
       respondToQuestion,
-      pendingQuestionToolCallIds,
-      hasBlockingQuestion,
-      pendingPermission: session.pendingPermission,
+      pendingQuestionToolCallIds: readOnly
+        ? new Set<string>()
+        : pendingQuestionToolCallIds,
+      hasBlockingQuestion: !readOnly && hasBlockingQuestion,
+      pendingPermission: readOnly ? null : session.pendingPermission,
       respondToPermission,
       retrySafetyReview: retrySafetyReviewThroughRef,
-      safetyReviewRetries: session.safetyReviewRetries,
+      safetyReviewRetries: readOnly ? undefined : session.safetyReviewRetries,
       recordPolicy,
       chatId: chatId ?? null,
       setMode: setModeForCtx,
@@ -785,8 +808,8 @@ export function AgentChat({
       attachmentImagesActive: surfaceActive,
       openFile: openFileThroughRef,
       warmFile: warmFileThroughRef,
-      openPrUrl: openPrUrlThroughRef,
-      openPreviewUrl: openPreviewUrlThroughRef,
+      openPrUrl: readOnly ? undefined : openPrUrlThroughRef,
+      openPreviewUrl: readOnly ? undefined : openPreviewUrlThroughRef,
     }),
     [
       isStreaming,
@@ -809,6 +832,7 @@ export function AgentChat({
       chatThread?.folder,
       session.cwd,
       surfaceActive,
+      readOnly,
       openFileThroughRef,
       warmFileThroughRef,
       openPrUrlThroughRef,
@@ -832,7 +856,7 @@ export function AgentChat({
   const agentSessions = useAgentSessions();
   const retryTurn = useCallback(
     (prompt: AgentTextMessage, events: AgentMessage[], newChat: boolean) => {
-      if (!chatId || !surfaceActive) return Promise.resolve();
+      if (!chatId || !interactive) return Promise.resolve();
       return retryAgentTurn({ chatId, prompt, events, newChat }, {
         sessions: agentSessions,
         getChat: (id) => useWorkspaceStore.getState().chats.find((chat) => chat.id === id),
@@ -843,7 +867,7 @@ export function AgentChat({
         throw error;
       });
     },
-    [agentSessions, chatId, dispatch, surfaceActive],
+    [agentSessions, chatId, dispatch, interactive],
   );
   const capabilitiesBridge = useBridge();
   const changeComposerMode = useCallback((mode: "code" | "design") => {
@@ -858,7 +882,7 @@ export function AgentChat({
     chatId,
     session.agentId ?? chatThread?.agentId,
     chatThread?.folder,
-    surfaceActive,
+    interactive,
   ]);
   const preparationOwnerRef = useRef<string | null>(preparationOwner);
   preparationOwnerRef.current = preparationOwner;
@@ -868,7 +892,7 @@ export function AgentChat({
   }, [preparationOwner]);
   const prepareSessionTools = useCallback(async () => {
     const agentId = session.agentId ?? chatThread?.agentId;
-    if (!chatId || !agentId || workspaceProvisioning || !surfaceActive) return;
+    if (!chatId || !agentId || workspaceProvisioning || !interactive) return;
     // The normal admission path owns auth, boundaries, env and single-flight
     // startup. Opening Tools prepares that same chat without adding a prompt.
     await agentSessions
@@ -887,12 +911,12 @@ export function AgentChat({
     session.cwd,
     session.initialize,
     workspaceProvisioning,
-    surfaceActive,
+    interactive,
   ]);
   const prepareSessionCommands = useCallback(() => {
     const agentId = session.agentId ?? chatThread?.agentId;
     if (
-      !chatId || agentId !== "claude" || !surfaceActive ||
+      !chatId || agentId !== "claude" || !interactive ||
       workspaceProvisioning || capabilitiesBridge?.status !== "connected"
     ) return;
     void warmPreparedSessionTools(
@@ -919,7 +943,7 @@ export function AgentChat({
     chatId,
     session.agentId,
     chatThread?.agentId,
-    surfaceActive,
+    interactive,
     workspaceProvisioning,
     capabilitiesBridge,
     prepareSessionTools,
@@ -946,7 +970,7 @@ export function AgentChat({
   useEffect(() => {
     if (
       !session.agentId ||
-      !surfaceActive ||
+      !interactive ||
       !canVerifyAgentRegistryInBackground(session.status)
     ) {
       return;
@@ -963,16 +987,16 @@ export function AgentChat({
       });
     }, AGENT_REGISTRY_VERIFICATION_DELAY_MS);
     return () => clearTimeout(timer);
-  }, [agentSessions, chatId, session.agentId, session.status, surfaceActive]);
+  }, [agentSessions, chatId, session.agentId, session.status, interactive]);
 
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
   const signInAgentId = session.agentId ?? chatThread?.agentId ?? null;
   const handleSignIn = useCallback(() => {
-    if (!surfaceActive || !isSubscriptionProvider(signInAgentId)) return;
+    if (!interactive || !isSubscriptionProvider(signInAgentId)) return;
     requestProviderSettings(signInAgentId);
     dispatch({ type: "SET_ACTIVE_PAGE", page: "settings" });
-  }, [dispatch, signInAgentId, surfaceActive]);
+  }, [dispatch, signInAgentId, interactive]);
   // Keep the ref the chat file-open closure reads in sync with the chat's
   // workspace owner. The session cwd is only a pre-hydration fallback: if an
   // engine ever reports a nested cwd, its file link still belongs to the
@@ -982,8 +1006,8 @@ export function AgentChat({
     chatCwdRef.current = cwd;
     // Prime the workspace file list so the FIRST file-chip click resolves
     // synchronously (instant open) instead of waiting on git ls-files.
-    warmWorkspaceFiles(cwd);
-  }, [session.cwd, chatThread?.folder]);
+    if (!readOnly) warmWorkspaceFiles(cwd);
+  }, [session.cwd, chatThread?.folder, readOnly]);
   const updateChatSettings = useCallback(
     (
       updates: Partial<
@@ -1004,10 +1028,10 @@ export function AgentChat({
         >
       >,
     ) => {
-      if (!chatId) return;
+      if (readOnly || !chatId) return;
       dispatch({ type: "UPDATE_CHAT_SETTINGS", id: chatId, updates });
     },
-    [chatId, dispatch],
+    [chatId, dispatch, readOnly],
   );
 
   // Single source of truth for "which past
@@ -1724,8 +1748,9 @@ export function AgentChat({
       session.initialize?.agentCapabilities?.promptCapabilities?.image !==
       false,
     modelId: chatThread?.model ?? null,
-    cwd: session.cwd ?? chatThread?.folder ?? null,
-    attachmentImagesActive: surfaceActive,
+    cwd: readOnly ? null : session.cwd ?? chatThread?.folder ?? null,
+    stageIntoContextGraph: !readOnly,
+    attachmentImagesActive: interactive,
     originUrl: composerOriginUrl,
     availableCommands: session.availableCommands,
     placeholder: resolveComposerPlaceholder(conversationStarted),
@@ -1749,6 +1774,9 @@ export function AgentChat({
       if (editingQueuedRef.current) return;
       updateLiveDraftRef.current();
     },
+    // History keeps this editor mounted through recovery. Seed its parked
+    // draft once, including attachment bytes; readOnly gates editing, staging
+    // and persistence until the same composer becomes available again.
     initialContent: initialContentRef.current,
   });
   const {
@@ -1781,18 +1809,18 @@ export function AgentChat({
   // ChatBody's spawn effect and flips status off `failed`). The composer is
   // display:none'd — not disabled — when a permission/question card takes its
   // slot (composerConcealed), so there is no remaining state that wants a
-  // read-only editor. TipTap editors are created editable, so we only ever
-  // need to re-assert it (defensively, after a swap) — never clear it.
+  // read-only editor. Saved workspace history is the exception: its composer
+  // is absent and must never accept or submit a parked draft.
   useEffect(() => {
-    composerEditor?.setEditable(true);
-  }, [composerEditor]);
+    composerEditor?.setEditable(!readOnly);
+  }, [composerEditor, readOnly]);
 
   // A fork publishes its new tab before the transcript read settles. Register
   // only while THIS retained surface is active: insertTextAttachment focuses
   // the editor, so a hidden destination must queue the chip instead of stealing
   // focus from whichever chat the user moved to meanwhile.
   useEffect(() => {
-    if (!chatId || !surfaceActive || !composerEditor) return;
+    if (!chatId || !interactive || !composerEditor) return;
     return registerLiveChatTextAttachmentStager(chatId, (input) => {
       const staged = stageTextAttachment(input);
       if (staged && !staged.ok) {
@@ -1802,11 +1830,11 @@ export function AgentChat({
       }
       return staged !== null;
     });
-  }, [chatId, composerEditor, surfaceActive, stageTextAttachment]);
+  }, [chatId, composerEditor, interactive, stageTextAttachment]);
 
   // ── attach another chat's transcript ──
   //
-  // The read is gated three ways. `surfaceActive` because retained background
+  // The read is gated three ways. `interactive` because retained background
   // chats keep this component mounted, and without it every hidden tab
   // re-pulls the folder's chat list on every DB_CHANGED tick (AGENTS.md:
   // hidden surfaces are inert). The other two are the surfaces that consume
@@ -1835,7 +1863,7 @@ export function AgentChat({
     useChatTranscriptSummaries(
       chatThread?.folder,
       chatId,
-      surfaceActive && (transcriptRowLive || transcriptPickerOpen),
+      interactive && (transcriptRowLive || transcriptPickerOpen),
     );
   const warmTranscriptPicker = useCallback(() => {
     warmChatTranscriptSummaries(chatThread?.folder, chatId);
@@ -2800,7 +2828,7 @@ export function AgentChat({
       }
 
       // ⌘K is composer-focus; allowed even when in an input
-      if (e.key.toLowerCase() === "k") {
+      if (!readOnly && e.key.toLowerCase() === "k") {
         e.preventDefault();
         composerFocusRef.current();
         return;
@@ -2844,7 +2872,7 @@ export function AgentChat({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [chatId, surfaceActive]);
+  }, [chatId, surfaceActive, readOnly]);
 
   // File picker for the "+" → "Add attachment" menu (routes through the
   // editor's insertFiles, same as drag-drop / paste).
@@ -2857,7 +2885,7 @@ export function AgentChat({
   // into the module-level ref. Draft snapshots include this live value while
   // typing; parking and unmount also publish it to the workspace store.
   const updateLiveDraft = useCallback(() => {
-    if (!chatId) return;
+    if (readOnly || !chatId) return;
     const s = serializeComposerState();
     if (!s || s.isEmpty) {
       composerLiveRef.current = { text: "", attachments: [], json: null };
@@ -2871,10 +2899,10 @@ export function AgentChat({
     };
     composerLiveRef.current = draft;
     setLiveChatDraft(chatId, { ...draft });
-  }, [chatId, serializeComposerState]);
+  }, [chatId, serializeComposerState, readOnly]);
   updateLiveDraftRef.current = updateLiveDraft;
   const persistComposerDraft = useCallback(() => {
-    if (!chatId) return;
+    if (readOnly || !chatId) return;
     const { text, attachments: atts, json } = composerLiveRef.current;
     if (text.trim() === "" && atts.length === 0) {
       dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
@@ -2885,9 +2913,9 @@ export function AgentChat({
       chatId,
       draft: { text, attachments: atts, json },
     });
-  }, [chatId, dispatch]);
+  }, [chatId, dispatch, readOnly]);
   useEffect(() => {
-    if (!chatId) return;
+    if (readOnly || !chatId) return;
     return registerLiveChatDraftRestorer(chatId, (draft) => {
       // A queued-message edit or newer typing owns the editor now. The live
       // draft coordinator also checks its keystroke-fresh mirror, while this
@@ -2907,15 +2935,15 @@ export function AgentChat({
       };
       return true;
     });
-  }, [chatId, serializeComposerState, setComposerContent]);
+  }, [chatId, serializeComposerState, setComposerContent, readOnly]);
   useEffect(() => {
     return () => {
-      if (!chatId) return;
+      if (readOnly || !chatId) return;
       persistComposerDraft();
       // Hand off to the parked snapshot before releasing the live owner.
       setLiveChatDraft(chatId, null);
     };
-  }, [chatId, persistComposerDraft]);
+  }, [chatId, persistComposerDraft, readOnly]);
 
   // The error states `failed` / `auth-required` no longer lock the composer
   // (2026-07-10, see canSend below) — sending IS the retry affordance. This
@@ -2932,7 +2960,7 @@ export function AgentChat({
   // reset is a settings/menu affordance.
   const lastErrorLabelRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!surfaceActive) {
+    if (!interactive) {
       lastErrorLabelRef.current = null;
       return;
     }
@@ -2999,7 +3027,7 @@ export function AgentChat({
     session.agentId,
     agentSessions,
     chatId,
-    surfaceActive,
+    interactive,
   ]);
   // ── Plan review (Claude's ExitPlanMode) ─────────────────────────────────
   // Plan review is NOT a permission gate. A regular Allow/Deny REPLACES the
@@ -3146,7 +3174,7 @@ export function AgentChat({
   // local ComposerAttachmentMenu and ModelPill both derive closed from this
   // value in the same render.
   const composerConcealed =
-    !surfaceActive || permissionCardActive || blockingQuestionActive;
+    !interactive || permissionCardActive || blockingQuestionActive;
   // Live mirror for the always-focus guardian's document listener, so it can
   // read the current concealment without re-subscribing on every card toggle.
   const composerConcealedRef = useRef(composerConcealed);
@@ -3160,7 +3188,7 @@ export function AgentChat({
   // back when a permission/question card resolves" behavior — composerOwnsFocus
   // folds in !composerConcealed, so answering a card that returns the composer
   // re-focuses too. Gated on activeChatId===chatId so exactly ONE composer ever
-  // pulls focus: a split mounts several AgentChats that are all surfaceActive at
+  // pulls focus: a split mounts several AgentChats that are all interactive at
   // once, but only the focused window's chat is the global active chat. The
   // held-elsewhere guard means a pane/tab click (focus lands on <body> or a tab
   // button) focuses, while clicking straight into another input/menu/dialog —
@@ -3231,7 +3259,7 @@ export function AgentChat({
   // Attached while this pane is on screen; the live owns-check gates it to the
   // single active window, and self-focus can't loop (it fires no click).
   useEffect(() => {
-    if (!surfaceActive || !composerEditor) return;
+    if (!interactive || !composerEditor) return;
     const composerDom = composerEditor.view.dom as HTMLElement;
     const onClick = (e: MouseEvent) => {
       // Keyboard/programmatic clicks (detail 0) don't yank focus — keyboard
@@ -3273,7 +3301,7 @@ export function AgentChat({
     };
     document.addEventListener("click", onClick, true);
     return () => document.removeEventListener("click", onClick, true);
-  }, [surfaceActive, composerEditor, chatId]);
+  }, [interactive, composerEditor, chatId]);
 
   // `failed` / `auth-required` do not disable Send. With the
   // inline error banners gone (01u — errors are toasts), a disabled composer
@@ -3757,7 +3785,7 @@ export function AgentChat({
     extras?: Parameters<typeof runSend>[1],
     recordActivity = true,
   ): Promise<void> => {
-    if (sendInFlightRef.current) return;
+    if (readOnly || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     // Title generation is cosmetic and may boot another provider process.
     // Postpone queued title work before the first await in this send so it
@@ -3792,7 +3820,7 @@ export function AgentChat({
     // setContent doesn't emit an editor change — re-sync the live draft to
     // the restored content explicitly.
     updateLiveDraftRef.current();
-    if (surfaceActive) queueMicrotask(() => focusComposer());
+    if (interactive) queueMicrotask(() => focusComposer());
   };
 
   /** Load a queued message into the composer for editing ("Editing queued
@@ -4008,24 +4036,24 @@ export function AgentChat({
   // must still exit queued-edit mode and release the provider hold; otherwise
   // an invisible editor could park that provider queue indefinitely.
   const releaseQueueRef = useRef<(() => void) | undefined>(undefined);
-  releaseQueueRef.current = session.releaseQueue;
+  releaseQueueRef.current = readOnly ? undefined : session.releaseQueue;
   const exitQueuedEditRef = useRef(exitQueuedEdit);
   exitQueuedEditRef.current = exitQueuedEdit;
-  const wasSurfaceActiveRef = useRef(surfaceActive);
+  const wasSurfaceActiveRef = useRef(interactive);
   useEffect(() => {
     const wasActive = wasSurfaceActiveRef.current;
-    wasSurfaceActiveRef.current = surfaceActive;
+    wasSurfaceActiveRef.current = interactive;
     // Intent pre-rendering mounts a chat inactive. Only a real visible→parked
     // transition owns queue release/draft persistence; otherwise a hover would
     // publish a redundant global store write before the user even selects it.
-    if (surfaceActive || !wasActive) return;
+    if (interactive || !wasActive) return;
     if (editingQueuedRef.current != null) exitQueuedEditRef.current();
     else releaseQueueRef.current?.();
     // exitQueuedEdit restores the pre-edit stash synchronously; persist only
     // afterward so a parked chat can never save queued-message text as its
     // ordinary composer draft.
     persistComposerDraft();
-  }, [persistComposerDraft, surfaceActive]);
+  }, [persistComposerDraft, interactive]);
   // Bounded-deck eviction and application shutdown retain the old unmount
   // guarantee as a final idempotent safety net.
   useEffect(() => {
@@ -4062,7 +4090,7 @@ export function AgentChat({
   // and the session is ready, send it and clear the queue.
   const pendingSub = pendingChatSubmission;
   useEffect(() => {
-    if (!surfaceActive) return;
+    if (!interactive) return;
     if (!pendingSub) return;
     if (!chatId) return;
     // Only the active chat consumes the pending submission. The store
@@ -4101,7 +4129,7 @@ export function AgentChat({
     session.pendingPermission,
     chatId,
     activeChatId,
-    surfaceActive,
+    interactive,
     // Re-arm once a send that was being prepared has finished, so a submission
     // that arrived during that window still goes out.
     sendPreparing,
@@ -4112,7 +4140,7 @@ export function AgentChat({
   // avoids mistaking the editor's initial seed tick for a user clear.
   const queuedContentSeenRef = useRef(false);
   useEffect(() => {
-    if (!chatId || !pendingAutoSend) {
+    if (readOnly || !chatId || !pendingAutoSend) {
       queuedContentSeenRef.current = false;
       return;
     }
@@ -4124,7 +4152,7 @@ export function AgentChat({
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       queuedContentSeenRef.current = false;
     }
-  }, [chatId, composerEmpty, dispatch, pendingAutoSend]);
+  }, [chatId, composerEmpty, dispatch, pendingAutoSend, readOnly]);
 
   // Prepared-workspace hand-off: the dispatcher can seed this composer, or the
   // user can type and press Send while checkout is still running. Once the
@@ -4138,7 +4166,7 @@ export function AgentChat({
   // and says so instead of holding it silently — the reported "I sent it
   // before the workspace was ready and it just sat there".
   useEffect(() => {
-    if (!chatId || pendingAutoSendAt === null) return;
+    if (readOnly || !chatId || pendingAutoSendAt === null) return;
     const decide = (): "wait" | "send" | "release" =>
       queuedFirstTurnAction({
         status: session.status,
@@ -4197,6 +4225,7 @@ export function AgentChat({
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    readOnly,
     pendingAutoSendAt,
     workspaceProvisioning,
     session.status,
@@ -4212,7 +4241,7 @@ export function AgentChat({
   // Distinct from pendingChatSubmission above, which auto-fires.
   const pendingAppend = pendingComposerAppend;
   useEffect(() => {
-    if (!pendingAppend) return;
+    if (readOnly || !pendingAppend) return;
     if (!chatId) return;
     // Append only targets this chat. (chatId null = EmptyComposer
     // case, handled separately in EmptyComposer.tsx.)
@@ -4220,9 +4249,9 @@ export function AgentChat({
     // Append element context at the end as plain text; the user keeps editing.
     appendComposerText(`\n\n${pendingAppend.text}`);
     dispatch({ type: "CONSUME_COMPOSER_APPEND", id: pendingAppend.id });
-    if (surfaceActive) queueMicrotask(() => focusComposer());
+    if (interactive) queueMicrotask(() => focusComposer());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingAppend, chatId, surfaceActive]);
+  }, [pendingAppend, chatId, interactive, readOnly]);
 
   const handleAttachFiles = useCallback(
     () => fileInputRef.current?.click(),
@@ -4251,7 +4280,12 @@ export function AgentChat({
   // composer state chip + toast layer.
 
   return (
-    <div className="zeros-agent-surface text-fg1 [container-type:inline-size] flex h-full min-h-0 flex-col bg-transparent text-sm [container-name:agent-chat]">
+    <div
+      // Runtime-generated markdown and scrollbars require this style scope.
+      // Own it here so saved history matches chats mounted through ChatDeck.
+      data-zeros-root=""
+      className="zeros-agent-surface text-fg1 [container-type:inline-size] flex h-full min-h-0 flex-col bg-transparent text-sm [container-name:agent-chat]"
+    >
       {/* The Zeros Foundation-aligned chat
           header is suppressed when the caller passes any `headerActions`
           (truthy or an empty fragment). The Conversation pane path always passes
@@ -4395,7 +4429,13 @@ export function AgentChat({
               change, so it stays put. Still hidden on `error` — a failed
               session shows its own failure UI and provenance would read as
               reassurance the user shouldn't take. */}
-            {session.transcriptState === "resident" &&
+            {readOnly &&
+              session.transcriptState === "resident" &&
+              session.messages.length === 0 && (
+                <p className="text-fg2 text-sm">No chat history.</p>
+              )}
+            {!readOnly &&
+              session.transcriptState === "resident" &&
               session.messages.length === 0 &&
               !session.error && (
                 <ChatProvenance
@@ -4451,7 +4491,7 @@ export function AgentChat({
                 isTail: isVisualTail,
                 inFlight: turnInFlight,
               });
-              const authRequired = authState === "sign-in";
+              const authRequired = !readOnly && authState === "sign-in";
               const authStopped = authState === "stopped";
               const visibleEvents = authState
                 ? authenticationTurnOutput(turn.events)
@@ -4493,6 +4533,7 @@ export function AgentChat({
                         // copy-only: their reset boundary is the opening
                         // provider prompt, not the steer message id.
                         onEdit={
+                          readOnly ||
                           turn.userPrompt.autoAction ||
                           turn.userPrompt.queued ||
                           turn.isSteer
@@ -4573,7 +4614,9 @@ export function AgentChat({
                             : null,
                         )}
                         workflow={activeWorkflow}
-                        onStopWorkflow={session.stopBackgroundTask}
+                        onStopWorkflow={
+                          readOnly ? undefined : session.stopBackgroundTask
+                        }
                         ctx={messageCtx}
                         footer={
                           !authRequired &&
@@ -4581,23 +4624,24 @@ export function AgentChat({
                           chatId &&
                           ownsProviderFooter ? (
                             <TurnFooter
+                              readOnly={readOnly}
                               surfaceActive={surfaceActive}
                               chatId={chatId}
                               turnId={turn.recordedTurnId ?? turn.userPrompt.id}
                               failure={isVisualTail ? session.failure : null}
                               recoveryFailure={turn.userPrompt.recoveryFailure}
                               onRetryNewChatIntent={
-                                surfaceActive && chatThread
+                                interactive && chatThread
                                   ? () => warmRetryTranscript(chatThread, turn.userPrompt!, turn.providerEvents)
                                   : undefined
                               }
                               onRetry={
-                                surfaceActive && isVisualTail
+                                interactive && isVisualTail
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, false)
                                   : undefined
                               }
                               onRetryNewChat={
-                                surfaceActive && isVisualTail && session.agentRole !== "design"
+                                interactive && isVisualTail && session.agentRole !== "design"
                                   ? () => retryTurn(turn.userPrompt!, turn.providerEvents, true)
                                   : undefined
                               }
@@ -4755,6 +4799,7 @@ export function AgentChat({
         {/* px-7 (28px, 2026-07-16): kept in lock-step with the transcript
           column's flat 28px gutter above so the composer's edges align with
           the message bubbles at every width. */}
+        {readOnly ? composerReplacement : (
         <div className="mx-auto box-border flex w-full max-w-[1152px] min-w-0 shrink-0 flex-col gap-0.5 border-t-0 bg-transparent px-7 pt-0 pb-4">
           {/* Inline composer errors use the shared toast surface: the
             "Error: <label>" surfaces as a toast.error from a useEffect
@@ -4869,9 +4914,7 @@ export function AgentChat({
             <div
               className={cn(
                 "border-border1 bg-bg2 focus-within:border-border2 relative flex w-full min-w-0 flex-col border px-3.5 py-3 shadow-xs transition-[border-color,background,box-shadow] duration-150 ease-out",
-                // 12px corners, shared with the edit composer + the sent
-                // user-message bubble (see PROMPT_SURFACE_RADIUS).
-                PROMPT_SURFACE_RADIUS,
+                COMPOSER_SURFACE_RADIUS,
                 // Drag border: subtle (border2), not near-white --highlighted-bright; `!`
                 // beats the higher-specificity focus-within:border-border2 so the drag
                 // state looks identical whether or not the composer is focused.
@@ -4901,7 +4944,7 @@ export function AgentChat({
                     "bg-bg3/75 text-fg2 pointer-events-none absolute inset-0 z-[5] flex flex-col items-center justify-center gap-1.5 p-3 text-xs",
                     // Tracks the card's corners so the drop veil doesn't square
                     // off inside them.
-                    PROMPT_SURFACE_RADIUS,
+                    COMPOSER_SURFACE_RADIUS,
                   )}
                   aria-hidden="true"
                 >
@@ -5116,6 +5159,7 @@ export function AgentChat({
             chrome doesn't jump when toggling between AgentChat and
             EmptyComposer. */}
         </div>
+        )}
       </div>
       {/* Full-screen image preview
           overlay. Triggered by clicking an image attachment chip in
@@ -5125,7 +5169,8 @@ export function AgentChat({
 
       {/* `/add-dir` + "+" → "Link workspaces": pick a worktree or browse a
           folder to grant Claude extra access. Controlled modal; gated on a
-          live chat so cwd / linked dirs are available. */}      {chatThread && (
+          live chat so cwd / linked dirs are available. */}
+      {!readOnly && chatThread && (
         <WorkspaceDirectoryPicker
           open={workspacePickerOpen}
           onOpenChange={setWorkspacePickerOpen}
