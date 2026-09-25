@@ -66,6 +66,15 @@ For renderer state, navigation, loading, tabs, panels, or list work, also read
 For provider event handling or tool transcript UI, also read
 `docs/agent-tool-presentation.md`.
 
+## Agent credentials
+
+- Live checks use the gitignored `.env.agent` at the repository root; its
+  template is `.env.agent.example`, and Conductor copies it into new
+  workspaces. It holds Alpha and test credentials only: never add Beta or
+  Production keys.
+- Run `pnpm agent:check` to verify it read-only. Never print, log, commit or
+  echo a credential value, including in command arguments and test output.
+
 ## Verification
 
 Before handoff, run `pnpm typecheck`, `pnpm lint`, `pnpm check:ui`,

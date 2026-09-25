@@ -523,12 +523,22 @@ Hosted control planes boot with `DATABASE_MIGRATIONS_ON_BOOT=false` and refuse
 to start while the ledger has a pending or unknown migration. Railway waits for
 a healthy `/healthz` before replacing a deployment, so when a merge adds a
 migration, Alpha's new deployment fails and the previous one keeps serving.
-Apply the migration with the separately authorized migrator, then promptly
+Apply the migration with `release-migration:manage` (below), then promptly
 redeploy the same commit: the previous deployment cannot restart against a
 ledger that records a migration it does not know. Railway also skips a `main`
 deployment whose CI check suite failed, including the Release (alpha) desktop
 workflow. A later merge that changes no watched path does not retry the skipped
 deployment; deploy the current `main` commit explicitly.
+
+`pnpm --dir apps/control-plane release-migration:manage --database <database>`
+plans against a PlanetScale branch: it mints a one-hour owner role, lists the
+pending migrations and deletes the role. Add `--execute --confirm <database>`
+to take an on-demand backup first, run the strict runner (which verifies every
+recorded checksum), confirm that nothing remains pending and delete the role.
+It reads `PLANETSCALE_ORG`, `PLANETSCALE_SERVICE_TOKEN_ID` and
+`PLANETSCALE_SERVICE_TOKEN`; use a token that reaches only the target database.
+At a release cut, run it for Beta and then Production, each immediately before
+promoting that channel's build.
 
 `pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
 closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish

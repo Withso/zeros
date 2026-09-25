@@ -82,8 +82,10 @@
 #                               empty (apps/desktop/src/engine/settings/ops.ts).
 
 # Machine-local environment. `/.env*` is the anchored form of the built-in
-# default: the root `.env` plus `.env.local` and friends — and nothing from a
-# sibling directory that happens to keep an env file of its own.
+# default: the root `.env` plus `.env.local`, the agent credentials file
+# `.env.agent` (AGENTS.md) and friends — and nothing from a sibling directory
+# that happens to keep an env file of its own. The tracked `.env.agent.example`
+# arrives through git like any tracked file.
 /.env*
 /apps/control-plane/.env*
 
