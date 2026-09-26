@@ -115,6 +115,15 @@ Object.assign(window, {
         inspection = { ...inspection, isRepo: true, hasCommits: true };
         return { repoRoot: folder, initialSha: "fixture-initial-commit" };
       }
+      if (op === "workspace_clone") {
+        inspection = {
+          ...inspection,
+          isRepo: true,
+          hasCommits: true,
+          originUrl: String(params?.url),
+        };
+        return { repoRoot: folder, defaultBranch: "main" };
+      }
       if (op === "workspace_inspect_folder") {
         if (inspectionFails) throw new Error("Folder temporarily unavailable");
         return inspection;
@@ -312,13 +321,16 @@ const auth = {
 
 function Harness() {
   useProjectCapabilitiesRefresh();
-  const { openProject } = useAddProject();
+  const { openProject, openGithubProject, quickStart } = useAddProject();
   const openSavedWorkspace = useOpenWorkspace();
   const { projects } = useProjects();
   const project = projects.find((row) => row.repoRoot === folder);
   const activeRepoId = useWorkspaceStore((state) => state.activeRepoId);
   const repoProject = projects.find((row) => row.id === activeRepoId);
   const page = useWorkspaceStore((state) => state.activePage);
+  const createProjectId = useWorkspaceStore(
+    (state) => state.createWorkspaceProjectId,
+  );
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   const chats = useWorkspaceStore((state) => state.chats);
   const activeChatId = useWorkspaceStore((state) => state.activeChatId);
@@ -336,7 +348,7 @@ function Harness() {
         <Button
           onClick={
             automatic
-              ? openProject
+              ? () => openProject()
               : () => {
                   // Restore a pre-existing root-bound chat, not a new-project admission.
                   const saved = upsertProject({
@@ -386,10 +398,10 @@ function Harness() {
           ) : page === "create" && DispatcherPage ? (
             <DispatcherPage
               active
-              initialProjectId={project?.id}
+              initialProjectId={createProjectId}
               onOpenProject={openProject}
-              onOpenGithubProject={() => {}}
-              onQuickStart={() => {}}
+              onOpenGithubProject={openGithubProject}
+              onQuickStart={quickStart}
             />
           ) : page === "repo" && repoProject ? (
             <RepoPage project={repoProject} />

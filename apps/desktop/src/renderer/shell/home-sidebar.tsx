@@ -294,15 +294,15 @@ export function HomeSidebar() {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-56">
-              <DropdownMenuItem onSelect={openProject}>
+              <DropdownMenuItem onSelect={() => openProject()}>
                 <FolderOpen />
                 <span>Open folder…</span>
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={openGithubProject}>
+              <DropdownMenuItem onSelect={() => openGithubProject()}>
                 <GithubIcon />
                 <span>Open GitHub project…</span>
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={quickStart}>
+              <DropdownMenuItem onSelect={() => quickStart()}>
                 <Plus />
                 <span>Start from scratch…</span>
               </DropdownMenuItem>

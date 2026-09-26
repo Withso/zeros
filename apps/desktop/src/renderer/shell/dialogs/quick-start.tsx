@@ -1,4 +1,4 @@
-// Start from scratch creates an empty local Git repository and its first workspace.
+// Start from scratch creates an empty local Git repository for the parent to open.
 import React, { useEffect, useState } from "react";
 
 import { Button, Input } from "../../shared/ui";
@@ -29,6 +29,8 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 interface QuickStartDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Whether the parent will immediately create the first workspace. */
+  createWorkspace?: boolean;
   /** Called after a project is created so the parent can refresh
    *  Repository panel + activate the new project. */
   onCreated?: (args: { repoRoot: string; name: string }) => void;
@@ -49,6 +51,7 @@ function defaultParentFolder(): string {
 export function QuickStartDialog({
   open,
   onOpenChange,
+  createWorkspace = true,
   onCreated,
   onRequestPublish,
 }: QuickStartDialogProps) {
@@ -133,7 +136,9 @@ export function QuickStartDialog({
             Create project
           </DialogTitle>
           <DialogDescription className="text-fg2 text-xs">
-            Create a project and your first workspace.
+            {createWorkspace
+              ? "Create a project and your first workspace."
+              : "Create a project to use in your workspace."}
           </DialogDescription>
         </DialogHeader>
         <DialogBody className="gap-5">
