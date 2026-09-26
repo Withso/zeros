@@ -2,8 +2,9 @@ import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "
 import pg from "pg";
 import { afterAll,beforeAll,beforeEach,describe,expect,it } from "vitest";
 import { withSystemTx } from "../db.js";
+import {ensureUser} from "../auth.js";
 import { runMigrations } from "../migrate.js";
-import { ensureCloudPilotUser,seedReadyCloudWorkspace } from "./test-fixtures.js";
+import { ensureCloudPilotUser,seedReadyCloudWorkspace,seedReadyProCloudWorkspace } from "./test-fixtures.js";
 import { DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import { assertCloudActorSession,assertRecordedCloudActor,DatabaseCloudWorkspaceActorSessionService } from "./actor-sessions.js";
 import { cloudWorkspaceDeviceProofMessage } from "./replicas.js";
@@ -14,7 +15,7 @@ import {DatabaseCloudAgentExecutionService} from "./agent-executions.js";
 import {withAuthorityDeadlineBarrier,withHeldEngineRows} from "./authority-deadline-test-utils.js";
 
 const d=process.env.TEST_DATABASE_URL?describe:describe.skip;
-d("actor-aware cloud runtime admission",()=>{
+d.each(["legacy","pro"] as const)("actor-aware cloud runtime admission (%s)",funding=>{
   let pool:pg.Pool;
   let fixture:Awaited<ReturnType<typeof seedReadyCloudWorkspace>>;
   let guest:Awaited<ReturnType<typeof ensureCloudPilotUser>>;
@@ -27,8 +28,8 @@ d("actor-aware cloud runtime admission",()=>{
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);
-    fixture=await seedReadyCloudWorkspace(pool);
-    guest=await ensureCloudPilotUser(pool,{provider:"workos",providerSubject:`user_${randomUUID()}`,email:`guest-${randomUUID()}@example.test`,displayName:"Guest",
+    fixture=await (funding==="pro"?seedReadyProCloudWorkspace:seedReadyCloudWorkspace)(pool);
+    guest=await (funding==="pro"?ensureUser:ensureCloudPilotUser)(pool,{provider:"workos",providerSubject:`user_${randomUUID()}`,email:`guest-${randomUUID()}@example.test`,displayName:"Guest",
       session:{id:`session_${randomUUID()}`,clientKind:"desktop",authTime:Math.floor(Date.now()/1000),tokenExpiresAt:Math.floor(Date.now()/1000)+3600}});
     guest.accountRevision=Number((await pool.query("SELECT auth_revision FROM users WHERE id=$1",[guest.id])).rows[0].auth_revision);
     await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES ($1,$2,$3,'desktop',now()+interval '1 hour')",
@@ -58,7 +59,26 @@ d("actor-aware cloud runtime admission",()=>{
   const decision = () => ({kind:"begin",admissible:true,action:{operationId:randomUUID(),conversationId:"shared-chat",
     executionId:"shared-execution",kind:"permission",requestId:randomUUID(),payload:{response:{outcome:"cancelled"}}}});
 
+  if(funding==="pro")it("revokes live writer sessions and queued execution when changed to Read-only",async()=>{
+    const signer=await device(),grant=await service.issue({...subject(),proof:signer.proof()});
+    const admitted=await service.consume({...engine(),token:grant.grantToken});
+    const commands=new DatabaseCloudWorkspaceCommandService({pool});
+    await commands.mutate({...engine(),actorSessionId:admitted.actorSessionId,deviceId:signer.id},queued());
+    await collaboration.setRole({...owner(),userId:guest.id,role:"viewer"});
+    expect(await service.authorizeRelay(grant.grantToken,{connected:true})).toBeNull();
+    await expect(service.consume({...engine(),token:grant.grantToken,renew:true})).rejects.toMatchObject({status:401});
+    await expect(commands.claim(engine(),"shared-chat","shared-execution")).resolves.toMatchObject({dispatchAllowed:false});
+    const viewerGrant=await service.issue({...subject(),proof:signer.proof()});
+    const viewer=await service.consume({...engine(),token:viewerGrant.grantToken});
+    expect(viewer.role).toBe("viewer");
+    await expect(commands.mutate({...engine(),actorSessionId:viewer.actorSessionId,deviceId:signer.id},queued(1))).rejects.toBeDefined();
+    await collaboration.setRole({...owner(),userId:guest.id,role:"developer"});
+    expect(await service.authorizeRelay(grant.grantToken,{connected:true})).toBeNull();
+  });
+
   it.each(["admission", "renewal", "engine", "source", "pro", "guest"] as const)("rejects %s expiry after the transaction starts",async deadline=>{
+    // Isolate the paid deadline from this legacy fixture's complimentary staff benefit.
+    if(deadline==="pro")await pool.query("UPDATE staff_pro_benefits SET revoked_at=clock_timestamp() WHERE user_id=$1",[guest.id]);
     const signer=await device(),grant=await service.issue({...subject(),proof:signer.proof()});
     if(deadline!=="admission")await service.consume({...engine(),token:grant.grantToken});
     const controlled=withAuthorityDeadlineBarrier(pool,/cloud_workspace_engine_authority_current/,async()=>{

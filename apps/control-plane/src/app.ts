@@ -11,6 +11,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { Hono, type Context } from "hono";
+import {isCustomerCloudPath,publicCloudError} from "./cloud-workspaces/public-contract.js";
 import { HTTPException } from "hono/http-exception";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
@@ -569,6 +570,7 @@ export function createApp(
     // middleware contract.
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
+      if(isCustomerCloudPath(c.req.path))return c.json({error:publicCloudError(err.code)},err.status);
       return c.json(
         {
           error: {

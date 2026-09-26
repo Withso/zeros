@@ -757,6 +757,7 @@ function createOrganizationRouter(
          VALUES ($1, $2, 'owner')`,
         [root.id, user.id],
       );
+      await tx.query("SELECT provision_cloud_workspace_pro_defaults($1)", [root.id]);
       const team = await tx.query<{ id: string }>(
         `INSERT INTO teams (org_id, slug, name, is_default, created_by)
          VALUES ($1, 'default', 'Default', true, $2)

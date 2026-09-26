@@ -16,17 +16,19 @@ d('explicit individual Pro operator authority',()=>{
  beforeEach(async()=>{
   await pool.query('DROP SCHEMA public CASCADE; CREATE SCHEMA public');await runMigrations(pool);
   actor=randomUUID();subject=randomUUID();
-  await pool.query("INSERT INTO users(id,email,display_name,staff_role) VALUES($1,$2,'Owner','platform_owner'),($3,$4,'Pilot member','developer')",[actor,actor+'@example.test',subject,subject+'@example.test']);
+  await pool.query("INSERT INTO users(id,email,display_name,staff_role) VALUES($1,$2,'Owner','platform_owner'),($3,$4,'Pro member',NULL)",[actor,actor+'@example.test',subject,subject+'@example.test']);
   input={operationId:randomUUID(),channel:'development',actorUserId:actor,subjectUserId:subject,expectedEmail:subject+'@example.test',enabled:true,validFrom:new Date(Date.now()-60000).toISOString(),validUntil:new Date(Date.now()+3600000).toISOString(),reason:'Explicit individual Pro pilot qualification allowance'};
  });
  async function execute(change=input){const plan=await manageAccountPro(pool,change,options());return manageAccountPro(pool,change,{...options(),execute:true,approval:plan.planSha256});}
- it('plans without granting, then grants the fresh staff account once without an organization or compute budget',async()=>{
+ it('records paid Pro alongside complimentary staff Pro once without an organization or compute budget',async()=>{
+  await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1",[subject]);
+  expect((await withSystemTx(pool,tx=>tx.query('SELECT cloud_workspace_pro_user_live($1) AS live',[subject]))).rows[0].live).toBe(true);
   const plan=await manageAccountPro(pool,input,options());expect(plan.state).toBe('planned');
   expect((await pool.query('SELECT count(*)::int AS n FROM account_entitlements')).rows[0].n).toBe(0);
   const result=await manageAccountPro(pool,input,{...options(),execute:true,approval:plan.planSha256});expect(result.state).toBe('changed');
   expect((await manageAccountPro(pool,input,{...options(),execute:true,approval:plan.planSha256})).state).toBe('replayed');
   expect((await pool.query('SELECT plan,status,cloud_workspaces_allowed,revision FROM account_entitlements WHERE user_id=$1',[subject])).rows[0]).toEqual({plan:'pro',status:'active',cloud_workspaces_allowed:true,revision:'1'});
-  expect((await pool.query('SELECT cloud_workspace_pro_user_live($1) AS live',[subject])).rows[0].live).toBe(true);
+  expect((await withSystemTx(pool,tx=>tx.query('SELECT cloud_workspace_pro_user_live($1) AS live',[subject]))).rows[0].live).toBe(true);
   expect((await pool.query('SELECT count(*)::int AS n FROM managed_compute_funding_receipts')).rows[0].n).toBe(0);
   expect((await pool.query('SELECT count(*)::int AS n FROM account_pro_entitlement_changes')).rows[0].n).toBe(1);
  });
@@ -40,7 +42,7 @@ d('explicit individual Pro operator authority',()=>{
  it('revokes personal Pro immediately and refuses stale approval after grant/revoke/grant ABA',async()=>{
   await execute();const stale={...input,operationId:randomUUID(),enabled:false};const plan=await manageAccountPro(pool,stale,options());
   await execute({...input,operationId:randomUUID(),enabled:false});
-  expect((await pool.query('SELECT cloud_workspace_pro_user_live($1) AS live',[subject])).rows[0].live).toBe(false);
+  expect((await withSystemTx(pool,tx=>tx.query('SELECT cloud_workspace_pro_user_live($1) AS live',[subject]))).rows[0].live).toBe(false);
   await execute({...input,operationId:randomUUID()});
   await expect(manageAccountPro(pool,stale,{...options(),execute:true,approval:plan.planSha256})).rejects.toThrow(/plan/i);
   expect((await pool.query('SELECT revision FROM account_entitlements WHERE user_id=$1',[subject])).rows[0].revision).toBe('3');
@@ -61,7 +63,7 @@ d('explicit individual Pro operator authority',()=>{
   await expect(execute({...grant,operationId:randomUUID()})).rejects.toThrow(/active/i);
   account.accountStatus='deletion_pending';
   const restored=await app.request('/v1/account/deletion/restore',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({requestId:scheduled.deletion.id})});
-  expect(restored.status).toBe(200);expect((await pool.query('SELECT cloud_workspace_pro_user_live($1) AS live',[account.id])).rows[0].live).toBe(false);
+  expect(restored.status).toBe(200);expect((await withSystemTx(pool,tx=>tx.query('SELECT cloud_workspace_pro_user_live($1) AS live',[account.id]))).rows[0].live).toBe(false);
   await pool.query("UPDATE users SET auth_status='deleted',deleted_at=now() WHERE id=$1",[account.id]);
   await expect(execute({...revoke,operationId:randomUUID()})).rejects.toThrow(/erased/i);
  });

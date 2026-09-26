@@ -388,6 +388,7 @@ async function lockImportAuthority(
   ).rows[0];
   if (!row) throw new WorkspaceForkError("not_found", "Fork import not found");
   await authorizeCloudWorkspaceOperation(tx, {
+    workspaceId: input.workspaceId,
     organizationId: input.organizationId,
     teamId: row.team_id,
     actorUserId: input.accountUserId,

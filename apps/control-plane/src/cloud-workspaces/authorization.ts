@@ -191,10 +191,7 @@ async function loadAccountEntitlement(
   userId: string,
 ): Promise<AccountEntitlementRow | null> {
   const result = await tx.query<AccountEntitlementRow>(
-    `SELECT ae.plan, ae.revision
-     FROM account_entitlements ae
-     WHERE ae.user_id = $1
-       AND ${activeEntitlementSql("ae")}`,
+    `SELECT plan, revision FROM cloud_workspace_pro_entitlement($1)`,
     [userId],
   );
   return result.rows[0] ?? null;
@@ -217,6 +214,9 @@ export async function authorizeCloudWorkspaceOperation(
     /** Sponsor-only operations retain this gate; shared access uses the
      * workspace actor authority separately from compute funding. */
     requireWorkspaceOwner: boolean;
+    /** Existing organization-funded epochs keep their historical authority.
+     * New workspaces always use the creator's individual Pro. */
+    workspaceId?: string;
     /** Read/runtime paths may share the tenant fence. Provisioning, billing
      * and quota mutations retain the default exclusive organization lock. */
     organizationLock?: "share" | "update";
@@ -310,11 +310,6 @@ export async function authorizeCloudWorkspaceOperation(
       403, "cloud_workspaces_not_allowed", "Personal workspaces are local only",
     );
   }
-  if (!scope.actor_pilot_allowed || !scope.owner_pilot_allowed) {
-    throw new CloudWorkspaceAuthorizationError(
-      403, "cloud_pilot_access_required", "Cloud workspaces are restricted to the staff pilot",
-    );
-  }
 
   if (
     input.workosEnabled &&
@@ -335,11 +330,13 @@ export async function authorizeCloudWorkspaceOperation(
   );
   const entitlement = entitlementResult.rows[0];
 
-  // Pro is an individual subscription. A legacy Pro organization row is not
-  // a funding source and other members' subscriptions never fund this owner.
-  // Business identity remains explicit even after cancellation: do not silently
-  // downgrade a lapsed Business organization to individual Pro authorization.
-  if (!entitlement || entitlement.plan === "pro") {
+  const legacyOrganizationFunding = input.workspaceId ? (await tx.query(
+    `SELECT 1 FROM cloud_workspaces workspace JOIN workspace_billing_epochs billing
+       ON billing.workspace_id=workspace.id AND billing.billing_epoch=workspace.current_billing_epoch
+     WHERE workspace.id=$1 AND workspace.org_id=$2 AND billing.entitlement_scope='organization'`,
+    [input.workspaceId,input.organizationId],
+  )).rowCount === 1 : false;
+  if (!legacyOrganizationFunding) {
     const owner = await loadAccountEntitlement(tx, input.billingOwnerUserId);
     const actor = input.actorUserId === input.billingOwnerUserId
       ? owner : await loadAccountEntitlement(tx, input.actorUserId);
@@ -352,7 +349,12 @@ export async function authorizeCloudWorkspaceOperation(
     return { ...base, isPersonal: false, entitlementScope: "account", plan: "pro",
       entitlementRevision: safeRevision(owner.revision, "account entitlement") };
   }
-  if (!entitlement.active) {
+  // Business launch policy is deferred. Only an already-recorded organization
+  // epoch can enter the old staff/seat path; never silently convert its payer.
+  if (!scope.actor_pilot_allowed || !scope.owner_pilot_allowed) {
+    throw new CloudWorkspaceAuthorizationError(403,"cloud_pilot_access_required","Legacy cloud authority is unavailable");
+  }
+  if (!entitlement?.active) {
     throw new CloudWorkspaceAuthorizationError(
       403, "cloud_organization_entitlement_required",
       "An active organization cloud entitlement is required",

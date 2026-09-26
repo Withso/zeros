@@ -332,7 +332,7 @@ d("owner-managed cloud-workspace quotas", () => {
           expectedOrganizationSlug: organizationSlug,
         }),
       ),
-    ).rejects.toThrow(/entitlement/i);
+    ).resolves.toMatchObject({state:"planned"});
 
     const used = await seedReadyCloudWorkspace(pool);
     await pool.query(

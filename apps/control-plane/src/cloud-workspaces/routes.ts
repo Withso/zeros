@@ -49,6 +49,9 @@ import type {
 import { createCloudWorkspaceManagementRoutes } from "./management-routes.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import {DatabaseComputeUserFunding} from "./compute-funding.js";
+import {readProComputeUsage} from "./pro-allowance.js";
+import {publicCloudError} from "./public-contract.js";
+import {computeMicroUsd} from "./provider-compute.js";
 import { authorizeCloudWorkspaceCleanup, authorizeCloudWorkspaceActor, DatabaseCloudWorkspaceCollaborationService } from "./actors.js";
 import type { CloudWorkspaceProviderName } from "./provider.js";
 import type { DaytonaProviderConnectionQualifier } from "./provider-qualification.js";
@@ -323,6 +326,11 @@ async function ensureWorkspaceDeletionJob(
 }
 
 type WorkspaceRow = {
+  actor_role: string|null;
+  sponsor_pro_live: boolean;
+  allowance_available: string|null;
+  allowance_policy_id: string|null;
+  allowance_seconds_per_dollar: string|null;
   id: string;
   org_id: string;
   team_id: string;
@@ -406,8 +414,8 @@ type ForkIntentRow = {
   completed_at: Date | string | null;
 };
 
-const WORKSPACE_SELECT = `
-  SELECT cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
+const workspaceSelect = (actorSql="NULL::text") => `
+  SELECT ${actorSql} AS actor_role,cw.id, cw.org_id, cw.team_id, cw.created_by, cw.owner_user_id,
          cw.display_name,
          cw.repository_forge, cw.repository_owner, cw.repository_name,
          cw.repository_revision, cw.status, cw.desired_state,
@@ -417,12 +425,20 @@ const WORKSPACE_SELECT = `
          g.provider, g.provider_connection_id, g.image_ref,
          g.architecture, g.cpu_millicores, g.memory_mib, g.storage_mib,
          g.source_commit, pb.observed_state, pb.provider_target,
-         pb.last_observed_at AS provider_last_observed_at
+         pb.last_observed_at AS provider_last_observed_at,
+         cloud_workspace_pro_user_live(cw.owner_user_id) AS sponsor_pro_live,
+         allowance.compute_policy_id AS allowance_policy_id,allowance.seconds_per_dollar AS allowance_seconds_per_dollar,
+         funding.granted_micro_usd-coalesce(usage.debited,0)-coalesce(usage.reserved,0) AS allowance_available
   FROM cloud_workspaces cw
   JOIN cloud_workspace_generations g
     ON g.workspace_id = cw.id AND g.generation = cw.current_generation
   JOIN cloud_workspace_provider_bindings pb
-    ON pb.workspace_id = g.workspace_id AND pb.generation = g.generation`;
+    ON pb.workspace_id = g.workspace_id AND pb.generation = g.generation
+  LEFT JOIN managed_compute_pro_allowances allowance ON allowance.user_id=cw.owner_user_id
+    AND allowance.starts_at<=clock_timestamp() AND allowance.ends_at>clock_timestamp()
+  LEFT JOIN managed_compute_user_periods funding ON funding.id=allowance.period_id
+  LEFT JOIN LATERAL(SELECT sum(debited_micro_usd) AS debited,sum(reserved_micro_usd) AS reserved
+    FROM managed_compute_credit_periods WHERE funding_period_id=funding.id) usage ON true`;
 
 function parse<T>(
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -463,7 +479,15 @@ function iso(value: Date | string | null): string | null {
   return Number.isFinite(timestamp.getTime()) ? timestamp.toISOString() : null;
 }
 
-function workspaceDocument(row: WorkspaceRow) {
+function workspaceDocument(row: WorkspaceRow,config:CloudWorkspaceBackendConfig|null) {
+  const canWrite=["prompter","developer","manager","owner"].includes(row.actor_role??"");
+  const canManage=["manager","owner"].includes(row.actor_role??"");
+  const policy=config?.computePolicy;
+  const minimum=policy?computeMicroUsd(Math.ceil((policy.minimumTtlSeconds+policy.requestMarginSeconds)*Math.max(row.cpu_millicores/4000,row.memory_mib/8192)),policy.secondsPerDollar):null;
+  const reason=!config?"cloud_disabled":!row.actor_role?"pro_required":!canManage?"workspace_role_required":!row.sponsor_pro_live?"sponsor_unavailable"
+    :!['stopped','archived'].includes(row.status)?"workspace_not_stopped":!policy||row.allowance_available===null?"allowance_pending"
+      :row.allowance_policy_id!==policy.policyId||Number(row.allowance_seconds_per_dollar)!==policy.secondsPerDollar?"allowance_unavailable"
+        :Number(row.allowance_available)<minimum!?"allowance_exhausted":null;
   return {
     id: row.id,
     organizationId: row.org_id,
@@ -472,6 +496,7 @@ function workspaceDocument(row: WorkspaceRow) {
     ownerUserId: row.owner_user_id,
     sharingMode: row.sharing_mode,
     accessRevision: Number(row.access_revision),
+    capabilities:{canWrite,canManage,canStart:reason===null,startUnavailableReason:reason},
     name: row.display_name,
     placement: "cloud" as const,
     status: row.status,
@@ -484,27 +509,20 @@ function workspaceDocument(row: WorkspaceRow) {
     },
     generation: {
       number: row.current_generation,
-      provider: row.provider,
-      imageRef: row.image_ref,
       architecture: row.architecture,
       resources: {
         cpuMillicores: row.cpu_millicores,
         memoryMiB: row.memory_mib,
         storageMiB: row.storage_mib,
       },
-      sourceCommit: row.source_commit,
       observedState: row.observed_state,
-      providerTarget: row.provider_target,
       lastObservedAt: iso(row.provider_last_observed_at),
     },
     version: Number(row.version),
     error:
       row.last_error_code === null
         ? null
-        : {
-            code: row.last_error_code,
-            message: row.last_error_message,
-          },
+        : publicCloudError(row.last_error_code),
     lastObservedAt: iso(row.last_observed_at),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
@@ -534,7 +552,7 @@ function transitionDocument(row: GenerationTransitionRow) {
     error:
       row.error_code === null
         ? null
-        : { code: row.error_code, message: row.error_message },
+        : publicCloudError(row.error_code),
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
     completedAt: iso(row.completed_at),
@@ -586,12 +604,12 @@ function sameDigest(left: Buffer, right: Buffer): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
-async function loadWorkspaceRow(tx:Tx,orgId:string,workspaceId:string,lock=false):Promise<WorkspaceRow>{
+async function loadWorkspaceRow(tx:Tx,orgId:string,workspaceId:string,lock=false,actorUserId?:string):Promise<WorkspaceRow>{
   const result = await tx.query<WorkspaceRow>(
-    `${WORKSPACE_SELECT}
+    `${workspaceSelect(actorUserId?"cloud_workspace_actor_role(cw.id,$3)":"NULL::text")}
      WHERE cw.org_id = $1 AND cw.id = $2
      ${lock ? "FOR UPDATE OF cw" : ""}`,
-    [orgId, workspaceId],
+    actorUserId?[orgId,workspaceId,actorUserId]:[orgId,workspaceId],
   );
   const row = result.rows[0];
   if (!row) throw new HttpError(404, "not_found", "Cloud workspace not found");
@@ -605,13 +623,14 @@ async function loadWorkspace(
   userId: string,
   options: { lock?: boolean; ownerOnly?: boolean } = {},
 ): Promise<WorkspaceRow> {
-  const row=await loadWorkspaceRow(tx,orgId,workspaceId,options.lock);
+  const row=await loadWorkspaceRow(tx,orgId,workspaceId,options.lock,userId);
   if (row.owner_user_id===userId) {
     await authorizeCloudWorkspaceDataAccess(tx,{organizationId:orgId,teamId:row.team_id,
       actorUserId:userId,ownerUserId:row.owner_user_id,requireWorkspaceOwner:true});
+    row.actor_role=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!.role;
   } else {
     if(options.ownerOnly)throw new HttpError(404,"not_found","Cloud workspace not found");
-    try { await authorizeCloudWorkspaceActor(tx,{workspaceId,organizationId:orgId,actorUserId:userId,capability:"read"}); }
+    try { row.actor_role=(await authorizeCloudWorkspaceActor(tx,{workspaceId,organizationId:orgId,actorUserId:userId,capability:"read"})).role; }
     catch(error) { if(error instanceof HttpError)throw new HttpError(404,"not_found","Cloud workspace not found");throw error; }
   }
   return row;
@@ -731,7 +750,7 @@ async function resolveAuthorizedTeam(
      FROM teams t
      JOIN team_members tm
        ON tm.team_id = t.id AND tm.org_id = t.org_id
-      AND tm.user_id = $2 AND tm.role = 'maintainer'
+      AND tm.user_id = $2
      WHERE t.org_id = $1 AND t.deleted_at IS NULL
        AND t.id = coalesce($3::uuid, (
          SELECT dt.id FROM teams dt
@@ -1112,6 +1131,10 @@ export function createCloudWorkspaceRoutes(
   const engineClientAdmissionService =
     options.engineClientAdmissionService ?? null;
   const base = "/v1/organizations/:organization/cloud-workspaces";
+  app.get('/v1/cloud-compute-usage',async c=>{
+    c.header('Cache-Control','no-store');c.header('Pragma','no-cache');
+    return c.json(await readProComputeUsage(pool,c.get('user').id));
+  });
   app.get('/v1/cloud-compute-credits',async c=>{
     c.header('Cache-Control','no-store');
     return c.json({currency:'USD',unit:'micro_usd',scope:'user',periods:await new DatabaseComputeUserFunding(pool).balanceForUser(c.get('user').id)});
@@ -1255,7 +1278,7 @@ export function createCloudWorkspaceRoutes(
       }
       return (
         await tx.query<WorkspaceRow>(
-          `${WORKSPACE_SELECT}
+          `${workspaceSelect("cloud_workspace_actor_role(cw.id,$2)")}
            WHERE ($1::uuid IS NULL OR cw.org_id = $1)
              AND (cw.owner_user_id=$2 OR cw.org_id IN (SELECT org_id FROM organization_members WHERE user_id=$2)
                OR cw.id IN (SELECT workspace_id FROM cloud_workspace_guest_grants WHERE user_id=$2 AND revoked_at IS NULL AND expires_at>now()))
@@ -1278,7 +1301,7 @@ export function createCloudWorkspaceRoutes(
     const hasMore = rows.length > limit;
     const page = hasMore ? rows.slice(0, limit) : rows;
     return c.json({
-      workspaces: page.map(workspaceDocument),
+      workspaces: page.map(row=>workspaceDocument(row,config)),
       nextCursor: hasMore ? encodeCursor(page[page.length - 1]!) : null,
     });
   };
@@ -1292,7 +1315,7 @@ export function createCloudWorkspaceRoutes(
       if(!scope)throw new HttpError(404,"not_found","Cloud workspace not found");
       const row=await loadWorkspace(tx,scope.org_id,workspaceId,userId);
       const live=(await tx.query<{role:string|null}>("SELECT cloud_workspace_actor_role($1,$2) AS role",[workspaceId,userId])).rows[0]!;
-      return {workspace:workspaceDocument(row),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`};
+      return {workspace:workspaceDocument(row,config),access:{role:live.role??"owner",computeEligible:live.role!==null},path:`/workspace/${workspaceId}`};
     });
     return c.json(result);
   });
@@ -1305,7 +1328,7 @@ export function createCloudWorkspaceRoutes(
     const row = await withSystemTx(pool, (tx) =>
       loadWorkspace(tx, orgId, workspaceId, user.id),
     );
-    return c.json({ workspace: workspaceDocument(row) });
+    return c.json({ workspace: workspaceDocument(row,config) });
   });
 
   app.post(`${base}/:workspace/runtime/admission`, async (c) => {
@@ -1374,40 +1397,18 @@ export function createCloudWorkspaceRoutes(
         : kind === "tunnel"
           ? parse(TunnelAccessSchema, raw)
           : parse(PreviewAccessSchema, raw);
-    const remotePort =
-      kind === "tunnel"
-        ? (body as z.infer<typeof TunnelAccessSchema>).remotePort
-        : kind === "preview"
-          ? (body as z.infer<typeof PreviewAccessSchema>).port
-          : undefined;
-    const runtimeGeneration =
-      kind === "tunnel"
-        ? (body as z.infer<typeof TunnelAccessSchema>).runtimeGeneration
-        : undefined;
-    const tunnelScope =
-      kind === "tunnel"
-        ? (body as z.infer<typeof TunnelAccessSchema>)
-        : undefined;
+    // Public transports use the actor-aware Zeros relay. Raw infrastructure
+    // SSH destinations remain private to the legacy runtime/operator adapter.
+    if(kind!=="preview"){
+      await withSystemTx(pool,tx=>authorizeCloudWorkspaceActor(tx,{organizationId,workspaceId,actorUserId:user.id,capability:"edit"}));
+      throw new HttpError(409,"cloud_workspace_runtime_connection_required","Connect using the workspace runtime connection");
+    }
     const document = await accessService.issue({
       organizationId,
       workspaceId,
       accountUserId: user.id,
-      kind,
-      ...(runtimeGeneration === undefined
-        ? {}
-        : {
-            purpose: "engine-runtime" as const,
-            expectedGeneration: runtimeGeneration,
-          }),
-      ...(remotePort === undefined ? {} : { remotePort }),
-      ...(tunnelScope
-        ? {
-            deviceId: tunnelScope.deviceId,
-            ...(tunnelScope.requestedLocalPort === undefined
-              ? {}
-              : { requestedLocalPort: tunnelScope.requestedLocalPort }),
-          }
-        : {}),
+      kind: "preview",
+      remotePort: (body as z.infer<typeof PreviewAccessSchema>).port,
       expiresInMinutes: body.expiresInMinutes,
       idempotencyKey: key,
     });
@@ -1985,7 +1986,7 @@ export function createCloudWorkspaceRoutes(
     // outside a database transaction; the final transaction rechecks every
     // mutable fact before it writes or consumes quota.
     const preflight = await withSystemTx(pool, async (tx) => {
-      await requireOrganizationRole(tx, orgId, user.id, "admin");
+      await requireOrganizationRole(tx, orgId, user.id, "member");
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
         await assertCreateReplay(tx, existing);
@@ -2074,7 +2075,7 @@ export function createCloudWorkspaceRoutes(
       c.header("Idempotency-Replayed", "true");
       return c.json(
         {
-          workspace: workspaceDocument(preflight.workspace),
+          workspace: workspaceDocument(preflight.workspace,config),
           intent: intentDocument(preflight.intent),
           fork: forkDocument(preflight.fork),
           replayed: true,
@@ -2102,7 +2103,7 @@ export function createCloudWorkspaceRoutes(
     }
 
     const result = await withSystemTx(pool, async (tx) => {
-      await requireOrganizationRole(tx, orgId, user.id, "admin");
+      await requireOrganizationRole(tx, orgId, user.id, "member");
       // This parent lock serializes duplicate idempotency keys and quota
       // consumption. Authorization below reads current WorkOS/plan/seat state.
       await lockCloudOrganization(tx, orgId);
@@ -2445,7 +2446,7 @@ export function createCloudWorkspaceRoutes(
     if (result.replayed) c.header("Idempotency-Replayed", "true");
     return c.json(
       {
-        workspace: workspaceDocument(result.workspace),
+        workspace: workspaceDocument(result.workspace,config),
         intent: intentDocument(result.intent),
         fork: forkDocument(result.fork),
         replayed: result.replayed,
@@ -2493,7 +2494,7 @@ export function createCloudWorkspaceRoutes(
     const result = await withSystemTx(pool, async (tx) => {
       await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
-      const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true);
+      const workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
       await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
@@ -2540,6 +2541,7 @@ export function createCloudWorkspaceRoutes(
 
       await authorizeCloudWorkspaceActor(tx,{organizationId:orgId,workspaceId,actorUserId:user.id,capability:"manage"});
       const authorization = await authorizeCloudWorkspaceOperation(tx, {
+        workspaceId,
         organizationId: orgId,
         teamId: workspace.team_id,
         actorUserId: workspace.owner_user_id,
@@ -2946,7 +2948,7 @@ export function createCloudWorkspaceRoutes(
     if (result.replayed) c.header("Idempotency-Replayed", "true");
     return c.json(
       {
-        workspace: workspaceDocument(result.workspace),
+        workspace: workspaceDocument(result.workspace,config),
         transition: transitionDocument(result.transition),
         intent: intentDocument(result.intent),
       },
@@ -2982,7 +2984,7 @@ export function createCloudWorkspaceRoutes(
     const result = await withSystemTx(pool, async (tx) => {
       await requireOrganizationMembership(tx, orgId, user.id);
       await lockCloudOrganization(tx, orgId);
-      let workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true);
+      let workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
       await authorizeCloudWorkspaceCleanup(tx,{organizationId:orgId,workspaceId,actorUserId:user.id});
       const existing = await loadIntentByKey(tx, orgId, key);
       if (existing) {
@@ -3020,6 +3022,7 @@ export function createCloudWorkspaceRoutes(
           );
         }
         const authorization = await authorizeCloudWorkspaceOperation(tx, {
+          workspaceId,
           organizationId: orgId,
           teamId: workspace.team_id,
           actorUserId: workspace.owner_user_id,
@@ -3073,7 +3076,7 @@ export function createCloudWorkspaceRoutes(
             reason,
           });
         if (restoredGeneration !== null) {
-          workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true);
+          workspace = await loadWorkspaceRow(tx, orgId, workspaceId, true, user.id);
         }
       }
 
@@ -3231,7 +3234,7 @@ export function createCloudWorkspaceRoutes(
         },
       );
       return {
-        workspace: await loadWorkspaceRow(tx, orgId, workspaceId),
+        workspace: await loadWorkspaceRow(tx, orgId, workspaceId, false, user.id),
         intent: inserted.rows[0]!,
         replayed: false,
       };
@@ -3240,7 +3243,7 @@ export function createCloudWorkspaceRoutes(
     if (result.replayed) c.header("Idempotency-Replayed", "true");
     return c.json(
       {
-        workspace: workspaceDocument(result.workspace),
+        workspace: workspaceDocument(result.workspace,config),
         intent: intentDocument(result.intent),
       },
       result.replayed ? 200 : 202,

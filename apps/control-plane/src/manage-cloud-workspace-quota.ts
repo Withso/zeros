@@ -414,22 +414,6 @@ export async function manageCloudWorkspaceQuota(
       );
     }
 
-    const entitlement = await client.query<{ present: boolean }>(
-      `SELECT true AS present
-       FROM organization_entitlements
-       WHERE org_id = $1
-         AND status IN ('active', 'trialing')
-         AND cloud_workspaces_allowed
-         AND valid_from <= now()
-         AND (valid_until IS NULL OR valid_until > now())`,
-      [request.organizationId],
-    );
-    if (!entitlement.rows[0]?.present) {
-      throw new CloudWorkspaceQuotaManagementError(
-        "Cloud quota requires a current Organization cloud entitlement",
-      );
-    }
-
     const quotaResult = await client.query<QuotaRow>(
       `SELECT max_workspaces, max_running_workspaces, max_cpu_millicores,
               max_memory_mib, max_storage_mib
@@ -551,6 +535,7 @@ export async function manageCloudWorkspaceQuota(
            max_memory_mib = EXCLUDED.max_memory_mib,
            max_storage_mib = EXCLUDED.max_storage_mib,
            updated_by = EXCLUDED.updated_by,
+           default_policy_version = NULL,
            updated_at = now()`,
       [
         request.organizationId,

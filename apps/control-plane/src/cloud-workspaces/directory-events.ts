@@ -37,7 +37,10 @@ export function publishCloudWorkspaceDirectoryChanges(pool:pg.Pool):Promise<void
           // A deleted host has no FK target. Surviving external recipients still
           // need a content-free refresh; they receive no deleted tenant identity.
           const orgId=org.rowCount===1?row.org_id:null;
-          const recipients=[row.owner_user_id,...row.guest_user_ids].filter((value):value is string=>value!==null);
+          const legacyRecipients=[row.owner_user_id,...row.guest_user_ids].filter((value):value is string=>value!==null);
+          const recipients=(await tx.query<{user_id:string}>(`SELECT user_id FROM (
+            SELECT user_id FROM cloud_workspace_directory_recipients WHERE workspace_id=$1
+            UNION SELECT unnest($2::uuid[])) recipients ORDER BY user_id LIMIT 100`,[row.workspace_id,legacyRecipients])).rows.map(user=>user.user_id);
           const users=(await tx.query<{expected:string[];locked:string[]}>(`WITH targets AS MATERIALIZED (
               SELECT id FROM users WHERE id=ANY($1::uuid[]) AND auth_status='active' AND deleted_at IS NULL
             ), locked AS MATERIALIZED (
@@ -53,6 +56,12 @@ export function publishCloudWorkspaceDirectoryChanges(pool:pg.Pool):Promise<void
             WHERE account.id=ANY($2::uuid[]) AND account.auth_status='active' AND account.deleted_at IS NULL
               AND NOT EXISTS (SELECT 1 FROM organization_members member WHERE member.org_id=$1 AND member.user_id=account.id)`,
           [orgId,users.locked]);
+          await tx.query("DELETE FROM cloud_workspace_directory_recipients WHERE workspace_id=$1 AND user_id=ANY($2::uuid[])",[row.workspace_id,recipients]);
+          await tx.query(`UPDATE cloud_workspace_directory_outbox SET owner_user_id=CASE WHEN owner_user_id=ANY($2::uuid[]) THEN NULL ELSE owner_user_id END,
+            guest_user_ids=ARRAY(SELECT recipient FROM unnest(guest_user_ids) recipient WHERE NOT recipient=ANY($2::uuid[])) WHERE workspace_id=$1`,[row.workspace_id,recipients]);
+          const remaining=await tx.query(`SELECT 1 FROM cloud_workspace_directory_recipients WHERE workspace_id=$1
+            UNION ALL SELECT 1 FROM cloud_workspace_directory_outbox WHERE workspace_id=$1 AND (owner_user_id IS NOT NULL OR cardinality(guest_user_ids)>0) LIMIT 1`,[row.workspace_id]);
+          if(remaining.rowCount)return;
         }
         await tx.query("DELETE FROM cloud_workspace_directory_outbox WHERE workspace_id=$1",[row.workspace_id]);
       });

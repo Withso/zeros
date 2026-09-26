@@ -730,6 +730,7 @@ export class DatabaseCloudWorkspaceReplicaService {
     });
     if (input.access !== "data") {
       await authorizeCloudWorkspaceOperation(tx, {
+        workspaceId: input.workspaceId,
         organizationId: input.organizationId,
         teamId: row.team_id,
         actorUserId: row.owner_user_id,

@@ -199,6 +199,19 @@ export type ReadyCloudWorkspaceFixture = {
   heartbeatToken: string;
 };
 
+/** Individual Pro fixture; historical Business fixtures remain unchanged. */
+export async function seedReadyProCloudWorkspace(pool:pg.Pool,options:{ownerUserId?:string}={}):Promise<ReadyCloudWorkspaceFixture>{
+  const fixture=await seedReadyCloudWorkspace(pool,options);
+  await withSystemTx(pool,async tx=>{
+    await tx.query("UPDATE workspace_billing_epochs SET ended_at=clock_timestamp() WHERE workspace_id=$1",[fixture.workspaceId]);
+    await tx.query(`INSERT INTO workspace_billing_epochs(workspace_id,billing_epoch,org_id,billing_owner_user_id,
+      entitlement_scope,entitlement_plan,entitlement_revision,created_by)
+      SELECT $1,2,$2,$3,'account','pro',revision,$3 FROM cloud_workspace_pro_entitlement($3)`,[fixture.workspaceId,fixture.organizationId,fixture.userId]);
+    await tx.query("UPDATE cloud_workspaces SET current_billing_epoch=2,single_member_mode=false,sharing_mode='organization' WHERE id=$1",[fixture.workspaceId]);
+  });
+  return fixture;
+}
+
 /** Canonical Phase-3 fixture. It deliberately seeds every current authority
  * edge instead of relying on legacy migration backfills. */
 export async function seedReadyCloudWorkspace(

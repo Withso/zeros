@@ -1,12 +1,19 @@
 # Individual Pro operator access
 
-Billing integration is deferred during the staff pilot. `account-pro:manage`
+Payment integration is deferred. `account-pro:manage`
 provides an explicit, database-owner operation to grant or revoke an individual
 account's Pro entitlement. It does not grant a staff role, add organization
-membership, activate a Business seat, or supply compute credits. Runtime access
-still requires the staff pilot gate and all ordinary workspace authorization.
+membership or activate a Business seat. The Pro allowance issuer observes
+trusted activation/renewal changes separately; this command cannot choose or
+top up an automatic grant. Runtime access requires current individual Pro and
+ordinary workspace authorization, with no additional staff gate for Pro.
 One Pro account can participate in multiple Pro organizations with its existing
 personal entitlement and compute allowance.
+
+Standing `platform_owner` and `developer` roles grant complimentary Pro through
+`staff_pro_benefits`, with a separate audit trail. Staff revocation preserves
+independently paid Pro. Both eligibility sources share one monthly allowance.
+See [Pro backend](pro-backend.md) for the immutable cycle anchor and rollout.
 
 Use a direct primary migration connection with `DATABASE_MIGRATION_ROLE` set to
 the stable object owner when the login rotates. Never give that connection to the
@@ -33,7 +40,10 @@ Save a private JSON document, replacing these synthetic values:
 }
 ```
 
-`validUntil` may be `null` for an explicitly indefinite grant. Set `enabled` to
+`validUntil` may be `null` for an explicitly indefinite entitlement. Such an
+activation funds one monthly period; it is not evidence of recurring paid
+renewals. Later periods need confirmed renewal/paid-through evidence or a current
+staff benefit. Set `enabled` to
 `false` and use a new operation ID to revoke; the cancelled entitlement remains
 with an advanced revision. Use a non-personal operational reason because it is
 stored in owner-only audit evidence. The expected email is checked but is not

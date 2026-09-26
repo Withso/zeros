@@ -759,6 +759,7 @@ describe("repository layout contracts", () => {
       "enterprise-and-self-hosting.md",
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
+      "pro-backend.md",
       "product-contract.md",
       "provider-contract.md",
       "qualification-status.md",

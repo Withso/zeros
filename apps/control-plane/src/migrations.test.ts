@@ -384,6 +384,26 @@ d("migration ladder", () => {
     }
   });
 
+  it("backfills Pro benefits and missing caps without selecting inherited writers or converting Business history",async()=>{
+    const index=LADDER.indexOf("0101_cloud_workspace_pro_entitlements.sql");
+    await applyThrough(index);
+    const pro=await seedReadyCloudWorkspace(pool),business=await seedReadyCloudWorkspace(pool,{ownerUserId:pro.userId});
+    await pool.query("UPDATE workspace_billing_epochs SET entitlement_scope='account',entitlement_plan='pro' WHERE workspace_id=$1",[pro.workspaceId]);
+    await pool.query("UPDATE cloud_workspaces SET single_member_mode=false,sharing_mode='organization' WHERE id IN ($1,$2)",[pro.workspaceId,business.workspaceId]);
+    await pool.query("DELETE FROM cloud_workspace_quotas WHERE org_id=$1",[pro.organizationId]);
+    await pool.query("INSERT INTO cloud_workspace_object_storage_limits(org_id,max_organization_bytes,max_workspace_bytes) VALUES($1,2000000,1000000) ON CONFLICT(org_id) DO UPDATE SET max_workspace_bytes=1000000",[pro.organizationId]);
+    const history=(await pool.query("SELECT * FROM workspace_billing_epochs ORDER BY workspace_id")).rows;
+    for(const file of LADDER.slice(index))await applyAndRecord(file);
+    expect((await pool.query("SELECT * FROM workspace_billing_epochs ORDER BY workspace_id")).rows).toEqual(history);
+    expect((await pool.query("SELECT pro_sharing_ready FROM cloud_workspaces WHERE id=$1",[pro.workspaceId])).rows[0].pro_sharing_ready).toBe(false);
+    expect((await pool.query("SELECT pro_sharing_ready FROM cloud_workspaces WHERE id=$1",[business.workspaceId])).rows[0].pro_sharing_ready).toBe(true);
+    expect((await pool.query("SELECT slot,user_id FROM cloud_workspace_writer_slots WHERE workspace_id=$1",[pro.workspaceId])).rows).toEqual([{slot:1,user_id:pro.userId}]);
+    expect((await pool.query("SELECT enabled FROM staff_pro_benefit_changes WHERE user_id=$1",[pro.userId])).rows).toEqual([{enabled:true}]);
+    expect((await pool.query("SELECT source FROM account_entitlements WHERE user_id=$1",[pro.userId])).rows[0].source).toBe("operator");
+    expect((await pool.query("SELECT default_policy_version FROM cloud_workspace_quotas WHERE org_id=$1",[pro.organizationId])).rows[0].default_policy_version).toBe("pro-v1");
+    expect((await pool.query("SELECT max_workspace_bytes,default_policy_version FROM cloud_workspace_object_storage_limits WHERE org_id=$1",[pro.organizationId])).rows[0]).toEqual({max_workspace_bytes:"1000000",default_policy_version:null});
+  });
+
   it("defers the 0023 lifecycle-intent foreign-key scan to controlled 0025", async () => {
     const boundaryIndex = LADDER.indexOf(
       "0025_cloud_workspace_engine_authority.sql",

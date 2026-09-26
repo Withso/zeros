@@ -209,8 +209,7 @@ async function nextCheckAt(
            coalesce(entitlement.valid_until,
              now() + ($2::bigint * interval '1 millisecond'))
          ) AS next_check_at
-         FROM account_entitlements entitlement
-         WHERE entitlement.user_id = $1`,
+         FROM cloud_workspace_pro_entitlement($1) entitlement`,
         [authorization.billingOwnerUserId, recheckIntervalMs],
       )
     : await tx.query<{ next_check_at: Date }>(
@@ -520,6 +519,7 @@ export class DatabaseCloudWorkspacePaidAuthorityReconciler {
         )
       ) {
         const authorization = await authorizeCloudWorkspaceOperation(tx, {
+          workspaceId: workspace.id,
           organizationId: workspace.org_id,
           teamId: workspace.team_id,
           actorUserId: workspace.owner_user_id,
@@ -552,6 +552,7 @@ export class DatabaseCloudWorkspacePaidAuthorityReconciler {
       let authorization: CloudWorkspaceAuthorization;
       try {
         authorization = await authorizeCloudWorkspaceOperation(tx, {
+          workspaceId: workspace.id,
           organizationId: workspace.org_id,
           teamId: workspace.team_id,
           actorUserId: workspace.owner_user_id,

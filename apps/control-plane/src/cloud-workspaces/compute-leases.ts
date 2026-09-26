@@ -3,6 +3,7 @@ import type pg from "pg";
 import { withSystemTx } from "../db.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
 import {lockComputeUserFunding,prepareComputeUserPeriods} from "./compute-funding.js";
+import {ensureProMonthlyAllowance} from "./pro-allowance.js";
 import {
   planManagedComputeCredit,
   type ComputeCreditPlanningPeriod,
@@ -277,16 +278,16 @@ export class CloudWorkspaceComputeLeaseCoordinator {
     )
       throw failure("compute_policy_changed");
     return withSystemTx(this.options.pool, async (tx) => {
-      const now = (
-        await tx.query<{ now: Date }>("SELECT clock_timestamp() AS now")
-      ).rows[0]!.now.getTime();
       const billing=(await tx.query<{entitlement_plan:string}>(`SELECT entitlement_plan FROM workspace_billing_epochs
         WHERE workspace_id=$1 AND org_id=$2 AND billing_epoch=$3 AND billing_owner_user_id=$4`,
         [lease.workspace_id,lease.org_id,lease.billing_epoch,lease.user_id])).rows[0];
       if(billing?.entitlement_plan==='pro') {
         await lockComputeUserFunding(tx,lease.user_id);
+        const allowance=await ensureProMonthlyAllowance(tx,lease.user_id,policy);
+        if(allowance.state!=="ready")throw failure(`compute_allowance_${allowance.state}`);
         await prepareComputeUserPeriods(tx,{userId:lease.user_id,organizationId:lease.org_id});
       }
+      const now = (await tx.query<{now:Date}>("SELECT clock_timestamp() AS now")).rows[0]!.now.getTime();
       const rows = (
         await tx.query(
           `SELECT period.*,reservation.meter_since,reservation.meter_through,reservation.billable_seconds,

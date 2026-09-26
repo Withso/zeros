@@ -5,6 +5,12 @@ managed deployment default. The registry resolves the exact provider recorded
 on a generation. A missing registration or unavailable customer credential fails
 closed; it never borrows another provider's managed account.
 
+These are internal execution and operator contracts. The
+[Pro public response boundary](pro-backend.md#customer-response-boundary)
+removes compute supplier names, targets, image references and diagnostics from
+customer responses. Public human connections use the Zeros runtime relay;
+persisted provider identities and native credentials remain internal.
+
 ## Immutable generations
 
 Explicit customer connections choose their own provider and provisioning
