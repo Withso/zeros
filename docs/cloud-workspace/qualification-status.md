@@ -33,11 +33,11 @@ Daytona worker isolation is still unqualified. See
 
 Batch 8 closed the staff backend milestone on September 24, 2026.
 
-| Channel    | Backend                                                              | Migration ledger | Cloud execution                                         |
-| ---------- | -------------------------------------------------------------------- | ---------------- | ------------------------------------------------------- |
-| Alpha      | Pro backend `bf45aad6` from `main`, explicitly deployed September 26 | through `0104`   | on; lifecycle qualification pending GitHub installation |
-| Beta       | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                     |
-| Production | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                     |
+| Channel    | Backend                                                              | Migration ledger | Cloud execution                                    |
+| ---------- | -------------------------------------------------------------------- | ---------------- | -------------------------------------------------- |
+| Alpha      | Pro backend `bf45aad6` from `main`, explicitly deployed September 26 | through `0104`   | on; physical provider deletion remains unconfirmed |
+| Beta       | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                |
+| Production | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                |
 
 - Managed Boat Linux VMs are the default provider. Daytona remains a separate
   adapter, used only when explicitly selected: its worker isolation is
@@ -71,13 +71,24 @@ Batch 8 closed the staff backend milestone on September 24, 2026.
   testing Pro admission. Automatic issuance produced exactly one allowance.
   At the verified provider rate of 100,000 standard seconds per dollar, the
   monthly 500-hour allowance represents $18 of compute, excluding other costs.
-- Live create/start/stop/delete on Alpha is not yet qualified: GitHub's
-  `zeros-alpha` App authenticates successfully but has no installations.
-  Repository verification rejects creation before allocating compute. Install
-  the Alpha App on the test repository's GitHub account and retry through the
-  authenticated API; do not substitute the unrelated historical installation
-  record or bypass repository authorization. UI work may start, but its live
-  cloud lifecycle test requires this prerequisite.
+- After installing the `zeros-alpha` GitHub App with access to the test
+  repository, the ordinary Pro sponsor passed authenticated create, idempotent
+  create replay, engine readiness, checkpointed stop, wake and second engine
+  readiness. The collaborator response counted the owner as one of ten writer
+  slots. Workspace responses remained provider-neutral throughout.
+- Stop captured 4,721 encrypted file objects in approximately 266 seconds;
+  the next final checkpoint completed in approximately 20 seconds. Both
+  compute reservations settled against the same sponsor with zero remaining
+  reservations or platform exposure: 405 billed standard-machine seconds,
+  or $0.00405 against a $0.10 compute qualification budget. Object storage costs
+  are separate. No paid model turn or signed desktop behavior was tested.
+- Delete was accepted after the second durable checkpoint and stopped compute.
+  The exact Boat deletion operation reports `blocked`, with no completion
+  timestamp. This reproduces the previously open provider-deletion boundary on
+  Alpha: full physical deletion is not qualified. Keep the journal, encrypted
+  objects and fixture Organization until the receipt completes; an absent
+  sandbox or a successful delete request is not completion evidence. UI wiring
+  can proceed against Alpha, but launch qualification must retain this open item.
 
 ## Current eight-step execution
 
