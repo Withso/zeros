@@ -72,15 +72,21 @@ export interface PendingProject {
   name: string;
 }
 
+export interface AddProjectOptions {
+  /** Return the registered project to Create's picker without opening a
+   * workspace. Omit for the usual first-workspace flow. */
+  onSelect?: (project: Project) => void;
+}
+
 interface AddProjectActions {
   /** Open the native folder picker and register the chosen folder as a project.
    *  A foreign linked-worktree is routed through the Add-local-project
    *  confirmation first. */
-  openProject: () => void;
+  openProject: (options?: AddProjectOptions) => void;
   /** Open the "Open GitHub project" clone dialog. */
-  openGithubProject: () => void;
+  openGithubProject: (options?: AddProjectOptions) => void;
   /** Open the "Start from scratch" new-repo dialog. */
-  quickStart: () => void;
+  quickStart: (options?: AddProjectOptions) => void;
   /** Open the new-workspace dispatcher — the unified "+ Create" launcher
    *  (pick a project, type a task, pick the agent/model, Create). */
   openDispatcher: (initialProjectId?: string) => void;
@@ -143,10 +149,13 @@ export function AddProjectProvider({
   // (engine up) or the safety timeout below.
   const [openingRoot, setOpeningRoot] = useState<string | null>(null);
 
-  // Quick Start + Open GitHub project dialogs — simple boolean open
-  // state since they have no per-row state.
-  const [quickStartOpen, setQuickStartOpen] = useState(false);
-  const [openGithubOpen, setOpenGithubOpen] = useState(false);
+  // Each dialog retains the selection intent of the action that opened it.
+  const [quickStartTarget, setQuickStartTarget] = useState<
+    AddProjectOptions | null
+  >(null);
+  const [openGithubTarget, setOpenGithubTarget] = useState<
+    AddProjectOptions | null
+  >(null);
   // Add local project dialog — populated when pickProjectFolder picks a
   // linked-worktree (foreign tool's branch). Stays null when the
   // picked folder is a fresh repo / primary checkout.
@@ -180,11 +189,12 @@ export function AddProjectProvider({
 
   /** In-app folder opens ask before initializing Git, then land in a managed
    * worktree. Reopening reuses a live workspace. Deep links only register a
-   * project: external URLs must not initialize Git or create worktrees. */
+   * project: external URLs must not initialize Git or create worktrees.
+   * Create's project picker registers and selects only; submission owns setup. */
   const openFirstWorkspace = useCallback(
     async (
       root: string,
-      opts: {
+      opts: AddProjectOptions & {
         inspect?: InspectFolderResult;
         autoCreate?: boolean;
         initializeConfirmed?: boolean;
@@ -193,8 +203,13 @@ export function AddProjectProvider({
       const repoRoot = normalizeProjectRoot(root);
       if (pendingOpens.current.has(repoRoot)) return;
       pendingOpens.current.add(repoRoot);
-      const { autoCreate = true } = opts;
+      const { onSelect } = opts;
+      const autoCreate = !onSelect && (opts.autoCreate ?? true);
       const land = (project: Project) => {
+        if (onSelect) {
+          onSelect(project);
+          return;
+        }
         const existing = leftmostLiveWorkspace(
           peekWorkspacesFor(project.repoSlug),
         );
@@ -240,6 +255,7 @@ export function AddProjectProvider({
             label: "Retry",
             onClick: () =>
               void openFirstWorkspaceRef.current(repoRoot, {
+                onSelect,
                 autoCreate,
                 initializeConfirmed: opts.initializeConfirmed,
               }),
@@ -332,39 +348,38 @@ export function AddProjectProvider({
     return () => window.clearTimeout(id);
   }, [pendingProject]);
 
-  const openProject = useCallback(async () => {
-    if (!nativeRuntime) {
-      return;
-    }
-    try {
-      // Pick the folder WITHOUT respawning the engine. Adding a repo no longer
-      // kills + re-roots the engine (the 30s freeze) — the running engine serves
-      // the new repo over the bridge the moment we upsert it. Returns the
-      // absolute path, or null on cancel.
-      const root = await pickProjectFolder();
-      if (!root) return;
-      // Inspect the picked folder before registration. If it is a linked
-      // worktree
-      // owned by another tool, surface the "Add local project"
-      // confirmation dialog instead of silently registering. The dialog
-      // then drives workspace_create_from_branch to adopt the branch.
-      const inspect = await workspaceInspectFolder(root);
-      if (inspect && inspect.isRepo && inspect.isWorktree) {
-        // The adopt confirmation dialog takes over from here (its own flow
-        // registers the project, whose root differs from this picked worktree).
-        setAdoptFolder({ ...inspect, path: root });
+  const openProject = useCallback(
+    async ({ onSelect }: AddProjectOptions = {}) => {
+      if (!nativeRuntime) {
         return;
       }
-      // The shared flow asks before Git initialization and opens a worktree.
-      setPendingProject({ root, name: deriveProjectName(root) });
-      // Reuse the inspect from above rather than re-probing the same folder.
-      void openFirstWorkspace(root, { inspect });
-    } catch (err) {
-      toast.error("Couldn't open that project", {
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }, [openFirstWorkspace, nativeRuntime]);
+      try {
+        // Pick the folder without respawning the engine. The running engine
+        // serves the new repo once it is registered. Null means canceled.
+        const root = await pickProjectFolder();
+        if (!root) return;
+        const inspect = await workspaceInspectFolder(root);
+        if (!onSelect && inspect.isRepo && inspect.isWorktree) {
+          // Ordinary opens confirm adoption of a foreign worktree. Create only
+          // selects its repository and leaves workspace creation to submission.
+          setAdoptFolder({ ...inspect, path: root });
+          return;
+        }
+        const repoRoot = inspect.isWorktree ? (inspect.mainRoot ?? root) : root;
+        setPendingProject({ root: repoRoot, name: deriveProjectName(repoRoot) });
+        // Reuse inspection only when it belongs to the root being registered.
+        void openFirstWorkspace(repoRoot, {
+          onSelect,
+          ...(repoRoot === root ? { inspect } : {}),
+        });
+      } catch (err) {
+        toast.error("Couldn't open that project", {
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [openFirstWorkspace, nativeRuntime],
+  );
 
   // File → Open Folder / Cmd+Shift+O (native menu) routes here so it shares ONE
   // open-project path with the Dispatcher and the welcome screen. Subscribe
@@ -384,12 +399,12 @@ export function AddProjectProvider({
     return () => unlisten?.();
   }, []);
 
-  const openGithubProject = useCallback(() => {
-    setOpenGithubOpen(true);
+  const openGithubProject = useCallback((options: AddProjectOptions = {}) => {
+    setOpenGithubTarget(options);
   }, []);
 
-  const quickStart = useCallback(() => {
-    setQuickStartOpen(true);
+  const quickStart = useCallback((options: AddProjectOptions = {}) => {
+    setQuickStartTarget(options);
   }, []);
 
   const openDispatcher = useCallback(
@@ -447,11 +462,17 @@ export function AddProjectProvider({
         }}
       />
       <QuickStartDialog
-        open={quickStartOpen}
-        onOpenChange={setQuickStartOpen}
+        open={quickStartTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setQuickStartTarget(null);
+        }}
+        createWorkspace={!quickStartTarget?.onSelect}
         onCreated={({ repoRoot }) => {
           // Create already authorizes Git setup for this new folder.
-          void openFirstWorkspace(repoRoot, { initializeConfirmed: true });
+          void openFirstWorkspace(repoRoot, {
+            ...quickStartTarget,
+            initializeConfirmed: true,
+          });
           refreshProjects();
         }}
         onRequestPublish={(repoRoot, name) =>
@@ -459,10 +480,12 @@ export function AddProjectProvider({
         }
       />
       <OpenGithubProjectDialog
-        open={openGithubOpen}
-        onOpenChange={setOpenGithubOpen}
+        open={openGithubTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setOpenGithubTarget(null);
+        }}
         onCloned={({ repoRoot }) => {
-          void openFirstWorkspace(repoRoot);
+          void openFirstWorkspace(repoRoot, openGithubTarget ?? {});
           refreshProjects();
         }}
       />

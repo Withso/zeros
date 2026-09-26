@@ -68,6 +68,7 @@ import {
 import type { ChatThread } from "../../state/store";
 import { createDispatcherChat } from "./dispatcher-chat";
 import { prepareProjectFolder } from "../project-folder-setup";
+import type { AddProjectOptions } from "../add-project-provider";
 import {
   loadAgents,
   useAgentsSnapshot,
@@ -118,9 +119,9 @@ interface DispatcherPageProps {
   /** Repository context supplied by the global top bar, when available. */
   initialProjectId?: string | null;
   /** Shared add-project flows (from AddProjectProvider) inside the project picker. */
-  onOpenProject: () => void;
-  onOpenGithubProject: () => void;
-  onQuickStart: () => void;
+  onOpenProject: (options?: AddProjectOptions) => void;
+  onOpenGithubProject: (options?: AddProjectOptions) => void;
+  onQuickStart: (options?: AddProjectOptions) => void;
 }
 
 /** Resolve the project to pre-select: the one the active chat lives in (so
@@ -160,6 +161,8 @@ export function DispatcherPage({
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
+  const selectAddedProject = (project: Project) =>
+    setSelectedProjectId(project.id);
   const [sourceSelection, setSourceSelection] =
     useState<DispatcherSourceSelection | null>(null);
   const [projectMenuOpen, setProjectMenuOpen] = useState(false);
@@ -504,16 +507,24 @@ export function DispatcherPage({
                   </DropdownMenuItem>
                 ))}
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => onOpenProject()}>
+                <DropdownMenuItem
+                  onSelect={() => onOpenProject({ onSelect: selectAddedProject })}
+                >
                   <FolderOpen className="text-fg2" strokeWidth={1.5} />
                   <span>Open project</span>
                 </DropdownMenuItem>
-                <DropdownMenuItem onSelect={() => onOpenGithubProject()}>
+                <DropdownMenuItem
+                  onSelect={() =>
+                    onOpenGithubProject({ onSelect: selectAddedProject })
+                  }
+                >
                   <GithubIcon className="text-fg2" strokeWidth={1.5} />
                   <span>Open GitHub project</span>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => onQuickStart()}>
+                <DropdownMenuItem
+                  onSelect={() => onQuickStart({ onSelect: selectAddedProject })}
+                >
                   <Plus className="text-fg2" strokeWidth={1.5} />
                   <span>Start from scratch</span>
                 </DropdownMenuItem>

@@ -69,7 +69,7 @@ import { runSubscriptionSmoke } from "./ui-smoke-subscription.mjs";
 import { runFolderWorkspaceSmoke, runWorkspaceRecoveryNavigationSmoke } from "./ui-smoke-folder-workspace.mjs";
 import { runFolderReviewSmoke } from "./ui-smoke-folder-review.mjs";
 import { runFolderFilesSmoke } from "./ui-smoke-folder-files.mjs";
-import { runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
+import { runCreateProjectSelectionSmoke, runFolderCreateSmoke, runFolderDesignSetupSmoke, runFolderAutoSetupSmoke, runStartFromScratchSmoke } from "./ui-smoke-folder-create.mjs";
 import { runRepoSettingsSmoke } from "./ui-smoke-repo-settings.mjs";
 import { runDialogChromeSmoke } from "./ui-smoke-project-folder-setup.mjs";
 import { runFilePrefetchSmoke } from "./ui-smoke-file-prefetch.mjs";
@@ -2559,6 +2559,7 @@ try {
   await runFolderFilesSmoke({ page, check });
   await runStartFromScratchSmoke({ page, check });
   await runFolderAutoSetupSmoke({ page, check });
+  await runCreateProjectSelectionSmoke({ page, check });
   await runFolderCreateSmoke({ page, check });
   await runFolderDesignSetupSmoke({ page, check });
   await runDialogChromeSmoke({ page, check });

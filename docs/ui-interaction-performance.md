@@ -104,9 +104,14 @@ Two rules that pattern enforces:
 
 Create's project, source and Code/Design controls share one row above the prompt,
 with mode aligned right and long labels truncated in narrow windows. The project
-picker also owns Open project, Open GitHub project and Start from scratch. The source
-picker separates local branches from the configured remote's branches, shows
-the actual default branch, and retains each tab's confirmed rows independently
+picker also owns Open project, Open GitHub project and Start from scratch. These
+actions register and select their project while keeping Create and its draft open.
+Workspace creation waits for submission, as does Git preparation for opened
+folders. Opening a linked worktree here selects its primary repository without
+adopting a workspace.
+Welcome, sidebar and native-menu opens retain their immediate workspace flow.
+The source picker separates local branches from the configured remote's branches,
+shows the actual default branch, and retains each tab's confirmed rows independently
 of GitHub requests. Issues remain unavailable until issue creation is supported.
 Catalog keys include the checkout root and observed origin; local branch keys
 include the checkout root and repository slug. Intent warms local metadata;
