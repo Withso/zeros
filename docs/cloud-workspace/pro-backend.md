@@ -1,8 +1,8 @@
 # Pro cloud backend
 
-This is the backend contract for individual Pro launch. It adds migrations
-`0101`–`0104`; it does not enable a deployment, apply hosted migrations, or ship
-desktop UI. Business pricing, seats and collaboration policy remain deferred.
+This is the backend contract for individual Pro launch. Migrations
+`0101`–`0104` are applied on Alpha and its cloud workers are enabled. Desktop UI
+is separate work. Business pricing, seats and collaboration policy remain deferred.
 See [qualification status](qualification-status.md) for deployed evidence.
 
 ## Authorization and sharing
@@ -153,8 +153,9 @@ The old public `/access/ssh` and `/access/tunnels` creation routes now return
 `409 cloud_workspace_runtime_connection_required`; they cannot return supplier
 hosts or credentials. Clients use the existing actor-aware `/runtime/services`
 relay. Existing grant revocation and local tunnel activation remain available.
-Desktop wiring for this public contract migration is a separate phase; cloud
-execution stays disabled until the new client path is qualified.
+Desktop wiring for this public contract migration is a separate phase. Alpha
+execution is enabled for qualification; desktop cloud surfaces must adopt and
+qualify the new client path before exposing it. Beta and Production remain off.
 
 ## Safety defaults and rollout
 
@@ -171,7 +172,7 @@ Before deployment, inventory existing grants and pilot periods, review the
 sharing cutover, and run migrations through the controlled migration process.
 `0101` and `0103` require controlled downtime. Do not run an old allocator or
 authorization implementation alongside the new policy. Staff receive the
-complimentary benefit when these migrations are applied; no hosted entitlement
-changes are part of this backend implementation. Alpha enablement, its separate
-runtime key/storage configuration, desktop UI, Beta and Production remain
-separate qualification steps.
+complimentary benefit when these migrations are applied. Alpha has completed
+this migration and configuration rollout. Its live lifecycle qualification,
+desktop UI, Beta and Production remain separate qualification steps; consult
+[qualification status](qualification-status.md) before claiming readiness.

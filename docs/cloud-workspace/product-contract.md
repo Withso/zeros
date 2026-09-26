@@ -64,8 +64,10 @@ WorkOS membership alone never authorizes paid compute.
 The new [Pro backend](pro-backend.md) replaces staff-only admission for individual
 Pro sponsorship and adds an automatic 500-hour monthly allowance. Standing
 `platform_owner` and `developer` staff receive separately audited complimentary
-Pro with that same allowance. Cloud execution remains disabled on deployed
-channels pending qualification. The workspace owner sponsors compute. Editing
+Pro with that same allowance. Alpha cloud execution is enabled for backend and
+desktop qualification; Beta and Production remain disabled. See
+[qualification status](qualification-status.md) for the live test boundary.
+The workspace owner sponsors compute. Editing
 and agent execution require Write, while invitations and credential
 administration require workspace owner/manager authority.
 Personal model credentials require explicit delegation, including to other admins.

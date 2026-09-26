@@ -1,28 +1,28 @@
 # Cloud backend qualification status
 
-Reviewed September 25, 2026. This matrix distinguishes implemented behavior,
-live evidence and release qualification. Both production cloud execution flags
-remain disabled. Desktop cloud creation UI is outside this backend change.
+Reviewed September 26, 2026. This matrix distinguishes implemented behavior,
+live evidence and release qualification. Alpha cloud execution, setup and
+background workers are enabled. Beta and Production cloud execution remains
+disabled. Desktop cloud creation UI is outside this backend change.
 
-The current release milestone is an internal pilot for standing Zeros staff
-roles `platform_owner` and `developer`. Customer subscription/payment integration
-is deferred. Organization ownership, membership, tenant isolation, explicit
-operator-funded allowances, quotas and finite compute leases still apply.
-The isolated deployed API has passed staff-admission withdrawal and restoration,
-including denial when a staff account lacks its own Pro entitlement. Provider
-runtime admission remains a separate qualification boundary.
+Alpha admits individual Pro sponsors in collaborative Organizations; only
+standing Zeros staff roles `platform_owner` and `developer` may create those
+Organizations. Customer subscription/payment integration is deferred.
+Organization membership, tenant isolation, monthly allowances, quotas and
+finite compute leases still apply. Beta and Production retain the earlier
+staff-only policy with cloud execution off. Provider runtime admission remains
+a separate qualification boundary.
 
-The repository now also contains the [Pro backend](pro-backend.md) policy and
+Alpha now runs the [Pro backend](pro-backend.md) policy and
 migrations `0101`–`0104`: individual sponsorship, complimentary staff Pro,
 monthly allowances, ten assigned writers and unlimited Read-only Pro guests.
-This is backend implementation, not hosted rollout evidence. The channel table
-below remains the recorded deployed state; hosted migrations, Alpha enablement
-and desktop qualification are separate work.
+Both existing staff accounts have complimentary Pro and one automatically
+issued allowance each. Desktop qualification remains separate work.
 
 Alpha, Beta and Production now use PlanetScale Postgres; the control-plane
 application remains on Railway. All three cutovers passed source fencing, data
 comparison, forward migrations, runtime-role and public API checks. Normal app
-access is restored; cloud execution remains disabled. Batch 4 covers deployed
+access is restored. Batch 4 covers deployed
 account connection, collaboration and image publication. Batch 6 requalified
 managed Boat through the isolated deployment's public API, and Batch 7
 exercised recovery, fault injection, sustained load and operations there.
@@ -33,11 +33,11 @@ Daytona worker isolation is still unqualified. See
 
 Batch 8 closed the staff backend milestone on September 24, 2026.
 
-| Channel | Backend | Migration ledger | Cloud execution |
-| --- | --- | --- | --- |
-| Alpha | current `main`, deployed automatically | through `0100` | off |
-| Beta | September 25 release (`release/0.1.19`) | through `0100` | off |
-| Production | September 25 release (`release/0.1.19`) | through `0100` | off |
+| Channel    | Backend                                                              | Migration ledger | Cloud execution                                    |
+| ---------- | -------------------------------------------------------------------- | ---------------- | -------------------------------------------------- |
+| Alpha      | Pro backend `bf45aad6` from `main`, explicitly deployed September 26 | through `0104`   | on; physical provider deletion remains unconfirmed |
+| Beta       | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                |
+| Production | September 25 release (`release/0.1.19`)                              | through `0100`   | off                                                |
 
 - Managed Boat Linux VMs are the default provider. Daytona remains a separate
   adapter, used only when explicitly selected: its worker isolation is
@@ -51,40 +51,75 @@ Batch 8 closed the staff backend milestone on September 24, 2026.
 - The isolated qualification deployment used for Batches 4–8 is retired. Its
   evidence is summarized here and in
   [infrastructure and operations](infrastructure-and-operations.md#recovery-drills-and-measured-limits).
-- Enabling cloud execution on Alpha for desktop UI wiring needs its own Boat,
-  object-store, keyring and operator configuration. That is the first step of
-  the UI wiring phase, not a backend gap.
+- Alpha has a dedicated non-admin runtime key, distinct from the agent key,
+  the pinned `zeros-qualification-aa11196c97a6` image, measured 70,225 MiB
+  storage, and a 900-second finite compute lease. Its `zeros-cloud-workspaces-alpha`
+  R2 bucket has a separate credential and object/secret keyrings. Encrypted
+  upload, readback, decryption and deletion fencing passed against that bucket.
+  The runtime key is action-scoped; its provider resource/environment scope is
+  wildcard, so provider-enforced isolation from future environments is not claimed.
+- The controlled Alpha rollout used a successful on-demand backup, drained
+  the old deployment, applied `0101`–`0104` with checksum verification, removed
+  the temporary migration role, and deployed the merged backend. Hosted boot
+  migrations remain off. `/healthz` reports execution, setup, background workers
+  and durability healthy. The Alpha desktop release workflow failed its shipping
+  kernel ZSR qualification; the API was deployed explicitly. PR #211's merge
+  checks all passed; no new signed desktop release is claimed.
+- A disposable ordinary Pro account passed real WorkOS authentication,
+  percentage-only usage reads, Personal cloud denial, and denial of both
+  Organization creation routes. Its temporary staff role was removed before
+  testing Pro admission. Automatic issuance produced exactly one allowance.
+  At the verified provider rate of 100,000 standard seconds per dollar, the
+  monthly 500-hour allowance represents $18 of compute, excluding other costs.
+- After installing the `zeros-alpha` GitHub App with access to the test
+  repository, the ordinary Pro sponsor passed authenticated create, idempotent
+  create replay, engine readiness, checkpointed stop, wake and second engine
+  readiness. The collaborator response counted the owner as one of ten writer
+  slots. Workspace responses remained provider-neutral throughout.
+- Stop captured 4,721 encrypted file objects in approximately 266 seconds;
+  the next final checkpoint completed in approximately 20 seconds. Both
+  compute reservations settled against the same sponsor with zero remaining
+  reservations or platform exposure: 405 billed standard-machine seconds,
+  or $0.00405 against a $0.10 compute qualification budget. Object storage costs
+  are separate. No paid model turn or signed desktop behavior was tested.
+- Delete was accepted after the second durable checkpoint and stopped compute.
+  The exact Boat deletion operation reports `blocked`, with no completion
+  timestamp. This reproduces the previously open provider-deletion boundary on
+  Alpha: full physical deletion is not qualified. Keep the journal, encrypted
+  objects and fixture Organization until the receipt completes; an absent
+  sandbox or a successful delete request is not completion evidence. UI wiring
+  can proceed against Alpha, but launch qualification must retain this open item.
 
 ## Current eight-step execution
 
-| Step | Repository implementation and evidence | Open exit condition |
-| --- | --- | --- |
-| 1. Contracts | Portable client/runtime, provider, command, checkpoint and security contracts; Organization ownership and Personal-local enforcement | Keep advertised capabilities within this matrix |
-| 2. Provider registry | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions; isolated deployed Daytona onboarding, distinct valid-key rotation, replay, rejected rotation and revocation | Qualification with an enabled compute profile |
-| 3. Secure Linux / Boat | Pinned native image, unprivileged engine/worker separation, setup, admission, heartbeat, lifecycle and finite provider lease; live authorized Boat create/readiness | Exact production deployment, remaining provider deletion proof and host-security release review |
-| 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat | Production agent-account connection/authentication flow, Codex on the current image and declared tooling gaps below |
-| 5. Devices and commands | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat; a 30-minute two-workspace, six-device soak with complete replay after a disconnect | Multi-region and fleet-scale load, and later native client release tests |
-| 6. Durability | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue; a workspace whose provider host was destroyed recovered from its last durable checkpoint after an operator loss attestation; a point-in-time database restore with every referenced object verified and measured RPO/RTO | Cross-region recovery, and recovery after losing the object store itself |
-| 7. Daytona BYO | Provider and onboarding code plus database regressions; live allocation/cleanup probes; off by default, selected only explicitly | Deferred. Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
-| 8. Spend and operations | Credit grants, reservations, cumulative meter, live Boat rejected-create closure and settlement, ledger-to-provider meter reconciliation, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha/Beta/Production PlanetScale cutovers, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence; operator-attested loss settlement, emailed health alerts, an external uptime probe, a measured load baseline and object-key rotation | Production deployment and provider deletion completion; customer billing deferred |
+| Step                         | Repository implementation and evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           | Open exit condition                                                                                                                                                   |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1. Contracts                 | Portable client/runtime, provider, command, checkpoint and security contracts; Organization ownership and Personal-local enforcement                                                                                                                                                                                                                                                                                                                                                                                                                                             | Keep advertised capabilities within this matrix                                                                                                                       |
+| 2. Provider registry         | Managed Boat and versioned customer Daytona connections; immutable generation routing, independent profiles, key rotation and revocation regressions; isolated deployed Daytona onboarding, distinct valid-key rotation, replay, rejected rotation and revocation                                                                                                                                                                                                                                                                                                                | Qualification with an enabled compute profile                                                                                                                         |
+| 3. Secure Linux / Boat       | Pinned native image, unprivileged engine/worker separation, setup, admission, heartbeat, lifecycle and finite provider lease; live authorized Boat create/readiness                                                                                                                                                                                                                                                                                                                                                                                                              | Exact production deployment, remaining provider deletion proof and host-security release review                                                                       |
+| 4. Shared headless workspace | File/Git/process/PTY, shared Code/Design conversation, API authoring and capture, native agent continuation, private previews and scoped human services exercised on Boat                                                                                                                                                                                                                                                                                                                                                                                                        | Production agent-account connection/authentication flow, Codex on the current image and declared tooling gaps below                                                   |
+| 5. Devices and commands      | Durable queues, approval/Stop receipts, independent device grants, bounded replay; live concurrent and suspended clients on Boat; a 30-minute two-workspace, six-device soak with complete replay after a disconnect                                                                                                                                                                                                                                                                                                                                                             | Multi-region and fleet-scale load, and later native client release tests                                                                                              |
+| 6. Durability                | Dirty Git/index/unpublished HEAD, attachments, native histories and Design restored into a fresh Boat generation; public recovery from a stopped workspace, rollback and upgrade on the current image; active-turn loss leaves an uncertain command and paused queue; a workspace whose provider host was destroyed recovered from its last durable checkpoint after an operator loss attestation; a point-in-time database restore with every referenced object verified and measured RPO/RTO                                                                                   | Cross-region recovery, and recovery after losing the object store itself                                                                                              |
+| 7. Daytona BYO               | Provider and onboarding code plus database regressions; live allocation/cleanup probes; off by default, selected only explicitly                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Deferred. Linux-VM snapshot/region/quota preflight implemented; the tested host fails user-namespace creation as the actual worker identity. Full parity remains open |
+| 8. Spend and operations      | Credit grants, reservations, cumulative meter, live Boat rejected-create closure and settlement, ledger-to-provider meter reconciliation, finite renewal, budget drain/Stop, settlement, engine-loss Stop, leased cross-provider drift, cleanup, staff admission regressions, deployed WorkOS identity, Alpha/Beta/Production PlanetScale cutovers, isolated restore/HA/PITR evidence and encrypted R2 upload/readback/decryption evidence; operator-attested loss settlement, emailed health alerts, an external uptime probe, a measured load baseline and object-key rotation | Production deployment and provider deletion completion; customer billing deferred                                                                                     |
 
 The eight steps are not all complete. Local tests and a successful Boat runtime
 do not clear Daytona or production operations gates.
 
 ## Supported native tools and evidence
 
-| Capability | Backend | Live qualification |
-| --- | --- | --- |
-| Files, search, Git, process execution and PTY | Existing Zeros engine over authenticated portable bridge | Boat |
-| Code and Design with one agent conversation | Mode revisions, cloud API authoring, directory lifecycle, capture and durable recovery | Boat |
-| Claude, Cursor and Codex native sessions | Existing provider adapters; explicit model credentials remain tenant scoped | Boat with test-authorized credentials: Claude and Cursor on the current image, Codex on the previous image only; production account connection remains open |
-| SSH / SFTP / TCP forwarding | Zeros runtime SSH inside the admitted engine namespace; independent device/service grants and descendant retirement | Boat, including PTY dimensions, stderr/exit, file/tunnel roundtrips and revocation |
-| HTTP and HMR previews | Private scoped relay with current authority checks | Boat |
-| Ordered live streams, replay and Stop/approval receipts | Shared schemas, durable receipts, bounded buffers, per-device authority | Boat headless clients, including late and suspended receivers |
-| Receive-only replicas and immutable copy/fork | Backend services and regression coverage | Signed desktop lifecycle qualification remains open |
-| TypeScript, JavaScript and Python language services | Typed disk-backed symbols/completions, actor and execution isolation, bounded RPC and retirement | Real native and root namespace canaries plus actual Boat v3 engine image attestation; Daytona remains open |
-| Personal Codex subscription renewal | Encrypted native cache, durable single-use refresh attempts, access-only leases, per-owner consent | Real pinned native cache renewal and paid native turn/resume on qualified Boat images; exact deployed account-connection and delegation qualification remains open |
-| Windows/macOS compute, public ports, UDP and simultaneous text editing with conflict resolution | Outside the current Linux pilot | No claim |
+| Capability                                                                                      | Backend                                                                                                             | Live qualification                                                                                                                                                 |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Files, search, Git, process execution and PTY                                                   | Existing Zeros engine over authenticated portable bridge                                                            | Boat                                                                                                                                                               |
+| Code and Design with one agent conversation                                                     | Mode revisions, cloud API authoring, directory lifecycle, capture and durable recovery                              | Boat                                                                                                                                                               |
+| Claude, Cursor and Codex native sessions                                                        | Existing provider adapters; explicit model credentials remain tenant scoped                                         | Boat with test-authorized credentials: Claude and Cursor on the current image, Codex on the previous image only; production account connection remains open        |
+| SSH / SFTP / TCP forwarding                                                                     | Zeros runtime SSH inside the admitted engine namespace; independent device/service grants and descendant retirement | Boat, including PTY dimensions, stderr/exit, file/tunnel roundtrips and revocation                                                                                 |
+| HTTP and HMR previews                                                                           | Private scoped relay with current authority checks                                                                  | Boat                                                                                                                                                               |
+| Ordered live streams, replay and Stop/approval receipts                                         | Shared schemas, durable receipts, bounded buffers, per-device authority                                             | Boat headless clients, including late and suspended receivers                                                                                                      |
+| Receive-only replicas and immutable copy/fork                                                   | Backend services and regression coverage                                                                            | Signed desktop lifecycle qualification remains open                                                                                                                |
+| TypeScript, JavaScript and Python language services                                             | Typed disk-backed symbols/completions, actor and execution isolation, bounded RPC and retirement                    | Real native and root namespace canaries plus actual Boat v3 engine image attestation; Daytona remains open                                                         |
+| Personal Codex subscription renewal                                                             | Encrypted native cache, durable single-use refresh attempts, access-only leases, per-owner consent                  | Real pinned native cache renewal and paid native turn/resume on qualified Boat images; exact deployed account-connection and delegation qualification remains open |
+| Windows/macOS compute, public ports, UDP and simultaneous text editing with conflict resolution | Outside the current Linux pilot                                                                                     | No claim                                                                                                                                                           |
 
 ## Evidence limits
 
@@ -126,7 +161,7 @@ do not clear Daytona or production operations gates.
   and denied API access while another user's session remained valid. Revocation
   took about 60 seconds through the isolated deployment's event-polling fallback.
   This proves session isolation, not instant revocation or native-device behavior.
-- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remains disabled. Encrypted backup recovery has separate evidence. Batch 7 added a same-region restore drill of the database with its objects; regional recovery remains open.
+- Isolated PlanetScale restores preserve source rows, enforce NOINHERIT runtime roles and pass same-region HA failover and point-in-time recovery. Separate encrypted R2 evidence verifies upload, readback, integrity and decryption. All three main cutovers preserve their original datasets and pass authenticated owner/tenant-isolation and concurrent event-stream checks; cloud execution remained disabled during those cutovers. Encrypted backup recovery has separate evidence. Batch 7 added a same-region restore drill of the database with its objects; regional recovery remains open.
 - Disposable PostgreSQL 15 and 18 final-copy rehearsals cover writer draining,
   connection fencing, dropped-column and enum restore compatibility, sequence
   ownership, role drift, cancellation and uncertain fence acknowledgements.
