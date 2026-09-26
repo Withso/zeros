@@ -4,7 +4,7 @@ import {afterAll,beforeAll,beforeEach,describe,expect,it,vi} from "vitest";
 import {ensureUser} from "../auth.js";
 import {runMigrations} from "../migrate.js";
 import {getSecuritySnapshot,listSecurityEvents,publishPendingSecurityEvents,PostgresSecurityEventBroker,startSecurityEventPublisher} from "../security-events.js";
-import {seedReadyCloudWorkspace} from "./test-fixtures.js";
+import {seedReadyCloudWorkspace,seedReadyProCloudWorkspace} from "./test-fixtures.js";
 import {DatabaseCloudWorkspaceCollaborationService} from "./actors.js";
 import {eraseCloudWorkspaceCollaborationIdentity} from "./actors.js";
 import {withSystemTx} from "../db.js";
@@ -17,6 +17,21 @@ d("cloud workspace directory live updates",()=>{
   afterAll(async()=>{await pool.end();});
   beforeEach(async()=>{await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public");await runMigrations(pool);});
   const user=(id:string)=>ensureUser(pool,{provider:"workos",providerSubject:`workos|${id}`,email:`durable-${id}@example.test`,displayName:"Directory actor"});
+  it("delivers deletion refreshes to more than 100 Pro viewers in bounded pages",async()=>{
+    const fixture=await seedReadyProCloudWorkspace(pool);
+    await pool.query(`WITH recipients AS (INSERT INTO users(email,display_name)
+      SELECT 'viewer-'||gen_random_uuid()||'@example.test','Viewer' FROM generate_series(1,101) RETURNING id)
+      INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,expires_at)
+      SELECT gen_random_uuid(),$1,$2,id,'viewer',now()+interval '1 day' FROM recipients`,[fixture.workspaceId,fixture.organizationId]);
+    await pool.query("UPDATE cloud_workspaces SET status='deleted',desired_state='deleted',deleted_at=now(),version=version+1 WHERE id=$1",[fixture.workspaceId]);
+    await pool.query("DELETE FROM cloud_workspace_guest_grants WHERE workspace_id=$1",[fixture.workspaceId]);
+    await pool.query("DELETE FROM cloud_workspaces WHERE id=$1",[fixture.workspaceId]);
+    await publishCloudWorkspaceDirectoryChanges(pool);
+    expect((await pool.query("SELECT count(*)::int AS n FROM security_events WHERE user_id IS NOT NULL")).rows[0].n).toBeLessThanOrEqual(100);
+    await publishCloudWorkspaceDirectoryChanges(pool);
+    expect((await pool.query("SELECT count(DISTINCT user_id)::int AS n FROM security_events WHERE user_id IS NOT NULL")).rows[0].n).toBe(101);
+    expect((await pool.query("SELECT 1 FROM cloud_workspace_directory_outbox WHERE workspace_id=$1",[fixture.workspaceId])).rowCount).toBe(0);
+  });
   it.each(["organization","workspace"])("skips a busy %s without delaying another tenant",async(kind)=>{
     const busy=await seedReadyCloudWorkspace(pool),free=await seedReadyCloudWorkspace(pool);
     const lock=await pool.connect();let publication:Promise<void>|undefined;

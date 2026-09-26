@@ -6,12 +6,12 @@ credits. The existing hosted Daytona path remains an explicit compatibility
 policy; qualifying it for managed credit billing requires its own reliable
 usage meter and finite stop adapter. A new hosted provider fails closed.
 
-For the internal owner/developer pilot, customer payment and subscription
-integration is deferred. An authorized platform owner supplies audited,
-explicitly bounded operating-budget grants using the operator flow below.
-Staff status neither creates credits nor bypasses organization authorization,
-quotas, reservations, metering or provider stop deadlines. Commercial invoice
-funding and seat-allowance policy remain a later integration.
+The [Pro backend](pro-backend.md) automatically issues one monthly allowance
+per eligible user: 500 standard-machine hours, recorded as a server-defined
+receipt under the existing funding lock. Staff receive independently audited
+complimentary Pro with the same limits. Payment collection remains a separate
+integration. Deployed staff-pilot receipts remain historical evidence; overlapping
+pilot periods block automatic issuance until an explicit cutover is resolved.
 
 Credits are integer micro-US dollars (`1 USD = 1000000 micro_usd`). A Pro
 funding receipt belongs to one user and explicit period, independent of any
@@ -19,9 +19,10 @@ organization. Reservations in multiple organizations conserve that single user
 allowance. Joining another organization never duplicates it. The workspace owner
 sponsors compute; a collaborator's action does not change the payer. Business
 organization grants remain a separate ledger and cannot replenish Pro-backed
-periods. A paid entitlement permits cloud use; it does not mint credits. A future
-$20 individual allowance would be a `20000000` grant from a validated receipt.
-There is no automatic invoice collection or model-token allowance here.
+periods. Eligibility does not bypass the allowance issuer or ledger. At a
+qualified 100,000 standard seconds per dollar, the monthly receipt is
+`18000000` micro-USD. There is no rollover, automatic invoice collection,
+customer overage or model-token allowance here.
 
 ## Allocation and settlement
 
@@ -104,9 +105,10 @@ Prepare a private JSON document containing `channel`, `fundingScope`, `userId`,
 `actorUserId`, `startsAt`, `endsAt`, `amountMicroUsd`, `policyId`, `idempotencyKey`
 and `reason`. For Pro and the staff pilot, use `"fundingScope": "user"` and omit
 organization fields. The root allowance follows that account across organizations.
-For Business, use `"fundingScope": "organization"` and include `organizationId`
+For historical Organization funding, use `"fundingScope": "organization"` and include `organizationId`
 and `expectedOrganizationSlug`; current membership and the exact slug are checked.
-For example, a Pro grant document has this shape (replace all fixture values):
+Manual receipts cannot top up an automatic monthly period. The following is a
+historical pilot grant shape, not the Pro monthly issuer (replace all fixtures):
 
 ```json
 {

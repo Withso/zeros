@@ -82,6 +82,8 @@ d("private provider execution leases",()=>{
     await pool.query("INSERT INTO auth_sessions(provider_session_id,provider_sub,user_id,client_kind,last_token_expires_at) VALUES($1,$2,$3,'desktop',now()+interval '1 hour')",
       [guest.authentication.sessionId,guest.identity.subject,guest.id]);
     await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[guest.id]);
+    // Test the paid deadline independently of the fixture's free staff Pro.
+    if(deadline==="pro")await pool.query("UPDATE staff_pro_benefits SET revoked_at=clock_timestamp() WHERE user_id=$1",[guest.id]);
     const collaboration=new DatabaseCloudWorkspaceCollaborationService(pool),invite=await collaboration.invite({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,
       actorUserId:owner.id,email:guest.email,role:"developer"});
     await collaboration.accept({actorUserId:guest.id,identity:guest.identity,token:invite.token});

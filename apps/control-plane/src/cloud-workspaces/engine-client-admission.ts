@@ -190,6 +190,7 @@ export class DatabaseCloudWorkspaceEngineClientAdmissionService {
           );
         }
         await authorizeCloudWorkspaceOperation(tx, {
+          workspaceId: input.workspaceId,
           organizationId: input.organizationId,
           teamId: current.team_id,
           actorUserId: input.actorUserId,

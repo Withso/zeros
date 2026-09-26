@@ -3,6 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type pg from "pg";
 
 import { audit } from "../audit.js";
+import {publicCloudError} from "./public-contract.js";
 import {
   HttpError,
   requireOrganizationMembership,
@@ -305,6 +306,7 @@ async function workspaceAuthority(
   if (!row) throw new HttpError(404, "not_found", "Cloud workspace not found");
   if (input.paid) {
     await authorizeCloudWorkspaceOperation(tx, {
+      workspaceId: input.workspaceId,
       organizationId: input.organizationId,
       teamId: row.team_id,
       actorUserId: row.owner_user_id,
@@ -2318,12 +2320,10 @@ export class DatabaseCloudWorkspaceManagementService {
     return {
       id: row.id,
       ownerKind: row.owner_kind,
-      provider: row.provider,
-      displayName: row.display_name,
+      displayName: row.credential_source==="hosted"?"Zeros Cloud":"Custom compute",
       credentialSource: row.credential_source,
       version: safeVersion(row.current_version, "provider connection"),
       state: row.state,
-      region: row.region,
       capabilities: {
         qualified: capabilities.qualified === true,
         qualificationVersion:
@@ -3429,7 +3429,7 @@ export class DatabaseCloudWorkspaceManagementService {
               createdAt: iso(settings.created_at),
             }
           : null,
-        provider: provider
+        compute: provider
           ? {
               ...this.providerConnectionDocument(provider),
               generationVersion: safeVersion(
@@ -3479,7 +3479,7 @@ export class DatabaseCloudWorkspaceManagementService {
           state: row.state,
           deliveryCount: row.delivery_count,
           deadlineAt: iso(row.deadline_at),
-          errorCode: row.error_code,
+          errorCode: row.error_code===null?null:publicCloudError(row.error_code).code,
           createdAt: iso(row.created_at),
           completedAt: iso(row.completed_at),
         })),
@@ -3492,7 +3492,7 @@ export class DatabaseCloudWorkspaceManagementService {
           createdAt: iso(row.created_at),
           availableAt: iso(row.available_at),
           expiresAt: iso(row.expires_at),
-          errorCode: row.error_code,
+          errorCode: row.error_code===null?null:publicCloudError(row.error_code).code,
         })),
         retention: retention
           ? {
@@ -3525,7 +3525,7 @@ export class DatabaseCloudWorkspaceManagementService {
           version: safeVersion(row.version, "replica"),
           updatedAt: iso(row.updated_at),
           lastAppliedAt: iso(row.last_applied_at),
-          errorCode: row.last_error_code,
+          errorCode: row.last_error_code===null?null:publicCloudError(row.last_error_code).code,
         })),
         forwards: forwards.rows.map((row) => ({
           id: row.id,
@@ -3544,7 +3544,7 @@ export class DatabaseCloudWorkspaceManagementService {
           operation: row.operation,
           state: row.state,
           attemptCount: row.attempt_count,
-          errorCode: row.error_code,
+          errorCode: row.error_code===null?null:publicCloudError(row.error_code).code,
           createdAt: iso(row.created_at),
           updatedAt: iso(row.updated_at),
         })),
@@ -3552,7 +3552,7 @@ export class DatabaseCloudWorkspaceManagementService {
           ? {
               state: deletion.state,
               attemptCount: deletion.attempt_count,
-              errorCode: deletion.error_code,
+              errorCode: deletion.error_code===null?null:publicCloudError(deletion.error_code).code,
               updatedAt: iso(deletion.updated_at),
               completedAt: iso(deletion.completed_at),
             }

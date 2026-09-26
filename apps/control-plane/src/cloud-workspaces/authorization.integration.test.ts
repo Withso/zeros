@@ -1,4 +1,4 @@
-import {withCloudFixtureOwnerTx} from "./test-fixtures.js";
+import {withCloudFixtureOwnerTx,seedReadyCloudWorkspace} from "./test-fixtures.js";
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
@@ -42,7 +42,6 @@ d("cloud paid-work authorization", () => {
       email: `member-${randomUUID()}@example.test`,
       displayName: "Member",
     });
-    await pool.query("UPDATE users SET staff_role = 'developer' WHERE id = ANY($1::uuid[])", [[owner.id, member.id]]);
   });
 
   async function personalScope() {
@@ -121,7 +120,7 @@ d("cloud paid-work authorization", () => {
     ).rejects.toMatchObject({ code: "cloud_workspaces_not_allowed" });
   });
 
-  it("funds a Pro workspace from its owner without requiring other members to pay", async () => {
+  it("requires individual Pro for each actor while fixing funding to the owner", async () => {
     const scope = await collaborativeScope();
     await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
@@ -184,7 +183,7 @@ d("cloud paid-work authorization", () => {
     expect(admitted.plan).toBe("pro");
   });
 
-  it("rejects an organization entitlement before its activation time", async () => {
+  it("does not substitute an Organization entitlement for individual Pro", async () => {
     const scope = await collaborativeScope();
     await withSystemTx(pool, async (tx) => {
       await tx.query(
@@ -216,7 +215,7 @@ d("cloud paid-work authorization", () => {
         }),
       ),
     ).rejects.toMatchObject({
-      code: "cloud_organization_entitlement_required",
+      code: "cloud_account_entitlement_required",
     });
   });
 
@@ -277,7 +276,7 @@ d("cloud paid-work authorization", () => {
     }))).resolves.toMatchObject({ entitlementScope: "account", plan: "pro", isPersonal: false });
   });
 
-  it("denies non-staff even with active account and organization entitlements", async () => {
+  it("admits non-staff Pro despite unrelated Organization entitlements", async () => {
     const scope = await collaborativeScope();
     await pool.query("UPDATE users SET staff_role = NULL WHERE id = $1", [owner.id]);
     await withCloudFixtureOwnerTx(pool, async (tx) => {
@@ -290,56 +289,19 @@ d("cloud paid-work authorization", () => {
     await expect(withSystemTx(pool, (tx) => authorizeCloudWorkspaceOperation(tx, {
       organizationId: scope.orgId, teamId: scope.teamId, actorUserId: owner.id,
       billingOwnerUserId: owner.id, workosEnabled: false, requireWorkspaceOwner: false,
-    }))).rejects.toMatchObject({ code: "cloud_pilot_access_required" });
+    }))).resolves.toMatchObject({ entitlementScope: "account", plan: "pro" });
   });
 
-  it("requires an active Business seat and enforces the purchased seat ceiling", async () => {
-    const scope = await collaborativeScope();
-    await withSystemTx(pool, async (tx) => {
-      await tx.query(
-        `INSERT INTO organization_entitlements (
-           org_id, plan, status, cloud_workspaces_allowed, seat_limit, source
-         ) VALUES ($1, 'business', 'active', true, 1, 'operator')`,
-        [scope.orgId],
-      );
-      await tx.query(
-        `INSERT INTO organization_seat_assignments (org_id, user_id, state)
-         VALUES ($1, $2, 'active')`,
-        [scope.orgId, owner.id],
-      );
-    });
-
-    const admitted = await withSystemTx(pool, (tx) =>
-      authorizeCloudWorkspaceOperation(tx, {
-        organizationId: scope.orgId,
-        teamId: scope.teamId,
-        actorUserId: owner.id,
-        billingOwnerUserId: owner.id,
-        workosEnabled: false,
-        requireWorkspaceOwner: false,
-      }),
-    );
-    expect(admitted.plan).toBe("business");
-
-    await withSystemTx(pool, (tx) =>
-      tx.query(
-        `INSERT INTO organization_seat_assignments (org_id, user_id, state)
-         VALUES ($1, $2, 'active')`,
-        [scope.orgId, member.id],
-      ),
-    );
-    await expect(
-      withSystemTx(pool, (tx) =>
-        authorizeCloudWorkspaceOperation(tx, {
-          organizationId: scope.orgId,
-          teamId: scope.teamId,
-          actorUserId: owner.id,
-          billingOwnerUserId: owner.id,
-          workosEnabled: false,
-          requireWorkspaceOwner: false,
-        }),
-      ),
-    ).rejects.toMatchObject({ code: "cloud_organization_seat_limit_exceeded" });
+  it("retains seat enforcement for a historical Organization-funded epoch", async () => {
+    const fixture=await seedReadyCloudWorkspace(pool,{ownerUserId:owner.id});
+    await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1",[owner.id]);
+    await pool.query("UPDATE organization_entitlements SET seat_limit=1 WHERE org_id=$1",[fixture.organizationId]);
+    await pool.query("INSERT INTO organization_members(org_id,user_id,role) VALUES($1,$2,'member')",[fixture.organizationId,member.id]);
+    const input={workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,teamId:fixture.teamId,
+      actorUserId:owner.id,billingOwnerUserId:owner.id,workosEnabled:false,requireWorkspaceOwner:true};
+    await expect(withSystemTx(pool,tx=>authorizeCloudWorkspaceOperation(tx,input))).resolves.toMatchObject({plan:"business",entitlementScope:"organization"});
+    await pool.query("INSERT INTO organization_seat_assignments(org_id,user_id,state) VALUES($1,$2,'active')",[fixture.organizationId,member.id]);
+    await expect(withSystemTx(pool,tx=>authorizeCloudWorkspaceOperation(tx,input))).rejects.toMatchObject({code:"cloud_organization_seat_limit_exceeded"});
   });
 
   it("keeps Phase 5 runtime admission owner-only", async () => {

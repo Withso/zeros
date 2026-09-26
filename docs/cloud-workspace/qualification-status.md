@@ -12,6 +12,13 @@ The isolated deployed API has passed staff-admission withdrawal and restoration,
 including denial when a staff account lacks its own Pro entitlement. Provider
 runtime admission remains a separate qualification boundary.
 
+The repository now also contains the [Pro backend](pro-backend.md) policy and
+migrations `0101`–`0104`: individual sponsorship, complimentary staff Pro,
+monthly allowances, ten assigned writers and unlimited Read-only Pro guests.
+This is backend implementation, not hosted rollout evidence. The channel table
+below remains the recorded deployed state; hosted migrations, Alpha enablement
+and desktop qualification are separate work.
+
 Alpha, Beta and Production now use PlanetScale Postgres; the control-plane
 application remains on Railway. All three cutovers passed source fencing, data
 comparison, forward migrations, runtime-role and public API checks. Normal app

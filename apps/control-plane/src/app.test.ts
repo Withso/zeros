@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
+import {Context} from "hono";
+import {HttpError} from "./authz.js";
 
 import { createApp } from "./app.js";
 import type { Config, GithubBackendConfig } from "./config.js";
@@ -92,6 +94,13 @@ function workosConfig(): Config {
 }
 
 describe("unexpected error privacy", () => {
+  it("projects deliberate customer cloud errors without infrastructure messages or details",async()=>{
+    const app=createApp(config(null),pool,emailConfig as never);
+    const context=new Context(new Request('https://api.example.test/v1/cloud-workspaces/workspace'),{path:'/v1/cloud-workspaces/workspace'});
+    const response=await app.errorHandler(new HttpError(503,'boat_credit_limit','Boat raw diagnostic',{target:'private-target'}),context);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({error:{code:'cloud_workspace_unavailable',message:'The cloud workspace is temporarily unavailable'}});
+  });
   it.each([true, false])("omits driver details from logs and HTTP responses (production=%s)", async (isProduction) => {
     const app = createApp({ ...config(null), isProduction }, pool, emailConfig as never);
     const sentinel = "private-value-that-must-never-be-logged";

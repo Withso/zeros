@@ -21,7 +21,19 @@ export function createCloudWorkspaceCollaborationRoutes(pool:pg.Pool,delivery:Wo
     if(!org)throw new HttpError(404,"cloud_workspace_not_found","Cloud workspace access is unavailable");
     return {workspaceId,organizationId:org.org_id,actorUserId:c.get("user").id};
   };
-  app.get(`${base}/collaborators`,async c=>c.json(await service.list(await scope(c))));
+  app.get(`${base}/collaborators`,async c=>{
+    const page=parse(z.object({pageSize:z.coerce.number().int().min(1).max(100).optional(),guestCursor:z.string().uuid().optional(),
+      invitationCursor:z.string().uuid().optional(),memberCursor:z.string().uuid().optional()}).strict(),c.req.query());
+    return c.json(await service.list({...await scope(c),
+      ...(page.pageSize===undefined?{}:{pageSize:page.pageSize}),
+      ...(page.guestCursor===undefined?{}:{guestCursor:page.guestCursor}),
+      ...(page.invitationCursor===undefined?{}:{invitationCursor:page.invitationCursor}),
+      ...(page.memberCursor===undefined?{}:{memberCursor:page.memberCursor})}));
+  });
+  app.patch(`${base}/collaborators/:user`,async c=>{
+    const {role}=parse(z.object({role:z.enum(["viewer","developer"])}).strict(),await c.req.json().catch(()=>null));
+    return c.json(await service.setRole({...await scope(c),userId:parse(z.string().uuid(),c.req.param("user")),role}));
+  });
   app.patch(`${base}/sharing`,async c=>{
     const input=parse(z.object({sharingMode:z.enum(["private","organization"]),expectedRevision:z.number().int().positive().max(Number.MAX_SAFE_INTEGER)}).strict(),await c.req.json().catch(()=>null));
     return c.json(await service.setSharing({...await scope(c),...input}));

@@ -59,7 +59,10 @@ behavior from release qualification and deferred product surfaces.
 
 - [Qualification status](qualification-status.md) separates the current eight
   backend steps, native tool coverage, live evidence and remaining release gates.
-- [Managed compute credits](compute-credits.md) defines explicit grants,
+- [Pro backend](pro-backend.md) defines individual sponsorship, monthly
+  allowances, staff benefits, explicit writers, unlimited Read-only Pro guests
+  and the provider-neutral API migration. Its hosted rollout is separate.
+- [Managed compute credits](compute-credits.md) defines automatic and explicit grants,
   reservations, finite provider leases, settlement and operator rollout.
 - [Database qualification](database-qualification.md) defines the selected
   PlanetScale Postgres target, migration prerequisites and recovery acceptance.

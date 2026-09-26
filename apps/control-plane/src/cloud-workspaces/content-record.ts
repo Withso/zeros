@@ -1162,6 +1162,7 @@ export class DatabaseCloudWorkspaceContentService {
       const scope = workspace.rows[0];
       if (!scope) throw new HttpError(404, "not_found", "Workspace not found");
       await authorizeCloudWorkspaceOperation(tx, {
+        workspaceId: input.workspaceId,
         organizationId: input.organizationId,
         teamId: scope.team_id,
         actorUserId: input.accountUserId,

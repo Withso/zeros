@@ -310,7 +310,9 @@ d("cloud workspace content durability", () => {
     }
     const reused = await blobs.putBatch({ ...engineAuthority(), entries });
     expect(reused.blobs.every(blob => blob.reused)).toBe(true);
-  });
+  // Also verifies 64 serial downloads, each reauthorizing before and after I/O.
+  // The batch query-count assertion above remains the performance invariant.
+  }, 30_000);
 
   it("rejects oversized batches before storage or reservation and rolls quota admission back as a whole", async () => {
     await expect(blobs.putBatch({ ...engineAuthority(), entries: Array.from({ length: 65 }, () => Buffer.alloc(0)) })).rejects.toMatchObject({ code: "invalid_input" });

@@ -8,6 +8,7 @@ import type { AuthedUser } from "../auth.js";
 import { withSystemTx, type Tx } from "../db.js";
 import {emitCloudWorkspaceAccessChange} from "./collaboration-events.js";
 import {sealWorkspaceInvitation} from "./invitation-envelope.js";
+import {activateWriterSlot,hasProSharing,pruneWriterSlots,releaseWriterSlot,reserveWriterSlot,writerAvailability} from "./pro-sharing.js";
 
 export type WorkspaceInvitationDeliveryConfig={keys:Readonly<Record<number,string>>;currentKeyVersion:number;webOrigin:string};
 
@@ -149,11 +150,13 @@ export async function eraseCloudWorkspaceCollaborationIdentity(tx:Tx,userId:stri
   await tx.query("DELETE FROM cloud_agent_credential_delegations WHERE grantee_user_id=$1",[userId]);
   await tx.query("DELETE FROM cloud_workspace_actor_sessions WHERE actor_user_id=$1",[userId]);
   await tx.query("DELETE FROM cloud_workspace_guest_grants WHERE user_id=$1",[userId]);
+  await tx.query("DELETE FROM cloud_workspace_writer_slots WHERE user_id=$1 AND slot<>1",[userId]);
   await tx.query("UPDATE cloud_workspace_guest_grants SET created_by=NULL WHERE created_by=$1",[userId]);
   await tx.query(`UPDATE cloud_workspace_directory_outbox SET
     owner_user_id=CASE WHEN owner_user_id=$1 THEN NULL ELSE owner_user_id END,
     guest_user_ids=array_remove(guest_user_ids,$1::uuid)
     WHERE owner_user_id=$1 OR $1::uuid=ANY(guest_user_ids)`,[userId]);
+  await tx.query("DELETE FROM cloud_workspace_directory_recipients WHERE user_id=$1",[userId]);
 }
 
 async function lockWorkspace(tx:Tx,scope:CloudWorkspaceActorScope):Promise<void> {
@@ -176,7 +179,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       const authority = await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
       if (authority.accessRevision!==input.expectedRevision) throw new HttpError(409,"cloud_workspace_access_conflict","Workspace sharing changed");
       const row = (await tx.query<{access_revision:string}>(`UPDATE cloud_workspaces
-        SET sharing_mode=$3,single_member_mode=false,access_revision=access_revision+1,version=version+1,updated_at=now()
+        SET sharing_mode=$3,single_member_mode=false,pro_sharing_ready=true,access_revision=access_revision+1,version=version+1,updated_at=now()
         WHERE id=$1 AND org_id=$2 RETURNING access_revision`,[input.workspaceId,input.organizationId,input.sharingMode])).rows[0]!;
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.sharing_changed",{workspaceId:input.workspaceId,sharingMode:input.sharingMode});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"sharing_changed",discoveryChanged:true});
@@ -213,11 +216,18 @@ export class DatabaseCloudWorkspaceCollaborationService {
           AND invitation.revoked_at IS NOT NULL AND delivery.state IN ('queued','sending')`,[input.workspaceId]);
       const pending = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_invitations
         WHERE workspace_id=$1 AND revoked_at IS NULL AND accepted_at IS NULL AND expires_at>clock_timestamp()`,[input.workspaceId])).rows[0]!;
-      if (Number(pending.count)>=100) throw new HttpError(409,"cloud_workspace_invitation_limit","Workspace invitation limit reached");
+      const proSharing=await hasProSharing(tx,input.workspaceId);
+      if (!proSharing&&Number(pending.count)>=100) throw new HttpError(409,"cloud_workspace_invitation_limit","Workspace invitation limit reached");
       const row = (await tx.query<{expires_at:Date}>(`INSERT INTO cloud_workspace_invitations
         (id,workspace_id,org_id,recipient_email_sha256,token_hash,role,invited_by,expires_at,inviter_fingerprint,idempotency_key,request_sha256)
         VALUES ($1,$2,$3,$4,$5,$6,$7,now()+interval '7 days',$8,$9,$10) RETURNING expires_at`,
       [invitationId,input.workspaceId,input.organizationId,digest(email.data),digest(token),input.role,input.actorUserId,inviter.fingerprint,input.idempotencyKey??null,input.idempotencyKey?requestHash:null])).rows[0]!;
+      if(proSharing&&input.role!=="viewer"){
+        const recipient=(await tx.query<{user_id:string}>(`SELECT DISTINCT user_id FROM user_identities
+          WHERE lower(btrim(email_at_link))=$1 AND status='active' AND email_verified_at IS NOT NULL LIMIT 2`,[email.data])).rows;
+        await reserveWriterSlot(tx,input.workspaceId,{invitationId,...(recipient.length===1?{userId:recipient[0]!.user_id}:{})});
+      }
+      if(proSharing)await pruneWriterSlots(tx,input.workspaceId);
       if(this.delivery) {
         const encoded=this.delivery.keys[this.delivery.currentKeyVersion];
         if(!encoded) throw new HttpError(503,"cloud_workspace_invitation_delivery_unavailable","Workspace invitation delivery is not configured");
@@ -226,6 +236,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
         await tx.query(`INSERT INTO cloud_workspace_invitation_deliveries(invitation_id,key_version,nonce,ciphertext,auth_tag)
           VALUES ($1,$2,$3,$4,$5)`,[invitationId,this.delivery.currentKeyVersion,sealed.nonce,sealed.ciphertext,sealed.authTag]);
       }
+      await this.cancelInvalidDeliveries(tx,input.workspaceId);
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.invited",{workspaceId:input.workspaceId,invitationId,role:input.role});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"invitations_changed"});
       return {id:invitationId,token,expiresAt:row.expires_at.toISOString(),replayed:false};
@@ -267,10 +278,21 @@ export class DatabaseCloudWorkspaceCollaborationService {
       if (inviter.fingerprint!==invitation.inviter_fingerprint) unavailable();
       await tx.query(`UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE workspace_id=$1 AND user_id=$2 AND revoked_at IS NULL`,[scope.workspace_id,input.actorUserId]);
       const count = (await tx.query<{count:string}>(`SELECT count(*) FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp()`,[scope.workspace_id])).rows[0]!;
-      if (Number(count.count)>=100) throw new HttpError(409,"cloud_workspace_guest_limit","Workspace guest limit reached");
+      const proSharing=await hasProSharing(tx,scope.workspace_id);
+      if (!proSharing&&Number(count.count)>=100) throw new HttpError(409,"cloud_workspace_guest_limit","Workspace guest limit reached");
       const grantId = randomUUID();
       await tx.query(`INSERT INTO cloud_workspace_guest_grants(id,workspace_id,org_id,user_id,role,created_by,expires_at)
         VALUES ($1,$2,$3,$4,$5,$6,now()+interval '90 days')`,[grantId,scope.workspace_id,scope.org_id,input.actorUserId,invitation.role,invitation.invited_by]);
+      if(proSharing){
+        // Acceptance replaces any prior explicit collaborator role with this
+        // bounded grant, including for Organization members. Keeping a member
+        // assignment would outlive expiry or bypass an invited downgrade.
+        await tx.query(`DELETE FROM cloud_workspace_members WHERE workspace_id=$1 AND org_id=$2 AND user_id=$3
+          AND role<>'owner' AND NOT EXISTS(SELECT 1 FROM cloud_workspaces WHERE id=$1 AND owner_user_id=$3)`,
+        [scope.workspace_id,scope.org_id,input.actorUserId]);
+        if(invitation.role==="viewer")await releaseWriterSlot(tx,scope.workspace_id,input.actorUserId);
+        else await activateWriterSlot(tx,scope.workspace_id,input.actorUserId,invitation.id);
+      }
       await tx.query(`UPDATE cloud_workspace_invitations SET accepted_at=now(),accepted_by=$2,guest_grant_id=$3 WHERE id=$1`,[invitation.id,input.actorUserId,grantId]);
       await this.cancelInvalidDeliveries(tx,binding.workspaceId);
       await audit(tx,scope.org_id,input.actorUserId,"cloud_workspace.invitation_accepted",{workspaceId:scope.workspace_id,invitationId:invitation.id,grantId});
@@ -285,6 +307,7 @@ export class DatabaseCloudWorkspaceCollaborationService {
       await lockWorkspace(tx,input);
       await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
       await tx.query(`UPDATE cloud_workspace_invitations SET revoked_at=coalesce(revoked_at,now()) WHERE id=$1 AND workspace_id=$2 AND org_id=$3`,[input.invitationId,input.workspaceId,input.organizationId]);
+      await pruneWriterSlots(tx,input.workspaceId);
       await this.cancelInvalidDeliveries(tx,input.workspaceId);
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.invitation_revoked",{workspaceId:input.workspaceId,invitationId:input.invitationId});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"invitations_changed"});
@@ -297,6 +320,8 @@ export class DatabaseCloudWorkspaceCollaborationService {
     return withSystemTx(this.pool,async tx=>{
       await lockWorkspace(tx,input);
       await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
+      const owner=await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 AND owner_user_id=$2",[input.workspaceId,input.guestUserId]);
+      if(owner.rowCount)throw new HttpError(409,"cloud_workspace_owner_required","The workspace owner cannot be removed");
       await tx.query(`UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1
         WHERE workspace_id=$1 AND org_id=$2 AND user_id=$3 AND revoked_at IS NULL`,[input.workspaceId,input.organizationId,input.guestUserId]);
       await tx.query(`UPDATE cloud_workspace_invitations SET revoked_at=coalesce(revoked_at,now())
@@ -305,9 +330,45 @@ export class DatabaseCloudWorkspaceCollaborationService {
           UNION SELECT digest(lower(btrim(email)),'sha256') FROM users WHERE id=$3
         ))`,[input.workspaceId,input.organizationId,input.guestUserId]);
       await this.cancelInvalidDeliveries(tx,input.workspaceId);
+      if(await hasProSharing(tx,input.workspaceId)){
+        await releaseWriterSlot(tx,input.workspaceId,input.guestUserId);
+        await tx.query("DELETE FROM cloud_workspace_members WHERE workspace_id=$1 AND user_id=$2 AND role<>'owner'",[input.workspaceId,input.guestUserId]);
+      }
       await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.guest_revoked",{workspaceId:input.workspaceId,guestUserId:input.guestUserId});
       await emitCloudWorkspaceAccessChange(tx,{...input,reason:"guests_changed",target:{userId:input.guestUserId,reason:"access_revoked"}});
       return {revoked:true};
+    });
+  }
+
+  async setRole(input:CloudWorkspaceActorScope & {userId:string;role:"viewer"|"developer"}){
+    if(!id.safeParse(input.userId).success||!["viewer","developer"].includes(input.role))
+      throw new HttpError(422,"invalid_input","Invalid collaborator role");
+    return withSystemTx(this.pool,async tx=>{
+      await lockWorkspace(tx,input);
+      await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
+      if(!await hasProSharing(tx,input.workspaceId))throw new HttpError(409,"cloud_workspace_sharing_policy_unavailable","Workspace sharing policy is unavailable");
+      if((await tx.query("SELECT 1 FROM cloud_workspaces WHERE id=$1 AND owner_user_id=$2",[input.workspaceId,input.userId])).rowCount)
+        throw new HttpError(409,"cloud_workspace_owner_required","The workspace owner's role cannot change");
+      if(input.role!=="viewer"&&!(await tx.query("SELECT 1 WHERE cloud_workspace_pro_user_live($1)",[input.userId])).rowCount)unavailable();
+      const member=await tx.query("SELECT 1 FROM organization_members WHERE org_id=$1 AND user_id=$2",[input.organizationId,input.userId]);
+      if(member.rowCount){
+        await tx.query(`INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,$4)
+          ON CONFLICT(workspace_id,user_id) DO UPDATE SET role=EXCLUDED.role,updated_at=clock_timestamp()`,[input.workspaceId,input.organizationId,input.userId,input.role]);
+      }
+      const guest=await tx.query(`UPDATE cloud_workspace_guest_grants SET role=$3,revision=revision+1
+        WHERE workspace_id=$1 AND user_id=$2 AND revoked_at IS NULL AND expires_at>clock_timestamp() RETURNING id`,[input.workspaceId,input.userId,input.role]);
+      if(!member.rowCount&&!guest.rowCount)unavailable();
+      if(input.role==="viewer"){
+        await tx.query(`UPDATE cloud_workspace_invitations SET revoked_at=clock_timestamp() WHERE workspace_id=$1
+          AND accepted_at IS NULL AND revoked_at IS NULL AND recipient_email_sha256 IN (
+            SELECT digest(lower(btrim(email_at_link)),'sha256') FROM user_identities WHERE user_id=$2
+          )`,[input.workspaceId,input.userId]);
+        await releaseWriterSlot(tx,input.workspaceId,input.userId);
+      }else await reserveWriterSlot(tx,input.workspaceId,{userId:input.userId});
+      await this.cancelInvalidDeliveries(tx,input.workspaceId);
+      await audit(tx,input.organizationId,input.actorUserId,"cloud_workspace.collaborator_role_changed",{workspaceId:input.workspaceId,userId:input.userId,role:input.role});
+      await emitCloudWorkspaceAccessChange(tx,{...input,reason:"guests_changed",discoveryChanged:member.rowCount===1});
+      return {userId:input.userId,role:input.role,writers:await writerAvailability(tx,input.workspaceId)};
     });
   }
 
@@ -319,18 +380,34 @@ export class DatabaseCloudWorkspaceCollaborationService {
         AND delivery.state IN ('queued','sending')`,[workspaceId]);
   }
 
-  async list(input:CloudWorkspaceActorScope) {
+  async list(input:CloudWorkspaceActorScope & {pageSize?:number;guestCursor?:string;invitationCursor?:string;memberCursor?:string}) {
+    const pageSize=input.pageSize??100;
+    if(!Number.isInteger(pageSize)||pageSize<1||pageSize>100||[input.guestCursor,input.invitationCursor,input.memberCursor].some(value=>value!==undefined&&!id.safeParse(value).success))
+      throw new HttpError(422,"invalid_input","Invalid collaboration page");
     return withSystemTx(this.pool,async tx=>{
       await lockWorkspace(tx,input);
       const authority=await authorizeCloudWorkspaceActor(tx,{...input,capability:"manage"});
       const guests=await tx.query<{id:string;user_id:string;role:string;revision:string;expires_at:Date}>(`SELECT id,user_id,role,revision,expires_at
-        FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp() ORDER BY created_at,id LIMIT 100`,[input.workspaceId]);
+        FROM cloud_workspace_guest_grants WHERE workspace_id=$1 AND revoked_at IS NULL AND expires_at>clock_timestamp()
+          AND ($2::uuid IS NULL OR id>$2) ORDER BY id LIMIT $3`,[input.workspaceId,input.guestCursor??null,pageSize+1]);
       const invitations=await tx.query<{id:string;role:string;expires_at:Date;state:string|null}>(`SELECT invitation.id,invitation.role,invitation.expires_at,delivery.state
         FROM cloud_workspace_invitations invitation LEFT JOIN cloud_workspace_invitation_deliveries delivery ON delivery.invitation_id=invitation.id
         WHERE invitation.workspace_id=$1 AND invitation.revoked_at IS NULL AND invitation.accepted_at IS NULL AND invitation.expires_at>clock_timestamp()
-        ORDER BY invitation.created_at,invitation.id LIMIT 100`,[input.workspaceId]);
-      return {accessRevision:authority.accessRevision,guests:guests.rows.map(row=>({id:row.id,userId:row.user_id,role:row.role,revision:Number(row.revision),expiresAt:row.expires_at.toISOString()})),
-        invitations:invitations.rows.map(row=>({id:row.id,role:row.role,expiresAt:row.expires_at.toISOString(),deliveryState:row.state??"unavailable"}))};
+          AND ($2::uuid IS NULL OR invitation.id>$2) ORDER BY invitation.id LIMIT $3`,[input.workspaceId,input.invitationCursor??null,pageSize+1]);
+      const members=await tx.query<{user_id:string;role:string|null}>(`SELECT member.user_id,cloud_workspace_actor_role($1,member.user_id) AS role
+        FROM organization_members member JOIN cloud_workspaces workspace ON workspace.org_id=member.org_id
+        WHERE workspace.id=$1 AND ($2::uuid IS NULL OR member.user_id>$2)
+          AND (workspace.sharing_mode='organization' OR EXISTS(SELECT 1 FROM cloud_workspace_members explicit_member
+            WHERE explicit_member.workspace_id=$1 AND explicit_member.user_id=member.user_id))
+        ORDER BY member.user_id LIMIT $3`,[input.workspaceId,input.memberCursor??null,pageSize+1]);
+      return {accessRevision:authority.accessRevision,
+        writers:await hasProSharing(tx,input.workspaceId)?await writerAvailability(tx,input.workspaceId):null,
+        guests:guests.rows.slice(0,pageSize).map(row=>({id:row.id,userId:row.user_id,role:row.role,revision:Number(row.revision),expiresAt:row.expires_at.toISOString()})),
+        invitations:invitations.rows.slice(0,pageSize).map(row=>({id:row.id,role:row.role,expiresAt:row.expires_at.toISOString(),deliveryState:row.state??"unavailable"})),
+        members:members.rows.slice(0,pageSize).map(row=>({userId:row.user_id,role:row.role})),
+        guestCursor:guests.rows.length>pageSize?guests.rows[pageSize-1]!.id:null,
+        invitationCursor:invitations.rows.length>pageSize?invitations.rows[pageSize-1]!.id:null,
+        memberCursor:members.rows.length>pageSize?members.rows[pageSize-1]!.user_id:null};
     });
   }
 }

@@ -442,12 +442,12 @@ Exercise this procedure in Alpha and Beta before Production. For each channel:
 3. In a database-owner shell inside that exact reviewed image, run only the
    compiled strict migrator. Scope the approval to this one process; never save
    it on the Railway web service. A database beginning before `0009` and
-   advancing through the current release requires all eight current controlled
+   advancing through this migration artifact requires all ten controlled
    boundaries:
 
    ```bash
    NODE_ENV=production \
-   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql,0025_cloud_workspace_engine_authority.sql,0060_cloud_workspace_pending_blob_deletions.sql,0061_workos_provider_erasure_fences.sql,0073_cloud_workspace_compute_leases.sql,0075_security_event_commit_order.sql,0076_cloud_workspace_individual_pro_and_pilot.sql,0079_cloud_workspace_user_compute_funding.sql,0101_cloud_workspace_pro_entitlements.sql,0103_cloud_workspace_pro_sharing.sql \
    node dist/migrate.js
    ```
 

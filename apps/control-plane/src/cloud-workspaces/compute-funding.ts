@@ -121,6 +121,8 @@ export class DatabaseComputeUserFunding {
       const overlap=(await tx.query<Root>("SELECT * FROM managed_compute_user_periods WHERE user_id=$1 AND starts_at<$3 AND ends_at>$2 FOR UPDATE",[request.userId,request.startsAt,request.endsAt])).rows;
       let period=overlap[0];
       if(overlap.length>1||(period&&(period.starts_at.getTime()!==start||period.ends_at.getTime()!==end)))deny('compute_credit_period_overlap');
+      if(period&&(await tx.query("SELECT 1 FROM managed_compute_pro_allowances WHERE period_id=$1",[period.id])).rowCount)
+        deny('compute_credit_monthly_allowance_locked');
       if(!period)period=(await tx.query<Root>("INSERT INTO managed_compute_user_periods(id,user_id,starts_at,ends_at) VALUES ($1,$2,$3,$4) RETURNING *",[randomUUID(),request.userId,request.startsAt,request.endsAt])).rows[0]!;
       if(money(period.granted_micro_usd)+request.amountMicroUsd>maximum)deny('compute_credit_invalid');
       // A different user's concurrent receipt loses here. Never ON CONFLICT

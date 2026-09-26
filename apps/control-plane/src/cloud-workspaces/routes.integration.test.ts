@@ -23,6 +23,8 @@ import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js"
 import { createCloudWorkspaceRoutes } from "./routes.js";
 import { sealCloudProviderCredential } from "./provider-connections.js";
 import { DatabaseManagedComputeCreditLedger } from "./compute-credits.js";
+import { reserveWriterSlot } from "./pro-sharing.js";
+import { DatabaseProMonthlyAllowance } from "./pro-allowance.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -151,6 +153,19 @@ d("cloud workspace API contracts", () => {
     actor=outsider;
     expect((await request(`/v1/organizations/${orgId}/cloud-compute-credits`)).status).toBe(404);
   });
+  it("returns a private percentage snapshot without granting funding or accepting a different user",async()=>{
+    const before=await request('/v1/cloud-compute-usage');
+    expect(before.headers.get('cache-control')).toBe('no-store');
+    expect(await before.json()).toMatchObject({state:'pending',usedPercent:null,reservedPercent:null,availablePercent:null});
+    expect((await pool.query('SELECT 1 FROM managed_compute_funding_receipts')).rowCount).toBe(0);
+    await new DatabaseProMonthlyAllowance(pool,{policyId:'qualified-v1',secondsPerDollar:100000}).ensure(owner.id);
+    const usage=await (await request('/v1/cloud-compute-usage')).json();
+    expect(usage).toMatchObject({state:'ready',usedPercent:0,reservedPercent:0,availablePercent:100});
+    expect(Object.keys(usage).sort()).toEqual(['asOf','availablePercent','reservedPercent','resetsAt','state','usedPercent']);
+    actor=outsider;
+    expect(await (await request(`/v1/cloud-compute-usage?userId=${owner.id}`)).json()).toMatchObject({state:'pending',usedPercent:null});
+    expect((await pool.query('SELECT 1 FROM managed_compute_funding_receipts')).rowCount).toBe(1);
+  });
 
   const createWorkspace = async (key = randomUUID()) => {
     const response = await request(
@@ -163,6 +178,20 @@ d("cloud workspace API contracts", () => {
     };
     return { response, body, key };
   };
+
+  it("creates for a non-staff Pro member without an Organization subscription or seat",async()=>{
+    await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1",[owner.id]);
+    await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[owner.id]);
+    await pool.query("DELETE FROM organization_seat_assignments WHERE org_id=$1",[orgId]);
+    await pool.query("DELETE FROM organization_entitlements WHERE org_id=$1",[orgId]);
+    await pool.query("UPDATE organization_members SET role='member' WHERE org_id=$1 AND user_id=$2",[orgId,owner.id]);
+    await pool.query("UPDATE team_members SET role='member' WHERE team_id=$1 AND user_id=$2",[teamId,owner.id]);
+    actor={...owner,staffRole:null};
+    const created=await createWorkspace();
+    expect(created.response.status,JSON.stringify(created.body)).toBe(202);
+    expect((await pool.query("SELECT billing_owner_user_id,entitlement_scope,entitlement_plan FROM workspace_billing_epochs WHERE workspace_id=$1",[created.body.workspace.id])).rows)
+      .toEqual([{billing_owner_user_id:owner.id,entitlement_scope:'account',entitlement_plan:'pro'}]);
+  });
 
   const customerDaytona = async () => {
     const id = randomUUID();
@@ -437,7 +466,7 @@ d("cloud workspace API contracts", () => {
     expect(response.status, JSON.stringify(body)).toBe(202);
     expect(body).toMatchObject({
       workspace: {
-        generation: { provider: "daytona", imageRef: "snap-pinned" },
+        generation: { resources: {cpuMillicores:2000,memoryMiB:4096} },
       },
     });
     const generation = await pool.query(
@@ -475,7 +504,7 @@ d("cloud workspace API contracts", () => {
     expect(created.response.status, JSON.stringify(created.body)).toBe(202);
     expect(created.body).toMatchObject({
       workspace: {
-        generation: { provider: "boat", imageRef: "boat-qualified-template" },
+        generation: { resources: {cpuMillicores:4000,memoryMiB:8192} },
       },
     });
   });
@@ -489,14 +518,12 @@ d("cloud workspace API contracts", () => {
         desiredState: "running",
         generation: {
           number: 1,
-          provider: "daytona",
-          imageRef: "snap-pinned",
           observedState: "absent",
         },
       },
       intent: { state: "queued" },
     });
-    expect(JSON.stringify(created.body)).not.toContain("providerResourceId");
+    expect(JSON.stringify(created.body)).not.toMatch(/provider|imageRef|snap-pinned|daytona|boat/i);
 
     const records = await pool.query(
       `SELECT cw.id, cw.owner_user_id, cw.repository_id,
@@ -617,14 +644,34 @@ d("cloud workspace API contracts", () => {
     const resolved=await request(`/v1/cloud-workspaces/${workspaceId}`);
     expect(resolved.status).toBe(200);
     expect(resolved.headers.get('cache-control')).toBe('no-store');
-    expect(await resolved.json()).toMatchObject({workspace:{id:workspaceId,organizationId:orgId},access:{role:"developer"}});
+    expect(await resolved.json()).toMatchObject({workspace:{id:workspaceId,organizationId:orgId},access:{role:"viewer"}});
     expect(await (await request('/v1/cloud-workspaces')).json()).toMatchObject({workspaces:[{id:workspaceId}]});
     const managementView=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`);
     expect(managementView.status).toBe(200);
     expect(managementView.headers.get("cache-control")).toBe("no-store");
-    expect(await managementView.json()).toMatchObject({settings:null,provider:null,quota:null,usage:[]});
+    expect(await managementView.json()).toMatchObject({settings:null,compute:null,quota:null,usage:[]});
     await pool.query("DELETE FROM organization_members WHERE org_id=$1 AND user_id=$2",[orgId,outsider.id]);
     expect((await request(`/v1/cloud-workspaces/${workspaceId}`)).status).toBe(404);
+  });
+  it("keeps stored infrastructure diagnostics out of workspace responses",async()=>{
+    const created=await createWorkspace();
+    await pool.query("UPDATE cloud_workspaces SET last_error_code='boat_allocation_failed',last_error_message='Boat snapshot secret-target failed' WHERE id=$1",[created.body.workspace.id]);
+    const response=await request(`/v1/cloud-workspaces/${created.body.workspace.id}`);
+    const body=await response.json();
+    expect(response.status).toBe(200);
+    expect(JSON.stringify(body)).not.toMatch(/boat|daytona|snapshot|secret-target|providerTarget|imageRef/i);
+    expect(body.workspace.error).toEqual({code:'cloud_workspace_unavailable',message:'The cloud workspace is temporarily unavailable'});
+  });
+  it.each(['stopped','archived'])("reports funded start availability for a %s workspace without exposing the sponsor's balance",async status=>{
+    const policy={provider:'daytona',policyId:'test-compute-v1',secondsPerDollar:100000,minimumTtlSeconds:60,maximumTtlSeconds:600,requestMarginSeconds:5};
+    configureApp(false,{...cloudConfig,computePolicy:policy});
+    const created=await createWorkspace();
+    await pool.query("UPDATE cloud_workspaces SET status=$2::text::cloud_workspace_status,desired_state=$2::text::cloud_workspace_desired_state WHERE id=$1",[created.body.workspace.id,status]);
+    await new DatabaseProMonthlyAllowance(pool,policy).ensure(owner.id);
+    const response=await request(`/v1/cloud-workspaces/${created.body.workspace.id}`);
+    const body=await response.json();
+    expect(body.workspace.capabilities).toMatchObject({canStart:true,startUnavailableReason:null});
+    expect(JSON.stringify(body)).not.toMatch(/MicroUsd|Percent|allowance_available|seconds_per_dollar/);
   });
 
   it("lets an external Pro guest discover only its granted workspace and redacted management data",async()=>{
@@ -640,7 +687,7 @@ d("cloud workspace API contracts", () => {
     expect((await request(`/v1/cloud-workspaces/${sibling.body.workspace.id}`)).status).toBe(404);
     const overview=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`);
     expect(overview.status).toBe(200);expect(overview.headers.get('cache-control')).toBe('no-store');
-    expect(await overview.json()).toMatchObject({settings:null,provider:null,quota:null,usage:[],exports:[],replicas:[],forwards:[]});
+    expect(await overview.json()).toMatchObject({settings:null,compute:null,quota:null,usage:[],exports:[],replicas:[],forwards:[]});
     for(const suffix of ['provider-connections','secret-bindings'])expect((await request(`/v1/organizations/${orgId}/cloud-workspace-management/${suffix}`)).status).toBe(404);
     expect((await request(`/v1/organizations/${orgId}/cloud-workspaces`)).status).toBe(404);
     await pool.query("UPDATE cloud_workspace_guest_grants SET revoked_at=now(),revision=revision+1 WHERE id=$1",[grant]);
@@ -682,7 +729,7 @@ d("cloud workspace API contracts", () => {
     expect(overviewBody).toMatchObject({
       workspace: { id: workspaceId, repositoryId },
       settings: { effective: { secretNames: [] } },
-      provider: { credentialSource: "hosted" },
+      compute: { credentialSource: "hosted" },
     });
     expect(JSON.stringify(overviewBody)).not.toContain("providerResourceId");
     expect(JSON.stringify(overviewBody)).not.toContain(cloudConfig.apiKey);
@@ -695,7 +742,7 @@ d("cloud workspace API contracts", () => {
     expect(hidden.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("issues SSH, preview, and localhost-tunnel access through the coordinator", async () => {
+  it("requires neutral runtime transport for SSH and tunnels while issuing preview access", async () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     const sshKey = randomUUID();
@@ -707,19 +754,10 @@ d("cloud workspace API contracts", () => {
         body: { expiresInMinutes: 15 },
       },
     );
-    expect(ssh.status).toBe(201);
+    expect(ssh.status).toBe(409);
     expect(ssh.headers.get("cache-control")).toBe("no-store");
     await expect(ssh.json()).resolves.toMatchObject({
-      grant: { kind: "ssh", workspaceId },
-      ssh: { host: "ssh.app.daytona.io" },
-    });
-    expect(accessService.issue).toHaveBeenCalledWith({
-      organizationId: orgId,
-      workspaceId,
-      accountUserId: owner.id,
-      kind: "ssh",
-      expiresInMinutes: 15,
-      idempotencyKey: sshKey,
+      error: { code: "cloud_workspace_runtime_connection_required" },
     });
 
     const tunnel = await request(
@@ -735,16 +773,13 @@ d("cloud workspace API contracts", () => {
         },
       },
     );
-    expect(tunnel.status).toBe(201);
+    expect(tunnel.status).toBe(409);
     const tunnelBody = await tunnel.json();
     expect(tunnelBody).toMatchObject({
-      grant: { kind: "tunnel", remotePort: 4_173 },
-      tunnel: {
-        remoteHost: "127.0.0.1",
-        remotePort: 4_173,
-        session: { id: TUNNEL_SESSION_ID, deviceId: DEVICE_ID },
-      },
+      error: { code: "cloud_workspace_runtime_connection_required" },
     });
+    expect(accessService.issue).not.toHaveBeenCalled();
+    // Previously issued sessions can still report their local activation.
     const activated = await request(
       `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/tunnels/${TUNNEL_SESSION_ID}`,
       {
@@ -1205,11 +1240,15 @@ d("cloud workspace API contracts", () => {
         [teamId, orgId, owner.id],
       );
     });
+    await withCloudFixtureOwnerTx(pool, async tx => {
+      await tx.query("UPDATE users SET staff_role=NULL WHERE id=$1",[owner.id]);
+      await tx.query("UPDATE account_entitlements SET status='expired',revision=revision+1 WHERE user_id=$1",[owner.id]);
+    });
 
     const create = await createWorkspace();
     expect(create.response.status).toBe(403);
     expect(create.body).toMatchObject({
-      error: { code: "forbidden" },
+      error: { code: "cloud_account_entitlement_required" },
     });
 
     const stopped = await request(
@@ -1225,7 +1264,7 @@ d("cloud workspace API contracts", () => {
     expect(deleted.status).toBe(202);
   });
 
-  it.each(["wake", "upgrade"] as const)("charges the immutable Pro sponsor when an organization administrator requests %s", async operation => {
+  it.each(["wake", "upgrade"] as const)("charges the immutable Pro sponsor when an explicitly assigned workspace manager requests %s", async operation => {
     const created=await createWorkspace();expect(created.response.status).toBe(202);
     const workspaceId=created.body.workspace.id;
     await withCloudFixtureOwnerTx(pool,async tx=>{
@@ -1237,6 +1276,14 @@ d("cloud workspace API contracts", () => {
       for(const userId of [owner.id,outsider.id])await tx.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator') ON CONFLICT(user_id) DO UPDATE SET plan='pro',status='active',cloud_workspaces_allowed=true",[userId]);
     });
     actor=outsider;
+    const endpoint=`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/${operation==='wake'?'wake':'generations'}`;
+    expect((await request(endpoint,{method:'POST',key:randomUUID(),...(operation==='upgrade'?{body:{operation:'upgrade'}}:{})})).status).toBe(403);
+    await withSystemTx(pool,async tx=>{
+      await tx.query("SELECT id FROM organizations WHERE id=$1 FOR UPDATE",[orgId]);
+      await tx.query("SELECT id FROM cloud_workspaces WHERE id=$1 FOR UPDATE",[workspaceId]);
+      await tx.query("INSERT INTO cloud_workspace_members(workspace_id,org_id,user_id,role) VALUES($1,$2,$3,'manager')",[workspaceId,orgId,outsider.id]);
+      await reserveWriterSlot(tx,workspaceId,{userId:outsider.id});
+    });
     const result=await request(`/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/${operation==='wake'?'wake':'generations'}`,
       {method:'POST',key:randomUUID(),...(operation==='upgrade'?{body:{operation:'upgrade'}}:{})});
     const body=await result.json();expect(result.status,JSON.stringify(body)).toBe(202);
@@ -1291,9 +1338,10 @@ d("cloud workspace API contracts", () => {
   });
 
   it("rebinds a renewed entitlement before waking a stopped generation", async () => {
+    await pool.query("INSERT INTO account_entitlements(user_id,plan,status,cloud_workspaces_allowed,source) VALUES($1,'pro','active',true,'operator')",[owner.id]);
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
-    await withSystemTx(pool, async (tx) => {
+    await withCloudFixtureOwnerTx(pool, async (tx) => {
       await tx.query(
         `UPDATE cloud_workspace_lifecycle_intents
          SET state = 'succeeded', completed_at = now()
@@ -1308,10 +1356,10 @@ d("cloud workspace API contracts", () => {
         [workspaceId],
       );
       await tx.query(
-        `UPDATE organization_entitlements
+        `UPDATE account_entitlements
          SET revision = revision + 1, updated_at = now()
-         WHERE org_id = $1`,
-        [orgId],
+         WHERE user_id = $1`,
+        [owner.id],
       );
     });
 
@@ -1325,7 +1373,7 @@ d("cloud workspace API contracts", () => {
       intent: { operation: "wake", state: "queued" },
     });
     const authority = (
-      await pool.query<{
+      await withSystemTx(pool, tx => tx.query<{
         current_billing_epoch: string;
         paid: boolean;
         live_epoch_count: number;
@@ -1340,7 +1388,7 @@ d("cloud workspace API contracts", () => {
                    AND billing.ended_at IS NULL) AS live_epoch_count
          FROM cloud_workspaces workspace WHERE workspace.id = $1`,
         [workspaceId],
-      )
+      ))
     ).rows[0];
     expect(authority).toEqual({
       current_billing_epoch: "2",
@@ -1921,8 +1969,6 @@ d("cloud workspace API contracts", () => {
           // Rollback is a fresh candidate, but the current source remains
           // authoritative throughout the checkpoint + drain barrier.
           number: 2,
-          imageRef: "snap-newer",
-          sourceCommit: "b".repeat(40),
         },
         status: "ready",
       },

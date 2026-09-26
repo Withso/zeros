@@ -2005,6 +2005,7 @@ export class DatabaseCloudWorkspaceBlobService {
       }
       try {
         await authorizeCloudWorkspaceOperation(tx, {
+          workspaceId: input.workspaceId,
           organizationId: input.organizationId,
           teamId: scope.team_id,
           actorUserId: input.accountUserId,

@@ -99,6 +99,7 @@ if (workosSync) {
   );
 }
 let stopCloudReconciler = async () => {};
+let stopCloudProAllowances = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
 let stopCloudCheckpointRequestWorker = async () => {};
@@ -165,6 +166,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     { DatabaseCloudWorkspaceHealthService },
     { CloudWorkspaceOutboxWorker, HttpCloudWorkspaceOutboxSink },
     { CloudWorkspaceHealthAlertWorker },
+    { DatabaseProMonthlyAllowance },
   ] = await Promise.all([
     import("./cloud-workspaces/provider-deployment.js"),
     import("./cloud-workspaces/provider-resolver.js"),
@@ -191,6 +193,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
     import("./cloud-workspaces/health.js"),
     import("./cloud-workspaces/outbox.js"),
     import("./cloud-workspaces/health-alerts.js"),
+    import("./cloud-workspaces/pro-allowance.js"),
   ]);
   const cloud = config.cloudWorkspaces;
   const invitationConfig=workspaceInvitationDeliveryConfig(cloud,config.inviteLinkBase,emailConfig);
@@ -519,6 +522,7 @@ if (config.cloudWorkspaces && !config.databaseMaintenanceMode) {
       intervalMs: cloud.reconcileIntervalMs,
       leaseMs: Math.max(10 * 60_000, cloud.operationTimeoutSeconds * 2_000),
     }).stop;
+    if(cloud.computePolicy)stopCloudProAllowances=new DatabaseProMonthlyAllowance(pool,cloud.computePolicy).start();
     stopCloudAccessRevocationWorker = accessRevocationWorker.start();
     stopCloudCheckpointRequestWorker = checkpointRequestWorker.start();
     if (forkWorker) stopCloudForkWorker = forkWorker.start();
@@ -601,6 +605,7 @@ function shutdown(signal: string): void {
     stopCloudInvitationWorker(),
     stopCloudHealthAlerts(),
     stopCloudReconciler(),
+    stopCloudProAllowances(),
     workosSync?.stop() ?? Promise.resolve(),
     securityEventBroker.stop(),
     stopSecurityEventPublisher(),

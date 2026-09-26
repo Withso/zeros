@@ -264,7 +264,7 @@ d("cloud workspace Phase 5 management", () => {
       expect(queries.mock.calls.some(call=>typeof call[0]==="string"&&call[0].includes("FROM cloud_workspace_usage_events"))).toBe(false);
     } finally {queries.mockRestore();}
     expect(result.workspace).toMatchObject({id:workspaceId});
-    expect(result.settings).toBeNull();expect(result.provider).toBeNull();expect(result.quota).toBeNull();
+    expect(result.settings).toBeNull();expect(result.compute).toBeNull();expect(result.quota).toBeNull();
     expect(result.usage).toEqual([]);expect(result.checkpoints).toEqual([]);
     await expect(management.updateRetention({organizationId:orgId,workspaceId,actorUserId:collaborator.id,expectedVersion:1,
       recordEventDays:30,contentEventDays:7,checkpointDays:30,exportDays:7})).rejects.toMatchObject({status:404});
@@ -296,7 +296,7 @@ d("cloud workspace Phase 5 management", () => {
     await collaboration.accept({actorUserId:guest.id,identity:guest.identity,token:invitation.token});
     const ownerOverview=await management.workspaceOverview(scope);expect(JSON.stringify(ownerOverview)).toContain(sentinel);
     const guestOverview=await management.workspaceOverview({...scope,actorUserId:guest.id});
-    expect(guestOverview).toMatchObject({workspace:{id:workspaceId},settings:null,provider:null,quota:null,usage:[],exports:[],replicas:[],forwards:[]});
+    expect(guestOverview).toMatchObject({workspace:{id:workspaceId},settings:null,compute:null,quota:null,usage:[],exports:[],replicas:[],forwards:[]});
     expect(JSON.stringify(guestOverview)).not.toContain(sentinel);
     expect((await pool.query('SELECT 1 FROM organization_members WHERE org_id=$1 AND user_id=$2',[orgId,guest.id])).rowCount).toBe(0);
     await collaboration.revokeGuest({...scope,guestUserId:guest.id});
@@ -995,7 +995,7 @@ d("cloud workspace Phase 5 management", () => {
         expectedVersion: 1,
         apiKey: "daytona-rotated-after-change-abcdefghijklmnopqrstuvwxyz",
       });
-      expect(result.connection).toMatchObject({ region: config.target });
+      expect(result.connection).not.toHaveProperty("region");
       expect(clientFactory).toHaveBeenCalledExactlyOnceWith(
         expect.objectContaining({
           apiUrl: config.apiUrl,

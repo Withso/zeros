@@ -334,19 +334,6 @@ export async function manageCloudWorkspaceObjectStorage(
         "Object-storage target must be the exact active cloud-enabled Organization",
       );
     }
-    const entitled = await client.query(
-      `SELECT 1 FROM organization_entitlements
-       WHERE org_id = $1 AND status IN ('active', 'trialing')
-         AND cloud_workspaces_allowed AND valid_from <= now()
-         AND (valid_until IS NULL OR valid_until > now())`,
-      [request.organizationId],
-    );
-    if ((entitled.rowCount ?? 0) !== 1) {
-      throw new CloudWorkspaceObjectStorageManagementError(
-        "Object-storage limits require a current Organization cloud entitlement",
-      );
-    }
-
     // Runtime admission can already hold Organization/FK row locks when it
     // enters the shared advisory boundary. Keep that same row-before-advisory
     // order here so an operator plan cannot form a lock cycle with an upload.
@@ -453,6 +440,7 @@ export async function manageCloudWorkspaceObjectStorage(
        SET max_organization_bytes = EXCLUDED.max_organization_bytes,
            max_workspace_bytes = EXCLUDED.max_workspace_bytes,
            updated_by = EXCLUDED.updated_by,
+           default_policy_version = NULL,
            updated_at = now()`,
       [
         request.organizationId,

@@ -46,7 +46,7 @@ chat, paths, and processes remain private to its device. See
 
 The current backend milestone supports organization-shared workspaces and
 exact-workspace guest collaboration. Existing private workspaces stay private;
-new shared workspaces admit current organization members as developers. Invited
+new shared Pro workspaces admit eligible organization members as Read-only. Invited
 guests never acquire organization membership or access to sibling workspaces.
 Personal remains permanently device-local; migrations `0018` and `0053` and
 server authorization enforce that boundary.
@@ -55,14 +55,19 @@ Pro is an individual subscription. A Pro account may join multiple Pro
 organizations; there is no purchased Pro organization subscription or five-member
 limit. Each actor and the immutable compute sponsor must retain their own current
 authority. One member's lapsed subscription does not disable unrelated members.
-Business/Enterprise subscriptions and purchased seat assignments remain separate.
+Write assignments are explicit and limited to ten people per workspace,
+including its owner; Read-only Pro collaborators have no total count limit.
+Business/Enterprise subscriptions and purchased seat assignments remain separate
+historical contracts, with their launch policy deferred.
 WorkOS membership alone never authorizes paid compute.
 
-The pilot admits active `platform_owner` and `developer` staff only. Public
-customer access and billing integration remain disabled. Staff receive explicit,
-audited operating-budget grants; staff status does not mint funds. The workspace
-owner sponsors compute. Editing and agent execution are shared, while invitations,
-workspace deletion and credential administration require owner/admin authority.
+The new [Pro backend](pro-backend.md) replaces staff-only admission for individual
+Pro sponsorship and adds an automatic 500-hour monthly allowance. Standing
+`platform_owner` and `developer` staff receive separately audited complimentary
+Pro with that same allowance. Cloud execution remains disabled on deployed
+channels pending qualification. The workspace owner sponsors compute. Editing
+and agent execution require Write, while invitations and credential
+administration require workspace owner/manager authority.
 Personal model credentials require explicit delegation, including to other admins.
 A client detach never stops another participant's active execution.
 

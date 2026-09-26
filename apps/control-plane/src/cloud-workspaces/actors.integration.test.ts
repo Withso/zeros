@@ -118,13 +118,14 @@ d("workspace-scoped multiplayer authority", () => {
     await expect(access(guestId,"manage")).rejects.toMatchObject({status:403});
   });
 
-  it("rejects expired, revoked, unverified, and non-staff invitations without consuming them", async () => {
+  it("rejects expired, revoked, unverified, and non-Pro invitations without consuming them", async () => {
     await sharing();
     const invite = await service.invite({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,actorUserId:fixture.userId,email:guestEmail,role:"viewer"});
     await pool.query("UPDATE user_identities SET email_verified_at=NULL WHERE user_id=$1",[guestId]);
     await expect(accept({actorUserId:guestId,token:invite.token})).rejects.toMatchObject({status:404});
     await pool.query("UPDATE user_identities SET email_verified_at=now() WHERE user_id=$1",[guestId]);
     await pool.query("UPDATE users SET staff_role=NULL WHERE id=$1",[guestId]);
+    await pool.query("UPDATE account_entitlements SET status='expired' WHERE user_id=$1",[guestId]);
     await expect(accept({actorUserId:guestId,token:invite.token})).rejects.toMatchObject({status:404});
     await pool.query("UPDATE users SET staff_role='developer' WHERE id=$1",[guestId]);
     await service.revokeInvitation({workspaceId:fixture.workspaceId,organizationId:fixture.organizationId,actorUserId:fixture.userId,invitationId:invite.id});

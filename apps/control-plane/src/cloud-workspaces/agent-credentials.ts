@@ -40,12 +40,12 @@ export function cloudAgentCredentialKeys(config:CloudWorkspaceBackendConfig|null
 export class DatabaseCloudAgentCredentialService {
   constructor(private readonly pool:pg.Pool,private readonly encryption:CloudAgentCredentialKeys){}
 
-  private async owner(tx:Tx,userId:string,requirePilot=false):Promise<void>{
+  private async owner(tx:Tx,userId:string,requirePro=false):Promise<void>{
     if(!uuid.safeParse(userId).success)unavailable();
     const account=await tx.query(`SELECT account.id FROM users account WHERE account.id=$1 AND account.auth_status='active' AND account.deleted_at IS NULL
-      AND (NOT $2::boolean OR cloud_workspace_pilot_user_live(account.id))
+      AND (NOT $2::boolean OR cloud_workspace_pro_user_live(account.id))
       AND EXISTS(SELECT 1 FROM user_identities identity WHERE identity.user_id=account.id AND identity.provider='workos'
-        AND identity.status='active' AND identity.email_verified_at IS NOT NULL) FOR KEY SHARE OF account SKIP LOCKED`,[userId,requirePilot]);
+        AND identity.status='active' AND identity.email_verified_at IS NOT NULL) FOR KEY SHARE OF account SKIP LOCKED`,[userId,requirePro]);
     if(account.rowCount!==1)unavailable();
   }
 
