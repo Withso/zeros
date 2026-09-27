@@ -145,6 +145,7 @@ import { clearTerminalFolders } from "../../shell/terminal/terminal-store";
 import { clearChatPaneFolders } from "../../state/chat-panes-store";
 import { clearDashboardRepoFilter } from "../dashboard/preferences";
 import { forgetRepositoryVisibility } from "../dashboard/workspace-visibility";
+import { forgetRepositoryCollapsed } from "../../shell/sidebar-collapsed-repositories";
 import { folderIsOwnedByProject } from "../../state/workspace-resolution";
 import {
   isInheritedSource,
@@ -1890,12 +1891,55 @@ function PathsSection({ project }: { project: Project }) {
 // "No workspace selected" pane.
 function RemoveRepositorySection({ project }: { project: Project }) {
   const plainFolder = project.isGitRepository === false;
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  return (
+    <SettingsSection
+      title={plainFolder ? "Remove folder" : "Remove repository"}
+      description={
+        plainFolder
+          ? "Remove this folder and its chats from Zeros. Your files stay on disk."
+          : "Take this repo out of Zeros and delete the worktrees Zeros created for it. Your source folder is left untouched."
+      }
+    >
+      <div>
+        <Button
+          variant="destructive-secondary"
+          size="md"
+          onClick={() => setConfirmOpen(true)}
+        >
+          <Trash2 className="size-3.5" aria-hidden="true" />
+          {plainFolder ? "Remove folder" : "Remove repository"}
+        </Button>
+      </div>
+
+      <RemoveRepositoryDialog
+        project={project}
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+      />
+    </SettingsSection>
+  );
+}
+
+/** The confirmation + removal flow behind every "Remove repository" entry
+ *  point (this section and the sidebar's repository menu). The caller owns
+ *  only `open`; the dialog refuses to close while a removal is in flight. */
+export function RemoveRepositoryDialog({
+  project,
+  open,
+  onOpenChange,
+}: {
+  project: Project;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const plainFolder = project.isGitRepository === false;
   const dispatch = useWorkspaceDispatch();
   const chats = useChats();
   const activeChatId = useActiveChatId();
   const newAgentFolder = useNewAgentFolder();
   const { projects } = useProjects();
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const handleRemove = async () => {
@@ -2008,7 +2052,7 @@ function RemoveRepositorySection({ project }: { project: Project }) {
       }
 
       // 5. Close the dialog before removing its target from the retained deck.
-      setConfirmOpen(false);
+      onOpenChange(false);
 
       // 6. Drop the project from the registry + per-repo UI prefs, then tell
       //    every consumer (sidebar, settings repo list) to refresh.
@@ -2025,6 +2069,7 @@ function RemoveRepositorySection({ project }: { project: Project }) {
       clearChatPaneFolders([...removedFolders], project.id);
       clearDashboardRepoFilter(project.repoSlug);
       forgetRepositoryVisibility(project.repoSlug);
+      forgetRepositoryCollapsed(project.id);
       dispatch({
         type: "REMOVE_REPO_UI_STATE",
         projectId: project.id,
@@ -2077,71 +2122,51 @@ function RemoveRepositorySection({ project }: { project: Project }) {
   };
 
   return (
-    <SettingsSection
-      title={plainFolder ? "Remove folder" : "Remove repository"}
-      description={
-        plainFolder
-          ? "Remove this folder and its chats from Zeros. Your files stay on disk."
-          : "Take this repo out of Zeros and delete the worktrees Zeros created for it. Your source folder is left untouched."
-      }
+    <Dialog
+      open={open}
+      onOpenChange={(o) => {
+        // Don't let an outside-click / Esc close the dialog mid-removal.
+        if (!busy) onOpenChange(o);
+      }}
     >
-      <div>
-        <Button
-          variant="destructive-secondary"
-          size="md"
-          onClick={() => setConfirmOpen(true)}
-        >
-          <Trash2 className="size-3.5" aria-hidden="true" />
-          {plainFolder ? "Remove folder" : "Remove repository"}
-        </Button>
-      </div>
-
-      <Dialog
-        open={confirmOpen}
-        onOpenChange={(o) => {
-          // Don't let an outside-click / Esc close the dialog mid-removal.
-          if (!busy) setConfirmOpen(o);
-        }}
-      >
-        <DialogContent className="max-w-[480px]">
-          <DialogHeader>
-            <DialogTitle>Remove {project.name}?</DialogTitle>
-          </DialogHeader>
-          <DialogBody>
-            <DialogDescription className="flex flex-col gap-3">
-              <span>
-                {plainFolder
-                  ? "This folder's chats will be permanently deleted from Zeros."
-                  : "All your workspaces will be permanently deleted."}
-              </span>
-              <span>
-                The source directory{" "}
-                <span className="break-all">{project.repoRoot}</span> will not
-                be modified.
-              </span>
-            </DialogDescription>
-          </DialogBody>
-          <DialogFooter>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setConfirmOpen(false)}
-              disabled={busy}
-            >
-              Cancel
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={() => void handleRemove()}
-              disabled={busy}
-            >
-              {busy && <ZerosSpinner size={16} tone="inherit" />}
-              Remove
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </SettingsSection>
+      <DialogContent className="max-w-[480px]">
+        <DialogHeader>
+          <DialogTitle>Remove {project.name}?</DialogTitle>
+        </DialogHeader>
+        <DialogBody>
+          <DialogDescription className="flex flex-col gap-3">
+            <span>
+              {plainFolder
+                ? "This folder's chats will be permanently deleted from Zeros."
+                : "All your workspaces will be permanently deleted."}
+            </span>
+            <span>
+              The source directory{" "}
+              <span className="break-all">{project.repoRoot}</span> will not be
+              modified.
+            </span>
+          </DialogDescription>
+        </DialogBody>
+        <DialogFooter>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onOpenChange(false)}
+            disabled={busy}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => void handleRemove()}
+            disabled={busy}
+          >
+            {busy && <ZerosSpinner size={16} tone="inherit" />}
+            Remove
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

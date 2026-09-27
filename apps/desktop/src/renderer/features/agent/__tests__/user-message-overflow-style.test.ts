@@ -18,7 +18,7 @@ function code(relativePath: string): string {
 
 describe("narrow transcript message overflow", () => {
   it("bounds user bubbles to their lane and shrinks unbroken text", () => {
-    expect(code("../turn-container.tsx")).toContain("max-w-[min(768px,100%)]");
+    expect(code("../turn-container.tsx")).toContain("max-w-[min(800px,100%)]");
 
     const textMessage = code("../renderers/text-message.tsx");
     expect(textMessage.match(/wrap-anywhere/g)).toHaveLength(2);

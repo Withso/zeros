@@ -64,7 +64,7 @@ import { prepareProjectFolder } from "./project-folder-setup";
 import { InitializeProjectDialog } from "./dialogs/initialize-project";
 
 /** A folder the user has just picked that hasn't finished registering yet.
- *  Drives the minimal shimmer state in the global top bar. */
+ *  Drives the minimal shimmer row in the app sidebar. */
 export interface PendingProject {
   /** Absolute path of the picked folder. */
   root: string;
@@ -95,11 +95,11 @@ interface AddProjectActions {
    *  leaf folder name). Desktop-only. */
   publishToGithub: (repoRoot: string, defaultName?: string) => void;
   /** Set while a picked folder is mid-open (engine respawning) and the real
-   *  project row hasn't landed yet. Null at rest. The top bar renders a shimmer
+   *  project row hasn't landed yet. Null at rest. The sidebar renders a shimmer
    *  state for it; it clears the moment the registered project appears. */
   pendingProject: PendingProject | null;
-  /** Repo root of a project whose engine is mid-respawn. Null at rest. The top
-   *  bar swaps that project's chip for the branded Z shimmer.
+  /** Repo root of a project whose engine is mid-respawn. Null at rest. The
+   *  sidebar swaps that repository's icon for the branded Z shimmer.
    *
    *  The normal "Open project" flow no longer respawns (it registers the repo
    *  and the running engine serves it), so this stays null there — the brief
@@ -136,7 +136,7 @@ export function AddProjectProvider({
   const nativeRuntime = useNativeRuntime();
 
   // Picked-but-not-yet-registered project. Set the instant a folder is chosen
-  // and cleared once the real project row lands — the top bar paints a minimal
+  // and cleared once the real project row lands — the sidebar paints a minimal
   // shimmer row meanwhile so the open never feels stuck during engine work.
   const [pendingProject, setPendingProject] = useState<PendingProject | null>(
     null,
@@ -173,7 +173,7 @@ export function AddProjectProvider({
 
   // Paint the shimmer the instant the user picks a folder — the native
   // `project-opening` event fires BEFORE the (multi-second) engine respawn, so
-  // the top bar reflects the choice immediately instead of waiting on the IPC.
+  // the sidebar reflects the choice immediately instead of waiting on the IPC.
   useEffect(() => {
     let unlisten: (() => void) | null = null;
     void onProjectOpening(({ root }) => {

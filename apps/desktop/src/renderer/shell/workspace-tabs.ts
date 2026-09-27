@@ -26,16 +26,6 @@ export interface WorkspaceFadeVisibility {
   beforePinnedRight: boolean;
 }
 
-/** A short boundary hairline belongs only between two unselected destinations.
- *  The carrier remains in flow when hidden so selecting a tab never changes
- *  spacing, scroll width, or sticky offsets. */
-export function navigationBoundarySeparatorVisible(
-  leftActive: boolean,
-  rightActive: boolean,
-): boolean {
-  return !leftActive && !rightActive;
-}
-
 /** The workspace to land on when the primary checkout is not an offered
  * destination — the leftmost tab, so "somewhere sensible" matches what the
  * strip shows. Returns null for a cold or worktree-less repo. Shared with the
@@ -226,56 +216,6 @@ export function workspacePinSide(args: {
   return null;
 }
 
-/** The sticky `right` inset that parks a pinned repository lead immediately
- * before the pinned pill: the pill's own trailing inset, plus the pill, plus
- * the carrier between them. Pure so the one number CSS and the fade placement
- * both depend on cannot drift between them. */
-export function workspacePinnedLeadTrailingInset(args: {
-  edgeInset: number;
-  tabWidth: number;
-  gap: number;
-}): number {
-  return (
-    Math.max(0, args.edgeInset) +
-    Math.max(0, args.tabWidth) +
-    Math.max(0, args.gap)
-  );
-}
-
-/** Where the two relocated fades sit once something has parked at that edge.
- *
- * Each edge is charged for ONLY what parked at THAT edge. The pill and its
- * repository lead can legitimately split across both — a long repository whose
- * icon has already reached the leading edge while its selection is still parked
- * at the trailing one — and charging the trailing fade for a lead pinned at the
- * leading edge would strand a lead-slot of unfaded content beside the pill. */
-export function workspacePinnedFadeOffsets(args: {
-  clientWidth: number;
-  tabWidth: number;
-  edgeInset: number;
-  leadSlot: number;
-  fadeWidth: number;
-  pinSide: WorkspacePinSide;
-  leadPinSide: WorkspacePinSide;
-}): { afterPinnedLeft: number; beforePinnedRight: number } {
-  const leadingLead = args.leadPinSide === "left" ? args.leadSlot : 0;
-  const trailingLead = args.leadPinSide === "right" ? args.leadSlot : 0;
-  return {
-    afterPinnedLeft:
-      args.edgeInset +
-      leadingLead +
-      (args.pinSide === "left" ? args.tabWidth : 0),
-    beforePinnedRight: Math.max(
-      0,
-      args.clientWidth -
-        args.edgeInset -
-        (args.pinSide === "right" ? args.tabWidth : 0) -
-        trailingLead -
-        args.fadeWidth,
-    ),
-  };
-}
-
 /** Move an externally selected tab's natural slot into view. CSS sticky keeps
  * the active tab visible while scrolling, so `scrollIntoView()` would inspect
  * its clamped visual box and incorrectly decide that an off-screen natural
@@ -368,7 +308,8 @@ export function filterArchivedWorkspaces(
       if (
         workspace.repoSlug !== repoSlug ||
         (workspace.present !== false &&
-          (typeof workspace.archivedAt !== "number" || !Number.isFinite(workspace.archivedAt)))
+          (typeof workspace.archivedAt !== "number" ||
+            !Number.isFinite(workspace.archivedAt)))
       )
         return false;
       if (terms.length === 0) return true;
@@ -381,7 +322,8 @@ export function filterArchivedWorkspaces(
     })
     .sort(
       (a, b) =>
-        (b.archivedAt ?? b.lastActiveAt ?? b.createdAt) - (a.archivedAt ?? a.lastActiveAt ?? a.createdAt) ||
+        (b.archivedAt ?? b.lastActiveAt ?? b.createdAt) -
+          (a.archivedAt ?? a.lastActiveAt ?? a.createdAt) ||
         b.createdAt - a.createdAt ||
         a.id.localeCompare(b.id),
     );

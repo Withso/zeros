@@ -96,6 +96,11 @@ import {
   type DispatcherSourceSelection,
 } from "./dispatcher-source";
 import {
+  consumeCreateFromSourceRequest,
+  resolveCreateFromSourceRequest,
+  useCreateFromSourceRequest,
+} from "./create-source-request";
+import {
   getActiveOrganizationIdSnapshot,
   getActiveOrganizationSnapshot,
 } from "../../features/team/team-store";
@@ -116,7 +121,7 @@ interface DispatcherPageProps {
   /** Retained Home surfaces stay mounted. Gate effects and selection resets to
    * the visible Create route so hidden pages remain inert. */
   active: boolean;
-  /** Repository context supplied by the global top bar, when available. */
+  /** Repository context supplied by the app sidebar, when available. */
   initialProjectId?: string | null;
   /** Shared add-project flows (from AddProjectProvider) inside the project picker. */
   onOpenProject: (options?: AddProjectOptions) => void;
@@ -226,6 +231,40 @@ export function DispatcherPage({
   useEffect(() => {
     if (!active) setProjectMenuOpen(false);
   }, [active]);
+
+  // A repository's "Create from…" opens this page for that repository and asks
+  // the source picker to open once. Wait while the routed repository is being
+  // selected; any other request is stale and dropped rather than kept armed.
+  const sourceRequest = useCreateFromSourceRequest();
+  const [sourcePickerRequestId, setSourcePickerRequestId] = useState<
+    number | null
+  >(null);
+  const projectIds = useMemo(
+    () => projects.map((project) => project.id),
+    [projects],
+  );
+  useEffect(() => {
+    if (!active || !sourceRequest) return;
+    const decision = resolveCreateFromSourceRequest({
+      request: sourceRequest,
+      routedProjectId: initialProjectId,
+      selectedProjectId,
+      projectIds,
+      sourceAvailable: !needsGitSetup && !busy && !designBusy,
+    });
+    if (decision === "wait") return;
+    consumeCreateFromSourceRequest(sourceRequest.id);
+    if (decision === "open") setSourcePickerRequestId(sourceRequest.id);
+  }, [
+    active,
+    busy,
+    designBusy,
+    initialProjectId,
+    needsGitSetup,
+    projectIds,
+    selectedProjectId,
+    sourceRequest,
+  ]);
 
   // What Design entry would do to the selected repository's main checkout
   // (open its design folder, or create "<repo> - Design"). Warmed while the
@@ -543,6 +582,8 @@ export function DispatcherPage({
                 value={base}
                 active={active}
                 disabled={busy || designBusy}
+                openRequestId={sourcePickerRequestId}
+                onOpenRequestHandled={() => setSourcePickerRequestId(null)}
                 onChange={(next) =>
                   setSourceSelection(
                     next && selectedProject

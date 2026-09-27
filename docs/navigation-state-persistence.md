@@ -12,6 +12,10 @@ remains ephemeral.
 | --------------------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------- |
 | Home: Dashboard / Settings / repo page                                | app                          | `WorkspaceState.lastHomePage`                               | Dashboard if a repo target is absent                                            |
 | Dashboard repository filter                                           | app                          | `zeros:dashboard-repo-filter:v1`                            | All projects when its slug is gone                                              |
+| Sidebar workspace presentation (Grouped / Ungrouped)                  | app                          | `WorkspaceState.workspaceListFilter`                        | Grouped; legacy Active → Ungrouped, `repo:<id>` → Grouped                       |
+| Sidebar repository collapse                                           | project id                   | `sidebar-collapsed-repositories-v1` (256 newest)            | expanded; unknown ids ignored, pruned on repository removal                     |
+| Sidebar width                                                         | app                          | `zeros:home-sidebar-width:v1` (key kept from the Home rail) | 256px, clamped 200–420px and to the window                                      |
+| Sidebar collapsed                                                     | app                          | `app-sidebar-collapsed`                                     | open                                                                            |
 | Settings primary section                                              | app                          | `settings:active-section`                                   | first valid visible section                                                     |
 | Providers inner tab                                                   | app                          | `providers:active-tab`                                      | first valid provider                                                            |
 | Terminal Agents inner tab                                             | app                          | `zeros:terminal-agents-active:v1`                           | first present agent; unsaved New Agent is not persisted                         |
@@ -27,6 +31,7 @@ remains ephemeral.
 | Setup / Run / terminal session selection and sessions                 | workspace folder             | terminal store's `activeTerminalTabByFolder` / session list | Setup or first valid session per store policy                                   |
 | Browser iframe DOM, recent file/diff trees, transcripts, terminal DOM | exact workspace/tab identity | bounded retained decks                                      | cold remount after eviction                                                     |
 | Create pickers, confirmation dialogs, unsaved New Agent               | modal/draft instance         | component-local only                                        | reset on close/reload                                                           |
+| Create from… "open the source picker" intent                          | one navigation               | in-memory `create-source-request.ts`                        | dropped when Create shows another or a removed repository                       |
 
 ## Required change procedure
 

@@ -9,64 +9,79 @@ function source(relativePath: string): string {
 
 describe("live Run wave placement", () => {
   it("keeps action waves in primary tabs, bottom tabs, and the sidebar", () => {
-    const terminalTab = source("apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx");
-    const primary = source("apps/desktop/src/renderer/shell/workbench/tab-strip.tsx");
-    const sidebar = source("apps/desktop/src/renderer/shell/terminal/terminal-workbench-layout.tsx");
+    const terminalTab = source(
+      "apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx",
+    );
+    const primary = source(
+      "apps/desktop/src/renderer/shell/workbench/tab-strip.tsx",
+    );
+    const sidebar = source(
+      "apps/desktop/src/renderer/shell/terminal/terminal-workbench-layout.tsx",
+    );
     expect(primary).toContain("<RunWave");
     expect(sidebar).toContain("<RunWave");
     expect(terminalTab).toContain("<RunWave");
   });
 
   it("marks every running workspace blue-primary, selected or not", () => {
-    const topBar = source("apps/desktop/src/renderer/shell/top-bar.tsx");
-
-    expect(topBar).toContain("runActionRunning");
-    expect(topBar).toContain("<RunWave");
-    expect(topBar).toContain("useWorkspaceRunActivitySync(realWorkspaces)");
-    expect(topBar).toContain("useAnyRunActionRunning(workspace.path)");
-    // A live run is the loudest thing a tab can say, so it stays the accent
-    // colour in every tab — dimming the unselected ones hid running work.
-    expect(topBar).toContain(
-      '<RunWave size={12} className="text-blue-primary"',
+    const row = source(
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
-    expect(topBar).not.toMatch(/<RunWave[\s\S]{0,120}?active \?/);
-    expect(topBar).not.toContain(
+    const sidebar = source("apps/desktop/src/renderer/shell/app-sidebar.tsx");
+
+    expect(row).toContain("runActionRunning");
+    expect(row).toContain("<RunWave");
+    expect(sidebar).toContain("useWorkspaceRunActivitySync(realWorkspaces)");
+    expect(row).toContain("useAnyRunActionRunning(workspace.path)");
+    // A live run is the loudest thing a row can say, so it stays the accent
+    // colour in every row — dimming the unselected ones hid running work.
+    expect(row).toContain('<RunWave size={12} className="text-blue-primary"');
+    expect(row).not.toMatch(/<RunWave[\s\S]{0,120}?active \?/);
+    expect(row).not.toContain(
       "anyRunActionRunning && activeWorkspaceId === workspace.id",
     );
-    expect(topBar).not.toContain("useRunStatuses");
+    expect(row).not.toContain("useRunStatuses");
   });
 
-  it("shows the counts AND the wave, counts first", () => {
-    const topBar = source("apps/desktop/src/renderer/shell/top-bar.tsx");
-
-    // They no longer compete for one slot: the tab is content-sized, so it can
-    // afford both, and a running workspace should still report what it changed.
-    // DOM order is the visual order — counts sit to the LEFT of the wave.
-    // Plain folder tabs have no Git comparison. Managed workspace tabs keep
-    // the same independent counts and Run wave.
-    expect(topBar).toContain(
-      "useWorkspaceChangeLines(localFolder ? null : workspace)",
+  it("shows the counts AND the wave, counts first, at the row's end", () => {
+    const row = source(
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
     );
-    expect(topBar).toMatch(
-      /<WorkspaceChangeCounts \{\.\.\.changeLines\} active=\{active\} \/>[\s\S]*?<RunWave/,
+
+    // A running workspace should still report what it changed. DOM order is
+    // the visual order — counts sit to the LEFT of the wave, and both sit
+    // after the name. Plain folder rows have no Git comparison.
+    expect(row).toMatch(
+      /useWorkspaceChangeLines\(\s*localFolder \? null : workspace,/,
+    );
+    expect(row).toMatch(
+      /\{label\}<\/span>[\s\S]*?<WorkspaceChangeCounts \{\.\.\.changeLines\} active=\{active\} \/>[\s\S]*?<RunWave/,
     );
     // Each is independently optional — neither may sit in the other's branch,
     // or one of them goes back to suppressing the other.
-    expect(topBar).toMatch(/\{!archiving && \([\s\S]*?<WorkspaceChangeCounts/);
-    expect(topBar).toMatch(/\{runActionRunning && \([\s\S]*?<RunWave/);
-    expect(topBar).not.toMatch(/runActionRunning \?[\s\S]{0,200}?<RunWave/);
+    expect(row).toMatch(/\{!archiving && \([\s\S]*?<WorkspaceChangeCounts/);
+    expect(row).toMatch(/\{runActionRunning && \([\s\S]*?<RunWave/);
+    expect(row).not.toMatch(/runActionRunning \?[\s\S]{0,200}?<RunWave/);
   });
 
   it("keeps the wave and the counts out of the truncation path", () => {
-    const topBar = source("apps/desktop/src/renderer/shell/top-bar.tsx");
-    const counts = source("apps/desktop/src/renderer/shell/workspace-change-counts.tsx");
+    const row = source(
+      "apps/desktop/src/renderer/shell/sidebar-workspace-row.tsx",
+    );
+    const counts = source(
+      "apps/desktop/src/renderer/shell/workspace-change-counts.tsx",
+    );
 
-    // The tab's 180px cap has to land on the branch name. RunWave is shrink-0
-    // inside its own component; the ± pair declares it on its wrapper span. If
-    // either could shrink, a busy workspace would render half a number.
+    // Only the name may truncate. RunWave is shrink-0 inside its own
+    // component, the ± pair declares it on its wrapper span, and the trailing
+    // cluster is shrink-0. If either could shrink, a busy workspace would
+    // render half a number.
     expect(counts).toMatch(/className="[^"]*\bshrink-0\b/);
-    expect(topBar).toMatch(
-      /<span className="[^"]*\bflex-auto\b[^"]*">\s*<span className="[^"]*\btruncate\b[^"]*">\{label\}/,
+    expect(row).toMatch(
+      /<span className="[^"]*\bflex-1\b[^"]*\btruncate\b[^"]*">\{label\}<\/span>/,
+    );
+    expect(row).toMatch(
+      /const SIDEBAR_WORKSPACE_TRAILING_CLS =\s*\n?\s*"[^"]*\bshrink-0\b/,
     );
   });
 
@@ -76,12 +91,13 @@ describe("live Run wave placement", () => {
     // reads {} both before its first workspace.runInfo lands and when nothing
     // is running; publishing the first as if it were the second blanks a live
     // wave on that workspace's own tab for a round-trip, every cold open.
-    const terminalTab = source("apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx");
+    const terminalTab = source(
+      "apps/desktop/src/renderer/shell/workbench/tabs/terminal-tab.tsx",
+    );
 
     expect(terminalTab).toContain("ready: runStatusesReady");
     expect(terminalTab).toMatch(
       /if \(!actionsReady \|\| !runStatusesReady\) return;\s*publishRunActivity\(/,
     );
   });
-
 });

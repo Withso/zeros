@@ -61,6 +61,32 @@ describe("loadPersistedUiState — activeChatByFolder", () => {
     });
   });
 
+  it.each(["activeChatByFolder", "lastWorkspaceByRepoRoot"] as const)(
+    "restores special keys in %s as own data properties",
+    (field) => {
+      const entries = [
+        ["__proto__", "saved-prototype-name"],
+        ["constructor", "saved-constructor-name"],
+        ["toString", "saved-method-name"],
+        ["/repo/workspace", "saved-workspace"],
+      ];
+      localStorage.setItem(
+        KEY,
+        JSON.stringify({ [field]: Object.fromEntries(entries) }),
+      );
+
+      const restored = loadPersistedUiState()[field]!;
+      expect(Object.getPrototypeOf(restored)).toBe(Object.prototype);
+      for (const [key, value] of entries) {
+        expect(Object.hasOwn(restored, key)).toBe(true);
+        expect(restored[key]).toBe(value);
+      }
+      expect(JSON.stringify(restored)).toBe(
+        JSON.stringify(Object.fromEntries(entries)),
+      );
+    },
+  );
+
   it("drops entries whose value isn't a non-empty string", () => {
     localStorage.setItem(
       KEY,
@@ -346,6 +372,23 @@ describe("loadPersistedUiState — scoped navigation", () => {
       "project-a": "git",
     });
   });
+
+  it.each(["__proto__", "constructor", "toString"])(
+    "migrates the legacy view for %s as an own data property",
+    (projectId) => {
+      localStorage.setItem(
+        KEY,
+        JSON.stringify({ activePage: "repo", activeRepoId: projectId }),
+      );
+      localStorage.setItem("zeros-repo-page:view", JSON.stringify("git"));
+
+      const restored = loadPersistedUiState().repoPageViewByProject!;
+      expect(Object.getPrototypeOf(restored)).toBe(Object.prototype);
+      expect(Object.keys(restored)).toEqual([projectId]);
+      expect(Object.hasOwn(restored, projectId)).toBe(true);
+      expect(restored[projectId]).toBe("git");
+    },
+  );
 
   it("bounds scoped maps to their newest 128 entries", () => {
     const entries = Object.fromEntries(

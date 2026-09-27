@@ -272,7 +272,7 @@ Object.assign(window, {
 const { ConversationPane } =
   await import("../shell/conversation/conversation-pane");
 const { AddProjectProvider } = await import("../shell/add-project-provider");
-const { TopBar } = await import("../shell/top-bar");
+const { AppSidebar } = await import("../shell/app-sidebar");
 const { useActiveWorkspace } = await import("../state/use-active-workspace");
 const { workspaceIsReadOnly } = await import("../state/workspace-history");
 const { RepoWorkspacesList } =
@@ -373,13 +373,15 @@ function ActiveTranscriptReference() {
 function HistoryRoute() {
   const { workspace } = useActiveWorkspace();
   return (
-    <>
-      <TopBar />
-      {workspace && !workspaceIsReadOnly(workspace) && (
-        <div data-testid="restored-workspace">Workspace ready</div>
-      )}
-      {workspace && <ConversationPane workspace={workspace} />}
-    </>
+    <div className="flex min-h-0 flex-1">
+      <AppSidebar />
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+        {workspace && !workspaceIsReadOnly(workspace) && (
+          <div data-testid="restored-workspace">Workspace ready</div>
+        )}
+        {workspace && <ConversationPane workspace={workspace} />}
+      </div>
+    </div>
   );
 }
 

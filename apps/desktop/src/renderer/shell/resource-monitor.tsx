@@ -1,7 +1,8 @@
 // ============================================
 // COMPONENT: ResourceMonitor
-// PURPOSE: Live whole-app CPU/memory pill and process-inspection popover.
-// USED IN: TopBar, immediately before the archived-workspaces control.
+// PURPOSE: App resource icon, memory tooltip and process-inspection popover.
+// USED IN: AppSidebar's title band, immediately before the archived-workspaces
+//          control.
 // ============================================
 
 // --- IMPORTS ---
@@ -39,7 +40,6 @@ import {
   onActiveBridgeConnected,
 } from "../platform/bridge/active-bridge";
 import { Button } from "../shared/ui/primitives/button";
-import { Pill } from "../shared/ui/primitives/pill";
 import {
   Popover,
   PopoverContent,
@@ -66,9 +66,9 @@ import {
 // --- CONSTANTS ---
 
 const OPEN_SAMPLE_INTERVAL_MS = 1_000;
-// The closed pill shows two rounded totals — it doesn't need a near-live
+// The closed icon's tooltip shows rounded memory — it doesn't need a near-live
 // cadence, and every sample forks a `ps` process-table scan in Electron main
-// plus (while open) a PTY census round-trip. 15s keeps the pill honest while
+// plus (while open) a PTY census round-trip. 15s keeps the tooltip current while
 // making the idle app quiet; opening the popover snaps to the 1s cadence.
 const CLOSED_SAMPLE_INTERVAL_MS = 15_000;
 const MAX_VISIBLE_TREE_DEPTH = 8;
@@ -261,7 +261,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   const [snapshot, setSnapshot] = useState<ProcessMetricsSnapshot | null>(null);
   // Latest polling error; it never clears the retained confirmed snapshot.
   const [sampleError, setSampleError] = useState<string | null>(null);
-  // App-global display scope; true keeps the pill honest by default.
+  // App-global display scope; include terminal processes by default.
   const [includeTerminal, setIncludeTerminal] = useState(true);
   // Whether identical sibling processes are aggregated into one row.
   const [stack, setStack] = useState(false);
@@ -387,7 +387,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
   }, [ready, refreshTerminalOwnership]);
 
   // Poll sequentially so reads never overlap. Open inspection gets a one-second
-  // cadence; the closed pill backs off to four seconds and hidden windows stop
+  // cadence; the closed icon backs off to 15 seconds and hidden windows stop
   // entirely. A generation check rejects any response from the prior cadence.
   useEffect(() => {
     if (!ready) return;
@@ -411,7 +411,7 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       // Setup and ephemeral PTYs intentionally do not publish the shared-tab
       // registry event. Refresh the cheap PID-only census at every bounded
       // sample so the filter still covers them within this sample's exact key.
-      // Only while the popover is OPEN: the closed pill shows rounded totals,
+      // Only while the popover is OPEN: the tooltip shows rounded memory,
       // the registry listener above still tracks ordinary terminal changes,
       // and skipping the census keeps the idle app off the engine round-trip.
       if (open) {
@@ -583,15 +583,28 @@ export const ResourceMonitor = memo(function ResourceMonitor() {
       <Popover open={open} onOpenChange={setOpen}>
         <Tooltip label={triggerLabel} side="bottom">
           <PopoverTrigger asChild>
-            <Pill aria-label={triggerLabel} aria-expanded={open}>
-              <Cpu aria-hidden="true" />
-              <span className="tabular-nums">
-                {totals ? formatResourceMemory(totals.memoryBytes) : "—"}
-              </span>
-            </Pill>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1"
+              data-active={open}
+              aria-label="App resources"
+              aria-expanded={open}
+            >
+              <Cpu className="size-3.5" strokeWidth={1.5} aria-hidden="true" />
+            </Button>
           </PopoverTrigger>
         </Tooltip>
-        <PopoverContent align="end" sideOffset={5} size="wide" padding="none">
+        {/* The monitor sits at the sidebar's top edge, so the panel opens
+            toward the content area rather than back over the sidebar. */}
+        <PopoverContent
+          aria-label="App resources"
+          align="start"
+          sideOffset={5}
+          size="wide"
+          padding="none"
+        >
           <div className="flex items-start justify-between gap-4 p-4 pb-3">
             <div className="min-w-0">
               <div className="text-fg2 text-xs font-medium">Resources</div>

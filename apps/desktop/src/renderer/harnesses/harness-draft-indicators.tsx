@@ -5,7 +5,7 @@ import "../../../../../styles/globals.css";
 import { Profiler, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { ChatTabs } from "../shell/conversation/chat-tabs";
-import { WorkspaceTab } from "../shell/top-bar";
+import { SidebarWorkspaceRow } from "../shell/sidebar-workspace-row";
 import { rememberChangeLines } from "../shell/use-workspace-change-lines";
 import { useWorkspaceStore } from "../state/workspace-store";
 import { useChatPanesStore, usePaneLayout } from "../state/chat-panes-store";
@@ -260,26 +260,10 @@ function Harness() {
   };
   return (
     <main className="bg-bg1 text-fg1 min-h-screen p-4">
+      {/* A sidebar-width column: rows fill it, so a long name truncates. */}
       <div
-        className="flex gap-1"
+        className="bg-sidebar-bg flex w-[220px] flex-col gap-px p-1"
         data-testid="workspace-tabs"
-        onPointerMove={(event) => {
-          const hovered = (event.target as Element).closest<HTMLElement>(
-            "[data-workspace-tab]",
-          );
-          for (const tab of event.currentTarget.querySelectorAll<HTMLElement>(
-            "[data-workspace-tab]",
-          )) {
-            if (tab === hovered) tab.dataset.hovered = "true";
-            else delete tab.dataset.hovered;
-          }
-        }}
-        onPointerLeave={(event) => {
-          for (const tab of event.currentTarget.querySelectorAll<HTMLElement>(
-            "[data-workspace-tab]",
-          ))
-            delete tab.dataset.hovered;
-        }}
       >
         {workspaces.map((owner) => (
           <Profiler
@@ -287,15 +271,14 @@ function Harness() {
             id={`workspace-${owner.id}`}
             onRender={countCommit}
           >
-            <WorkspaceTab
+            <SidebarWorkspaceRow
               workspace={mixed && owner.id === "b" ? mixedWorkspace : owner}
               active={owner.id === workspaceId}
               chatIds={draftIds.get(owner.id)!}
               draftChatIds={draftIds.get(owner.id)!}
               project={mixed ? project : null}
               mixedRepositories={mixed}
-              groupedRepository={false}
-              groupEnd={false}
+              grouped={!mixed}
               onSelect={selectWorkspace}
               onPrefetch={() => {}}
               onArchive={(owner) => archiveRequests.push(owner.id)}
